@@ -18,6 +18,7 @@ from .shared import (
     add_deepseek_web,
     add_edge_probe,
     add_agent_cost,
+    add_network_info,
     add_submenu,
     add_golden_spin,
     add_music_next,
@@ -91,6 +92,9 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     if getattr(pet, "on_open_chat", None) is not None:
         add_harness(menu, pet, icons=False)
     add_deepseek_web(menu, icons=False)
+    # 网络信息（issue #172）：与 modern 注册表同一条显隐门（shared 里的
+    # network_info_menu_enabled），否则两套菜单会出现两种真值。
+    add_network_info(menu, pet, icons=False)
     add_proactive_menu(menu, pet)
     add_agent_link_menu(menu, pet)
     add_memory_trim(menu, pet, icons=False)

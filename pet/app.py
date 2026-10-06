@@ -536,6 +536,9 @@ class PetInstance:
             self._slot_wrap(self.shell.clear_spawned_pets)
             if not self.config.instance_id else None)
         win.on_open_todo_panel = self._slot_wrap(self.shell.open_todo_panel)
+        # 网络信息（issue #172）：右键菜单入口 → 进程级弹窗（overlay 侧由
+        # SpriteMenuFacade.on_network_info 走同一方法）。
+        win.on_network_info = self._slot_wrap(self.shell.open_network_info)
         win.on_voice_chime_now = self._slot_wrap(self.shell.trigger_voice_chime_now)
         win.on_toggle_voice_chime = self._slot_wrap(self.shell.toggle_voice_chime)
         # 点击自言自语的朗读走同一条音频通道（AppShell 持有，进程内唯一）。
@@ -1173,6 +1176,9 @@ class AppShell:
         # 角色热切换重建窗口后无需重绑（PR72 上游版挂 PetApp；本分支归 AppShell）。
         self.todo_service = None
         self.todo_panel = None
+        # 网络信息弹窗（issue #172）：进程级单例、非模态。数据只在打开时取一次
+        # （后台线程），故不需要常驻服务；窗口销毁即置空。
+        self.network_info_dialog = None
         if self._todo_wanted():
             self._ensure_todo_service()
         # 语音报时：进程级单例（多窗共用调度器）。默认关闭（2026-09-19 起，
@@ -3436,6 +3442,27 @@ class AppShell:
 
     def _todo_panel_finished(self, _result: int) -> None:
         self.todo_panel = None
+
+    def open_network_info(self) -> None:
+        """打开「网络信息」弹窗（非模态单例；数据只在打开时取一次，不轮询）。"""
+        from .network_info_dialog import NetworkInfoDialog
+
+        if getattr(self, "network_info_dialog", None) is None:
+            # parent 必须是 QWidget：overlay 拓扑下 self.win 是 sprite 壳（QObject），
+            # 直接当 parent 会在 QDialog 构造期 TypeError（同待办面板）。
+            parent = self.win
+            dialog = NetworkInfoDialog(parent if isinstance(parent, QWidget) else None)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            dialog.finished.connect(self._network_info_finished)
+            self.network_info_dialog = dialog
+        inst = self.instance
+        if inst is not None:
+            inst._present_dialog(self.network_info_dialog)
+        else:
+            self.network_info_dialog.show()
+
+    def _network_info_finished(self, _result: int) -> None:
+        self.network_info_dialog = None
 
     def trigger_voice_chime_now(self, text: str = "") -> None:
         """手动报时：设置页试听入口与菜单编排加回的「立即报时」共用（该菜单项默认隐藏）。

@@ -165,6 +165,7 @@ from .persona_template import (
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
+from . import settings_network
 from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
@@ -625,6 +626,9 @@ class ModernSettingsDialog(QDialog):
                 island_content,
             )
         )
+        # 网络信息（issue #172）：控件/行/保存在 settings_network（行数预算原因）。
+        island_layout.addWidget(SettingsSection(
+            "网络信息", settings_network.build_island_network_rows(self), island_content))
         island_layout.addStretch(1)
         self._add_page("灵动岛", "island", self._page_shell("灵动岛", island_content))
 
@@ -1789,7 +1793,7 @@ class ModernSettingsDialog(QDialog):
             "菜单编排",
             page_content(
                 [
-                    ("内容与布局", claim("menu_template", "context_menu_layout")),
+                    ("内容与布局", claim("menu_template", "context_menu_layout") + settings_network.build_menu_rows(self)),
                 ]
             ),
         )
@@ -2312,6 +2316,7 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
+        settings_network.save_network_settings(self)
         settings_music.save_music_player_settings(self)
         settings_quiet.save_quiet_settings(self)
         settings_weather.save_weather_settings(self)

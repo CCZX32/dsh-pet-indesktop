@@ -508,6 +508,27 @@ def add_look_screen(menu: QMenu, pet, *, icons: bool = True):
     return add_action(menu, "看看屏幕", "screen" if icons else None, callback, close_on_trigger=True)
 
 
+def network_info_menu_enabled(pet) -> bool:
+    """「网络信息」入口的显隐门（``network_info_menu_enabled``，默认开）。
+
+    两套建造器（modern 注册表的 available、legacy 的条件分支）共用同一判定，避免
+    "新版菜单里关掉了、旧版菜单还在"这种两套真值。**只控显隐**：关掉即菜单里不再
+    出现该入口，已经打开的弹窗不动（弹窗数据只在打开时取一次，无需回收）。
+    """
+    cfg = getattr(pet, "cfg", None)
+    if cfg is None:
+        return True
+    return bool(cfg.get("network_info_menu_enabled", True))
+
+
+def add_network_info(menu: QMenu, pet, *, icons: bool = True):
+    callback = getattr(pet, "on_network_info", None)
+    if callback is None or not network_info_menu_enabled(pet):
+        return None
+    return add_action(
+        menu, "网络信息", "web" if icons else None, callback, close_on_trigger=True)
+
+
 def add_balance(menu: QMenu, pet, *, icons: bool = True):
     callback = getattr(pet, "on_show_balance", None)
     if callback is None:

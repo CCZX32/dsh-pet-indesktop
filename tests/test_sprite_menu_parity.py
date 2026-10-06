@@ -73,6 +73,7 @@ REQUIRED_LABELS = (
     "打开网页版 DeepSeek",
     "主动识屏",
     "Agent 联动",
+    "网络信息",
     "切换到新版菜单",
 )
 MUSIC_LABELS = (
@@ -116,6 +117,9 @@ class _StubAppShell:
 
     def open_todo_panel(self):
         self._record("open_todo_panel")
+
+    def open_network_info(self):
+        self._record("open_network_info")
 
     def trigger_voice_chime_now(self, text=""):
         self._record("trigger_voice_chime_now", text)
@@ -202,6 +206,7 @@ def _reference_window(config, *, chat=True):
     win.on_clear_spawned_pets = lambda: None
     win.on_check_update = lambda parent=None: None
     win.on_open_todo_panel = lambda: None
+    win.on_network_info = lambda: None
     win.on_voice_chime_now = lambda text="": None
     win.on_toggle_voice_chime = lambda: None
     win.on_festival_now = lambda: None
@@ -362,7 +367,8 @@ def test_modern_template_exposes_same_capabilities(tmp_path):
         controls = _find(menu, "桌宠控制").menu()
         assert _find(controls, "生小肥鱼") is not None
         tools = _find(menu, "工具与帮助").menu()
-        for label in ("DeepSeek Harness", "打开网页版 DeepSeek", "GitHub 项目页"):
+        for label in ("DeepSeek Harness", "打开网页版 DeepSeek", "网络信息",
+                      "GitHub 项目页"):
             assert _find(tools, label) is not None
     finally:
         shell._delete_runtime_marker()
@@ -421,6 +427,19 @@ def test_chat_gated_entries_follow_chat_availability(tmp_path):
     finally:
         win.close()
         shell._delete_runtime_marker()
+
+
+# ------------------------------------------------- 网络信息入口（issue #172）
+def test_network_info_entry_hidden_when_disabled_in_settings(tmp_path):
+    """菜单入口显隐由 ``network_info_menu_enabled`` 决定，两套模板同一判定。"""
+    for template in ("modern", "legacy"):
+        shell, _instance, _config = _make_overlay(
+            tmp_path / template, template=template,
+            values={"network_info_menu_enabled": False})
+        try:
+            assert "网络信息" not in _all_labels(build_sprite_full_menu(shell))
+        finally:
+            shell._delete_runtime_marker()
 
 
 # ---------------------------------------------------------------- 5. 音乐服务门
@@ -504,6 +523,9 @@ def test_menu_routes_legacy_service_semantics(tmp_path, monkeypatch):
         link_menu = _find(menu, "Agent 联动").menu()
         _find(link_menu, "Claude Code").setChecked(True)
         assert manager_calls == [("claude", True)]
+        # 网络信息 → AppShell.open_network_info（进程级弹窗，与作用对象无关）
+        _find(menu, "网络信息").trigger()
+        assert "open_network_info" in [call[0] for call in instance.shell.calls]
         # 切换到新版菜单 → 配置 + 原地重开
         switch = _find(menu, "切换到新版菜单")
         switch.trigger()

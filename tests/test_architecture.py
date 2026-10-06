@@ -226,12 +226,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-# 2026-10-08 上调到 2421（#208 免打扰 + #209 天气 整合叠加）：免打扰接线 4 行
-# （import 1 + 小节行 1 + 保存回写 1 + 注释 1，实现全在 pet/settings_quiet.py）；
-# 天气接线 2 行（settings_weather import 1 + _write_config 委托 1，实现全在
-# pet/settings_weather.py）。两分支保存委托并序。实测 2421；按文件约定只随
-# 实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2421
+# 2026-10-08 上调到 2426（#208 免打扰 + #209 天气 + #172 网络信息 整合叠加）：
+# 免打扰 4 行 / 天气 2 行 / 网络信息 5 行（import 1 + 岛页小节 3 + 保存委托 1），
+# 实现分别在 pet/settings_quiet.py / settings_weather.py / settings_network.py。
+# 实测 2426；按文件约定只随实测校准（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2426
 
 
 def _read(name: str) -> str:
@@ -245,6 +244,9 @@ def test_pure_logic_modules_do_not_import_qt():
     # 2026-09-23 加入 overlay_settings_command：D12 指令通道的写/读/消费与拓扑门
     # 必须零 Qt——独立设置进程（pet/__main__.py --settings）禁止导入 pet.app/
     # overlay_shell，env 读取的唯一实现只能落在两侧都能 import 的轻模块里。
+    # 2026-10-07 加入 net_monitor：网络信息（issue #172）的采样核心（计数器/
+    # 延迟探测/文案）必须零 Qt——它跑在后台采样线程里，GUI 侧只读快照；
+    # network_info.py 是弹窗的数据层（属地解析/连通性/文案），同样零 Qt。
     for name in (
         "collision.py", "physics.py",
         "festival_calendar.py", "festival_data.py", "festival.py",
@@ -254,6 +256,7 @@ def test_pure_logic_modules_do_not_import_qt():
         # 「回收内存」(#210)：过滤真值表与 ctypes 薄封装必须零 Qt——后台线程里
         # 跑的就是这一层，单测也在无 Qt 的替身上验（ctypes 全 mock）。
         "memory_trim.py",
+        "net_monitor.py", "network_info.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

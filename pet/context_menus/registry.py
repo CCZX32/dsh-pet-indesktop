@@ -47,6 +47,8 @@ from .shared import (
     add_return_corner,
     add_spawn_pet,
     add_submenu,
+    add_network_info,
+    network_info_menu_enabled,
     build_animation_categories,
     build_character_menu,
     build_size_menu,
@@ -76,6 +78,7 @@ ACTION_LABELS = {
     "proactive_screen": "主动识屏", "todo_panel": "待办提醒",
     "quiet_mode": "免打扰",
     "weather": "查看天气", "weather_cities": "天气城市",
+    "network_info": "网络信息",
     "modern_settings": "桌宠设置", "quit": "退出",
 }
 
@@ -103,6 +106,7 @@ ACTION_ICONS = {
     "proactive_screen": "screen", "todo_panel": "todo",
     "quiet_mode": "pause",
     "weather": "weather", "weather_cities": "weather",
+    "network_info": "web",
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
     "festival_now": "todo", "festival_toggle": "todo",
@@ -219,6 +223,19 @@ def _flag_toggle_spec(key: str, on_label: str, off_label: str, icon: str,
         )
 
     return _build
+
+
+def _network_info_available(pet) -> bool:
+    """「网络信息」入口可用性：回调在 + 设置里开着（默认开）。
+
+    设置关掉时**从** ``available_ids`` **里消失**（而不是"照建但什么都不做"）：
+    ``resolve_menu_layout`` 连同节点一起过滤掉、菜单编排器标成不可用，与
+    ``music_*``（歌词功能没开就不出现在菜单里，见 ``_music_lyric_configured``）
+    同一条先例。注意：菜单编排器把这种"不可用"统一显示成「此平台不可用」，
+    文案粒度是既有实现的口径，不是本项引入的。
+    """
+    return bool(callable(getattr(pet, "on_network_info", None))
+                and network_info_menu_enabled(pet))
 
 
 _build_voice_chime_toggle = _flag_toggle_spec(
@@ -363,6 +380,10 @@ class MenuActionRegistry:
                 _callback_available("on_show_weather"),
                 enabled=_weather_enabled,
                 disabled_reason=_WEATHER_DISABLED_REASON,
+            ),
+            "network_info": MenuActionSpec(
+                add_network_info, _network_info_available,
+                disabled_reason="已在设置里关闭「网络信息」菜单入口",
             ),
             "quit": MenuActionSpec(add_quit),
         }

@@ -891,6 +891,16 @@ class Config:
             "character_profiles": {},  # 角色档案：{角色id: {click_talk_bindings: {动画id: [台词]}}}
             "chat_always_on_top": False,  # 聊天窗置顶
             "dynamic_island": _default_dynamic_island_data(),
+            # —— 网络信息（issue #172）——
+            # 灵动岛信息槽改显「延迟 + 上下行网速」。默认关：延迟探测每秒要发一次
+            # 小包（单次往返在网约 160 字节，含 IP/UDP 头），属"要花流量"的能力，
+            # 必须用户显式开启；网速读网卡计数器本身零流量，但它和延迟同槽展示，
+            # 故同一个开关。
+            "island_network_enabled": False,
+            # 延迟探测间隔（秒），由 net_monitor.clamp_interval 夹到 [0.5, 60]。
+            "network_probe_interval_seconds": 1.0,
+            # 右键菜单「网络信息」入口显隐（弹窗只在打开时取一次数据，不轮询）。
+            "network_info_menu_enabled": True,
             "proactive_screen": _default_proactive_screen_data(),
             "agent_link": _default_agent_link_data(),
             "file_interpret": _default_file_interpret_data(),
@@ -1189,6 +1199,9 @@ class Config:
             "character_profiles",
             "chat_always_on_top",
             "dynamic_island",
+            "island_network_enabled",
+            "network_probe_interval_seconds",
+            "network_info_menu_enabled",
             "collision_enabled",
             "collision_restitution",
             "collision_friction",
@@ -1458,6 +1471,17 @@ class Config:
         self.data["character_profiles"] = _clean_character_profiles(self.data.get("character_profiles"))
         self.data["chat_always_on_top"] = bool(self.data.get("chat_always_on_top", False))
         self.data["dynamic_island"] = _clean_dynamic_island_data(self.data.get("dynamic_island"))
+        # 网络信息（issue #172）三键：布尔同规防字符串布尔误开；探测间隔走
+        # net_monitor 的区间口径（0.5~60 秒）——真值与消费方共用一处实现，
+        # 不在这里另写一份 0.5/60 字面量（两份迟早漂移）。
+        from . import net_monitor as net_monitor_mod
+
+        self.data["island_network_enabled"] = _bool_or_default(
+            self.data.get("island_network_enabled"), False)
+        self.data["network_probe_interval_seconds"] = net_monitor_mod.clamp_interval(
+            self.data.get("network_probe_interval_seconds"))
+        self.data["network_info_menu_enabled"] = _bool_or_default(
+            self.data.get("network_info_menu_enabled"), True)
         for prefix in ("chat_background", "modern_chat_background"):
             opacity_key = f"{prefix}_opacity"
             fill_key = f"{prefix}_fill"
@@ -1713,6 +1737,9 @@ class Config:
             "weather_enabled",
             "weather_city",
             "weather_city_list",
+            "island_network_enabled",
+            "network_probe_interval_seconds",
+            "network_info_menu_enabled",
         }:
             self._normalize_pet_settings()
 

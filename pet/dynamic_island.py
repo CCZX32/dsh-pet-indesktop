@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import catalog
+from . import catalog, net_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,15 @@ class DynamicIsland(QWidget):
         self._info_timer.timeout.connect(self._refresh)
         self._info_timer.start()
 
+        # 网络槽（``island_network_enabled``，默认关）：采样在后台线程里跑
+        # （psutil 计数器单次调用实测 23ms，不能进 16ms 的动画帧预算），
+        # 这里只按探测间隔读一次快照、文本变了才重绘。
+        self._net_monitor: net_monitor.NetMonitor | None = None
+        self._net_sample: net_monitor.NetSample | None = None
+        self._net_timer = QTimer(self)
+        self._net_timer.setSingleShot(False)
+        self._net_timer.timeout.connect(self._tick_network)
+
         # 余额峰谷档位切换的准点刷新：单次定时到下一切换边界，刷新后再排下一次。
         self._tier_tick_timer = QTimer(self)
         self._tier_tick_timer.setSingleShot(True)
@@ -287,6 +296,7 @@ class DynamicIsland(QWidget):
             app.applicationStateChanged.connect(self._on_application_state_changed)
 
         self._apply_position()
+        self._sync_network_slot()
 
     # ------------------------------------------------------------ 模式/配置
     @property
@@ -311,6 +321,20 @@ class DynamicIsland(QWidget):
 
     def _event_effects_enabled(self) -> bool:
         return bool(self._cfg.get("event_effects", True))
+
+    def _net_enabled(self) -> bool:
+        """网络槽开关（``island_network_enabled``，默认关）。
+
+        开启时**信息槽直接改显网络信息**（下行/上行速率 + 延迟），关闭时回到
+        ``info_mode`` 选的内容。这样"开关"是网络槽的唯一所有者：用户不会遇到
+        "开关开了但信息槽还显示时间"这种看不出生效的状态；设置页在网络槽开着
+        时会隐掉「信息槽内容」那一行（开着时它不生效，见 settings_network）。
+        """
+        return bool(self.config.get("island_network_enabled", False))
+
+    def _net_interval(self) -> float:
+        return net_monitor.clamp_interval(
+            self.config.get("network_probe_interval_seconds", net_monitor.DEFAULT_INTERVAL_SECONDS))
 
     def _edge_dock_enabled(self) -> bool:
         return bool(self._cfg.get("edge_dock", True))
@@ -461,6 +485,7 @@ class DynamicIsland(QWidget):
         self._cfg = _cfg_dict(self.config)
         self._schedule_next_balance_tier_refresh()
         self._sync_card_labels()
+        self._sync_network_slot()
         # 头像必须跟着刷新作废：provider 取的是**当前形象**的帧，而角色热切换
         # 只调 refresh_from_config（不动 island 配置），不换缓存就一直挂旧头像
         if self._icon_image_mode() or self._icon_spec() != old_icon:
@@ -532,6 +557,63 @@ class DynamicIsland(QWidget):
             return
         self._update_size()
         self._clamp_to_screen()
+        self.update()
+
+    # ------------------------------------------------------------ 网络槽
+    def _make_net_monitor(self, interval: float) -> net_monitor.NetMonitor:
+        """建采样器（**测试替换点**：替身不碰 psutil、不发探测包）。"""
+        return net_monitor.NetMonitor(interval=interval)
+
+    def _sync_network_slot(self) -> None:
+        """按配置启停网络槽的采样线程与读取定时器（幂等）。
+
+        关闭 → 彻底收口（线程停、socket 关、快照丢弃，信息槽回到 ``info_mode``）；
+        开启但岛不可见 → 只留对象、不采样（同 hideEvent 的"隐藏即休眠"口径）。
+        采样间隔变化（设置页改 ``network_probe_interval_seconds``）即时生效，
+        不重建线程。
+        """
+        if not self._net_enabled():
+            self._pause_network_slot()
+            if self._net_monitor is not None:
+                self._net_monitor.close()
+                self._net_monitor = None
+            self._net_sample = None
+            return
+        interval = self._net_interval()
+        if self._net_monitor is None:
+            self._net_monitor = self._make_net_monitor(interval)
+        else:
+            self._net_monitor.set_interval(interval)
+        self._net_timer.setInterval(max(200, int(round(interval * 1000))))
+        if self.isVisible():
+            self._net_monitor.start()
+            self._net_timer.start()
+        else:
+            self._pause_network_slot()
+
+    def _pause_network_slot(self) -> None:
+        """停表停线程但保留对象（隐藏/不可见时用；socket 由线程自己收口）。"""
+        self._net_timer.stop()
+        if self._net_monitor is not None:
+            self._net_monitor.stop()
+
+    def _tick_network(self) -> None:
+        """读一次采样快照；值没变就什么都不做（静止时零重绘）。"""
+        monitor = self._net_monitor
+        if monitor is None:
+            return
+        sample = monitor.snapshot()
+        if sample is None or sample == self._net_sample:
+            return
+        self._net_sample = sample
+        # 定宽文案下宽度通常不变（见 format_network_slot），但仍走一次尺寸重算：
+        # 首帧从 "0B/--" 换到真值时字体度量可能有 1~2px 差异。刻意不走
+        # _refresh()——那会每秒重申一次置顶（原生 SetWindowPos），没必要，
+        # 30s 心跳已经覆盖置顶保活。
+        if self._mode == "docked" and not self._hover_peek:
+            self.update()
+            return
+        self._update_size()
         self.update()
 
     # ------------------------------------------------------------ 卡片
@@ -826,6 +908,16 @@ class DynamicIsland(QWidget):
         return icon, name, info, status
 
     def _info_text(self) -> str:
+        if self._net_enabled():
+            # 网络槽接管信息槽（开关的唯一所有权，见 _net_enabled 的说明）：
+            # 采样还没出第一轮时按 0B/-- 显示，不空着也不编造数字。
+            sample = self._net_sample
+            if sample is None:
+                return net_monitor.format_network_slot(0.0, 0.0, None)
+            return net_monitor.format_network_slot(
+                sample.down_bps, sample.up_bps, sample.latency_ms,
+                lost=sample.latency_lost,
+            )
         mode = str(self._cfg.get("info_mode") or "time")
         if mode == "custom":
             return str(self._cfg.get("custom_text") or "").strip() or "自定义"
@@ -1396,6 +1488,8 @@ class DynamicIsland(QWidget):
         self._anim_timer.stop()
         self._dock_back_timer.stop()
         self._card_collapse_timer.stop()
+        # 网络槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，不 join）
+        self._pause_network_slot()
 
     def showEvent(self, event) -> None:  # noqa: N802
         """重新显示：恢复信息轮询并立即刷新（沉睡期间的内容变化补上），
@@ -1404,6 +1498,7 @@ class DynamicIsland(QWidget):
         self._finish_animations()
         self._info_timer.start()
         self._schedule_next_balance_tier_refresh()
+        self._sync_network_slot()
         self._refresh()
         # 原生窗口此刻已就绪；再延迟一拍重申一次 topmost——show 期间 Qt 还在
         # 收尾窗口排序，它可能覆盖同步那次（口径同 legacy window.py showEvent）
