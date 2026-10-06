@@ -49,6 +49,14 @@ import re
 import time
 from pathlib import Path
 
+# 配置目录口径复用 ``config`` 的既有解析（``app.main`` 的
+# ``config_dir = _default_base() / APP_DIR_NAME`` 同源）。模块级导入是有意的：
+# 拓扑门要在**测试里**能被钉到临时目录（conftest 的隔离夹具替换本模块的
+# ``_default_base``），函数内 ``from .config import ...`` 会绕开这层注入。
+# ``config`` 是零 Qt 轻模块，独立设置进程本来就 import 它（``Config``），
+# 不会让本模块失去"两侧都能 import"的定位。
+from .config import APP_DIR_NAME, _default_base
+
 logger = logging.getLogger(__name__)
 
 # T5：开发期一次性分流 flag（不进 Config/设置页/schema）。显式值优先于配置。
@@ -108,8 +116,6 @@ def topology_config_path() -> Path:
     取**主配置**而不是当前 instance 的槽位配置：捕获模式是进程级（重启后整个
     进程只起主宠物）的重启级开关，槽位配置里的同名键不参与拓扑判定。
     """
-    from .config import APP_DIR_NAME, _default_base
-
     return _default_base() / APP_DIR_NAME / "config.json"
 
 
@@ -170,6 +176,36 @@ def is_overlay_topology() -> bool:
         return explicit
     return not stream_capture_mode_enabled()
 
+
+def capture_switch_is_restart_level() -> bool:
+    """本进程的「重启级」判定：拓扑由主配置捕获开关造成？
+
+    True = 本次启动的（legacy）单窗形态就是 ``config.json`` 的捕获开关造成的，
+    所以那个键是**重启级**开关：运行期热切换（``PetWindow.refresh_pet_settings``
+    → ``window_screen.set_stream_capture_mode``）不得执行，否则用户在设置页点一下
+    就会把正在被 OBS 捕获的窗口当场变回 Tool 窗口（直播断源），与设置页
+    「重启后生效」的文案自相矛盾。
+
+    显式 ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）下主配置捕获开关为假 →
+    False → 保留原有的运行期即时切换语义（那是开发期分流，不是用户开关）。
+    默认 overlay 进程同样读 False，但那边本来就没有 PetWindow 消费它。
+    """
+    return stream_capture_mode_enabled()
+
+
+def effective_stream_capture_mode(window_value) -> bool:
+    """窗口能力该用的捕获开关（主配置压过窗口自己那份配置）。
+
+    ``PetWindow`` 读的是**自己那份** ``Config``：``--slot N`` 启动出来的窗读
+    ``config-slot-N.json``（``window.py`` 的窗旗标构造）。而拓扑只看主配置，
+    于是"主配置 true + slot 配置 false"会让窗口落在 legacy 单窗形态里却仍是
+    Tool 窗口——OBS 依旧枚举不到，正是捕获模式要解决的症状。故主配置开启时
+    以它为准（不改写 slot 配置，只影响本次窗口能力的有效值）；主配置关闭时
+    按窗口自己那份配置（env 逃生门下仍是逐窗可切）。
+    """
+    if stream_capture_mode_enabled():
+        return True
+    return bool(window_value)
 
 
 def slot_from_instance_id(instance_id) -> int | None:

@@ -56,10 +56,11 @@ flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as
 `stream_capture_mode` key (main `config.json`, snapshotted once per process by
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real
-title-bearing window OBS can enumerate, and spawned pets stay collapsed (the
-active-slot list is left untouched, so they return when the switch is turned
-off). `PetWindow` is kept permanently for the capture-mode (streaming) surface
-and single-pet legacy runs — **fix crashes there only**.
+title-bearing window OBS can enumerate (the window capability follows the main
+config even for `--slot N` windows), spawned pets stay collapsed and manual
+spawning is refused (the active-slot list is left untouched, so they return when
+the switch is turned off). `PetWindow` is kept permanently for the capture-mode
+(streaming) surface and single-pet legacy runs — **fix crashes there only**.
 
 The multi-process multi-pet layer (cross-process collision IPC, slot file locks,
 instance launcher, child-pet taskkill cleanup, runtime-marker live consumers) was

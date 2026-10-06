@@ -67,6 +67,24 @@ class _StubOverlayShell:
         pass
 
 
+class _RecorderWin(_StubWin):
+    """legacy 主窗替身 + 冒泡记录：给 ``_wire_window`` 与"拒绝 spawn"的反馈面用。
+
+    ``__getattr__`` 只为本用例兜住 ``_wire_window`` 里那一大片 ``win.xxx = ...``
+    接线读值（真窗才有的可选面）；已定义的方法不受影响。
+    """
+
+    def __init__(self, *, watch: bool = True):
+        super().__init__(watch=watch)
+        self.bubbles: list[str] = []
+
+    def show_bubble(self, text, duration_ms=3200, subtitle=None, **kwargs):
+        self.bubbles.append(text)
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
 def _start_shell(tmp_path, monkeypatch, *, dsh=False, topology="legacy",
                  win=None, ui_stub=True, prepare=None, ui_create=None):
     """真 AppShell.start()（"起桌宠"那一层置空）。
@@ -284,6 +302,51 @@ def test_overlay_topology_would_restore_spawned_pets(tmp_path, monkeypatch):
     assert shell._overlay_shell is not None
     assert shell._overlay_shell.started == 1
     assert len(shell._instances) == 1  # 子肥鱼由壳负责（sprite），不走 AppShell._instances
+
+
+def test_capture_mode_refuses_manual_spawn(tmp_path, monkeypatch):
+    """审查修复 2：捕获模式（单窗）下右键「生小肥鱼」被拒 + 冒泡，不新建任何窗。
+
+    走真接线：``PetInstance._wire_window``（app.py:529）把菜单的 ``on_spawn_pet``
+    挂到 ``AppShell.spawn_pet``，这里直接触发那个回调。显式 env legacy（dev 逃生
+    门）与配置捕获开关同拓扑同语义，同一个门一起拒（见 ``spawn_pet`` 的判定）。
+    """
+    from pet import overlay_settings_command as cmd_mod
+    from pet.app import AppShell
+
+    win = _RecorderWin()
+    shell = _start_shell(
+        tmp_path, monkeypatch, topology=None, win=win,
+        prepare=lambda cfg: cfg.set("stream_capture_mode", True))
+    spawned: list[int] = []
+    monkeypatch.setattr(AppShell, "spawn_in_process_window",
+                        lambda self, index=1: spawned.append(index))
+    try:
+        assert cmd_mod.is_overlay_topology() is False, "用例前置：捕获模式已生效"
+        shell.instance._wire_window(win)
+        assert callable(win.on_spawn_pet)
+        win.on_spawn_pet()                     # 菜单的真实回调
+        assert spawned == [], "单窗形态下不得再拉进程内窗口"
+        assert len(shell._instances) == 1
+        assert win.bubbles == ["直播捕获兼容模式仅主宠物"], "必须给用户一句解释"
+    finally:
+        cmd_mod.reset_topology_snapshot()
+
+
+def test_overlay_topology_still_spawns_on_menu_action(tmp_path, monkeypatch):
+    """对照：默认 overlay 拓扑下同一回调照常生小肥鱼（证明上一条不是空转）。"""
+    from pet.app import AppShell
+
+    monkeypatch.setattr(overlay_shell_mod, "OverlayShell", _StubOverlayShell)
+    win = _RecorderWin()
+    shell = _start_shell(tmp_path, monkeypatch, topology="overlay", win=win)
+    spawned: list[int] = []
+    monkeypatch.setattr(AppShell, "spawn_in_process_window",
+                        lambda self, index=1: spawned.append(index))
+    shell.instance._wire_window(win)
+    win.on_spawn_pet()
+    assert spawned == [1]
+    assert win.bubbles == []
 
 
 # ---------------------------------------------------------------- 一次保存一次应用

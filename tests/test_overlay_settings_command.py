@@ -30,22 +30,26 @@ def _now() -> float:
 
 @pytest.fixture(autouse=True)
 def _clean_topology_snapshot():
-    """每个用例从零快照开始（快照按配置路径分键，但真实目录路径会跨用例复用）。"""
+    """每个用例从零快照开始（快照按配置路径分键，但真实目录路径会跨用例复用）。
+
+    conftest 的 ``_isolate_topology_config`` 已做同样两件事（钉临时目录 + 清快照），
+    这里再显式收一次：本文件的用例直接盯着拓扑门，快照残留会让"改盘不生效"这类
+    断言假绿。
+    """
     cmd.reset_topology_snapshot()
     yield
     cmd.reset_topology_snapshot()
 
 
 def _pin_config(tmp_path, monkeypatch):
-    """把拓扑门的配置路径钉到临时目录（不读开发机真实 config.json）。
+    """把拓扑门的配置目录钉到临时目录（不读开发机真实 config.json）。
 
-    门的生产口径是 ``_default_base()/APP_DIR_NAME/config.json``（见
-    ``config.py`` 的 ``_default_base`` / ``APP_DIR_NAME``）；测试只替换路径解析，
+    门的生产口径是 ``_default_base()/APP_DIR_NAME/config.json``（``config.py`` 的
+    两个名字）；这里只替换目录解析这一层——与 conftest 的隔离夹具同一个 seam，
     文件读取逻辑本身不 mock。
     """
-    path = tmp_path / "dsh-pet-standalone" / "config.json"
-    monkeypatch.setattr(cmd, "topology_config_path", lambda: path)
-    return path
+    monkeypatch.setattr(cmd, "_default_base", lambda: tmp_path)
+    return cmd.topology_config_path()
 
 
 # ---------------------------------------------------------------- 拓扑门
@@ -133,13 +137,15 @@ def test_topology_config_verdict_is_snapshotted_once(tmp_path, monkeypatch):
 
 
 def test_topology_config_path_reuses_app_config_location(monkeypatch):
-    """路径解析复用 config 的既有口径，不自己拼第二份。"""
+    """路径解析就是 ``_default_base()/APP_DIR_NAME/config.json``，不另拼第二份。
+
+    两个名字在本模块**模块级**从 ``config`` 复用（同一对象），测试可注入——这也是
+    conftest 隔离夹具钉的那一层；本用例直接钉这两个名字验证组合结果。
+    """
     from pathlib import Path
 
-    from pet import config as config_mod
-
-    monkeypatch.setattr(config_mod, "_default_base", lambda: Path("/tmp/base"))
-    monkeypatch.setattr(config_mod, "APP_DIR_NAME", "dsh-pet-test")
+    monkeypatch.setattr(cmd, "_default_base", lambda: Path("/tmp/base"))
+    monkeypatch.setattr(cmd, "APP_DIR_NAME", "dsh-pet-test")
     assert cmd.topology_config_path() == Path(
         "/tmp/base") / "dsh-pet-test" / "config.json"
 

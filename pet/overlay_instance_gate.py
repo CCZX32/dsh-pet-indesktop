@@ -75,11 +75,11 @@ def _trace(config_dir: Path | str, message: str) -> None:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(f"{stamp} {message}\n")
     except OSError:
-        logger.debug("overlay 进程门留痕失败: %s", message, exc_info=True)
+        logger.debug("桌宠单实例进程门留痕失败: %s", message, exc_info=True)
 
 
 class OverlayInstanceGate:
-    """overlay 拓扑单实例进程门（QLockFile 语义，跨进程独占）。
+    """桌宠单实例进程门（QLockFile 语义，跨进程独占；两个拓扑共用）。
 
     生命周期：``acquire()`` → 进程存活期间持有 → ``release()``（幂等）。
     未持有时 ``release()`` 是 no-op——绝不动别人的锁文件。
@@ -134,12 +134,12 @@ class OverlayInstanceGate:
         try:
             locked = bool(self._lock.tryLock(0))
         except Exception:
-            logger.exception("overlay 进程门抢锁异常: %s", self.path)
+            logger.exception("桌宠单实例进程门抢锁异常: %s", self.path)
             locked = False
         if locked:
             self._held = True
             self._acquired = True
-            logger.info("overlay 单实例进程门已获取: %s", self.path)
+            logger.info("桌宠单实例进程门已获取: %s", self.path)
             _trace(self.config_dir, f"acquired pid={os.getpid()} lock={self.path}")
             return True
         if not self.path.exists():
@@ -147,12 +147,12 @@ class OverlayInstanceGate:
             # 放行启动，否则坏环境下桌宠会永久静默起不来。
             self._acquired = True
             logger.warning(
-                "overlay 进程门不可用（锁文件不存在，按环境错误放行）: %s", self.path)
+                "桌宠单实例进程门不可用（锁文件不存在，按环境错误放行）: %s", self.path)
             _trace(self.config_dir, f"gate-unavailable pid={os.getpid()} lock={self.path}")
             return True
         self._acquired = False
         logger.warning(
-            "overlay 拓扑已有实例持有进程门，拒绝启动: %s (holder pid=%s)",
+            "已有实例持有进程门，拒绝启动: %s (holder pid=%s)",
             self.path, self.holder_pid())
         _trace(self.config_dir,
                f"refused pid={os.getpid()} holder={self.holder_pid()} lock={self.path}")
@@ -167,4 +167,4 @@ class OverlayInstanceGate:
         try:
             self._lock.unlock()
         except Exception:
-            logger.exception("overlay 进程门释放失败: %s", self.path)
+            logger.exception("桌宠单实例进程门释放失败: %s", self.path)

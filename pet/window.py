@@ -539,7 +539,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
         # 直播捕获兼容模式（stream_capture_mode）：Tool → 普通顶层窗口 + 标题，
         # 使直播姬/OBS 的窗口捕获能枚举到桌宠（Tool 窗口会被捕获软件过滤）。
-        self._stream_capture_mode = bool(config.get('stream_capture_mode', False))
+        # 有效值由拓扑模块归并：主配置的捕获开关压过本窗配置（T4 Phase A；否则
+        # --slot N 的窗在捕获模式的 legacy 拓扑里仍是 Tool，OBS 枚举不到）。
+        from . import overlay_settings_command
+        self._stream_capture_mode = overlay_settings_command.effective_stream_capture_mode(
+            config.get('stream_capture_mode', False))
         self._capture_headroom = 0  # 捕获子气泡需要的透明头顶空间（逻辑像素）
         self._draw_delta = QPoint(0, 0)  # 贴边绘制偏移（见类属性注释）
         flags = build_window_flags(config, self.mouse_through, self._stream_capture_mode)
@@ -3793,7 +3797,15 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self.set_auto_hide_fullscreen(desired_auto_hide)
         desired_stream_capture = bool(self.cfg.get('stream_capture_mode', False))
         if desired_stream_capture != self._stream_capture_mode:
-            self.set_stream_capture_mode(desired_stream_capture)
+            from . import overlay_settings_command
+            if overlay_settings_command.capture_switch_is_restart_level():
+                # T4：该键是重启级拓扑输入——运行期撤掉窗旗标会把正在被 OBS 捕获
+                # 的窗口当场变回 Tool（直播断源），与设置页「重启后生效」矛盾。
+                # 显式 env legacy（dev 逃生门）不走这条：那边保留即时切换。
+                logging.info(
+                    "直播捕获兼容：本次启动由主配置决定（重启级开关），改动重启后生效")
+            else:
+                self.set_stream_capture_mode(desired_stream_capture)
         desired_drag_physics = bool(self.cfg.get('drag_physics', False))
         if desired_drag_physics != self.drag_physics:
             self.set_drag_physics(desired_drag_physics)

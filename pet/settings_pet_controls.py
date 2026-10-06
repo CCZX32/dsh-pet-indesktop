@@ -374,6 +374,14 @@ def build_pet_controls(host) -> None:
         host.auto_hide_fullscreen_check.setChecked(bool(host.config.get("auto_hide_fullscreen", True)))
         host.stream_capture_check = ToggleSwitch(host)
         host.stream_capture_check.setChecked(bool(host.config.get("stream_capture_mode", False)))
+        if getattr(getattr(host, "config", None), "instance_id", None):
+            # T4 Phase A：捕获开关是**进程级重启级**开关（拓扑输入），归主桌宠页
+            # 那一份主配置所有。子宠页保存写的是 config-slot-N.json
+            # （modern_settings_dialog 的保存回写），而拓扑判定只读主配置 ⇒ 在这里
+            # 点什么都不会生效（死开关）。同 modern_settings_dialog 对
+            # harness 自启的「仅主桌宠可设置」口径：置灰 + tooltip 说明。
+            host.stream_capture_check.setEnabled(False)
+            host.stream_capture_check.setToolTip("仅主桌宠可设置")
 
     host.speed_select = ModernSelect(host, width=112)
     current_speed = float(host.config.get("playback_speed", 1.0))

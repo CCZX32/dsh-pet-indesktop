@@ -1152,10 +1152,12 @@ class AppShell:
         self._balance_cache = None
         self._balance_bridge = None
         self._on_about_to_quit_connected = False
-        # overlay 拓扑产品壳（4.1a）：仅 PET_RENDER_TOPOLOGY=overlay 时构造
+        # overlay 拓扑产品壳（4.1a）：仅 overlay 拓扑构造；捕获模式与显式
+        # PET_RENDER_TOPOLOGY=legacy 都走 legacy 单窗，恒为 None
         self._overlay_shell = None
-        # D4：overlay 拓扑单实例进程门（由 main() 抢到后传入；legacy 拓扑恒为
-        # None）。释放挂在会话结束路径（_on_session_end）与 main() 的 finally。
+        # D4：桌宠单实例进程门（由 main() 抢到后传入；两个拓扑都有，只有直接
+        # 构造 AppShell 的测试路径才会拿到 None）。释放挂在会话结束路径
+        # （_on_session_end）与 main() 的 finally。
         self._overlay_gate = overlay_gate
         self._balance_timer = QTimer()
         self._balance_timer.timeout.connect(self.show_balance)
@@ -2031,7 +2033,7 @@ class AppShell:
         if not getattr(self, "_plain_about_to_quit", False):
             self._session_end_done = True
         self._mark_session_ending()
-        # D4：会话结束（关机/注销）路径释放 overlay 单实例进程门。与下面的
+        # D4：会话结束（关机/注销）路径释放桌宠单实例进程门。与下面的
         # 「不做会话保存/写盘/槽位解锁」不冲突——本模块的释放是一次 unlink +
         # 关句柄，O(1)、不派生进程、不写盘；不显式释放则只剩"进程被拆掉后由
         # OS 回收句柄 + 下次启动按 QLockFile pid 陈旧判定接管"这条兜底链。
@@ -2058,14 +2060,14 @@ class AppShell:
         )
 
     def _release_overlay_gate(self) -> None:
-        """释放 overlay 单实例进程门（D4；幂等，legacy 拓扑下恒为 no-op）。"""
+        """释放桌宠单实例进程门（D4；幂等，未注入门时 no-op）。"""
         gate = getattr(self, "_overlay_gate", None)
         if gate is None:
             return
         try:
             gate.release()
         except Exception:
-            logging.exception("释放 overlay 进程门失败")
+            logging.exception("释放桌宠单实例进程门失败")
 
     def _mark_session_ending(self) -> None:
         """置位进程级 ffmpeg spawn 闸门（webm_clip.set_session_ending）。
@@ -3036,7 +3038,19 @@ class AppShell:
         4.4b：多进程多宠退役层删除后，多宠的唯一形态是进程内多窗/多 sprite。
         ``--slot`` / ``DSH_PET_SPAWN_OFFSET_INDEX`` 兼容解析保留（T5），
         落点错峰仍按 spawn 序号计算。
+
+        T4 Phase A：捕获模式（``stream_capture_mode``）重启后走 legacy **单窗**
+        形态，多宠已收拢为主宠物；此时再手工生一只，在用户看来就是"又冒出一只
+        完整桌宠"，与单窗口径冲突（且 OBS 源列表会出现两个同标题窗口）。显式
+        ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）同拓扑同语义，一并拒绝。
         """
+        from .overlay_shell import is_overlay_topology
+        if not is_overlay_topology():
+            logging.info("直播捕获兼容（单窗形态）下不生小肥鱼：仅主宠物")
+            win = getattr(getattr(self, "instance", None), "win", None)
+            if win is not None:
+                win.show_bubble("直播捕获兼容模式仅主宠物", duration_ms=4000)
+            return
         try:
             self._spawned_pet_count += 1
             self.spawn_in_process_window(self._spawned_pet_count)

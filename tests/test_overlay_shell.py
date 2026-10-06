@@ -165,6 +165,7 @@ def _make_shell(screen=None, instance=None):
 # ---------------------------------------------------------------- env flag 契约
 def test_is_overlay_topology_env_contract(monkeypatch):
     # T5 默认化：默认 overlay；PET_RENDER_TOPOLOGY=legacy 是唯一逃生门
+    # （配置侧输入为空 = 默认 overlay，见下面的隔离用例）
     monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
     assert is_overlay_topology() is True
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "overlay")
@@ -173,6 +174,31 @@ def test_is_overlay_topology_env_contract(monkeypatch):
     assert is_overlay_topology() is False
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "")
     assert is_overlay_topology() is True
+
+
+def test_topology_config_input_is_isolated_to_tmp(tmp_path, monkeypatch):
+    """拓扑门的配置输入必须钉在本用例临时目录（审查修复 5）。
+
+    拓扑自 T4 起还读主配置 ``stream_capture_mode``。若测试进程真去读，上面那条
+    「清 env ⇒ 默认 overlay」在**开发机勾过捕获模式**时会假红（判定读到真实
+    ``<APPDATA>/dsh-pet-standalone/config.json``），CI 上却永远绿——断言失去意义。
+    conftest 的 ``_isolate_topology_config`` 夹具把目录解析钉到 ``tmp_path``；
+    本用例锁死这件事（并在同一份路径上写 true 证明读的确实是它）。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    path = cmd_mod.topology_config_path()
+    assert str(path).startswith(str(tmp_path)), "门的配置路径必须在本用例临时目录内"
+    assert cmd_mod.is_overlay_topology() is True     # 空目录 = 默认 overlay
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"stream_capture_mode": true}', encoding="utf-8")
+    cmd_mod.reset_topology_snapshot()
+    try:
+        assert cmd_mod.is_overlay_topology() is False, "钉的这份文件必须就是判定输入"
+    finally:
+        cmd_mod.reset_topology_snapshot()
 
 
 # ---------------------------------------------------------------- 构建期：dpr/bounds/右下角
