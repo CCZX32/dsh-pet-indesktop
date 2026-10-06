@@ -28,6 +28,7 @@ from .music_lyric_controller import (
     LEAD_MIN_SECONDS,
     LYRIC_LEAD_SECONDS,
 )
+from .music_title import FOOBAR_FORMAT_MAX_CHARS
 from .config import (
     DEFAULT_CONTEXT_MENU_APPEARANCE,
     DEFAULT_MENU_EASTER_EGG,
@@ -330,6 +331,21 @@ def build_pet_controls(host) -> None:
         host.music_browser_media_check.setChecked(
             bool(host.config.get("music_browser_media_enabled", False))
         )
+    # foobar2000 歌词（#228）同样只在 Windows 建控件：窗口标题源走 Win32 枚举，
+    # 其它平台建了也没效果。格式串输入框是**高级**项——自动模式已经能工作，只有
+    # 用户在 foobar 里改过「窗口标题」时才需要它把歌名/歌手切准。
+    host.foobar_lyrics_check = None
+    host.foobar_title_format_edit = None
+    if sys.platform == "win32":
+        host.foobar_lyrics_check = ToggleSwitch(host)
+        host.foobar_lyrics_check.setChecked(
+            bool(host.config.get("foobar_lyrics_enabled", False))
+        )
+        host.foobar_title_format_edit = _line_edit(
+            str(host.config.get("foobar_title_format", "") or "")
+        )
+        host.foobar_title_format_edit.setMaxLength(FOOBAR_FORMAT_MAX_CHARS)
+        host.foobar_title_format_edit.setPlaceholderText("留空 = 自动")
     host.agent_cost_check = ToggleSwitch(host)
     host.agent_cost_check.setChecked(bool(host.config.get("agent_cost_enabled", False)))
     host.music_lyric_lead_spin = BrowserDoubleSpinBox(host)

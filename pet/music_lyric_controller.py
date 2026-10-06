@@ -16,6 +16,11 @@
 ``now_playing`` 按会话类型与来源做否决（明确的视频、以及关掉开关后的浏览器
 会话），被否决的会话整条链路都不参与——不显示、不取词、不唱歌。
 
+**标题不等于歌名**：网页标题（B 站是「【4K】周杰伦《晴天》官方MV_哔哩哔哩
+_bilibili」）与 foobar 的窗口标题都不是结构化的歌名/歌手，所以取词前要先过
+``music_title`` 清洗；**只有浏览器会话**走这条路（见 :meth:`_lyric_query`），
+原生播放器给的是 SMTC 的结构化字段，清洗只会误伤。气泡标题仍显示原始标题。
+
 **优先级最低**：歌词气泡必须给告警/审批/交互气泡让路，且不能把自言自语顶掉
 又立刻被顶回来。做法是暂停更新 + ``hold_bubble`` 占位（与自言自语同一个让路机制）。
 
@@ -31,7 +36,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import music_lyric, now_playing
+from . import music_lyric, music_title, now_playing
 
 log = logging.getLogger(__name__)
 
@@ -594,6 +599,44 @@ class MusicLyricController(QObject):
         except Exception:
             return False
 
+    def _foobar_lyrics_enabled(self) -> bool:
+        """「foobar2000 歌词」开关（配置缺失/脏值一律按关处理）。
+
+        与上面同规：读配置只在采样线程上做，不另存一份会过期的副本。
+        """
+        try:
+            return bool(self.win.cfg.get("foobar_lyrics_enabled", False))
+        except Exception:
+            return False
+
+    def _foobar_title_format(self) -> str:
+        """foobar 窗口标题格式串（配置缺失/非字符串一律按"自动"处理）。"""
+        try:
+            value = self.win.cfg.get("foobar_title_format", "")
+        except Exception:
+            return ""
+        return value.strip() if isinstance(value, str) else ""
+
+    def _lyric_query(self, title: str, artist: str, playback) -> tuple[str, str]:
+        """取词用的 ``(歌名, 歌手)``——**只有浏览器媒体会话**才先清洗标题。
+
+        原生播放器（网易云 / QQ 音乐 / Spotify 等）走 SMTC 的结构化字段，标题
+        本来就是歌名，清洗只会误伤。浏览器给的是网页标题（B 站是
+        「【4K】周杰伦《晴天》官方MV_哔哩哔哩_bilibili」），直接拿去搜命中率极低
+        ——这正是 issue #228 的 B 站侧。清洗规则与误伤防护见 ``music_title``。
+
+        口径与"浏览器会话参与歌词"开关**同一个**：开关关着时浏览器会话本就整条
+        不进链路，打开才可能走到这里。
+        """
+        try:
+            if not self._browser_media_enabled():
+                return title, artist
+            if not now_playing.is_browser_session(getattr(playback, "app_id", "")):
+                return title, artist
+        except Exception:
+            return title, artist
+        return music_title.clean_web_title(title, artist)
+
     def _sample_loop(self) -> None:
         """**常驻**采样线程：等信号 → 采一次 → 回报，循环直到关闭。
 
@@ -611,6 +654,8 @@ class MusicLyricController(QObject):
                 playback = now_playing.get_now_playing(
                     self._tracked_app_id,
                     allow_browser=self._browser_media_enabled(),
+                    allow_foobar=self._foobar_lyrics_enabled(),
+                    foobar_title_format=self._foobar_title_format(),
                 )
             except Exception:
                 playback = None
@@ -658,7 +703,12 @@ class MusicLyricController(QObject):
         key = track.key()
         now = time.monotonic()
         # 记住这次跟的是哪个播放器，下一拍带上它去采样（会话选取据此粘住）。
-        self._tracked_app_id = str(getattr(playback, "app_id", "") or "")
+        # **foobar 窗口标题源不占 SMTC 的跟踪位**：那个位是给会话选取用的，塞一个
+        # SMTC 里不存在的 id 只会丢掉"粘住当前播放器"的能力（见
+        # now_playing.is_foobar_source）。
+        app_id = str(getattr(playback, "app_id", "") or "")
+        if not now_playing.is_foobar_source(app_id):
+            self._tracked_app_id = app_id
 
         if not track.playing:
             # 暂停：只冻结进度，**不要** reset——否则恢复播放时同一首歌会被
@@ -726,17 +776,20 @@ class MusicLyricController(QObject):
 
         # 先亮出歌名：一是给用户即时反馈，二是填上取词那几秒的空窗——
         # 否则切歌后会有 3~5 秒什么都不显示。
+        # 注意这里用**原始** title/artist 显示；取词用的是清洗后的查询词
+        # （见 _lyric_query），两者刻意分开：显示不该被清洗规则改写。
         self._announce(title, artist)
 
         if key in self._no_lyric_keys or key in self._loading:
             return
 
         # 取词走后台线程：轮询里绝不发网络请求。
+        query_title, query_artist = self._lyric_query(title, artist, playback)
         self._loading.add(key)
         self._pending_playback = playback
         threading.Thread(
             target=self._fetch_worker,
-            args=(key, title, artist),
+            args=(key, query_title, query_artist),
             name="music-lyric-fetch",
             daemon=True,
         ).start()

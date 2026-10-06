@@ -126,6 +126,47 @@ def browser_media_rows(dialog) -> list[SettingRow]:
     ]
 
 
+def foobar_lyrics_supported() -> bool:
+    """「foobar2000 歌词」是否在本平台可用——窗口标题源走 Win32 窗口枚举。"""
+    return sys.platform == "win32"
+
+
+def foobar_lyrics_rows(dialog) -> list[SettingRow]:
+    """「foobar2000 歌词」两行（**仅 Windows**，与 browser_media_rows 同规）。
+
+    行文案里必须如实写清三条，否则用户会以为是"功能坏了"：
+
+    1. **推荐路线**是给 foobar 装 SMTC 组件（如 foo_mediacontrol）——那条路走现有
+       的 SMTC 采样，比窗口标题可靠得多；本开关是给不想装组件的人用的替代路线。
+    2. 窗口标题分辨不出播放状态：foobar 开着但没在播时，可能仍显示上一首。
+    3. 只在没有其它播放器（SMTC 在播会话）时才生效，不会抢走正在听的那首歌。
+    """
+    check = getattr(dialog, "foobar_lyrics_check", None)
+    edit = getattr(dialog, "foobar_title_format_edit", None)
+    if check is None or edit is None or not foobar_lyrics_supported():
+        return []
+    return [
+        SettingRow(
+            "foobar_lyrics",
+            "foobar2000 歌词",
+            "foobar2000 默认不向系统上报播放信息，这里改为读它的窗口标题，只在"
+            "没有其它播放器在播时生效。更可靠的路线是给 foobar 装支持系统媒体控制"
+            "（SMTC）的组件（如 foo_mediacontrol）——装好后本开关不需要打开。"
+            "已知局限：窗口标题分辨不出它是否在播，foobar 没在播时可能仍显示上一首。",
+            check,
+        ),
+        SettingRow(
+            "foobar_title_format",
+            "foobar2000 窗口标题格式",
+            "留空 = 自动（歌名与歌手顺序不可知时不猜，两种顺序都能搜到）。若歌词"
+            "对不上，把 foobar「显示 → 默认用户界面 → 窗口标题」里的那串原样填进来"
+            "（例如 %artist% - %title%），就能精确切分歌名与歌手。",
+            edit,
+            stacked=True,
+        ),
+    ]
+
+
 def save_music_player_settings(dialog) -> None:
     """写回 ``music_player_paths``；两项都留空 = 回到自动搜索，并清掉路径缓存。"""
     if getattr(dialog, "music_player_detect_btn", None) is None:
@@ -142,6 +183,30 @@ def save_music_player_settings(dialog) -> None:
     if paths != previous:
         # 路径变了：让右键菜单下次拿到确定态（自动搜索的负缓存也要作废）。
         music_players.clear_cache()
+
+
+# 「音乐关联」域里两个**来源开关**的控件名 → 配置键。控件在
+# pet/settings_pet_controls 里按平台条件创建（非 Windows 为 None）。
+_SOURCE_SWITCHES = (
+    ("music_browser_media_check", "music_browser_media_enabled"),
+    ("foobar_lyrics_check", "foobar_lyrics_enabled"),
+)
+
+
+def save_source_settings(dialog) -> None:
+    """写回歌词来源开关与 foobar 窗口标题格式串。
+
+    集中在这里的原因与控件/行同源：``modern_settings_dialog._save`` 的行数预算已无
+    余量，这一组键的写回语义（"控件不存在就整键跳过"，非 Windows 上没有该控件）
+    放进对话框本体只会多出几行重复的 getattr 样板。
+    """
+    for attr, key in _SOURCE_SWITCHES:
+        widget = getattr(dialog, attr, None)
+        if widget is not None:
+            dialog.config.set(key, widget.isChecked())
+    edit = getattr(dialog, "foobar_title_format_edit", None)
+    if edit is not None:
+        dialog.config.set("foobar_title_format", edit.text().strip())
 
 
 def start_detect(dialog, *, warm=None, lookup=None) -> None:

@@ -827,6 +827,14 @@ class Config:
             # 不否决就会对着视频显示「我在唱《视频标题》」。网页版音乐平台
             # 需要用户显式打开。
             "music_browser_media_enabled": False,
+            # foobar2000 歌词（issue #228）：foobar 默认不注册 SMTC，这里改用它的
+            # 主窗口标题当补充源。**默认关**：窗口标题分辨不出播放状态（foobar
+            # 开着没在播时可能读到上一首），且只在 SMTC 没有在播会话时才生效。
+            "foobar_lyrics_enabled": False,
+            # foobar 窗口标题的 titleformat 串（「显示 → 默认用户界面 → 窗口标题」）。
+            # 空 = 自动：不猜歌名/歌手顺序（见 pet/music_title.py）。出厂默认值随
+            # 版本与主题变化，没有稳定契约，所以做成可配置而不是硬编码一份。
+            "foobar_title_format": "",
             # 手动指定播放器路径 {netease|qqmusic: exe 路径}：自动搜索找不到时的
             # 逃生口，只能手改 config.json（暂无设置页控件），空 = 走自动搜索。
             "music_player_paths": {},
@@ -1093,6 +1101,8 @@ class Config:
             "music_lyric_cache_limit",
             "music_lyric_lead_seconds",
             "music_browser_media_enabled",
+            "foobar_lyrics_enabled",
+            "foobar_title_format",
             "music_player_paths",
             "agent_cost_enabled",
             "golden_spin_on_click",
@@ -1465,6 +1475,20 @@ class Config:
         self.data["music_browser_media_enabled"] = _bool_or_default(
             self.data.get("music_browser_media_enabled"), False
         )
+        # foobar2000 歌词（#228）两个键：布尔同规走 _bool_or_default；格式串非
+        # 字符串一律回落"自动"，并截到 music_title 的长度上限——手改配置写进超长
+        # 串会让每次窗口标题匹配都跑一遍长正则（采样是 1s 一拍）。
+        self.data["foobar_lyrics_enabled"] = _bool_or_default(
+            self.data.get("foobar_lyrics_enabled"), False
+        )
+        from .music_title import FOOBAR_FORMAT_MAX_CHARS
+
+        raw_format = self.data.get("foobar_title_format")
+        self.data["foobar_title_format"] = (
+            raw_format.strip()[:FOOBAR_FORMAT_MAX_CHARS]
+            if isinstance(raw_format, str)
+            else ""
+        )
         # 持续静音判定时长：下限 1s（低于它就退回"瞬时静音即退出"的老问题），
         # 上限必须有——否则手改 1e9 会让唱歌状态永不退出。
         self.data["music_sing_grace_seconds"] = _float_or_default(
@@ -1631,6 +1655,8 @@ class Config:
             "music_lyric_lead_seconds",
             "music_lyric_cache_limit",
             "music_browser_media_enabled",
+            "foobar_lyrics_enabled",
+            "foobar_title_format",
             "agent_cost_enabled",
             "music_player_paths",
             "character_profiles",

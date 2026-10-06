@@ -226,7 +226,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
+# 2026-10-07 回调到 2412（夜间整合分支：歌词来源批次把「浏览器媒体会话参与
+# 歌词」的 4 行写回搬进 settings_music.save_source_settings，换成 1 行调用，
+# 同时并入 foobar2000 歌词两行——净 −3）。实测 2412；按文件约定只随实测校准。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2412
 
 
 def _read(name: str) -> str:
@@ -246,6 +249,9 @@ def test_pure_logic_modules_do_not_import_qt():
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py", "overlay_settings_command.py",
+        # 2026-10-07 加入 music_title：标题清洗/解析是取词链路的前处理，规则要能
+        # 脱离 Qt 单独跑真值表（误伤防护的用例都是纯字符串）。
+        "music_title.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
