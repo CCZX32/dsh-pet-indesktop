@@ -3003,7 +3003,11 @@ def test_image_directory_picker_opens_right_drawer_with_three_column_masonry(tmp
     from pet.modern_settings_dialog import ImagePreviewDrawer, ResourcePathPicker
 
     short = tmp_path / "01-one.png"
-    long = tmp_path / ("02-" + "very-long-image-name-" * 8 + ".jpg")
+    # 名字要够长（卡片文本按宽度截断显示、tooltip 显示全名），但不能长到触发
+    # Windows MAX_PATH：tmp_path 本身已有 ~90 字符，*8 的重复拼出 262 字符的
+    # 绝对路径，在未开启长路径支持（LongPathsEnabled=0）的 Windows 上
+    # Image.save() 直接 FileNotFoundError。*3 仍是长名字，够验证截断与 tooltip。
+    long = tmp_path / ("02-" + "very-long-image-name-" * 3 + ".jpg")
     Image.new("RGB", (40, 80), "red").save(short)
     Image.new("RGB", (100, 40), "blue").save(long)
     Image.new("RGB", (80, 80), "green").save(tmp_path / "03-square.png")

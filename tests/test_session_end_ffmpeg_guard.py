@@ -48,6 +48,23 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def _wait_until(pred, timeout: float = 10.0) -> bool:
+    """有界等待（同 tests/test_agent_link_threads.py 的 wait_until 惯例）。
+
+    reader 是 ``clip.start()`` 之后在**新线程**里跑起来的，紧接 start() 的断言
+    只是赌子线程先被调度：给 reader 线程注入 300ms 启动延迟后
+    ``spy.read_frames_calls`` 仍是空列表（实测必红）；``_ensure_meta`` 的探测
+    同样被踢给 daemon 线程异步完成。轮询等待只在「真的没发生」时才失败——慢
+    runner 上不再抛硬币（PR-MERGE-LESSONS：poll state with a wide budget）。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _reset_session_ending():
     """会话结束 latch 是进程级：任一用例置位后必须复位，否则后续用例静默不起 reader。"""
@@ -182,15 +199,15 @@ def test_control_group_spawns_normally_without_session_end(tmp_path, monkeypatch
     assert webm_clip_mod.session_ending() is False
 
     assert clip.start() is True
-    assert spy.read_frames_calls, "正常运行期必须照常拉起 reader（对照组）"
+    assert _wait_until(lambda: bool(spy.read_frames_calls)), (
+        "正常运行期必须照常拉起 reader（对照组）"
+    )
     clip._ensure_meta()
     # 主线程 _ensure_meta 走「GUI 线程不跑 ffprobe」闸：探测被踢给 daemon
-    # 线程异步完成。轮询等待而不是赌线程调度——慢 runner（2 核 CI）上
-    # 固定时序是抛硬币（PR-MERGE-LESSONS：poll state with a wide budget）。
-    deadline = time.monotonic() + 10.0
-    while not spy.count_calls and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert spy.count_calls, "正常运行期元数据探测照常（对照组）"
+    # 线程异步完成，同样只能等待、不能赌调度。
+    assert _wait_until(lambda: bool(spy.count_calls)), (
+        "正常运行期元数据探测照常（对照组）"
+    )
     clip.cleanup()
 
 
