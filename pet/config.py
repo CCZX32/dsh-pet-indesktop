@@ -823,6 +823,10 @@ class Config:
             "context_menu_layout": None,
             "context_menu_appearance": dict(DEFAULT_CONTEXT_MENU_APPEARANCE),
             "menu_easter_egg": dict(DEFAULT_MENU_EASTER_EGG),
+            # 动画菜单连播（#221）：默认 False = 点一个动作就把整条菜单链收起，
+            # 菜单不再挡住桌宠。想连点多个动作连播的用户手改成 true（菜单行为类
+            # 偏好，与 mem_* 同口径：不进设置页，config.json 里改）。
+            "anim_menu_stay_open": False,
             "quick_launch_apps": [dict(item) for item in DEFAULT_QUICK_LAUNCH_APPS],
             "auto_hide_fullscreen": True,  # 全屏应用自动隐藏（Windows）
             # 免打扰（issue #208）：右键菜单四档时长的默认档 + 全屏应用时自动等效
@@ -1127,6 +1131,7 @@ class Config:
             "context_menu_appearance",
             "quick_launch_apps",
             "menu_easter_egg",
+            "anim_menu_stay_open",
             "auto_hide_fullscreen",
             "quiet_minutes_default",
             "quiet_also_on_fullscreen",
@@ -1475,6 +1480,9 @@ class Config:
         self.data["context_menu_layout"] = _clean_menu_layout_override(self.data.get("context_menu_layout"))
         self.data["context_menu_appearance"] = _clean_menu_appearance(self.data.get("context_menu_appearance"))
         self.data["menu_easter_egg"] = _clean_menu_easter_egg(self.data.get("menu_easter_egg"))
+        # 动画菜单连播（#221）：布尔走 _bool_or_default（防手写 "false" 被当开）
+        self.data["anim_menu_stay_open"] = _bool_or_default(
+            self.data.get("anim_menu_stay_open"), False)
         self.data["quick_launch_apps"] = _clean_quick_launch_apps(self.data.get("quick_launch_apps"))
         if self.data.get("chat_ui_style") not in {"modern", "classic"}:
             self.data["chat_ui_style"] = "modern"
@@ -1722,6 +1730,7 @@ class Config:
             "context_menu_layout",
             "quick_launch_apps",
             "menu_easter_egg",
+            "anim_menu_stay_open",
             "click_sound_enabled",
             "click_sound_pack",
             "click_sound_volume",

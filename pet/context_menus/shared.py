@@ -183,8 +183,116 @@ def add_submenu(menu: QMenu, text: str, icon_name: str | None = None) -> QMenu:
     return submenu
 
 
+# ------------------------------------------------------------ 随机动作前缀分组
+# 2026-10-07 实机：随机动作 95 项单列 236×1439px，顶满全屏。清单里的前缀本就
+# 系统化（吃* / 工作状态-* / 余额-* / 碎碎念-* / 原地* / 放*），按前缀再分一层
+# 后每级回到一屏内；判定全部来自清单本身（不硬编码字符表），角色包日后新增
+# `乐器-*` 这类前缀会自动成族。
+ANIMATION_GROUP_RESIDUAL_LABEL = "更多"
+# 家族最少成员数：少于 3 项的"共同前缀"多半只是巧合，不值得多一层菜单。
+ANIMATION_FAMILY_MIN_MEMBERS = 3
+# 家族键最大字符数：更长的公共前缀（近同名动作）不作为分组依据。
+ANIMATION_FAMILY_MAX_KEY_LEN = 4
+# 清单短于该长度就不分组：动作不多的角色保持平铺菜单，不多加一层。
+ANIMATION_GROUP_MIN_ENTRIES = 24
+
+
+def animation_menu_stay_open(pet) -> bool:
+    """动作菜单是否连播（``anim_menu_stay_open``，默认 False = 点一次就收起）。
+
+    False（默认）时动画叶子挂 ``closeOnTrigger``：点一次动作，用户要的是看动作，
+    菜单必须让开。True 退回旧行为——菜单留在屏上，可以连点多个动作连播。
+    只作用**触发动作播放**的叶子，设置类 / 开关类 / 子菜单一律不受影响。
+
+    ``cfg`` 按面探测而不是直接取：菜单建造器的宿主可能是 duck-typed 替身
+    （``__getattr__`` 兜底返回函数），拿不到真配置时按默认值处理。
+    """
+    getter = getattr(getattr(pet, "cfg", None), "get", None)
+    if not callable(getter):
+        return False
+    return bool(getter("anim_menu_stay_open", False))
+
+
+def _dash_family_key(name: str) -> str | None:
+    """``余额-钱袋满溢`` 这类名字的分隔符前缀就是家族键。"""
+    if "-" in name:
+        key = name.split("-", 1)[0].strip()
+        if key and key != ANIMATION_GROUP_RESIDUAL_LABEL:
+            return key
+    return None
+
+
+def _prefix_family_key(name: str, names, minimum: int, max_key_len: int) -> str | None:
+    """名字所属的前缀家族键（``吃*`` / ``原地*`` / ``放*``）。
+
+    家族由**首字**划定（"吃西瓜 / 吃饺子 / 吃Token" 同族），键取该族全体成员的
+    最长公共前缀：吃瓜/吃饺/吃Token 的公共前缀只有 "吃"，原地系列是 "原地"。
+    这样组长短随素材自然变化，也不会把 "吃10号" 这类名字单独拆成一个 "吃1" 族。
+    首字族凑不满 ``minimum`` 就是没有家族（"被吓一跳 / 被落叶淹没" 只有 2 项）。
+    """
+    head = name[:1]
+    if not head or head == ANIMATION_GROUP_RESIDUAL_LABEL:
+        return None
+    family = [candidate for candidate in names if candidate.startswith(head)]
+    if len(family) < minimum:
+        return None
+    key = head
+    for length in range(2, max_key_len + 1):
+        if len(name) < length:
+            break
+        prefix = name[:length]
+        if not all(candidate.startswith(prefix) for candidate in family):
+            break
+        key = prefix
+    return key
+
+
+def group_animation_entries(entries) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """把随机动作清单按前缀家族分组。
+
+    返回 ``()`` 表示**不分组**（调用方按原清单平铺）：清单够短、整份清单共用
+    同一个前缀（分组没有收益）、或前缀都凑不满 ``ANIMATION_FAMILY_MIN_MEMBERS``。
+    不返回空家族，也不丢项——每个名字要么落在某个家族，要么落在「更多」，成员
+    顺序与传入清单一致（只是换了一层菜单）。
+
+    家族排序 = 成员数降序（同数保持首次出现顺序），「更多」永远最后。
+    """
+    names = [str(name) for name in entries]
+    if len(names) < ANIMATION_GROUP_MIN_ENTRIES:
+        return ()
+    keys: dict[str, str | None] = {}
+    for name in names:
+        keys[name] = _dash_family_key(name) or _prefix_family_key(
+            name, names, ANIMATION_FAMILY_MIN_MEMBERS, ANIMATION_FAMILY_MAX_KEY_LEN,
+        )
+    counts: dict[str, int] = {}
+    for key in keys.values():
+        if key is not None:
+            counts[key] = counts.get(key, 0) + 1
+
+    families: dict[str, list[str]] = {}
+    residual: list[str] = []
+    for name in names:
+        key = keys[name]
+        if key is None or counts.get(key, 0) < ANIMATION_FAMILY_MIN_MEMBERS:
+            residual.append(name)
+            continue
+        families.setdefault(key, []).append(name)
+    if len(families) + (1 if residual else 0) < 2:
+        # 整份清单挤在同一个前缀里：拆开也不比原清单短，不做无收益的层级。
+        return ()
+    groups = [
+        (label, tuple(members))
+        for label, members in sorted(families.items(), key=lambda item: -len(item[1]))
+    ]
+    if residual:
+        groups.append((ANIMATION_GROUP_RESIDUAL_LABEL, tuple(residual)))
+    return tuple(groups)
+
+
 def _populate_animation_category(
     submenu: QMenu, pet, entries, callback, leaf_role_icons: bool,
+    close_on_trigger: bool,
 ) -> None:
     """首次展开动画分类子菜单时才填充动作，避免根菜单构建时遍历 91 个动画。"""
     if getattr(submenu, "_animation_populated", False):
@@ -195,6 +303,9 @@ def _populate_animation_category(
     lazy_actions = []
     for name in entries:
         action = submenu.addAction(QIcon(), name) if leaf_role_icons else submenu.addAction(name)
+        # 触发一次动作播放的叶子：默认点完就收起整条菜单链（#221），想连播的
+        # 用户把 anim_menu_stay_open 打开，退回"留在屏上连点"的旧行为。
+        action.setProperty("closeOnTrigger", bool(close_on_trigger))
         connect_action(action, lambda name=name, callback=callback: callback(name))
         if leaf_role_icons:
             icon_actions.append((action, name))
@@ -281,14 +392,17 @@ def build_animation_categories(
     menu: QMenu, pet, *, icons: bool, legacy_labels: bool = False,
     leaf_role_icons: bool = False,
 ) -> None:
+    close_on_trigger = not animation_menu_stay_open(pet)
     categories = (
-        ("待机", pet.idles, pet.switch_clip),
-        ("转向", pet.turns, pet.switch_clip),
-        ("移动", pet.moves, pet.trigger_move),
-        ("点击回应", pet.clicks, pet.switch_clip),
-        ("随机动作", pet.acts, pet.switch_clip),
+        ("待机", pet.idles, pet.switch_clip, False),
+        ("转向", pet.turns, pet.switch_clip, False),
+        ("移动", pet.moves, pet.trigger_move, False),
+        ("点击回应", pet.clicks, pet.switch_clip, False),
+        # 随机动作是唯一可能上百项的分类（实机 95 项，单列 1439px）：只有它按
+        # 前缀再分一层，其余分类清单短，维持平铺。
+        ("随机动作", pet.acts, pet.switch_clip, True),
     )
-    for label, entries, callback in categories:
+    for label, entries, callback, groupable in categories:
         if not entries:
             continue
         submenu = QMenu(f"动画 · {label}" if legacy_labels else label, menu)
@@ -297,10 +411,27 @@ def build_animation_categories(
         inherit_menu_style(menu, submenu)
         if icons:
             submenu.setIcon(vector_menu_icon(menu, "play"))
-        # 首次展开该分类子菜单时才填充动作：根菜单构建不再遍历 91 个动画
+        # 首次展开该子菜单时才填充动作：根菜单构建不再遍历 91 个动画。家族
+        # 子菜单在构建期就建好（此时样式/交互安装还没跑，它们能被递归覆盖到），
+        # 动作同样延迟到各自 aboutToShow——只有用户真正展开的那一族才解码缩略图。
+        # 宿主面可能是 duck-typed 替身（``__getattr__`` 兜底返回函数）：不是真
+        # 序列就不分组，交给下面的平铺路径（与分组前逐位一致）。
+        groups = ()
+        if groupable and isinstance(entries, (list, tuple)):
+            groups = group_animation_entries(entries)
+        if groups:
+            for family_label, family_entries in groups:
+                family = add_submenu(submenu, family_label)
+                family.aboutToShow.connect(
+                    lambda s=family, e=family_entries, c=callback, l=leaf_role_icons,
+                           p=pet, t=close_on_trigger:
+                        _populate_animation_category(s, p, e, c, l, t)
+                )
+            continue
         submenu.aboutToShow.connect(
-            lambda s=submenu, e=entries, c=callback, l=leaf_role_icons, p=pet:
-                _populate_animation_category(s, p, e, c, l)
+            lambda s=submenu, e=entries, c=callback, l=leaf_role_icons, p=pet,
+                   t=close_on_trigger:
+                _populate_animation_category(s, p, e, c, l, t)
         )
 
 

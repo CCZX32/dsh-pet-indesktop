@@ -33,6 +33,7 @@ from pet.config import Config
 RELOAD_WHITELIST_SNAPSHOT = frozenset(
     {
         "agent_cost_enabled",
+        "anim_menu_stay_open",
         "animation_gap_seconds",
         "auto_hide_fullscreen",
         "autostart_wanted",
@@ -305,6 +306,48 @@ def _memory_trim_config(tmp_path, raw: dict) -> Config:
         json.dumps({"version": 4, **raw}, ensure_ascii=False), encoding="utf-8",
     )
     return Config(base=tmp_path)
+
+
+# ------------------------------------------------- 动画菜单连播（#221）
+def _anim_menu_config(tmp_path, raw) -> Config:
+    """把 ``anim_menu_stay_open`` 写成脏值落盘，再走真实加载路径。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"version": 4, "anim_menu_stay_open": raw}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return Config(base=tmp_path)
+
+
+def test_anim_menu_stay_open_defaults_to_closing_after_action(tmp_path):
+    """默认 False = 点一个动作就收起菜单（#221 的产品决策）。
+
+    该键是**菜单行为类**偏好：不进设置页（与 mem_* 同口径），用户手改
+    config.json 才切到连播。
+    """
+    assert Config(base=tmp_path).data["anim_menu_stay_open"] is False
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("false", False), ("no", False), ("off", False),
+    ("true", True), ("yes", True), ("on", True),
+    # 非字符串布尔不参与解析（同族布尔键同规）：回落默认 False
+    (1, False), (0, False), (None, False), ("随便", False),
+])
+def test_dirty_anim_menu_stay_open_is_not_truthy_by_string(tmp_path, raw, expected):
+    """bool("false") is True——字符串布尔必须按字面语义归一。"""
+    cfg = _anim_menu_config(tmp_path / f"raw-{raw}", raw)
+    assert cfg.data["anim_menu_stay_open"] is expected
+
+
+def test_set_and_reload_keep_anim_menu_stay_open(tmp_path):
+    """set() 路径归一，且落盘 → 重启加载不被默认值冲掉。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("anim_menu_stay_open", "on")
+    assert cfg.data["anim_menu_stay_open"] is True
+    assert cfg.save() is True
+    assert Config(base=tmp_path).data["anim_menu_stay_open"] is True
 
 
 # ------------------------------------------------- 天气三键（issue #209）
