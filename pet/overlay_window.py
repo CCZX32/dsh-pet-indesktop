@@ -6,9 +6,10 @@ Windows 合成器上是结构性税负（move() 1.5-4.3ms/次 + DWM 多窗竞争
 overlay 内合成后，宠物移动 = 改 sprite 坐标 + update(脏矩形)，完全不经过
 WM/DWM 的窗口移动路径。Phase 0 实测（同目录 probe_report）该路线 GO。
 
-本阶段（1b/2）：Windows 逐像素穿透已接通（复用 platform_win 的
-WS_EX_TRANSPARENT 轮询 + 联合命中，见 showEvent）；非 Windows 联合
-QRegion setMask 与多屏几何留待后续（spec 开放问题 Q1）。
+本阶段（1b/2）：逐像素穿透两端都已接通——Windows 复用 platform_win 的
+WS_EX_TRANSPARENT 轮询，非 Windows（X11/macOS）复用 platform_passthrough 的
+Qt 属性 + 原生输入穿透标志轮询，两边同一套判定/档位协议（见 showEvent）；
+多屏几何见 Phase 4。
 Phase 3a：右键菜单最小集（contextMenuEvent → sprite_menu.build_sprite_menu）；
 鼠标路由只让左键进拖拽 grab，右键只弹菜单（PetWindow 旧语义）。
 Phase 3b：sprite 位置监听（add_position_listener）——sprite 不产生 moveEvent，
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from . import catalog
 from . import overlay_peripherals
+from .platform_passthrough import QtPerPixelInputController
 from .sprite_menu import build_sprite_menu
 from .sprite_slingshot import SlingshotController
 from .tick_driver import TickDriver
@@ -92,10 +94,10 @@ class OverlayWindow(QWidget):
         # 变化的 sprite 触发其 listeners（cb(sprite)）；外围小窗（气泡等）的
         # 跟随源——sprite 不是窗口，没有 moveEvent 可挂。
         self._position_listeners: dict = {}
-        # Windows 逐像素穿透协议字段（WindowsPerPixelInputController 直接复用，
-        # 见 showEvent）：mouse_through = 用户手动"鼠标穿透"开关（恒穿透）；
-        # _press_global 非 None = 拖拽中（穿透轮询据此降频并强制不穿透）。
-        # 非 Windows 平台的联合 QRegion setMask 穿透为后续阶段。
+        # 逐像素穿透协议字段（platform_win 的 Windows 控制器与
+        # platform_passthrough 的 Qt 控制器共用同一套判定，见 showEvent 平台分派）：
+        # mouse_through = 用户手动"鼠标穿透"开关（恒穿透）；_press_global 非 None
+        # = 拖拽中（穿透轮询据此降频并强制不穿透）。
         self.mouse_through = False
         self._press_global: QPoint | None = None
         self._drag_committed = False  # 过 DRAG_THRESHOLD 才升级真拖拽（点击候选期 False）
@@ -196,11 +198,22 @@ class OverlayWindow(QWidget):
             # 点击宠物不夺前台焦点（issue #98 语义沿用）。每次显示都补一次：
             # on_top 开关会重建原生窗口，新句柄不带 WS_EX_NOACTIVATE。
             _set_windows_no_activate(int(self.winId()))
+        else:
+            # 非 Windows（X11/macOS）同一条逐像素穿透：落点是 Qt 属性
+            # WA_TransparentForMouseEvents + 原生输入穿透标志，判定与档位协议
+            # 与 Windows 控制器逐条相同（见 platform_passthrough 模块 docstring）。
+            # 这里此前没有任何穿透落点，整屏 overlay 就是一个整屏输入区——
+            # 桌面点击被整块吞掉（发布阻断项）。
+            if self._input_controller is None:
+                self._input_controller = QtPerPixelInputController(self)
+            else:
+                self._input_controller.resume()
 
     def hideEvent(self, event) -> None:
         """隐藏期不轮询（O2）：不可见窗口不收输入，两条探测链路都是空转。
 
-        - 逐像素穿透轮询（10/50ms：QCursor.pos + GetWindowLongW）停表；
+        - 逐像素穿透轮询（10/50ms，Windows 写扩展样式位 / 非 Windows 写 Qt 属性
+          与原生输入穿透标志）停表；
         - 光标可见性探测（20Hz）停表——由可见性闸门转达（overlay 不认识
           watcher，多屏多 overlay 时语义也是进程级的「全都在隐藏」）；
         - 全屏探测 1Hz 表**不**停：它是全屏避让后恢复显示的唯一路径。
