@@ -740,8 +740,9 @@ def test_autostart_delegates_existing_instance_check_to_launcher(tmp_path, monke
     """已有 web 实例在线时，自启也必须把判定交给 launcher——不能在 app 层提前 return。
 
     回归（2026-10 双目标）：app 层用「web 端口在线就 return」当复用判定，会把
-    ``harness_launch_target=desktop/auto`` 的选择一起挡掉（桌面端不听 web 端口，
-    本机有 web 实例 ≠ 用户要的桌面端已在跑）。
+    ``harness_launch_target=desktop`` 的选择一起挡掉（桌面端不听 web 端口，
+    本机有 web 实例 ≠ 用户要的桌面端已在跑）。auto 现已解析成 service，本用例
+    钉的仍是「判定下沉、一次都不 spawn」这条契约。
     """
     shell = _gate_shell(tmp_path, dsh_link=True)
     launched: list[dict] = []
@@ -753,6 +754,34 @@ def test_autostart_delegates_existing_instance_check_to_launcher(tmp_path, monke
     shell._maybe_autostart_harness()
     assert _wait_for(lambda: bool(launched)), "已有实例的判定必须交给 launch_harness"
     assert launched[0].get("target") == "auto", "自启必须带上配置里的目标"
+
+
+def test_autostart_default_target_starts_service_without_gui_or_browser(
+        tmp_path, monkeypatch, spawn_probe):
+    """默认目标（auto）在装了桌面端的机器上：只拉服务，不拉 GUI、不开浏览器。
+
+    回归（2026-10 语义收紧）：auto 曾解析成 desktop（检测到桌面端安装优先），
+    于是每次桌宠启动都把整个桌面端 GUI 拉起来。产品口径：自启只负责把 dsh 服务
+    拉起来，要界面必须显式选 web / 桌面端目标。
+
+    消融判别（实测）：把 ``resolve_launch_target`` 的 auto 改回 desktop，本用例
+    变红——服务没被拉起，反而是桌面端 ``_spawn_desktop`` 被调用。
+    """
+    shell = _gate_shell(tmp_path, dsh_link=True)  # 目标取配置默认 auto
+    exe = tmp_path / "DeepSeek Harness.exe"
+    exe.write_bytes(b"MZ")
+    desktop_spawned: list = []
+    opened: list[str] = []
+    monkeypatch.setattr(hl, "DESKTOP_SUPPORTED", True)
+    monkeypatch.setattr(hl, "desktop_install_path", lambda: exe)
+    monkeypatch.setattr(hl, "desktop_process_running", lambda: False)
+    monkeypatch.setattr(hl, "_spawn_desktop", lambda path: desktop_spawned.append(path))
+    monkeypatch.setattr(hl.webbrowser, "open", lambda url: opened.append(url))
+
+    shell._maybe_autostart_harness()
+    assert _wait_for(lambda: bool(spawn_probe)), "auto 必须照常把 dsh 服务拉起来"
+    assert desktop_spawned == [], "自启不得拉起桌面端 GUI"
+    assert opened == [], "自启不得打开浏览器"
 
 
 def test_autostart_desktop_not_spawned_when_toggle_flipped_during_probe(tmp_path, monkeypatch):

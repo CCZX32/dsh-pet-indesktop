@@ -331,22 +331,26 @@ class ModernSettingsDialog(QDialog):
         self.harness_autostart_check = ToggleSwitch(self)
         self._harness_autostart_initial = bool(self.config.get("harness_autostart", False))
         self.harness_autostart_check.setChecked(self._harness_autostart_initial)
-        # 自启目标下拉（2026-10 双目标）：auto=检测到桌面端优先桌面端、否则 web；
+        # 自启目标下拉（2026-10 双目标；2026-10 语义收紧）：auto 与 service 都是
+        # 「只拉起 dsh 服务」（不开浏览器、不开界面），web/desktop 才是显式要界面；
         # 只作用于「随桌宠启动」，菜单的两个启动入口是显式选择（不受本项影响）。
         # 桌面端探测/自动拉起本轮只支持 Windows，唯一口径是
         # harness_launcher.DESKTOP_SUPPORTED（不在设置页另写一份平台判定）。
         # 不支持的平台上该项**保留但置灰**（能力暂不可用 ≠ 永久不支持，见
         # docs/SETTINGS-CHANGE-GATES.md §4「暂不可用的能力保留并解释原因」），
-        # 并保证 desktop 绝不会被写回：显示与保存两处都回落 auto（该平台上
-        # auto 解析就是 web），存量配置里的 desktop 因此不会变成无声死选项。
+        # 并保证 desktop 绝不会被写回：显示与保存两处都回落 auto（auto 与平台
+        # 无关，解析就是 service），存量配置里的 desktop 因此不会变成无声死选项。
         self._harness_desktop_available = bool(harness_mod.DESKTOP_SUPPORTED)
         self.harness_launch_target_select = ModernSelect(self, width=190)
-        self.harness_launch_target_select.addItem(
-            "自动（桌面端优先）" if self._harness_desktop_available else "自动（dsh web 界面）",
-            "auto",
-        )
+        self.harness_launch_target_select.addItem("自动（仅服务，不开界面）", "auto")
+        self.harness_launch_target_select.addItem("仅 dsh 服务（不开界面）", "service")
         self.harness_launch_target_select.addItem("dsh web 界面", "web")
         self.harness_launch_target_select.addItem("桌面端界面", "desktop")
+        # 自绘文本区不带省略号：控件宽度按**最长项文案**算，不写死固定值
+        # （「仅 dsh 服务（不开界面）」在默认字体下要 216px，写死 190 会把尾部裁掉）。
+        self.harness_launch_target_select.setFixedWidth(
+            max(190, self.harness_launch_target_select.suggestedWidth())
+        )
         if not self._harness_desktop_available:
             self.harness_launch_target_select.setItemDisabled(
                 self.harness_launch_target_select.findData("desktop"), True
@@ -463,17 +467,19 @@ class ModernSettingsDialog(QDialog):
         general_layout.setSpacing(18)
         autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（仅主桌宠可设置）"
         # 「自启目标」的说明随平台变：桌面端项在非 Windows 上置灰，文案必须
-        # 说清原因（不能留着「自动 = 检测到桌面端就起桌面端」这种本平台做不到的话）。
+        # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。
         if self._harness_desktop_available:
             harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：自动 = 检测到桌面端安装则起桌面端、否则起 dsh web。"
+                "只决定「随桌宠启动」拉起哪一个：自动与「仅 dsh 服务」都是只把 dsh 服务拉起来"
+                "（不开浏览器、不开桌面端界面），想在自启时进界面要显式选「dsh web 界面」或「桌面端界面」。"
                 "右键菜单/托盘的「启动 dsh web 界面」「启动桌面端界面」是你点哪项就起哪项，"
                 "不受本项影响；「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
             )
         else:
             harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：本平台暂不支持自动拉起桌面端（本版本仅 Windows），"
-                "所以「桌面端界面」置灰、自动 = 起 dsh web；右键菜单里的「启动桌面端界面」会如实提示不支持、"
+                "只决定「随桌宠启动」拉起哪一个：自动与「仅 dsh 服务」都是只把 dsh 服务拉起来、"
+                "不开浏览器；本平台暂不支持自动拉起桌面端（本版本仅 Windows），所以「桌面端界面」置灰，"
+                "想在自启时进界面要显式选「dsh web 界面」。右键菜单里的「启动桌面端界面」会如实提示不支持、"
                 "不会静默改开网页。「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
             )
         launch_rows = [

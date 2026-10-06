@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """一键启动 DeepSeek Harness（dsh web 默认端口 38080；或桌面端应用）。
 
-双目标（2026-10）：``launch_harness(..., target=)`` 接受 ``"auto" | "web" |
-"desktop"``——auto 在检测到桌面端安装（NSIS per-user 默认位或注册表卸载项的
-InstallLocation / DisplayIcon）时走桌面端，否则走 web；显式 web/desktop 直通。
-桌面端探测与自动拉起**目前仅 Windows**：非 Windows 上 auto 仍解析成 web，
-显式 desktop 回报 ``unsupported``（不 Popen 目录、也不静默改开网页）。桌面端是
-用户的主力 GUI 应用：由桌宠拉起只登记不杀（退出收口只覆盖 web 服务进程）。
+双目标（2026-10）：``launch_harness(..., target=)`` 接受 ``"auto" | "service" |
+"web" | "desktop"``——auto 与 service 都是「只拉起 dsh 服务」（不开浏览器、不开
+界面），web/desktop 是显式要界面的选择。auto 曾经按「检测到桌面端安装就走桌面端」
+解析，那会让每次桌宠自启都把整个桌面端 GUI 拉起来；自启的本意只是拉起服务，
+故（2026-10 产品口径）auto 恒等于 service，不再做任何桌面端探测。桌面端探测与
+自动拉起**目前仅 Windows**：显式 desktop 在非 Windows 上报 ``unsupported``
+（不 Popen 目录、也不静默改开网页）。桌面端是用户的主力 GUI 应用：由桌宠拉起
+只登记不杀（退出收口只覆盖 web 服务进程）。
 
 
 启动命令解析按可靠性级联（适配不同安装方式/不同 PATH 的电脑）：
@@ -74,13 +76,14 @@ def _candidate_ports(port: int = DEFAULT_PORT) -> list[int]:
 
 
 # ------------------------------------------------------------------ 桌面端
-LAUNCH_TARGETS = ("auto", "web", "desktop")
+LAUNCH_TARGETS = ("auto", "service", "web", "desktop")
 DESKTOP_APP_NAME = "DeepSeek Harness"
 _DESKTOP_EXE_NAME = "DeepSeek Harness.exe"
 # 桌面端自动拉起**本轮只支持 Windows**：macOS 的 .app 是目录（Popen 不了），
-# Linux 无官方包。非 Windows 一律按「不支持」处理——auto 继续走 web（上游默认
-# 行为不变），显式 desktop 明确回报 unsupported；绝不让占位路径把默认拐到 desktop。
-# 在线判定用的 19387 端口候选在 pet/dsh_state.py（那边是纯逻辑，不在这里重复）。
+# Linux 无官方包。非 Windows 一律按「不支持」处理——自动目标（auto/service）本就
+# 只起服务、与平台无关，显式 desktop 明确回报 unsupported；绝不让占位路径把默认
+# 拐到 desktop。在线判定用的 19387 端口候选在 pet/dsh_state.py（那边是纯逻辑，
+# 不在这里重复）。
 DESKTOP_SUPPORTED = os.name == "nt"
 
 # 注册表卸载项路径（NSIS per-user 安装写 HKCU）
@@ -165,7 +168,8 @@ def desktop_install_path() -> Path | None:
     """桌面端安装路径（未安装或平台不支持返回 None）。
 
     非 Windows 直接 None——不返回 macOS ``.app``（那是目录，Popen 不了）；
-    auto 因此仍解析成 web，显式 desktop 由上层的 ``unsupported`` 兜住。
+    显式 desktop 由上层的 ``unsupported`` 兜住（自动目标 auto/service 与平台
+    无关，本来就只起服务）。
     """
     if not DESKTOP_SUPPORTED:
         return None
@@ -208,12 +212,18 @@ def desktop_process_running() -> bool:
 
 
 def resolve_launch_target(target: str = "auto") -> str:
-    """auto → desktop（检测到桌面端安装）否则 web；显式 web/desktop 直通。"""
+    """auto → service（只拉起 dsh 服务，不开界面）；显式 service/web/desktop 直通。
+
+    auto 曾经是「检测到桌面端安装就走桌面端」——那让每次桌宠自启都把整个桌面端
+    GUI 拉起来。产品口径（2026-10）：自启只负责把 dsh 服务拉起来，web/desktop
+    界面必须是用户显式选择，所以 auto 不再做任何桌面端探测（安装位/注册表/进程
+    一律不看），恒等于 service。非法值照旧回落 auto（即 service）。
+    """
     t = str(target or "auto").strip().lower()
     if t not in LAUNCH_TARGETS:
         t = "auto"
     if t == "auto":
-        return "desktop" if desktop_install_path() is not None else "web"
+        return "service"
     return t
 
 
@@ -549,9 +559,19 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
                    cancel_check=None, target: str = "auto") -> tuple[str, str]:
     """启动 harness；open_browser=True 时确保浏览器被打开。
 
+    target（解析后）决定拉起什么：
+
+    - ``service``（含 auto）：**只拉起 dsh 服务**——走 web 启动路径，但
+      ``open_browser`` 一律按 False 处理（调用方传 True 也不开浏览器、不派生
+      等就绪开页面的线程）。遗留限制（与 ``open_browser=False`` 同源）：旧版
+      dsh 不支持 ``--no-open`` 时它会自己开浏览器，service 目标无法阻止
+      （启动前无法可靠探测）。
+    - ``web``：显式要界面——``open_browser=True`` 时复用已有实例会直接开页面，
+      新起实例（命令带 ``--no-open``）由桌宠等就绪后开页面。
+    - ``desktop``：显式要界面——拉起桌面端 exe（见下）。
+
     open_browser=False（随桌宠自启动场景）：只起服务不开浏览器——已有实例
-    直接返回，新起实例不等就绪、不开页面。注意旧版 dsh 不支持 --no-open
-    时会自己开浏览器，此参数无法阻止（启动前无法可靠探测）。
+    直接返回，新起实例不等就绪、不开页面。
 
     ``cancel_check``（可选）：无参可调用对象，返回 True 表示「放弃拉起」。
     在慢命令解析（``_find_launch_command``，npm 探测最长 15s）**之后**、
@@ -560,7 +580,8 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
     菜单手动启动不传（用户明示动作永远可用）。
 
     返回 (status, url)：
-    - already   已有实例在运行（配置端口或官方默认 3080）；open_browser 时已打开浏览器
+    - already   已有实例在运行（配置端口或官方默认 3080）；service 目标不开浏览器，
+                其余 open_browser=True 时已打开浏览器
     - started   已后台启动；open_browser 且命令带 --no-open 时由桌宠等待就绪后
                 打开浏览器，否则由 dsh 自己开浏览器（桌宠不重复打开）
     - aborted   cancel_check 命中：慢探测后放弃拉起（未 spawn）
@@ -568,11 +589,11 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
     - unsupported 平台不支持桌面端（非 Windows；info="desktop"）
     - error     启动异常（info 为异常信息）
 
-    target="desktop"（或 auto 解析为 desktop）时走桌面端：桌面端进程已在跑
-    直接返回 already（Electron 单实例，不重复拉起）；否则启动 exe，不开浏览器、
-    不就绪等待（desktop host 自报 19387，联动读方探活自会发现）。桌面端只
-    登记不杀——pet 退出/联动关闭都不会动它。非 Windows 只支持 web：auto 仍解析
-    成 web，显式 desktop 回报 unsupported（不静默回落，也不去 Popen 一个目录）。
+    target="desktop"（必须是显式选择；auto 不再解析成 desktop）时走桌面端：桌面端
+    进程已在跑直接返回 already（Electron 单实例，不重复拉起）；否则启动 exe，不开
+    浏览器、不就绪等待（desktop host 自报 19387，联动读方探活自会发现）。桌面端只
+    登记不杀——pet 退出/联动关闭都不会动它。非 Windows 上桌面端报 unsupported
+    （不静默回落，也不去 Popen 一个目录）。
     """
     resolved = resolve_launch_target(target)
     if resolved == "desktop":
@@ -594,6 +615,13 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
             return "error", str(exc)
         logging.info("已拉起 DeepSeek Harness 桌面端：%s", exe)
         return "started", "desktop"
+    if resolved == "service":
+        # service（含 auto）：只拉起服务本身，强制 headless——调用方传
+        # open_browser=True 也不开浏览器。置 False 后下面的等待线程分支
+        # （`if not open_browser` 提前返回）就不可能到达。
+        # 遗留限制：旧版 dsh 不支持 --no-open 时会自己开浏览器，service
+        # 目标无法阻止（与 open_browser=False 的同一处限制，见 docstring）。
+        open_browser = False
     for candidate in _candidate_ports(port):
         if is_running(candidate):
             url = f"http://127.0.0.1:{candidate}"
@@ -1162,9 +1190,9 @@ def restart_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> t
 def launch_harness_gui(parent=None, action: str = "start", target: str = "auto") -> None:
     """GUI 菜单入口：探测/确认/启动/停止全部离开 GUI 线程，结果回 GUI 线程提示。
 
-    ``target``（仅 action="start" 有意义）："auto"（默认，检测到桌面端优先）/
-    "web" / "desktop"；重启/停止只作用于 web 服务进程（desktop 是用户的主力
-    应用，桌宠绝不终止它）。
+    ``target``（仅 action="start" 有意义）："auto" / "service"（只起服务，不开
+    浏览器）/ "web" / "desktop"（后两者是显式要界面）；重启/停止只作用于 web
+    服务进程（desktop 是用户的主力应用，桌宠绝不终止它）。
 
     命令解析可能同步执行 `npm root -g`（最长 15 秒）、进程反查在 Windows 上
     跑 PowerShell `Get-CimInstance`（最长 10 秒），放在 GUI 线程会卡住界面；
