@@ -2090,13 +2090,16 @@ class AppShell:
     def _maybe_autostart_harness(self) -> None:
         """「随桌宠启动 dsh 服务」：主窗就绪后按 ``harness_launch_target`` 拉起。
 
-        目标是 dsh web 时全程静默（CREATE_NO_WINDOW 隐藏控制台 +
-        open_browser=False，不开浏览器、无弹窗）；目标是桌面端界面时直接打开
-        桌面端应用（用户的主力应用，桌宠退出**不会**关它）。
+        目标 auto/service 都是**只拉起 dsh 服务**：全程静默（CREATE_NO_WINDOW
+        隐藏控制台 + open_browser=False，不开浏览器、不开界面、无弹窗）——自启的
+        本意就是把服务准备好，要界面得用户显式选 web/desktop 目标（菜单里点哪项
+        起哪项）。目标是 desktop 时直接打开桌面端应用（用户的主力应用，桌宠退出
+        **不会**关它）；auto 已不再解析成 desktop（2026-10 语义收紧：否则每次
+        桌宠启动都会把整个桌面端 GUI 拉起来）。
 
         「本机已有实例」的判定交给 ``launch_harness`` 自己做：它同时会看 web
         端口候选与桌面端单实例；在这里按 web 端口提前 return，会把用户选的
-        桌面端/auto 目标一起挡掉（桌面端根本不上那个端口）。
+        桌面端目标一起挡掉（桌面端根本不上那个端口）。
 
         机器级语义：仅主窗就绪时调度一次（进程内新窗不重复触发）。
 

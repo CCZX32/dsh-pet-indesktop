@@ -280,6 +280,38 @@ def test_set_normalizes_music_and_cost_keys(tmp_path):
     assert cfg.data["agent_cost_enabled"] is True
 
 
+# ------------------------------------------------- 自启目标（harness_launch_target）
+def _launch_target_config(tmp_path, raw: str) -> Config:
+    """把 ``harness_launch_target`` 写成指定原始值落盘，再走真实加载路径。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"version": 4, "harness_launch_target": raw}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return Config(base=tmp_path)
+
+
+def test_harness_launch_target_accepts_service_and_falls_back_to_auto(tmp_path):
+    """归一化认 ``service``（新增的自启目标），非法值仍回落 ``auto``。
+
+    语义收紧（2026-10）：auto 不再解析成 desktop，而是只拉起 dsh 服务；设置页
+    新增「仅 dsh 服务」项后，该值必须能落盘、重载后不被归一化抹掉。
+    """
+    assert _launch_target_config(tmp_path / "svc", "service").get("harness_launch_target") == "service"
+    assert _launch_target_config(tmp_path / "auto", "auto").get("harness_launch_target") == "auto"
+    for i, bad in enumerate(("desktop-gui", "SERVICE2", "", "0")):
+        cfg = _launch_target_config(tmp_path / f"bad{i}", bad)
+        assert cfg.get("harness_launch_target") == "auto", f"非法值 {bad!r} 必须回退 auto"
+
+
+def test_set_harness_launch_target_keeps_service(tmp_path):
+    """set() 路径同样不吞 service（设置页保存走 set → save）。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("harness_launch_target", "service")
+    assert cfg.data["harness_launch_target"] == "service"
+
+
 def test_dirty_music_and_cost_config_does_not_break_settings_page(tmp_path):
     """设置页（settings_pet_controls）面对脏配置必须能构造出来。"""
     from PySide6.QtWidgets import QApplication

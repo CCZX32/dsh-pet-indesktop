@@ -791,8 +791,9 @@ class Config:
             "golden_spin_direct": False,  # 点击触发黄金回旋时跳过点击动画，直接回旋并逐圈加速
             "edge_probe_enabled": False,  # 拖到屏幕左右边缘后自动进入探头姿态
             "autostart_wanted": False,  # 用户曾开启过开机自启（用于启动自检：被安全软件清理时提醒）
-            "harness_autostart": False,  # 随桌宠启动自动拉起（web 目标=只起服务不开浏览器；桌面端目标=打开界面）
-            # 自启目标：auto=检测到桌面端安装则桌面端、否则 web；web/desktop 显式指定。
+            "harness_autostart": False,  # 随桌宠启动自动拉起（auto/service/web 目标=只起服务不开浏览器；桌面端目标=打开界面）
+            # 自启目标：auto=只拉起 dsh 服务（不开浏览器、不开界面），与 service 同义；
+            # service 显式写「只起服务」、web/desktop 是显式要界面的选择。
             # **只作用于「随桌宠启动」**：右键菜单/托盘的启动入口是显式选择，不受它影响；
             # 「重启/停止服务」始终只作用于 dsh web 服务进程。
             "harness_launch_target": "auto",
@@ -1275,7 +1276,7 @@ class Config:
 
     def _normalize_pet_settings(self):
         target = str(self.data.get("harness_launch_target") or "auto").strip().lower()
-        self.data["harness_launch_target"] = target if target in ("auto", "web", "desktop") else "auto"
+        self.data["harness_launch_target"] = target if target in ("auto", "service", "web", "desktop") else "auto"
         dialogue_mode = str(self.data.get("dialogue_mode") or "legacy").lower()
         self.data["dialogue_mode"] = dialogue_mode if dialogue_mode in {"legacy", "whale_maid", "custom"} else "legacy"
         raw_phrases = self.data.get("dialogue_phrases")

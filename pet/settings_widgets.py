@@ -846,6 +846,18 @@ class ModernSelect(QAbstractButton):
     def currentText(self) -> str:  # noqa: N802
         return self._items[self._index][0] if 0 <= self._index < len(self._items) else ""
 
+    def suggestedWidth(self) -> int:  # noqa: N802
+        """装得下最长项文案所需的控件宽度。
+
+        自绘文本区不带省略号（``paintEvent`` 直接 ``drawText`` 到
+        ``width() - 34``：左内缩 10 + 右侧 24 留给 chevron），宽度不够就**裁字**。
+        调用方加长下拉文案时用本方法取宽度，别再手算固定值。"""
+        widest = max(
+            (self.fontMetrics().horizontalAdvance(text) for text, _ in self._items),
+            default=0,
+        )
+        return widest + 34
+
     def popupStyleSheet(self) -> str:  # noqa: N802
         return settings_popup_stylesheet(self)
 

@@ -142,7 +142,11 @@ def test_supports_no_open_disk_cache(monkeypatch, tmp_path):
 
 
 def test_launch_harness_reuses_existing_instance_on_alt_port(monkeypatch):
-    """已有 dsh web 跑在官方默认 3080 时，直接复用打开，不再新起 38080。"""
+    """已有 dsh web 跑在官方默认 3080 时，直接复用打开，不再新起 38080。
+
+    ``target="web"`` 显式给出：默认的 auto 已改为 service（只起服务、不开浏览器），
+    本用例钉的是 web 目标「复用并打开」这条契约。
+    """
     from pet import harness_launcher as hl
 
     opened = []
@@ -154,7 +158,7 @@ def test_launch_harness_reuses_existing_instance_on_alt_port(monkeypatch):
         raise AssertionError("已有实例运行时不应再 spawn")
 
     monkeypatch.setattr(hl, "_spawn", _no_spawn)
-    status, url = hl.launch_harness()
+    status, url = hl.launch_harness(target="web")
     assert status == "already"
     assert url == "http://127.0.0.1:3080"
     assert opened == ["http://127.0.0.1:3080"]
@@ -173,7 +177,7 @@ def test_launch_harness_prefers_configured_port(monkeypatch):
         return True  # 第一个候选（配置端口）即有监听
 
     monkeypatch.setattr(hl, "is_running", _probe)
-    status, url = hl.launch_harness(port=38080)
+    status, url = hl.launch_harness(port=38080, target="web")
     assert status == "already"
     assert probed == [38080]
     assert opened == ["http://127.0.0.1:38080"]
@@ -290,7 +294,7 @@ def test_launch_harness_browser_ownership(monkeypatch):
         hl, "_find_launch_command",
         lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080"],
     )
-    status, url = hl.launch_harness()
+    status, url = hl.launch_harness(target="web")
     assert status == "started"
     assert opened == []
     assert threads == []
@@ -300,7 +304,7 @@ def test_launch_harness_browser_ownership(monkeypatch):
         hl, "_find_launch_command",
         lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
     )
-    status, url = hl.launch_harness()
+    status, url = hl.launch_harness(target="web")
     assert status == "started"
     assert threads, "带 --no-open 时应启动等待线程"
     assert opened == []
@@ -433,32 +437,104 @@ def test_target_desktop_launches_exe_when_installed(monkeypatch, tmp_path):
     assert opened == [], "桌面端路径不得打开浏览器"
 
 
-def test_auto_falls_back_to_web_when_desktop_absent(monkeypatch):
-    """③ auto + 桌面端未安装 → 回落 web（上游默认行为不变）。"""
+def test_auto_resolves_to_service_without_probing_desktop(monkeypatch):
+    """③ auto → service，且**不再做任何桌面端探测**（安装位/注册表/进程都不看）。
+
+    语义收紧（2026-10，产品口径）：自启的本意是只拉起 dsh 服务，web/desktop
+    界面必须是显式选择。旧语义（auto 装上桌面端就拐 desktop）让每次桌宠启动都
+    把整个桌面端 GUI 拉起来。把两个探测入口换成会抛的替身：auto 只要碰它们一次
+    就是回归。合法/非法/空值一并钉住——非法值照旧回落 auto（= service）。
+    """
     from pet import harness_launcher as hl
 
-    monkeypatch.setattr(hl, "desktop_install_path", lambda: None)
-    monkeypatch.setattr(hl, "desktop_process_running", lambda: False)
+    def _boom(*args, **kwargs):
+        raise AssertionError("auto 不得再探测桌面端（安装位 / 进程枚举）")
+
+    monkeypatch.setattr(hl, "desktop_install_path", _boom)
+    monkeypatch.setattr(hl, "desktop_process_running", _boom)
+
+    assert hl.resolve_launch_target("auto") == "service"
+    assert hl.resolve_launch_target("") == "service"
+    assert hl.resolve_launch_target("  AUTO  ") == "service"
+    assert hl.resolve_launch_target("bogus") == "service", "非法值回退 auto（= service）"
+    assert hl.resolve_launch_target("service") == "service"
+    assert hl.resolve_launch_target("web") == "web"
+    assert hl.resolve_launch_target("desktop") == "desktop"
+
+
+def test_auto_launch_is_headless_service(monkeypatch):
+    """③ auto 走 web 启动路径，但强制 headless：不开浏览器、不派生等待线程。
+
+    ``open_browser`` 取默认 True——service 的定义就是「只起服务」，调用方传什么
+    都改变不了这一点（自启路径靠这条保证不弹浏览器）。
+    """
+    from pet import harness_launcher as hl
+
+    opened: list[str] = []
+    threads: list = []
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(hl.webbrowser, "open", lambda url: opened.append(url))
     monkeypatch.setattr(hl, "is_running", lambda port=None: False)
-    monkeypatch.setattr(hl, "_which", lambda name: "dsh" if name == "dsh" else None)
-    monkeypatch.setattr(hl, "_supports_no_open", lambda base: True)
-    spawned = []
-    monkeypatch.setattr(hl, "_spawn", lambda command: spawned.append(command))
+    monkeypatch.setattr(hl, "_spawn", lambda command: spawned.append(list(command)))
+    monkeypatch.setattr(
+        hl.threading, "Thread",
+        lambda target=None, daemon=None, **kwargs: threads.append(target),
+    )
+    monkeypatch.setattr(
+        hl, "_find_launch_command",
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+    )
 
-    assert hl.resolve_launch_target("auto") == "web"
-    status, url = hl.launch_harness(target="auto", open_browser=False)
-    assert status == "started"
-    assert spawned and spawned[0][1] == "web", "auto 未检出桌面端时必须回落 web 启动命令"
+    status, url = hl.launch_harness(target="auto")
+    assert status == "started" and url == "http://127.0.0.1:38080"
+    assert spawned and spawned[0][1] == "web", "auto 必须照常把 dsh web 服务拉起来"
+    assert opened == [], "auto（service）不得打开浏览器"
+    assert threads == [], "auto（service）不得派生「等就绪再开页面」线程"
 
 
-def test_auto_prefers_desktop_when_installed(monkeypatch, tmp_path):
-    """auto + 桌面端已安装 → 走桌面端（spec 的 auto 语义）。"""
+def test_service_target_stays_headless_even_with_open_browser_true(monkeypatch):
+    """显式 service 目标：即使调用方传 ``open_browser=True`` 也不开浏览器。
+
+    与 web 目标的判别只在这一格：web + open_browser=True + --no-open 会派生
+    等待线程（见 ``test_launch_harness_browser_ownership``），service 不会。
+    """
     from pet import harness_launcher as hl
 
-    exe = tmp_path / "DeepSeek Harness.exe"
-    exe.write_bytes(b"MZ")
-    monkeypatch.setattr(hl, "desktop_install_path", lambda: exe)
-    assert hl.resolve_launch_target("auto") == "desktop"
+    opened: list[str] = []
+    threads: list = []
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(hl.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(hl, "is_running", lambda port=None: False)
+    monkeypatch.setattr(hl, "_spawn", lambda command: spawned.append(list(command)))
+    monkeypatch.setattr(
+        hl.threading, "Thread",
+        lambda target=None, daemon=None, **kwargs: threads.append(target),
+    )
+    monkeypatch.setattr(
+        hl, "_find_launch_command",
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+    )
+
+    status, url = hl.launch_harness(target="service", open_browser=True)
+    assert status == "started"
+    assert spawned, "service 必须照常起 dsh web 进程"
+    assert opened == [] and threads == [], "service 目标必须强制 headless"
+
+
+def test_service_target_does_not_open_browser_on_reused_instance(monkeypatch):
+    """已有实例在线：service 报 already 但不开浏览器（web 目标这里会开）。"""
+    from pet import harness_launcher as hl
+
+    opened: list[str] = []
+    monkeypatch.setattr(hl.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(hl, "is_running", lambda port=None: True)
+    monkeypatch.setattr(
+        hl, "_spawn", lambda command: (_ for _ in ()).throw(AssertionError("已有实例不得再拉起"))
+    )
+
+    status, url = hl.launch_harness(target="service", open_browser=True)
+    assert status == "already" and url == "http://127.0.0.1:38080"
+    assert opened == [], "service 复用已有实例时同样不得打开浏览器"
 
 
 def test_explicit_desktop_not_installed_is_not_found(monkeypatch):
@@ -671,10 +747,11 @@ def test_registry_probe_finds_versioned_name_and_icon_path(tmp_path, monkeypatch
 
 
 def test_desktop_unsupported_platform_keeps_web_default(monkeypatch):
-    """非 Windows（本轮不支持桌面端）：auto 仍走 web，显式 desktop 明确报不支持。
+    """非 Windows（本轮不支持桌面端）：auto 走 service，显式 desktop 明确报不支持。
 
     占位实现曾把 macOS 的 ``/Applications/*.app`` 目录当成桌面端可执行文件：
-    auto 会拐到 desktop、然后 Popen 一个目录。能力位钉死后不许回归。
+    auto 会拐到 desktop、然后 Popen 一个目录。能力位钉死后不许回归；auto 现已
+    统一落到 service（与平台无关，非 Windows 只是「更不可能拐到 desktop」）。
     """
     from pet import harness_launcher as hl
 
@@ -682,7 +759,7 @@ def test_desktop_unsupported_platform_keeps_web_default(monkeypatch):
     assert hl.desktop_install_path() is None
     assert hl.desktop_processes() == []
     assert hl.desktop_process_running() is False
-    assert hl.resolve_launch_target("auto") == "web", "非 Windows 的 auto 默认必须是 web"
+    assert hl.resolve_launch_target("auto") == "service", "auto 恒为 service（不探测桌面端）"
     assert hl.resolve_launch_target("desktop") == "desktop"
     assert hl.launch_harness(target="desktop") == ("unsupported", "desktop")
 

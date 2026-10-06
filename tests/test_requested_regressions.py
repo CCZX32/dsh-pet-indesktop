@@ -236,6 +236,70 @@ def test_harness_target_desktop_selectable_on_supported_platform(tmp_path, monke
     app.processEvents()
 
 
+def test_harness_target_offers_service_item_and_auto_says_headless(tmp_path, monkeypatch):
+    """自启目标：新增「仅 dsh 服务」项；auto 措辞改成「仅服务，不开界面」。
+
+    语义收紧（2026-10，产品口径）：自启的本意只是把 dsh 服务拉起来——不开浏览器、
+    不开桌面端界面；要界面必须自己选 web / 桌面端。旧措辞「自动（桌面端优先）」
+    描述的是被撤掉的旧语义（装上桌面端就拐 desktop），留着就是骗用户。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(settings_mod.harness_mod, "DESKTOP_SUPPORTED", True)
+
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    select = dialog.harness_launch_target_select
+
+    assert select.itemText(0) == "自动（仅服务，不开界面）", "auto 项不得再写「桌面端优先」"
+    assert select.currentData() == "auto", "默认仍是 auto"
+    service_idx = select.findData("service")
+    assert service_idx == 1, "「仅 dsh 服务」排在 auto 之后"
+    assert select.itemText(service_idx) == "仅 dsh 服务（不开界面）"
+    assert not select.isItemDisabled(service_idx)
+    # web / desktop 两项不动
+    assert select.itemText(select.findData("web")) == "dsh web 界面"
+    assert select.itemText(select.findData("desktop")) == "桌面端界面"
+
+    row = dialog.findChild(settings_mod.SettingRow, "settingRow_harness_launch_target")
+    hint = row.hint_label.text()
+    assert "自动" in hint and "不开浏览器" in hint, "说明里必须写清 auto = 只起服务不开浏览器"
+
+    select.setCurrentData("service")
+    assert dialog._write_config() is True
+    assert Config(tmp_path).get("harness_launch_target") == "service", "service 必须能落盘"
+    dialog.close()
+    app.processEvents()
+
+
+def test_harness_target_select_width_fits_its_longest_item(tmp_path, monkeypatch):
+    """下拉宽度必须装得下最长项文案——自绘文本区没有省略号，窄了直接裁字。
+
+    回归（本轮）：控件宽度写死 190px，文本区只有 ``190-34=156px``，而新增的
+    「仅 dsh 服务（不开界面）」在默认字体下要 182px → 用户看到的是被截断的半句话。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    select = dialog.harness_launch_target_select
+
+    assert select.width() >= select.suggestedWidth(), (
+        f"控件宽 {select.width()}px 装不下最长项（需 {select.suggestedWidth()}px）"
+    )
+    dialog.close()
+    app.processEvents()
+
+
 def test_click_sound_path_is_linked_to_enable_toggle_and_persisted(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
