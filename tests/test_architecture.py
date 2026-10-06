@@ -226,11 +226,12 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-# 2026-10-08 上调到 2426（#208 免打扰 + #209 天气 + #172 网络信息 整合叠加）：
-# 免打扰 4 行 / 天气 2 行 / 网络信息 5 行（import 1 + 岛页小节 3 + 保存委托 1），
-# 实现分别在 pet/settings_quiet.py / settings_weather.py / settings_network.py。
-# 实测 2426；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2426
+# 2026-10-08 回调到 2423（#208+#209+#172 叠加后，#228 歌词批次把「浏览器媒体
+# 会话参与歌词」的 4 行写回搬进 settings_music.save_source_settings 换成 1 行、
+# 并入 foobar2000 歌词两行——净 −3）：免打扰 4 行 / 天气 2 行 / 网络信息 5 行，
+# 实现分别在 pet/settings_quiet.py / settings_weather.py / settings_network.py /
+# settings_music.py。实测 2423；按文件约定只随实测校准（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2423
 
 
 def _read(name: str) -> str:
@@ -257,6 +258,9 @@ def test_pure_logic_modules_do_not_import_qt():
         # 跑的就是这一层，单测也在无 Qt 的替身上验（ctypes 全 mock）。
         "memory_trim.py",
         "net_monitor.py", "network_info.py",
+        # 2026-10-07 加入 music_title：标题清洗/解析是取词链路的前处理，规则要能
+        # 脱离 Qt 单独跑真值表（误伤防护的用例都是纯字符串）。
+        "music_title.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

@@ -14,6 +14,12 @@
 因此 ``Playback.position`` 允许为 ``None``，表示"该播放器不提供进度"，
 调用方需回退到本地计时推算。这与同类工具（如 Lyricify）的处理方式一致。
 
+**SMTC 之外还有一个补充源**：foobar2000 默认不注册 SMTC，永远不出现在会话
+列表里，所以它额外走"进程 + 主窗口标题"（``pet/foobar_playing.py``）。那一路只在
+**SMTC 没有在播会话**时被询问（见 :func:`_read_foobar_playback`），返回的
+``app_id`` 是 :data:`foobar_playing.FOOBAR_APP_ID`，调用方据此不拿它覆盖 SMTC 的
+跟踪位。
+
 本模块只读系统信息，不发起任何网络请求，也不触碰音频流。
 """
 
@@ -24,6 +30,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+
+from . import foobar_playing
 
 # 判定"不上报进度"的阈值：末位时长小于该值视为无效时间轴。
 _MIN_VALID_DURATION = 0.01
@@ -177,6 +185,15 @@ def is_browser_session(app_id: str | None) -> bool:
     表外应用一律返回 False——只否决明确认识的浏览器，不做白名单式拦截。
     """
     return normalized_app_id(app_id) in _BROWSER_APP_IDS
+
+
+def is_foobar_source(app_id: str | None) -> bool:
+    """这条采样是否来自 foobar2000 窗口标题源（非 SMTC 会话）。
+
+    调用方据此**不要**把它写进 SMTC 的跟踪位（``tracked_app_id``）：那个位是给
+    会话选取用的，塞一个 SMTC 里不存在的 id 会白白丢掉"粘住当前播放器"的能力。
+    """
+    return str(app_id or "").strip().lower() == foobar_playing.FOOBAR_APP_ID
 
 
 def _read_media_type(holder) -> int:
@@ -359,16 +376,55 @@ def _pick_singing_session(
     return accepted[0]
 
 
+def _read_foobar_playback(allow_foobar: bool, title_format: str) -> Playback | None:
+    """foobar2000 补充源：读它的主窗口标题，包成一次采样结果。
+
+    三条刻意的口径：
+
+    - **不抢 SMTC 的位**：只有调用方在"SMTC 没有在播会话"时才走到这里
+      （见 :func:`_read_async`）；返回的 ``app_id`` 是
+      :data:`foobar_playing.FOOBAR_APP_ID`，调用方据此不覆盖 SMTC 的跟踪位。
+    - **进度恒为 ``None``**：窗口标题里没有时间轴，交给调用方按本地时钟推算
+      （与网易云同一个口径，手动对齐入口照常可用）。
+    - **只当"在播"**：窗口标题分辨不出播放状态，能读到的曲目按在播处理；用户
+      开着 foobar 但没在播时可能读到上一首——这是本能力的已知局限，所以开关
+      默认关、文案里如实写明。
+    """
+    if not allow_foobar:
+        return None
+    parsed = foobar_playing.read_track(str(title_format or ""))
+    if parsed is None:
+        return None
+    title, artist = parsed
+    return Playback(
+        track=Track(title=title, artist=artist, playing=True),
+        position=None,
+        updated_at=time.monotonic(),
+        app_id=foobar_playing.FOOBAR_APP_ID,
+    )
+
+
 async def _read_async(
-    tracked_app_id: str | None = None, *, allow_browser: bool = True
+    tracked_app_id: str | None = None,
+    *,
+    allow_browser: bool = True,
+    allow_foobar: bool = False,
+    foobar_title_format: str = "",
 ) -> Playback | None:
     manager_cls = _import_winrt()
     if manager_cls is None:
-        return None
+        # 没有 WinRT（非 Windows / 未装可选依赖）：SMTC 无从查起。foobar 的窗口
+        # 标题源不依赖 WinRT，仍可作补充——两者都不行时才返回 None。
+        return _read_foobar_playback(allow_foobar, foobar_title_format)
     manager = await manager_cls.request_async()
     snapshot = _pick_singing_session(
         _session_snapshots(manager), tracked_app_id, allow_browser
     )
+    # foobar 是**补充源**：SMTC 有在播会话时绝不问它（见 _read_foobar_playback）。
+    if snapshot is None or not snapshot.playing:
+        fallback = _read_foobar_playback(allow_foobar, foobar_title_format)
+        if fallback is not None:
+            return fallback
     if snapshot is None:
         # 没有可接受的候选：既可能是"没有会话"，也可能是"只有在播的视频/被否决
         # 的浏览器会话"。两种都与"无标题"同一口径——不显示、不取词、不唱歌。
@@ -543,7 +599,11 @@ def play_session_for(exe_name: str) -> bool:
 
 
 def get_now_playing(
-    tracked_app_id: str | None = None, *, allow_browser: bool = True
+    tracked_app_id: str | None = None,
+    *,
+    allow_browser: bool = True,
+    allow_foobar: bool = False,
+    foobar_title_format: str = "",
 ) -> Playback | None:
     """返回当前播放信息；无播放器/无会话/任何异常时返回 ``None``。
 
@@ -555,12 +615,24 @@ def get_now_playing(
     上报成音乐类型，类型过滤挡不住它，只能按会话来源否决。默认 ``True`` 保持
     旧行为（采样层不替调用方做策略决定，由持有配置的调用方显式传入）。
 
+    ``allow_foobar=True``（设置页「foobar2000 歌词」开启）时，SMTC **没有在播
+    会话**的情况下读 foobar2000 主窗口标题作为补充源（它默认不注册 SMTC，见
+    ``pet/foobar_playing.py``）。``foobar_title_format`` 是用户在 foobar 里配置的
+    窗口标题格式串，空串 = 自动（不猜歌名/歌手顺序）。
+
     本函数绝不抛异常——歌词只是锦上添花，不能因为第三方接口异常影响桌宠本体。
     """
     if sys.platform != "win32":
         return None
     try:
-        return asyncio.run(_read_async(tracked_app_id, allow_browser=allow_browser))
+        return asyncio.run(
+            _read_async(
+                tracked_app_id,
+                allow_browser=allow_browser,
+                allow_foobar=allow_foobar,
+                foobar_title_format=foobar_title_format,
+            )
+        )
     except Exception:
         return None
 

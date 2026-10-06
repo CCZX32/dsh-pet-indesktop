@@ -661,7 +661,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
                     SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
-                ] + settings_music.browser_media_rows(self),
+                ] + settings_music.browser_media_rows(self) + settings_music.foobar_lyrics_rows(self),
                 behavior_content,
             )
         )
@@ -1772,7 +1772,7 @@ class ModernSettingsDialog(QDialog):
             [
                 ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media")
+                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics", "foobar_title_format")
                  + settings_music.build_music_player_rows(self)),
                 ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                 ("边缘探头", claim("edge_probe")),
@@ -2197,10 +2197,7 @@ class ModernSettingsDialog(QDialog):
             self.config.set(
                 "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
             )
-        if getattr(self, "music_browser_media_check", None) is not None:
-            self.config.set(
-                "music_browser_media_enabled", self.music_browser_media_check.isChecked()
-            )
+        settings_music.save_source_settings(self)
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())

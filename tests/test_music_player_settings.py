@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from pet import music_players, settings_music
+from pet.settings_widgets import ToggleSwitch, _line_edit
 
 pytest.importorskip("PySide6")
 
@@ -264,3 +265,113 @@ def test_browser_media_widget_is_windows_only(monkeypatch, tmp_path):
     dialog._save()
     dialog.reject()
     app.processEvents()
+
+
+# ------------------------------------------------------------------ #228
+#
+# foobar2000 歌词（窗口标题源）。平台闸门与 browser_media 同规：控件与设置行都只在
+# Windows 创建，非 Windows 连控件都不建（免得出现"控件在、行不在"的游离开关）。
+
+
+def test_foobar_lyrics_rows_are_absent_on_non_windows(monkeypatch):
+    """非 Windows 平台：即使控件存在，两行也不出现（平台闸门优先）。"""
+    import sys
+
+    from pet.settings_widgets import ToggleSwitch
+
+    _qapp()
+    host = type(
+        "H",
+        (),
+        {
+            "foobar_lyrics_check": ToggleSwitch(),
+            "foobar_title_format_edit": _line_edit(""),
+        },
+    )()
+
+    for platform in ("linux", "darwin"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert settings_music.foobar_lyrics_supported() is False
+        assert settings_music.foobar_lyrics_rows(host) == []
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert settings_music.foobar_lyrics_supported() is True
+    rows = settings_music.foobar_lyrics_rows(host)
+    assert [row.objectName() for row in rows] == [
+        "settingRow_foobar_lyrics",
+        "settingRow_foobar_title_format",
+    ]
+
+
+def test_foobar_lyrics_rows_are_absent_when_widgets_missing():
+    """控件没建（非 Windows 的实际形态）时行也不建——不留孤儿行。"""
+    _qapp()
+    host = type("H", (), {"foobar_lyrics_check": None, "foobar_title_format_edit": None})()
+    assert settings_music.foobar_lyrics_rows(host) == []
+
+
+def test_foobar_lyrics_widgets_are_windows_only(monkeypatch, tmp_path):
+    """控件本体同样只在 Windows 创建；缺控件时保存路径安全跳过。"""
+    import sys
+
+    from pet import settings_pet_controls
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_pet_controls.sys, "platform", "linux")
+    dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    assert dialog.foobar_lyrics_check is None, "非 Windows 不该建这个控件"
+    assert dialog.foobar_title_format_edit is None
+    dialog._save()
+    dialog.reject()
+    app.processEvents()
+
+
+def test_save_source_settings_writes_both_switches_and_format(tmp_path):
+    """保存：两个来源开关与格式串一起写回，格式串去掉首尾空白。"""
+    from pet.config import Config
+
+    _qapp()
+    cfg = Config(tmp_path)
+    host = type(
+        "H",
+        (),
+        {
+            "config": cfg,
+            "music_browser_media_check": ToggleSwitch(),
+            "foobar_lyrics_check": ToggleSwitch(),
+            "foobar_title_format_edit": _line_edit("  %artist% - %title%  "),
+        },
+    )()
+    host.music_browser_media_check.setChecked(True)
+    host.foobar_lyrics_check.setChecked(True)
+
+    settings_music.save_source_settings(host)
+
+    assert cfg.get("music_browser_media_enabled") is True
+    assert cfg.get("foobar_lyrics_enabled") is True
+    assert cfg.get("foobar_title_format") == "%artist% - %title%"
+
+
+def test_save_source_settings_skips_missing_widgets(tmp_path):
+    """控件不存在（非 Windows）时**整键跳过**：不许把它写成 False 覆盖用户配置。"""
+    from pet.config import Config
+
+    _qapp()
+    cfg = Config(tmp_path)
+    cfg.set("foobar_lyrics_enabled", True)
+    host = type(
+        "H",
+        (),
+        {
+            "config": cfg,
+            "music_browser_media_check": None,
+            "foobar_lyrics_check": None,
+            "foobar_title_format_edit": None,
+        },
+    )()
+
+    settings_music.save_source_settings(host)
+
+    assert cfg.get("foobar_lyrics_enabled") is True, "缺控件不该把开关写成 False"

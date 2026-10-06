@@ -96,6 +96,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "modern_chat_card_opacity",
         "mouse_through",
         "music_browser_media_enabled",
+        "foobar_lyrics_enabled",
+        "foobar_title_format",
         "music_lyric_cache_limit",
         "music_lyric_enabled",
         "music_lyric_lead_seconds",
@@ -179,8 +181,9 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 默认值 dict 键集合现状快照 = 白名单 ∪ 特例键。
 # 2026-09-17 加入 music_player_paths（交付前审查 P1-3 登记）。
 # 2026-09-22 加入点击台词朗读 / 台词本地语音预缓存 / 自言自语配图概率 3 键
-# （self_talk_speak_enabled、self_talk_voice_precache_enabled、self_talk_image_chance）
-# 后实测：白名单字面量 123 + 特例 5 = 128。
+# （self_talk_speak_enabled、self_talk_voice_precache_enabled、self_talk_image_chance）。
+# 2026-10-07 加入音乐播放器来源 2 键（foobar_lyrics_enabled / foobar_title_format）。
+# 后实测：白名单字面量 127 + 特例 5 = 132。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 
