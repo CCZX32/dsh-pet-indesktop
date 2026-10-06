@@ -1268,6 +1268,49 @@ def test_menu_domain_uses_in_page_task_tabs_without_changing_sidebar(tmp_path, m
     app.processEvents()
 
 
+def test_network_info_entry_status_follows_its_setting(tmp_path, monkeypatch):
+    """入口开关关掉时编排器状态列显示「已停用」（不是「此平台不可用」，也不消失）。
+
+    Runtime Disabled 契约（CONTEXT.md）：开关关掉保留位置、置灰并解释；能力不可用
+    才是另一回事。这里同时钉住"配置态初始状态"与"页面上切换即时生效"两条路径。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet import modern_settings_dialog as settings_mod
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+
+    off_cfg = Config(tmp_path / "off")
+    off_cfg.set("network_info_menu_enabled", False)
+    dialog = ModernSettingsDialog(off_cfg, include_ai=True)
+    try:
+        item = dialog.menu_layout_editor.item_for_action("network_info")
+        assert item is not None, "编排器里必须保留该项（不是从树里消失）"
+        assert item.text(1) == "已停用"
+
+        dialog.network_info_menu_check.setChecked(True)
+        app.processEvents()
+        assert item.text(1) == "已启用"
+    finally:
+        dialog.reject()
+        app.processEvents()
+
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    on_cfg = Config(tmp_path / "on")
+    dialog = ModernSettingsDialog(on_cfg, include_ai=True)
+    try:
+        assert dialog.menu_layout_editor.item_for_action("network_info").text(1) == "已启用"
+        dialog.network_info_menu_check.setChecked(False)
+        app.processEvents()
+        assert dialog.menu_layout_editor.item_for_action("network_info").text(1) == "已停用"
+    finally:
+        dialog.reject()
+        app.processEvents()
+
+
 def test_runtime_toggles_refresh_menu_status_without_rewriting_tree(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 

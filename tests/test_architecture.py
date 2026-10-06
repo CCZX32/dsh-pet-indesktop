@@ -229,7 +229,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 回调到 2420（网络信息 issue #172）：本文件只加三处接线——import 1 行、
 # 岛页挂「网络信息」小节 3 行、保存委托 1 行；菜单域那一行是既有「内容与布局」行的
 # 追加（净 0）。控件/行/保存全在 pet/settings_network.py。实测 2420。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2420
+# 2026-10-07 再调到 2423（同 issue 的对齐）：菜单入口改成运行时置灰（CONTEXT.md 的
+# Runtime Disabled）后，编排器的状态列要跟着它显示「已停用」——`_sync_menu_action_states`
+# +2 行（读开关）与开关接线 +1 行。实测 2423。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2423
 
 
 def _read(name: str) -> str:

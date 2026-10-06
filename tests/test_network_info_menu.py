@@ -23,7 +23,11 @@ from PySide6.QtWidgets import QApplication, QMenu
 from pet import network_info_dialog as dialog_mod
 from pet.config import Config
 from pet.context_menus import registry as registry_mod
-from pet.context_menus.shared import add_network_info, network_info_menu_enabled
+from pet.context_menus.shared import (
+    NETWORK_INFO_DISABLED_REASON,
+    add_network_info,
+    network_info_menu_enabled,
+)
 from pet.menu_layout import load_default_menu_layout
 
 app = QApplication.instance() or QApplication([])
@@ -81,21 +85,31 @@ def test_gate_default_on_and_missing_callback_counts_as_unavailable():
     assert network_info_menu_enabled(_Pet({"network_info_menu_enabled": False})) is False
     assert network_info_menu_enabled(object()) is True  # 无 cfg 的宿主按默认开
 
-    assert "network_info" in registry_mod.MENU_ACTIONS.available_ids(_Pet())
-    assert "network_info" not in registry_mod.MENU_ACTIONS.available_ids(
+
+def test_callback_gates_availability_and_switch_gates_enablement():
+    """两条门各管一件事（CONTEXT.md 的 Runtime Disabled）：
+
+    - 回调缺失（纯桌宠变体/替身）＝**能力不可用** → 从 available 里消失，整条不出现；
+    - 开关关掉＝**运行时停用** → 仍在 available 里（保留布局位置），只是不在 enabled
+      里，渲染成"灰掉 + 说明"，不再从菜单消失。
+    """
+    actions = registry_mod.MENU_ACTIONS
+    assert "network_info" in actions.available_ids(_Pet())
+    assert "network_info" in actions.available_ids(
+        _Pet({"network_info_menu_enabled": False})), "开关不该再影响可用性"
+    assert "network_info" not in actions.available_ids(_Pet(with_callback=False))
+
+    assert "network_info" in actions.enabled_ids(_Pet())
+    assert "network_info" not in actions.enabled_ids(
         _Pet({"network_info_menu_enabled": False}))
-    assert "network_info" not in registry_mod.MENU_ACTIONS.available_ids(
-        _Pet(with_callback=False))
+    assert "network_info" not in actions.enabled_ids(_Pet(with_callback=False))
 
 
-def test_availability_helper_matches_registry_gate():
-    """两套 facade 的显隐判定同源：注册表 available 与建造器走同一个函数。"""
-    def available(pet) -> bool:
-        return "network_info" in registry_mod.MENU_ACTIONS.available_ids(pet)
-
-    for pet in (_Pet(), _Pet({"network_info_menu_enabled": False}),
-                _Pet(with_callback=False)):
-        assert available(pet) is registry_mod._network_info_available(pet)
+def test_disable_reason_is_shared_by_registry_and_builder():
+    """置灰文案单源：注册表 disabled_reason 与建造器写的 tooltip 必须同一份。"""
+    assert registry_mod.MENU_ACTIONS.disabled_reason("network_info") == \
+        NETWORK_INFO_DISABLED_REASON
+    assert NETWORK_INFO_DISABLED_REASON
 
 
 # ---------------------------------------------------------------- 建造函数
@@ -106,6 +120,7 @@ def test_add_network_info_builds_action_with_click_callback():
         action = add_network_info(menu, pet, icons=False)
         assert action is not None
         assert action.text() == "网络信息"
+        assert action.isEnabled() is True
         assert action.property("closeOnTrigger") is True
         action.trigger()
         assert pet.calls == 1
@@ -114,17 +129,59 @@ def test_add_network_info_builds_action_with_click_callback():
         app.processEvents()
 
 
-def test_add_network_info_returns_none_when_hidden_or_no_callback():
-    """legacy 建造器直接调它：关掉设置或无回调时不得留下点了没反应的项。"""
-    for pet in (_Pet({"network_info_menu_enabled": False}),
-                _Pet({"network_info_menu_enabled": True}, with_callback=False)):
-        menu = QMenu()
-        try:
-            assert add_network_info(menu, pet) is None
-            assert _labels(menu) == []
-        finally:
-            menu.close()
-            app.processEvents()
+def test_add_network_info_keeps_disabled_entry_when_switch_off():
+    """legacy 建造器直接调它：开关关掉时**保留入口但置灰 + 说明**，不点了没反应也不消失。"""
+    pet = _Pet({"network_info_menu_enabled": False})
+    menu = QMenu()
+    try:
+        action = add_network_info(menu, pet, icons=False)
+        assert action is not None, "关掉的是开关不是能力：入口保留位置"
+        assert action.text() == "网络信息"
+        assert action.isEnabled() is False
+        assert action.toolTip() == NETWORK_INFO_DISABLED_REASON
+        action.trigger()
+        assert pet.calls == 0, "置灰项不得触发回调"
+    finally:
+        menu.close()
+        app.processEvents()
+
+
+def test_add_network_info_returns_none_only_without_callback():
+    """回调不存在（能力不可用）：整条不出现，而不是留一个永远灰着的占位。"""
+    menu = QMenu()
+    try:
+        assert add_network_info(menu, _Pet(with_callback=False)) is None
+        assert _labels(menu) == []
+    finally:
+        menu.close()
+        app.processEvents()
+
+
+def test_modern_registry_renders_entry_disabled_with_reason():
+    """modern 路径（注册表 populate）：开关关掉时渲染成置灰项并带说明。"""
+    nodes = ({"type": "action", "id": "network_info", "visible": True},)
+
+    off = _Pet({"network_info_menu_enabled": False})
+    menu = QMenu()
+    try:
+        registry_mod.MENU_ACTIONS.populate(
+            menu, off, nodes, enabled_actions=registry_mod.MENU_ACTIONS.enabled_ids(off))
+        action = _find(menu, "网络信息")
+        assert action.isEnabled() is False
+        assert action.toolTip() == registry_mod.MENU_ACTIONS.disabled_reason("network_info")
+    finally:
+        menu.close()
+        app.processEvents()
+
+    on = _Pet()
+    menu = QMenu()
+    try:
+        registry_mod.MENU_ACTIONS.populate(
+            menu, on, nodes, enabled_actions=registry_mod.MENU_ACTIONS.enabled_ids(on))
+        assert _find(menu, "网络信息").isEnabled() is True
+    finally:
+        menu.close()
+        app.processEvents()
 
 
 def test_add_network_info_uses_semantic_vector_icon():

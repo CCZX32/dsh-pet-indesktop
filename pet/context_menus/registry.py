@@ -15,6 +15,7 @@ from .fun_entry import add_ojingjing_entry
 from .icons import custom_file_menu_icon, vector_menu_icon
 from .quick_launch import add_quick_launch_menu, configured_quick_apps
 from .shared import (
+    NETWORK_INFO_DISABLED_REASON,
     QUARK_PAN_URL,
     REPO_URL,
     add_action,
@@ -193,17 +194,14 @@ def _flag_toggle_spec(key: str, on_label: str, off_label: str, icon: str,
     return _build
 
 
-def _network_info_available(pet) -> bool:
-    """「网络信息」入口可用性：回调在 + 设置里开着（默认开）。
+def _network_info_enabled(pet) -> bool:
+    """「网络信息」入口的运行时启用态：设置里开着才可用（默认开）。
 
-    设置关掉时**从** ``available_ids`` **里消失**（而不是"照建但什么都不做"）：
-    ``resolve_menu_layout`` 连同节点一起过滤掉、菜单编排器标成不可用，与
-    ``music_*``（歌词功能没开就不出现在菜单里，见 ``_music_lyric_configured``）
-    同一条先例。注意：菜单编排器把这种"不可用"统一显示成「此平台不可用」，
-    文案粒度是既有实现的口径，不是本项引入的。
+    **只影响 enabled，不影响 available**：关掉开关时入口保留布局位置、渲染成
+    "灰掉 + 说明"（CONTEXT.md 的 Runtime Disabled），不把节点从菜单树里过滤掉——
+    过滤只用于"能力不可用"，本例里就是回调缺失（纯桌宠变体）。
     """
-    return bool(callable(getattr(pet, "on_network_info", None))
-                and network_info_menu_enabled(pet))
+    return network_info_menu_enabled(pet)
 
 
 _build_voice_chime_toggle = _flag_toggle_spec(
@@ -330,8 +328,10 @@ class MenuActionRegistry:
                 _build_festival_toggle, _callback_available("on_toggle_festival")
             ),
             "network_info": MenuActionSpec(
-                add_network_info, _network_info_available,
-                disabled_reason="已在设置里关闭「网络信息」菜单入口",
+                add_network_info,
+                _callback_available("on_network_info"),
+                enabled=_network_info_enabled,
+                disabled_reason=NETWORK_INFO_DISABLED_REASON,
             ),
             "quit": MenuActionSpec(add_quit),
         }

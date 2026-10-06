@@ -444,11 +444,10 @@ def add_look_screen(menu: QMenu, pet, *, icons: bool = True):
 
 
 def network_info_menu_enabled(pet) -> bool:
-    """「网络信息」入口的显隐门（``network_info_menu_enabled``，默认开）。
+    """「网络信息」入口的开关（``network_info_menu_enabled``，默认开）。
 
-    两套建造器（modern 注册表的 available、legacy 的条件分支）共用同一判定，避免
-    "新版菜单里关掉了、旧版菜单还在"这种两套真值。**只控显隐**：关掉即菜单里不再
-    出现该入口，已经打开的弹窗不动（弹窗数据只在打开时取一次，无需回收）。
+    两套建造器（modern 注册表的 enabled、legacy 建造器）共用同一判定，避免
+    "新版菜单里关掉了、旧版菜单还在"这种两套真值。
     """
     cfg = getattr(pet, "cfg", None)
     if cfg is None:
@@ -456,12 +455,28 @@ def network_info_menu_enabled(pet) -> bool:
     return bool(cfg.get("network_info_menu_enabled", True))
 
 
+#: 入口关掉时的说明（注册表的 ``disabled_reason`` 与建造器写的 tooltip 共用这一份，
+#: 口径见 CONTEXT.md 的 Runtime Disabled：保留位置、置灰、并解释原因）。
+NETWORK_INFO_DISABLED_REASON = "已在设置里关闭「网络信息」菜单入口"
+
+
 def add_network_info(menu: QMenu, pet, *, icons: bool = True):
+    """「网络信息」入口：**能力**看回调，**开关**看配置，两者语义不同。
+
+    - 回调不存在（纯桌宠变体）＝ 能力不可用 → 整条不出现；
+    - 开关关掉 ＝ 运行时停用 → 保留位置、置灰并写上说明（不消失、也不点了没反应）。
+      legacy 建造器直接调本函数，故置灰在这里落地；modern 路径的 ``populate`` 会按
+      ``enabled_ids`` 再置一次灰（同一份 reason，幂等）。
+    """
     callback = getattr(pet, "on_network_info", None)
-    if callback is None or not network_info_menu_enabled(pet):
+    if callback is None:
         return None
-    return add_action(
+    action = add_action(
         menu, "网络信息", "web" if icons else None, callback, close_on_trigger=True)
+    if not network_info_menu_enabled(pet):
+        action.setEnabled(False)
+        action.setToolTip(NETWORK_INFO_DISABLED_REASON)
+    return action
 
 
 def add_balance(menu: QMenu, pet, *, icons: bool = True):
