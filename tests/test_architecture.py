@@ -223,7 +223,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # （关窗但跳过整表写回，flag 语义留在对话框内），确认框/重置实现全在
 # pet/settings_reset_defaults.py。实测恰为 2407（= 当前预算，零余量）：本次不再
 # 上调，按文件约定"只随实测校准"；若与其它在飞分支叠加越线，按先例带日期注释校准。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2407
+# 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
+# +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
+# 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
 
 
 def _read(name: str) -> str:
