@@ -660,6 +660,7 @@ class ModernSettingsDialog(QDialog):
                 "拖拽与弹射",
                 [
                     SettingRow("drag_physics", "拖动物理", "启用拖拽惯性、重力和边缘反弹。", self.drag_physics_check),
+                    SettingRow("drop_gravity", "静止放手下落", "松开鼠标时若几乎没动（速度低于甩出死区），宠物不再停在半空，而是以零初速受重力自然落下、落地静止。贴地松手不弹跳；与「拖动物理」无关：关掉拖动物理时甩出的惯性仍不生效。", self.drop_gravity_check),
                     SettingRow("throw_strength", "甩出力度", "控制桌宠被甩出或弹射发射时的最大速度限制。", self.throw_strength_select),
                     SettingRow("slingshot_enabled", "弹弓弹射", "拖拽桌宠时点击右键进入蓄力瞄准，松开左键弹射飞出（Esc或右键取消）。", self.slingshot_check),
                     SettingRow("lock_position", "锁定位置", "桌宠固定不动，无法拖动（点击互动仍有效）。", self.lock_position_check),
@@ -1763,7 +1764,7 @@ class ModernSettingsDialog(QDialog):
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
                 ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media")
                  + settings_music.build_music_player_rows(self)),
-                ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
+                ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                 ("边缘探头", claim("edge_probe")),
                 ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
                 ("多开碰撞", collision_primary),
@@ -2112,6 +2113,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("no_move", self.no_move_check.isChecked())
         self.config.set("mouse_through", self.mouse_through_check.isChecked())
         self.config.set("drag_physics", self.drag_physics_check.isChecked())
+        self.config.set("drop_gravity", self.drop_gravity_check.isChecked())
         self.config.set("throw_strength", str(self.throw_strength_select.currentData() or "standard"))
         self.config.set("slingshot_enabled", self.slingshot_check.isChecked())
         self.config.set("collision_enabled", self.collision_enabled_check.isChecked())

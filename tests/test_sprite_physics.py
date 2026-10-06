@@ -318,6 +318,167 @@ def test_stale_release_returns_normal():
     assert sprite.velocity == QPointF(0, 0)
 
 
+# ---------------------------------------------------------------- #219 静止放手下落开关
+# 现状（issue #219）：低速松手 = 原地放下，半空松手就停在半空。drop_gravity
+# 打开后改为以**零初速**进 throw 物理模式，由重力自然落地（链路由
+# ThrowPhysicsController 现成提供）；已经贴地时不能多绕一次抛掷接管——物理
+# 下一 tick 就判回静止，白绑一次悬空 clip 还要提交一次落地预热。
+def _bounds_sprite(pos, clock):
+    """挂上 bounds 的 sprite（真机由 overlay_shell 逐只喂，`_at_ground` 依赖它）。"""
+    sprite = _make_sprite(pos, clock=clock)
+    sprite.set_bounds(QRect(0, 0, 800, 600))
+    return sprite
+
+
+def _slow_drag_release(sprite, clock, start):
+    """低速拖拽（2px / 0.01s = 200px/s < DEAD_ZONE_SPEED）后松手。"""
+    release = _drag_steps(sprite, clock, start, [(2.0, 0.0, 0.01)] * 3)
+    sprite.on_release(release)
+    return release
+
+
+def test_drop_gravity_slow_release_falls_to_ground():
+    """#219：开关开 → 低速松手以零初速进抛掷链，由重力落地后静止。"""
+    controller = ThrowPhysicsController(BOUNDS)
+    clock = FakeClock()
+    sprite = _bounds_sprite((100.0, 100.0), clock)
+    sprite.drag_physics = True
+    sprite.drop_gravity = True
+
+    _slow_drag_release(sprite, clock, (110.0, 110.0))
+
+    assert sprite.interaction_state == INTERACTION_THROWN   # 进抛掷物理模式
+    assert sprite.velocity == QPointF(0, 0)                 # 零初速（不是甩出速度）
+    assert sprite.pos.y() == 100.0                          # 本 tick 位置未变
+
+    ticks = 0
+    while sprite.interaction_state == INTERACTION_THROWN and ticks < 1200:
+        controller.tick([sprite], 1 / 60)
+        ticks += 1
+    assert sprite.interaction_state == INTERACTION_NORMAL   # 落地静止，交还行为层
+    assert sprite.pos.y() == FLOOR_Y                        # 落在地板上
+    assert sprite.velocity == QPointF(0, 0)
+
+
+def test_drop_gravity_off_slow_release_stays_in_the_air():
+    """#219 默认路径：开关关（默认）→ 维持现状，原地停在半空，不进抛掷链。"""
+    controller = ThrowPhysicsController(BOUNDS)
+    clock = FakeClock()
+    sprite = _bounds_sprite((100.0, 100.0), clock)
+    sprite.drag_physics = True
+    assert sprite.drop_gravity is False                     # 默认关 = 现状
+
+    _slow_drag_release(sprite, clock, (110.0, 110.0))
+
+    assert sprite.interaction_state == INTERACTION_NORMAL
+    assert sprite.velocity == QPointF(0, 0)
+    for _ in range(30):
+        controller.tick([sprite], 1 / 60)
+    assert sprite.pos.y() == 100.0                          # 半空不动（零变化）
+
+
+def test_drop_gravity_grounded_slow_release_rests_without_bounce():
+    """#219：开关开 + 已贴地松手 → 立即静止，不弹跳。
+
+    贴地这一路不进抛掷接管：一次 THROWN 会白绑悬空 clip（落地回待机再绑一次
+    idle）+ 提交一次整池落地预热，而物理下一 tick 就把零初速的贴地 sprite 判
+    回 normal——实测 GUI 线程 3 tick 从 0.48ms 涨到 2.00ms，还多两次后台
+    ffmpeg 预热（见交付报告探针）。
+    """
+    controller = ThrowPhysicsController(BOUNDS)
+    clock = FakeClock()
+    # 抓取偏移 (10,10)：松手落点 y = FLOOR_Y 恰好贴地
+    sprite = _bounds_sprite((100.0, FLOOR_Y), clock)
+    sprite.drag_physics = True
+    sprite.drop_gravity = True
+
+    _slow_drag_release(sprite, clock, (110.0, FLOOR_Y + 10.0))
+
+    assert sprite.pos.y() == FLOOR_Y                        # 贴地落点
+    assert sprite.interaction_state == INTERACTION_NORMAL   # 立即静止
+    assert sprite.velocity == QPointF(0, 0)                 # 无速度可弹
+
+    for _ in range(30):
+        controller.tick([sprite], 1 / 60)
+        assert sprite.pos.y() == FLOOR_Y                    # 从未离开地面（不弹跳）
+    assert sprite.velocity == QPointF(0, 0)
+    assert sprite.interaction_state == INTERACTION_NORMAL
+
+
+def test_zero_velocity_drop_on_ground_rests_without_bounce():
+    """兜底口径：零初速 + 贴地进抛掷链也首个子步就静止（不弹跳）。
+
+    与上一条相对：上一条锁「贴地不进链」，本条锁「就算进了链也不弹」——
+    落地竖直速度只到 g·8ms=11.2px/s，远低于 GROUND_BOUNCE_STOP_VY=120，
+    throw_step 直接归零（改动前即成立，作为复用链路的性质固定下来）。
+    """
+    controller = ThrowPhysicsController(BOUNDS)
+    sprite = _make_sprite((100.0, FLOOR_Y))
+    sprite.interaction_state = INTERACTION_THROWN
+    sprite.set_velocity(QPointF(0, 0))
+
+    for _ in range(5):
+        controller.tick([sprite], 1 / 60)
+        assert sprite.pos.y() == FLOOR_Y
+    assert sprite.interaction_state == INTERACTION_NORMAL
+    assert sprite.velocity == QPointF(0, 0)
+
+
+def test_grounded_drop_skips_thrown_capture_and_landing_warm(monkeypatch):
+    """#219：贴地松手连抛掷接管都不进——不提交整池落地预热、不打飞行期 pin。
+
+    进一次 THROWN 不是零成本：``_enter_thrown`` 会绑悬空 clip 并调
+    ``_warm_landing_idles``（后台逐条拉 ffmpeg 预热 idle 首帧 + 打
+    ``_ffr_landing_pinned``），而贴地这一路物理下一 tick 就判回静止——预热
+    当即被 ``_unpin_landing_idles`` 摘掉，纯浪费（实测 GUI 线程 3 tick
+    0.48→2.00ms、后台多两次预热，见交付报告探针）。
+
+    「提交」面用 ``_WARM_EXECUTOR.submit`` 记录（同步、确定性）而不是数
+    clip 预热次数：预热跑在共享单 worker 上，全量套件里队列常排着别的用例的
+    预热，数次数会把「用例顺序」写进断言（本地单跑绿、全量跑红）。半空对照
+    证明同装配下这条链路确实会提交，贴地那半不是空过。
+    """
+    from pet import sprite_behavior
+    from pet.sprite_behavior import BehaviorController, STATE_THROWN
+
+    submitted: list = []
+    monkeypatch.setattr(sprite_behavior._WARM_EXECUTOR, "submit",
+                        lambda fn, *args: submitted.append((fn, args)))
+
+    def scene(y: float):
+        clip = WarmClip()
+        lib = FakeLibrary(clip)
+        lib.idles = ["fake"]
+        clock = FakeClock()
+        sprite = PetSprite(lib, pos=QPointF(100.0, y), scale=0.5)
+        sprite.set_bounds(QRect(0, 0, 800, 600))
+        sprite.bind_clip("fake")
+        sprite._clock = clock
+        sprite.drag_physics = True
+        sprite.drop_gravity = True
+        behavior = BehaviorController(BOUNDS_INT)
+        behavior.predict_enabled = False
+        return clip, sprite, clock, behavior
+
+    grounded_clip, grounded, clock, behavior = scene(FLOOR_Y)
+    _slow_drag_release(grounded, clock, (110.0, FLOOR_Y + 10.0))
+    behavior.tick([grounded], 0.016)
+    ThrowPhysicsController(BOUNDS).tick([grounded], 0.016)
+
+    assert behavior.state_of(grounded) != STATE_THROWN    # 没进飞行接管
+    assert grounded_clip._ffr_landing_pinned is False     # 没打飞行期 pin
+    assert submitted == []                                # 没提交落地预热
+
+    airborne_clip, airborne, clock, behavior = scene(50.0)
+    _slow_drag_release(airborne, clock, (110.0, 60.0))
+    behavior.tick([airborne], 0.016)
+
+    assert behavior.state_of(airborne) == STATE_THROWN    # 半空：真进飞行
+    assert airborne_clip._ffr_landing_pinned is True      # 起飞打 pin
+    assert len(submitted) == 1                            # 起飞边沿提交一次
+    assert airborne_clip in submitted[0][1][0]            # 提交的就是它的 idle 池
+
+
 def test_release_velocity_direction_matches_drag():
     clock = FakeClock()
     sprite = _make_sprite((300.0, 300.0), clock=clock)

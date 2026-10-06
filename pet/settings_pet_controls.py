@@ -203,6 +203,10 @@ def build_pet_controls(host) -> None:
         host.cursor_hidden_passthrough_check.setChecked(bool(host.config.get("cursor_hidden_passthrough", True)))
     host.drag_physics_check = ToggleSwitch(host)
     host.drag_physics_check.setChecked(bool(host.config.get("drag_physics", False)))
+    # 静止放手下落（#219）：低速松手零初速受重力落地。独立于「拖动物理」——
+    # 拖动物理关时低速松手同样是「原地放下」，用户要的下落不该被那个开关挡住。
+    host.drop_gravity_check = ToggleSwitch(host)
+    host.drop_gravity_check.setChecked(bool(host.config.get("drop_gravity", False)))
     # 「单进程多开」开关不再创建（拓扑收口 Phase A：设置页隐藏；
     # 游离 ToggleSwitch 会被孤儿开关测试拦截）。
 

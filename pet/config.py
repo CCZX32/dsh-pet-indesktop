@@ -748,6 +748,7 @@ class Config:
             "mouse_through": False,
             "cursor_hidden_passthrough": True,
             "drag_physics": False,
+            "drop_gravity": False,  # 静止放手下落：低速松手零初速受重力落地（#219，默认关=旧行为）
             "lock_position": False,  # 锁定位置：桌宠不可拖动（点击仍有效）
             "shift_drag": False,  # 按住 SHIFT+左键才能拖动
             "pet_opacity": 100,  # 桌宠窗口不透明度 10-100
@@ -1014,6 +1015,7 @@ class Config:
             "mouse_through",
             "cursor_hidden_passthrough",
             "drag_physics",
+            "drop_gravity",
             "context_menu_template",
             "dialogue_mode",
             "dialogue_phrases",
@@ -1031,6 +1033,7 @@ class Config:
             "click_sound_volume",
             "slingshot_enabled",
             "throw_strength",
+            "drop_gravity",
             "idle_low_fps_enabled",
             "idle_low_fps_threshold",
             "click_show_balance",
@@ -1376,6 +1379,8 @@ class Config:
         self.data["golden_spin_on_click"] = _bool_or_default(self.data.get("golden_spin_on_click"), False)
         self.data["golden_spin_direct"] = _bool_or_default(self.data.get("golden_spin_direct"), False)
         self.data["edge_probe_enabled"] = _bool_or_default(self.data.get("edge_probe_enabled"), False)
+        # 静止放手下落（#219）：同族布尔键，防手改字符串布尔误开。
+        self.data["drop_gravity"] = _bool_or_default(self.data.get("drop_gravity"), False)
         self.data["agent_link"] = _clean_agent_link_data(self.data.get("agent_link"))
         # 音乐关联 / 消费统计（#129 新增的 5 键）：此前只在默认值与 reload 白名单
         # 里登记、没进归一化——手改成脏值后数值键会让设置页构造直接抛
@@ -1538,6 +1543,7 @@ class Config:
             "collision_sound_volume",
             "slingshot_enabled",
             "throw_strength",
+            "drop_gravity",
             "agent_link",
             "file_interpret",
             "idle_low_fps_enabled",
