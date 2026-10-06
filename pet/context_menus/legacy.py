@@ -26,6 +26,7 @@ from .shared import (
     add_music_pause,
     add_music_prev,
     add_music_quit,
+    add_memory_trim,
     add_harness,
     add_no_move,
     add_on_top,
@@ -87,6 +88,7 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     add_deepseek_web(menu, icons=False)
     add_proactive_menu(menu, pet)
     add_agent_link_menu(menu, pet)
+    add_memory_trim(menu, pet, icons=False)
 
     menu.addSeparator()
     add_template_switch(menu, pet, str(template["switch_label"]), str(template["switch_to"]), icons=False)

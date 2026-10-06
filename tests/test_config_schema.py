@@ -84,6 +84,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "idle_low_fps_threshold",
         "lock_position",
         "media_prewarm",
+        "mem_min_size_mb",
+        "mem_skip_foreground",
         "menu_easter_egg",
         "modern_chat_background",
         "modern_chat_background_fill",
@@ -279,6 +281,60 @@ def test_set_normalizes_music_and_cost_keys(tmp_path):
     assert cfg.data["music_lyric_enabled"] is False
     cfg.set("agent_cost_enabled", "yes")
     assert cfg.data["agent_cost_enabled"] is True
+
+
+# ------------------------------------------------- 「回收内存」(#210) 两个键
+def _memory_trim_config(tmp_path, raw: dict) -> Config:
+    """把 mem_* 键写成脏值落盘，再走真实加载路径（reload + _normalize_pet_settings）。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"version": 4, **raw}, ensure_ascii=False), encoding="utf-8",
+    )
+    return Config(base=tmp_path)
+
+
+def test_memory_trim_keys_have_documented_defaults(tmp_path):
+    """默认值：跳过前台（保护用户正在用的窗口）、阈值 50MB。
+
+    两个键都是"菜单动作类功能"的配置面，**不进设置页**——只能手改 config.json
+    或由菜单路径读取，默认值即推荐值。
+    """
+    cfg = Config(base=tmp_path)
+
+    assert cfg.data["mem_skip_foreground"] is True
+    assert cfg.data["mem_min_size_mb"] == 50.0
+
+
+def test_dirty_memory_trim_keys_are_normalized(tmp_path):
+    """脏值不得打死 worker 线程：字符串布尔不许被 bool() 误开，阈值必须落区间。
+
+    阈值下限 0 有语义（0 = 连 0 字节进程都纳入），上限与
+    ``pet/memory_trim.py::MIN_SIZE_MB_MAX`` 同值（漂移由 test_memory_trim 钉住）。
+    """
+    from pet import memory_trim
+
+    assert _memory_trim_config(
+        tmp_path / "str-bool", {"mem_skip_foreground": "false"},
+    ).data["mem_skip_foreground"] is False
+    assert _memory_trim_config(
+        tmp_path / "bad-num", {"mem_min_size_mb": "abc"},
+    ).data["mem_min_size_mb"] == memory_trim.DEFAULT_MIN_SIZE_MB
+    assert _memory_trim_config(
+        tmp_path / "negative", {"mem_min_size_mb": -5},
+    ).data["mem_min_size_mb"] == 0.0
+    assert _memory_trim_config(
+        tmp_path / "huge", {"mem_min_size_mb": 10 ** 9},
+    ).data["mem_min_size_mb"] == memory_trim.MIN_SIZE_MB_MAX
+
+
+def test_set_normalizes_memory_trim_keys(tmp_path):
+    cfg = Config(base=tmp_path)
+
+    cfg.set("mem_min_size_mb", "abc")
+    assert cfg.data["mem_min_size_mb"] == 50.0
+    cfg.set("mem_skip_foreground", "false")
+    assert cfg.data["mem_skip_foreground"] is False
 
 
 # ------------------------------------------------- 自启目标（harness_launch_target）

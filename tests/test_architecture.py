@@ -246,6 +246,9 @@ def test_pure_logic_modules_do_not_import_qt():
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py", "overlay_settings_command.py",
+        # 「回收内存」(#210)：过滤真值表与 ctypes 薄封装必须零 Qt——后台线程里
+        # 跑的就是这一层，单测也在无 Qt 的替身上验（ctypes 全 mock）。
+        "memory_trim.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
