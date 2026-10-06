@@ -88,7 +88,7 @@ from . import overlay_settings_command
 from . import overlay_spawn_state
 from . import slot_manager
 from . import window_alerts
-from .context_menus.shared import release_menu_tree
+from .context_menus.shared import add_tray_action, release_menu_tree
 from .physics import throw_speed_cap
 from .config import (
     DEFAULT_SELF_TALK_BUBBLE_STYLE,
@@ -2957,7 +2957,10 @@ class OverlayShell(QObject):
                               lambda s=sprite: self.exit_pet(s))
         self._pet_visible_actions = visible_actions
         menu.addSeparator()
-        menu.addAction("桌宠设置", lambda: self.open_settings_for(self.sprite))
+        # 与 legacy 托盘同口径：菜单先关、回调延到菜单关闭后执行（原生菜单跟踪
+        # 会话里开窗/冒泡会被 AppKit 抑制，见 shared.run_after_menu_closed）。
+        add_tray_action(menu, "桌宠设置",
+                        lambda: self.open_settings_for(self.sprite))
         # legacy 托盘两项（app.py:3333-3343）：鼠标穿透的取消入口只有托盘/设置页，
         # 开着时桌宠点不动；开机自启此前只有右键菜单有勾选项。
         mouse_through = menu.addAction("鼠标穿透")

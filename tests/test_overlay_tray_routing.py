@@ -517,6 +517,12 @@ def test_tray_settings_entry_uses_main_identity(tmp_path):
             open_settings_process=lambda inst: (opened.append(inst), True)[1])
         _spawn_two(shell)
         _action(_tray_menu(shell), "桌宠设置").trigger()
+        # 托盘入口是「菜单先关、回调延后」（shared.run_after_menu_closed）：
+        # 本用例只管身份路由，时序按宽预算轮询等命令落到 open_settings_process。
+        deadline = time.monotonic() + 3
+        while not opened and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
         assert [inst.config.instance_id for inst in opened] == [""]
     finally:
         _teardown(shell)

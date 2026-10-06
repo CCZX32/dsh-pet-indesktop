@@ -45,7 +45,7 @@ from . import updater
 from . import webm_clip as webm_clip_mod
 from .config import APP_DIR_NAME, Config, _default_base
 from .context_menus.icons import vector_menu_icon
-from .context_menus.shared import open_deepseek_web
+from .context_menus.shared import add_tray_action, open_deepseek_web
 from .desktop_notify import DesktopNotification, position_stack
 from .harness_launcher import launch_harness_gui
 from .library import MovieLibrary
@@ -3544,8 +3544,11 @@ class AppShell:
         if self.enable_chat:
             menu.addAction('AI 对话', self.instance.open_chat)
             menu.addAction('快速对话（气泡）', self.instance.open_quick_chat)
-            menu.addAction('AI 设置', self.instance.open_chat_settings)
-        menu.addAction('桌宠设置', self.instance.open_modern_settings)
+            # 托盘菜单是原生弹出（macOS 上是 NSMenu 跟踪会话），设置入口必须在
+            # 菜单关闭后才执行：会话中新建/激活窗口会被 AppKit 抑制（首次点击
+            # 无反应，issue #4 家族）。其余条目按最小面不动。
+            add_tray_action(menu, 'AI 设置', self.instance.open_chat_settings)
+        add_tray_action(menu, '桌宠设置', self.instance.open_modern_settings)
 
         m_char = track_menu(menu.addMenu('切换角色'))
         current = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
