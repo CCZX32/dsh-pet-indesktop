@@ -133,6 +133,17 @@ SECTION_HINT_LABEL = "__pet_section_hint__"
 SELF_TALK_IMAGE_BOX_W = 220
 SELF_TALK_IMAGE_BOX_H = 140
 
+# 呼吸泡正文盒的最小高度（逻辑像素）：低于它正文会被挤成一条缝，宁可放大画布。
+BREATH_LABEL_MIN_H = 42
+
+# 呼吸泡副标题的左右安全内边距（参考画布 240 宽下的逻辑像素）：有机轮廓底部
+# 两角向内收到画布宽度的约 13%/86%，左对齐的副标题末行会压到轮廓外沿。
+BREATH_SUBTITLE_SIDE_INSET = 14
+
+# 呼吸泡画布宽度上限（参考画布 240 宽下的逻辑像素）：文字/配图内容按缩放系数
+# 换算，超长内容不允许把水泡顶成整屏。
+BREATH_CANVAS_MAX_W = 320
+
 
 class FlowLayout(QLayout):
     """流式布局：子项超出可用宽度时自动换行（按钮行专用）。
@@ -300,11 +311,13 @@ class PetSpeechBubble(QFrame):
         # recommendation).  Keep it inside the same text column as the main
         # message; QLabel otherwise reports the full unwrapped line as its
         # sizeHint and can stretch an interactive bubble across the chat UI.
+        # 上限值随「气泡文字大小」缩放、并在 show_text 里抬到气泡真实内宽，
+        # 见 _sync_subtitle_max_width（issue #216：写死 248px 会让 Qt 的
+        # 定高口径与绘制口径分叉，副标题多出一行被裁）。
         self._subtitle_label.setWordWrap(True)
         self._subtitle_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        self._subtitle_label.setMaximumWidth(248)
         self._subtitle_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
@@ -446,6 +459,7 @@ class PetSpeechBubble(QFrame):
             self._layout.setAlignment(
                 self.label, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
+            self._subtitle_label.setContentsMargins(0, 0, 0, 0)
             self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.setMinimumSize(0, 0)
             self.setMaximumSize(16777215, 16777215)
@@ -461,12 +475,40 @@ class PetSpeechBubble(QFrame):
             f"color: {self._preset['foreground']}; "
             f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
+        self._subtitle_label.setMaximumWidth(self._subtitle_width_floor())
         self._page_indicator.setStyleSheet(
             "QLabel#pet-page-indicator { background: transparent; border: none; padding: 0; "
             f"color: {self._preset['foreground']}; "
             f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
         self.update()
+
+    def _subtitle_width_floor(self) -> int:
+        """副标题宽度下限（= 基础文本列宽 × 气泡文字大小）。"""
+        return int(round(BUBBLE_TEXT_COLUMN * self._text_scale))
+
+    def _subtitle_shown(self) -> bool:
+        """副标题当前是否参与布局（hide 掉/空文本的 label 不占高度）。"""
+        return (not self._subtitle_label.isHidden()
+                and bool(self._subtitle_label.text().strip()))
+
+    def _sync_subtitle_max_width(self, label_width: int, column: int | None = None) -> None:
+        """副标题宽度上限对齐气泡真实内宽（issue #216）。
+
+        QLabel 自带一个宽度上限（防长副标题把交互气泡撑到聊天窗宽），但 Qt 在
+        **按高度定尺寸**时用的是「未夹取」的宽度算行数，而布局与真正绘制按上限
+        夹取——气泡一宽过上限（「气泡文字大小」放大，或长正文把列宽撑开），副标题
+        就多出一行、高度预算少一行：末行被自己的 label 裁掉，气泡也跟着矮一截。
+        上限至少抬到正文 label 宽度（两端同口径，这一条是硬要求）；上限的另一头是
+        本次气泡实际使用的文本列宽 ``column``——正文窄时保持原上限，交互气泡的
+        列宽未缩放，因此长副标题也不会把它撑到聊天窗宽。
+
+        ``column`` 为 None（呼吸泡：内宽由画布推出）时只按缩放后的基础列宽取上限。
+        """
+        floor = self._subtitle_width_floor()
+        if column is not None:
+            floor = min(floor, int(column))
+        self._subtitle_label.setMaximumWidth(max(int(label_width), floor))
 
     def _configure_breath_content(
         self,
@@ -488,6 +530,7 @@ class PetSpeechBubble(QFrame):
                 int(base_size.height() * content_scale),
             )
         bubble_size = self._breath_size_for_content(base_size)
+        bubble_size, label_height = self._breath_size_for_subtitle(bubble_size)
         self._breath_scale = bubble_size.width() / 240.0
         scale = self._breath_scale
         if self._content_kind == "image":
@@ -506,9 +549,18 @@ class PetSpeechBubble(QFrame):
         label_width = max(
             92, bubble_size.width() - margins.left() - margins.right()
         )
-        label_height = max(
-            42, bubble_size.height() - margins.top() - margins.bottom()
-        )
+        if label_height is None:      # 无副标题/配图：旧口径（正文盒吃满内高）
+            label_height = self._breath_label_height(
+                bubble_size.height() - margins.top() - margins.bottom(),
+                label_width, bubble_size.width(),
+            )
+        self._sync_subtitle_max_width(label_width)
+        # 有机轮廓在底部两角向内收，左对齐的副标题最后一行会贴到轮廓外沿
+        # （issue #216 的「跨到气泡轮廓外」——文字落在透明区，深色桌面上直接
+        # 看不见）。给副标题左右各留一段安全内边距，正文盒不动（正文居中，
+        # 天然避让两角）。
+        inset = self._breath_subtitle_inset(bubble_size.width())
+        self._subtitle_label.setContentsMargins(inset, 0, inset, 0)
         self.label.setFixedSize(label_width, label_height)
         self.setFixedSize(bubble_size)
         if self._content_kind == "image" and not self._source_pixmap.isNull():
@@ -528,6 +580,92 @@ class PetSpeechBubble(QFrame):
                 bubble_max_lines(self._raw_text, keep_breaks=self._multi_line),
                 keep_breaks=self._multi_line,
             ))
+
+    def _breath_subtitle_inset(self, canvas_width: int) -> int:
+        """呼吸泡副标题的左右安全内边距（画布尺寸等比换算）。
+
+        有机轮廓在底部两角向内收到画布宽度的 ~13%/~86%，左对齐的副标题末行
+        会压到轮廓外沿——那段像素落在气泡之外的透明区，深色桌面上直接看不见
+        （issue #216 的①③）。内边距按画布宽等比，形状与观感一致。
+        """
+        return int(round(BREATH_SUBTITLE_SIDE_INSET * canvas_width / 240.0))
+
+    def _breath_subtitle_reserve(self, label_width: int, canvas_width: int) -> int:
+        """副标题要从正文盒里让出的高度（行距 + 它自己的行高）；无副标题 = 0。
+
+        必须用正文 label 宽度量：副标题落到布局里拿到的就是这个宽度
+        （``heightForWidth`` 自己会扣掉左右内边距，安全内边距先设好再量）。
+        """
+        if not self._subtitle_shown():
+            return 0
+        inset = self._breath_subtitle_inset(canvas_width)
+        self._subtitle_label.setContentsMargins(inset, 0, inset, 0)
+        self._sync_subtitle_max_width(label_width)
+        self._subtitle_label.ensurePolished()
+        # 标题态（歌词歌名）会关掉 wordWrap，此时 heightForWidth 返回 -1，
+        # 退回 sizeHint：不能让「-1」把副标题的预留高度算成 0。
+        sub_height = self._subtitle_label.heightForWidth(max(1, label_width))
+        if sub_height < 0:
+            sub_height = self._subtitle_label.sizeHint().height()
+        return self._layout.spacing() + sub_height
+
+    def _breath_label_height(self, inner: int, label_width: int, canvas_width: int) -> int:
+        """呼吸泡正文盒高度（旧口径）：吃满内高，下限 ``BREATH_LABEL_MIN_H``。
+
+        只在「没有副标题」时用到（有副标题时 ``_breath_size_for_subtitle`` 已经把
+        让位后的盒高算好并返回）。这里仍减去副标题预留量，是为了配图/无副标题路径
+        复用同一出处、不出现第二套公式。
+        """
+        return max(BREATH_LABEL_MIN_H,
+                   inner - self._breath_subtitle_reserve(label_width, canvas_width))
+
+    def _breath_size_for_subtitle(self, bubble_size: QSize) -> tuple[QSize, int | None]:
+        """把副标题的行高算进呼吸泡画布高度（issue #216）。
+
+        呼吸泡是宽高比锁定的画布（240:195），正文盒按画布取剩余空间：没有
+        副标题时这是对的，带上副标题后正文盒先把内高吃满、副标题只能吃边角，
+        字体一放大或正文一短，副标题末行就被自己的 label 裁掉（实机报告：
+        峰谷副标题第二行被裁）。
+
+        这里把「正文盒 + 副标题」当一个整体做高度预算：先把副标题的高度从
+        正文盒里让出来，正文盒退到下限（``BREATH_LABEL_MIN_H``）仍不够时按同一
+        比例放大画布——等比缩放 ⇒ 水泡轮廓形状不变，只是整体大一圈。
+
+        宽高比关系：文字内高 = 画布高 − (56+44) × 画布高/195 = 画布高 × 95/195。
+        返回 ``(画布尺寸, 正文盒高度)``；无副标题/配图气泡原样返回
+        ``(原尺寸, None)``（调用方按旧口径自己算正文盒，零行为变化）。
+        调用期间会按候选画布尺寸重设文字内边距（调用方随后按最终画布尺寸再设一次，
+        两处同源、不会分叉）。
+        """
+        if self._content_kind != "text" or not self._subtitle_shown():
+            return bubble_size, None
+        size = QSize(bubble_size)
+        label_height = BREATH_LABEL_MIN_H
+        for _ in range(3):
+            scale = size.width() / 240.0
+            self._layout.setContentsMargins(
+                round(28 * scale), round(56 * scale),
+                round(52 * scale), round(44 * scale),
+            )
+            margins = self._layout.contentsMargins()
+            label_width = max(92, size.width() - margins.left() - margins.right())
+            inner = size.height() - margins.top() - margins.bottom()
+            reserve = self._breath_subtitle_reserve(label_width, size.width())
+            label_height = max(BREATH_LABEL_MIN_H, inner - reserve)
+            if label_height + reserve <= inner:
+                return size, label_height
+            # 画布放大后内宽变宽 → 副标题行数可能变少：迭代两三次即收敛。
+            # 放大同样受呼吸泡画布上限约束（与 _breath_size_for_content 同源）：
+            # 超长副标题不允许把水泡顶成整屏，放不下时按既有口径裁切。
+            needed_inner = label_height + reserve
+            height = int(ceil(needed_inner * 195 / 95))
+            cap = int(round(BREATH_CANVAS_MAX_W * self._text_scale))
+            width = max(size.width(), min(cap, int(round(height * 240 / 195))))
+            grown = QSize(width, int(width * 195 / 240 + 0.5))
+            if grown == size:
+                break
+            size = grown
+        return size, label_height
 
     def _breath_size_for_content(self, base_size: QSize) -> QSize:
         """Grow the reference canvas when content needs more safe-area space.
@@ -553,7 +691,8 @@ class PetSpeechBubble(QFrame):
         content_scale = (
             self._image_scale if self._content_kind == "image" else self._text_scale
         )
-        width = max(base_size.width(), min(int(round(320 * content_scale)), width))
+        width = max(base_size.width(),
+                    min(int(round(BREATH_CANVAS_MAX_W * content_scale)), width))
         return QSize(width, int(width * 195 / 240 + 0.5))
 
     def set_interactive(self, on: bool) -> None:
@@ -702,6 +841,9 @@ class PetSpeechBubble(QFrame):
             self._interactive_active = True
         else:
             self._teardown_interactive()
+        # 本次实际使用的文本列宽（呼吸泡为 None：内宽由画布推出），
+        # 供副标题宽度上限取「不与正文列宽打架」的口径。
+        column: int | None = None
         if self._preset.get("shape") == "breath_bubble" and not interactive:
             self._configure_breath_content(anchor_rect, pet_scale)
         else:
@@ -780,6 +922,11 @@ class PetSpeechBubble(QFrame):
                 self.label.setFixedSize(
                     bubble_label_size(metrics, pages, column, text_slack)
                 )
+        # 副标题宽度上限对齐刚定下的气泡内宽（issue #216）：不这样做时 Qt 的
+        # 定高口径（未夹取的宽）与布局/绘制口径（按上限夹取）会分叉，副标题多出
+        # 一行、末行被自己的 label 裁掉。呼吸泡路径已在 _configure_breath_content
+        # 内同步过（那里的 label 宽度是画布推出来的，column=None），此处幂等。
+        self._sync_subtitle_max_width(self.label.width(), column)
         self.adjustSize()
         self._place(anchor_rect)
         self.show()
