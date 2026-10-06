@@ -106,6 +106,72 @@ def defer_menu_callback(menu: QMenu, callback) -> bool:
     return True
 
 
+# 托盘菜单的"菜单关干净了吗"轮询预算：50ms × 60 ≈ 3s，与
+# ``app.py::_present_dialog`` 的重试预算同口径（慢平台也不至于提前放弃）。
+_MENU_CLOSE_POLL_MS = 50
+_MENU_CLOSE_POLL_MAX = 60
+
+
+def _menu_open(menu: QMenu) -> bool:
+    """菜单是否还在显示态（C++ 侧已销毁按"已关闭"处理）。"""
+    try:
+        return bool(menu.isVisible())
+    except RuntimeError:
+        return False
+
+
+def run_after_menu_closed(menu: QMenu, callback) -> None:
+    """关闭菜单，并把命令推迟到菜单（及其原生跟踪会话）结束后执行。
+
+    **为什么托盘菜单不能复用 ``defer_menu_callback``**：
+
+    1. 那条路依赖 ``menu.exec()`` 返回后的 ``take_deferred_menu_callbacks``
+       派发点，而托盘菜单由 ``QSystemTrayIcon`` 原生弹出，进程里没有这个收口点；
+    2. 它用 ``menu.isVisible()`` 判断"是否在菜单里"，而 macOS 的托盘菜单是
+       AppKit 原生 NSMenu（Qt 侧 QMenu 从未 ``show()``，``isVisible()`` 恒为
+       False）——判定会直接退回内联执行，正是要避开的：原生菜单跟踪会话中
+       新建/激活窗口会被 AppKit 抑制，表现为「点了没反应」（issue #4 同族，
+       右键菜单路径已在 window.py / overlay_shell 用 deferred 队列解决）。
+
+    因此托盘路径的规则是"菜单先关、等它真的不在了再执行"：先按既有
+    ``close_on_trigger`` 语义关闭菜单，再用定时器轮询确认它已关闭（预算 3s；
+    病态情况下宁可晚执行也不吞掉用户的点击）。Cocoa 的菜单跟踪跑在自身
+    run loop 模式，会压住这次定时器，命令自然落在跟踪会话结束之后。
+
+    定时器不绑 context（``AppShell`` 不是 QObject）；轮询链由闭包持有菜单与
+    回调，最长 3 秒，不会长期吊住对象。
+    """
+    close = getattr(menu, "close", None)
+    if callable(close):
+        try:
+            close()
+        except RuntimeError:
+            pass
+
+    def check(attempt: int = 0) -> None:
+        if _menu_open(menu):
+            if attempt >= _MENU_CLOSE_POLL_MAX:
+                callback()
+                return
+            QTimer.singleShot(_MENU_CLOSE_POLL_MS, lambda: check(attempt + 1))
+            return
+        callback()
+
+    QTimer.singleShot(0, check)
+
+
+def add_tray_action(menu: QMenu, text: str, callback):
+    """托盘菜单条目：菜单先关、回调延到菜单关闭后执行（见 :func:`run_after_menu_closed`）。
+
+    与 ``add_action`` 分开而不是加个开关：托盘菜单没有 QAction 图标列，也不走
+    ``closeOnTrigger`` 属性（那条路要 ``menu.exec()`` 的收口点）。
+    """
+    action = menu.addAction(text)
+    action.triggered.connect(
+        lambda _checked=False: run_after_menu_closed(menu, callback))
+    return action
+
+
 def release_menu_tree(menu: QMenu) -> None:
     """释放整棵右键菜单树（``menu.exec()`` 返回后必须调用一次）。
 

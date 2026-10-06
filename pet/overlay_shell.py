@@ -88,7 +88,7 @@ from . import overlay_settings_command
 from . import overlay_spawn_state
 from . import slot_manager
 from . import window_alerts
-from .context_menus.shared import release_menu_tree
+from .context_menus.shared import add_tray_action, release_menu_tree
 from .physics import throw_speed_cap
 from .config import (
     DEFAULT_SELF_TALK_BUBBLE_STYLE,
@@ -2957,7 +2957,10 @@ class OverlayShell(QObject):
                               lambda s=sprite: self.exit_pet(s))
         self._pet_visible_actions = visible_actions
         menu.addSeparator()
-        menu.addAction("桌宠设置", lambda: self.open_settings_for(self.sprite))
+        # 与 legacy 托盘同口径：菜单先关、回调延到菜单关闭后执行（原生菜单跟踪
+        # 会话里开窗/冒泡会被 AppKit 抑制，见 shared.run_after_menu_closed）。
+        add_tray_action(menu, "桌宠设置",
+                        lambda: self.open_settings_for(self.sprite))
         # legacy 托盘两项（app.py:3333-3343）：鼠标穿透的取消入口只有托盘/设置页，
         # 开着时桌宠点不动；开机自启此前只有右键菜单有勾选项。
         mouse_through = menu.addAction("鼠标穿透")
@@ -4094,12 +4097,40 @@ class OverlayShell(QObject):
         返回 True = 已交给独立设置进程（与 ``AppShell.open_settings_process``
         同义）。只认 AppShell 的 opener：拿不到（测试替身）或开关关闭 → False；
         overlay 拓扑没有 PetWindow 可挂 parent，故不做进程内回退。
+
+        交不出去时必须给可见反馈（``_notify_settings_unavailable``）：菜单项看着
+        可用、点下去毫无反应是最难自查的一类"坏了"。
         """
         opener = getattr(getattr(self._instance, "shell", None),
                          "open_settings_process", None)
         if not callable(opener):
             return False
-        return bool(opener(_SettingsIdentity(self.sprite_instance_id(sprite))))
+        if bool(opener(_SettingsIdentity(self.sprite_instance_id(sprite)))):
+            return True
+        self._notify_settings_unavailable()
+        return False
+
+    def _notify_settings_unavailable(self) -> None:
+        """设置进程交不出去时的可见反馈（气泡说明 + 日志）。
+
+        **为什么是气泡而不是"菜单项置灰 + tooltip"**：``settings_process_isolation``
+        在设置界面没有任何入口，置灰只说明"不可用"、说不出原因，用户也没有补救
+        路径；tooltip 在 macOS 原生菜单上根本不显示，而 mac 正是这条缺陷家族的
+        主战场（legacy 拓扑有进程内设置窗兜底，只有 overlay 会走到这里）。反馈收
+        在 ``open_settings_for``（唯一路由点）→ 托盘、右键 facade 的
+        ``on_open_modern_settings`` / ``on_open_settings`` 三条入口自动都有；置灰
+        得在每个菜单构建处各写一遍，且构建期冻结的状态在用户改完 config.json 后
+        就是错的（该键改动无需重启）。
+
+        文案按原因分两种，并点名 config 键（用户能在 config.json 里改回来）。
+        """
+        if not bool(self._config.get("settings_process_isolation", True)):
+            reason = ("config.json 里的 settings_process_isolation 被关掉了，"
+                      "改回 true 再点一次")
+        else:
+            reason = "独立设置进程没拉起来，稍后重试或看日志"
+        logging.warning("overlay: 桌宠设置未打开（%s）", reason)
+        self.show_bubble(f"桌宠设置没打开：{reason}", duration_ms=6000)
 
     def _sprite_visible(self, sprite) -> bool:
         """sprite 当前可见性（M14）；无该字段的鸭式 sprite 视为可见。"""
