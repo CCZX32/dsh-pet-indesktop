@@ -316,6 +316,28 @@ def test_external_attribute_write_is_converged_back():
         widget.close()
 
 
+def test_external_flag_write_is_converged_back():
+    """外部把原生输入穿透标志翻掉（同句柄、属性仍对）：轮询必须把它收敛回来。
+
+    属性与标志是两个独立的判据，任一侧被外部改写都要能在下一 tick 自愈——只钉属性
+    侧会漏掉「标志被平台/第三方清掉」这一类（穿透静默失效的另一种形态）。
+    """
+    window = _FakeWindow(transparent=True)
+    window.handle = _FakeHandle(0xA1)
+    controller = _controller(window)
+    try:
+        assert controller._apply_through(True) is True
+        assert window.handle.flags() & FLAG
+        assert window.testAttribute(ATTR) is True
+
+        window.handle.setFlag(FLAG, False)        # 外部改写：标志被翻掉，句柄未变
+        assert controller._apply_through(True) is True
+        assert window.handle.flags() & FLAG, "标志侧外部改写必须被收敛回目标态"
+        assert window.testAttribute(ATTR) is True
+    finally:
+        controller.stop()
+
+
 def test_recreated_native_window_replays_through_state():
     """原生窗口重建（on_top / 捕获模式改 flags）→ 句柄变化：必须重放穿透态。
 
@@ -365,11 +387,22 @@ class _CountingCursor(_FixedCursor):
 
 
 def test_poll_tiers_match_windows_protocol(monkeypatch):
-    """档位常量与 Windows 控制器同值（协议一致才谈得上「同一套判定」）。"""
+    """档位常量与 Windows 控制器**逐值同源**，三平台都断言（不再只 gate 到 Windows）。
+
+    硬编码字面量在 posix 上钉不住任何东西：Windows 侧改了档位这里照样绿。改从
+    ``platform_win`` 直接取常量——该模块 posix 可 import（``tests/test_overlay_hidden_polling.py``
+    等文件本就在 Linux/macOS CI 上模块级 import 它）。
+    """
+    from pet.platform_win import WindowsPerPixelInputController as WinCtl
+
     normal = pp.QtPerPixelInputController.NORMAL_POLL_INTERVAL_MS
     idle = pp.QtPerPixelInputController.IDLE_POLL_INTERVAL_MS
-    assert (normal, idle) == (10, 50)
-    assert pp.QtPerPixelInputController.DRAG_POLL_INTERVAL_MS == 100
+    drag = pp.QtPerPixelInputController.DRAG_POLL_INTERVAL_MS
+    assert normal == WinCtl.NORMAL_POLL_INTERVAL_MS
+    assert idle == WinCtl.IDLE_POLL_INTERVAL_MS
+    assert drag == WinCtl.DRAG_POLL_INTERVAL_MS
+    assert idle > normal > 0                     # 两段式定档的前提
+    assert drag > idle                           # 拖拽档最省
 
     monkeypatch.setattr(pp, "QCursor", _FixedCursor(INSIDE))
     window = _FakeWindow(transparent=True)
@@ -629,17 +662,14 @@ def test_press_release_symmetric_drag_tier(monkeypatch):
 
 
 # ---------------------------------------------------------------- 与 Windows 控制器同为一份真值表
-@pytest.mark.skipif(os.name != "nt", reason="Windows 控制器仅在 win32 可实例化")
 def test_matches_windows_controller_decisions():
-    """逐条对齐：同一窗口事实下两个控制器的判定必须完全一致。"""
-    from pet.platform_win import WindowsPerPixelInputController as WinCtl
+    """逐条对齐：同一窗口事实下两个控制器的判定必须完全一致。
 
-    assert (pp.QtPerPixelInputController.NORMAL_POLL_INTERVAL_MS
-            == WinCtl.NORMAL_POLL_INTERVAL_MS)
-    assert (pp.QtPerPixelInputController.IDLE_POLL_INTERVAL_MS
-            == WinCtl.IDLE_POLL_INTERVAL_MS)
-    assert (pp.QtPerPixelInputController.DRAG_POLL_INTERVAL_MS
-            == WinCtl.DRAG_POLL_INTERVAL_MS)
+    三平台都跑：这里只读 Windows 控制器的判定（``object.__new__`` 绕过 ``__init__``，
+    不碰 user32/扩展样式位），所以 posix 上同样可执行。档位常量对齐在
+    ``test_poll_tiers_match_windows_protocol`` 里断言。
+    """
+    from pet.platform_win import WindowsPerPixelInputController as WinCtl
 
     for mouse_through, press_active, visible, transparent, point, expected in CASES:
         window = _FakeWindow(transparent=transparent, visible=visible)

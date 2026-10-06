@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 import os
+import sys
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -214,15 +215,28 @@ def test_tray_hide_and_screen_migration_stay_paired(tmp_path):
         assert shell._watcher._cursor_timer.isActive()
 
         old = shell.overlay
+        old_ctl = old._input_controller          # 迁移前捕获：旧 overlay 自己的控制器
         shell._migrate_to_screen(app.primaryScreen())
         assert shell.overlay is not old, "前提：迁移确实重建了 overlay"
         assert overlay_peripherals.visible_overlay_count() == base + 1, (
             "旧 overlay 必须从闸门里摘掉（hide/close 成对）")
         assert shell._watcher._cursor_timer.isActive()
-        if os.name == "nt":
-            # 逐像素穿透轮询由 showEvent 按平台创建（见文件头注释）
-            ctl = shell.overlay._input_controller
-            assert ctl is not None and ctl._timer.isActive(), "新 overlay 必须重新轮询"
+        # 逐像素穿透轮询由 showEvent 按平台创建（见文件头注释），两个平台都要钉：
+        # 新 overlay 必须重新有控制器并在轮询，旧 overlay 的控制器必须已停表——
+        # 迁移是「旧窗 close + 新窗 show」的配对路径，漏任一半都会留下空转的轮询表。
+        ctl = shell.overlay._input_controller
+        assert ctl is not None and ctl._timer.isActive(), "新 overlay 必须重新轮询"
+        assert old_ctl is not None and not old_ctl._timer.isActive(), (
+            "旧 overlay 的控制器必须已停表")
+        # 平台判据用 ``sys.platform``——与产品分派（overlay_window.showEvent 的
+        # win32 门）同一个键，避免测试用了另一个键而给出错误期望。
+        if sys.platform == "win32":
+            from pet.platform_win import WindowsPerPixelInputController
+            assert isinstance(ctl, WindowsPerPixelInputController)
+        else:
+            from pet.platform_passthrough import QtPerPixelInputController
+            assert isinstance(ctl, QtPerPixelInputController), (
+                "posix 由 Qt 控制器接管穿透（此前 posix 无任何穿透落点）")
     finally:
         shell.stop()
         shell._delete_runtime_marker()
