@@ -568,7 +568,87 @@ def test_menu_exit_this_kept_for_multi_pet(tmp_path):
         shell._delete_runtime_marker()
 
 
-# ---------------------------------------------------------------- 7. 菜单关闭后派发
+# ---------------------------------------------------------------- 7. 动画分组与收起
+# 长随机动作清单样本：前缀家族结构同实机 shenshen 随机动作池（吃* 17 项、
+# 余额-* / 工作状态-* / 原地* 各 6 项、放* 4 项、碎碎念-* 3 项 + 长尾）。
+LONG_ACTS = (
+    [f"吃{index}号" for index in range(17)]
+    + [f"余额-档位{index}" for index in range(6)]
+    + [f"工作状态-状态{index}" for index in range(6)]
+    + [f"原地{tag}动作" for tag in ("小憩", "敲击", "跳跃", "蹲下", "重力", "旋转")]
+    + [f"放{index}灯" for index in range(4)]
+    + [f"碎碎念-场景{index}" for index in range(3)]
+    + [f"{head}长尾动作" for head in "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉"]
+)
+
+
+def _find_anywhere(container, label):
+    """递归查找（modern 的动画分类藏在「播放动画」子菜单里）。"""
+    for action in container.actions():
+        if action.text() == label:
+            return action
+        submenu = action.menu()
+        if submenu is not None:
+            found = _find_anywhere(submenu, label)
+            if found is not None:
+                return found
+    return None
+
+
+def _animation_families(container, *, label="随机动作", collect_actions=None):
+    submenu = _find_anywhere(container, label).menu()
+    submenu.aboutToShow.emit()
+    families = {}
+    for action in submenu.actions():
+        child = action.menu()
+        if child is None:
+            continue
+        child.aboutToShow.emit()
+        families[action.text()] = [a.text() for a in child.actions() if not a.isSeparator()]
+        if collect_actions is not None:
+            collect_actions.extend(
+                a for a in child.actions() if not a.isSeparator())
+    return families
+
+
+def test_long_animation_menu_groups_and_closes_on_both_layouts(tmp_path):
+    """长随机动作清单：overlay facade 与真实 PetWindow 两条路径逐项一致。
+
+    同时锁住 overlay 侧的两件能力：分组层级照建（facade 的素材面接得上），
+    以及族内叶子带 ``closeOnTrigger``（点完动作整条菜单链收起，overlay 的
+    ``_dispatch_deferred_menu_callbacks`` 负责派发挂起命令）。
+    """
+    for template in ("legacy", "modern"):
+        shell, _instance, config = _make_overlay(tmp_path / template, template=template)
+        win = _reference_window(config)
+        try:
+            win.acts = list(LONG_ACTS)
+            shell.sprite.library.acts = list(LONG_ACTS)
+            shell.behavior._cats_cache.clear()
+
+            reference = _reference_menu(win, config, template)
+            overlay = build_sprite_full_menu(shell)
+            _assert_reference_contained(overlay, reference)
+
+            # legacy 扁平布局的分类标题带「动画 · 」前缀（legacy_labels）
+            label = "动画 · 随机动作" if template == "legacy" else "随机动作"
+            leaves: list = []
+            overlay_families = _animation_families(
+                overlay, label=label, collect_actions=leaves)
+            assert overlay_families == _animation_families(reference, label=label), template
+            assert set(overlay_families) == {
+                "吃", "余额", "工作状态", "原地", "放", "碎碎念", "更多",
+            }, template
+            assert sum(len(members) for members in overlay_families.values()) == len(LONG_ACTS)
+            assert leaves
+            for action in leaves:
+                assert action.property("closeOnTrigger") is True, action.text()
+        finally:
+            win.close()
+            shell._delete_runtime_marker()
+
+
+# ---------------------------------------------------------------- 8. 菜单关闭后派发
 def test_close_on_trigger_commands_dispatch_after_menu_exec(tmp_path):
     """close_on_trigger 命令必须派发（此前 overlay 整类静默失效）。"""
     shell, _instance, _config = _make_overlay(tmp_path, template="modern")

@@ -39,6 +39,17 @@ validated local image with contain/cover rendering; an unreadable local image
 falls back to the Menu Action Model icon.
 _Avoid_: Renamed command, embedded image bytes
 
+**Animation Menu Dismissal**:
+The interaction rule of the animation submenus: triggering a play-once action
+plays it and dismisses the whole menu chain, because the next thing the user
+wants to see is the pet. It governs the play-once animation leaves only —
+toggles, value pickers, and submenu navigation keep their own rules — and the
+`anim_menu_stay_open` preference (default off) restores the stay-open behavior
+for users who chain several actions. The random-action list is grouped by the
+prefix families already present in the animation names, so no level of that
+menu needs scrolling across a whole screen.
+_Avoid_: Sticky menu, per-item dismissal flag
+
 **Capability Unavailable**:
 An action cannot exist on the current platform or build. The Menu Layout Tree
 retains its position for cross-platform editing, while the current runtime may
