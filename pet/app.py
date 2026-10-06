@@ -1152,10 +1152,12 @@ class AppShell:
         self._balance_cache = None
         self._balance_bridge = None
         self._on_about_to_quit_connected = False
-        # overlay 拓扑产品壳（4.1a）：仅 PET_RENDER_TOPOLOGY=overlay 时构造
+        # overlay 拓扑产品壳（4.1a）：仅 overlay 拓扑构造；捕获模式与显式
+        # PET_RENDER_TOPOLOGY=legacy 都走 legacy 单窗，恒为 None
         self._overlay_shell = None
-        # D4：overlay 拓扑单实例进程门（由 main() 抢到后传入；legacy 拓扑恒为
-        # None）。释放挂在会话结束路径（_on_session_end）与 main() 的 finally。
+        # D4：桌宠单实例进程门（由 main() 抢到后传入；两个拓扑都有，只有直接
+        # 构造 AppShell 的测试路径才会拿到 None）。释放挂在会话结束路径
+        # （_on_session_end）与 main() 的 finally。
         self._overlay_gate = overlay_gate
         self._balance_timer = QTimer()
         self._balance_timer.timeout.connect(self.show_balance)
@@ -1913,11 +1915,20 @@ class AppShell:
             self._on_about_to_quit_connected = True
         character_id = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
         logging.info('当前形象: %s', character_id)
-        # 拓扑分流（T5/4.1a）：PET_RENDER_TOPOLOGY=overlay（dev flag，唯一
-        # 读取点在 overlay_shell.is_overlay_topology）→ 单合成窗产品壳
-        # 接管渲染，不建 PetWindow；默认路径逐行不变
+        # 拓扑分流（T5/4.1a + T4 Phase A）：唯一读取点是
+        # overlay_shell.is_overlay_topology（显式 PET_RENDER_TOPOLOGY 优先，其次
+        # 主配置 stream_capture_mode，启动时快照定死）。overlay → 单合成窗产品壳
+        # 接管渲染，不建 PetWindow；**捕获模式（stream_capture_mode=true）→ 这里
+        # 走 legacy 单窗 PetWindow 路径**（OBS 只能枚举真窗口），OverlayShell
+        # 根本不构造 ⇒ 活跃宠清单里的多只桌宠不会自动复活（T4「重启时收拢为主
+        # 宠物」），但清单本身不删（关掉捕获模式重启即回来）。
         from .overlay_shell import is_overlay_topology
-        if is_overlay_topology():
+        overlay_topology = is_overlay_topology()
+        # 拓扑落一行日志：捕获模式"勾了但没重启"与"重启后确实切了"在用户侧
+        # 只表现为窗口标题/任务栏，支持排查需要一行可 grep 的证据。
+        logging.info('渲染拓扑: %s',
+                     'overlay(单合成窗)' if overlay_topology else 'legacy(单窗 PetWindow)')
+        if overlay_topology:
             from .overlay_shell import OverlayShell
             # 4.3 后半：把进程级共享子系统（agent_link / proactive）注入 sprite
             # 世界的壳——overlay 拓扑下 instances[].win 恒为 None，扇出目标就是
@@ -2022,7 +2033,7 @@ class AppShell:
         if not getattr(self, "_plain_about_to_quit", False):
             self._session_end_done = True
         self._mark_session_ending()
-        # D4：会话结束（关机/注销）路径释放 overlay 单实例进程门。与下面的
+        # D4：会话结束（关机/注销）路径释放桌宠单实例进程门。与下面的
         # 「不做会话保存/写盘/槽位解锁」不冲突——本模块的释放是一次 unlink +
         # 关句柄，O(1)、不派生进程、不写盘；不显式释放则只剩"进程被拆掉后由
         # OS 回收句柄 + 下次启动按 QLockFile pid 陈旧判定接管"这条兜底链。
@@ -2049,14 +2060,14 @@ class AppShell:
         )
 
     def _release_overlay_gate(self) -> None:
-        """释放 overlay 单实例进程门（D4；幂等，legacy 拓扑下恒为 no-op）。"""
+        """释放桌宠单实例进程门（D4；幂等，未注入门时 no-op）。"""
         gate = getattr(self, "_overlay_gate", None)
         if gate is None:
             return
         try:
             gate.release()
         except Exception:
-            logging.exception("释放 overlay 进程门失败")
+            logging.exception("释放桌宠单实例进程门失败")
 
     def _mark_session_ending(self) -> None:
         """置位进程级 ffmpeg spawn 闸门（webm_clip.set_session_ending）。
@@ -3030,7 +3041,19 @@ class AppShell:
         4.4b：多进程多宠退役层删除后，多宠的唯一形态是进程内多窗/多 sprite。
         ``--slot`` / ``DSH_PET_SPAWN_OFFSET_INDEX`` 兼容解析保留（T5），
         落点错峰仍按 spawn 序号计算。
+
+        T4 Phase A：捕获模式（``stream_capture_mode``）重启后走 legacy **单窗**
+        形态，多宠已收拢为主宠物；此时再手工生一只，在用户看来就是"又冒出一只
+        完整桌宠"，与单窗口径冲突（且 OBS 源列表会出现两个同标题窗口）。显式
+        ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）同拓扑同语义，一并拒绝。
         """
+        from .overlay_shell import is_overlay_topology
+        if not is_overlay_topology():
+            logging.info("直播捕获兼容（单窗形态）下不生小肥鱼：仅主宠物")
+            win = getattr(getattr(self, "instance", None), "win", None)
+            if win is not None:
+                win.show_bubble("直播捕获兼容模式仅主宠物", duration_ms=4000)
+            return
         try:
             self._spawned_pet_count += 1
             self.spawn_in_process_window(self._spawned_pet_count)
@@ -3729,17 +3752,18 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     # 确定配置根目录
     config_dir = _default_base() / APP_DIR_NAME
 
-    # D4（PHASE4_DESIGN §4）overlay 拓扑单实例进程门：**先于** slot 竞争。
-    # overlay 双开 = 两个进程各自恢复全部 sprite、位置回写互踩，第二实例必须在
-    # 产生任何配置目录副作用（抢 slot-1、落种 config-slot-N.json）之前退场。
-    # legacy 拓扑（PET_RENDER_TOPOLOGY 未设）下 acquire 返回 None，下面逐行不变。
+    # D4（PHASE4_DESIGN §4）桌宠单实例进程门：**先于** slot 竞争。两个拓扑都抢
+    # （T4 Phase A）：overlay 双开 = 两个进程各自恢复全部 sprite、位置回写互踩；
+    # 捕获模式的 legacy 单窗拓扑同样是完整实例（建窗、存位置、落盘配置），双开
+    # 与「重启时多只桌宠先收拢为主宠物」的单窗口径冲突。第二实例必须在产生任何
+    # 配置目录副作用（抢 slot-1、落种 config-slot-N.json）之前退场。
     overlay_gate = overlay_gate_mod.acquire_overlay_instance_gate(config_dir)
-    if overlay_gate is not None and not overlay_gate.acquired:
+    if not overlay_gate.acquired:
         # 双击桌面宠物场景：不弹窗、不阻塞，只留痕 + 退出。退出码对齐
         # pet/__main__.py 的 settings.lock 惯例（「已有实例，本次退出」= 0），
         # 免得外壳把"第二实例"当启动失败报错。
         logging.warning(
-            "overlay 拓扑已有实例在运行（门 %s，持有者 pid=%s）：本次启动退出",
+            "已有实例在运行（门 %s，持有者 pid=%s）：本次启动退出",
             overlay_gate.path, overlay_gate.holder_pid(),
         )
         return overlay_gate_mod.DUPLICATE_EXIT_CODE
@@ -3786,13 +3810,13 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
         return app.exec()
     finally:
         # D4：正常退出（app.exec() 返回前 aboutToQuit 已跑完，各窗位置已落盘）
-        # 才释放 overlay 进程门——比 _on_about_to_quit 内更晚，避免"本地还在收尾、
-        # 第二实例已能起来"的位置回写竞态。会话结束路径另见 _on_session_end。
+        # 才释放进程门——比 _on_about_to_quit 内更晚，避免"本地还在收尾、第二
+        # 实例已能起来"的位置回写竞态。会话结束路径另见 _on_session_end。
         if overlay_gate is not None:
             try:
                 overlay_gate.release()
             except Exception:
-                logging.exception("释放 overlay 进程门失败")
+                logging.exception("释放桌宠单实例进程门失败")
 
 
 if __name__ == '__main__':

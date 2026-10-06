@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-"""D4：overlay 拓扑单实例进程门（PHASE4_DESIGN §4 / §5 4.2c）。
+"""D4：桌宠进程单实例门（PHASE4_DESIGN §4 / §5 4.2c）。
 
 问题（评审 GLM 发现）：overlay 拓扑裸退役 slot 锁后，「双击桌面宠物」的二次
 启动语义没了——两个 overlay 进程各自恢复全部 sprite、位置回写互踩。本模块用
 QLockFile（与 ``pet/__main__.py`` 的 ``settings.lock``、frameseq 的
-``.converting.lock`` 同一套语义）做进程级互斥：overlay 拓扑下第二实例在
-**任何配置目录副作用之前**（不抢 slot-1、不落种 config-slot-N.json）拒绝启动。
+``.converting.lock`` 同一套语义）做进程级互斥：第二个实例在**任何配置目录副作用
+之前**（不抢 slot-1、不落种 config-slot-N.json）拒绝启动。
 
-作用域严格 = overlay 拓扑进程。拓扑判定唯一入口仍是
-``overlay_shell.is_overlay_topology()``（T5：dev env flag，不进 Config/schema），
-本模块只做转发（``is_required()``，测试可注入）；非 overlay 拓扑下
-``acquire_overlay_instance_gate`` 直接返回 None，连锁文件都不创建——legacy
-多进程多宠照旧靠 slot 锁，启动链逐行不变。
+作用域（T4 Phase A 扩到两个拓扑）：**不再按拓扑分流**——默认 overlay 拓扑与
+捕获模式的 legacy 单窗拓扑都抢同一把门。捕获模式下的桌宠也是完整实例（建
+PetWindow、恢复位置、落盘配置），双开同样互踩，且第二条启动在用户看来就是"又
+起了一只完整桌宠"，与「重启时多只桌宠先收拢为主宠物」的单窗口径直接冲突。锁名
+仍叫 ``overlay-instance.lock``（历史名，跨版本稳定，改名只会留下孤儿锁文件），
+语义已是"桌宠进程单实例门"。拓扑判定入口仍是 ``overlay_shell.is_overlay_topology``，
+本模块不再消费它（见 ``tests/test_overlay_instance_gate.py`` 的双拓扑用例）。
 
 崩溃残留（stale lock）完全交给 QLockFile 既有判定，不自己猜：
 - 残留文件里的持有者 pid 已死（同主机）→ 立刻接管（实测 Qt 6.11.2：kill 掉
@@ -37,36 +39,28 @@ from PySide6.QtCore import QLockFile
 
 logger = logging.getLogger(__name__)
 
-# 锁文件名：进程级唯一，落在 config 目录（与 settings.lock 平级）。
+# 锁文件名：进程级唯一，落在 config 目录（与 settings.lock 平级）。名字里的
+# "overlay" 是历史（门最早只在 overlay 拓扑生效），语义已是"桌宠进程单实例"。
 LOCK_NAME = "overlay-instance.lock"
 # 留痕文件：pet-* 命名空间内，随既有 7 天日志清理回收。
 TRACE_NAME = "pet-overlay-gate.log"
 # QLockFile 的陈旧判定窗口（与 settings.lock 同值；判定还叠加 pid 存活检查）。
 STALE_LOCK_MS = 30_000
 
-# 抢门失败（= 已有 overlay 实例在运行）时的退出码：0 = 静默退出，对齐
+# 抢门失败（= 已有桌宠实例在运行）时的退出码：0 = 静默退出，对齐
 # pet/__main__.py 的 settings.lock 惯例（「已有设置进程持有 settings.lock，
 # 本次退出」→ return 0）。双击桌面宠物场景下第二实例不该让外壳/父进程把它当
 # 启动失败报错；留痕由日志与 pet-overlay-gate.log 承担。
 DUPLICATE_EXIT_CODE = 0
 
 
-def is_required() -> bool:
-    """当前拓扑是否需要进程门（overlay 拓扑唯一判定入口的转发）。"""
-    from .overlay_shell import is_overlay_topology
+def acquire_overlay_instance_gate(config_dir: Path | str) -> "OverlayInstanceGate":
+    """启动链入口（``app.main``）：无条件建门（两个拓扑都抢，见模块 docstring）。
 
-    return bool(is_overlay_topology())
-
-
-def acquire_overlay_instance_gate(config_dir: Path | str) -> "OverlayInstanceGate | None":
-    """启动链入口（``app.main``）：非 overlay 拓扑返回 None，零副作用。
-
-    overlay 拓扑返回门对象：``gate.acquired`` 为假即「已有实例在运行」，
-    调用方留痕后按 ``DUPLICATE_EXIT_CODE`` 退出；为真则须在退出路径
-    （正常退出 / 会话结束）调 ``gate.release()``。
+    返回门对象：``gate.acquired`` 为假即「已有实例在运行」，调用方留痕后按
+    ``DUPLICATE_EXIT_CODE`` 退出；为真则须在退出路径（正常退出 / 会话结束）
+    调 ``gate.release()``。
     """
-    if not is_required():
-        return None
     gate = OverlayInstanceGate(config_dir)
     gate.acquire()
     return gate
@@ -81,11 +75,11 @@ def _trace(config_dir: Path | str, message: str) -> None:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(f"{stamp} {message}\n")
     except OSError:
-        logger.debug("overlay 进程门留痕失败: %s", message, exc_info=True)
+        logger.debug("桌宠单实例进程门留痕失败: %s", message, exc_info=True)
 
 
 class OverlayInstanceGate:
-    """overlay 拓扑单实例进程门（QLockFile 语义，跨进程独占）。
+    """桌宠单实例进程门（QLockFile 语义，跨进程独占；两个拓扑共用）。
 
     生命周期：``acquire()`` → 进程存活期间持有 → ``release()``（幂等）。
     未持有时 ``release()`` 是 no-op——绝不动别人的锁文件。
@@ -140,12 +134,12 @@ class OverlayInstanceGate:
         try:
             locked = bool(self._lock.tryLock(0))
         except Exception:
-            logger.exception("overlay 进程门抢锁异常: %s", self.path)
+            logger.exception("桌宠单实例进程门抢锁异常: %s", self.path)
             locked = False
         if locked:
             self._held = True
             self._acquired = True
-            logger.info("overlay 单实例进程门已获取: %s", self.path)
+            logger.info("桌宠单实例进程门已获取: %s", self.path)
             _trace(self.config_dir, f"acquired pid={os.getpid()} lock={self.path}")
             return True
         if not self.path.exists():
@@ -153,12 +147,12 @@ class OverlayInstanceGate:
             # 放行启动，否则坏环境下桌宠会永久静默起不来。
             self._acquired = True
             logger.warning(
-                "overlay 进程门不可用（锁文件不存在，按环境错误放行）: %s", self.path)
+                "桌宠单实例进程门不可用（锁文件不存在，按环境错误放行）: %s", self.path)
             _trace(self.config_dir, f"gate-unavailable pid={os.getpid()} lock={self.path}")
             return True
         self._acquired = False
         logger.warning(
-            "overlay 拓扑已有实例持有进程门，拒绝启动: %s (holder pid=%s)",
+            "已有实例持有进程门，拒绝启动: %s (holder pid=%s)",
             self.path, self.holder_pid())
         _trace(self.config_dir,
                f"refused pid={os.getpid()} holder={self.holder_pid()} lock={self.path}")
@@ -173,4 +167,4 @@ class OverlayInstanceGate:
         try:
             self._lock.unlock()
         except Exception:
-            logger.exception("overlay 进程门释放失败: %s", self.path)
+            logger.exception("桌宠单实例进程门释放失败: %s", self.path)

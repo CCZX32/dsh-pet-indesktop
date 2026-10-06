@@ -1,15 +1,25 @@
 # -*- coding: utf-8 -*-
-"""捕获模式在 overlay 拓扑下的文案/消费口径回归（DS 审查 M15 / T4）。
+"""捕获模式的设置页文案与启动期拓扑分流回归（T4 Phase A）。
 
-overlay 拓扑不建 PetWindow，捕获依赖的窗旗标（``set_stream_capture_mode``）
-在全仓没有 overlay 侧消费者，**重启也不生效**（审计 D：PHASE4_DESIGN 早期的
-「重启级切换」设想从未落地）。故设置页文案改为如实说明不支持并置灰控件。
-legacy 拓扑（PetWindow 唯一存在理由）文案与运行期切换路径保持不变。
+T4 原意（``.scratch/single-overlay-window/PHASE4_DESIGN.md:80-82``）：overlay
+拓扑下勾选捕获模式 = **重启级拓扑切换**，重启后走 legacy 单窗 PetWindow 路径
+（OBS 只能枚举真窗口），重启时多宠收拢为主宠物。此前该设想从未落地——壳上没有
+``set_stream_capture_mode`` 运行期入口，设置页只能如实说明"暂不支持"并置灰。
+
+Phase A 把它接通：拓扑判定增加"主配置 ``stream_capture_mode=true``"这一输入
+（``overlay_settings_command.is_overlay_topology``，进程内快照一次），设置页去掉
+置灰、文案改回 T4 口径；启动期收拢由拓扑分流本身保证（capture 模式不构造
+OverlayShell ⇒ 不跑 ``_restore_spawned_pets``）。本文件锁定文案口径，启动期分流
+见 ``tests/test_background_service_gates.py``。
+
+「本阶段不治黑屏」：BitBlt/游戏捕获读不到分层窗口内容属已知限制（README 已如实
+写明，Phase B 跟踪），与本文件的窗口枚举口径无关。
 
 纪律：offscreen；同步直调，不 sleep。
 """
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -21,41 +31,167 @@ from tests.test_overlay_dead_switches import _make_shell
 app = QApplication.instance() or QApplication([])
 
 LEGACY_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
+RESTART_HINT = LEGACY_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
 
 
-def _stream_capture_hint(tmp_path, monkeypatch, topology: str) -> str:
-    """按拓扑构建设置页，取「直播捕获兼容」行的说明文本。"""
+def _build_dialog(tmp_path, monkeypatch, *, topology: str | None = None,
+                  instance_id: str = "", capture: bool | None = None):
+    """构建设置页（Windows 场景），拓扑门的配置输入钉到本用例临时目录。
+
+    ``topology=None`` = 不设 env，由主配置 ``stream_capture_mode`` 决定（生产
+    路径）；``capture`` 非 None 时先写进**主配置**。``instance_id`` 非空 = 子宠页
+    （它自己的 config-slot-N.json 才是读写对象，拓扑门仍只认主配置）。
+    """
     import pet.modern_settings_dialog as settings_mod
-    from pet.config import Config
+    from pet import overlay_settings_command as cmd_mod
+    from pet.config import APP_DIR_NAME, Config
 
     monkeypatch.setattr(settings_mod.sys, "platform", "win32")
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    monkeypatch.setenv("PET_RENDER_TOPOLOGY", topology)
-    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    if topology is None:
+        monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
+    else:
+        monkeypatch.setenv("PET_RENDER_TOPOLOGY", topology)
+    config = Config(base=tmp_path, instance_id=instance_id) if instance_id else Config(tmp_path)
+    if capture is not None:
+        config.set("stream_capture_mode", capture)
+        assert config.save()
+    main_path = tmp_path / APP_DIR_NAME / "config.json"
+    monkeypatch.setattr(cmd_mod, "topology_config_path", lambda: main_path)
+    cmd_mod.reset_topology_snapshot()
+    return settings_mod.ModernSettingsDialog(config, include_ai=False)
+
+
+def _close(dialog):
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def _stream_capture_hint(tmp_path, monkeypatch, topology: str | None) -> str:
+    """按拓扑构建设置页，取「直播捕获兼容」行的说明文本。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet import overlay_settings_command as cmd_mod
+
+    dialog = _build_dialog(tmp_path, monkeypatch, topology=topology)
     try:
         row = dialog.findChild(settings_mod.SettingRow,
                                "settingRow_stream_capture")
         assert row is not None, "Windows 设置页必须有直播捕获兼容行"
         return row.hint_label.text()
     finally:
-        dialog.close()
-        dialog.deleteLater()
-        app.processEvents()
+        _close(dialog)
+        cmd_mod.reset_topology_snapshot()
 
 
-def test_stream_capture_copy_says_unsupported_under_overlay_topology(tmp_path, monkeypatch):
-    """overlay 拓扑：文案如实说明单窗模式不支持（不再声称「重启后生效」）。"""
+def test_stream_capture_copy_is_restart_level_under_overlay_topology(tmp_path, monkeypatch):
+    """overlay（默认路径）：如实说明这是重启级切换（T4 口径）。"""
     hint = _stream_capture_hint(tmp_path, monkeypatch, "overlay")
-    assert "暂不支持" in hint
-    assert "重启" not in hint
-    assert "让 OBS 等工具能够枚举并捕获桌宠窗口" in hint
+    assert hint == RESTART_HINT
+    assert "重启后生效" in hint
+    assert "收拢为主宠物" in hint
 
 
-def test_stream_capture_copy_unchanged_under_legacy_topology(tmp_path, monkeypatch):
-    """legacy 拓扑：文案逐字不变（运行期切换仍有效，不该提示重启）。"""
+def test_stream_capture_copy_same_restart_copy_when_already_checked(tmp_path, monkeypatch):
+    """已勾选（配置 true，尚未重启的那一进程）：不得退回"看起来已经生效"的旧文案。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet import overlay_settings_command as cmd_mod
+
+    dialog = _build_dialog(tmp_path, monkeypatch, capture=True)
+    try:
+        row = dialog.findChild(settings_mod.SettingRow,
+                               "settingRow_stream_capture")
+        hint = row.hint_label.text()
+        checked = dialog.stream_capture_check.isChecked()
+    finally:
+        _close(dialog)
+        cmd_mod.reset_topology_snapshot()
+    assert hint == RESTART_HINT
+    assert checked is True
+
+
+def test_stream_capture_check_is_never_greyed_out(tmp_path, monkeypatch):
+    """T4 Phase A：**主宠页**两个拓扑下都可点（不再置灰）。"""
+    from pet import overlay_settings_command as cmd_mod
+
+    for capture in (False, True):
+        dialog = _build_dialog(tmp_path, monkeypatch, capture=capture)
+        try:
+            assert dialog.stream_capture_check.isEnabled() is True, capture
+            assert dialog.stream_capture_check.isChecked() is capture
+        finally:
+            _close(dialog)
+            cmd_mod.reset_topology_snapshot()
+
+
+def test_stream_capture_check_disabled_on_child_page(tmp_path, monkeypatch):
+    """审查修复 1：子宠页该行置灰 + 说明「仅主桌宠可设置」，点击无效。
+
+    子宠页保存写的是 ``config-slot-N.json``（modern_settings_dialog 的保存回写），
+    而拓扑判定只读主配置 ⇒ 这一行在子宠页点什么都不会生效。子宠页也不再可能靠
+    运行期多开落地（捕获模式下 spawn 入口已拒绝），故一律归主宠页。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from pet import overlay_settings_command as cmd_mod
+
+    dialog = _build_dialog(tmp_path, monkeypatch, topology="overlay",
+                           instance_id="slot-1", capture=False)
+    try:
+        check = dialog.stream_capture_check
+        assert check is not None, "Windows 设置页必须有直播捕获兼容行"
+        assert check.isEnabled() is False
+        assert check.toolTip() == "仅主桌宠可设置"
+
+        dialog.show()
+        app.processEvents()
+        QTest.mouseClick(check, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        assert check.isChecked() is False, "置灰控件必须点不动"
+        # 保存链路的写回只写该页自己那份配置：slot 配置里的值不参与拓扑判定
+        assert dialog.config.get("stream_capture_mode") is False
+    finally:
+        _close(dialog)
+        cmd_mod.reset_topology_snapshot()
+
+
+def test_stream_capture_child_row_also_disabled_in_legacy(tmp_path, monkeypatch):
+    """legacy（捕获模式重启后的形态）下子宠页同样归主宠页：那时根本不存在子窗。"""
+    dialog = _build_dialog(tmp_path, monkeypatch, topology="legacy",
+                           instance_id="slot-1")
+    try:
+        assert dialog.stream_capture_check.isEnabled() is False
+    finally:
+        _close(dialog)
+
+
+def test_stream_capture_copy_unchanged_under_explicit_legacy_env(tmp_path, monkeypatch):
+    """显式 PET_RENDER_TOPOLOGY=legacy（dev 逃生门）：运行期即时切换，提示不重启。"""
     hint = _stream_capture_hint(tmp_path, monkeypatch, "legacy")
     assert hint == LEGACY_HINT
     assert "重启" not in hint
+
+
+def test_capture_config_flips_topology_verdict(tmp_path, monkeypatch):
+    """配置文件就是拓扑输入：true → 非 overlay（legacy 单窗）。"""
+    from pet import overlay_settings_command as cmd_mod
+    from pet.config import Config
+
+    monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
+    config = Config(tmp_path)
+    monkeypatch.setattr(cmd_mod, "topology_config_path", lambda: config.path)
+    cmd_mod.reset_topology_snapshot()
+    assert cmd_mod.is_overlay_topology() is True
+    config.set("stream_capture_mode", True)
+    assert config.save()
+    cmd_mod.reset_topology_snapshot()
+    try:
+        assert cmd_mod.is_overlay_topology() is False
+        assert json.loads(config.path.read_text(encoding="utf-8"))[
+            "stream_capture_mode"] is True
+    finally:
+        cmd_mod.reset_topology_snapshot()
 
 
 def test_overlay_topology_has_no_runtime_capture_switch(tmp_path, monkeypatch):

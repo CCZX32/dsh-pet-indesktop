@@ -9,9 +9,13 @@
   预热（``app.py``：``prewarm_enabled=not idle_low_fps_enabled``）。legacy 的
   PetWindow 确实是降帧（``window.py`` 的 ``_idle_reduction_active`` +
   ``_sync_movie_throttle``），故文案按拓扑分流，legacy 原文案不动。
-- T2「直播捕获兼容」（``stream_capture_mode``）：文案声称 overlay 下「重启后
-  生效」，但 overlay 全仓无消费者（``overlay_window`` 恒 FramelessTool、无
-  ``set_stream_capture_mode``），重启也不生效 → 置灰 + 如实说明。
+- T2「直播捕获兼容」（``stream_capture_mode``）：文案曾声称 overlay 下「重启后
+  生效」但 overlay 全仓无消费者（``overlay_window`` 恒 FramelessTool、无
+  ``set_stream_capture_mode``）→ 当时改为置灰 + 如实说明。**T4 Phase A 复盘
+  落地**：该键成为拓扑输入（``overlay_settings_command.is_overlay_topology``
+  读主配置 ``stream_capture_mode``，进程内快照一次），勾选后重启真的走 legacy
+  单窗路径并收拢多宠，故撤销置灰、文案回到 T4 口径（重启后生效 + 多宠收拢）；
+  显式 ``PET_RENDER_TOPOLOGY=legacy`` 仍是运行期即时切换，逐字保留原提示。
 - T3 窗口级键（置顶/鼠标穿透/不透明度/锁定位置/SHIFT 拖拽/光标隐藏穿透/全屏
   自动隐藏）在 overlay 一窗多宠下物理上只能整窗生效 → 子宠设置页补一句
   「对所有桌宠生效」；主宠页与 legacy 拓扑不加。
@@ -108,16 +112,16 @@ def test_idle_low_fps_copy_keeps_legacy_frame_reduction(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 # T2 直播捕获兼容
 # --------------------------------------------------------------------------
-def test_stream_capture_disabled_with_truthful_copy_under_overlay(overlay_dialog):
-    """overlay：无消费者 → 控件置灰，文案不再说「重启后生效」。"""
+def test_stream_capture_enabled_with_restart_level_copy_under_overlay(overlay_dialog):
+    """overlay：可点 + T4 口径（重启后生效、多宠先收拢为主宠物）。"""
     hint = _hint(overlay_dialog, "stream_capture")
-    assert overlay_dialog.stream_capture_check.isEnabled() is False
-    assert "暂不支持" in hint
-    assert "重启" not in hint
+    assert overlay_dialog.stream_capture_check.isEnabled() is True
+    assert hint == LEGACY_STREAM_CAPTURE_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+    assert "暂不支持" not in hint
 
 
-def test_disabled_stream_capture_ignores_clicks_but_legacy_toggle_works(tmp_path, monkeypatch):
-    """置灰必须真禁用；legacy 对照组证明点击确实送达（否则断言是空转）。"""
+def test_stream_capture_toggle_clickable_in_both_topologies(tmp_path, monkeypatch):
+    """两个拓扑下点击都送达（T4 Phase A 撤销置灰；legacy 对照组同时证明非空转）。"""
     for name in ("overlay", "legacy"):
         (tmp_path / name).mkdir()
     overlay = _dialog(tmp_path / "overlay", monkeypatch, topology="overlay")
@@ -129,8 +133,8 @@ def test_disabled_stream_capture_ignores_clicks_but_legacy_toggle_works(tmp_path
         QTest.mouseClick(overlay.stream_capture_check, Qt.MouseButton.LeftButton)
         QTest.mouseClick(legacy.stream_capture_check, Qt.MouseButton.LeftButton)
         app.processEvents()
-        assert overlay.stream_capture_check.isChecked() is False  # 置灰：点不动
-        assert legacy.stream_capture_check.isChecked() is True    # 对照：点得动
+        assert overlay.stream_capture_check.isChecked() is True
+        assert legacy.stream_capture_check.isChecked() is True
     finally:
         _close(overlay)
         _close(legacy)
