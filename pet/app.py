@@ -516,6 +516,8 @@ class PetInstance:
         win.on_open_quick_chat = self._slot_wrap(self.open_quick_chat) if self.enable_chat else None
         win.on_open_chat_settings = self._slot_wrap(self.open_chat_settings) if self.enable_chat else None
         win.on_show_balance = self._slot_wrap(self.shell.show_balance) if self.enable_chat else None
+        # 天气：进程级服务（AppShell.show_weather），与聊天能力无关（独立外部数据源）
+        win.on_show_weather = self._slot_wrap(self.shell.show_weather)
         win.on_check_update = self._slot_wrap(self.shell.check_update)
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
@@ -1151,6 +1153,8 @@ class AppShell:
         self._quiet_balance_last: float | None = None
         self._balance_cache = None
         self._balance_bridge = None
+        # 天气服务（「查看天气」）：懒创建，进程级单例（多窗共用一份忙门与客户端）
+        self._weather_service = None
         self._on_about_to_quit_connected = False
         # overlay 拓扑产品壳（4.1a）：仅 overlay 拓扑构造；捕获模式与显式
         # PET_RENDER_TOPOLOGY=legacy 都走 legacy 单窗，恒为 None
@@ -2943,6 +2947,18 @@ class AppShell:
             self._balance_busy = False
             error_message = f'余额查询失败：{exc}'
             QTimer.singleShot(0, lambda message=error_message: bridge.done.emit(False, message))
+
+    def show_weather(self, parent=None) -> None:
+        """「查看天气」：后台取当前城市天气并在桌宠气泡报出。
+
+        与 ``show_balance`` 同口径：``parent`` 是气泡宿主（旧版拓扑是 PetWindow、
+        overlay 拓扑是壳）；服务懒创建、进程级单例（多窗共用）。
+        """
+        from .weather_service import WeatherService
+
+        if self._weather_service is None:
+            self._weather_service = WeatherService(self)
+        self._weather_service.show_weather(parent)
 
     def _balance_worker(self, bridge, base_url: str, api_key: str, verify_ssl: bool, provider_key: str = '', *, quiet: bool = False) -> None:
         from . import balance as balance_mod  # 按需导入（见 _show_balance_payload）

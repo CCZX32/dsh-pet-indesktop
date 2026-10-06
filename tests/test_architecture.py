@@ -226,7 +226,15 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
+# 2026-10-07 上调到 2417：issue #209「查看天气 + 多城市」——本文件只加两行接线
+# （settings_weather 的 import 1 行 + _write_config 委托 1 行），与既有
+# settings_file_interpret / settings_music 的接线形态一致；设置页控件、行装配、
+# 城市列表归一化全部落在 pet/settings_weather.py（不受本预算约束），菜单与城市
+# 对话框在 pet/weather_menu.py，取数与源切换在 pet/weather.py。实测 2417。
+# 说明：这是"最小可能的接线行数"下仍越线——`_write_config` 逐模块显式委托，
+# 没有可以挂靠的通用保存循环；再省只能压行/合并语句，那正是预算注释明令禁止的
+# 反向优化。若与其它在飞分支叠加越线，按先例带日期注释校准。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2417
 
 
 def _read(name: str) -> str:

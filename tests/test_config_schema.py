@@ -157,6 +157,9 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "voice_chime_custom_quotes_zh",
         "voice_chime_voice",
         "voice_chime_volume",
+        "weather_city",
+        "weather_city_list",
+        "weather_enabled",
     }
 )
 
@@ -279,6 +282,52 @@ def test_set_normalizes_music_and_cost_keys(tmp_path):
     assert cfg.data["music_lyric_enabled"] is False
     cfg.set("agent_cost_enabled", "yes")
     assert cfg.data["agent_cost_enabled"] is True
+
+
+# ------------------------------------------------- 天气三键（issue #209）
+def _dirty_weather_config(tmp_path):
+    """把天气三键写成脏值落盘，再走真实加载路径（reload + _normalize_pet_settings）。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "weather_enabled": "false",
+                "weather_city": "  鹿城区  ",
+                "weather_city_list": ["北京", "北京", " 鹿城区 ", "", 42, "上海"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return Config(base=tmp_path)
+
+
+def test_dirty_weather_keys_are_normalized(tmp_path):
+    """脏 config.json 加载后：布尔判真、城市名归一化、列表去空去重。"""
+    cfg = _dirty_weather_config(tmp_path)
+
+    assert cfg.data["weather_enabled"] is False, "'false' 不得被 bool() 误开"
+    assert cfg.data["weather_city"] == "鹿城"
+    assert cfg.data["weather_city_list"] == ["北京", "鹿城", "上海"]
+
+
+def test_set_normalizes_weather_keys(tmp_path):
+    """set() 的归一化名单同样覆盖天气三键（设置页/菜单写回不得绕过钳制）。"""
+    from pet.weather import MAX_CITIES, normalize_city_list
+
+    cfg = Config(base=tmp_path)
+    cfg.set("weather_enabled", "yes")
+    assert cfg.data["weather_enabled"] is True
+    cfg.set("weather_city", "乌鲁木齐县")
+    assert cfg.data["weather_city"] == "乌鲁木齐"
+    cfg.set("weather_city_list", [f"城市{i}" for i in range(MAX_CITIES + 5)])
+    assert cfg.data["weather_city_list"] == normalize_city_list(
+        [f"城市{i}" for i in range(MAX_CITIES + 5)]
+    )
+    cfg.set("weather_city_list", "北京")
+    assert cfg.data["weather_city_list"] == []
 
 
 # ------------------------------------------------- 自启目标（harness_launch_target）

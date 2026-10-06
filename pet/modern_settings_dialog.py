@@ -165,6 +165,7 @@ from .persona_template import (
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
+from . import settings_weather
 from . import settings_pet_controls
 from . import settings_reset_defaults
 
@@ -2309,6 +2310,7 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
         settings_music.save_music_player_settings(self)
+        settings_weather.save_weather_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 

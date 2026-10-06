@@ -38,6 +38,7 @@ from .shared import (
     build_size_menu,
     build_speed_menu,
 )
+from ..weather_menu import add_show_weather, add_weather_cities
 
 
 def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
@@ -59,6 +60,8 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     build_character_menu(menu, pet, icons=False)
 
     menu.addSeparator()
+    add_show_weather(menu, pet, icons=False)
+    add_weather_cities(menu, pet, icons=False)
     add_return_corner(menu, pet, icons=False)
     add_on_top(menu, pet, icons=False)
     add_no_move(menu, pet, icons=False)
