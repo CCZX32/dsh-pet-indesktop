@@ -430,14 +430,43 @@ def test_chat_gated_entries_follow_chat_availability(tmp_path):
 
 
 # ------------------------------------------------- 网络信息入口（issue #172）
-def test_network_info_entry_hidden_when_disabled_in_settings(tmp_path):
-    """菜单入口显隐由 ``network_info_menu_enabled`` 决定，两套模板同一判定。"""
+def _find_action(container, label: str):
+    """递归找 label 对应的 QAction（子菜单里也算）。"""
+    for action in container.actions():
+        if action.isSeparator():
+            continue
+        if action.text() == label:
+            return action
+        submenu = action.menu()
+        if submenu is not None:
+            found = _find_action(submenu, label)
+            if found is not None:
+                return found
+    return None
+
+
+def test_network_info_entry_greyed_out_when_switched_off(tmp_path):
+    """入口开关关掉 = 保留位置 + 置灰 + 说明（Runtime Disabled），两套模板一致。"""
     for template in ("modern", "legacy"):
         shell, _instance, _config = _make_overlay(
             tmp_path / template, template=template,
             values={"network_info_menu_enabled": False})
         try:
-            assert "网络信息" not in _all_labels(build_sprite_full_menu(shell))
+            action = _find_action(build_sprite_full_menu(shell), "网络信息")
+            assert action is not None, f"{template}：入口应保留位置（不是消失）"
+            assert action.isEnabled() is False, template
+            assert action.toolTip(), f"{template}：置灰必须有说明"
+        finally:
+            shell._delete_runtime_marker()
+
+
+def test_network_info_entry_enabled_by_default(tmp_path):
+    for template in ("modern", "legacy"):
+        shell, _instance, _config = _make_overlay(tmp_path / f"on-{template}",
+                                                  template=template)
+        try:
+            action = _find_action(build_sprite_full_menu(shell), "网络信息")
+            assert action is not None and action.isEnabled() is True, template
         finally:
             shell._delete_runtime_marker()
 

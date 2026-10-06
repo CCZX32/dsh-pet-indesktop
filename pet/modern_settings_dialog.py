@@ -1002,6 +1002,7 @@ class ModernSettingsDialog(QDialog):
         self.island_info_mode_select.currentIndexChanged.connect(self._update_island_custom_text)
         self.egg_enabled_check.toggled.connect(self._update_egg_controls)
         self.egg_enabled_check.toggled.connect(self._sync_menu_action_states)
+        self.network_info_menu_check.toggled.connect(self._sync_menu_action_states)
         self.quick_launch_editor.changed.connect(self._sync_menu_action_states)
         self.collision_enabled_check.toggled.connect(self._update_collision_controls)
         self.collision_sound_check.toggled.connect(self._update_collision_sound_controls)
@@ -1047,6 +1048,8 @@ class ModernSettingsDialog(QDialog):
             enabled.discard("quick_launch")
         if not self.egg_enabled_check.isChecked():
             enabled.discard("ojingjing")
+        if not self.network_info_menu_check.isChecked():
+            enabled.discard("network_info")
         self.menu_layout_editor.set_enabled_actions(enabled)
 
     def _build_pet_controls(self) -> None:

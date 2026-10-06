@@ -231,7 +231,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 并入 foobar2000 歌词两行——净 −3）：免打扰 4 行 / 天气 2 行 / 网络信息 5 行，
 # 实现分别在 pet/settings_quiet.py / settings_weather.py / settings_network.py /
 # settings_music.py。实测 2423；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2423
+# 2026-10-08 再调到 2426（#172 对齐：菜单入口改运行时置灰——CONTEXT.md 的
+# Runtime Disabled）：编排器状态列随开关显示「已停用」——`_sync_menu_action_states`
+# +2 行（读开关）与开关接线 +1 行。实测 2426。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2426
 
 
 def _read(name: str) -> str:
