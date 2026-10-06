@@ -166,6 +166,7 @@ from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
 from . import settings_pet_controls
+from . import settings_reset_defaults
 
 
 # 语言配置页只展示用户能理解的事件名称；内部 key 仍用于保存和渲染。
@@ -310,6 +311,9 @@ class ModernSettingsDialog(QDialog):
         self.sidebar.setIconSize(QSize(18, 18))
         self.sidebar.setSpacing(2)
         sidebar_layout.addWidget(self.sidebar, 1)
+        # 全局兜底入口（命令而非偏好项，故放侧栏底部）：实现全在
+        # pet/settings_reset_defaults.py（本文件有行数预算），这里只做接线。
+        settings_reset_defaults.create_reset_button(self, sidebar_layout)
         self.version_footer = QLabel(f"版本 v{__version__}", sidebar_pane)
         self.version_footer.setObjectName("settingsVersion")
         self.version_footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2374,6 +2378,15 @@ class ModernSettingsDialog(QDialog):
         cb = getattr(self.parent(), "on_voice_chime_now", None)
         if callable(cb):
             cb(text)
+
+    def _close_after_external_write(self) -> None:
+        """关窗，但跳过关闭路径的整表写回（``_write_config``）。
+
+        供"已在窗口外完成落盘"的入口使用（当前是「恢复默认设置」）：此时控件里
+        持有的仍是落盘前的旧值，关闭路径照常写回就会把刚写下的配置静默覆盖回去。
+        """
+        self._saved_via_button = True
+        self.accept()
 
     def reject(self) -> None:  # noqa: N802 - Qt API
         """Esc 路径与关闭按钮一致：保存设置并应用开机自启。"""
