@@ -8,14 +8,18 @@
    否则坏文件会被 3s 轮询永远重放；
 4. 指令身份：``target`` 为 slot 编号时只退那一只，裸指令 = 全部子肥鱼。
 
-拓扑门（``is_overlay_topology``）也归本模块：设置进程要按拓扑分流，但
+拓扑门（``is_overlay_topology``）也归本模块：设置进程必须按拓扑分流，但
 ``pet/__main__.py --settings`` 明确禁止导入重量级模块（pet.app/overlay_shell），
-故 env 读取实现落在零 Qt 模块，``overlay_shell.is_overlay_topology`` 转发。
+故拓扑读取实现落在零 Qt 模块，``overlay_shell.is_overlay_topology`` 转发。
+拓扑输入两个：显式 ``PET_RENDER_TOPOLOGY``（dev 逃生门，优先）与主配置
+``stream_capture_mode``（T4：勾选 = 重启级切到 legacy 单窗，进程内快照一次）。
 """
 from __future__ import annotations
 
 import json
 import logging
+
+import pytest
 
 from pet import overlay_settings_command as cmd
 
@@ -24,9 +28,31 @@ def _now() -> float:
     return 1_800_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _clean_topology_snapshot():
+    """每个用例从零快照开始（快照按配置路径分键，但真实目录路径会跨用例复用）。"""
+    cmd.reset_topology_snapshot()
+    yield
+    cmd.reset_topology_snapshot()
+
+
+def _pin_config(tmp_path, monkeypatch):
+    """把拓扑门的配置路径钉到临时目录（不读开发机真实 config.json）。
+
+    门的生产口径是 ``_default_base()/APP_DIR_NAME/config.json``（见
+    ``config.py`` 的 ``_default_base`` / ``APP_DIR_NAME``）；测试只替换路径解析，
+    文件读取逻辑本身不 mock。
+    """
+    path = tmp_path / "dsh-pet-standalone" / "config.json"
+    monkeypatch.setattr(cmd, "topology_config_path", lambda: path)
+    return path
+
+
 # ---------------------------------------------------------------- 拓扑门
-def test_is_overlay_topology_env_contract(monkeypatch):
-    # T5 默认化：默认 overlay；legacy 为唯一逃生门（大小写/空白不敏感）
+def test_is_overlay_topology_env_contract(tmp_path, monkeypatch):
+    # T5 默认化：默认 overlay；legacy 为唯一逃生门（大小写/空白不敏感）。
+    # 配置侧未开启时 env 是唯一输入（配置文件不存在，见 _pin_config）。
+    _pin_config(tmp_path, monkeypatch)
     monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
     assert cmd.is_overlay_topology() is True
     monkeypatch.setenv(cmd.ENV_TOPOLOGY, "overlay")
@@ -39,6 +65,83 @@ def test_is_overlay_topology_env_contract(monkeypatch):
     assert cmd.is_overlay_topology() is False
     monkeypatch.setenv(cmd.ENV_TOPOLOGY, "")
     assert cmd.is_overlay_topology() is True
+
+
+def test_topology_follows_stream_capture_mode_in_config(tmp_path, monkeypatch):
+    """T4 Phase A：config.json 勾选捕获模式 = 本进程走 legacy 单窗（重启级切换）。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+    assert cmd.stream_capture_mode_enabled() is True
+    assert cmd.is_overlay_topology() is False
+
+
+@pytest.mark.parametrize("value", [True, "true", "1", " yes ", "on"])
+def test_topology_accepts_user_edited_truthy_values(tmp_path, monkeypatch, value):
+    """手改 config.json 的宽松布尔（``config._bool_or_default`` 同口径）也算开启。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": value}), encoding="utf-8")
+    assert cmd.is_overlay_topology() is False
+
+
+@pytest.mark.parametrize("kind", ["missing", "corrupt", "not-object", "unreadable"])
+def test_topology_falls_back_to_overlay_on_bad_config(tmp_path, monkeypatch, kind):
+    """缺文件/损坏 JSON/内容不是对象/根本读不了 → 一律 overlay，绝不抛给启动链。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "corrupt":
+        path.write_text('{"stream_capture_mode": tru', encoding="utf-8")
+    elif kind == "not-object":
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+    elif kind == "unreadable":
+        # 路径被目录占住：read_text 抛 IsADirectoryError（OSError 子类）
+        path.mkdir()
+    assert cmd.stream_capture_mode_enabled() is False
+    assert cmd.is_overlay_topology() is True
+
+
+def test_explicit_env_wins_over_stream_capture_config(tmp_path, monkeypatch):
+    """显式 env 是 dev 逃生门：压过配置（否则开发者无法在勾选状态下跑 overlay）。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, "overlay")
+    assert cmd.is_overlay_topology() is True
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, "legacy")
+    assert cmd.is_overlay_topology() is False
+
+
+def test_topology_config_verdict_is_snapshotted_once(tmp_path, monkeypatch):
+    """T5：配置判定进程内定死——设置页勾选后，正在跑的进程不得中途翻拓扑。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": False}), encoding="utf-8")
+    assert cmd.is_overlay_topology() is True
+
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+    assert cmd.is_overlay_topology() is True, "盘上改动不得改变本进程已定的拓扑"
+
+    cmd.reset_topology_snapshot()  # 等价于"下一次启动"
+    assert cmd.is_overlay_topology() is False
+
+
+def test_topology_config_path_reuses_app_config_location(monkeypatch):
+    """路径解析复用 config 的既有口径，不自己拼第二份。"""
+    from pathlib import Path
+
+    from pet import config as config_mod
+
+    monkeypatch.setattr(config_mod, "_default_base", lambda: Path("/tmp/base"))
+    monkeypatch.setattr(config_mod, "APP_DIR_NAME", "dsh-pet-test")
+    assert cmd.topology_config_path() == Path(
+        "/tmp/base") / "dsh-pet-test" / "config.json"
 
 
 def test_slot_from_instance_id():

@@ -59,12 +59,18 @@ from .settings_widgets import (
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
 
-#: 「直播捕获兼容」基础文案（描述能力本身）；legacy 拓扑逐字用它。
+#: 「直播捕获兼容」基础文案（描述能力本身）；显式 env legacy（运行期即时切换）
+#: 逐字用它。
 STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
-#: overlay 拓扑：该键无任何消费者（不建 PetWindow，壳上也无运行期入口），
-#: 重启同样不生效——如实说明不支持（配合置灰控件）。
-STREAM_CAPTURE_OVERLAY_HINT = (
-    STREAM_CAPTURE_HINT + "当前单窗口渲染模式暂不支持直播捕获兼容。"
+#: 默认（非显式 env legacy）路径的补充说明（T4：重启级切换）。
+#:
+#: 该键是**拓扑输入**（见 ``overlay_settings_command.is_overlay_topology``）：
+#: 勾选后重启走 legacy 单窗 PetWindow 路径，overlay 单合成窗没有可枚举的窗口；
+#: 重启时按 T4 口径多只桌宠先收拢为主宠物（活跃宠清单保留，不删档）。
+#: 已勾选未重启、以及 overlay 未勾选两种状态共用这句：省略"勾选后"这类前提，
+#: 免得用户在已勾选状态下看到「勾选后生效」而以为还要再勾一次。
+STREAM_CAPTURE_RESTART_HINT = (
+    STREAM_CAPTURE_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
 )
 
 #: 「省电模式」（idle_low_fps_enabled）文案，按拓扑分流：
@@ -105,20 +111,24 @@ def _is_overlay_topology() -> bool:
 
 
 def stream_capture_hint() -> str:
-    """「直播捕获兼容」说明文案（按渲染拓扑分流，T4 / PHASE4_DESIGN.md:80-82）。
+    """「直播捕获兼容」说明文案（T4 / PHASE4_DESIGN.md:80-82）。
 
-    捕获依赖 PetWindow 的窗旗标（``window_screen.py`` 的
-    set_stream_capture_mode），overlay 拓扑不构造 PetWindow，壳上也没有运行期
-    入口——该键在 overlay 下**无任何消费者，重启同样不生效**，故如实说明不支持
-    并在 ``build_pet_controls`` 里置灰控件。legacy 拓扑文案逐字不变（运行期即时
-    生效）。
+    文案按**当前进程的拓扑输入**分流：
+
+    - 显式 ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）：本进程就是 legacy，
+      PetWindow 运行期即时生效（``window_screen.py`` 的
+      set_stream_capture_mode），逐字原提示、不提示重启；
+    - 其余（默认 overlay，或已勾选捕获模式 = 重启后走 legacy）：该键是**重启级
+      切换**——勾选只落配置，本进程不会翻拓扑，故如实说明重启与多宠收拢。
 
     文案落在本模块（控件本体也在这里）而不是 ``modern_settings_dialog``：
     后者的行数预算只随实测校准，能不加行就不加。
     """
-    if _is_overlay_topology():
-        return STREAM_CAPTURE_OVERLAY_HINT
-    return STREAM_CAPTURE_HINT
+    from . import overlay_settings_command
+
+    if overlay_settings_command.env_forces_legacy():
+        return STREAM_CAPTURE_HINT
+    return STREAM_CAPTURE_RESTART_HINT
 
 
 def idle_low_fps_hint() -> str:
@@ -364,11 +374,6 @@ def build_pet_controls(host) -> None:
         host.auto_hide_fullscreen_check.setChecked(bool(host.config.get("auto_hide_fullscreen", True)))
         host.stream_capture_check = ToggleSwitch(host)
         host.stream_capture_check.setChecked(bool(host.config.get("stream_capture_mode", False)))
-        if _is_overlay_topology():
-            # overlay 无消费者（不建 PetWindow，壳上无 set_stream_capture_mode）：
-            # 置灰 + 如实说明，避免用户以为勾上就能被 OBS 枚举。
-            host.stream_capture_check.setEnabled(False)
-            host.stream_capture_check.setToolTip(STREAM_CAPTURE_OVERLAY_HINT)
 
     host.speed_select = ModernSelect(host, width=112)
     current_speed = float(host.config.get("playback_speed", 1.0))

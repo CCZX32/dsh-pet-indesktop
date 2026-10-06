@@ -29,7 +29,7 @@ import pet.app as app_mod
 import pet.overlay_shell as overlay_shell_mod
 from pet import harness_launcher
 from pet.app import AppShell
-from pet.config import Config
+from pet.config import APP_DIR_NAME, Config
 
 app = QApplication.instance() or QApplication([])
 
@@ -68,24 +68,30 @@ class _StubOverlayShell:
 
 
 def _start_shell(tmp_path, monkeypatch, *, dsh=False, topology="legacy",
-                 win=None, ui_stub=True):
+                 win=None, ui_stub=True, prepare=None, ui_create=None):
     """真 AppShell.start()（"起桌宠"那一层置空）。
 
     默认显式走 ``legacy`` 拓扑：不建 OverlayShell / 素材库（起桌宠那一层），
-    与本文件被测的三件事（跟踪器门、共享全屏 watcher 门、应用链计数）无关；
-    overlay 分支专门由 ``test_overlay_topology_skips_shared_fullscreen_watcher``
-    用壳替身覆盖。
+    与本文件被测的门控无关；overlay 分支专门由
+    ``test_overlay_topology_skips_shared_fullscreen_watcher`` 用壳替身覆盖。
+    ``topology=None`` = 不设 env，由主配置决定（捕获模式用例走这条生产路径）；
+    ``prepare(config)`` 在落盘前改配置，``ui_create`` 记录 legacy 建窗被走到。
     """
-    monkeypatch.setenv("PET_RENDER_TOPOLOGY", topology)
+    if topology is None:
+        monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
+    else:
+        monkeypatch.setenv("PET_RENDER_TOPOLOGY", topology)
     config = Config(base=tmp_path)
     if dsh:
         agent_cfg = dict(config.get("agent_link") or {})
         agent_cfg["dsh"] = True
         config.set("agent_link", agent_cfg)
+    if prepare is not None:
+        prepare(config)
     assert config.save()  # 落盘：外部变更监视的前提
     shell = AppShell(app, config)
     if ui_stub:
-        shell.instance._create_ui = lambda cid: None
+        shell.instance._create_ui = ui_create or (lambda cid: None)
         shell.instance._apply_spawn_offset = lambda: None
         shell.instance._sync_animation_prewarm = lambda: None
         shell.instance._refresh_chat_windows = lambda: None
@@ -225,6 +231,59 @@ def test_legacy_topology_still_starts_shared_fullscreen_watcher(tmp_path, monkey
     assert fs._any_wants() is True, "legacy 窗 _watch_required 为真时必须真探测"
     fs.stop()
     fs._thread.join(timeout=5.0)
+
+
+# ------------------------------------------------ 捕获模式的启动期拓扑分流（T4 Phase A）
+def test_stream_capture_mode_boots_legacy_single_window(tmp_path, monkeypatch):
+    """勾选捕获模式 → 重启走 legacy 单窗：不建 overlay 壳 ⇒ 多宠不复活（收拢）。
+
+    生产路径（不设 env，只改主配置）：``overlay_settings_command.is_overlay_topology``
+    读到 ``stream_capture_mode=true`` → 这里走 legacy 分支建 PetWindow，
+    ``OverlayShell`` 根本不构造，overlay 的多宠恢复点
+    （``overlay_shell._restore_spawned_pets``）不可能被走到。
+    """
+    from pet import overlay_settings_command as cmd_mod
+    from pet import overlay_spawn_state
+
+    # 壳替身：万一退回 overlay 分支，断言会干净失败（真实壳会去建素材库/合成窗）
+    monkeypatch.setattr(overlay_shell_mod, "OverlayShell", _StubOverlayShell)
+
+    # 活跃宠清单 [1, 2]：overlay 拓扑启动会按它复活 2 只子肥鱼
+    active_dir = tmp_path / APP_DIR_NAME
+    active_dir.mkdir(parents=True, exist_ok=True)
+    assert overlay_spawn_state.save_active_slots(active_dir, [1, 2])
+
+    def _prepare(config):
+        config.set("stream_capture_mode", True)
+        monkeypatch.setattr(cmd_mod, "topology_config_path", lambda: config.path)
+
+    ui_created: list[str] = []
+    shell = _start_shell(
+        tmp_path, monkeypatch, topology=None, win=_StubWin(),
+        prepare=_prepare, ui_create=lambda cid: ui_created.append(cid))
+    try:
+        assert ui_created, "捕获模式必须走 legacy 建窗分支（PetWindow 才可被 OBS 枚举）"
+        assert getattr(shell, "_overlay_shell", None) is None, "捕获模式不得建 overlay 壳"
+        assert len(shell._instances) == 1, "多宠必须收拢为主宠物"
+        # 清单本身不删：关掉捕获模式再重启，小肥鱼应当回来
+        assert overlay_spawn_state.load_active_slots(active_dir) == [1, 2]
+    finally:
+        cmd_mod.reset_topology_snapshot()
+
+
+def test_overlay_topology_would_restore_spawned_pets(tmp_path, monkeypatch):
+    """对照组：同一份活跃宠清单在 overlay 拓扑下确实由壳接管（对照非空转）。"""
+    from pet import overlay_spawn_state
+
+    active_dir = tmp_path / APP_DIR_NAME
+    active_dir.mkdir(parents=True, exist_ok=True)
+    assert overlay_spawn_state.save_active_slots(active_dir, [1, 2])
+
+    monkeypatch.setattr(overlay_shell_mod, "OverlayShell", _StubOverlayShell)
+    shell = _start_shell(tmp_path, monkeypatch, topology="overlay")
+    assert shell._overlay_shell is not None
+    assert shell._overlay_shell.started == 1
+    assert len(shell._instances) == 1  # 子肥鱼由壳负责（sprite），不走 AppShell._instances
 
 
 # ---------------------------------------------------------------- 一次保存一次应用

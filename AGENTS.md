@@ -52,8 +52,14 @@ classDiagram
 flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as a
 `PetSprite` inside a single `OverlayWindow`; multi-pet is in-process
 (`AppShell.spawn_in_process_window` / `OverlayShell.spawn_pet`, slot identity via
-`pet/overlay_spawn_state.py`). `PetWindow` is kept permanently for the capture-mode
-(streaming) surface and single-pet legacy runs — **fix crashes there only**.
+`pet/overlay_spawn_state.py`). The topology verdict also reads the persistent
+`stream_capture_mode` key (main `config.json`, snapshotted once per process by
+`pet/overlay_settings_command.is_overlay_topology`): capture mode is a
+restart-level switch to the legacy single-window path, where the pet is a real
+title-bearing window OBS can enumerate, and spawned pets stay collapsed (the
+active-slot list is left untouched, so they return when the switch is turned
+off). `PetWindow` is kept permanently for the capture-mode (streaming) surface
+and single-pet legacy runs — **fix crashes there only**.
 
 The multi-process multi-pet layer (cross-process collision IPC, slot file locks,
 instance launcher, child-pet taskkill cleanup, runtime-marker live consumers) was

@@ -27,8 +27,17 @@ settings.lock 单实例）里点「一键退出子肥鱼」无法跨进程删 sp
 
 拓扑门 ``is_overlay_topology`` 也收口在本模块：设置进程必须按拓扑分流，而
 ``pet/__main__.py --settings`` 禁止导入重量级模块（pet.app / overlay_shell，
-会连带素材库/ffmpeg/托盘），所以 env 读取的唯一实现放在这个零 Qt 模块，
+会连带素材库/ffmpeg/托盘），所以拓扑读取的唯一实现放在这个零 Qt 模块，
 ``overlay_shell.is_overlay_topology`` 只做转发（对外入口名不变）。
+
+拓扑输入有两个（T4 落地，Phase A）：
+
+1. ``PET_RENDER_TOPOLOGY`` 显式 env = dev 逃生门，**显式值优先**（测试与开发
+   都要能压过用户配置）；
+2. 主配置 ``config.json`` 的 ``stream_capture_mode``：勾选「直播捕获兼容」即
+   **重启级切换**到 legacy 单窗 PetWindow 路径（overlay 单合成窗不给 OBS
+   枚举的窗口）。**进程内快照一次**（T5：启动时定死，不做运行时切换）——
+   否则用户在设置页勾上以后，正在跑的这一进程会中途翻拓扑。
 """
 from __future__ import annotations
 
@@ -42,9 +51,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# T5：开发期一次性分流 flag（不进 Config/设置页/schema）。
+# T5：开发期一次性分流 flag（不进 Config/设置页/schema）。显式值优先于配置。
 ENV_TOPOLOGY = "PET_RENDER_TOPOLOGY"
 TOPOLOGY_OVERLAY = "overlay"
+
+#: T4：持久键 ``stream_capture_mode`` 也是拓扑输入（勾选 = 重启级切到 legacy
+#: 单窗路径，OBS 才能枚举到窗口）。键名与 ``config.py`` 的 schema 同字面量。
+STREAM_CAPTURE_KEY = "stream_capture_mode"
+
+#: 拓扑判定的配置快照（T5：进程内只读一次）。按**配置文件路径**分键：生产进程
+#: 只有 ``<config_dir>/config.json`` 一条路径（等于"进程内快照一次"），测试用
+#: 临时目录各自独立、互不污染。清空见 ``reset_topology_snapshot``。
+_CAPTURE_SNAPSHOT: dict[Path, bool] = {}
 
 # 指令文件：运行时状态文件，刻意不带 config- 前缀——既不进旧 slot 配置 glob
 # （agent_link/config 迁移），也不与 runtime 标记 glob 相撞。与
@@ -62,12 +80,96 @@ DEFAULT_MAX_AGE_S = 120.0
 _SLOT_INSTANCE_RE = re.compile(r"^slot-(\d+)$")
 
 
-def is_overlay_topology() -> bool:
-    """当前进程是否 overlay 拓扑（T5：唯一 env 读取实现）。
+def _explicit_env_verdict() -> bool | None:
+    """显式 env 逃生门的判定：``legacy`` → 非 overlay；其它非空值 → overlay。
 
-    T5 默认化：默认 overlay；``PET_RENDER_TOPOLOGY=legacy`` 为 dev 逃生门
-    （不进 Config/设置页/schema，启动时定死不做运行时切换）。"""
-    return os.environ.get(ENV_TOPOLOGY, "").strip().lower() != "legacy"
+    未设置 / 空白 → None（不是判定，只表示"env 没有发话"，交给配置判定）。大小写
+    与首尾空白不敏感（历史契约）。
+    """
+    raw = os.environ.get(ENV_TOPOLOGY, "").strip().lower()
+    if not raw:
+        return None
+    return raw != "legacy"
+
+
+def env_forces_legacy() -> bool:
+    """显式 ``PET_RENDER_TOPOLOGY=legacy``？（dev 逃生门，运行期即时切换）。
+
+    设置页文案要用它区分「本进程就是 legacy，开关即时生效」与「默认路径：开关
+    是重启级拓扑输入」（见 ``settings_pet_controls.stream_capture_hint``）。
+    """
+    return _explicit_env_verdict() is False
+
+
+def topology_config_path() -> Path:
+    """主配置 ``config.json`` 的路径（复用 config 的既有目录解析，不另拼一份）。
+
+    ``app.main`` 的 ``config_dir = _default_base() / APP_DIR_NAME`` 是同一口径。
+    取**主配置**而不是当前 instance 的槽位配置：捕获模式是进程级（重启后整个
+    进程只起主宠物）的重启级开关，槽位配置里的同名键不参与拓扑判定。
+    """
+    from .config import APP_DIR_NAME, _default_base
+
+    return _default_base() / APP_DIR_NAME / "config.json"
+
+
+def _read_stream_capture_mode(path: Path) -> bool:
+    """读 ``config.json`` 的捕获开关；文件缺失/损坏/不可读一律 False（overlay）。
+
+    读配置绝不允许拖垮启动：设置目录可能是只读盘、被别的进程占住，或用户手改
+    成半截 JSON。布尔清洗复用 ``config._bool_or_default``（手改 ``"true"`` /
+    ``"1"`` / ``"on"`` 同样算开启），不另造一套解析。
+    """
+    from .config import _bool_or_default
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.debug("拓扑门：捕获模式配置不可读，按未开启处理: %s", path,
+                     exc_info=True)
+        return False
+    if not isinstance(data, dict):
+        logger.warning("拓扑门：配置不是对象，捕获模式按未开启处理: %s", path)
+        return False
+    return bool(_bool_or_default(data.get(STREAM_CAPTURE_KEY), False))
+
+
+def stream_capture_mode_enabled(path: Path | str | None = None) -> bool:
+    """主配置是否开启「直播捕获兼容」（True = 本进程应走 legacy 单窗）。
+
+    ``path`` 缺省 = ``topology_config_path()``（生产唯一入参）；显式传入只为
+    测试/诊断。首次读取即快照，之后同路径的判定不再回读磁盘（T5）。
+    """
+    target = Path(path) if path is not None else topology_config_path()
+    cached = _CAPTURE_SNAPSHOT.get(target)
+    if cached is None:
+        cached = _read_stream_capture_mode(target)
+        _CAPTURE_SNAPSHOT[target] = cached
+    return cached
+
+
+def reset_topology_snapshot() -> None:
+    """清掉拓扑配置快照（仅测试/诊断用；生产进程启动后只读一次就定死）。"""
+    _CAPTURE_SNAPSHOT.clear()
+
+
+def is_overlay_topology() -> bool:
+    """当前进程是否 overlay 拓扑（T5：唯一读取实现，启动时定死）。
+
+    判定顺序：
+
+    1. ``PET_RENDER_TOPOLOGY`` 显式值（dev 逃生门，优先）；
+    2. 否则读主配置的 ``stream_capture_mode``：开启 → legacy（捕获模式重启级
+       切换，T4），关闭/读不到 → overlay（默认拓扑）。
+
+    不做运行时切换：配置判定在首次读取时快照（``stream_capture_mode_enabled``），
+    设置页勾选只影响**下一次启动**。
+    """
+    explicit = _explicit_env_verdict()
+    if explicit is not None:
+        return explicit
+    return not stream_capture_mode_enabled()
+
 
 
 def slot_from_instance_id(instance_id) -> int | None:

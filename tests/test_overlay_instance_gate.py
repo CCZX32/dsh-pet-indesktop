@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""D4 overlay 拓扑单实例进程门测试（全 offscreen）。
+"""D4 桌宠单实例进程门测试（全 offscreen）。
 
 覆盖验收口径：
 1. 抢到门拒绝双开、释放后可再开、未持有者 release 不碰别人的锁文件；
 2. 崩溃残留锁（真子进程被 kill 后留下的锁文件）按 QLockFile 既有 stale 语义接管；
 3. 环境错误（锁文件根本建不出来）放行启动，不把坏环境伪装成"已有实例"；
-4. legacy 拓扑无门：不建锁文件/留痕；4.4a 起 main() 不再抢 slot 文件锁
-   （`--slot` 兼容解析保留）；
-5. 启动链接线：overlay 双开在 slot 竞争之前被拒 + 留痕 + 静默退出码；
+4. 门与拓扑无关（T4 Phase A）：legacy 单窗（含捕获模式重启后的形态）同样抢门，
+   第二个完整实例被拒；4.4a 起 main() 不再抢 slot 文件锁（`--slot` 兼容解析保留）；
+5. 启动链接线：双开在 slot 竞争之前被拒 + 留痕 + 静默退出码；
    正常退出（main finally）与会话结束（_on_session_end）两条路径都释放门；
 6. 真进程/真 QApplication 端到端双开（子进程跑 `python -m pet`）。
 
@@ -253,25 +253,34 @@ def test_gate_path_blocked_fails_open(tmp_path):
 
 
 # ---------------------------------------------------------------- 拓扑作用域
-def test_topology_check_forwards_to_overlay_shell(monkeypatch):
-    """门是否启用只认 overlay_shell.is_overlay_topology（唯一判定入口）。"""
-    from pet.overlay_shell import ENV_TOPOLOGY, is_overlay_topology
+def test_gate_is_topology_independent(tmp_path, monkeypatch):
+    """T4 Phase A：门不再按拓扑分流——两个拓扑都抢同一把锁。
 
-    for value in (None, "legacy", "", "overlay", " OVERLAY "):
-        if value is None:
-            monkeypatch.delenv(ENV_TOPOLOGY, raising=False)
-        else:
-            monkeypatch.setenv(ENV_TOPOLOGY, value)
-        assert gate_mod.is_required() == is_overlay_topology()
-    assert gate_mod.is_required() is True  # 末项 " OVERLAY " 归一到 overlay
+    overlay 双开会各自恢复 sprite 互踩；捕获模式的 legacy 单窗也是完整实例
+    （建窗/存位置/落盘配置），双开与「重启时多只桌宠收拢为主宠物」直接冲突。
+    """
+    for index, value in enumerate(("legacy", "", "overlay", " OVERLAY ")):
+        case_dir = tmp_path / f"case-{index}"
+        monkeypatch.setenv("PET_RENDER_TOPOLOGY", value)
+        gate = gate_mod.acquire_overlay_instance_gate(case_dir)
+        assert gate is not None, value
+        assert (gate.acquired, gate.held) == (True, True), value
+        # 同目录第二次启动被拒（跨拓扑一致）
+        second = gate_mod.acquire_overlay_instance_gate(case_dir)
+        assert (second.acquired, second.held) == (False, False), value
+        gate.release()
 
 
-def test_legacy_topology_has_no_gate(tmp_path, monkeypatch):
-    """legacy 拓扑无门：入口返回 None，连锁文件/留痕都不建（零副作用）。"""
+def test_legacy_topology_also_holds_the_gate(tmp_path, monkeypatch):
+    """legacy 拓扑（含捕获模式重启后的形态）：照样占住进程门，双击不起第二实例。"""
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
-    assert gate_mod.is_required() is False
-    assert gate_mod.acquire_overlay_instance_gate(tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+    first = gate_mod.acquire_overlay_instance_gate(tmp_path)
+    assert first.acquired is True and first.held is True
+    assert first.path.exists() is True
+
+    second = gate_mod.acquire_overlay_instance_gate(tmp_path)
+    assert second.acquired is False
+    first.release()
 
 
 def test_overlay_topology_creates_gate_and_refuses_second(tmp_path, monkeypatch):
@@ -314,12 +323,13 @@ def test_main_refuses_second_overlay_instance_before_slot(tmp_path, monkeypatch,
     assert "refused" in (config_dir / gate_mod.TRACE_NAME).read_text(encoding="utf-8")
 
 
-def test_main_legacy_topology_skips_gate_and_does_not_take_slot_lock(
+def test_main_legacy_topology_also_takes_gate_and_does_not_take_slot_lock(
         tmp_path, monkeypatch):
-    """legacy 拓扑不触门，且 main() 不再抢 slot 文件锁（T5）。
+    """legacy 拓扑同样抢门（T4 Phase A），且 main() 不再抢 slot 文件锁（T5）。
 
-    `--slot N` 兼容解析保留：合法值只用于选 config-slot-N.json 身份，
-    不再有任何跨进程竞争副作用（不建 slots/、不落种、不留痕）。
+    捕获模式重启后就是 legacy 单窗形态：门必须照样占住（否则双击会起第二个完整
+    实例），启动链其余部分逐行不变。`--slot N` 兼容解析保留：合法值只用于选
+    config-slot-N.json 身份，不再有任何跨进程竞争副作用（不建 slots/、不落种）。
     """
     from pet import app as app_mod
     from pet.config import Config as RealConfig
@@ -352,8 +362,37 @@ def test_main_legacy_topology_skips_gate_and_does_not_take_slot_lock(
     assert os.environ["DSH_PET_INSTANCE"] == "slot-3"
     assert not (config_dir / "slots").exists()              # 不抢锁 = 不建 slots/
     assert not list(config_dir.glob("config-slot-*.json"))
+    # 门真被抢过（留痕），且正常退出已释放（锁文件不残留）
+    assert "acquired" in (config_dir / gate_mod.TRACE_NAME).read_text(encoding="utf-8")
     assert not (config_dir / gate_mod.LOCK_NAME).exists()
-    assert not (config_dir / gate_mod.TRACE_NAME).exists()
+
+
+def test_main_legacy_topology_refuses_second_instance(tmp_path, monkeypatch, caplog):
+    """捕获模式形态（legacy 单窗）下双击起第二个完整实例：拒绝且零副作用。"""
+    from pet import app as app_mod
+
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
+    monkeypatch.setattr(app_mod, "_default_base", lambda: tmp_path)
+    monkeypatch.setattr(app_mod, "QApplication", _FakeQApplication)
+
+    config_dir = tmp_path / APP_DIR_NAME
+    holder = gate_mod.OverlayInstanceGate(config_dir)
+    assert holder.acquire() is True
+
+    class _ForbiddenShell:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("已有实例在运行：不得建到 AppShell 这一层")
+
+    monkeypatch.setattr(app_mod, "AppShell", _ForbiddenShell)
+    try:
+        with caplog.at_level(logging.WARNING):
+            code = app_mod.main(["dsh-pet"])
+    finally:
+        holder.release()
+
+    assert code == gate_mod.DUPLICATE_EXIT_CODE == 0
+    assert any("已有实例在运行" in record.getMessage() for record in caplog.records)
+    assert not list(config_dir.glob("config-slot-*.json"))
 
 
 def test_main_releases_gate_when_startup_fails(tmp_path, monkeypatch):
@@ -389,7 +428,7 @@ def test_main_releases_gate_when_startup_fails(tmp_path, monkeypatch):
 
 
 def test_session_end_releases_gate(tmp_path, monkeypatch):
-    """会话结束链：_on_session_end 释放门（幂等），legacy（无门）下为 no-op。"""
+    """会话结束链：_on_session_end 释放门（幂等）；未注入门时 release 为 no-op。"""
     from pet.app import AppShell
 
     gate = gate_mod.OverlayInstanceGate(tmp_path)
@@ -406,9 +445,9 @@ def test_session_end_releases_gate(tmp_path, monkeypatch):
     assert gate.path.exists() is False
     AppShell._on_session_end(shell)  # 幂等：不再收口第二次
 
-    legacy = object.__new__(AppShell)
-    legacy._overlay_gate = None
-    AppShell._release_overlay_gate(legacy)  # legacy 拓扑：no-op
+    bare = object.__new__(AppShell)
+    bare._overlay_gate = None
+    AppShell._release_overlay_gate(bare)  # 无门（object.__new__ 造壳）：no-op
 
 
 # ---------------------------------------------------------------- 真进程端到端

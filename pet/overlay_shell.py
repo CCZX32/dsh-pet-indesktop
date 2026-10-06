@@ -19,7 +19,9 @@
   收口本路径 MovieLibrary 的全部 clip（issue #111 等价链，D10 落点）。
 
 T5 切换策略：PET_RENDER_TOPOLOGY=overlay 环境变量是开发期一次性分流 flag，
-读取收口在本模块 is_overlay_topology()，不进 Config/设置页/schema。
+读取收口在本模块 is_overlay_topology()；T4 Phase A 起判定再叠加主配置的
+``stream_capture_mode``（勾选「直播捕获兼容」= 重启级切到 legacy 单窗，OBS 才
+枚举得到窗口；见 ``overlay_settings_command``）。
 4.1a 明确不做：多 sprite（4.2）、位置持久化（4.2a，本刀恒走默认右下角）、
 岛/气泡/聊天/菜单全量 parity（4.1b/4.1c）、捕获模式切换（T4 后续）。
 
@@ -631,12 +633,13 @@ class _SpriteSelfTalkHost:
 
 
 def is_overlay_topology() -> bool:
-    """唯一拓扑判定入口（T5：dev flag，不进 Config/设置页/schema）。
+    """唯一拓扑判定入口（输入：显式 PET_RENDER_TOPOLOGY env + 主配置捕获开关）。
 
     实现在零 Qt 的 ``overlay_settings_command``：设置进程（``--settings``，
     ``pet/__main__.py`` 明确禁止导入 pet.app/overlay_shell）也要按拓扑决定
-    D12 指令通道走不走，故 env 读取的实现必须落在两侧都能 import 的模块；
-    本函数保留为对外唯一入口名（app.py/overlay_instance_gate 照旧转发）。
+    D12 指令通道走不走，故拓扑读取的实现必须落在两侧都能 import 的模块；
+    本函数保留为对外唯一入口名（app.py 照旧转发）。T4 起判定还读主配置的
+    ``stream_capture_mode``（勾选 = 重启级切到 legacy 单窗），细节见该模块。
     """
     return overlay_settings_command.is_overlay_topology()
 
