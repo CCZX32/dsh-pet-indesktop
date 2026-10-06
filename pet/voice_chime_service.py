@@ -765,6 +765,11 @@ class VoiceChimeService:
         if win is not None and win.isVisible():
             if window_alerts.sprite_in_flight(win):
                 return
+            if window_alerts.quiet_blocked(win):
+                # 免打扰（含全屏等效）：报时气泡不冒，转存暂存队列（语音照常播、
+                # 只是不留字），结束时统一汇报。停在降级链之前同 festival_service。
+                window_alerts.defer_quiet(text)
+                return
             suppressed = window_alerts.bubble_blocked(win)
             if not suppressed:
                 try:

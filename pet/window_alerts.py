@@ -19,6 +19,7 @@ from collections import deque
 from PySide6.QtCore import QTimer
 
 from . import catalog
+from . import quiet_mode
 from . import window_placement
 
 # 确认"音乐真的停了"所需的持续静音时长（秒）。歌曲的前奏/间奏/轻声段会让
@@ -47,11 +48,80 @@ def bubble_blocked(host, sprite=None) -> bool:
     ``sprite=None`` = host 的默认宠（壳 = 主 sprite）。调用方一律走这个函数，
     绝不各写一份 ``getattr(host, "_bubble_suppressed")``——那样飞行期就漏出
     气泡来（B1 的缺口正是这六处各写各的守卫）。
+
+    **免打扰不在这里**：自言自语（含点击回应台词）也走本门禁，而它属于交互
+    应答，免打扰期间必须照常冒（issue #208 规格）。普通提醒/气泡请改读
+    :func:`quiet_blocked`。
     """
     checker = getattr(host, "_bubble_blocked", None)
     if callable(checker):
         return bool(checker(sprite))
     return bool(getattr(host, "_bubble_suppressed", False))
+
+
+def quiet_blocked(host) -> bool:
+    """免打扰（手动 **或** 全屏等效）是否拦下**普通**提醒/气泡。
+
+    全应用唯一判据是 ``quiet_mode.QuietState.suppression_active()``；本函数只
+    负责取 host 的配置（``quiet_also_on_fullscreen``，默认开）并转发。
+
+    **穿透类不读它**（issue #208 规格）：审批/提问/错误等状态类事件走
+    ``alert_survives_suppression``；自言自语/点击台词走 ``bubble_blocked``；
+    联动状态气泡走 ``show_bubble`` 直发——三类都不经这道门，压了会出事故。
+    """
+    state = quiet_mode.shared_quiet_state()
+    getter = getattr(getattr(host, "cfg", None), "get", None)
+    also_on_fullscreen = quiet_mode.DEFAULT_QUIET_ALSO_ON_FULLSCREEN
+    if callable(getter):
+        try:
+            also_on_fullscreen = bool(
+                getter("quiet_also_on_fullscreen", also_on_fullscreen)
+            )
+        except Exception:
+            pass
+    return state.suppression_active(also_on_fullscreen=also_on_fullscreen)
+
+
+def defer_quiet(text: str) -> None:
+    """把被免打扰拦下的普通提醒记入暂存队列（上限 20，溢出丢最旧）。"""
+    quiet_mode.shared_quiet_state().remember(text)
+
+
+def report_quiet_summary(host, items) -> bool:
+    """免打扰结束后用一条气泡汇报「免打扰期间有 N 条提醒」。
+
+    走 ``show_alert``（``alert_type="lifecycle"`` 属穿透类，不会被本模块的任何
+    门禁拦下）而不是 ``show_bubble``：结束那一刻最常见的情形是"正挂着一条审批
+    气泡"，直发气泡会被让路丢弃，走提醒队列才保证送达。宿主没有提醒队列面
+    （overlay 的 SpriteMenuFacade）时回退直发气泡。
+
+    返回是否确实发出了汇报（空暂存 = 无需打扰用户，返回 False）。
+    """
+    texts = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not texts:
+        return False
+    latest = texts[-1]
+    if len(latest) > quiet_mode.QUIET_TEXT_LIMIT:
+        latest = latest[: quiet_mode.QUIET_TEXT_LIMIT] + "…"
+    if len(texts) == 1:
+        text = f"免打扰期间有 1 条提醒：{latest}"
+    else:
+        text = f"免打扰期间有 {len(texts)} 条提醒，最近一条：{latest}"
+    alert = getattr(host, "show_alert", None)
+    if callable(alert):
+        alert(
+            text,
+            duration_ms=quiet_mode.QUIET_SUMMARY_MS,
+            sticky=False,
+            alert_type="lifecycle",
+            priority=3,
+        )
+        return True
+    bubble = getattr(host, "show_bubble", None)
+    if callable(bubble):
+        bubble(text, duration_ms=quiet_mode.QUIET_SUMMARY_MS)
+        return True
+    return False
 
 
 def sprite_in_flight(host, sprite=None) -> bool:
@@ -155,6 +225,16 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
                sticky: bool = True, alert_id: str = "", priority: int = 3,
                alert_type: str = "watchdog", metadata: dict | None = None) -> None:
     """提醒消息队列：需要用户注意的提醒统一入队，一次只展示一个。"""
+    if quiet_blocked(host) and not alert_survives_suppression(
+            alert_type, sticky=sticky, buttons=buttons, priority=priority):
+        # 免打扰（含全屏等效）期间的**普通**提醒不冒：进暂存队列，免打扰结束
+        # （到时/提前/退出全屏）后统一汇报。
+        #
+        # 这一段刻意放在 isVisible 判定**之前**：全屏避让会把桌宠藏起来，若先走
+        # 「不可见」分支，普通提醒会被改道/丢弃，暂存队列就永远收不到东西——
+        # 而"全屏时攒着、退出后一次性告知"正是 quiet_also_on_fullscreen 的价值。
+        defer_quiet(text)
+        return
     if not host.isVisible():
         # 桌宠隐藏：非交互提醒（无按钮）改道灵动岛反馈面；交互气泡与
         # 设置页抑制期维持原丢弃行为。
@@ -260,6 +340,19 @@ def pump_alerts(host) -> None:
         return
     if not host._alert_queue:
         return
+    if quiet_blocked(host):
+        # 免打扰开始**之前**已入队的普通提醒：一并转存暂存队列，否则它们会在
+        # 免打扰期间照旧冒出来（而且恰好是"刚开免打扰就冒一条"的观感）。
+        # 穿透类（审批/提问/生命周期）留在队列里照常推进。
+        while host._alert_queue and not alert_survives_suppression(
+            host._alert_queue[0].get("alertType", ""),
+            sticky=bool(host._alert_queue[0].get("sticky")),
+            buttons=host._alert_queue[0].get("buttons"),
+            priority=int(host._alert_queue[0].get("priority", 3)),
+        ):
+            defer_quiet(host._alert_queue.popleft().get("text", ""))
+        if not host._alert_queue:
+            return
     if not host.isVisible() or bubble_blocked(host):
         return
     item = host._alert_queue.popleft()

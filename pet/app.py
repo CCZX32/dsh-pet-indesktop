@@ -2449,6 +2449,12 @@ class AppShell:
         """
         if getattr(self, "_shared", None) is None:
             return
+        # 免打扰（issue #208）：全屏 = 等效免打扰的唯一来源（不另起探测）。
+        # 刻意放在下面的每窗过滤**之前**：那个过滤按 auto_hide_fullscreen 逐窗
+        # 筛选，而 quiet_also_on_fullscreen 是独立的用户偏好，与自动隐藏无关。
+        from . import quiet_mode
+
+        quiet_mode.note_fullscreen(hit)
         for inst in self._instances:
             win = inst.win
             if win is None or not shiboken6.isValid(win):

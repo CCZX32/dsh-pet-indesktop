@@ -41,6 +41,7 @@ from .shared import (
     add_no_move,
     add_on_top,
     add_proactive_menu,
+    add_quiet_mode_menu,
     add_quit,
     add_return_corner,
     add_spawn_pet,
@@ -72,6 +73,7 @@ ACTION_LABELS = {
     "check_update": "检查更新", "github_project": "GitHub 项目页",
     "quark_download": "夸克网盘下载", "agent_link": "Agent 联动",
     "proactive_screen": "主动识屏", "todo_panel": "待办提醒",
+    "quiet_mode": "免打扰",
     "modern_settings": "桌宠设置", "quit": "退出",
 }
 
@@ -97,6 +99,7 @@ ACTION_ICONS = {
     "deepseek_web": "web", "check_update": "update", "github_project": "web",
     "quark_download": "download", "agent_link": "automation",
     "proactive_screen": "screen", "todo_panel": "todo",
+    "quiet_mode": "pause",
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
     "festival_now": "todo", "festival_toggle": "todo",
@@ -311,6 +314,9 @@ class MenuActionRegistry:
                 add_proactive_menu,
                 lambda pet: sys.platform == "win32" and callable(getattr(pet, "on_open_chat", None)),
             ),
+            # 免打扰：进程级状态，任何宿主（PetWindow / SpriteMenuFacade）都可用，
+            # 不做能力判定——菜单里永远给得出入口，用户不必先找开关。
+            "quiet_mode": MenuActionSpec(add_quiet_mode_menu),
             "modern_settings": MenuActionSpec(
                 _build_settings, _callback_available("on_open_modern_settings")
             ),

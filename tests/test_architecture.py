@@ -226,7 +226,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
+# 2026-10-08 上调到 2419（#208 免打扰）：本文件只加接线 3 行（import 1 +
+# 「免打扰」小节行 1 + 保存回写 1），控件/行/保存实现全在 pet/settings_quiet.py。
+# 实测 2419；按文件约定只随实测校准（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2419
 
 
 def _read(name: str) -> str:

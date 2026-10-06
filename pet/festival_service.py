@@ -204,6 +204,12 @@ class FestivalReminderService:
         if win is not None and win.isVisible():
             if window_alerts.sprite_in_flight(win):
                 return
+            if window_alerts.quiet_blocked(win):
+                # 免打扰（含全屏等效）：普通提醒不冒，转存暂存队列，结束时统一汇报。
+                # 刻意在下面的降级链**之前**：设置页抑制期的"退到气泡位直写展示"
+                # 是给用户主动关注的事件兜底的，免打扰则明确要求"这段时间别打扰我"。
+                window_alerts.defer_quiet(text)
+                return
             suppressed = window_alerts.bubble_blocked(win)
             if not suppressed:
                 try:

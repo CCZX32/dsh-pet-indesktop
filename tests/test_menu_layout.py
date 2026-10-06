@@ -29,6 +29,7 @@ def test_modern_default_v1_has_compact_root_and_safety_actions():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
         "memory_trim",
         "voice_chime_now",
         "voice_chime_toggle",
@@ -338,6 +339,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
         "memory_trim",
         "voice_chime_now",
         "voice_chime_toggle",
@@ -370,6 +372,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
         "memory_trim",
         "modern_settings",
         "quit",
@@ -537,9 +540,11 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     if sys.platform == "win32":
         expected_root.insert(-2, "主动识屏")
         expected_root.insert(-2, "待办提醒")
+        expected_root.insert(-2, "免打扰")
         expected_root.insert(-2, "回收内存")
     else:
         expected_root.insert(-2, "待办提醒")
+        expected_root.insert(-2, "免打扰")
     # 报时/节日四项默认不在菜单上（模板 visible: false，2026-09-19 起）
     assert root == expected_root
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
@@ -553,9 +558,10 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     ]
     if sys.platform == "win32":
         expected_rendered.insert(-3, "主动识屏")
-    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 [回收内存] | 桌宠设置 退出
+    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 免打扰 [回收内存] | 桌宠设置 退出
     # （报时/节日四项默认 visible: false，不渲染；回收内存仅在 Windows 出现）
     expected_rendered.insert(-3, "待办提醒")
+    expected_rendered.insert(-3, "免打扰")
     if sys.platform == "win32":
         expected_rendered.insert(-3, "回收内存")
     assert rendered == expected_rendered

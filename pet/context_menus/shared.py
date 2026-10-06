@@ -375,6 +375,71 @@ def add_proactive_menu(menu: QMenu, pet) -> None:
         add_action(sub, '打开设置…', None, open_settings, close_on_trigger=True)
 
 
+def add_quiet_mode_menu(menu: QMenu, pet, *, icons: bool = True) -> QMenu:
+    """「免打扰」子菜单：四档时长 + 提前结束，开启期间显示剩余时间。
+
+    为什么是一个 id 挂子菜单（同 ``add_harness`` / ``add_music_lyric_align``）：
+    菜单模板与用户自己编排过的布局里只会出现 ``quiet_mode`` 这一个 id，新增 id
+    对老布局不生效。
+
+    状态是**进程级**的（``quiet_mode.shared_quiet_state()``）：多宠共享一份，
+    任何一只的菜单开/关都作用于全部窗口——抑制本就是进程级的（issue #208）。
+    时长档位取自 ``config.QUIET_MINUTE_CHOICES``，"默认"那一档由
+    ``quiet_minutes_default`` 决定（设置页可改，这里只读不写）。
+    """
+    from .. import quiet_mode
+    from ..config import QUIET_MINUTE_CHOICES
+
+    state = quiet_mode.shared_quiet_state()
+    active = state.manual_active()
+    remaining = state.remaining_label()
+    default_minutes = quiet_mode.normalize_quiet_minutes(
+        pet.cfg.get("quiet_minutes_default", quiet_mode.DEFAULT_QUIET_MINUTES)
+    )
+    submenu = add_submenu(
+        menu,
+        f"免打扰 · 剩余 {remaining}" if active else "免打扰",
+        "pause" if icons else None,
+    )
+    for minutes in QUIET_MINUTE_CHOICES:
+        label = quiet_mode.quiet_duration_label(minutes)
+        if minutes == default_minutes:
+            label += "（默认）"
+        if active and minutes == state.started_minutes():
+            label += " · 进行中"
+        add_action(
+            submenu, label, None,
+            lambda minutes=minutes: quiet_mode.shared_quiet_state().start(minutes),
+            close_on_trigger=True,
+        )
+    submenu.addSeparator()
+    end_action = add_action(
+        submenu,
+        f"提前结束（剩余 {remaining}）" if active else "提前结束",
+        None,
+        lambda: end_quiet_mode(pet),
+        close_on_trigger=True,
+    )
+    # 未在免打扰中时置灰而不是整条隐藏：菜单结构不随状态变形（同
+    # registry._music_lyric_configured 的取舍），用户也能一眼看到入口在哪。
+    end_action.setEnabled(bool(active))
+    return submenu
+
+
+def end_quiet_mode(pet) -> list[str]:
+    """提前结束免打扰并汇报暂存提醒（返回被汇报的提醒文案）。
+
+    走 ``pet`` 的宿主面汇报：菜单建造器的 pet 既可能是 PetWindow 也可能是
+    overlay 的 SpriteMenuFacade，两者都有气泡/提醒面（由 window_alerts 择优）。
+    """
+    from .. import quiet_mode
+    from .. import window_alerts
+
+    items = quiet_mode.shared_quiet_state().end_now()
+    window_alerts.report_quiet_summary(pet, items)
+    return items
+
+
 def add_agent_link_menu(menu: QMenu, pet) -> None:
     """Agent 联动二级菜单（4 个 Agent 独立开关 + 自定义 Agent 三级子菜单 + 气泡提醒选项，失败/拒绝自动回滚勾选）。"""
     sub = add_submenu(menu, "Agent 联动", None)

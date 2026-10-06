@@ -3446,6 +3446,11 @@ class OverlayShell(QObject):
             pass
         logging.info("overlay: 全屏状态变化 hit=%s auto_hidden=%s why=%s",
                      hit, self._auto_hidden, why)
+        # 免打扰（issue #208）：全屏 = 等效免打扰的唯一来源（与 legacy 的
+        # AppShell._on_shared_fullscreen 同一处判定，不另起探测）。
+        from . import quiet_mode
+
+        quiet_mode.note_fullscreen(bool(hit))
         if hit:
             if not self._auto_hidden and self.overlay.isVisible():
                 self._auto_hidden = True

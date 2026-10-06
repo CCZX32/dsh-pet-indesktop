@@ -28,9 +28,11 @@ from PySide6.QtCore import QObject, Signal
 
 from . import platform_win
 from . import vision as vision_mod
+from . import window_alerts
 from .agent_link import AgentLinkManager
 from .overlay_settings_command import is_overlay_topology
 from .proactive import ProactiveScreenWatcher
+from .quiet_mode import QuietTicker
 
 log = logging.getLogger("dsh-pet-standalone")
 
@@ -483,7 +485,26 @@ class SharedSubsystems:
         self.fs = SharedFullscreenWatcher(shell)
         self.fs.fullscreen_changed.connect(shell._on_shared_fullscreen)
         self.fs.cursor_visibility_changed.connect(shell._on_shared_cursor)
+        # 免打扰（issue #208）：进程级一份轮询表，只在免打扰生效期间跑；结束时
+        # 经共享 proxy 把"攒了几条提醒"汇报到首个可见窗（多窗只报一处）。
+        self.quiet = QuietTicker(
+            also_on_fullscreen=lambda: bool(
+                shell.config.get("quiet_also_on_fullscreen", True)
+            )
+        )
+        self.quiet.ended.connect(self._on_quiet_ended)
         _LIVE_SHARED_SUBSYSTEMS.add(self)
+
+    def _on_quiet_ended(self, items) -> None:
+        """免打扰结束（到点 / 退出全屏）：一条气泡汇报暂存提醒。
+
+        ``MultiWindowProxy`` 直接当呈现宿主：它的 ``show_alert`` 会落到首个可见
+        窗（与联动提醒同策），多宠不会重复播报。
+        """
+        try:
+            window_alerts.report_quiet_summary(self.proxy, items)
+        except Exception:
+            log.exception("免打扰结束汇报失败")
 
     def start(self) -> None:
         # overlay 拓扑不启共享全屏 watcher：sprite 世界的壳自持
@@ -508,6 +529,7 @@ class SharedSubsystems:
         self.proactive.stop_all()
         self.agent_link.stop_all()
         self.fs.stop()
+        self.quiet.stop()
         _release_qt_lifetimes(self)
 
     @classmethod
@@ -536,7 +558,7 @@ def _release_qt_lifetimes(subs: "SharedSubsystems") -> None:
         app = QCoreApplication.instance()
         if app is None:
             return
-        for obj in (subs.proactive._bridge, subs.proactive._timer, subs.fs):
+        for obj in (subs.proactive._bridge, subs.proactive._timer, subs.fs, subs.quiet):
             try:
                 if obj.parent() is None and obj.thread() is app.thread():
                     obj.setParent(app)

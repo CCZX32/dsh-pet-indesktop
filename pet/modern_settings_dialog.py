@@ -166,6 +166,7 @@ from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
 from . import settings_pet_controls
+from . import settings_quiet
 from . import settings_reset_defaults
 
 
@@ -1888,6 +1889,8 @@ class ModernSettingsDialog(QDialog):
             [
                 ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
                 ("主动感知", proactive_rows),
+                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
+                ("免打扰", settings_quiet.build_quiet_rows(self)),
             ]
         )
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
@@ -2309,6 +2312,7 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
         settings_music.save_music_player_settings(self)
+        settings_quiet.save_quiet_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 
