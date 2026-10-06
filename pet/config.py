@@ -834,6 +834,11 @@ class Config:
             "golden_spin_on_click": False,  # 点击回应动画结束后自动接一段黄金回旋
             "golden_spin_direct": False,  # 点击触发黄金回旋时跳过点击动画，直接回旋并逐圈加速
             "edge_probe_enabled": False,  # 拖到屏幕左右边缘后自动进入探头姿态
+            # 「回收内存」菜单动作（#210）：只作用于**别的**进程（自己/前台/自己
+            # 的子进程/系统关键进程一律不碰，见 pet/memory_trim.py）。菜单动作类
+            # 功能不进设置页，这两个键只存在于 config.json。
+            "mem_skip_foreground": True,  # 跳过当前前台进程（不抖用户正在用的窗口）
+            "mem_min_size_mb": 50.0,  # 工作集小于该值(MB)的进程不折腾
             "autostart_wanted": False,  # 用户曾开启过开机自启（用于启动自检：被安全软件清理时提醒）
             "harness_autostart": False,  # 随桌宠启动自动拉起（auto/service/web 目标=只起服务不开浏览器；桌面端目标=打开界面）
             # 自启目标：auto=只拉起 dsh 服务（不开浏览器、不开界面），与 service 同义；
@@ -1098,6 +1103,8 @@ class Config:
             "golden_spin_on_click",
             "golden_spin_direct",
             "edge_probe_enabled",
+            "mem_skip_foreground",
+            "mem_min_size_mb",
             "balance_tier_labels_mode",
             "balance_tier_label_peak",
             "balance_tier_label_idle",
@@ -1447,6 +1454,12 @@ class Config:
         self.data["golden_spin_on_click"] = _bool_or_default(self.data.get("golden_spin_on_click"), False)
         self.data["golden_spin_direct"] = _bool_or_default(self.data.get("golden_spin_direct"), False)
         self.data["edge_probe_enabled"] = _bool_or_default(self.data.get("edge_probe_enabled"), False)
+        # 「回收内存」(#210)：布尔走 _bool_or_default 防字符串布尔误开；阈值夹到
+        # [0, 8192]（上限与 pet/memory_trim.py::MIN_SIZE_MB_MAX 同值，由
+        # test_memory_trim 的漂移断言钉住）——脏值直接打死 worker 线程不可接受，
+        # 负值则会退化成"连 0 字节进程都要折腾"。
+        self.data["mem_skip_foreground"] = _bool_or_default(self.data.get("mem_skip_foreground"), True)
+        self.data["mem_min_size_mb"] = _float_or_default(self.data.get("mem_min_size_mb"), 50.0, 0.0, 8192.0)
         # 静止放手下落（#219）：同族布尔键，防手改字符串布尔误开。
         self.data["drop_gravity"] = _bool_or_default(self.data.get("drop_gravity"), False)
         self.data["agent_link"] = _clean_agent_link_data(self.data.get("agent_link"))
@@ -1633,6 +1646,8 @@ class Config:
             "music_browser_media_enabled",
             "agent_cost_enabled",
             "music_player_paths",
+            "mem_skip_foreground",
+            "mem_min_size_mb",
             "character_profiles",
             "chat_always_on_top",
             "dynamic_island",

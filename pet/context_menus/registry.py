@@ -29,6 +29,7 @@ from .shared import (
     add_harness,
     add_hide_pet,
     add_look_screen,
+    add_memory_trim,
     add_agent_cost,
     add_music_lyric_align,
     add_music_next,
@@ -66,6 +67,7 @@ ACTION_LABELS = {
     "music_lyric_align": "歌词对齐",
     "agent_cost": "显示本轮消费",
     "quick_launch": "快捷启动", "balance": "DeepSeek 余额",
+    "memory_trim": "回收内存",
     "harness": "启动 DeepSeek Harness", "deepseek_web": "打开网页版 DeepSeek",
     "check_update": "检查更新", "github_project": "GitHub 项目页",
     "quark_download": "夸克网盘下载", "agent_link": "Agent 联动",
@@ -91,6 +93,7 @@ ACTION_ICONS = {
     "music": "play", "music_pause": "pause", "music_open_netease": "play",
     "music_open_qqmusic": "play", "music_lyric_align": "play",
     "quick_launch": "application", "balance": "balance", "harness": "harness",
+    "memory_trim": "clear",
     "deepseek_web": "web", "check_update": "update", "github_project": "web",
     "quark_download": "download", "agent_link": "automation",
     "proactive_screen": "screen", "todo_panel": "todo",
@@ -129,6 +132,17 @@ def _music_lyric_configured(pet) -> bool:
     （测试也会因此依赖机器状态）。没在播时改为置灰（见 enabled）。
     """
     return bool(pet.cfg.get("music_lyric_enabled", False))
+
+
+def _memory_trim_available(_pet) -> bool:
+    """「回收内存」只对 Windows 显示：其它平台没有 EmptyWorkingSet。
+
+    判定走 ``pet/memory_trim.py::is_supported``（与执行层同一判据），不另写一份
+    ``sys.platform`` 比较——菜单给不给看和执行能不能跑必须是同一个真相。
+    """
+    from .. import memory_trim
+
+    return memory_trim.is_supported()
 
 
 def _music_align_ready(pet) -> bool:
@@ -273,6 +287,9 @@ class MenuActionRegistry:
             ),
             "music_open_netease": MenuActionSpec(add_music_open_netease),
             "music_open_qqmusic": MenuActionSpec(add_music_open_qqmusic),
+            # 平台门在 menu_layout 的 available_actions 过滤里生效（非 Windows
+            # 整条不出现）；builder 自身也有同一道门，legacy 扁平布局直接调它。
+            "memory_trim": MenuActionSpec(add_memory_trim, _memory_trim_available),
             "golden_spin": MenuActionSpec(
                 add_golden_spin,
                 _callback_available("trigger_golden_spin"),
