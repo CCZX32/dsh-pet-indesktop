@@ -176,22 +176,39 @@ def _right_release(pos: QPointF, global_pos: QPointF) -> QMouseEvent:
 class _BigScreen:
     """拖拽/锁位语义测试需要"无边界"环境：offscreen 默认屏只有 800×600，
     合成事件坐标贴近其边缘时会触发贴边钳位与绘制补偿（该语义由
-    tests/test_edge_reachability.py 专门锁定，不在此重复）。"""
+    tests/test_edge_reachability.py 专门锁定，不在此重复）。
+
+    尺寸理由见 ``tests/test_drag_move_coalescing.py`` 的同类假屏：窗口初始位置按
+    运行机真实屏幕算，假屏只放大到 1920×1200 时真实桌面上的目标会被贴边钳位
+    （本机实测 ``test_shift_drag_requires_shift`` 等用例必红）。
+    """
 
     def name(self):
         return "big"
 
     def availableGeometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def geometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def devicePixelRatio(self):
         return 1.0
 
 
 _BIG_SCREEN = _BigScreen()
+
+
+@pytest.fixture(autouse=True)
+def _single_screen_desktop(monkeypatch):
+    """关掉「多屏活动区域」快照（理由见 test_drag_move_coalescing 同名 fixture）：
+    本文件用假屏造无边界环境，而 #186 的多屏快照走 ``QGuiApplication.screens()``
+    绕过假屏、把窗口钳到真实桌面，导致「按住 SHIFT 应可拖动」这类断言在带缩放/
+    多显示器桌面上必红。
+    """
+    from pet import window_placement
+
+    monkeypatch.setattr(window_placement, "desktop_area", lambda: None)
 
 
 def _make_win(app, tmp_path, **overrides):
