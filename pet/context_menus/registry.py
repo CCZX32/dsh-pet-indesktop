@@ -14,6 +14,7 @@ from ..config import DEFAULT_MENU_EASTER_EGG
 from .fun_entry import add_ojingjing_entry
 from .icons import custom_file_menu_icon, vector_menu_icon
 from .quick_launch import add_quick_launch_menu, configured_quick_apps
+from ..weather_menu import add_show_weather, add_weather_cities
 from .shared import (
     QUARK_PAN_URL,
     REPO_URL,
@@ -74,6 +75,7 @@ ACTION_LABELS = {
     "quark_download": "夸克网盘下载", "agent_link": "Agent 联动",
     "proactive_screen": "主动识屏", "todo_panel": "待办提醒",
     "quiet_mode": "免打扰",
+    "weather": "查看天气", "weather_cities": "天气城市",
     "modern_settings": "桌宠设置", "quit": "退出",
 }
 
@@ -100,6 +102,7 @@ ACTION_ICONS = {
     "quark_download": "download", "agent_link": "automation",
     "proactive_screen": "screen", "todo_panel": "todo",
     "quiet_mode": "pause",
+    "weather": "weather", "weather_cities": "weather",
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
     "festival_now": "todo", "festival_toggle": "todo",
@@ -146,6 +149,18 @@ def _memory_trim_available(_pet) -> bool:
     from .. import memory_trim
 
     return memory_trim.is_supported()
+
+_WEATHER_DISABLED_REASON = "天气功能已在设置中关闭"
+
+
+def _weather_enabled(pet) -> bool:
+    """「查看天气 / 天气城市」是否可用：只看设置里的天气总开关。
+
+    与歌词同口径：开关关掉**不**改动菜单结构，只把条目置灰并给出原因
+    （CONTEXT.md「Runtime Disabled」：位置保留、切换开关不重写菜单树）。
+    """
+    cfg = getattr(pet, "cfg", None)
+    return bool(cfg.get("weather_enabled", True)) if cfg is not None else True
 
 
 def _music_align_ready(pet) -> bool:
@@ -334,6 +349,20 @@ class MenuActionRegistry:
             ),
             "festival_toggle": MenuActionSpec(
                 _build_festival_toggle, _callback_available("on_toggle_festival")
+            ),
+            # 天气：回调缺失 = 能力不可用（隐藏）；开关关掉 = 运行时置灰、位置保留
+            # （CONTEXT.md 的 Capability Unavailable / Runtime Disabled 口径）。
+            "weather": MenuActionSpec(
+                add_show_weather,
+                _callback_available("on_show_weather"),
+                enabled=_weather_enabled,
+                disabled_reason=_WEATHER_DISABLED_REASON,
+            ),
+            "weather_cities": MenuActionSpec(
+                add_weather_cities,
+                _callback_available("on_show_weather"),
+                enabled=_weather_enabled,
+                disabled_reason=_WEATHER_DISABLED_REASON,
             ),
             "quit": MenuActionSpec(add_quit),
         }

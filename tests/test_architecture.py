@@ -226,10 +226,12 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-# 2026-10-08 上调到 2419（#208 免打扰）：本文件只加接线 3 行（import 1 +
-# 「免打扰」小节行 1 + 保存回写 1），控件/行/保存实现全在 pet/settings_quiet.py。
-# 实测 2419；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2419
+# 2026-10-08 上调到 2421（#208 免打扰 + #209 天气 整合叠加）：免打扰接线 4 行
+# （import 1 + 小节行 1 + 保存回写 1 + 注释 1，实现全在 pet/settings_quiet.py）；
+# 天气接线 2 行（settings_weather import 1 + _write_config 委托 1，实现全在
+# pet/settings_weather.py）。两分支保存委托并序。实测 2421；按文件约定只随
+# 实测校准（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2421
 
 
 def _read(name: str) -> str:

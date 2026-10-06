@@ -64,6 +64,8 @@
     {"type": "action", "id": "todo_panel", "visible": true, "section": "tools"},
     {"type": "action", "id": "quiet_mode", "visible": true, "section": "tools"},
     {"type": "action", "id": "memory_trim", "visible": true, "section": "tools"},
+    {"type": "action", "id": "weather", "visible": true, "section": "tools"},
+    {"type": "action", "id": "weather_cities", "visible": true, "section": "tools"},
     {"type": "action", "id": "voice_chime_now", "visible": false, "section": "tools"},
     {"type": "action", "id": "voice_chime_toggle", "visible": false, "section": "tools"},
     {"type": "action", "id": "festival_now", "visible": false, "section": "tools"},

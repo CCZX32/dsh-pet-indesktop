@@ -108,6 +108,9 @@ class _StubAppShell:
     def show_balance(self, parent=None):
         self._record("show_balance", parent)
 
+    def show_weather(self, parent=None):
+        self._record("show_weather", parent)
+
     def check_update(self, parent=None):
         self._record("check_update", parent)
 
@@ -191,6 +194,7 @@ def _reference_window(config, *, chat=True):
     win.on_open_chat = (lambda: None) if chat else None
     win.on_open_chat_settings = (lambda: None) if chat else None
     win.on_show_balance = (lambda parent=None: None) if chat else None
+    win.on_show_weather = lambda parent=None: None
     win.on_look_screen = win.look_at_screen if chat else None
     win.on_open_modern_settings = lambda: None
     win.on_open_legacy_settings = None          # app.py:457 恒注入 None

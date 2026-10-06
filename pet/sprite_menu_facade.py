@@ -350,6 +350,20 @@ class SpriteMenuFacade:
         return lambda *_ignored: fn(shell)
 
     @property
+    def on_show_weather(self):
+        """「查看天气」：``AppShell.show_weather``；父窗同样传**壳**。
+
+        与 ``on_show_balance`` 的差别只有一条：**不**受聊天能力门控——天气取的是
+        独立外部数据源，没有聊天/DSL 变体也不该消失。气泡归主宠（与 overlay 点击
+        路径同口径：壳的 ``show_bubble`` 作用于主 sprite）。
+        """
+        fn = _first_callable(self._hosts(), ("show_weather",))
+        if fn is None:
+            return None
+        shell = self._shell
+        return lambda *_ignored: fn(shell)
+
+    @property
     def on_check_update(self):
         """「检查更新」：``AppShell.check_update``（窗口版是 ``_slot_wrap`` 包装，
         这里壳本身即唯一窗，无需槽位前缀）。

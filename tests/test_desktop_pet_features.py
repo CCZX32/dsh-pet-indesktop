@@ -883,6 +883,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     expected_labels.append("免打扰")    # 免打扰入口（#208，四档时长子菜单）
     if sys.platform == "win32":
         expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
+    expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([

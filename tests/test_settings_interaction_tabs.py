@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""「互动」域页内分标签（点击与音效 / 自言自语）的聚焦回归。
+"""「互动」域页内分标签（点击与音效 / 自言自语 / 天气）的聚焦回归。
 
 背景：主人反馈「设置界面有点乱，单页面太多东西」。互动域原先 18 行 / 3 组**平铺、
 零折叠**，是本仓库最长的"无折叠"域之一；「菜单」域已用 ``SettingsTabContainer``
@@ -22,7 +22,9 @@ EXPECTED_SIDEBAR = [
     "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
 ]
 # 标签键/名：键给代码（稳定），名给用户（可读）。顺序 = 使用顺序。
-EXPECTED_TABS = (("click", "点击与音效"), ("self_talk", "自言自语"))
+# 「天气」（issue #209，2026-10-07）与「点击显示余额」同族——都是"桌宠替你看一眼
+# 外部数据"的互动面，故挂在同一个域里当第三个同级任务，而不是新开侧栏域。
+EXPECTED_TABS = (("click", "点击与音效"), ("self_talk", "自言自语"), ("weather", "天气"))
 
 # 每组行各自应该落在哪个标签
 ROWS_BY_TAB = {
@@ -37,6 +39,7 @@ ROWS_BY_TAB = {
         "self_talk_max", "self_talk_texts", "self_talk_images", "self_talk_image_scale",
         "self_talk_image_chance",
     ),
+    "weather": ("weather_enabled", "weather_city", "weather_city_list"),
 }
 
 
@@ -171,6 +174,7 @@ def test_sections_keep_their_titles_inside_the_tabs(dialog):
 
     assert section_titles("click") == ["输入", "点击反馈"]
     assert section_titles("self_talk") == ["自言自语"]
+    assert section_titles("weather") == ["天气"]
 
 
 def test_click_speak_toggle_starts_unchecked_like_the_config_default(dialog):

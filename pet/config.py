@@ -926,6 +926,14 @@ class Config:
             "festival_reminder_speak": False,  # 节日提醒是否语音播报
             "festival_custom_quotes_cn": "",  # 自定义中文文案（一行一条，追加到内置库）
             "festival_custom_quotes_west": "",  # 自定义西文文案（一行一条，追加到内置库）
+            # 天气（右键菜单「查看天气」/「天气城市」，issue #209）。**默认开**：
+            # 与报时/节日不同，它是纯拉取型——不点不发请求、不主动冒泡，默认关掉
+            # 只会让第一次点击撞上一句"功能已关闭"。默认**不猜城市**：气泡永远会
+            # 把城市名报出来，与其猜一个大概率不对的城市，不如给一句可执行的引导
+            # （"还没选天气城市：右键菜单 → 天气城市 → 添加城市…"）。
+            "weather_enabled": True,  # 天气功能总开关
+            "weather_city": "",  # 当前城市（空 = 还没选，菜单会引导去添加）
+            "weather_city_list": [],  # 城市清单（全局，上限 12，见 weather.MAX_CITIES）
             **DEFAULT_COLLISION_SETTINGS,
             "media_prewarm": "balanced",  # full / balanced / minimal 素材首帧预热力度
             # 批10-A3：默认 32→8MB。预测式预热（批10-A1）落地后，首帧 LRU 只需
@@ -1174,6 +1182,9 @@ class Config:
             "festival_reminder_speak",
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",
+            "weather_enabled",
+            "weather_city",
+            "weather_city_list",
             "character_aliases",
             "character_profiles",
             "chat_always_on_top",
@@ -1500,6 +1511,14 @@ class Config:
         self.data["mem_min_size_mb"] = _float_or_default(self.data.get("mem_min_size_mb"), 50.0, 0.0, 8192.0)
         # 静止放手下落（#219）：同族布尔键，防手改字符串布尔误开。
         self.data["drop_gravity"] = _bool_or_default(self.data.get("drop_gravity"), False)
+        # 天气三键（issue #209）：布尔走 _bool_or_default（防字符串 "false" 被
+        # bool() 误开），城市名/城市清单复用 weather 模块自己的归一化（剥行政区
+        # 后缀、去重、截断、上限 12）——单一来源，避免设置页/菜单/取数各洗一遍。
+        from .weather import normalize_city_list, normalize_city_name
+
+        self.data["weather_enabled"] = _bool_or_default(self.data.get("weather_enabled"), True)
+        self.data["weather_city"] = normalize_city_name(self.data.get("weather_city"))
+        self.data["weather_city_list"] = normalize_city_list(self.data.get("weather_city_list"))
         self.data["agent_link"] = _clean_agent_link_data(self.data.get("agent_link"))
         # 音乐关联 / 消费统计（#129 新增的 5 键）：此前只在默认值与 reload 白名单
         # 里登记、没进归一化——手改成脏值后数值键会让设置页构造直接抛
@@ -1691,6 +1710,9 @@ class Config:
             "character_profiles",
             "chat_always_on_top",
             "dynamic_island",
+            "weather_enabled",
+            "weather_city",
+            "weather_city_list",
         }:
             self._normalize_pet_settings()
 
