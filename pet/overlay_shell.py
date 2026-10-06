@@ -350,7 +350,7 @@ class _LinkAnimChain:
 #   （审计 C4），继续按主配置**全局**生效。
 PER_SLOT_SETTING_KEYS = frozenset({
     # 几何 / 运动
-    "scale", "playback_speed", "drag_physics", "throw_strength",
+    "scale", "playback_speed", "drag_physics", "drop_gravity", "throw_strength",
     "ffmpeg_recycle_minutes",
     # 音效（点击与碰撞各一对门/音量；音源包 click_sound_pack 两者共用）
     "click_sound_enabled", "click_sound_volume", "click_sound_pack",
@@ -3287,6 +3287,8 @@ class OverlayShell(QObject):
         cfg = self._sprite_config(sprite) if cfg is None else cfg
         sprite.throw_speed_cap = throw_speed_cap(cfg.get("throw_strength"))
         sprite.drag_physics = bool(cfg.get("drag_physics", False))
+        # 静止放手下落（#219）：与 drag_physics 平级，逐 sprite 取自己那份配置
+        sprite.drop_gravity = bool(cfg.get("drop_gravity", False))
         # 桌宠大小（scale）：旧机 refresh_pet_settings 即时 change_scale
         # （window.py:3937-3938），改完即改气泡画布/锚点。
         scale = self._config_scale(cfg)
