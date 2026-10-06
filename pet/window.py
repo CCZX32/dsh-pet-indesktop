@@ -97,7 +97,8 @@ from .proactive import effective_proactive_config
 from .window_optional_services import WindowFeatureGateMixin
 
 from . import platform_win
-from .platform_mac import _keep_macos_tool_window_visible, _mac_set_window_level
+from .platform_mac import (
+    _keep_macos_tool_window_visible, _mac_no_window_shadow_flag, _mac_set_window_level)
 from .platform_win import (
     GWL_EXSTYLE as GWL_EXSTYLE,
     _set_windows_click_through as _set_windows_click_through,
@@ -190,6 +191,9 @@ def build_window_flags(config, mouse_through: bool = False, stream_capture_mode:
         flags |= Qt.WindowType.WindowStaysOnTopHint
     if mouse_through:
         flags |= Qt.WindowType.WindowTransparentForInput
+    # macOS 关窗口系统阴影（issue #229：外圈黑边，普通模式与直播捕获模式都要关）。
+    # 放在 flags 工厂里：捕获模式开关重算 flags 时自动带上，无需在显示后补写。
+    flags |= _mac_no_window_shadow_flag()
     return flags
 
 

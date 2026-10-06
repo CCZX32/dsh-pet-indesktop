@@ -24,6 +24,28 @@ def _keep_macos_tool_window_visible(window) -> None:
         window.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
 
 
+def _mac_no_window_shadow_flag() -> Qt.WindowType:
+    """macOS：关掉窗口系统阴影的窗口标志（非 darwin 返回空标志，可直接 ``|=``）。
+
+    issue #229：macOS 桌宠窗口外圈有一圈系统阴影黑边，普通模式与直播捕获模式
+    都有。Qt 的 cocoa 插件把这个标志直接翻成 ``[NSWindow setHasShadow:NO]``
+    （qtbase 6.8 ``QCocoaWindow::setWindowFlags``，qcocoawindow.mm:726；窗口创建
+    路径的 ``hasShadow`` 也由同一份 flags 决定），所以这里不需要 objc ctypes：
+    标志跟着窗口 flags 走，Qt 每次重建原生窗口都会按它重新下发。
+
+    注入点必须在 **flags 构造处**（``OverlayWindow.__init__``、PetWindow 的
+    ``build_window_flags``）：可见窗口上 ``setWindowFlag`` 会重建原生窗口（频闪，
+    ``window_screen.set_stream_capture_mode`` 就是被迫走这条路的先例），而构造处
+    天然覆盖「捕获模式开关重算 flags」这条路径，无需每次显示补写。
+
+    非 darwin 返回 ``Qt.WindowType(0)``：X11 与 Windows 的插件都不消费该标志
+    （那里没有系统阴影可关），空标志让调用点写成 ``flags |= ...`` 而不必判平台。
+    """
+    if sys.platform == 'darwin':
+        return Qt.WindowType.NoDropShadowWindowHint
+    return Qt.WindowType(0)
+
+
 def _mac_set_window_level(view_id: int, level: int) -> bool:
     """macOS 原生：把 NSWindow 层级设为指定值（3=置顶浮动，0=普通）。
 

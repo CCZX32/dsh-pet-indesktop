@@ -45,6 +45,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from . import catalog
 from . import overlay_peripherals
+from .platform_mac import _mac_no_window_shadow_flag
 from .platform_passthrough import QtPerPixelInputController
 from .sprite_menu import build_sprite_menu
 from .sprite_slingshot import SlingshotController
@@ -63,9 +64,12 @@ class OverlayWindow(QWidget):
     def __init__(self, screen: QScreen | None = None, parent: QWidget | None = None,
                  *, driver: TickDriver | None = None) -> None:
         super().__init__(parent)
+        # macOS 关窗口系统阴影（issue #229：外圈黑边，普通模式与直播捕获模式都要关）：
+        # 标志只能在 flags 构造处给（见 platform_mac._mac_no_window_shadow_flag）。
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool
-                            | Qt.WindowType.WindowStaysOnTopHint)
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | _mac_no_window_shadow_flag())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         # Phase 1a 暂不做多屏：默认主屏，调用方可注入别的 QScreen。
