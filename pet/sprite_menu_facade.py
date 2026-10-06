@@ -370,6 +370,17 @@ class SpriteMenuFacade:
         return _first_callable(self._hosts(), ("open_todo_panel",))
 
     @property
+    def on_network_info(self):
+        """「网络信息」：``AppShell.open_network_info``（进程级弹窗，与窗口版同一方法）。
+
+        弹窗按当前网络环境取一次数据，与"哪一只宠被右击"无关，故不绑 sprite——
+        但仍必须在 facade 上存在：注册表的可用性判定要求 ``on_network_info``
+        可调用（``registry._network_info_available``），缺了这个属性 overlay 菜单
+        会静默少一项（tests/test_sprite_menu_parity.py 逐项比对拦得住）。
+        """
+        return _first_callable(self._hosts(), ("open_network_info",))
+
+    @property
     def on_voice_chime_now(self):
         return _first_callable(self._hosts(), ("trigger_voice_chime_now",))
 

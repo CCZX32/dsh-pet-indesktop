@@ -332,6 +332,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "harness",
         "deepseek_web",
         "check_update",
+        "network_info",
         "github_project",
         "quark_download",
         "agent_link",
@@ -573,6 +574,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         "DeepSeek Harness",
         "打开网页版 DeepSeek",
         "检查更新",
+        "网络信息",
         "GitHub 项目页",
     ]
     if sys.platform == "win32":

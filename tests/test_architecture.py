@@ -226,7 +226,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
 # +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
 # 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
+# 2026-10-07 回调到 2420（网络信息 issue #172）：本文件只加三处接线——import 1 行、
+# 岛页挂「网络信息」小节 3 行、保存委托 1 行；菜单域那一行是既有「内容与布局」行的
+# 追加（净 0）。控件/行/保存全在 pet/settings_network.py。实测 2420。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2420
 
 
 def _read(name: str) -> str:
@@ -240,12 +243,16 @@ def test_pure_logic_modules_do_not_import_qt():
     # 2026-09-23 加入 overlay_settings_command：D12 指令通道的写/读/消费与拓扑门
     # 必须零 Qt——独立设置进程（pet/__main__.py --settings）禁止导入 pet.app/
     # overlay_shell，env 读取的唯一实现只能落在两侧都能 import 的轻模块里。
+    # 2026-10-07 加入 net_monitor：网络信息（issue #172）的采样核心（计数器/
+    # 延迟探测/文案）必须零 Qt——它跑在后台采样线程里，GUI 侧只读快照；
+    # network_info.py 是弹窗的数据层（属地解析/连通性/文案），同样零 Qt。
     for name in (
         "collision.py", "physics.py",
         "festival_calendar.py", "festival_data.py", "festival.py",
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py", "overlay_settings_command.py",
+        "net_monitor.py", "network_info.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

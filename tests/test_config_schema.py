@@ -23,6 +23,8 @@ import inspect
 import json
 import re
 
+import pytest
+
 from pet import config as config_mod
 from pet.config import Config
 
@@ -82,6 +84,7 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "harness_launch_target",
         "idle_low_fps_enabled",
         "idle_low_fps_threshold",
+        "island_network_enabled",
         "lock_position",
         "media_prewarm",
         "menu_easter_egg",
@@ -97,6 +100,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "music_player_paths",
         "music_sing_enabled",
         "music_sing_grace_seconds",
+        "network_info_menu_enabled",
+        "network_probe_interval_seconds",
         "no_move",
         "on_top",
         "pet_opacity",
@@ -279,6 +284,82 @@ def test_set_normalizes_music_and_cost_keys(tmp_path):
     assert cfg.data["music_lyric_enabled"] is False
     cfg.set("agent_cost_enabled", "yes")
     assert cfg.data["agent_cost_enabled"] is True
+
+
+# ------------------------------------------------- 网络信息（issue #172 三键）
+def _dirty_network_config(tmp_path, raw: dict) -> Config:
+    """把网络信息三键写成脏值落盘，再走真实加载路径（reload + 归一化）。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 4}
+    payload.update(raw)
+    (cfg_dir / "config.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return Config(base=tmp_path)
+
+
+def test_network_keys_defaults_are_off_probe_and_on_menu(tmp_path):
+    """默认值即产品契约：延迟探测默认关（要发包）、菜单入口默认开。"""
+    cfg = Config(base=tmp_path)
+    assert cfg.data["island_network_enabled"] is False
+    assert cfg.data["network_probe_interval_seconds"] == 1.0
+    assert cfg.data["network_info_menu_enabled"] is True
+
+
+@pytest.mark.parametrize("raw,expected_island,expected_menu", [
+    ("false", False, False),
+    ("no", False, False),
+    ("true", True, True),
+    ("on", True, True),
+    # 整数不参与布尔解析（同族布尔键同规）：回落到各自默认值
+    (0, False, True),
+    (1, False, True),
+])
+def test_dirty_network_boolean_keys_are_not_truthy_by_string(
+        tmp_path, raw, expected_island, expected_menu):
+    """bool("false") is True —— 字符串布尔必须按字面语义归一（同族键同规）。"""
+    cfg = _dirty_network_config(tmp_path / f"island-{raw}", {"island_network_enabled": raw})
+    assert cfg.data["island_network_enabled"] is expected_island
+    cfg2 = _dirty_network_config(tmp_path / f"menu-{raw}", {"network_info_menu_enabled": raw})
+    assert cfg2.data["network_info_menu_enabled"] is expected_menu
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("abc", 1.0),
+    (None, 1.0),
+    (0.01, 0.5),
+    (0.5, 0.5),
+    (2.5, 2.5),
+    (9999, 60.0),
+])
+def test_dirty_probe_interval_is_clamped(tmp_path, raw, expected):
+    """探测间隔夹到 [0.5, 60]：脏值不得让采样线程以 0.01 秒的节奏发包。"""
+    cfg = _dirty_network_config(tmp_path / str(raw), {"network_probe_interval_seconds": raw})
+    assert cfg.data["network_probe_interval_seconds"] == pytest.approx(expected)
+
+
+def test_set_normalizes_network_keys(tmp_path):
+    """set() 路径同样归一（设置页写回的值不得绕过钳制）。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("island_network_enabled", "false")
+    assert cfg.data["island_network_enabled"] is False
+    cfg.set("network_probe_interval_seconds", 0.01)
+    assert cfg.data["network_probe_interval_seconds"] == pytest.approx(0.5)
+    cfg.set("network_info_menu_enabled", "off")
+    assert cfg.data["network_info_menu_enabled"] is False
+
+
+def test_network_keys_survive_reload_round_trip(tmp_path):
+    """落盘 → 重启加载：三键是普通白名单键，reload 后不得被默认值冲掉。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("island_network_enabled", True)
+    cfg.set("network_probe_interval_seconds", 3.0)
+    cfg.set("network_info_menu_enabled", False)
+    assert cfg.save() is True
+    restored = Config(base=tmp_path)
+    assert restored.data["island_network_enabled"] is True
+    assert restored.data["network_probe_interval_seconds"] == pytest.approx(3.0)
+    assert restored.data["network_info_menu_enabled"] is False
 
 
 # ------------------------------------------------- 自启目标（harness_launch_target）
