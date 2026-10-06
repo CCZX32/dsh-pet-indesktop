@@ -30,6 +30,7 @@ from .shared import (
     add_no_move,
     add_on_top,
     add_quit,
+    add_quiet_mode_menu,
     add_return_corner,
     add_spawn_pet,
     add_template_switch,
@@ -77,6 +78,7 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     add_music_open_netease(music_menu, pet, icons=False)
     add_music_open_qqmusic(music_menu, pet, icons=False)
     add_edge_probe(menu, pet, icons=False)
+    add_quiet_mode_menu(menu, pet, icons=False)
     build_size_menu(menu, pet, icons=False)
 
     menu.addSeparator()

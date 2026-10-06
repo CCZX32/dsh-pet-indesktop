@@ -100,6 +100,19 @@ controls. It is expanded by default and auto-expands when a search matches a row
 inside it.
 _Avoid_: Hidden advanced panel, per-feature switch list
 
+**Quiet Mode**:
+A process-wide, non-persistent do-not-disturb window covering every pet window
+and sprite at once. It suppresses ordinary reminders and bubbles — the pet
+bubble and the system notification of that same reminder — while self-talk
+(including click responses), link-state bubbles, and every stateful or
+interactive event (approval, question, error, lifecycle, balance) keep
+presenting, because those are answers the user must act on. Suppressed
+reminders are queued with a fixed bound (oldest dropped first) and reported in
+one bubble when quiet ends. A fullscreen application counts as quiet only while
+the persistent `quiet_also_on_fullscreen` preference is on, and it is the same
+fullscreen signal the auto-hide avoidance already uses.
+_Avoid_: Notification mute, global sound mute, per-pet mute
+
 **Session-End Spawn Freeze**:
 The process-wide latch armed when the operating system announces that the
 session is ending (`WM_QUERYENDSESSION`/`WM_ENDSESSION`, or Qt's session

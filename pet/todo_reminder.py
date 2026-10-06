@@ -333,6 +333,15 @@ class TodoReminderService:
         app = self._app
         text = f"⏰ 待办提醒：{fire['title']}（{fire['time']}）"
         win = getattr(app, "win", None)
+        if win is not None:
+            from . import window_alerts
+
+            if window_alerts.quiet_blocked(win):
+                # 免打扰（含全屏等效）：桌宠气泡**与系统通知**一并压住——只压气泡
+                # 的话，DND 期间照样弹一条 Windows 通知，等于没免打扰。提醒本身
+                # 进暂存队列，结束（到时/提前/退出全屏）后统一汇报。
+                window_alerts.defer_quiet(text)
+                return
         if win is not None and win.isVisible() and not self._bubble_suppressed():
             win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS)
             return

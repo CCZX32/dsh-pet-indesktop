@@ -245,6 +245,14 @@ class ProactiveScreenWatcher:
                 self._watcher._on_frame_ready(img, app_str, hwnd, cur_hash, info_dict)
 
             def _forward_bubble(self, text: str, duration_ms: int) -> None:
+                from . import window_alerts as _alerts
+
+                if _alerts.quiet_blocked(self._watcher.win):
+                    # 免打扰（含全屏等效）：识屏答复属普通气泡，不冒，转存暂存队列。
+                    # 先兆提示（"让我看看……"）刻意不拦：那是桌宠自身动作的即时
+                    # 反馈，不是提醒内容，压了会让"它在看"变成无解释的卡顿。
+                    _alerts.defer_quiet(text)
+                    return
                 if hasattr(self._watcher.win, "show_bubble"):
                     self._watcher.win.show_bubble(text, duration_ms=duration_ms)
 

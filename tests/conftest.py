@@ -196,6 +196,13 @@ def _close_qt_top_level_widgets():
         _mem_debug_mod._reset_for_tests()
     except Exception:
         pass
+    # 免打扰是**进程级单例**（issue #208）：某个用例开启后不复位，后续用例会
+    # 凭空进入"普通提醒被拦下"的状态，失败点离真因很远。
+    try:
+        from pet.quiet_mode import reset_shared_quiet_state
+        reset_shared_quiet_state()
+    except Exception:
+        pass
     # webm_clip 的「会话结束」闸门是进程级 latch（issue #111）：测试里置位后
     # 不复位会让后续用例静默拒绝一切 reader 启动（报错点离真因很远）。
     try:

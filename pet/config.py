@@ -34,6 +34,30 @@ DEFAULT_SELF_TALK_BUBBLE_STYLE = "classic_top"
 # 抽一条。默认 30%——图片目录常有几十张图，若与文本等权随机会让图片彻底压过文本
 # （实测某配置 24 图 + 5 句 → 出图 82.8%，点击几乎总是弹图）。
 DEFAULT_SELF_TALK_IMAGE_CHANCE = 30
+# 免打扰（issue #208）时长档位（分钟）：右键菜单四档与设置页「默认时长」共用这
+# 一份列表——**唯一来源**，两处各抄一份迟早漂移。
+QUIET_MINUTE_CHOICES = (15, 30, 60, 120)
+DEFAULT_QUIET_MINUTES = 30
+DEFAULT_QUIET_ALSO_ON_FULLSCREEN = True
+# 免打扰暂存队列上限：溢出丢最旧（规格硬要求）。
+QUIET_QUEUE_LIMIT = 20
+
+
+def normalize_quiet_minutes(value) -> int:
+    """把任意输入归一到一个合法档位（手改 config / 陈旧值都不至于让菜单空掉）。
+
+    非法值回落默认档；合法整数取**最近的档**（60 → 60，45 → 30/60 取近者），
+    保证消费方（菜单/设置页/倒计时）永远拿到 ``QUIET_MINUTE_CHOICES`` 里的值。
+    """
+    try:
+        minutes = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_QUIET_MINUTES
+    if minutes != minutes or minutes <= 0:  # NaN / 非正数
+        return DEFAULT_QUIET_MINUTES
+    return int(min(QUIET_MINUTE_CHOICES, key=lambda choice: (abs(choice - minutes), choice)))
+
+
 DEFAULT_DIALOGUE_PHRASES = {}
 DEFAULT_COLLISION_SETTINGS = {
     "collision_enabled": True,
@@ -801,6 +825,10 @@ class Config:
             "menu_easter_egg": dict(DEFAULT_MENU_EASTER_EGG),
             "quick_launch_apps": [dict(item) for item in DEFAULT_QUICK_LAUNCH_APPS],
             "auto_hide_fullscreen": True,  # 全屏应用自动隐藏（Windows）
+            # 免打扰（issue #208）：右键菜单四档时长的默认档 + 全屏应用时自动等效
+            # 免打扰。二者只描述**偏好**，当前是否在免打扰是运行态、不落盘。
+            "quiet_minutes_default": DEFAULT_QUIET_MINUTES,
+            "quiet_also_on_fullscreen": DEFAULT_QUIET_ALSO_ON_FULLSCREEN,
             "click_sound_enabled": True,  # 点击 Q 弹音效
             "click_sound_pack": _default_click_sound_pack(),
             "click_sound_volume": 0.70,
@@ -1069,6 +1097,8 @@ class Config:
             "quick_launch_apps",
             "menu_easter_egg",
             "auto_hide_fullscreen",
+            "quiet_minutes_default",
+            "quiet_also_on_fullscreen",
             "click_sound_enabled",
             "click_sound_pack",
             "click_sound_volume",
@@ -1443,6 +1473,14 @@ class Config:
         # 待办提醒：开关同规防字符串布尔误开；提前量钳到 [0, 60] 分钟（0=不提前）。
         self.data["todo_reminder_enabled"] = _bool_or_default(self.data.get("todo_reminder_enabled"), True)
         self.data["todo_reminder_lead_minutes"] = int(_float_or_default(self.data.get("todo_reminder_lead_minutes"), 5.0, 0.0, 60.0))
+        # 免打扰（issue #208）：默认时长归一到一个合法档位（手改成 7 分钟不该让
+        # 菜单里一个勾选项都对不上）；布尔键同族同规，防手改字符串布尔误开。
+        self.data["quiet_minutes_default"] = normalize_quiet_minutes(
+            self.data.get("quiet_minutes_default", DEFAULT_QUIET_MINUTES)
+        )
+        self.data["quiet_also_on_fullscreen"] = _bool_or_default(
+            self.data.get("quiet_also_on_fullscreen"), DEFAULT_QUIET_ALSO_ON_FULLSCREEN
+        )
         # 黄金回旋 / 边缘探头：与其它布尔键同规，防手改字符串布尔误开。
         self.data["golden_spin_on_click"] = _bool_or_default(self.data.get("golden_spin_on_click"), False)
         self.data["golden_spin_direct"] = _bool_or_default(self.data.get("golden_spin_direct"), False)
@@ -1625,6 +1663,8 @@ class Config:
             "spawn_inherit_dynamic_island",
             "todo_reminder_enabled",
             "todo_reminder_lead_minutes",
+            "quiet_minutes_default",
+            "quiet_also_on_fullscreen",
             "music_sing_enabled",
             "music_sing_grace_seconds",
             "music_lyric_enabled",

@@ -104,6 +104,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "pnpm_bin",
         "predict_prewarm_lead_ms",
         "quick_launch_apps",
+        "quiet_also_on_fullscreen",
+        "quiet_minutes_default",
         "bubble_text_scale",
         "rx",
         "ry",
