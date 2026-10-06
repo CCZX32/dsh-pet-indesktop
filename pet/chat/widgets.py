@@ -376,7 +376,12 @@ class MessageBubble(QFrame):
         self.setProperty("state", self.state)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding if role == "assistant" else QSizePolicy.Policy.Maximum,
-            QSizePolicy.Policy.Minimum,
+            # 助手气泡纵向用 Preferred：body 是 wordWrap QLabel，sizeHint() 按启发式
+            # 宽度算、远大于真实换行高度（同宽度实测 75 vs 45）。Minimum 会把这个偏大
+            # 的 sizeHint 当成行最小高，每条助手消息多出的高度累计后被时间线末尾唯一的
+            # Expanding 垫吃掉，即「末条消息下方空白随轮数增长」（#191：同窗口 20 条消息
+            # 实测 150px、5 条 30px，改 Preferred 后两者均为 0）。外观实测无变化。
+            QSizePolicy.Policy.Preferred if role == "assistant" else QSizePolicy.Policy.Minimum,
         )
 
         root = QHBoxLayout(self)
