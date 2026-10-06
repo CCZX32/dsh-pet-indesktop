@@ -218,6 +218,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-06 回调到 2407：该设置行改为 settings_music.browser_media_rows（受
 # 平台条件约束、并入既有的 `] + settings_music.browser_media_rows(self),` 一行），
 # 本文件净 −1 行（保存回写 4 行仍在）。实测 2407。
+# 2026-10-06 仍为 2407（「恢复默认设置」入口，issue #220）：本文件只加接线——
+# import 1 行 + 侧栏按钮构造 3 行 + `_close_after_external_write` 方法 7 行
+# （关窗但跳过整表写回，flag 语义留在对话框内），确认框/重置实现全在
+# pet/settings_reset_defaults.py。实测恰为 2407（= 当前预算，零余量）：本次不再
+# 上调，按文件约定"只随实测校准"；若与其它在飞分支叠加越线，按先例带日期注释校准。
 MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2407
 
 

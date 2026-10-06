@@ -440,6 +440,39 @@ def _merge_chat_data(raw):
     return result
 
 
+#: chat 域里的密钥类字段（provider 级）——「恢复默认设置」唯一保留的项。
+#:
+#: 为什么保留：API Key 是用户最难重配的一项（要回服务商后台重新申请/翻记录），
+#: 且 keyring 不可用时 ``_redacted_data`` 不落盘、明文只存在内存里，重置一并清掉
+#: 会让用户当场失去凭据。``api_key_ref``/``vision_api_key_ref`` 是指向系统钥匙串
+#: 的引用，属于同一份凭据的一半，必须与明文一起保留，否则钥匙串里有 key 也取不回来。
+#: 其余 chat 键（服务商地址/模型/提示词/历史长度）与其它域一律回默认。
+CHAT_SECRET_FIELDS = ("api_key", "api_key_ref", "vision_api_key", "vision_api_key_ref")
+
+
+def chat_secret_carryover(chat: Any) -> dict[str, dict]:
+    """提取 chat.providers 下各 provider 的密钥类字段（供重置时原样带过去）。
+
+    返回 ``{provider_id: {字段: 值}}``，只收集非空值；返回空 dict = 没有密钥要保留。
+    只读，不改传入数据（重置换掉 ``self.data`` 时旧值已不在原处，必须先取出来）。
+    """
+    providers = chat.get("providers") if isinstance(chat, dict) else None
+    if not isinstance(providers, dict):
+        return {}
+    carried: dict[str, dict] = {}
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        secrets = {
+            field: provider[field]
+            for field in CHAT_SECRET_FIELDS
+            if str(provider.get(field) or "").strip()
+        }
+        if secrets:
+            carried[str(provider_id)] = secrets
+    return carried
+
+
 def _default_base():
     if sys.platform == "win32":
         return Path(os.environ.get("APPDATA") or Path.home())
@@ -714,7 +747,17 @@ class Config:
         # 的）一律不动——「生小肥鱼」复用旧槽位时同样保留原槽设置。
         if self.instance_id and not self.path.exists():
             self._seed_slot_config_from_main()
-        self.data = {
+        self.data = self._initial_data()
+        self.reload()
+        self._normalize_pet_settings()
+
+    def _initial_data(self) -> dict:
+        """构造出厂默认配置数据（唯一来源）。
+
+        ``__init__`` 与 :meth:`reset_to_defaults` 共用本方法：默认值只此一份，
+        重置设置必须与首次启动落在同一组值上（两份字面量迟早会漂移）。
+        """
+        return {
             "version": 4,
             "rx": None,
             "ry": None,
@@ -872,8 +915,6 @@ class Config:
             "settings_process_isolation": True,
             "chat": _default_chat_data(),
         }
-        self.reload()
-        self._normalize_pet_settings()
 
     def _migrate_legacy_config(self, base) -> None:
         """旧版各变体共用 %APPDATA%/dsh-pet-standalone；升级后首次运行时
@@ -1128,6 +1169,33 @@ class Config:
         self._migrate_decode_broker_config(raw)
         self.data["version"] = 4
         self._migrate_plaintext_keys_to_keyring()
+
+    def reset_to_defaults(self) -> bool:
+        """把全部设置恢复出厂默认，仅保留 chat 域密钥类字段（见 ``CHAT_SECRET_FIELDS``）。
+
+        铁律：
+        - 默认值走 ``_initial_data``（与首次启动同一份字面量），不另建第二份默认；
+        - 落盘走 :meth:`save` 的既有原子写路径（临时文件 + ``atomic_replace_with_retry``，
+          脱敏也在同一处），因此与设置页「批量改配置 + 一次性落盘」范式一致：主进程的
+          config watcher 看到的要么是重置前、要么是重置后的完整文件，没有中间态；
+        - 落盘失败整体回滚内存（返回 False），不留"内存已是默认、磁盘还是旧值"的错位。
+
+        保留集按 provider 归位：只有重置后仍存在的 provider 才接受回填（默认集里的
+        ``openai-main``）。自定义 provider 的条目会被重置掉——它的 keyring 条目是外部
+        状态，本方法从不触碰 ``SecretStore``，所以密钥本身没有丢，只是配置里不再引用它。
+        """
+        carried = chat_secret_carryover(self.data.get("chat"))
+        previous = self.data
+        self.data = self._initial_data()
+        providers = self.data["chat"]["providers"]
+        for provider_id, secrets in carried.items():
+            provider = providers.get(provider_id)
+            if isinstance(provider, dict):
+                provider.update(secrets)
+        if not self.save():
+            self.data = previous
+            return False
+        return True
 
     def _migrate_plaintext_keys_to_keyring(self) -> None:
         """加载时把磁盘遗留的明文 API Key 迁移进 keyring。

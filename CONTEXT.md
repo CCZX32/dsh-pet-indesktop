@@ -76,6 +76,14 @@ A stable sidebar destination organized by user intent. Every persistent setting
 has one owning domain; platform support changes availability, not ownership.
 _Avoid_: Module page, Windows settings page
 
+**Settings Reset**:
+The whole-settings recovery command in the Settings System sidebar. It restores
+every persistent preference to its factory default in one atomic write and keeps
+only the AI provider credentials (`api_key`/`vision_api_key` and their keyring
+references), then closes the settings window so the running pet applies the
+defaults through the normal config-reload path. There is no per-page reset.
+_Avoid_: Per-page reset, credential reset
+
 **Report Gate**:
 The single control for how much of one aggregated event class the pet reports.
 It is a pass probability in `0.00–1.00` (`0.00` silences the class, `1.00`
