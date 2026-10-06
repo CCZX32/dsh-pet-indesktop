@@ -90,11 +90,19 @@ class _FixedCursor:
 
 
 class _FakeHandle:
-    """假 QWindow：记录 ``setFlag`` 调用，``flags()`` 回报当前标志位。"""
+    """假 QWindow：记录 ``setFlag`` 调用，``flags()`` 回报当前标志位。
 
-    def __init__(self) -> None:
+    ``win_id`` 可改，用来模拟「平台重建原生窗口」（``QWindow::winId()`` 是活读，
+    X11 上是 XID，重建即变）。
+    """
+
+    def __init__(self, win_id: int = 1) -> None:
         self.calls: list[tuple] = []
+        self.win_id = win_id
         self._flags = Qt.WindowType(0)
+
+    def winId(self) -> int:
+        return self.win_id
 
     def setFlag(self, flag, on: bool) -> None:
         self.calls.append((flag, bool(on)))
@@ -105,6 +113,28 @@ class _FakeHandle:
 
     def flags(self):
         return self._flags
+
+
+class _HandleRecorder:
+    """假 QWindow：初值可设（模拟「平台缓存说已经穿透」），记录 setFlag 序列。"""
+
+    def __init__(self, win_id: int, *, flags=Qt.WindowType(0)) -> None:
+        self.win_id = win_id
+        self.calls: list[tuple] = []
+        self._flags = flags
+
+    def winId(self) -> int:
+        return self.win_id
+
+    def flags(self):
+        return self._flags
+
+    def setFlag(self, flag, on: bool) -> None:
+        self.calls.append((flag, bool(on)))
+        if on:
+            self._flags |= flag
+        else:
+            self._flags &= ~flag
 
 
 class _FakeWindow(QObject):
@@ -289,18 +319,21 @@ def test_external_attribute_write_is_converged_back():
 def test_recreated_native_window_replays_through_state():
     """原生窗口重建（on_top / 捕获模式改 flags）→ 句柄变化：必须重放穿透态。
 
-    重放要真写两次：``QWindow::setFlag`` 对相同标志早退，单写 True 落不到新的
-    原生窗口（与 platform_win 的「句柄变化必须重读样式」同款防御）。
+    判据取 **QWindow 的 winId**（活读；X11 上重建后是新 XID），不用 QWidget 的
+    winId 缓存——平台在 ``QXcbWindow::show()`` 里重建原生窗口时 widget 缓存不更新，
+    用它判「句柄是否变化」会漏检。重放要真写两次：``QWindow::setFlag`` 对相同标志
+    早退，单写 True 落不到新的原生窗口（与 platform_win 的「句柄变化必须重读样式」
+    同款防御）。
     """
     window = _FakeWindow(transparent=True)
-    window.handle = _FakeHandle()
+    window.handle = _FakeHandle(0xA1)
     controller = _controller(window)
     try:
         assert controller._apply_through(True) is True
         assert window.handle.calls == [(FLAG, True)]
         assert controller._apply_through(True) is False      # 句柄未变：跳过
 
-        window.win_id = 9999                                 # 新原生窗口
+        window.handle.win_id = 0xB2                          # 平台重建：新原生窗口
         assert controller._apply_through(True) is True
         assert window.handle.calls[-2:] == [(FLAG, False), (FLAG, True)]
     finally:
@@ -412,8 +445,8 @@ def test_hide_stops_and_show_resumes_qt_controller(monkeypatch):
         overlay.show()
         controller = overlay._input_controller
         assert controller._timer.isActive()
-        assert _wait_until(lambda: overlay.testAttribute(ATTR) is True), (
-            "盒内无 sprite：轮询必须把穿透态收敛到「穿透」")
+        # 首次显示也走 resume 的同步收敛：show() 返回即穿透态正确
+        assert overlay.testAttribute(ATTR) is True, "盒内无 sprite：必须穿透"
 
         overlay.hide()
         assert not controller._timer.isActive(), "隐藏期不得再轮询"
@@ -458,6 +491,106 @@ def test_close_releases_qt_controller(monkeypatch):
         assert not controller._timer.isActive()
         assert overlay._input_controller is None
         assert overlay.testAttribute(ATTR) is False
+    finally:
+        overlay.close()
+
+
+def test_first_show_converges_through_state_synchronously(monkeypatch):
+    """Minor：首次显示 show() 返回时穿透态已收敛，不等 10ms 首拍定时器。
+
+    首拍之前整屏 overlay 仍是一个输入区（事件循环繁忙时首拍可能被推迟上百毫秒），
+    所以首次创建也必须走 ``resume()`` 的同款同步收敛，与 hide→show 恢复路径同契约。
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(pp, "QCursor", _FixedCursor(INSIDE))
+    overlay = OverlayWindow()
+    try:
+        overlay.show()
+        assert overlay.testAttribute(ATTR) is True, "show() 返回即为穿透态"
+        assert overlay._input_controller._timer.isActive()
+    finally:
+        overlay.close()
+
+
+def test_show_reconcile_replays_through_on_rebuilt_native_window(monkeypatch):
+    """Major：show 之后的延迟对账必须在**当前**原生窗口上真重放 False→True。
+
+    接缝：X11 上置顶标志触发的原生重建发生在 ``QXcbWindow::show()``，**晚于**
+    ``QWidget::showEvent`` 里第一次收敛；重建后的新窗口沿用旧的 ``m_transparent``
+    缓存，``setTransparentForMouseEvents(True)`` 于是早退、空输入区域不重建，穿透
+    静默失效。
+
+    这里把平台句柄换成「新窗口 + 缓存自称已穿透」的假件，并把 ``_applied_win_id``
+    设成新句柄（最坏情形：属性、标志、句柄三条判据读起来全都「已一致」，正常
+    轮询会永久跳过），断言延迟对账仍然写出 False→True，且属性同样先清再立。
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(pp, "QCursor", _FixedCursor(INSIDE))
+    overlay = OverlayWindow()
+    handle = _HandleRecorder(0xB2, flags=FLAG)   # 新原生窗口：平台缓存说「已穿透」
+    try:
+        overlay.show()
+        assert overlay.testAttribute(ATTR) is True
+        controller = overlay._input_controller
+
+        writes: list[tuple] = []
+        real_set_attribute = overlay.setAttribute
+
+        def _record_set_attribute(attribute, on):
+            writes.append((attribute, bool(on)))
+            real_set_attribute(attribute, on)
+
+        monkeypatch.setattr(overlay, "setAttribute", _record_set_attribute,
+                            raising=False)
+        monkeypatch.setattr(overlay, "windowHandle", lambda: handle, raising=False)
+        monkeypatch.setattr(overlay, "winId", lambda: 0xB2, raising=False)
+        controller._applied_win_id = 0xB2        # 最坏情形：句柄判据也读不出变化
+
+        assert _wait_until(lambda: bool(handle.calls)), "延迟对账必须自己跑起来"
+        assert handle.calls == [(FLAG, False), (FLAG, True)], "必须真重放（先清再立）"
+        assert writes[-2:] == [(ATTR, False), (ATTR, True)], "属性同理先清再立"
+        assert overlay.testAttribute(ATTR) is True
+    finally:
+        overlay.close()
+
+
+def test_pending_reconcile_does_not_reapply_after_hide(monkeypatch):
+    """隐藏/关闭后才到达的延迟对账必须早退：不得把已清掉的穿透态写回去。"""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(pp, "QCursor", _FixedCursor(INSIDE))
+    overlay = OverlayWindow()
+    try:
+        overlay.show()
+        overlay.hide()                    # 对账（singleShot(0)）还没跑就隐藏了
+        assert overlay.testAttribute(ATTR) is False
+        _pump(400)                        # 宽预算：让挂起的对账真跑起来
+        assert overlay.testAttribute(ATTR) is False, "隐藏后到达的对账必须早退"
+        assert not overlay._input_controller._timer.isActive()
+    finally:
+        overlay.close()
+
+
+def test_on_top_toggle_keeps_passthrough(monkeypatch):
+    """on_top 开关（``setWindowFlag`` + ``show``：原生窗口重建）后穿透态不丢。
+
+    这是 X11 上置顶重建的真实触发路径（``overlay_shell`` 的 on_top 开关就是这么
+    做的）：重建走的是「改 flags → 重新 show」，因此必须再次经过 showEvent 的
+    ``resume`` 同步收敛与延迟对账，而不是靠 10ms 轮询慢慢补。
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(pp, "QCursor", _FixedCursor(INSIDE))
+    overlay = OverlayWindow()
+    try:
+        overlay.show()
+        assert overlay.testAttribute(ATTR) is True
+
+        overlay.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+        overlay.show()
+        assert overlay.testAttribute(ATTR) is True, "关置顶重建后穿透态必须仍在"
+
+        overlay.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        overlay.show()
+        assert overlay.testAttribute(ATTR) is True, "开置顶重建后穿透态必须仍在"
     finally:
         overlay.close()
 

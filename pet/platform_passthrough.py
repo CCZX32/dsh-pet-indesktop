@@ -34,6 +34,17 @@
 分层：**该不该穿透**是纯函数 ``passthrough_decision``（离线可穷举），Qt 层只
 负责把窗口事实摊平喂进去、把结论落到窗口上。
 
+**显示契约**（三拍，少一拍就会有一段「状态读起来对、平台侧其实没生效」）：
+
+1. ``showEvent`` 里 ``resume()`` 同步收敛一次——``show()`` 返回时穿透态已经正确，
+   不必等 10ms 首拍定时器；
+2. ``resume()`` 同时排一次延迟对账 ``_reconcile_after_show``（``singleShot(0)``）：
+   X11 上置顶标志触发的原生重建发生在 ``QXcbWindow::show()``，**晚于** showEvent；
+   新窗口沿用旧的 ``m_transparent`` 缓存会让 ``setTransparentForMouseEvents(True)``
+   早退、空输入区域不重建，而属性/标志/句柄可能全都读起来「已一致」。对账因此不看
+   缓存，直接对当前目标态做一次**先清再立**的真重放；
+3. 之后轮询表按光标位置 10/50ms 接管常规收敛。
+
 未在本机验证（诚实登记）：X11/macOS 的真实跨应用穿透行为本机（Windows）无法
 执行。已知边界：X11 缺 XFixes 扩展时 ``QXcbWindow::setTransparentForMouseEvents``
 会静默早退（qxcbwindow.cpp:1279-1281）；Wayland 原生会话（非 XWayland）下
@@ -88,6 +99,9 @@ class QtPerPixelInputController:
     测试钉住（``tests/test_platform_passthrough.py`` 的真值表对齐用例）。
     """
 
+    #: 显示后延迟对账的延迟拍数：0 = 下一事件循环拍，此时平台显示（X11 的
+    #: ``QXcbWindow::show()`` 里可能还有一次置顶标志触发的原生重建）已完成。
+    RECONCILE_DELAY_MS = 0
     NORMAL_POLL_INTERVAL_MS = 10
     #: 光标在窗口包围盒外：逐像素判定必然「无命中 → 穿透」，低频空转即可
     #: （overlay 铺满整屏时，盒内判定还要每 tick 走一遍全部 sprite 的 alpha 查询）。
@@ -95,8 +109,9 @@ class QtPerPixelInputController:
     DRAG_POLL_INTERVAL_MS = 100
 
     # 类级默认值：测试可以 ``object.__new__`` 绕过 __init__ 拼控制器（同
-    # platform_win 惯例）。None = 还没写过窗口，第一次必然真写。
-    _applied_through: bool | None = None
+    # platform_win 惯例）。记的是上一次真写时用的**原生窗口句柄**（见
+    # ``_handle_win_id``）：None = 还没写过，句柄变化 = 平台重建过原生窗口，
+    # 两种情况都必须真重放（不能信「属性/标志读起来已一致」）。
     _applied_win_id: int | None = None
 
     def __init__(self, window: "OverlayWindow") -> None:
@@ -154,49 +169,92 @@ class QtPerPixelInputController:
             logging.debug("更新 Qt 逐像素鼠标穿透失败", exc_info=True)
 
     # ---------------------------------------------------------------- 落点（薄 Qt 层）
-    def _apply_through(self, enabled: bool) -> bool:
+    @staticmethod
+    def _handle_win_id(win, handle) -> int:
+        """当前原生窗口句柄：优先 QWindow 的 winId（活读），退到 QWidget 的值。
+
+        ``QWidget::winId()`` 返回 widget 侧缓存；平台在 ``QXcbWindow::show()`` 里
+        重建原生窗口时它不会更新，用它判「句柄是否变化」会漏检——漏掉的正好是
+        X11 置顶重建这一类。``QWindow::winId()`` 是 ``platformWindow->winId()``
+        的活读，重建后立刻是新值（X11 上是新 XID）。
+        """
+        if handle is not None:
+            return int(handle.winId())
+        return int(win.winId())
+
+    def _apply_through(self, enabled: bool, *, force: bool = False) -> bool:
         """把目标穿透态落到窗口：Qt 属性 + 原生输入穿透标志。
 
         状态已是目标态时直接跳过（返回 False）——10ms 档下这必须是纯内存比较，
         否则每 tick 都要改一次窗口。跳过条件三条同时成立：属性是目标态、原生
-        标志是目标态、**原生窗口句柄未变**。句柄变化必须重放：``setWindowFlags``
-        （on_top 开关、捕获模式开关）会重建原生窗口，新窗口的输入穿透标志可能
-        归零（``platform_win`` 对扩展样式位有同款防御）。重放要真写两次——
-        ``QWindow::setFlag`` 对相同标志早退（qwindow.cpp:979-988），单写 True
-        落不到新原生窗口。
+        标志是目标态、**原生窗口句柄未变**（判据见 ``_handle_win_id``）。
+
+        「真重放」（先清再立：``False`` 写一次再写目标值）在两种情况下必须做：
+
+        1. ``force=True``——show 之后的延迟对账（见 ``_reconcile_after_show``）：
+            X11 上置顶标志触发的原生重建发生在 ``QXcbWindow::show()``，晚于
+            ``QWidget::showEvent`` 的第一次收敛；重建后的新窗口沿用旧的
+            ``m_transparent`` 缓存，``setTransparentForMouseEvents(True)`` 早退、
+            **空输入区域不重建**，而属性/标志/句柄可能全都读起来「已一致」，正常
+            轮询于是永久跳过。只有真写一遍（先清缓存再立）才能把状态压回平台。
+        2. 检测到原生窗口重建（句柄变化）——同款平台缓存风险（``platform_win``
+           对扩展样式位有同款防御）。
 
         读属性/读标志都是纯 Qt 内存读（无系统调用），所以不需要 Windows 侧那种
         「每 N 次 refresh 才校正一次」的低频窗口：属性被外部改写会在一个 tick
         内被收敛回来。
         """
         win = self._window
-        win_id = int(win.winId())
         handle = win.windowHandle()
-        attribute_ok = bool(win.testAttribute(_TRANSPARENT_ATTR)) == enabled
-        flag_ok = (handle is None
-                   or bool(handle.flags() & _TRANSPARENT_FLAG) == enabled)
-        if attribute_ok and flag_ok and self._applied_win_id == win_id:
-            return False
+        win_id = self._handle_win_id(win, handle)
+        recreated = self._applied_win_id is not None and self._applied_win_id != win_id
+        if not force:
+            attribute_ok = bool(win.testAttribute(_TRANSPARENT_ATTR)) == enabled
+            flag_ok = (handle is None
+                       or bool(handle.flags() & _TRANSPARENT_FLAG) == enabled)
+            if attribute_ok and flag_ok and not recreated:
+                return False
+        pair = force or recreated
+        if pair:
+            # 先清：同名写入会被 QWidget::setAttribute / QWindow::setFlag 早退吃掉，
+            # 而平台侧缓存可能仍认为「已是目标态」。
+            win.setAttribute(_TRANSPARENT_ATTR, False)
         win.setAttribute(_TRANSPARENT_ATTR, enabled)
         if handle is not None:
-            if (enabled and self._applied_win_id is not None
-                    and self._applied_win_id != win_id):
+            if pair:
                 handle.setFlag(_TRANSPARENT_FLAG, False)
             handle.setFlag(_TRANSPARENT_FLAG, enabled)
-        self._applied_through = enabled
         self._applied_win_id = win_id
         return True
 
     def resume(self) -> None:
-        """隐藏后恢复（与 ``stop()`` 对称）：重开轮询表并立即收敛一次穿透态。
+        """隐藏后恢复（与 ``stop()`` 对称）：同步收敛一次、重开轮询表、排一次对账。
 
         「显示即立刻写正确穿透态」是硬要求：显示后不能有一段时间按陈旧状态吞掉
-        点击。所以先作废缓存、同步 refresh 一次，再开表。
+        点击。所以先作废缓存、同步 refresh 一次，再开表；最后排一次延迟对账兜住
+        「平台显示阶段又重建了原生窗口」（Major：X11 置顶标志的重建晚于 showEvent）。
         """
-        self._applied_through = None
         self._applied_win_id = None
         self.refresh()
         self._timer.start()
+        QTimer.singleShot(self.RECONCILE_DELAY_MS, self._window,
+                          self._reconcile_after_show)
+
+    def _reconcile_after_show(self) -> None:
+        """显示完成后的强制对账：不看缓存，把当前目标态真重放一遍（见 ``_apply_through``）。
+
+        已经隐藏/关闭（``stop()`` 停过表）时早退：那条路径刚把穿透态清掉，迟到的
+        对账不能又写回去。整个体包 try：这是异步投递（singleShot），投递方不知道
+        窗口/控制器是否已被销毁，死包装器上的 Qt 调用会以 RuntimeError 冒成
+        unraisable（同 overlay_window._alive 的处置口径）。
+        """
+        try:
+            if not self._timer.isActive():
+                return
+            pos = QCursor.pos()
+            self._apply_through(self.should_click_through(pos), force=True)
+        except (AttributeError, OSError, RuntimeError):
+            logging.debug("显示后对账 Qt 逐像素穿透失败", exc_info=True)
 
     def set_drag_active(self, active: bool) -> None:
         """拖拽按下/松手时切换轮询频率。
@@ -218,11 +276,11 @@ class QtPerPixelInputController:
         """停表（隐藏/关闭），并清掉穿透态（``mouse_through`` 除外）。
 
         缓存作废的理由同 Windows 侧：停表期间窗口可能被外部改写/重建，下次
-        refresh 必须重新读一遍真实状态。清穿透态是因为隐藏窗口留着穿透态时，
-        下次显示到第一次 refresh 之间会是一个「整屏吞点击」的窗口。
+        refresh 必须重新读一遍真实状态。清穿透态是让「未显示」与「未穿透」对齐：
+        隐藏窗口留着穿透位没有意义，重新显示时由 ``resume``（同步收敛）与延迟对账
+        重新建立正确状态；用户手动穿透开关（``mouse_through``）是用户意愿，保留。
         """
         self._timer.stop()
-        self._applied_through = None
         self._applied_win_id = None
         if not bool(getattr(self._window, "mouse_through", False)):
             try:

@@ -210,8 +210,10 @@ class OverlayWindow(QWidget):
             # 桌面点击被整块吞掉（发布阻断项）。
             if self._input_controller is None:
                 self._input_controller = QtPerPixelInputController(self)
-            else:
-                self._input_controller.resume()
+            # 首次创建与隐藏后恢复统一走 resume：同步收敛一次穿透态（首拍定时器
+            # 之前不留「整屏吞点击」窗口）+ 重开轮询表 + 排一次延迟对账（平台显示
+            # 阶段可能又重建了原生窗口，见 platform_passthrough._reconcile_after_show）。
+            self._input_controller.resume()
 
     def hideEvent(self, event) -> None:
         """隐藏期不轮询（O2）：不可见窗口不收输入，两条探测链路都是空转。
