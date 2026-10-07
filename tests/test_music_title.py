@@ -338,3 +338,22 @@ def test_random_format_fuzz_stays_bounded():
         music_title.parse_foobar_title(title, fmt)
     elapsed = time.perf_counter() - started
     assert elapsed < _FUZZ_BUDGET_SECONDS, f"800 组随机输入用了 {elapsed:.2f}s"
+
+
+def test_titleformat_multiword_title_not_truncated():
+    """%artist% - %title% [%length%] 配多词英文歌名：歌名必须完整（歌词族终审应修 2）。
+
+    修复前最左字面量匹配把 "Hotel California 06:30" 切成 title="Hotel"、
+    length="California 06:30"——截错的名字直接进搜索与缓存。
+    """
+    from pet.music_title import parse_foobar_title
+
+    assert parse_foobar_title(
+        "Eagles - Hotel California 06:30", "%artist% - %title% [%length%]"
+    ) == ("Hotel California", "Eagles")
+    # 单字面量格式（%title% - %artist%）同样取最右分隔：多词歌名不切错
+    assert parse_foobar_title(
+        "Hotel California - Eagles", "%title% - %artist%"
+    ) == ("Hotel California", "Eagles")
+    # 中文回归：原有行为不变
+    assert parse_foobar_title("周杰伦 - 晴天", "%artist% - %title%") == ("晴天", "周杰伦")

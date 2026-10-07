@@ -36,7 +36,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import music_lyric, music_title, now_playing
+from . import music_lyric, music_title, now_playing, window_alerts
 
 log = logging.getLogger(__name__)
 
@@ -307,7 +307,7 @@ class MusicLyricController(QObject):
 
     # 类级默认：单测直接驱动 _on_lyrics_ready 时未走过 _start_track，
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
-    _pending_playback: Any = None
+    _pending_by_key: dict = None
 
     def __init__(self, window: Any) -> None:
         super().__init__(window)
@@ -324,8 +324,10 @@ class MusicLyricController(QObject):
         self._sample_wake = threading.Event()
         self._sample_stop = threading.Event()
         self._current_key: tuple[str, str] | None = None
-        # 本次播放已尝试过取词但失败的曲目——避免反复请求同一首无词的歌。
-        self._no_lyric_keys: set[tuple[str, str]] = set()
+        # 取词失败曲目的重试冷却（key → 可再次尝试的时刻）。一次网络故障
+        # 不该把这首歌在本次会话里永久拉黑（歌词族终审应修 3）——冷却 5 分钟
+        # 后允许自动重试一次，网络恢复即可自愈；冷却内不反复请求。
+        self._no_lyric_until: dict[tuple[str, str], float] = {}
         self._loading: set[tuple[str, str]] = set()
         # 是否已经历过一次切歌边界。用于跳过"开启功能时正在播、且播放器不报
         # 进度"的那首歌——那种情况无从推断进度，显示只会错位。
@@ -358,7 +360,7 @@ class MusicLyricController(QObject):
         self._last_playing: bool | None = None
         # 取词对应的那次采样。取词是异步的，结果回来时要靠它换算进度，
         # 所以必须留在实例上（也要有类级默认，便于单测直接驱动回调）。
-        self._pending_playback: Any = None
+        self._pending_by_key: dict = {}
         self._lyrics_ready.connect(self._on_lyrics_ready)
         self._playback_ready.connect(self._on_playback_ready)
 
@@ -459,7 +461,7 @@ class MusicLyricController(QObject):
     def _reset(self) -> None:
         self._tracker.reset()
         self._current_key = None
-        self._no_lyric_keys.clear()
+        self._no_lyric_until.clear()
         self._loading.clear()
         self._primed = False
         self._detected_at = None
@@ -780,13 +782,17 @@ class MusicLyricController(QObject):
         # （见 _lyric_query），两者刻意分开：显示不该被清洗规则改写。
         self._announce(title, artist)
 
-        if key in self._no_lyric_keys or key in self._loading:
+        if key in self._loading or time.monotonic() < self._no_lyric_until.get(key, 0.0):
             return
 
         # 取词走后台线程：轮询里绝不发网络请求。
         query_title, query_artist = self._lyric_query(title, artist, playback)
         self._loading.add(key)
-        self._pending_playback = playback
+        # 采样上下文按**请求键**绑定，不写实例级单一槽（歌词族终审阻塞 1）：
+        # A 取词中快切 B 再切回 A 时，实例槽已被 B 覆盖，A 的结果回来会拿 B 的
+        # position/reported 装载——A 是估算进度、B 是真值时，A 的手动对齐会被
+        # 误判置灰一整首。按 key 绑定后，A 的结果永远只读 A 自己的上下文。
+        self._pending_by_key[key] = playback
         threading.Thread(
             target=self._fetch_worker,
             args=(key, query_title, query_artist),
@@ -968,7 +974,7 @@ class MusicLyricController(QObject):
         if lyrics is None or (not lyrics.lines and not lyrics.instrumental):
             # 查不到曲目：不再重试，但**标题继续常驻**——
             # 用户要的是"歌名长期显示"，查不到也不该让气泡空掉或消失。
-            self._no_lyric_keys.add(key)
+            self._no_lyric_until[key] = time.monotonic() + 300.0
             if self._title_line and not self._bubble_blocked():
                 self._show("", title=self._title_line, force=True)
             return
@@ -977,7 +983,7 @@ class MusicLyricController(QObject):
             return
 
         now = time.monotonic()
-        playback = self._pending_playback
+        playback = self._pending_by_key.pop(key, None)
         reported = getattr(playback, "position", None) if playback is not None else None
         if reported is not None:
             # 有真实进度（如 QQ 音乐）：从"读到该值的时刻"回推到此刻，
@@ -995,6 +1001,11 @@ class MusicLyricController(QObject):
                            reported=reported is not None)
         if self._bubble_blocked():
             return
+        # 歌词到位时若「进度估算提示」还占着气泡（首首那 12s），歌词优先——
+        # 提示是一次性引导，歌词是功能本体：用既有 resolve_alert 精确收起
+        # 那一条（不误伤队列里的其它提醒），否则用户第一首歌 12 秒零帧歌词。
+        if getattr(self.win, "_alert_current", None) is not None and                 self.win._alert_current.get("id") == "music-lyric-estimated":
+            window_alerts.resolve_alert(self.win, "music-lyric-estimated")
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。
         index = self._tracker.advance(now)
         self._last_lyric = self._tracker.text_at(index) if index >= 0 else ""

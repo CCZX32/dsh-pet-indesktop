@@ -502,23 +502,47 @@ def _assign_fields(values: dict, pending: list, chunk: str) -> bool:
     return True
 
 
+def _find_literal_right(text: str, literal: str, start: int) -> tuple[int, int] | None:
+    """从右往左找字面量（**最后一个**字面量专用，见 ``_match_items``）。"""
+    if _WHITESPACE_RE.search(literal) is None:
+        at = text.rfind(literal, start)
+        return None if at < 0 else (at, at + len(literal))
+    last = None
+    for match in _literal_pattern(literal).finditer(text, start):
+        last = match
+    if last is None:
+        return None
+    return (last.start(), last.end())
+
+
 def _match_items(items: tuple, text: str) -> dict | None:
     """按 ``字面量 / 字段`` 序列消费 ``text``，返回字段取值；对不上返回 ``None``。
 
-    单向扫描，**没有回溯**：每个字面量取它在当前位置之后的**最左**出现，于是
-    "前一个字段尽可能短、最后一个字段吃掉剩余"。循环次数受 items 与 text 长度
-    共同约束，最坏 O(len(items) × len(text))。
+    单向扫描，**没有回溯**：中间字面量取它在当前位置之后的**最左**出现，于是
+    "前一个字段尽可能短、最后一个字段吃掉剩余"。**最后一个字面量取最右出现**
+    （歌词族终审应修 2）：歌名常带空格，``%artist% - %title% [%length%]`` 配
+    ``Eagles - Hotel California 06:30`` 时，最左匹配会把 ``Hotel`` 当歌名、
+    把 ``California 06:30`` 全塞给 %length%——最右匹配才切得出 ``Hotel
+    California``。循环次数受 items 与 text 长度共同约束，最坏
+    O(len(items) × len(text))。
     """
+    last_literal_at = -1
+    for index, item in enumerate(items):
+        if not isinstance(item, _Field) and item.text:
+            last_literal_at = index
     values: dict = {}
     start = 0
     pending: list[str] = []
-    for item in items:
+    for index, item in enumerate(items):
         if isinstance(item, _Field):
             pending.append(item.name)
             continue
         if not item.text:
             continue
-        found = _find_literal(text, item.text, start)
+        if index == last_literal_at:
+            found = _find_literal_right(text, item.text, start)
+        else:
+            found = _find_literal(text, item.text, start)
         if found is None:
             return None
         if not _assign_fields(values, pending, text[start:found[0]]):

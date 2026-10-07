@@ -418,9 +418,37 @@ def test_title_kept_when_song_has_no_lyrics():
     ctrl._title_line = "我在唱《x》"
     ctrl._on_lyrics_ready(("x", "y"), None)
 
-    assert ("x", "y") in ctrl._no_lyric_keys
+    assert ("x", "y") in ctrl._no_lyric_until, "失败应进重试冷却（不是永久拉黑）"
     assert win.shown[-1] == ("", "我在唱《x》"), win.shown[-1]
     assert ctrl._title_line == "我在唱《x》"
+
+
+def test_no_lyric_retry_after_cooldown_not_permanent_blacklist():
+    """一次失败只冷却 5 分钟（歌词族终审应修 3）：冷却内不重试，冷却外允许。"""
+    import time as _time
+
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    ctrl._current_key = ("x", "y")
+    ctrl._title_line = "我在唱《x》"
+    ctrl._on_lyrics_ready(("x", "y"), None)
+    until = ctrl._no_lyric_until[("x", "y")]
+    assert _time.monotonic() < until <= _time.monotonic() + 300.5
+
+    # 冷却内：_start_track 早退，不发取词
+    started = []
+    ctrl._loading.discard(("x", "y"))
+    ctrl._lyric_query = lambda *a, **k: started.append(1) or ("t", "a")
+    ctrl._start_track(("x", "y"), "x", "y", _playback(None), _time.monotonic())
+    assert started == [], "冷却内不许重复取词"
+
+    # 冷却外：允许重试（网络恢复可自愈）
+    ctrl._no_lyric_until[("x", "y")] = _time.monotonic() - 1.0
+    ctrl._primed = True
+    ctrl._start_track(("x", "y"), "x", "y", _playback(None), _time.monotonic())
+    assert started == [1], "冷却外必须允许重试"
 
 
 def test_title_goes_into_body_when_no_lyric():
@@ -1133,7 +1161,7 @@ def test_start_track_first_song_without_position_fetches_lyrics(monkeypatch):
     ctrl._start_track(("夜曲", "周杰伦"), "夜曲", "周杰伦", _playback(None), 100.0)
 
     assert ("夜曲", "周杰伦") in ctrl._loading, "应已进入取词中"
-    assert ctrl._pending_playback is not None
+    assert ctrl._pending_by_key.get(("夜曲", "周杰伦")) is not None
     assert started.wait(5.0), "取词线程应被启动"
 
 
@@ -1293,4 +1321,144 @@ def test_bypassing_system_proxy_is_logged_once(monkeypatch, caplog):
     hits = [r.getMessage() for r in caplog.records if "系统代理" in r.getMessage()]
     assert len(hits) == 1, hits
     assert "127.0.0.1:12450" in hits[0], hits[0]
+
+
+
+# ---------------------------------------------------------------- 三源解析器 fixture（真实响应形态）
+# 2026-10-10 调查实锤：三个真实源解析器此前零覆盖（fetch 用例全部拿 lambda 桩换掉
+# _SOURCES），上游字段改名（网易云 artists→ar）在测试里不可见——这次事故的本来形态。
+# 以下 fixture 按当刻真实响应结构录制，堵住「结构变了测试还绿」这一类死法。
+
+class TestRealSourceParsers:
+    """三源解析器的真实响应 fixture（不碰网络：_http_get_json 全替身）。"""
+
+    @staticmethod
+    def _patch_http(monkeypatch, responses):
+        """按 URL 前缀分发录制响应；未命中前缀返回 None（模拟接口异常）。"""
+        def fake_get(url, **kwargs):
+            for prefix, payload in responses.items():
+                if prefix in url:
+                    return payload
+            return None
+        monkeypatch.setattr(music_lyric, "_http_get_json", fake_get)
+
+    def test_netease_matches_artist_via_ar_field(self, monkeypatch):
+        """现行响应：歌手在 ar（无 artists 字段）——本次事故的回归钉。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 12345, "name": "还是你的笑容最可爱",
+                 "ar": [{"name": "音阙诗听"}, {"name": "赵方婧"}],
+                 "al": {"name": "专辑"}},
+            ]}},
+            "song/lyric": {"lrc": {"lyric": "[00:01.00]第一句\n[00:05.00]第二句"}},
+        })
+        lyrics = music_lyric._fetch_from_netease("还是你的笑容最可爱", "音阙诗听")
+        assert lyrics is not None, "ar 字段必须能匹配歌手（artists 已下线）"
+        assert len(lyrics.lines) == 2
+
+    def test_netease_legacy_artists_field_still_works(self, monkeypatch):
+        """旧响应形态（artists）：向前兼容不丢。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 222, "name": "歌", "artists": [{"name": "歌手甲"}]},
+            ]}},
+            "song/lyric": {"lrc": {"lyric": "[00:01.00]词"}},
+        })
+        lyrics = music_lyric._fetch_from_netease("歌", "歌手甲")
+        assert lyrics is not None and len(lyrics.lines) == 1
+
+    def test_netease_candidates_without_match_logs_warning(self, monkeypatch, caplog):
+        """搜得到但无人匹配必须留 warning——静默失效是上次事故的共犯。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 1, "name": "歌", "ar": [{"name": "别人"}]},
+            ]}},
+        })
+        import logging
+        with caplog.at_level(logging.WARNING, logger="pet.music_lyric"):
+            assert music_lyric._fetch_from_netease("歌", "查无此人") is None
+        assert any("无人匹配歌手" in rec.message for rec in caplog.records)
+
+    def test_lrclib_synced_lyrics_parsed(self, monkeypatch):
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {
+                "syncedLyrics": "[00:01.00]line one\n[00:03.00]line two",
+                "plainLyrics": "line one\nline two",
+                "instrumental": False,
+            },
+        })
+        lyrics = music_lyric._fetch_from_lrclib("song", "artist")
+        assert lyrics is not None and len(lyrics.lines) == 2
+
+    def test_lrclib_plain_only_returns_none(self, monkeypatch):
+        """只有 plainLyrics（无时间轴）按设计返回 None——逐行歌词对齐用不了它。"""
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {"syncedLyrics": None, "plainLyrics": "a\nb",
+                                   "instrumental": False},
+        })
+        assert music_lyric._fetch_from_lrclib("song", "artist") is None
+
+    def test_lrclib_instrumental_flag(self, monkeypatch):
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {"syncedLyrics": None, "instrumental": True},
+        })
+        lyrics = music_lyric._fetch_from_lrclib("ost", "composer")
+        assert lyrics is not None and lyrics.instrumental is True
+
+    def test_qq_parser_with_recorded_shape(self, monkeypatch):
+        """QQ search 接口上游 500 是上游的事，解析器本身按录制形态必须有牙。"""
+        self._patch_http(monkeypatch, {
+            "client_search_cp": {"data": {"song": {"list": [
+                {"songmid": "mid123", "songname": "歌",
+                 "singer": [{"name": "歌手甲"}]},
+            ]}}},
+            "fcg_query_lyric_new": {"retcode": 0, "lyric": "[00:01.00]词一"},
+        })
+        lyrics = music_lyric._fetch_from_qq("歌", "歌手甲")
+        assert lyrics is not None and len(lyrics.lines) == 1
+
+
+class TestPendingPlaybackIsBoundPerRequest:
+    """A→B→A 快切时不许拿 B 的采样上下文装载 A 的歌词（歌词族终审阻塞 1）。
+
+    修复前：实例级 ``_pending_playback`` 被 B 覆盖，A 的结果回来读 B 的
+    position/reported——A 无进度、B 有进度时 A 被装成 reported=True，之后
+    A 每拍 position=None 清不掉它，「歌词对齐」整组置灰一整首。
+    """
+
+    def _controller(self, monkeypatch):
+        import pet.music_lyric_controller as mlc
+
+        monkeypatch.setattr(mlc.MusicLyricController, "_announce", lambda self, *a, **k: None)
+        monkeypatch.setattr(mlc.MusicLyricController, "_show", lambda self, *a, **k: None)
+        monkeypatch.setattr(mlc.MusicLyricController, "_bubble_blocked", lambda self: False)
+        return mlc, mlc.MusicLyricController(_FakeWin())
+
+    @staticmethod
+    def _playback(position, updated_at):
+        from types import SimpleNamespace
+        return SimpleNamespace(position=position, updated_at=updated_at)
+
+    def test_stale_pending_playback_never_leaks_across_songs(self, monkeypatch):
+        mlc, ctl = self._controller(monkeypatch)
+        pb_a = self._playback(None, 100.0)        # A 无真实进度（网易云型）
+        pb_b = self._playback(42.0, 100.0)        # B 有真实进度（QQ 音乐型）
+
+        # A 开始取词 → 快切 B → 再切回 A（A 在 _loading 早退，不重建上下文）
+        monkeypatch.setattr(ctl, "_lyric_query", lambda t, a, p: (t, a))
+        ctl._start_track("keyA", "歌A", "手A", pb_a, now=100.0)
+        ctl._start_track("keyB", "歌B", "手B", pb_b, now=101.0)
+        ctl._start_track("keyA", "歌A", "手A", pb_a, now=102.0)   # _loading 命中，早退
+        ctl._current_key = "keyA"
+
+        # A 的结果回来：必须读 A 自己的（无进度）上下文——reported=False
+        from pet.music_lyric import LyricLine, Lyrics
+        lyrics = Lyrics(lines=(LyricLine(1.0, "第一句"), LyricLine(5.0, "第二句")))
+
+        monkeypatch.setattr(ctl, "_enter_instrumental_mode", lambda l: None)
+        ctl._on_lyrics_ready("keyA", lyrics)
+        loaded = ctl._tracker
+        assert getattr(loaded, "_reported_position", None) in (False, None), (
+            "A 的歌词被 B 的真实进度污染（reported=True 会置灰对齐一整首）")
+
 
