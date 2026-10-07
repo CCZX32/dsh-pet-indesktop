@@ -101,7 +101,9 @@ def test_stream_capture_copy_same_restart_copy_when_already_checked(tmp_path, mo
     try:
         row = dialog.findChild(settings_mod.SettingRow,
                                "settingRow_stream_capture")
-        hint = row.hint_label.text()
+        # 设置页第三刀（2026-10-08）：被改过的行会在 hint 末尾追加一行默认值小字
+        # （「默认：关」），本用例只关心重启级文案那一段，逐字断言照旧。
+        hint = row.hint_label.text().split("\n默认：", 1)[0]
         checked = dialog.stream_capture_check.isChecked()
     finally:
         _close(dialog)

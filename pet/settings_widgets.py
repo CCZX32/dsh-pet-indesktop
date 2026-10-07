@@ -948,12 +948,33 @@ class SettingRow(QFrame):
             control.setAccessibleName(title)
         if hint and not control.accessibleDescription():
             control.setAccessibleDescription(hint)
+        # 「已修改」标记 + 单项「改回默认」入口（设置页第三刀）。默认态两者都收起，行的
+        # 呈现与改动前逐位一致；样式全部复用既有令牌（标记走 settingHint 的小字、按钮走
+        # 通用 QPushButton），不新增 QSS 面。谁点亮由对话框判定，本类只负责呈现。
+        self.modified_mark = QLabel("· 已修改", self)
+        self.modified_mark.setObjectName("settingHint")
+        self.modified_mark.hide()
+        self.default_reset_button = QPushButton("改回默认", self)
+        self.default_reset_button.setObjectName("settingDefaultReset")
+        self.default_reset_button.setAutoDefault(False)
+        self.default_reset_button.setDefault(False)
+        self.default_reset_button.setToolTip("把这一项改回默认值（保存并退出时生效）")
+        # 一页里有几十个同名按钮，读屏必须能说清是改哪一项（Tab 到才听得懂）
+        self.default_reset_button.setAccessibleName(f"把「{title}」改回默认值")
+        self.default_reset_button.hide()
+        mark_line = QHBoxLayout()
+        mark_line.setContentsMargins(0, 0, 0, 0)
+        mark_line.setSpacing(8)
+        mark_line.addWidget(self.modified_mark)
+        mark_line.addWidget(self.default_reset_button)
+        mark_line.addStretch(1)
         if stacked:
             row = QVBoxLayout(self)
             row.setContentsMargins(16, 10, 16, 10)
             row.setSpacing(0)
             row.addWidget(label)
             row.addWidget(hint_label)
+            row.addLayout(mark_line)
             row.addSpacing(7)
             row.addWidget(control)
             self._responsive_layout = None
@@ -967,6 +988,7 @@ class SettingRow(QFrame):
             copy.setSpacing(2)
             copy.addWidget(label)
             copy.addWidget(hint_label)
+            copy.addLayout(mark_line)
             copy.addStretch(1)
             row.addLayout(copy, 1)
             row.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -975,6 +997,24 @@ class SettingRow(QFrame):
         self.label = label
         self.hint_label = hint_label
         self.control = control
+
+    def set_default_state(self, default_text: str | None, *, can_reset: bool) -> None:
+        """切换本行的「已修改」呈现；``default_text=None`` 表示当前值就是默认值。
+
+        基线 hint 取「当前文本去掉上一次追加的默认值行」，而不是构造时那份原文：
+        别的入口会往 hint 尾部追加说明（子宠页的范围说明见
+        ``settings_pet_controls._apply_window_scope_rows``），写死原文会把它们抹掉。
+        每次刷新都重取基线，外部改写与这里的增删就不会互相踩。
+        依赖隐藏不做可见性记账：标记与按钮各自 ``setVisible``，父行不可见时它们自然
+        不呈现，父行重新显示后标记跟着回来（依赖行"改过没有"这件事一直记着）。
+        """
+        modified = default_text is not None
+        base_hint = self.hint_label.text().split("默认：", 1)[0].rstrip("\n")
+        self.hint_label.setText(
+            base_hint if not modified else f"{base_hint}\n默认：{default_text}"
+        )
+        self.modified_mark.setVisible(modified)
+        self.default_reset_button.setVisible(modified and can_reset)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

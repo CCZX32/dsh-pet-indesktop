@@ -162,6 +162,7 @@ from .persona_template import (
     CONDITIONAL_PARAMETERS,
     PARAMETERS,
 )
+from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
@@ -1048,6 +1049,8 @@ class ModernSettingsDialog(QDialog):
             from .settings_standalone import install_standalone_hooks
 
             install_standalone_hooks(self)
+        # 全部行（含域导航重建时才造出来的文件识别行）就位后再装「已修改」标记
+        settings_default_marks.install(self)
 
     def _sync_menu_action_states(self, *_args) -> None:
         enabled = set(self.menu_available_actions)
@@ -2432,6 +2435,8 @@ class ModernSettingsDialog(QDialog):
                 "保存失败",
                 "配置未能写入磁盘，改动可能在重启后丢失。\n\n配置路径：" + str(self.config.path),
             )
+        # 写回之后再对齐一次标记：落盘后的配置值才是「已改过没」的现行答案
+        settings_default_marks.refresh(self)
         return ok
 
     def _on_voice_chime_preview(self, text: str) -> None:
