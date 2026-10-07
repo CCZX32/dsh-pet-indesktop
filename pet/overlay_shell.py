@@ -2975,6 +2975,8 @@ class OverlayShell(QObject):
             for sprite, label in self._pet_entries():
                 # 子菜单也是同一个原生跟踪会话的一部分，会话中做这些同样会被抑制：
                 # 三条子项与顶层同族（同一批窗面/显隐状态），一律延迟派发。
+                # 关闭观测目标由 ``add_tray_action`` 统一取整棵树（``shared._menu_tree``）：
+                # 子菜单关掉 ≠ 会话结束，根菜单还开着就还在同一次原生跟踪里。
                 sub = menu.addMenu(label)
                 add_tray_action(sub, "回到右下角",
                                 lambda s=sprite: self._go_default_corner(s))

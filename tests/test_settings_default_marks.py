@@ -217,6 +217,14 @@ def test_single_reset_keeps_config_and_disk_untouched(env):
     _reveal(dialog, row)
     original_hint = row.hint_label.text()
 
+    # 前置：先把出厂配置落盘，磁盘断言才有可断的对象（"文件不存在就整段跳过"等于
+    # 没断——条件守卫一旦因环境变化不成立，这条验收会静默失效而不是变红）。
+    cfg.save()
+    config_path = cfg.dir / "config.json"
+    assert config_path.exists(), "前提：磁盘上已有一份出厂配置"
+    on_disk_before = config_path.read_text(encoding="utf-8")
+    assert json.loads(on_disk_before)["balance_refresh_minutes"] == 0, "前提：磁盘上是出厂值"
+
     row.control.setValue(30)
     app.processEvents()
     assert not row.modified_mark.isHidden()
@@ -228,13 +236,10 @@ def test_single_reset_keeps_config_and_disk_untouched(env):
     assert row.modified_mark.isHidden()
     assert row.default_reset_button.isHidden()
     assert row.hint_label.text() == original_hint  # hint 恢复原文，不残留默认值小字
-    # 保存前不碰 Config：内存与磁盘都还是出厂值
+    # 保存前不碰 Config：内存与磁盘都还是出厂值（磁盘按整份内容比对，不只是那一个键）
     assert cfg.get("balance_refresh_minutes") == 0
-    config_path = cfg.dir / "config.json"
-    if config_path.exists():
-        assert json.loads(config_path.read_text(encoding="utf-8"))[
-            "balance_refresh_minutes"
-        ] == 0
+    assert config_path.read_text(encoding="utf-8") == on_disk_before, \
+        "重置不得写盘（整份内容逐字比对，不是只看那一个键）"
 
 
 def test_single_reset_of_an_immediate_save_row_writes_through_at_once(env):

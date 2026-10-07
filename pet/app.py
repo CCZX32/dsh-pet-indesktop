@@ -2791,10 +2791,16 @@ class AppShell:
         唯一合成窗，那里走壳自己的 ``set_pet_visible(True)``（``overlay.show()`` +
         共享子系统 resume + 岛状态同步，与岛单击 toggle 同一条路，见
         ``overlay_shell.py`` 的 ``set_pet_visible``）。
+
+        整窗恢复之后还要补一手**逐只恢复**（见 :meth:`_restore_overlay_sprites`）：
+        壳的逐只隐藏是用户显式决定（托盘「显示这只」），``set_pet_visible(True)``
+        按设计保留它——只走整窗恢复的话，逐只全藏过的桌宠"窗在、宠不在"，岛却被
+        标成可见。
         """
         overlay = getattr(self, "_overlay_shell", None)
         if overlay is not None:
             overlay.set_pet_visible(True)
+            self._restore_overlay_sprites(overlay)
         else:
             for inst in getattr(self, "_instances", []):
                 win = getattr(inst, "win", None)
@@ -2806,6 +2812,28 @@ class AppShell:
         bubble = getattr(self, "island_chat", None)
         if bubble is not None and shiboken6.isValid(bubble):
             bubble.close()
+
+    def _restore_overlay_sprites(self, shell) -> None:
+        """整窗恢复后仍无可见 sprite 时，把逐只被藏的 sprite 全部恢复可见。
+
+        ``OverlayShell.set_pet_visible`` 的语义是「整窗显隐保留逐只选择」（壳的
+        ``_set_all_clips_paused`` 恢复侧显式跳过 ``visible`` 为假的 sprite，托盘
+        「显示这只」的隐藏不会被整窗显示悄悄解除）——那条语义是对的，问题在于岛
+        气泡「显示桌宠」是**唯一**能把隐藏的桌宠叫回来的手柄（桌宠不可见时用户够
+        不着托盘逐只菜单），它不能只恢复窗。
+
+        只在**一只可见的都没有**时才补这一步：有可见 sprite 就一根逐只标志都不碰，
+        用户的逐只选择原样保留；没有 sprite 清单的精简装配/测试替身按「窗口可见即
+        可见」处理（与 :meth:`_overlay_sprite_visible` 同一口径），什么都不做。
+        """
+        if self._overlay_sprite_visible(shell):
+            return
+        setter = getattr(shell, "set_sprite_visible", None)
+        if not callable(setter):
+            return
+        sprites = getattr(getattr(shell, "overlay", None), "sprites", ()) or ()
+        for sprite in list(sprites):
+            setter(sprite, True)
 
     def _open_settings_from_island(self) -> None:
         inst = self.instance

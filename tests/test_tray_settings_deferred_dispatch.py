@@ -515,6 +515,55 @@ def test_overlay_tray_per_pet_submenu_waits_for_menu_close(tmp_path):
         _close_overlay_tray(shell)
 
 
+def test_overlay_tray_submenu_entry_waits_for_the_whole_menu_tree(tmp_path):
+    """逐只子菜单条目的关闭观测目标是**整棵树**（根菜单 + 子菜单），不是子菜单单点。
+
+    ``add_tray_action(sub, ...)`` 此前只看 ``sub`` 自己：Windows 的 Qt popup 下关掉
+    根菜单会连带各层子菜单一起消失，所以"子菜单看不见了"碰巧等价于"整棵树关了"；
+    macOS 的托盘菜单是 AppKit 原生 NSMenu 跟踪会话，判定必须落在整棵树上——任一层
+    还开着就仍在这个会话里，回调此时执行照样被抑制（issue #4 家族）。
+
+    与其余子菜单用例的区别：这里真把 sub 也 ``show()`` 出来，断言根菜单与子菜单
+    都关闭之后回调才执行（回调执行瞬间的菜单开合状态是断言对象，不是等执行完再看）。
+    """
+    shell, menu = _overlay_tray(tmp_path)
+    try:
+        shell.spawn_pet()
+        menu = shell.tray.contextMenu()          # 生灭会重建菜单，重取
+        first = shell._spawned[0]
+        sub = _submenu(menu, f"小肥鱼 [slot-{shell._spawned_slots[first]}]")
+        corner = _entry(sub, "回到右下角")
+        expected = shell._default_corner_pos(shell._bounds, first.rect())
+        first.set_pos(QPointF(0, 0))
+        shell.sprite.set_pos(QPointF(11, 13))    # 主宠挪开：错路由时位置不会碰巧相等
+        main_pos = QPointF(shell.sprite.pos)
+
+        observed: list = []
+        real_corner = shell._go_default_corner
+
+        def spy(sprite, *args, **kwargs):
+            observed.append((menu.isVisible(), sub.isVisible()))
+            return real_corner(sprite, *args, **kwargs)
+
+        shell._go_default_corner = spy
+
+        _open_menu(menu)
+        sub.show()
+        app.processEvents()
+        assert sub.isVisible(), "前提：子菜单在显示态"
+
+        corner.trigger()
+        assert not sub.isVisible(), "点击后子菜单必须先关"
+        assert not menu.isVisible(), "根菜单也必须一起关（观测目标是整棵树，不是子菜单单点）"
+
+        assert _wait_until(lambda: first.pos == expected), "整棵树关闭后必须归位一次"
+        assert observed == [(False, False)], \
+            f"回调执行时整棵树必须都已关闭，实际开合状态 {observed}"
+        assert shell.sprite.pos == main_pos, "主宠不该被逐只动作带走"
+    finally:
+        _close_overlay_tray(shell)
+
+
 def test_overlay_tray_menu_open_syncs_check_marks_without_side_effects(tmp_path):
     """overlay 托盘弹出只同步勾选态看相，绝不顺手执行副作用。
 

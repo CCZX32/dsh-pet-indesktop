@@ -120,6 +120,18 @@ def _menu_open(menu: QMenu) -> bool:
         return False
 
 
+def _menu_tree(menu: QMenu) -> list:
+    """菜单所在的**整棵** popup 树：根菜单 + 各级子菜单。
+
+    传入子菜单时必须回到根：子菜单关掉不等于菜单会话结束——根菜单还开着就仍处于
+    同一个原生跟踪会话里（macOS 的 AppKit NSMenu 尤其如此；Windows 的 Qt popup 下
+    根菜单关闭会顺带收掉子菜单，所以那条路径只是**碰巧**等价）。``QMenu.addMenu``
+    建的子菜单以父菜单为 parent，``findChildren`` 递归拿到全部层级。
+    """
+    root = _root_menu(menu)
+    return [root, *root.findChildren(QMenu)]
+
+
 def run_after_menu_closed(menu: QMenu, callback) -> None:
     """关闭菜单，并把命令推迟到菜单（及其原生跟踪会话）结束后执行。
 
@@ -138,18 +150,25 @@ def run_after_menu_closed(menu: QMenu, callback) -> None:
     病态情况下宁可晚执行也不吞掉用户的点击）。Cocoa 的菜单跟踪跑在自身
     run loop 模式，会压住这次定时器，命令自然落在跟踪会话结束之后。
 
-    定时器不绑 context（``AppShell`` 不是 QObject）；轮询链由闭包持有菜单与
+    **关闭与观测的对象是整棵树，不是传进来的那一个菜单**（``_menu_tree``）：
+    子菜单条目（``add_tray_action(sub, ...)``）以前只看 ``sub`` 自己，而子菜单
+    关闭并不等于会话结束——根菜单还开着就还在同一次原生跟踪里，回调此时执行照样
+    会被 AppKit 抑制。逐只子菜单的三条动作正是这么接的。
+
+    定时器不绑 context（``AppShell`` 不是 QObject）；轮询链由闭包持有菜单树与
     回调，最长 3 秒，不会长期吊住对象。
     """
-    close = getattr(menu, "close", None)
-    if callable(close):
-        try:
-            close()
-        except RuntimeError:
-            pass
+    tree = _menu_tree(menu)
+    for item in tree:
+        close = getattr(item, "close", None)
+        if callable(close):
+            try:
+                close()
+            except RuntimeError:
+                pass
 
     def check(attempt: int = 0) -> None:
-        if _menu_open(menu):
+        if any(_menu_open(item) for item in tree):
             if attempt >= _MENU_CLOSE_POLL_MAX:
                 callback()
                 return
