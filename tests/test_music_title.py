@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import random
+import time
+
 from pet import music_title
 
 
@@ -199,3 +202,139 @@ def test_parse_rejects_format_without_title_field():
 
 def test_parse_strips_whitespace():
     assert music_title.parse_foobar_title("  晴天  ") == ("晴天", "")
+
+
+def test_space_only_separator_requires_real_whitespace():
+    """格式串里只有一个空格当分隔符时，窗口标题里必须有真空白。
+
+    这是从"每个占位符都翻译成 ``.+?``"换成逐段扫描后顺手修掉的老毛病：旧实现
+    把空白放宽成 ``\\s*``，于是 ``%title% %artist%`` 对 ``晴天 周杰伦`` 会在位置 0
+    匹配到**空**的空白段，切出 ``(晴, 天 周杰伦)`` 这种碎片。
+    """
+    assert music_title.parse_foobar_title(
+        "晴天 周杰伦", "%title% %artist%"
+    ) == ("晴天", "周杰伦")
+
+
+def test_format_with_trailing_blank_literal_still_parses():
+    """格式串首尾的空白字面量不强制要求：读到的窗口标题已经去过首尾空白。
+
+    ``%artist% - %title% ``（末尾多打一个空格）在旧实现里靠"空白放宽成 ``\\s*``"
+    侥幸能用；改成"字段之间的空白必须真吃到"之后就得单独兜住首尾这一对，
+    否则用户只是多打一个空格，整条格式串就静默退回不猜了。
+    """
+    assert music_title.parse_foobar_title(
+        "周杰伦 - 晴天", "%artist% - %title% "
+    ) == ("晴天", "周杰伦")
+    assert music_title.parse_foobar_title(
+        "周杰伦 - 晴天", " %title%"
+    ) == ("周杰伦 - 晴天", "")
+
+
+def test_format_with_optional_length_field():
+    """``%artist% - %title% [%length%]``：带/不带时长两种渲染都要能解析。
+
+    旧实现对这个格式串**恒返回 None**（整条链路当成"没有曲目"），而它是社区里
+    常见的窗口标题写法——属于这次重写顺手修掉的行为。
+    """
+    assert music_title.parse_foobar_title(
+        "周杰伦 - 晴天 [04:29]", "%artist% - %title% [%length%]"
+    ) == ("晴天", "周杰伦")
+    # 条件段不出现时渲染结果末尾会留一个空格，读回来已被去掉
+    assert music_title.parse_foobar_title(
+        "周杰伦 - 晴天", "%artist% - %title% [%length%]"
+    ) == ("晴天", "周杰伦")
+
+
+# ------------------------------------- 病态格式串必须快速失败（ReDoS 回归，M7）
+#
+# 背景（2026-10 扩大终审）：旧实现把每个占位符翻译成 `.+?`、条件段翻译成可选组，
+# 于是"一段相邻的不受限字段 + 一个在标题里找不到的字面量"构成了组合爆炸：
+# 匹配失败前要把 n 个字符切给 k 个字段的所有分法试一遍。本机实测（修复前）：
+#
+#     "%title%" + "%album%"*8 + "X"（64 字符，**未超配置的 120 字上限**）
+#        标题 "a"*30 -> 0.26s / "a"*40 -> 4.13s / "a"*50 -> **34.03s**
+#
+# 危害不是"慢"：CPython 的正则回溯持 GIL，而这条路径跑在歌词采样线程上
+# （music_lyric_controller 的常驻采样线程），被钉住就是歌词与切歌检测整条停摆。
+# 同一个进程里其它 Python 线程也一起挨饿。
+#
+# 断言口径：**同一病态输入重复 3 次的总耗时上限**。上限取得很宽（修复后实测
+# 约 1ms，即便 CI 慢 100 倍也远低于它）——它只用来钉住"指数级/组合爆炸"，
+# 不是基准测试。
+_PATHOLOGICAL_MATCH_REPEATS = 3
+_PATHOLOGICAL_MATCH_BUDGET_SECONDS = 0.5
+# 有界模糊的总预算（800 组，修复后实测约 40ms；CI 慢 20 倍也过得去）。
+_FUZZ_BUDGET_SECONDS = 1.0
+_PATHOLOGICAL_FORMATS = (
+    # 终审给的原始形态（64 字符）
+    ("%title%" + "%album%" * 8 + "X", "a" * 35),
+    # 换成另一个我们关心的字段，形态相同
+    ("%title%" + "%artist%" * 8 + "X", "a" * 35),
+    # 字段更多（106 字符，仍在 120 上限内）：修复前 7.6s
+    ("%title%" + "%album%" * 14 + "X", "a" * 30),
+    # 关心字段夹在中间（85 字符）：修复前 2.3s
+    ("%album%" * 3 + "%title%" + "%album%" * 8 + "X", "a" * 30),
+)
+
+
+def test_pathological_format_strings_fail_fast():
+    """病态格式串必须在毫秒级失败，而不是组合爆炸式回溯。"""
+    for fmt, title in _PATHOLOGICAL_FORMATS:
+        started = time.perf_counter()
+        for _ in range(_PATHOLOGICAL_MATCH_REPEATS):
+            music_title.parse_foobar_title(title, fmt)
+        elapsed = time.perf_counter() - started
+        assert elapsed < _PATHOLOGICAL_MATCH_BUDGET_SECONDS, (
+            f"格式串 {fmt!r}（{len(fmt)} 字符）匹配 {len(title)} 字标题，"
+            f"{_PATHOLOGICAL_MATCH_REPEATS} 次用了 {elapsed:.2f}s"
+            f"（上限 {_PATHOLOGICAL_MATCH_BUDGET_SECONDS}s）——回溯又回来了"
+        )
+
+
+def test_pathological_format_still_returns_a_usable_answer():
+    """快速失败不等于放弃：切不出来就退回"不猜"，标签照常显示。"""
+    fmt = "%title%" + "%album%" * 8 + "X"
+    title = "a" * 35
+    # 没有书名号、也没有分隔符 → 单段 → 歌名即整条、歌手留空（见 _haystack_artist）
+    assert music_title.parse_foobar_title(title, fmt) == (title, "")
+
+
+def test_over_complex_conditional_format_falls_back_to_auto():
+    """条件段太多时**不展开**（2^n 会炸），直接退回不猜。
+
+    10 个条件段 = 1024 条候选；上限是 16 条（4 个条件段），超过就判定"这不是
+    我们能可靠解析的格式串"。结果与不猜口径一致：整条当歌名、单段歌手留空。
+    """
+    fmt = "[%artist%]" * 10 + "%title%"
+    title = "a" * 35 + "周杰伦"
+    started = time.perf_counter()
+    got = music_title.parse_foobar_title(title, fmt)
+    elapsed = time.perf_counter() - started
+    assert got == (title, "")
+    assert elapsed < _PATHOLOGICAL_MATCH_BUDGET_SECONDS, f"{elapsed:.2f}s"
+
+
+def test_random_format_fuzz_stays_bounded():
+    """有界模糊：随机格式串 × 随机标题，任何组合都不许慢下来。
+
+    单点回归只能钉住已知形态；这一条用一个**固定种子**的随机语料把"格式串空间
+    里没有别的爆炸角落"也钉住（固定种子 = 可复现，不是掷骰子）。语料里刻意塞
+    了方括号、引号、`%`、空白与中英混排。
+    """
+    rng = random.Random(20261007)
+    pieces = (
+        "%title%", "%artist%", "%album%", "%tracknumber%", "%length%",
+        " - ", " / ", " ", "  ", "[", "]", "'", ".", "%artist% - ",
+        "%title% ", " (", ")", "%title%", "%artist%",
+    )
+    alphabet = "ab -/[]()%AB周杰伦"
+    started = time.perf_counter()
+    for _ in range(800):
+        fmt = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 9)))[:120]
+        title = "".join(
+            rng.choice(alphabet) for _ in range(rng.randint(1, 90))
+        )
+        music_title.parse_foobar_title(title, fmt)
+    elapsed = time.perf_counter() - started
+    assert elapsed < _FUZZ_BUDGET_SECONDS, f"800 组随机输入用了 {elapsed:.2f}s"

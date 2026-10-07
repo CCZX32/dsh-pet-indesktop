@@ -48,6 +48,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 # 清洗结果的可用下限（去空白与分隔符后的字符数）。低于它一律退回原文。
 MIN_QUERY_CHARS = 2
@@ -302,66 +303,249 @@ def clean_web_title(raw_title: str, raw_artist: str = "") -> tuple[str, str]:
 
 
 # ------------------------------------------------------ foobar2000 窗口标题解析
+#
+# **这里刻意不用"把格式串编译成正则"的做法**（2026-10 扩大终审 M7）：占位符翻译
+# 成 `.+?`、条件段翻译成可选组之后，"一段相邻的不受限字段 + 一个在标题里找不到的
+# 字面量"就是组合爆炸——匹配失败前要把 n 个字符切给 k 个字段的所有分法试一遍。
+# 本机实测（修复前）`"%title%"+"%album%"*8+"X"` 匹配 50 个 "a" 的标题要 34 秒，
+# 而这段代码跑在歌词采样线程上（**Python 正则回溯持 GIL**，钉住它等于歌词与切歌
+# 检测一起停摆）。改成下面的**分段扫描**：每个字面量用 `str.find` / 无回溯的
+# 小正则定位，字段取两段字面量之间的文本；所有循环都有硬上限。
 
 # titleformat 里的字段占位符、条件段方括号。
 _FMT_TOKEN_RE = re.compile(r"%([A-Za-z_][A-Za-z0-9_ ]*)%|(\[)|(\])")
 # 只有程序名时 foobar 没在播歌（窗口标题格式化后只剩这些）。
 _IDLE_RE = re.compile(r"^foobar2000(?:\s+v?[\d.]+)?$", re.IGNORECASE)
-# 换个说法：窗口标题里连一个歌名字段都没有时也算没在播。
 _TITLE_FIELD = "title"
 _ARTIST_FIELD = "artist"
+_CARED_FIELDS = (_TITLE_FIELD, _ARTIST_FIELD)
+
+# 条件段（`[...]`）的展开上限。titleformat 的 `[]` 是"里面字段非空才输出"，
+# 解析时既可能展开也可能不展开，所以候选数是 2^n；超过上限就判定"这不是我们能
+# 可靠解析的格式串"，直接退回不猜——**不猜好过指数展开**。16 条 = 4 个条件段，
+# 真实窗口标题格式串通常 0~2 个。
+_FORMAT_MAX_VARIANTS = 16
+# 参与格式串匹配的标题长度上限。窗口标题理论上可到 3 万字符，而"歌名 - 歌手"
+# 不可能那么长；超长的一律判为"不是曲目标题"，只走不猜路径，匹配代价因此有界。
+_FORMAT_MAX_MATCH_CHARS = 400
+# 字面量正则缓存：字面量集合来自用户配置的格式串，去重后条数极少。
+_MAX_LITERAL_PATTERNS = 128
+_WHITESPACE_RE = re.compile(r"\s")
 
 
-def _lit(text: str) -> str:
-    """格式串里的字面文本 → 正则：空白放宽成 ``\\s*``（窗口标题空格数不固定）。"""
-    return re.escape(text).replace("\\ ", r"\s*")
+class _Literal:
+    """格式串里的字面文本（原样出现在窗口标题里）。"""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
 
 
-def _format_pattern(fmt: str):
-    """把 titleformat 串编译成正则，返回 ``(pattern, 分组名集合)``。
+class _Field:
+    """格式串里的 ``%field%`` 占位符。"""
 
-    - ``%title%`` / ``%artist%`` → 具名分组；
-    - 其它占位符（``%album%`` / ``%length%`` 等）→ 任意通配，不参与取值；
-    - ``[...]`` 是 titleformat 的"字段非空才输出"条件段 → ``(?:...)?``；
-    - ``'...'`` 是字面量界定符，本身不输出；
-    - ``$if(...)`` 这类函数一律按字面文本处理——匹配不上就退回不猜，不会猜错。
+    __slots__ = ("name",)
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+class _Optional:
+    """格式串里的 ``[...]`` 条件段：整体出现或整体不出现。"""
+
+    __slots__ = ("tokens",)
+
+    def __init__(self, tokens: tuple):
+        self.tokens = tokens
+
+
+def _tokenize_format(fmt: str) -> tuple | None:
+    """把 titleformat 串切成 ``_Literal`` / ``_Field`` / ``_Optional`` 序列。
+
+    ``'...'`` 是 titleformat 的字面量界定符，本身不输出；``$if(...)`` 这类函数
+    一律按字面文本处理（匹配不上就退回不猜，不会猜错）。方括号不配对时返回
+    ``None``——畸形格式串不值得猜。
     """
     text = fmt.replace("'", "")
-    parts: list[str] = []
-    fields: set[str] = set()
+    stack: list[list] = []
+    tokens: list = []
     cursor = 0
     for match in _FMT_TOKEN_RE.finditer(text):
-        parts.append(_lit(text[cursor:match.start()]))
+        literal = text[cursor:match.start()]
+        if literal:
+            tokens.append(_Literal(literal))
         placeholder, open_bracket, close_bracket = match.groups()
         if open_bracket:
-            parts.append("(?:")
+            stack.append(tokens)
+            tokens = []
         elif close_bracket:
-            parts.append(")?")
+            if not stack:
+                return None  # 多出来的 ]
+            inner = tuple(tokens)
+            tokens = stack.pop()
+            tokens.append(_Optional(inner))
         else:
-            name = placeholder.strip().lower()
-            if name in (_TITLE_FIELD, _ARTIST_FIELD) and name not in fields:
-                fields.add(name)
-                parts.append(f"(?P<{name}>.+?)")
-            else:
-                parts.append(".+?")
+            tokens.append(_Field(placeholder.strip().lower()))
         cursor = match.end()
-    parts.append(_lit(text[cursor:]))
-    try:
-        return re.compile("^" + "".join(parts) + "$"), fields
-    except re.error:
-        return None, set()
+    if stack:
+        return None  # [ 没闭合
+    trailing = text[cursor:]
+    if trailing:
+        tokens.append(_Literal(trailing))
+    return tuple(tokens)
+
+
+def _format_field_names(tokens: tuple) -> set[str]:
+    """格式串里出现过的字段名（含条件段内的）。"""
+    names: set[str] = set()
+    for token in tokens:
+        if isinstance(token, _Field):
+            names.add(token.name)
+        elif isinstance(token, _Optional):
+            names |= _format_field_names(token.tokens)
+    return names
+
+
+def _trim_blank_literals(items: tuple) -> tuple:
+    """去掉首尾**只由空白组成**的字面量。
+
+    调用方读到窗口标题后会收敛并去掉首尾空白（``parse_foobar_title`` 的第一步），
+    而 foobar 按格式串渲染时首尾空白是真的——所以 ``%artist% - %title% `` 这种
+    末尾带空格的格式串，不能因为"少了一个空格"就整条判成解析不了。
+
+    夹在两个字段之间的空白字面量**不trim**：那里的空白是分隔符，必须真吃到
+    （否则 ``%title% %artist%`` 会在位置 0 匹配到空段，切出碎片）。
+    """
+    start, end = 0, len(items)
+    while start < end and isinstance(items[start], _Literal) and not items[start].text.strip():
+        start += 1
+    while end > start and isinstance(items[end - 1], _Literal) and not items[end - 1].text.strip():
+        end -= 1
+    return items[start:end]
+
+
+def _expand_optionals(tokens: tuple) -> list[tuple] | None:
+    """把条件段展开成若干条"只有字面量与字段"的候选；超过上限返回 ``None``。
+
+    "出现"的候选排在"不出现"前面：``[%artist% - ]%title%`` 遇到
+    ``周杰伦 - 晴天`` 时先按"歌手非空"解析，这才是用户实际配置它时的常见形态。
+
+    每条候选都会过一遍 :func:`_trim_blank_literals`——条件段的不出现分支经常
+    正好让某个空白字面量落到末尾。
+    """
+    variants: list[tuple] = [()]
+    for token in tokens:
+        if not isinstance(token, _Optional):
+            variants = [variant + (token,) for variant in variants]
+            continue
+        inner = _expand_optionals(token.tokens)
+        if inner is None:
+            return None
+        grown: list[tuple] = []
+        for variant in variants:
+            for tail in inner:
+                grown.append(variant + tail)
+        for variant in variants:
+            grown.append(variant)
+        if len(grown) > _FORMAT_MAX_VARIANTS:
+            return None
+        variants = grown
+    return [_trim_blank_literals(variant) for variant in variants]
+
+
+@lru_cache(maxsize=_MAX_LITERAL_PATTERNS)
+def _literal_pattern(literal: str) -> re.Pattern:
+    """字面量 → **无回溯**的小正则（只有字面字符与空白类，不存在嵌套量词）。"""
+    if not literal.strip():
+        # 整段都是空白：必须真吃到空白。旧实现把它放宽成 `\\s*`，于是
+        # `%title% %artist%` 会在位置 0 匹配空段，切出 (晴, 天 周杰伦) 这种碎片。
+        return re.compile(r"\s+")
+    return re.compile(re.escape(literal).replace("\\ ", r"\s*"))
+
+
+def _find_literal(text: str, literal: str, start: int) -> tuple[int, int] | None:
+    """在 ``text[start:]`` 里找字面量，返回 ``(起, 止)``；找不到返回 ``None``。
+
+    空白放宽：格式串里的空格对应窗口标题里的任意空白（用户常把 ``%artist% -``
+    写成带空格的形式，而标题里可能是 ``-``）。无空白的字面量直接 ``str.find``。
+    """
+    if _WHITESPACE_RE.search(literal) is None:
+        at = text.find(literal, start)
+        return None if at < 0 else (at, at + len(literal))
+    match = _literal_pattern(literal).search(text, start)
+    if match is None:
+        return None
+    return (match.start(), match.end())
+
+
+def _assign_fields(values: dict, pending: list, chunk: str) -> bool:
+    """把两段字面量之间的文本分给"待定字段"。
+
+    相邻字段之间没有字面量时，这段文本的切法原理上不可知（``%album%%title%``）。
+    规则：恰好只有一个字段是我们要的就整段给它（其余字段不关心内容）；一个都不
+    要也放行；要两个以上就**判这次匹配失败**——不猜好过乱切。
+    """
+    if not pending:
+        # 两段字面量之间夹着没人认领的文本：这个格式串描述不出这条标题。
+        return chunk == ""
+    if len(pending) == 1:
+        name = pending[0]
+        if name not in values:  # 同一字段出现两次时以第一次为准（与旧行为一致）
+            values[name] = chunk
+        return True
+    cared = [name for name in pending if name in _CARED_FIELDS and name not in values]
+    if len(cared) > 1:
+        return False
+    if cared:
+        values[cared[0]] = chunk
+    return True
+
+
+def _match_items(items: tuple, text: str) -> dict | None:
+    """按 ``字面量 / 字段`` 序列消费 ``text``，返回字段取值；对不上返回 ``None``。
+
+    单向扫描，**没有回溯**：每个字面量取它在当前位置之后的**最左**出现，于是
+    "前一个字段尽可能短、最后一个字段吃掉剩余"。循环次数受 items 与 text 长度
+    共同约束，最坏 O(len(items) × len(text))。
+    """
+    values: dict = {}
+    start = 0
+    pending: list[str] = []
+    for item in items:
+        if isinstance(item, _Field):
+            pending.append(item.name)
+            continue
+        if not item.text:
+            continue
+        found = _find_literal(text, item.text, start)
+        if found is None:
+            return None
+        if not _assign_fields(values, pending, text[start:found[0]]):
+            return None
+        pending = []
+        start = found[1]
+    if not _assign_fields(values, pending, text[start:]):
+        return None
+    return values
 
 
 def _parse_with_format(text: str, fmt: str):
-    pattern, fields = _format_pattern(fmt)
-    if pattern is None or _TITLE_FIELD not in fields:
-        # 没有 %title% 的格式串给不出歌名；编译失败的（$if 之类）也不硬来。
+    """按用户给的 titleformat 串切出 ``(歌名, 歌手)``；切不出来返回 ``None``。"""
+    if len(text) > _FORMAT_MAX_MATCH_CHARS:
         return None
-    match = pattern.match(text)
-    if match is None:
+    tokens = _tokenize_format(fmt)
+    if tokens is None or _TITLE_FIELD not in _format_field_names(tokens):
+        # 没闭合的方括号、或压根没有 %title% 的格式串都拿不到歌名。
         return None
-    groups = match.groupdict()
-    return str(groups.get(_TITLE_FIELD) or ""), str(groups.get(_ARTIST_FIELD) or "")
+    variants = _expand_optionals(tokens)
+    if variants is None:
+        return None
+    for items in variants:
+        values = _match_items(items, text)
+        if values is not None:
+            return str(values.get(_TITLE_FIELD, "")), str(values.get(_ARTIST_FIELD, ""))
+    return None
 
 
 def _parse_auto(text: str) -> tuple[str, str]:
