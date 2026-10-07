@@ -838,9 +838,10 @@ class DynamicIsland(QWidget):
         if (value in work_states and previous not in work_states
                 and self._event_effects_enabled()
                 and not quiet_mode.shared_quiet_state().suppression_active()):
-            # 事件弹跳必须过与 notify_event 同一道闸门：event_effects 开关 + 免打扰
-            # 安静规则（裁决稿 §一-7：禁弹跳，读数照常——状态点本身不受闸门影响；
-            # 免打扰判据复用全应用唯一的 suppression_active，与 window_alerts 同口径）
+            # 事件弹跳过两道闸：event_effects 开关（与 notify_event 同一道）+
+            # 免打扰安静规则（裁决稿 §一-7：禁弹跳，读数照常——这条比
+            # notify_event 多一道，是该裁决对本路径的单独要求；状态点本身不受
+            # 闸门影响。免打扰判据复用全应用唯一的 suppression_active）
             self._bounce(impulse=3.0)
         self.update()
 
@@ -1106,8 +1107,12 @@ class DynamicIsland(QWidget):
             if self._sys_sample is not None:
                 if self._sys_sample.state != island_segments.STATE_OK:
                     reason = str(getattr(self._sys_sample, "error_reason", "") or "")
+                    # 保持面 = 配置里当前的所有设备段（astra 保底 M2）：共享快照的
+                    # 故障同时影响 cpu/mem 两段，先折的段不能因为「收口袋时已不在
+                    # 订阅集」就把故障丢了（它曾通过共享快照呈现 error）。
                     self._sys_error_hold = {
-                        mid: reason for mid in self._sys_subscribed}
+                        mid: reason for mid in _SYS_METRIC_IDS
+                        if mid in self._metric_ids()}
                 else:
                     self._sys_error_hold = {}
             self._sys_sample = None
@@ -2982,6 +2987,8 @@ class DynamicIsland(QWidget):
         """
         self._stop_content_fade()
         self._content_fade_from = previous
+        self._fade_outgoing_masked = None
+        self._fade_masked_key = None
         self._content_fade_t = 0.0
         self._content_fade_last = time.monotonic()
         timer = QTimer(self)
@@ -3005,6 +3012,8 @@ class DynamicIsland(QWidget):
         """停表并销毁淡化定时器（幂等），并跳到终点帧（新位图全不透明）。"""
         timer, self._content_fade_timer = self._content_fade_timer, None
         self._content_fade_from = None
+        self._fade_outgoing_masked = None
+        self._fade_masked_key = None
         self._content_fade_t = 1.0
         if timer is not None:
             timer.stop()
@@ -3243,21 +3252,36 @@ class DynamicIsland(QWidget):
         self._sync_content_fade()
         outgoing = self._content_fade_from
         if outgoing is not None and self._content_fade_t < 1.0:
-            # 单侧淡化（主代理裁决 2026-10-07）：旧位图按 (1-t) 渐出，**新位图始终
-            # 以 opacity 1.0 直绘**。两侧都按系数画会让"新旧都有的那部分"被混两次
-            # （α ≈ t+(1-t)²，t=0.5 时稀释 25%），未变化的文字整片变淡再回来——违反
-            # "耐看"。单侧口径下共用区逐像素等于新位图（零稀释零闪烁），新增/重排的
-            # 内容即时就位，旧结构残影按 (1-t) 渐隐，过渡仍读得出来。
+            # 单侧淡化（主代理裁决 2026-10-07 + astra M3 遮罩 2026-10-07）：
+            # 旧位图**只在新内容透明的区域**按 (1-t) 渐出，新位图始终以 opacity 1.0
+            # 直绘。两侧都按系数画会让共用区被混两次（α ≈ t+(1-t)²）；而"旧图整张垫
+            # 底 + 新图盖面"对**半透明**共用像素同样不成立——合成 α = a+a(1-a)(1-t)，
+            # 单位盒（α70%）会从 0.70 被抬到 0.91（实测公式，E3 的 hit=255 探针
+            # 看不见它）。所以旧图先按「新内容的透明区」做遮罩：共用像素只剩新图
+            # （任何 alpha 都逐帧恒定），旧结构独有残影照常渐隐。
             #
-            # 旧位图多半来自**上一个结构**（宽度常不同），必须按新胶囊外形裁剪后
-            # 渐出：窗口是透明的，除了胶囊没有别的裁剪面，渐出的旧内容会悬在
-            # 胶囊外被看见（新位图由布局保证落在盒内，不需要裁）。
+            # 遮罩按 (旧图, 新图) 对缓存：淡化中新内容因采样刷新重建时自动重算；
+            # createMaskFromColor 只认 alpha=0，抗锯齿的半透边缘也算"有新墨"，
+            # 旧图不会垫在它们底下。
+            masked = self._fade_outgoing_masked
+            masked_key = (outgoing.cacheKey(), content.cacheKey())
+            if masked is None or self._fade_masked_key != masked_key:
+                from PySide6.QtGui import QBitmap
+                masked = QPixmap(outgoing)
+                masked.setMask(QBitmap.fromImage(
+                    content.toImage().createMaskFromColor(
+                        0, Qt.MaskMode.MaskOutColor)))  # 0 = 全透明 QRgb
+                # 本 Qt6 构建的 setMask 语义：掩码 1 位 = 透明（隔离探针实测），
+                # 故用 MaskOutColor——位 1 落在「新内容有墨」处（=旧图那些像素
+                # 变透明），位 0（不透明）恰好留在「新内容透明」的残影区。
+                self._fade_outgoing_masked = masked
+                self._fade_masked_key = masked_key
             painter.save()
             clip = QPainterPath()
             clip.addRoundedRect(rect, radius, radius)
             painter.setClipPath(clip)
             painter.setOpacity(1.0 - self._content_fade_t)
-            painter.drawPixmap(0, 0, outgoing)
+            painter.drawPixmap(0, 0, masked)
             painter.restore()
             painter.drawPixmap(0, 0, content)
         else:
@@ -3318,10 +3342,13 @@ class DynamicIsland(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802
         """窗口销毁：两条采样器主动收口（ops5.5 评审 M1）。
 
-        线程是 daemon、进程退时不阻塞，但 ``close()`` 的有界 join 与订阅清理是
-        设计好的收口路径（``sys_monitor.close``/``net_monitor.close``），只在配置
-        变更分支被调到的话，窗口销毁这条路就永远走不到——补上，与
-        ``pet/window.py`` 退出收口径一致。幂等：两处都判 None。
+        线程是 daemon、进程退时不阻塞，但 ``close()`` 是设计好的收口路径
+        （``sys_monitor.close`` 有界 join、``net_monitor.close`` 非阻塞停），
+        只在配置变更分支被调到的话，窗口销毁这条路就永远走不到——补上，
+        与 ``pet/window.py`` 退出收口径一致。幂等：两处都判 None。
+        注意 ``closeEvent`` 不发 ``stop()`` 只发 ``close()``：线程收到停止事件
+        后自行退出（实测 ~3ms），daemon 也不阻塞进程退出——这里兑现的是
+        「发出停止 + 订阅清理」，不是「返回前已 join」。
         """
         if self._net_monitor is not None:
             self._net_monitor.close()
@@ -3342,6 +3369,10 @@ class DynamicIsland(QWidget):
             # 否则"更新时间"会冻在隐藏那一刻
             self._card_tick_timer.start()
             self._sync_card_labels()
+            # 自动收起倒计时同样接回（S2 评审修复：hideEvent 停了它就再也不起，
+            # 卡片会永远开着）；光标在岛内则维持 hover 暂停，与 expand 同口径
+            if not self._cursor_inside:
+                self._card_collapse_timer.start()
         self._schedule_next_balance_tier_refresh()
         self._sync_network_slot()
         self._sync_sys_slot()

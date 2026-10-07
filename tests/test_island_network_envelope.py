@@ -124,21 +124,28 @@ def test_beyond_envelope_readings_never_change_the_plan(monkeypatch):
     try:
         island.show()
         app.processEvents()
-        monitor = made[0]
-        width0 = _critical_width(island, screen)
-        monitor.sample = _sample(2048.0, 512.0, 23.0)
-        island._tick_network()
-        app.processEvents()
+        _critical_width(island, screen)
+        # 临界搜索曾触发折叠→收口袋→新建采样器：必须拿**当前**这个
+        # （astra 保底 M1——拿旧对象喂样本等于什么都没喂进产品路径）
+        monitor = island._net_monitor
+        consumed = []
+
+        def feed(down, up, ms):
+            monitor.sample = _sample(down, up, ms)
+            island._tick_network()
+            app.processEvents()
+            consumed.append(island._net_sample)
+
+        feed(2048.0, 512.0, 23.0)
+        assert consumed[-1] is monitor.sample, "前提：样本必须真的被产品路径消费"
         key_ok = island._plan_inputs()
         folded_ok = island._row_plan().folded
         width_px = island.width()
         starts0, closes0 = monitor.starts, monitor.closes
 
-        # 持续超包络输入（G 级速率 + 四位毫秒）50 拍
-        monitor.sample = _sample(1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)
+        # 持续超包络输入（G 级速率 + 四位毫秒）50 拍——每拍都是新样本
         for _ in range(50):
-            island._tick_network()
-            app.processEvents()
+            feed(1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)
         assert island._plan_inputs() == key_ok, (
             "超包络读数改变了计划键——采样值穿透宽度白名单（R1 阻塞回归）")
         assert island._row_plan().folded == folded_ok, "折叠态不应随读数翻转"
@@ -149,9 +156,7 @@ def test_beyond_envelope_readings_never_change_the_plan(monkeypatch):
         # 包络内外来回跳同样稳定（K↔G 跨档不触发任何结构变化）
         for down, up, ms in ((2048.0, 512.0, 23.0),
                              (1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)) * 5:
-            monitor.sample = _sample(down, up, ms)
-            island._tick_network()
-            app.processEvents()
+            feed(down, up, ms)
         assert island._plan_inputs() == key_ok
         assert island._row_plan().folded == folded_ok
         assert island.width() == width_px
@@ -166,8 +171,8 @@ def test_plan_and_geometry_stay_consistent_across_ticks(monkeypatch):
     try:
         island.show()
         app.processEvents()
-        monitor = made[0]
         _critical_width(island, screen)
+        monitor = island._net_monitor  # 当前监视器（临界搜索重建过）
         for down, up, ms in ((2048.0, 512.0, 23.0),
                              (1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0),
                              (900 * 1024, 800 * 1024, 120.0),
@@ -175,6 +180,7 @@ def test_plan_and_geometry_stay_consistent_across_ticks(monkeypatch):
             monitor.sample = _sample(down, up, ms)
             island._tick_network()
             app.processEvents()
+            assert island._net_sample is monitor.sample, "样本必须真的被消费"
             assert island.width() == island._row_plan().width, (
                 f"读数 {down}/{up}/{ms} 后窗口宽与计划宽不一致")
     finally:

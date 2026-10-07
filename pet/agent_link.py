@@ -2966,6 +2966,12 @@ class AgentLinkManager(QObject):
                                 source_event: str = "") -> None:
         """订阅 DSH 收敛状态变化（单读方收敛器 → 呈现管线 + AppShell 转发）。
 
+        **迟到信号隔离（astra 保底 B1）**：worker 发出的收敛信号走 Qt 队列投递，
+        监视器停止时已入队的旧信号撤销不掉——若不拦，「关闭联动 → 同步发
+        offline 复位 → 泵队列 → 旧 waiting_approval/error 到达」会把呈现侧重新
+        锁回陈旧状态。监视器不在跑时只放行人工复位（link-disabled），其余一律
+        丢弃；DSH 真离线（offline）发生时监视器仍在跑，不受此闸影响。
+
         - 转发给 AppShell（灵动岛 set_agent_active / offline 收尾）；
         - thinking：legacy AgentStatus 基线只有 working/idle，thinking 由收敛器
           补进联动管线（思考气泡/动画——对话开始的稳定触发点之一，与真人消息
@@ -2979,6 +2985,10 @@ class AgentLinkManager(QObject):
         - waiting_question 只更新状态（岛指示/动画），不弹通用气泡——
           常驻问题气泡已由 ``_on_question_request`` 呈现（同事件双弹回归）。
         """
+        if source_event != "link-disabled":
+            mon = self.monitors.get("dsh")
+            if mon is None or not mon._running:
+                return  # 迟到/孤儿信号：监视器已停，见 docstring 的隔离说明
         self.dsh_state_changed.emit(from_state, to_state)
         if to_state == "offline":
             self.dismiss_all_interactions()

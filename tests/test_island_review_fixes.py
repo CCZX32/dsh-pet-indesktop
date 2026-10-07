@@ -6,7 +6,7 @@
 - astra 终审 R1：bounce 闸门 / squish 横向 / FontChange 几何 / 卡片 hover / 内容键模板分量
 - 6.1sol 交叉票 R2：起拖停淡化 / 部分折叠行标注 / oversize 含单位盒 / 审计用例诚实化
 - 6.1sol 终审 R3：hover 真实序列（本节 ②）、closeEvent、滞回清零、折叠故障保持、
-  DSH 关闭 offline（DSH 那例在本文件末尾）
+  DSH 关闭 offline（用例在 tests/test_agent_link.py::TestDshDisableResetsPresentationState）
 - 网络包络振荡的回归在 ``test_island_network_envelope.py``（astra 阻塞 1）
 
 - R1-2 工作上升沿弹跳必须过与 ``notify_event`` 同一道闸门（event_effects + 免打扰）
@@ -214,6 +214,12 @@ def test_card_hover_pauses_auto_collapse(monkeypatch):
         island.hide()
         app.processEvents()
         assert island._cursor_inside is False
+        # S2：hide→show 后自动收起倒计时必须接回（光标不在岛内时）
+        island.show()
+        app.processEvents()
+        assert island._mode == "expanded"
+        assert island._card_collapse_timer.isActive() is True, (
+            "hide→show 后 15s 自动收起没有恢复（卡片会永远开着）")
     finally:
         island.close()
 
@@ -378,12 +384,13 @@ def test_unsubscribing_a_metric_clears_its_hysteresis_memory(monkeypatch):
         app.processEvents()
         assert island._alert_severity.get(CPU) == isl.ALERT_CRIT, (
             "折叠必须保持 severity（E2「折叠不埋没告警」）")
-        # 恢复订阅那一刻清零（M3：新采样序列）→ 喂 85 从空记忆起步 → warn
+        # 恢复订阅那一刻清零（M3：新采样序列）→ 喂 91：旧记忆按滞回会保 crit
+        # （91 ≥ 92−3），新序列从空记忆起步只能 warn——这个值才有判别力
         island.config.set("island_metrics", ["cpu", "mem"])
         island.refresh_from_config()
         app.processEvents()
         assert CPU not in island._alert_severity, "恢复订阅后滞回记忆必须清零"
-        monitor.sample = sm.SysSample(cpu_percent=85.0, mem_percent=40.0,
+        monitor.sample = sm.SysSample(cpu_percent=91.0, mem_percent=40.0,
                                       sampled_at=_time.monotonic() + 1)
         island._tick_sys()
         assert island._alert_severity.get(CPU) == isl.ALERT_WARN
@@ -427,6 +434,11 @@ def test_full_fold_preserves_the_last_sampling_error(monkeypatch):
         segments = {seg.seg_id: seg for seg in island._compose_info_segments()}
         assert segments[CPU].state == isl.STATE_ERROR, (
             "被折前最后一拍是故障——段必须如实报 error，不是退回 sampling")
+        # astra 保底 M2：先折的段（mem 通常先折）故障同样要留住——
+        # 共享快照的故障覆盖两段，不能只保「收口袋时还订阅着」的那段
+        assert segments[MEM].state == isl.STATE_ERROR, (
+            "先折的段故障被丢了（保持面必须覆盖全部配置段）")
+        assert island._sys_error_hold.get(MEM) == "psutil 读数失败"
         # chip 的告警判定走当刻段列表：error 段按 crit 计（折叠不埋没故障）
         shown = island_layout_mod.apply_shrink(
             island._row_plan(), island._compose_info_segments(),
@@ -460,5 +472,76 @@ def test_hide_pauses_and_show_resumes_sys_sampling(monkeypatch):
         island.show()
         app.processEvents()
         assert monitor.started is True, "显示后采样必须恢复（订阅保留、幂等）"
+    finally:
+        island.close()
+
+
+# ---------------------------------------------------------- astra M3：半透明共用像素零抬升
+def test_fade_keeps_semi_transparent_shared_pixels_constant(monkeypatch):
+    """单侧淡化对 α<1 的共用像素也必须是恒定的（astra 保底 M3）。
+
+    修复前「旧图整张垫底 + 新图盖面」：共用半透明像素的合成
+    α = a+a(1-a)(1-t)——单位盒（α70%）在淡化中会被抬到 ~0.91。修复后旧图按
+    「新内容透明区」遮罩，共用像素只剩新图：任何 alpha 都逐帧恒定。
+    """
+    import time as _time
+
+    from PySide6.QtGui import QImage, qAlpha
+
+    from pet import sys_monitor as sm
+
+    island = _island(monkeypatch, metrics=["cpu"])
+    try:
+        island.show()
+        app.processEvents()
+        island._sys_pending = set()
+        island._sys_monitor.sample = sm.SysSample(
+            cpu_percent=42.0, mem_percent=61.0, sampled_at=_time.monotonic())
+        island._tick_sys()
+        island._update_size()
+        app.processEvents()
+
+        # 找单位盒（"%"，α70%）的一个共用像素：cpu 段的 unit 区
+        import pet.island_layout as layout_mod
+        segs = island._compose_info_segments()
+        plan = island._row_plan()
+        x = 19.0 + 26 + 8 + plan.name_w + 10
+        pl = layout_mod.place_info_segments(
+            segs, start_x=x,
+            primary_fm=island._metrics_for("primary"),
+            value_fm=island._metrics_for("value"),
+            label_fm=island._metrics_for("label"))
+        cpu_pl = [p for p in pl if p.unit_text][0]
+        probe_x = int(cpu_pl.unit_x + cpu_pl.unit_w // 2)
+
+        def grab_unit_alpha(img):
+            rows = [qAlpha(img.pixel(probe_x, y)) for y in range(img.height())]
+            return max(rows)
+
+        # 触发结构变化（关状态点）起淡化，泵到中段取一帧
+        island.config.set("dynamic_island", {
+            "enabled": True, "show_icon": True, "show_name": True,
+            "show_info": True, "info_mode": "time", "custom_text": "",
+            "show_status": False, "style": "dark", "x": 400, "y": 300})
+        island.refresh_from_config()
+        island._update_size()
+        app.processEvents()
+        assert island._content_fade_timer is not None, "结构变化必须起淡化"
+        island._content_fade_t = 0.5   # 钉在中段（不等真 16ms tick，时序确定性）
+        mid = QImage(island.width(), island.height(),
+                     QImage.Format_ARGB32_Premultiplied)
+        mid.fill(0)
+        island.render(mid)
+        island._stop_content_fade()
+        final = QImage(island.width(), island.height(),
+                       QImage.Format_ARGB32_Premultiplied)
+        final.fill(0)
+        island.render(final)
+        mid_a = grab_unit_alpha(mid)
+        final_a = grab_unit_alpha(final)
+        assert mid_a > 0 and final_a > 0, "单位盒探针列必须有墨"
+        assert abs(mid_a - final_a) <= 8, (
+            f"淡化中段单位盒 α={mid_a} 被抬升（终帧 {final_a}）——"
+            "半透明共用像素在淡化中不再恒定（M3 回归）")
     finally:
         island.close()

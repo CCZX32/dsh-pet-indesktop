@@ -651,8 +651,10 @@ def clear_segments() -> None:
 def oversize_segment_ids(font_metrics, *, font_key=None) -> tuple[str, ...]:
     """声明盒宽超过 :data:`MAX_SEGMENT_WIDTH_PX` 的第三方段 id（注册序）。
 
-    这是 120px 规则的落地点：超宽段**照样注册**，但进这张"首批折叠候选"名单——
-    布局层收缩时先折它们（长段自付成本），而不是把注册掐死在门口。
+    这是 120px 规则的落地点：超宽段**照样注册**，但进这张"首批折叠候选"名单
+    （长段自付成本），而不是把注册掐死在门口。**宿主尚未消费这张名单**
+    （收缩流水线的"先折候选"接线在 F2，见 docs/ISLAND-SEGMENTS-EXTENSION.md
+    §八 的如实清单）——当前它只是一份查询结果，不是已生效的行为。
 
     判决在这里做而不是注册处，是因为 px 必须**实测**：第三方注册时进程里通常还
     没有字体（本项目的盒宽从来不写死 px）。同一个声明按 ``(id, 字体指纹)`` 只告警
@@ -670,7 +672,7 @@ def oversize_segment_ids(font_metrics, *, font_key=None) -> tuple[str, ...]:
         if (declaration.id, key) not in _OVERSIZE_WARNED:
             _OVERSIZE_WARNED.add((declaration.id, key))
             logger.warning(
-                "第三方段 %s 的声明盒宽 %dpx 超过 %dpx 上限：已降为 +N 首批折叠候选"
+                "第三方段 %s 的声明盒宽 %dpx 超过 %dpx 上限：记入 +N 首批折叠候选名单（宿主尚未消费）"
                 "（注册保留，但它会先被折进 chip；超长段自付成本）",
                 declaration.id, width, MAX_SEGMENT_WIDTH_PX,
             )
