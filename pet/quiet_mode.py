@@ -78,9 +78,13 @@ class QuietState:
         self._minutes = 0
         self._fullscreen = False
         self._queue: list[str] = []
-        # 「上一次结算时是否处于抑制中」——到期/退出全屏的**边沿**由它判定，
-        # 只由 check_end() 维护（见该类方法注释）。
-        self._suppressed = False
+        # 「自上次结算以来进过免打扰」——到期/退出全屏的**边沿**由它判定。
+        # 入场路径（start / set_fullscreen(True)）就置位，不靠轮询表第一拍去补：
+        # 首个 1Hz tick 之前就退出全屏时，边沿必须是已经锁好的（否则暂存留着
+        # 永远不汇报）。
+        self._entered = False
+        # 已发出待交付汇报、尚未确认交付。交付确认前不排空、不停表。
+        self._awaiting_ack = False
         self._listeners: list = []
 
     # ---------------------------------------------------------------- 监听
@@ -108,12 +112,16 @@ class QuietState:
 
         已在免打扰中再次选择档位 = **重新计时**（用户改主意要再战一小时），
         不叠加、不复用剩余。
+
+        入场即锁定边沿（``_entered``）：不能等轮询表第一拍——首拍之前就结束
+        （提前结束 / 退出全屏）时，那一轮暂存提醒必须仍然汇报得出去。
         """
         span = normalize_quiet_minutes(
             DEFAULT_QUIET_MINUTES if minutes is None else minutes
         ) * 60.0
         self._minutes = int(span // 60)
         self._until = self._clock() + span
+        self._entered = True
         self._notify()
         return span
 
@@ -143,11 +151,16 @@ class QuietState:
 
         只记标志：是否**等效免打扰**由 ``suppression_active`` 结合配置键判断，
         本方法不替调用方决定（``quiet_also_on_fullscreen`` 关掉时全屏不该抑制）。
+
+        进入全屏时立刻锁定边沿（同 ``start``）：首个轮询拍之前就退出全屏，
+        暂存的提醒也必须汇报得出去。
         """
         on = bool(on)
         if on == self._fullscreen:
             return
         self._fullscreen = on
+        if on:
+            self._entered = True
         self._notify()
 
     def fullscreen(self) -> bool:
@@ -160,28 +173,47 @@ class QuietState:
             return True
         return bool(also_on_fullscreen) and self._fullscreen
 
-    def check_end(self, *, also_on_fullscreen: bool = DEFAULT_QUIET_ALSO_ON_FULLSCREEN) -> list[str] | None:
-        """结算一次：仍在免打扰 → ``None``；**刚结束** → 暂存提醒列表。
+    def take_report(self, *, also_on_fullscreen: bool = DEFAULT_QUIET_ALSO_ON_FULLSCREEN) -> list[str] | None:
+        """取出待汇报的暂存提醒**快照**（不排空）；无待汇报返回 ``None``。
 
-        边沿判定用 ``_suppressed``，且只在本方法里维护：手动结束（``end_now``）
-        已经自己汇报过了，下一次结算不会再报一遍（幂等，防重复气泡）。
+        **交付确认制**：排空只发生在 :meth:`ack_report`，调用方必须先确认这条
+        汇报真的交付出去了。先排空再交付是不允许的——退出全屏的那一拍里窗口
+        往往还没恢复显示，呈现代理筛不到可见目标，先排空就等于把提醒静默丢掉
+        且不可恢复。
+
+        幂等：在 :meth:`ack_report` 之前反复调用返回同一份快照，轮询表据此重试
+        直到有可交付目标。
         """
         if self.suppression_active(also_on_fullscreen=also_on_fullscreen):
-            self._suppressed = True
+            self._entered = True
             return None
-        if not self._suppressed:
+        if not self._entered:
             return None
-        self._suppressed = False
-        return self.drain()
+        self._awaiting_ack = True
+        return list(self._queue)
 
-    def end_now(self) -> list[str]:
-        """提前结束免打扰，返回暂存提醒（供调用方汇报）。未开启时返回空列表。"""
+    def ack_report(self) -> None:
+        """汇报已交付（或确认这一轮本就无事可报）：结束这一轮并排空暂存。"""
+        self._entered = False
+        self._awaiting_ack = False
+        self._queue = []
+
+    def report_pending(self) -> bool:
+        """是否已结算但尚未确认交付（轮询表据此保持重试，不得提前停表）。"""
+        return self._awaiting_ack
+
+    def end_now(self) -> bool:
+        """提前结束手动免打扰；返回是否本来在免打扰中。
+
+        **不动暂存队列、不排空、不发汇报**：结束计时只是让"免打扰不再生效"，
+        汇报统一走 ``take_report`` → 交付确认 → ``ack_report``，与到期、退出全屏
+        是同一条链（否则两条路径会各丢一次或各报一次）。
+        """
+        was = self.manual_active()
         self._until = None
-        self._suppressed = False
-        items = self.drain()
-        if items or self._fullscreen:
-            self._notify()
-        return items
+        if was:
+            self._entered = True
+        return was
 
     # ---------------------------------------------------------------- 暂存队列
     def remember(self, text: str) -> None:
@@ -197,6 +229,7 @@ class QuietState:
         return len(self._queue)
 
     def drain(self) -> list[str]:
+        """直接排空暂存（低层原语：测试与确认交付后的收口用）。"""
         items = self._queue
         self._queue = []
         return items
@@ -207,7 +240,8 @@ class QuietState:
         self._until = None
         self._minutes = 0
         self._fullscreen = False
-        self._suppressed = False
+        self._entered = False
+        self._awaiting_ack = False
         self._queue = []
 
 
@@ -268,17 +302,27 @@ class QuietTicker(QObject):
             return DEFAULT_QUIET_ALSO_ON_FULLSCREEN
 
     def _on_state_changed(self) -> None:
+        """状态边沿：进入免打扰 → 起表；退出（全屏解除）→ 立刻结算一次。"""
         if self._state.suppression_active(also_on_fullscreen=self._also()):
             if not self._timer.isActive():
                 self._timer.start()
             return
-        # 刚退出免打扰（到点 / 退出全屏 / 提前结束）：立刻结算一次，不等下一拍。
+        # 刚退出免打扰（退出全屏；到点由轮询表自己发现）：立刻结算一次，不等
+        # 下一拍。两个 note_fullscreen 调用点都把本通知放在「恢复可见性之后」
+        # （见 ``AppShell._on_shared_fullscreen`` / ``OverlayShell._on_fullscreen_changed``
+        # 的落点）——代理只投向可见窗，窗口还没回来就结算等于汇报无处可送。
         self.poll()
 
     def poll(self) -> None:
-        """结算一次：仍在免打扰 → 什么都不做；刚结束 → 发射 ``ended``。"""
-        items = self._state.check_end(also_on_fullscreen=self._also())
-        if not self._state.suppression_active(also_on_fullscreen=self._also()):
+        """结算一次：仍在免打扰 → 什么都不做；刚结束 → 发射 ``ended``。
+
+        汇报**未确认交付**（订阅方没 ``ack_report``）时保持重试：暂存不清空、
+        表不停。这样即使某一拍交付失败（此刻没有可见目标），提醒也只是晚一点
+        到，而不是消失。
+        """
+        items = self._state.take_report(also_on_fullscreen=self._also())
+        if not self._state.suppression_active(also_on_fullscreen=self._also()) \
+                and not self._state.report_pending():
             self._timer.stop()
         if items is not None:
             self.ended.emit(list(items))

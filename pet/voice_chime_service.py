@@ -762,13 +762,14 @@ class VoiceChimeService:
         from . import window_alerts
         app = self._app
         win = getattr(app, "win", None)
+        # 免打扰（含全屏等效）判定在**可见性判断之前**（同 festival_service）：
+        # 宿主隐藏时若先看 isVisible，报时提醒会走系统通知，免打扰压不住也不进
+        # 暂存队列。语音照常播，只是不留字、不入通知。
+        if win is not None and window_alerts.quiet_blocked(win):
+            window_alerts.defer_quiet(text)
+            return
         if win is not None and win.isVisible():
             if window_alerts.sprite_in_flight(win):
-                return
-            if window_alerts.quiet_blocked(win):
-                # 免打扰（含全屏等效）：报时气泡不冒，转存暂存队列（语音照常播、
-                # 只是不留字），结束时统一汇报。停在降级链之前同 festival_service。
-                window_alerts.defer_quiet(text)
                 return
             suppressed = window_alerts.bubble_blocked(win)
             if not suppressed:

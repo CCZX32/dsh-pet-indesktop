@@ -27,12 +27,12 @@ import weakref
 from PySide6.QtCore import QObject, Signal
 
 from . import platform_win
+from . import quiet_mode
 from . import vision as vision_mod
 from . import window_alerts
 from .agent_link import AgentLinkManager
 from .overlay_settings_command import is_overlay_topology
 from .proactive import ProactiveScreenWatcher
-from .quiet_mode import QuietTicker
 
 log = logging.getLogger("dsh-pet-standalone")
 
@@ -86,6 +86,14 @@ class MultiWindowProxy:
     def _visible_windows(self) -> list:
         return [w for w in self._windows() if getattr(w, "isVisible", lambda: True)()]
 
+    def has_presentation_target(self) -> bool:
+        """是否有可交付的呈现目标（至少一个可见窗）。
+
+        免打扰的结束汇报据此**确认交付**：没有目标就不排空暂存、下一拍重试，
+        否则（退出全屏的那一拍窗口还没回来）汇报会被静默丢掉且不可恢复。
+        """
+        return bool(self._visible_windows())
+
     # ---- 呈现扇出（只发给可见窗）----
     def show_bubble(self, text: str, duration_ms: int = 4500) -> None:
         # 联动气泡只发首个可见窗（与 show_alert 同策）：多窗同弹一条过程汇报
@@ -99,21 +107,32 @@ class MultiWindowProxy:
     def show_alert(self, text: str, *, subtitle: str = "", duration_ms: int = 0,
                    buttons: list | None = None, sticky: bool = True,
                    alert_id: str = "", priority: int = 3,
-                   alert_type: str = "watchdog", metadata: dict | None = None) -> None:
+                   alert_type: str = "watchdog", metadata: dict | None = None) -> bool:
         """把交互式提醒入队到**首个可见窗**（多窗只弹一处，避免每只桌宠重复轰炸）。
 
         ``agent_link`` 会先 ``hasattr(win, "show_alert")`` 决定是否走队列提醒；本方法
         确保共享 manager 的 ``win`` 是 proxy 时仍走交互式提醒（审批/控制按钮不丢失）。
         首个可见窗缺失 ``show_alert`` 时回退 ``show_bubble``（绝不因签名差异崩溃）。
         收起仍由 ``resolve_alert`` 全窗扇出兜底。
+
+        返回是否**确实交付出去了**（至少要有一个可见窗接手）：免打扰的结束汇报
+        据此确认交付，没有目标时保留暂存重试，而不是先排空再丢。
+
+        免打扰分流放在可见性筛选**之前**：先按可见窗筛的话，隐藏宿主（全屏避让、
+        手动隐藏）的普通提醒会在到达 ``window_alerts.show_alert`` 的门控之前就被
+        丢掉——既不上屏也不进暂存队列。普通提醒被暂存同样算"接手"。
         """
+        if window_alerts.quiet_blocked(self) and not window_alerts.alert_survives_suppression(
+                alert_type, sticky=sticky, buttons=buttons, priority=priority):
+            window_alerts.defer_quiet(text)
+            return True
         for w in self._visible_windows():
             method = getattr(w, "show_alert", None)
             if callable(method):
                 method(text, subtitle=subtitle, duration_ms=duration_ms,
                        buttons=buttons, sticky=sticky, alert_id=alert_id,
                        priority=priority, alert_type=alert_type, metadata=metadata)
-                return
+                return True
         # 可见窗都不支持 show_alert：退化到首个可见窗的 show_bubble
         for w in self._visible_windows():
             if hasattr(w, "show_bubble"):
@@ -122,7 +141,8 @@ class MultiWindowProxy:
                                   duration_ms=duration_ms if not sticky else 0)
                 except TypeError:
                     w.show_bubble(text, duration_ms=max(duration_ms, 4500))
-                return
+                return True
+        return False
 
     def resolve_alert(self, alert_id: str) -> None:
         """按 alert_id 在所有窗收起该提醒（含隐藏窗）：任意窗点按钮即全局收起。
@@ -487,7 +507,7 @@ class SharedSubsystems:
         self.fs.cursor_visibility_changed.connect(shell._on_shared_cursor)
         # 免打扰（issue #208）：进程级一份轮询表，只在免打扰生效期间跑；结束时
         # 经共享 proxy 把"攒了几条提醒"汇报到首个可见窗（多窗只报一处）。
-        self.quiet = QuietTicker(
+        self.quiet = quiet_mode.QuietTicker(
             also_on_fullscreen=lambda: bool(
                 shell.config.get("quiet_also_on_fullscreen", True)
             )
@@ -500,11 +520,24 @@ class SharedSubsystems:
 
         ``MultiWindowProxy`` 直接当呈现宿主：它的 ``show_alert`` 会落到首个可见
         窗（与联动提醒同策），多宠不会重复播报。
+
+        **交付确认制**：只有确有交付目标时才 ``ack_report``（排空暂存）。没有目标
+        （退出全屏的同一拍里窗口还没恢复显示）就原样返回——轮询表会保持重试，
+        提示只会晚一点到，不会消失。
         """
+        state = quiet_mode.shared_quiet_state()
+        if not items:
+            state.ack_report()   # 一轮下来无事可报：结算掉，别让轮询表空转
+            return
+        if not self.proxy.has_presentation_target():
+            return
         try:
-            window_alerts.report_quiet_summary(self.proxy, items)
+            delivered = window_alerts.report_quiet_summary(self.proxy, items)
         except Exception:
             log.exception("免打扰结束汇报失败")
+            return
+        if delivered:
+            state.ack_report()
 
     def start(self) -> None:
         # overlay 拓扑不启共享全屏 watcher：sprite 世界的壳自持

@@ -2450,11 +2450,17 @@ class AppShell:
         if getattr(self, "_shared", None) is None:
             return
         # 免打扰（issue #208）：全屏 = 等效免打扰的唯一来源（不另起探测）。
-        # 刻意放在下面的每窗过滤**之前**：那个过滤按 auto_hide_fullscreen 逐窗
-        # 筛选，而 quiet_also_on_fullscreen 是独立的用户偏好，与自动隐藏无关。
+        # **入场先立闸、退场后结算**，两个落点都不能挪：
+        # - 入场（hit=True）在隐藏各窗之前立闸，隐藏动作自身带出的呈现不会漏过门控；
+        # - 退场（hit=False）必须等各窗**恢复显示之后**再结算——结束汇报经
+        #   ``MultiWindowProxy`` 只投向可见窗，窗口还没回来就结算等于把攒下的
+        #   提醒汇报给空气（交付确认兜底会让它下一拍重试，但正序才是常态路径）。
+        # 也刻意不走下面那个按 auto_hide_fullscreen 的逐窗过滤：那是自动隐藏的
+        # 开关，与 quiet_also_on_fullscreen 是两个独立偏好。
         from . import quiet_mode
 
-        quiet_mode.note_fullscreen(hit)
+        if hit:
+            quiet_mode.note_fullscreen(True)
         for inst in self._instances:
             win = inst.win
             if win is None or not shiboken6.isValid(win):
@@ -2468,6 +2474,8 @@ class AppShell:
                 win.fullscreen_changed.emit(hit)
             except (AttributeError, RuntimeError):
                 logging.exception("扇出全屏状态到窗口失败")
+        if not hit:
+            quiet_mode.note_fullscreen(False)
 
     def _on_shared_cursor(self, visibility: str) -> None:
         """批5.2a：共享光标可见性广播 → 扇出到各窗的 _on_cursor_visibility_changed。"""
