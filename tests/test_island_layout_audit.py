@@ -65,6 +65,9 @@ class _StubMonitor:
     def set_interval(self, interval):
         self.interval = interval
 
+    def snapshot(self):
+        return self.sample
+
     def start(self):
         pass
 
@@ -309,10 +312,21 @@ def test_chip_text_optically_centered_in_box(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------- 7. 统一基线
 def test_all_text_layers_share_one_baseline(monkeypatch, tmp_path):
-    """主信息/数值/单位共用一条基线：墨底行差 ≤1px（E7 复核 E4 后仍成立）。"""
+    """主信息/数值/单位共用一条基线：墨底行差 ≤1px（E7 复核 E4 后仍成立）。
+
+    喂 ok 快照让单位盒真正画出（6.1sol 建议 6：修复前设备段停在 sampling，
+    单位根本不上墨，用例名不副实），并单独探测单位盒墨底。
+    """
+    import time as _time
+
+    from pet import sys_monitor as sm
+
     island, _screen = _make_island(monkeypatch, metrics=["cpu", "mem"])
     try:
-        island._sys_pending = set()  # 让段走 ok 态以外不需要——四态 -- 同样有墨
+        island._sys_pending = set()
+        island._sys_monitor.sample = sm.SysSample(
+            cpu_percent=42.0, mem_percent=61.0, sampled_at=_time.monotonic())
+        island._tick_sys()
         img = _fresh_content(island)
         segs = island._compose_info_segments()
         pl = layout.place_info_segments(
@@ -321,15 +335,25 @@ def test_all_text_layers_share_one_baseline(monkeypatch, tmp_path):
             value_fm=island._metrics_for("value"),
             label_fm=island._metrics_for("label"))
         bottoms = []
+        unit_bottoms = []
         for p in pl:
             if p.seg.kind == layout.KIND_CHIP:
                 continue
             bounds = _ink_bounds(img, int(p.box_x), int(p.box_x + p.box_w))
             if bounds is not None:
                 bottoms.append(bounds[3])
+            if p.unit_text:
+                ub = _ink_bounds(img, int(p.unit_x), int(p.unit_x + p.unit_w))
+                assert ub is not None, f"{p.seg.seg_id} 声明了单位但单位盒无墨"
+                unit_bottoms.append(ub[3])
         assert len(bottoms) >= 2, f"至少主信息 + 一个指标段可比（{bottoms}）"
         assert max(bottoms) - min(bottoms) <= 1, (
             f"各层基线不一致：墨底行 {bottoms}")
+        assert unit_bottoms, "ok 快照下 cpu/mem 的单位盒必须有墨"
+        assert max(unit_bottoms) - min(unit_bottoms) <= 1, (
+            f"单位盒基线不一致：墨底行 {unit_bottoms}")
+        assert max(abs(u - b) for u in unit_bottoms for b in bottoms) <= 1, (
+            f"单位盒与数值盒不共底：单位 {unit_bottoms} vs 数值 {bottoms}")
     finally:
         island.close()
 

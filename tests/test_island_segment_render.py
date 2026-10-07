@@ -293,7 +293,8 @@ def test_network_box_sample_is_a_realistic_envelope(tmp_path, monkeypatch):
 
     样本串决定盒宽：包络定得太宽，典型读数（K 级速率 + 两位毫秒）右对齐后会在
     段内留下大块空白（P1 实机截图自审发现的视觉缺陷）；包络外（G 级速率 /
-    四位毫秒）由 max(样本, 现文案) 加宽兜住，永不静默省略。
+    四位毫秒）由字段盒右省略护栏承接（R1 评审修复：`7947a18` 的 max(样本,现文案)
+    让采样值经 box_text 变相进宽度键，临界预算下会折叠振荡——盒宽必须恒为样本）。
     """
     cfg = _config(tmp_path)
     cfg.set("island_metrics", [NETWORK])
@@ -309,13 +310,24 @@ def test_network_box_sample_is_a_realistic_envelope(tmp_path, monkeypatch):
         assert within.box_text == island_layout_mod._NETWORK_BOX_SAMPLE
         assert "G" not in island_layout_mod._NETWORK_BOX_SAMPLE, (
             "样本不取 G 级病态形态（典型读数会在盒内留出大块空白）")
-        # 包络外（G 级速率 / 四位毫秒）：盒跟现文案走，不省略、不静默吃字
+        # 包络外（G 级速率 / 四位毫秒）：盒宽仍恒为样本（采样值不进宽度键），
+        # 显示由字段盒右省略护栏承接——不再加宽、不再省略进键
         made[0].sample = _net_sample(
             down=1023 * 1024 ** 3, up=1023 * 1024 ** 3, latency=1000.0)
         island._tick_network()
         beyond = _seg(island._compose_info_segments(), NETWORK)
-        assert beyond.box_text == beyond.text
-        assert "…" not in beyond.text
+        assert beyond.box_text == island_layout_mod._NETWORK_BOX_SAMPLE, (
+            "包络外读数也不许改盒宽（R1：采样值永不进宽度键）")
+        assert "G" in beyond.text, "段数据仍是完整读数（省略只发生在绘制层字段盒）"
+        # 绘制层落位：超宽串被字段盒右省略（护栏生效、岛宽不变）
+        placements = place_info_segments(
+            [beyond], start_x=0,
+            primary_fm=island._metrics_for("primary"),
+            value_fm=island._metrics_for("value"),
+            label_fm=island._metrics_for("label"))
+        assert "…" in placements[0].text, "包络外读数应被字段盒右省略"
+        assert placements[0].box_w == int(island._metrics_for("value").horizontalAdvance(
+            island_layout_mod._NETWORK_BOX_SAMPLE)), "盒宽必须等于声明样本实测宽"
     finally:
         island.close()
 

@@ -50,7 +50,9 @@ segments.register_segment(id=..., label=..., format_value=..., max_text=..., ...
 ## 三、宽度纪律
 
 - 盒宽 = `horizontalAdvance(label) + (4px) + horizontalAdvance(max_text)`，**实测**，
-  按 `(id, 字体指纹)` 缓存；字体/DPI 一变自动重测。
+  按 `(id, 字体指纹)` 缓存；字体/DPI 一变自动重测。声明了 `unit` 的段再
+  `+ 1px + horizontalAdvance(unit)`（E4 双盒：值盒与单位盒之间 1px 间隙）——
+  120px 超宽判决按这个**完整口径**算，长单位（如 `Mbps`）绕不过去。
 - **采样值不进任何宽度键**：读数只在盒内右对齐伸缩（`9% → 100%` 个位不动）。
   你的格式化函数无论返回什么，都不可能改岛宽——这是结构保证，不是纪律。
 - 运行期读数超过盒宽 → 右省略到盒宽 + warning（见 §五第二道护栏）。
@@ -128,7 +130,7 @@ declaration = segments.register_segment(
     id="cpu_temp",
     label="温度",                  # ≤ 6 字符（超了自动截断 + 告警）
     format_value=format_celsius,
-    max_text="888",                # 必填：最坏读数样本，声明盒宽 = 实测它
+    max_text="88",                 # 必填：最坏读数样本，声明盒宽 = 实测它
     unit="°C",                     # 单位盒（10px 降色）
     unit_full="摄氏度",             # 以下四项只在展开卡片的详情列出现
     source="本机传感器",
@@ -145,10 +147,12 @@ assert segments.render_compact(snapshot) == "温度74"        # 胶囊文案
 assert segments.alert_severity(declaration.id, 74.0) == segments.ALERT_WARN
 
 # 3) 宽度与降级判决（宿主排版时用同一份实测缓存）
+#    注意：声明了 unit 的段，盒宽 = label + 间隔 + max_text + 1px + 单位宽（双盒）
 metrics = QFontMetrics(QFont("", 13))
 assert declaration.width_px(metrics) == (
     metrics.horizontalAdvance("温度") + segments.LABEL_GAP_PX
-    + metrics.horizontalAdvance("888"))
+    + metrics.horizontalAdvance("88")
+    + 1 + metrics.horizontalAdvance("°C"))
 assert declaration.is_oversize(metrics) is False
 assert segments.oversize_segment_ids(metrics) == ()
 
@@ -157,19 +161,23 @@ assert segments.unregister_segment("cpu_temp") is True
 assert segments.alert_thresholds("cpu_temp") is None
 ```
 
-## 八、宿主接线现状（如实）
+## 八、宿主接线现状（如实，R1 评审补全版）
 
-F1 交付的是**接口与护栏**，以及 GPU 占位。当前状态：
+F1 交付的是**契约层（声明/护栏/文档）**与 GPU 占位。当前状态：
 
 | 能力 | 状态 |
 |---|---|
-| 声明/校验/注销、四态、宽度自测量、120px 判决、恶意段护栏 | ✅ 已实现（`pet/island_segments.py`） |
+| 声明/校验/注销、四态、宽度自测量（含单位盒）、120px 判决、恶意段护栏 | ✅ 已实现（`pet/island_segments.py`） |
 | `gpu`：已知 id、恒 `unavailable`（本版本没接数据源） | ✅ 已接线（config 白名单 + `_unavailable_reasons` + 卡片原因行 + 设置页开关） |
-| 第三方段进**胶囊**的渲染接线（`_compose_info_segments` 收第三方段） | ⬜ 未做（本 slice 无第三方段实例，接线点见该函数；现在做等于给不存在的路径铺代码） |
-| `oversize_segment_ids()` 在**收缩流水线**里的消费（先折候选） | ⬜ 未做（同上：`plan_info_row` 的折叠面目前只在被测对象存在时才谈得上"先折"） |
+| 第三方段进**胶囊**的渲染接线（`_compose_info_segments` 收第三方段） | ⬜ 未做 |
+| `oversize_segment_ids()` 在**收缩流水线**里的消费（先折候选） | ⬜ 未做 |
+| **配置准入**：`island_metrics` 的归一化白名单目前只放内置四员，已注册第三方 id 写进配置仍会被清掉 | ⬜ 未做 |
+| **采样生命周期**：谁调 `read`、在哪个线程、如何按折叠/隐藏/停靠退订——宿主路径未定义 | ⬜ 未做 |
+| **告警与更新时间的原始值**：`sample()` 格式化后只回文本，宿主无法仅凭快照按声明阈值推进告警；`updated_at` 也没有 | ⬜ 未做 |
 
-也就是说：**接口面（注册 + 护栏 + 文档）已冻结可依赖，渲染接线在下一 slice 做**。
-在那之前注册的段不会出现在胶囊上——这一点必须让第三方知道，不许含糊。
+也就是说：**契约层的 API 形状（声明字段/护栏/四态）本版本冻结**；但「注册即可上岛」
+**还不成立**——上表 ⬜ 项全部接通之前，注册的段不会出现在胶囊上，配置里也留不住。
+下一 slice（F2）的范围就是这张 ⬜ 表。这一点必须让第三方知道，不许含糊。
 
 ## 九、红线
 

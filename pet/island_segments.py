@@ -509,8 +509,16 @@ class SegmentDeclaration:
         return SegmentSnapshot(id=self.id, label=self.label, max_text=self.max_text)
 
     def width_px(self, font_metrics, *, font_key=None) -> int:
-        """声明盒宽（实测 px）：复用内置段的 :func:`measure_segment_width` 与同一份缓存。"""
-        return measure_segment_width(self.probe_snapshot(), font_metrics, font_key=font_key)
+        """声明盒宽（实测 px）：复用内置段的 :func:`measure_segment_width` 与同一份缓存。
+
+        含**单位盒**（R1 评审修复）：E4 起胶囊是「值盒 + 1px + 单位盒」双盒，
+        只量 label/max_text 会让长单位（如 ``Mbps``）绕过 120px 超宽判决——
+        声明了 unit 的段必须把 1px 间隙与单位实测宽一并计入。
+        """
+        width = measure_segment_width(self.probe_snapshot(), font_metrics, font_key=font_key)
+        if self.unit:
+            width += 1 + int(font_metrics.horizontalAdvance(self.unit))
+        return width
 
     def is_oversize(self, font_metrics, *, font_key=None) -> bool:
         """>120px 即超宽（降级为折叠候选，但**不**拒绝注册）。"""
@@ -653,7 +661,9 @@ def oversize_segment_ids(font_metrics, *, font_key=None) -> tuple[str, ...]:
     key = font_metrics_key(font_metrics) if font_key is None else font_key
     oversize: list[str] = []
     for declaration in _SEGMENTS.values():
-        width = measure_segment_width(declaration.probe_snapshot(), font_metrics, font_key=key)
+        # 走 declaration.width_px（含单位盒的完整口径）——直接用
+        # measure_segment_width 会让长单位（如 Mbps）绕过 120px 判决（R1 评审修复）。
+        width = declaration.width_px(font_metrics, font_key=key)
         if width <= MAX_SEGMENT_WIDTH_PX:
             continue
         oversize.append(declaration.id)

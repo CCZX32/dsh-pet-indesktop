@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import catalog, island_layout, island_segments, net_monitor, sys_monitor
+from . import catalog, island_layout, island_segments, net_monitor, quiet_mode, sys_monitor
 from .dsh_state import DshState
 from .island_layout import (
     _BASELINE_DY, _CHIP_ALERT_DOT_PX, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX,
@@ -831,7 +831,12 @@ class DynamicIsland(QWidget):
         if self._dot_done and self._status_dot_state() != _DOT_DONE:
             # 被更高优先级状态（错误/待确认/工作）顶掉：立即停表销毁，不留过期绿点
             self._stop_dot_done_timer()
-        if value in work_states and previous not in work_states:
+        if (value in work_states and previous not in work_states
+                and self._event_effects_enabled()
+                and not quiet_mode.shared_quiet_state().suppression_active()):
+            # 事件弹跳必须过与 notify_event 同一道闸门：event_effects 开关 + 免打扰
+            # 安静规则（裁决稿 §一-7：禁弹跳，读数照常——状态点本身不受闸门影响；
+            # 免打扰判据复用全应用唯一的 suppression_active，与 window_alerts 同口径）
             self._bounce(impulse=3.0)
         self.update()
 
@@ -1148,10 +1153,16 @@ class DynamicIsland(QWidget):
     def _update_alert_severity(self, sample) -> None:
         """按新快照推进各指标的告警级（滞回要的"上一拍"状态，P2 Slice E2）。
 
-        必须在**样本到达的那一刻**算（``_tick_sys`` 是读数的唯一入口），不能在
+        必须在 **GUI 读取快照的那一刻**算（``_tick_sys`` 是读数的唯一入口），不能在
         绘制时惰性算：两次读数之间不绘制是常态（窗口隐藏、值没变不 update），
         惰性算会把中间那拍整个漏掉，滞回退化成"每次都从零开始"——92 降 91 会被
         误判成首次越过 warn 线而画成黄，正好是滞回要防的事。
+
+        告警语义是**按 UI 读取拍**而不是按后台每份采样（R1 评审裁决）：后台采样
+        只留最新一份快照，GUI 1Hz 定时器来取——GUI 繁忙时后台连发两拍（92→91）
+        只会被读到 91。这是刻意的：**告警色跟随用户实际看到的读数**（没看到 92
+        就不该按 92 上色），与显示值永远一致；要"每份采样都推进"得在采样端维护
+        告警状态，那是另一条路，本版本不取。
 
         折叠不影响这里：快照是 cpu/mem 共享的，被折段的读数照旧推进它的告警级
         （哪怕这一段自己已经退订、显示退回 ``--``）——chip 告警点靠这条活着。
@@ -1468,11 +1479,11 @@ class DynamicIsland(QWidget):
     def _card_column_widths(self, rows) -> tuple[int, int, int]:
         """B 区三列的实际宽度（(名, 值, 详情)）——三者和**恰好等于内容宽**。
 
-        分配顺序：段名列 → 详情列（先要它声明的宽，至少 ``_CARD_DETAIL_MIN_PX``，
-        但给值列留够 ``_CARD_VALUE_MIN_PX``）→ 值列拿剩下的。为什么详情列优先：
-        它是卡片存在的理由（单位·来源·时间只在卡片有），而值列在胶囊上已经有了；
-        卡片宽被 420 钳住时该先省值列。两列的现文案都按各自列宽右省略，所以行宽
-        恒等于内容宽——"内容画出轮廓"在这条路径上不可能发生。
+        分配顺序：段名列 → 值列（先要它声明的宽——它是胶囊同款定宽字段盒，
+        截断一个读数是最不该发生的坏，但给详情列留够 ``_CARD_DETAIL_MIN_PX``）
+        → 详情列拿剩下的。为什么值列优先：读数的完整不可牺牲，详情（单位·来源·
+        时间）可以右省略。两列的现文案都按各自列宽右省略，所以行宽恒等于内容宽
+        ——"内容画出轮廓"在这条路径上不可能发生。
         """
         content = self._card_content_width()
         if not rows:
@@ -1537,6 +1548,11 @@ class DynamicIsland(QWidget):
         note = ""
         if seg.state == island_segments.STATE_OK:
             updated = self._card_updated_text(sampled_at)
+            if seg.seg_id in folded:
+                # 只折一部分时共享快照仍在顺带更新它（兄弟段还订阅着）——
+                # 值是活的要如实显示，但「已被胶囊折叠」这件事也必须标注
+                # （R1 评审修复：修复前这种行看起来与正常采样行毫无区别）。
+                updated = f"已折叠 · {updated}"
         elif seg.state == island_segments.STATE_SAMPLING:
             # 冷启动/刚恢复订阅的首轮：胶囊上是 ``--``，卡片在来源行注「采样中」
             # （k3 §6.3 的四态口径），不写成"不可用"——它不是不会来，是还没来。
@@ -2027,10 +2043,11 @@ class DynamicIsland(QWidget):
         """网络段：定宽槽串（``format_network_slot`` 的 5 列契约）直接进字段盒。
 
         没有 label（↓↑ 是槽串自带的 glyph），采样还没出第一轮时按四态显示 ``--``。
-        盒宽 = 样本与现文案的**较宽者**：样本兜住「千兆满速 + 近秒级延迟」包络内
-        的所有读数（盒内右对齐、数字跳动不推邻居）；包络外（G 级速率 / 四位毫秒）
-        宁可让岛变宽也不静默吃字——与主信息段同一口径，``box_text`` 本就在宽度
-        白名单键里，加宽走正规几何路径。
+        盒宽**恒为声明样本**（「千兆满速 + 近秒级延迟」现实包络）：读数在盒内右对齐
+        伸缩，采样值永不进宽度键——R1 评审修复：``7947a18`` 曾让盒宽取 max(样本,
+        现文案)，结果采样值经 ``box_text`` 变相进键，临界预算下会形成「折叠→清样本
+        →恢复→再折叠」的订阅振荡；包络外读数（G 级速率/四位毫秒）改由字段盒右省略
+        护栏承接（``format_field_box`` 自带 warning），不破坏宽度不变量。
         """
         sample = self._net_sample
         if sample is None:
@@ -2041,12 +2058,8 @@ class DynamicIsland(QWidget):
                 sample.down_bps, sample.up_bps, sample.latency_ms,
                 lost=sample.latency_lost)
             state = island_segments.STATE_OK
-        box = _NETWORK_BOX_SAMPLE
-        value_fm = self._metrics_for("value")
-        if int(value_fm.horizontalAdvance(text)) > int(value_fm.horizontalAdvance(box)):
-            box = text
         return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=island_segments.NETWORK, label="",
-                        text=text, box_text=box, state=state)
+                        text=text, box_text=_NETWORK_BOX_SAMPLE, state=state)
 
     def _device_segment(self, metric_id: str) -> _InfoSeg:
         """CPU / 内存段：读数来自共享的 ``SysMonitor`` 快照（无快照 = sampling）。
@@ -2787,7 +2800,10 @@ class DynamicIsland(QWidget):
         if abs(squish - 1.0) < 0.002:
             return base, base.height() / 2.0
         sy = squish
-        sx = 1.0 + (1.0 - sy) * 0.3  # 竖压横鼓（权重打折，鼓出不超出内缩余量）
+        # 竖压横鼓（权重打折，鼓出不超出内缩余量）；横向**只鼓不缩**（R1 评审修复：
+        # sy>1 拉伸期 sx<1 会让外壳比静止态窄，宽岛的头像/状态点画到外壳外——
+        # 内容不随形变，外壳横向必须始终 ≥ 静止宽）。
+        sx = 1.0 + max(0.0, 1.0 - sy) * 0.3
         w, h = base.width() * sx, base.height() * sy
         cx, cy = base.center().x(), base.center().y()
         return QRectF(cx - w / 2.0, cy - h / 2.0, w, h), h / 2.0
@@ -2986,7 +3002,8 @@ class DynamicIsland(QWidget):
             icon, name, info, status,
             self._icon_text() if icon else "",
             name_text if name else "",
-            tuple((seg.seg_id, seg.text, seg.unit, seg.state, seg.severity)
+            tuple((seg.seg_id, seg.label, seg.text, seg.unit, seg.state, seg.severity,
+                   seg.box_text, seg.elide_px)
                   for seg in segments),
             self._accent_color().name() if icon else "",
             primary_color.name() if name else "",
@@ -3240,6 +3257,11 @@ class DynamicIsland(QWidget):
             if getattr(self, "_mode", "") == "expanded":
                 self._sync_card_labels()
                 self._resize_card_if_needed()
+            elif not self._dragging:
+                # 普通胶囊同样要把几何提交掉（R1 评审修复）：缓存作废后下一次绘制
+                # 会按新字体重算计划，窗口宽若不同步就会与计划宽脱节（最长拖到
+                # 30s 心跳）。拖拽中冻结是既有纪律，松手由 mouseReleaseEvent 重算。
+                self._update_size()
 
     def _clear_font_cache(self) -> None:
         self._fonts.clear()
@@ -3270,6 +3292,10 @@ class DynamicIsland(QWidget):
     def enterEvent(self, event) -> None:  # noqa: N802
         # 展开卡片时不悬停放大（整窗缩放会截掉贴边的卡片底板，见 paintEvent）
         self._hover_scale_target = 1.0 if self._mode == "expanded" else 1.02
+        if self._mode == "expanded":
+            # hover 暂停自动收起（裁决稿 §一-10：用户在读卡片/准备点按钮时
+            # 不许被 15s 定时器收掉；离开即重新倒计时）
+            self._card_collapse_timer.stop()
         if self._mode == "docked" and not self._hover_peek:
             self._dock_back_timer.stop()
             self._hover_peek = True
@@ -3280,6 +3306,8 @@ class DynamicIsland(QWidget):
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._hover_scale_target = 1.0
+        if self._mode == "expanded":
+            self._card_collapse_timer.start()
         if self._mode == "docked" and self._hover_peek:
             self._dock_back_timer.start()
         self._ensure_anim_timer()
@@ -3310,6 +3338,10 @@ class DynamicIsland(QWidget):
         global_pos = event.globalPosition().toPoint()
         if not self._dragging and (global_pos - self._press_global).manhattanLength() >= QApplication.startDragDistance():
             self._dragging = True
+            # 起拖即停进行中的内容淡化（R1 评审修复：`_dragging` 只拦新淡化，
+            # 不停已在播的——"先淡化、后起拖"会让残影在拖拽中继续推进 130ms，
+            # 违反"拖拽中不播"）；停表即跳终点帧，口径与 hideEvent 一致
+            self._stop_content_fade()
             # 起拖先清几何插值状态（滑出/停靠/归位动画的目标）：否则动画
             # 每 16ms 把窗口拽回目标位，与拖拽 move() 互抢（不跟手/60Hz
             # 抖动，且期间碰撞结算被 _geo_to 守卫全程跳过）。注意不停动画

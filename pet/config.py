@@ -951,9 +951,10 @@ class Config:
             "dynamic_island": _default_dynamic_island_data(),
             # —— 灵动岛附加指标（P1 Slice C）——
             # 岛胶囊上附加指标段的**有序列表**（段 id 字符串）。**列表序 = 用户
-            # 优先级 = 收缩时尾部先被折叠**；合法 id 三员：network / cpu / mem
-            # （常量在 island_segments，不在这里写第二份字面量）。默认空 = 只要
-            # 主信息，升级用户不会突然多出指标。
+            # 优先级 = 收缩时尾部先被折叠**；合法 id 四员：network / cpu / mem / gpu
+            # （常量在 island_segments，不在这里写第二份字面量；gpu 是 P3 的能力
+            # 占位——胶囊零占位、卡片给原因行）。默认空 = 只要主信息，升级用户
+            # 不会突然多出指标。
             "island_metrics": [],
             # —— 网络信息（issue #172）——
             # 灵动岛信息槽改显「延迟 + 上下行网速」。默认关：延迟探测每秒要发一次
