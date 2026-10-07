@@ -185,7 +185,11 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 2026-09-22 加入点击台词朗读 / 台词本地语音预缓存 / 自言自语配图概率 3 键
 # （self_talk_speak_enabled、self_talk_voice_precache_enabled、self_talk_image_chance）。
 # 2026-10-07 加入音乐播放器来源 2 键（foobar_lyrics_enabled / foobar_title_format）。
-# 后实测：白名单字面量 127 + 特例 5 = 132。
+# 2026-10-07 深夜批次再加：天气 3（weather_enabled/weather_city/weather_city_list）、
+# 网络 3（island_network_enabled/network_probe_interval_seconds/network_info_menu_enabled）、
+# 免打扰 2（quiet_minutes_default/quiet_also_on_fullscreen）、回收内存 2
+# （mem_skip_foreground/mem_min_size_mb）、动画菜单 1（anim_menu_stay_open）。
+# 后实测（2026-10-07 夜间整合后复测）：白名单字面量 139 + 特例 5 = 144。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

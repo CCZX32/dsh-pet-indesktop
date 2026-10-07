@@ -69,7 +69,7 @@
 
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
-| `pet/music_title.py`（新） | +398 / −0 | 纯函数**零 Qt**。`clean_web_title()`（站点后缀 / UP主段 / 噪声标签 / 书名号歌名 / 歌手就近段 / 不猜 haystack / 误伤退回）+ `parse_foobar_title()`（titleformat→正则：`%title%` / `%artist%` 取名、其它占位符通配、`[...]`→`(?:...)?`、`''` 字面量、`$if(...)` 按字面处理→匹配不上退回不猜）+ 停止态识别。已加入 `test_architecture` 的「纯逻辑模块零 Qt」名单。 |
+| `pet/music_title.py`（新） | +398 / −0 | 纯函数**零 Qt**。`clean_web_title()`（站点后缀 / UP主段 / 噪声标签 / 书名号歌名 / 歌手就近段 / 不猜 haystack / 误伤退回）+ `parse_foobar_title()`（titleformat→正则：`%title%` / `%artist%` 取名、其它占位符通配、`[...]`→`(?:...)?`、`''` 字面量、`$if(...)` 按字面处理→匹配不上退回不猜）+ **空闲启发式**（标题只剩程序名/占位符即判「无曲目」；**分辨不出暂停**，见第七节）。已加入 `test_architecture` 的「纯逻辑模块零 Qt」名单。 |
 | `pet/foobar_playing.py`（新） | +166 / −0 | 进程检测（psutil，**2s TTL 缓存**）+ 窗口标题枚举（Win32 `EnumWindows`，只认 `GetWindow(hwnd, GW_OWNER)==0` 的可见顶层窗口——滤掉「参数选项」这类从属对话框，免得把 "Preferences" 当歌名；多条时取最长）+ `read_track()`。 |
 | `pet/now_playing.py` | +76 / −4 | 新增 `_read_foobar_playback()`；`_read_async` 在 `snapshot is None or not snapshot.playing` 时**才**问 foobar（SMTC 在播时一次都不问）；新增 `is_foobar_source()` 供调用方判断「别拿它覆盖 SMTC 跟踪位」；`get_now_playing()` 新增两个 **keyword-only** 参数（默认关，向后兼容）。 |
 | `pet/music_lyric_controller.py` | +56 / −3 | `_foobar_lyrics_enabled()` / `_foobar_title_format()`（脏值按关/自动）；`_lyric_query()`（**只有浏览器才洗标题**）；`_sample_loop` 把两个键带给 `now_playing`；`_on_playback_ready` 里 `if not now_playing.is_foobar_source(app_id)` 才更新 `_tracked_app_id`。 |
@@ -223,7 +223,12 @@ $ fetch_lyrics(*clean_web_title(...))           → 44 行 / 87 行
 
 **边界与失败路径（实机/自动已验证）**：
 
-- **foobar 停止态识别**：暂停/停止时不得当作在播（单测覆盖，真机无 foobar 可验，见下）。
+- **foobar 播放状态分辨不了（本路线的固有局限）**：窗口标题里**没有播放状态**，`parse_foobar_title`
+  只能靠**启发式**——标题退回程序名（`_IDLE_RE`）或解析不出歌名时返回 `None`（"无曲目"）。
+  因此**暂停是分辨不出来的**：暂停时标题仍是上一首 ⇒ **没在播时可能继续显示上一首**
+  （`now_playing.py:386-397` 已写明这条口径，配置键默认关、设置页文案也如实写了）。
+  这正是本批推荐 **b 路线（装 `foo_mediacontrol` 走 SMTC）** 的原因——SMTC 给的是结构化
+  播放状态，那条路没有这个局限。真机无 foobar 可验，见下。
 - **平台闸门**：非 Windows 不出现 foobar 设置行（`foobar_lyrics_supported()` 门）。
 - **缺控件时不写坏值**：保存时控件缺失则跳过该键（单测覆盖），不会把开关写成 `False`。
 - **顺序不可知**：两种顺序的真机/实网对照都拿到 63 行，证明不猜策略成立。
@@ -259,7 +264,7 @@ ImportError: cannot import name 'music_title'        # 红（模块尚不存在�
 | 结果不足 2 字时不退回原文 | **2 failed**（两条误伤防护） |
 | 顺序不可知时不猜（haystack）失效 | **1 failed**（真值表） |
 | foobar 格式串解析失效 | **2 failed** |
-| foobar 停止态识别失效 | **1 failed** |
+| foobar 空闲识别失效（`test_parse_rejects_idle_and_empty_titles`） | **1 failed** |
 | SMTC 在播时也去问 foobar | **1 failed** |
 | foobar 覆盖 SMTC 跟踪位 | **1 failed** |
 | 所有会话都清洗标题 | **1 failed**（原生播放器被误洗） |
@@ -284,16 +289,22 @@ ImportError: cannot import name 'music_title'        # 红（模块尚不存在�
 1. **本机没有 foobar2000，foobar 路径未端到端实机验证**（见第五节的探针结果）。要验收需
    先装 foobar2000；若对不上，把 foobar 的「显示 → 默认用户界面 → 窗口标题」里的那串**原样**
    填进设置页格式输入框即可。**没有用假数据把它写成「已验证」。**
-2. **歌词气泡本体未拍到照**（真机只确认了日志取词成功 + 唱歌动画），见第五节。
-3. **气泡标题仍显示原始网页标题**（如 `我在唱《【4K修复】周杰伦 - 晴天MV…》`），取词才用
+2. **窗口标题源分辨不出播放状态（a 路线的固有局限）**：foobar 的窗口标题里没有暂停/停止
+   信息，`parse_foobar_title` 只能靠**启发式**——标题退回程序名（`_IDLE_RE`）或解析不出歌名
+   时判「无曲目」。因此**暂停分辨不出来**（标题仍是上一首），**没在播时可能继续显示上一首**；
+   某些配置下停止后标题也保留上一首，同样会误判为在播。这是选 a 路线的代价，也正是本批
+   推荐 **b 路线（装 `foo_mediacontrol` 走 SMTC）** 的原因（SMTC 给结构化播放状态，无此局限）。
+   `now_playing.py:386-397` 与设置页文案都已如实写明。
+3. **歌词气泡本体未拍到照**（真机只确认了日志取词成功 + 唱歌动画），见第五节。
+4. **气泡标题仍显示原始网页标题**（如 `我在唱《【4K修复】周杰伦 - 晴天MV…》`），取词才用
    清洗后的查询词——按「任务一 = 取词前处理」的口径刻意没改。是否也显示清洗后的歌名是
    **留给产品决策**的一项。
-4. **标题里完全没有歌手信息时**（如只剩 `晴天`、artist 为空）`_name_matches` 仍会挡掉所有
+5. **标题里完全没有歌手信息时**（如只剩 `晴天`、artist 为空）`_name_matches` 仍会挡掉所有
    候选——这是取词器既有的设计，本批没动。
-5. **行数预算回调到 2412**（原 2415）：本批净减 3 行换来（把 browser_media 的 4 行写回搬进
+6. **行数预算回调到 2412**（原 2415）：本批净减 3 行换来（把 browser_media 的 4 行写回搬进
    `settings_music.save_source_settings`）。并入 integration 后，与其他批次叠加的最终实测预算
    为 **2426**（见合并提交）。
-6. **未做**：不装 foobar 时的近似能力；`docs/PR-REPORT` 之外没有新增研究文档。
+7. **未做**：不装 foobar 时的近似能力；`docs/PR-REPORT` 之外没有新增研究文档。
 
 ## 八、风险与回滚
 
@@ -308,8 +319,9 @@ ImportError: cannot import name 'music_title'        # 红（模块尚不存在�
 - **回滚**：`git revert 5ec61d0` 即可，无残留状态（config 里多出的两个键退化为无害未知键；
   缓存多出的条目由既有淘汰逻辑处理）。回滚后浏览器歌词回到「拿整条网页标题去搜」，
   **不会报错，只是命中率回落**。
-- **合并冲突面**：`tests/test_config_schema.py` 两份字面量快照（冲突时数字要对齐到
-  **127 + 5 = 132**）；`tests/test_architecture.py`（行数预算常量 + 纯逻辑模块名单）；
+- **合并冲突面**：`tests/test_config_schema.py` 两份字面量快照（#228 并入当时是
+  **127 + 5 = 132**；**集成分支当前实测已涨到 139 + 5 = 144**，冲突时按当时的实测值对齐，
+  别照抄本条数字）；`tests/test_architecture.py`（行数预算常量 + 纯逻辑模块名单）；
   `pet/modern_settings_dialog.py`（本批净减 3 行，与其它加行的批次会在此撞车——当晚的
   并序结论写在合并提交里）。`now_playing.get_now_playing()` 新增的是 **keyword-only** 参数
   （默认关），旧调用点无需改；但 `_read_async` 在无 WinRT 时**不再直接返回 `None`**（先问

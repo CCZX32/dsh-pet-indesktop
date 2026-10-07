@@ -16,6 +16,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 
 import pytest
 from PySide6.QtWidgets import QApplication, QMenu
@@ -30,6 +31,20 @@ MB = 1024 * 1024
 @pytest.fixture
 def app():
     return QApplication.instance() or QApplication([])
+
+
+def _wait_until(app, predicate, *, timeout=10.0, interval=0.02):
+    """宽预算条件轮询：worker 在**真线程**里跑、结果经 Qt 队列信号回 GUI 线程，
+    固定次数的 ``processEvents`` 赌不到那一次投递（CI 慢 runner 尤甚）。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(interval)
+    app.processEvents()
+    return predicate()
 
 
 # ---------------------------------------------------------------- 替身：整层 API
@@ -780,9 +795,10 @@ def test_unsupported_platform_click_reports_instead_of_crashing(app, monkeypatch
     assert action is None
 
     shared_mod.trigger_memory_trim(pet)
-    app.processEvents()
-
-    assert pet.bubbles and "Windows" in pet.bubbles[0]
+    # 这条走**真实** run_in_background：报告在 worker 线程产生、经队列信号回 GUI
+    # 线程，故等气泡而不是 processEvents 一次就断言。
+    assert _wait_until(app, lambda: bool(pet.bubbles)), "不支持平台也该有可见反馈"
+    assert "Windows" in pet.bubbles[0]
     menu.close()
     app.processEvents()
 

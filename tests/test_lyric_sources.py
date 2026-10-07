@@ -335,7 +335,8 @@ def test_browser_title_is_cleaned_into_the_fetch_query(monkeypatch):
 
     ctrl._on_playback_ready(_playback("msedge", title=BILI_TITLE, artist=""))
 
-    assert fetched, "浏览器会话开着开关就该取词"
+    # 取词在真线程（``music-lyric-fetch``）里跑，断言必须等它落地而不是立刻读。
+    assert _wait_until(lambda: fetched), "浏览器会话开着开关就该取词"
     _key, query_title, query_artist = fetched[0]
     assert (query_title, query_artist) == ("晴天", "周杰伦")
     assert any(BILI_TITLE in sub or BILI_TITLE in text for sub, text in win.shown), (
@@ -351,7 +352,7 @@ def test_native_player_title_is_never_cleaned(monkeypatch):
         _playback("cloudmusic.exe", title=BILI_TITLE, artist=MUSIC_ARTIST)
     )
 
-    assert fetched
+    assert _wait_until(lambda: fetched), "原生播放器同样该取词（只是不清洗）"
     _key, query_title, query_artist = fetched[0]
     assert (query_title, query_artist) == (BILI_TITLE, MUSIC_ARTIST)
 

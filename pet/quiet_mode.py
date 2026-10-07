@@ -10,9 +10,12 @@
   （``quiet_also_on_fullscreen``）。是否处于免打扰只由 ``suppression_active()``
   一处回答，消费方（``window_alerts.quiet_blocked``）不再各自读标志——这就是
   issue 要求的"单点收口"。
-- **纯逻辑零 Qt**：倒计时 / 档位 / 暂存队列都在 ``QuietState`` 上，注入时钟即可
-  在无 Qt 环境测试；Qt 侧只有 :class:`QuietTicker` 这一个 1Hz 轮询表，且**只在
-  免打扰生效期间才跑**（不新增常驻高频表）。
+- **状态是纯逻辑、模块是 Qt 层**：倒计时 / 档位 / 暂存队列都在 ``QuietState`` 上，
+  它自身不碰 Qt，注入时钟即可在无 Qt 环境独立测试；但**本模块整体不是零 Qt 模块**
+  （顶层 import ``PySide6.QtCore``，:class:`QuietTicker` 就是 QObject + QTimer），
+  所以它**不在** ``tests/test_architecture.py`` 的「纯逻辑模块零 Qt」名单里。Qt 侧只有
+  :class:`QuietTicker` 这一个 1Hz 轮询表，且**只在免打扰生效期间才跑**（不新增常驻
+  高频表）。
 
 与既有"全屏避让"的关系：全屏避让（``auto_hide_fullscreen`` → 隐藏桌宠）继续管
 **呈现**，本模块管**提醒**——两者共用同一份全屏信号（不另起探测），语义不重叠：

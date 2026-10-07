@@ -14,6 +14,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QTime
 from PySide6.QtWidgets import QApplication
 
 import pet.dynamic_island as island_mod
@@ -95,8 +96,13 @@ def test_network_slot_off_by_default_uses_info_mode_and_starts_nothing(tmp_path,
         app.processEvents()
         assert made == [], "默认关不得创建采样器（更别提起线程/发包）"
         assert island._net_timer.isActive() is False
-        assert island._info_text() == island._info_text()  # 走 info_mode 分支
-        assert "↓" not in island._info_text()
+        # 默认关 → 必须走 info_mode 分支（本用例配置 info_mode="time"）：文本是
+        # HH:mm 形态，而不是网络槽的 "↓…↑…"。给 ±1 分钟容差，避免恰好跨分钟时假红。
+        now = QTime.currentTime()
+        expected = {now.addSecs(offset).toString("HH:mm") for offset in (-60, 0, 60)}
+        text = island._info_text()
+        assert text in expected, f"默认关时信息槽必须回到 info_mode 内容，实际 {text!r}"
+        assert "↓" not in text
     finally:
         island.close()
 

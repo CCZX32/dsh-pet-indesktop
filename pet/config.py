@@ -1161,7 +1161,6 @@ class Config:
             "click_sound_volume",
             "slingshot_enabled",
             "throw_strength",
-            "drop_gravity",
             "idle_low_fps_enabled",
             "idle_low_fps_threshold",
             "click_show_balance",

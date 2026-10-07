@@ -277,7 +277,9 @@ $ py weather_smoke.py
 - **合并冲突面**：`pet/menu_templates/modern-default-v1.json` 与 `tests/test_menu_layout.py`
   （默认节点表/渲染表）、`tests/test_desktop_pet_features.py`（标签清单）、
   `tests/test_settings_interaction_tabs.py`（标签契约）——当晚与 #172 / #228 在同几处撞车，
-  按合并提交里的并序结论为准。**免打扰（#208）与本改动无共享代码**：天气气泡走的是既有
-  `show_bubble`，天然被任何新增门控覆盖。
+  按合并提交里的并序结论为准。**免打扰（#208）与本改动无共享代码**：天气气泡是用户主动
+  查询的应答，走既有 `show_bubble` **直发**；免打扰刻意不拦直发气泡（与自言自语、联动状态
+  气泡同一口径，见 `window_alerts.quiet_blocked` 的 docstring），被拦的只有普通提醒。
+  **天气气泡不受免打扰影响，这是设计意图。**
 - **分支状态**：本提交经 `bc34ac5` 并入 `integration/2026-10-07-night-batch`；
   分支未 push、PR 未开。
