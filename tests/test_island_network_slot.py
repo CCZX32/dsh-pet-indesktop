@@ -8,6 +8,11 @@
 真值；旧键 ``island_network_enabled`` 只在归一化阶段单向迁移一次，本文件不再
 造它——迁移本身由 ``tests/test_island_metrics_config.py`` 覆盖）。
 
+**段语义（P1 Slice D1 起）**：网络是普通指标段，文本进 ``_compose_info_segments()``
+的 network 段（断言走本文件的 ``_net_seg`` 助手）；信息槽内容永由 ``info_mode``
+决定，``_info_text()`` 只返回主信息段的文案。段管线的段序/文案/四态由
+``tests/test_island_segment_render.py`` 覆盖，本文件只管采样生命周期接线。
+
 采样器在测试里一律替换成替身（``DynamicIsland._make_net_monitor`` 替换点）：
 **测试不发真实探测包、不碰 psutil**，活体行为由实机验证覆盖。时序断言不赌
 真定时器节奏，全部同步直调。
@@ -22,7 +27,7 @@ from PySide6.QtCore import QTime
 from PySide6.QtWidgets import QApplication
 
 import pet.dynamic_island as island_mod
-from pet import net_monitor
+from pet import island_segments, net_monitor
 from pet.config import Config
 from pet.dynamic_island import DynamicIsland
 from pet.island_segments import NETWORK
@@ -87,6 +92,14 @@ def _island(tmp_path, monkeypatch, **network) -> tuple[DynamicIsland, list[StubM
     return DynamicIsland(_config(tmp_path, **network)), made
 
 
+def _net_seg(island: DynamicIsland):
+    """当前网络段（P1 D1 起网络是普通指标段，不再是"接管信息槽"的文案）。"""
+    for segment in island._compose_info_segments():
+        if segment.seg_id == NETWORK:
+            return segment
+    raise AssertionError("段列表里没有 network 段（网络段开关失效了？）")
+
+
 def _sample(down=2048.0, up=512.0, latency=23.0, lost=False):
     return net_monitor.NetSample(
         down_bps=down, up_bps=up, latency_ms=latency, latency_lost=lost, sampled_at=1.0,
@@ -126,12 +139,15 @@ def test_network_slot_on_starts_worker_and_shows_sample(tmp_path, monkeypatch):
         assert island._net_timer.isActive() is True
         assert island._net_timer.interval() == 2000
 
-        # 采样器还没出结果：槽位显示占位（0B / --），不空着也不编造
-        assert island._info_text() == net_monitor.format_network_slot(0.0, 0.0, None)
+        # 采样器还没出结果：段显示四态占位 "--"，不空着也不编造 0B
+        # （信息槽内容仍由 info_mode 决定——网络段不再是"接管信息槽"的特殊形态）
+        assert _net_seg(island).text == "--"
+        assert _net_seg(island).state == island_segments.STATE_SAMPLING
 
         made[0].sample = _sample()
         island._tick_network()
-        text = island._info_text()
+        text = _net_seg(island).text
+        assert _net_seg(island).state == island_segments.STATE_OK
         assert text.startswith("↓")
         assert "↓" in text and "↑" in text and "23ms" in text
         assert "2K" in text and "512B" in text
@@ -171,7 +187,7 @@ def test_network_slot_tick_keeps_text_width_stable(tmp_path, monkeypatch):
         ):
             made[0].sample = sample
             island._tick_network()
-            widths.add(len(island._info_text()))
+            widths.add(len(_net_seg(island).text))
         assert len(widths) == 1, widths
     finally:
         island.close()
@@ -184,7 +200,7 @@ def test_network_slot_lost_probe_shows_dashes(tmp_path, monkeypatch):
         app.processEvents()
         made[0].sample = _sample(latency=None, lost=True)
         island._tick_network()
-        assert island._info_text().endswith("--")
+        assert _net_seg(island).text.endswith("--")
     finally:
         island.close()
 
@@ -281,7 +297,9 @@ def test_network_slot_disabled_by_config_change_closes_worker(tmp_path, monkeypa
         assert island._net_monitor is None
         assert island._net_sample is None
         assert island._net_timer.isActive() is False
-        assert "↓" not in island._info_text(), "关掉后信息槽必须回到 info_mode 内容"
+        # 关掉后段列表里不该再有 network 段（信息槽回到 info_mode 的内容）
+        assert all(segment.seg_id != NETWORK
+                   for segment in island._compose_info_segments())
     finally:
         island.close()
 

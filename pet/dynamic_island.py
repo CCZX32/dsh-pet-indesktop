@@ -17,18 +17,20 @@ import logging
 import math
 import sys
 import time
+from dataclasses import dataclass
 
 from PySide6.QtCore import (
-    QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
+    QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QGuiApplication, QLinearGradient, QPainter, QPen, QPixmap,
+    QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter, QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import catalog, island_segments, net_monitor
+from . import catalog, island_segments, net_monitor, sys_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +175,140 @@ def _native_reassert_topmost(window) -> bool:
         return False
 
 
+# ---------------------------------------------------------------- 段管线（P1 D1）
+# 胶囊内容行 = 头像 + 角色名 + 主信息段 + 指标段… + 状态点（见设计稿 §1.1）。
+# 下面的常量与两个纯函数是"行内几何"的全部来源：``_capsule_width`` 用它们算自然
+# 宽，paintEvent 用它们落位——**同一份几何只有一个来源**，绘制层不做度量。
+#: 字号阶梯（逻辑 px；``setPixelSize`` 不用 pt——pt 要过一次 DPI 换算的二次取整）。
+#: L1 主信息 / L2 指标数值 / L3 角色名 / L4 段标签·单位。
+_FONT_LAYERS = {
+    "primary": (14, QFont.Weight.DemiBold),
+    "value": (13, QFont.Weight.Medium),
+    "name": (12, QFont.Weight.Normal),
+    "label": (10, QFont.Weight.Normal),
+}
+#: 统一基线：所有字号层级共用一条（胶囊垂直中心线下方 5px，见设计稿 §2.1）。
+#: 逐字号各自垂直居中会在单位跨档（10↔13px 混排）时上下跳。
+_BASELINE_DY = 5.0
+#: 段间竖线：槽位 19px = 9 + 1 + 9，竖线 1×14 垂直居中。
+_SEG_SLOT_PX = 19.0
+_DIVIDER_W_PX = 1.0
+_DIVIDER_H_PX = 14.0
+#: 内容行内边距左右各 19px（= 6 内缩 + 13 内容边距，沿用既有视觉）。
+_CONTENT_PAD_PX = 19.0
+_ICON_PX = 26.0
+_ICON_GAP_PX = 8.0
+#: 角色名上限 96px（超出右省略）：名字是身份不是数据，不该吃掉指标空间。
+_NAME_MAX_PX = 96
+_NAME_GAP_PX = 10.0
+_STATUS_DOT_PX = 8.0
+_STATUS_GAP_PX = 10.0
+#: 自然宽下限（沿用既有 120px：极小内容下岛仍是可点可拖的胶囊）。
+_MIN_CAPSULE_W = 120
+
+#: 主信息段的测宽样本（按模式取最坏形态）。time 定宽是"时间不推邻居"的前提；
+#: balance 的样本取 ``balance.format_balance`` 的真实单行形态（带 ¥ 与 5 位整数），
+#: 比它更长的串（带充值/赠送明细）按现文案加宽而不静默吃字（见 place_info_segments）。
+_PRIMARY_SAMPLES = {
+    "time": "88:88",
+    "balance": "余额 ¥88888.88",
+    "balance_tier": "低谷 → 88:88",
+}
+#: 网络段盒宽样本：用真格式化器的**最坏档位**生成（速率 5 列上限 + 4 位毫秒），
+#: 手写样本会和 ``format_network_slot`` 的定宽契约漂移。
+_NETWORK_BOX_SAMPLE = net_monitor.format_network_slot(
+    1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)
+#: 设备槽段的标签（数值样本取 ``sys_monitor.MAX_TEXT``，与格式化器同源）。
+_DEVICE_LABELS = {island_segments.CPU: "CPU", island_segments.MEM: "内存"}
+#: 设备槽段 id（订阅 key 同 id；cpu/mem 共用一条采样线程）。
+_SYS_METRIC_IDS = (island_segments.CPU, island_segments.MEM)
+
+
+@dataclass(frozen=True)
+class _InfoSeg:
+    """一个待渲染段（主信息段或指标段）——**数据不是绘制串**。
+
+    ``text`` 是"四态兜底之后"的显示文案（非 ``ok`` 一律同宽 ``--``）；``box_text``
+    是测宽样本（指标段 = 声明的最坏形态，主信息段 = 模式样本）。段列表是数据，
+    D2 的收缩流水线只需过滤列表（折尾段 / 省名字），不必改绘制。
+    """
+
+    kind: str        # "primary" / "metric"
+    seg_id: str      # "primary" / "network" / "cpu" / "mem" / 配置里的未知 id
+    label: str       # 段标签（L4 10px 层；主信息段为空）
+    text: str        # 当前显示文案（运行期值）
+    box_text: str    # 测宽样本（指标段 = max_text；主信息段 = 模式最坏形态）
+    state: str       # island_segments 的状态词表
+
+
+@dataclass(frozen=True)
+class _SegPlacement:
+    """一段在内容行里的落位（纯几何：绘制层只做装配，不做度量）。"""
+
+    seg: _InfoSeg
+    text: str            # 盒内实际绘制的文案（超宽时已右省略到盒宽）
+    text_w: int          # 上述文案的实测宽（盒内右对齐用）
+    label_x: float
+    label_w: int
+    box_x: float
+    box_w: int
+    divider_x: float | None   # 段前竖线的 x；首段为 None（竖线只出现在"段 ∧ 段"）
+
+    @property
+    def right(self) -> float:
+        return self.box_x + self.box_w
+
+
+def _box_sample(seg: _InfoSeg, value_fm) -> str:
+    """段盒的测宽样本：指标段恒为声明样本，主信息段取样本与现文案的较宽者。
+
+    指标段盒宽**与当前读数无关**，这就是"数字跳动不推邻居"的全部机制；主信息段
+    允许被现文案撑宽——``HH:mm`` 这类等宽形态由样本兜住（值变化不改宽），而余额
+    明细那种超长串宁可让岛变宽也不静默吃字（右省略由 D2 的 S3 负责 custom）。
+    """
+    if seg.kind != "primary":
+        return seg.box_text
+    if int(value_fm.horizontalAdvance(seg.text)) <= int(value_fm.horizontalAdvance(seg.box_text)):
+        return seg.box_text
+    return seg.text
+
+
+def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
+    """把段序列摆成一行（纯函数）：段间 19px 槽位、竖线居中、盒内右对齐。
+
+    为什么不用 ``island_segments.measure_segment_width``：那个函数只收**一个**
+    度量对象（Slice A 的契约假设"标签与数值同字体"），而排版是两档字号——标签
+    10px、数值 13px、主信息 14px。用 10px 度量数值会把盒子量小（13px 的字塞不
+    进去，每帧吃一次右省略 warning），用 13px 度量标签又让段宽虚胖。所以标签宽走
+    ``label_fm`` + :data:`island_segments.LABEL_GAP_PX`，数值盒宽走
+    :func:`island_segments.format_field_box`（同一套 ``max_text`` 语义，且自带
+    "超宽右省略 + warning"的硬护栏）。
+
+    ``start_x`` 是内容行里第一个段的起点（头像/角色名之后），返回值里的 x 全是
+    绝对坐标——绘制层只按它落笔。
+    """
+    placements: list[_SegPlacement] = []
+    x = float(start_x)
+    for index, seg in enumerate(segments):
+        metrics = primary_fm if seg.kind == "primary" else value_fm
+        display, box_w = island_segments.format_field_box(
+            seg.text, _box_sample(seg, metrics), metrics)
+        label_w = int(label_fm.horizontalAdvance(seg.label)) if seg.label else 0
+        gap = island_segments.LABEL_GAP_PX if seg.label else 0
+        divider_x = None
+        if index > 0:
+            divider_x = x + (_SEG_SLOT_PX - _DIVIDER_W_PX) / 2.0
+            x += _SEG_SLOT_PX
+        box_x = x + label_w + gap
+        placements.append(_SegPlacement(
+            seg=seg, text=display, text_w=int(metrics.horizontalAdvance(display)),
+            label_x=x, label_w=label_w, box_x=box_x, box_w=box_w,
+            divider_x=divider_x,
+        ))
+        x = box_x + box_w
+    return placements
+
+
 class DynamicIsland(QWidget):
     """胶囊形态的独立灵动岛窗口。"""
 
@@ -243,6 +379,13 @@ class DynamicIsland(QWidget):
         # 内容层位图缓存（paintEvent 的文字绘制是实测大头，见 _content_cache）
         self._content_pixmap: QPixmap | None = None
         self._content_cache_key: tuple | None = None
+        # 段管线的字体/宽度缓存：字号层懒建（_FONT_LAYERS），度量对象按层缓存；
+        # 自然宽按白名单键缓存（见 _capsule_width / _width_key）——采样值变化
+        # 进不了这个键，所以"数字跳动不推邻居"是结构保证而不是纪律。
+        self._fonts: dict[str, QFont] = {}
+        self._font_metrics: dict[str, QFontMetrics] = {}
+        self._width_cache_key: tuple | None = None
+        self._width_cache = 0
         self._geo_from: QRect | None = None
         self._geo_to: QRect | None = None
         self._geo_t = 0.0
@@ -278,6 +421,15 @@ class DynamicIsland(QWidget):
         self._net_timer.setSingleShot(False)
         self._net_timer.timeout.connect(self._tick_network)
 
+        # 设备槽段（``island_metrics`` 的 cpu/mem 成员，默认关）：与网络段同一套
+        # 生命周期纪律（岛可见才采样、段撤掉即收口），但采样器是**共享**的
+        # （``SysMonitor`` 一条线程喂两个段），订阅按段 id 计：0 订阅零 syscall。
+        self._sys_monitor: sys_monitor.SysMonitor | None = None
+        self._sys_sample: sys_monitor.SysSample | None = None
+        self._sys_timer = QTimer(self)
+        self._sys_timer.setSingleShot(False)
+        self._sys_timer.timeout.connect(self._tick_sys)
+
         # 余额峰谷档位切换的准点刷新：单次定时到下一切换边界，刷新后再排下一次。
         self._tier_tick_timer = QTimer(self)
         self._tier_tick_timer.setSingleShot(True)
@@ -297,6 +449,7 @@ class DynamicIsland(QWidget):
 
         self._apply_position()
         self._sync_network_slot()
+        self._sync_sys_slot()
 
     # ------------------------------------------------------------ 模式/配置
     @property
@@ -325,28 +478,25 @@ class DynamicIsland(QWidget):
     def _net_enabled(self) -> bool:
         """网络段开关：``island_metrics`` 里有没有 network（默认关）。
 
-        开启时**信息槽直接改显网络信息**（下行/上行速率 + 延迟），关闭时回到
-        ``info_mode`` 选的内容。这样"开关"是网络段的唯一所有者：用户不会遇到
-        "开关开了但信息槽还显示时间"这种看不出生效的状态；设置页在网络段开着
-        时会隐掉「信息槽内容」那一行（开着时它不生效，见 settings_network）。
+        网络是**普通指标段**（P1 Slice D1 起）：它和信息槽内容各占各的位置，
+        信息槽永远由 ``info_mode`` 决定，不再有"网络接管信息槽"的特殊形态。
 
         真值只有一个来源：列表的成员关系（P1 Slice C 起）。旧键
         ``island_network_enabled`` 只在归一化阶段单向迁移进列表，这里不再读它；
         非列表值（手改配置 / 桩对象）一律按"没开"处理，不做子串匹配。
         """
-        metrics = self.config.get("island_metrics", [])
-        return isinstance(metrics, (list, tuple)) and island_segments.NETWORK in metrics
+        return island_segments.NETWORK in self._metric_ids()
 
     def _net_interval(self) -> float:
         return net_monitor.clamp_interval(
             self.config.get("network_probe_interval_seconds", net_monitor.DEFAULT_INTERVAL_SECONDS))
 
     def _net_active(self) -> bool:
-        """网络槽的**有效**开关：网络槽开着 AND 信息槽可见（岛可见性另算，用 isVisible）。
+        """网络槽的**有效**开关：网络段在列表里 AND 信息槽可见（岛可见性另算）。
 
-        信息槽被关掉时网络文案根本画不出来（``_visible_parts`` 的第 3 位），
+        信息槽被关掉时一条信息段都画不出来（``_visible_parts`` 的第 3 位），
         继续跑采样线程只是白烧 psutil 的 23ms/秒与探测包——所以"显示信息槽"是
-        三态里的一态，不是只看网络开关。
+        三态里的一态，不是只看网络段在不在列表里。
         """
         if not self._net_enabled():
             return False
@@ -503,6 +653,7 @@ class DynamicIsland(QWidget):
         self._schedule_next_balance_tier_refresh()
         self._sync_card_labels()
         self._sync_network_slot()
+        self._sync_sys_slot()
         # 头像必须跟着刷新作废：provider 取的是**当前形象**的帧，而角色热切换
         # 只调 refresh_from_config（不动 island 配置），不换缓存就一直挂旧头像
         if self._icon_image_mode() or self._icon_spec() != old_icon:
@@ -616,7 +767,13 @@ class DynamicIsland(QWidget):
             self._net_monitor.stop()
 
     def _tick_network(self) -> None:
-        """读一次采样快照；值没变就什么都不做（静止时零重绘）。"""
+        """读一次采样快照；值没变就什么都不做（静止时零重绘）。
+
+        **刻意不调 ``_update_size``**：网络段盒宽由声明样本定死（见
+        ``_NETWORK_BOX_SAMPLE``），读数在盒内右对齐伸缩，几何重算走宽度白名单
+        （``_width_key``）——采样值不归它管。也不走 ``_refresh``：那会每秒重申
+        一次置顶（原生 SetWindowPos），没必要，30s 心跳已覆盖置顶保活。
+        """
         monitor = self._net_monitor
         if monitor is None:
             return
@@ -624,14 +781,83 @@ class DynamicIsland(QWidget):
         if sample is None or sample == self._net_sample:
             return
         self._net_sample = sample
-        # 定宽文案下宽度通常不变（见 format_network_slot），但仍走一次尺寸重算：
-        # 首帧从 "0B/--" 换到真值时字体度量可能有 1~2px 差异。刻意不走
-        # _refresh()——那会每秒重申一次置顶（原生 SetWindowPos），没必要，
-        # 30s 心跳已经覆盖置顶保活。
-        if self._mode == "docked" and not self._hover_peek:
-            self.update()
+        self.update()
+
+    # ------------------------------------------------------------ 设备槽（CPU/内存）
+    def _make_sys_monitor(self, interval: float) -> sys_monitor.SysMonitor:
+        """建共享采样器（**测试替换点**：替身不碰 psutil）。"""
+        return sys_monitor.SysMonitor(interval=interval)
+
+    def _sys_metric_ids(self) -> tuple[str, ...]:
+        """``island_metrics`` 里的设备槽成员（cpu/mem；保序，去重）。"""
+        return tuple(metric_id for metric_id in self._metric_ids()
+                     if metric_id in _SYS_METRIC_IDS)
+
+    def _sys_active(self) -> bool:
+        """设备槽的**有效**开关：段在列表里 AND 信息槽可见（可见性另算）。"""
+        return bool(self._sys_metric_ids()) and bool(self._visible_parts()[2])
+
+    def _sync_sys_slot(self) -> None:
+        """按配置启停设备槽的订阅、采样线程与读取定时器（幂等）。
+
+        订阅**按段**计：段在列表里就 subscribe、不在就 unsubscribe——0 订阅时
+        底座只空转计时、不产生任何 syscall（关掉指标段就该真的零开销）。
+        段全撤 / 信息槽关闭 → 彻底收口（线程停、快照丢弃）；只是暂时不可见 →
+        保留对象与订阅、停线程（同 hideEvent 的"隐藏即休眠"口径）。采样间隔固定
+        1Hz（不可配，见 ``sys_monitor.clamp_interval``），不重建线程。
+        """
+        if not self._sys_active():
+            self._unsubscribe_sys()
+            self._pause_sys_slot()
+            if self._sys_monitor is not None:
+                self._sys_monitor.close()
+                self._sys_monitor = None
+            self._sys_sample = None
             return
-        self._update_size()
+        monitor = self._sys_monitor
+        if monitor is None:
+            monitor = self._make_sys_monitor(sys_monitor.DEFAULT_INTERVAL_SECONDS)
+            self._sys_monitor = monitor
+        enabled = self._sys_metric_ids()
+        for metric_id in _SYS_METRIC_IDS:
+            if metric_id in enabled:
+                monitor.subscribe(metric_id)
+            else:
+                monitor.unsubscribe(metric_id)
+        self._sys_timer.setInterval(max(200, int(round(monitor.interval * 1000))))
+        if self.isVisible():
+            monitor.start()
+            self._sys_timer.start()
+        else:
+            self._pause_sys_slot()
+
+    def _unsubscribe_sys(self) -> None:
+        """退掉全部设备槽订阅（收口前的最后一步：订阅计数不许留在底座上）。"""
+        monitor = self._sys_monitor
+        if monitor is None:
+            return
+        for metric_id in _SYS_METRIC_IDS:
+            monitor.unsubscribe(metric_id)
+
+    def _pause_sys_slot(self) -> None:
+        """停表停线程但保留对象与订阅（隐藏/不可见时用）。"""
+        self._sys_timer.stop()
+        if self._sys_monitor is not None:
+            self._sys_monitor.stop()
+
+    def _tick_sys(self) -> None:
+        """读一次设备槽快照；值没变就什么都不做。
+
+        同 ``_tick_network``：**绝不调 ``_update_size``**（``CPU 9%→100%`` 只在
+        盒内左扩，不推邻居）；内容层位图按 ``_content_cache`` 的 key 自行重建。
+        """
+        monitor = self._sys_monitor
+        if monitor is None:
+            return
+        sample = monitor.snapshot()
+        if sample is None or sample == self._sys_sample:
+            return
+        self._sys_sample = sample
         self.update()
 
     # ------------------------------------------------------------ 卡片
@@ -926,31 +1152,18 @@ class DynamicIsland(QWidget):
         return icon, name, info, status
 
     def _info_text(self) -> str:
-        if self._net_enabled():
-            # 网络槽接管信息槽（开关的唯一所有权，见 _net_enabled 的说明）：
-            # 采样还没出第一轮时按 0B/-- 显示，不空着也不编造数字。
-            sample = self._net_sample
-            if sample is None:
-                return net_monitor.format_network_slot(0.0, 0.0, None)
-            return net_monitor.format_network_slot(
-                sample.down_bps, sample.up_bps, sample.latency_ms,
-                lost=sample.latency_lost,
-            )
-        mode = str(self._cfg.get("info_mode") or "time")
-        if mode == "custom":
-            return str(self._cfg.get("custom_text") or "").strip() or "自定义"
-        if mode == "balance_tier":
-            return self._balance_tier_display_text()
-        if mode == "balance":
-            return self._balance_text
-        from PySide6.QtCore import QTime
+        """主信息段的文案（单串视图；绘制走 :meth:`_compose_info_segments`）。
 
-        return QTime.currentTime().toString("HH:mm")
+        网络接管分支已在 P1 D1 删除：网络是普通指标段，信息槽永远由
+        ``info_mode`` 决定（见 ``_primary_segment``）。
+        """
+        return self._primary_segment().text
 
     def _info_color(self, fallback: QColor) -> QColor:
-        """余额峰谷信息槽跟随设置的峰谷提示颜色开关。
+        """余额峰谷主信息跟随设置的峰谷提示颜色开关。
 
-        开启后高峰显示红色、低谷显示绿色；关闭或非余额峰谷模式使用普通次文字色。
+        开启后高峰显示红色、低谷显示绿色；关闭或非余额峰谷模式使用传入的兜底色
+        （主信息段用主文字色，见 ``_content_cache``）。
         """
         if str(self._cfg.get("info_mode") or "time") != "balance_tier":
             return fallback
@@ -967,6 +1180,150 @@ class DynamicIsland(QWidget):
         if tier == "idle":
             return QColor("#30a46c")
         return fallback
+
+    # ------------------------------------------------------------ 段管线
+    def _font_for(self, layer: str) -> QFont:
+        """按字号层取内容字体（懒建 + 缓存；应用字体变化由 changeEvent 清缓存）。"""
+        font = self._fonts.get(layer)
+        if font is None:
+            px, weight = _FONT_LAYERS[layer]
+            font = QFont(self.font())
+            font.setPixelSize(px)
+            font.setWeight(weight)
+            self._fonts[layer] = font
+        return font
+
+    def _metrics_for(self, layer: str) -> QFontMetrics:
+        """按字号层取字体度量（缓存对象：QFontMetrics 构造有成本）。"""
+        metrics = self._font_metrics.get(layer)
+        if metrics is None:
+            metrics = QFontMetrics(self._font_for(layer))
+            self._font_metrics[layer] = metrics
+        return metrics
+
+    def _fonts_key(self) -> tuple:
+        """字号各层的度量指纹（内容层缓存 key 的"字体"分量）。
+
+        指纹探针（行度量 + 数字串宽度）由 ``island_segments`` 提供——系统字体/
+        字号/DPI 一变就换键，盒宽与内容层位图都跟着重测。
+        """
+        return tuple(island_segments.font_metrics_key(self._metrics_for(layer))
+                     for layer in _FONT_LAYERS)
+
+    def _metric_ids(self) -> tuple[str, ...]:
+        """``island_metrics`` 的段 id 序（**列表序 = 用户优先级 = 尾部先折叠**）。
+
+        这里只做"非空字符串 + 去重"：合法 id 的归一化在 config 层（Slice C），
+        未知 id 刻意透传——配置被手改或调用方给的是桩对象时，未知段要降级成
+        ``--`` 段（见 ``_unknown_segment``），而不是让整条岛炸掉。
+        """
+        metrics = self.config.get("island_metrics", [])
+        if not isinstance(metrics, (list, tuple)):
+            return ()
+        ids: list[str] = []
+        for item in metrics:
+            if not isinstance(item, str) or not item or item in ids:
+                continue
+            ids.append(item)
+        return tuple(ids)
+
+    @staticmethod
+    def _state_text(state: str, value: str) -> str:
+        """四态兜底：只有 ``ok`` 显示读数；其余一律同宽 ``--``（不伪造 0）。"""
+        return value if state == island_segments.STATE_OK else island_segments.UNKNOWN_TEXT
+
+    def _primary_segment(self) -> _InfoSeg:
+        """首段（恒为段列表第一项）：time / custom / balance / balance_tier 主信息。
+
+        按模式取测宽样本：时间为 ``88:88`` 定宽（数字不推邻居），余额/峰谷取真实
+        最长单行形态，custom 用配置文本自身。现文案超过样本时按现文案加宽（见
+        :func:`place_info_segments`），定宽靠样本而不是靠截断。
+        """
+        mode = str(self._cfg.get("info_mode") or "time")
+        if mode == "custom":
+            text = str(self._cfg.get("custom_text") or "").strip() or "自定义"
+            sample = text
+        elif mode == "balance_tier":
+            text = self._balance_tier_display_text()
+            sample = _PRIMARY_SAMPLES["balance_tier"]
+        elif mode == "balance":
+            text = self._balance_text
+            sample = _PRIMARY_SAMPLES["balance"]
+        else:
+            from PySide6.QtCore import QTime
+
+            text = QTime.currentTime().toString("HH:mm")
+            sample = _PRIMARY_SAMPLES["time"]
+        return _InfoSeg(kind="primary", seg_id="primary", label="", text=text,
+                        box_text=sample, state=island_segments.STATE_OK)
+
+    def _network_segment(self) -> _InfoSeg:
+        """网络段：定宽槽串（``format_network_slot`` 的 5 列契约）直接进字段盒。
+
+        没有 label（↓↑ 是槽串自带的 glyph），采样还没出第一轮时按四态显示 ``--``。
+        """
+        sample = self._net_sample
+        if sample is None:
+            text = island_segments.UNKNOWN_TEXT
+            state = island_segments.STATE_SAMPLING
+        else:
+            text = net_monitor.format_network_slot(
+                sample.down_bps, sample.up_bps, sample.latency_ms,
+                lost=sample.latency_lost)
+            state = island_segments.STATE_OK
+        return _InfoSeg(kind="metric", seg_id=island_segments.NETWORK, label="",
+                        text=text, box_text=_NETWORK_BOX_SAMPLE, state=state)
+
+    def _device_segment(self, metric_id: str) -> _InfoSeg:
+        """CPU / 内存段：读数来自共享的 ``SysMonitor`` 快照（无快照 = sampling）。
+
+        有快照但该字段是 None（CPU 差分首样本）也算 sampling——"还没读数"与
+        "读数是 0"必须分得开（``--`` 不伪造 0）。
+        """
+        sample = self._sys_sample
+        if sample is None:
+            state, value = island_segments.STATE_SAMPLING, None
+        elif sample.state != island_segments.STATE_OK:
+            state, value = island_segments.STATE_ERROR, None
+        else:
+            value = (sample.cpu_percent if metric_id == island_segments.CPU
+                     else sample.mem_percent)
+            state = (island_segments.STATE_OK if value is not None
+                     else island_segments.STATE_SAMPLING)
+        formatter = (sys_monitor.format_cpu if metric_id == island_segments.CPU
+                     else sys_monitor.format_mem)
+        return _InfoSeg(kind="metric", seg_id=metric_id, label=_DEVICE_LABELS[metric_id],
+                        text=self._state_text(state, formatter(value)),
+                        box_text=sys_monitor.MAX_TEXT, state=state)
+
+    @staticmethod
+    def _unknown_segment(metric_id: str) -> _InfoSeg:
+        """未实现的段 id（配置残留）：降级成 unknown 态 ``--`` 段，不崩不留洞。"""
+        return _InfoSeg(kind="metric", seg_id=metric_id,
+                        label=metric_id[:island_segments.LABEL_MAX_CHARS],
+                        text=island_segments.UNKNOWN_TEXT,
+                        box_text=island_segments.UNKNOWN_TEXT,
+                        state=island_segments.STATE_UNKNOWN)
+
+    def _compose_info_segments(self) -> list[_InfoSeg]:
+        """把"这一帧要画的信息"组合成段列表（数据，不是绘制串）。
+
+        首段恒为主信息段（信息槽内容由 ``info_mode`` 决定），其后按
+        ``island_metrics`` 的列表序追加指标段。信息槽整体关掉时返回空列表——
+        "没有段"与"首段不是 primary"是两件事。D2 的收缩流水线只需过滤这个列表
+        （折尾段、省名字）而不必改绘制。
+        """
+        if not self._visible_parts()[2]:
+            return []
+        segments = [self._primary_segment()]
+        for metric_id in self._metric_ids():
+            if metric_id == island_segments.NETWORK:
+                segments.append(self._network_segment())
+            elif metric_id in _DEVICE_LABELS:
+                segments.append(self._device_segment(metric_id))
+            else:
+                segments.append(self._unknown_segment(metric_id))
+        return segments
 
     def _character_name(self) -> str:
         character_id = str(self.config.get("character", catalog.DEFAULT_CHARACTER))
@@ -1049,19 +1406,71 @@ class DynamicIsland(QWidget):
         return scaled
 
     def _capsule_width(self) -> int:
+        """自然宽 = 内容行各件宽之和（左右各 19px 内边距，见设计稿 §1.1）。
+
+        宽度白名单的落地：**只在 :meth:`_width_key` 变化时重算一次**（缓存），
+        而采样值进不了那个键——所以"数字跳动不推邻居"是结构保证。指标段盒宽 =
+        声明样本的实测盒宽，读数在盒内右对齐伸缩；主信息段盒宽 = 样本与现文案的
+        较宽者（长余额串按现文案加宽，不静默吃字）。
+        """
+        key = self._width_key()
+        if self._width_cache_key == key:
+            return self._width_cache
         icon, name, info, status = self._visible_parts()
-        fm = self.fontMetrics()
-        # 左右边距各 16px，让状态灯到右边界的距离与图标到左边界的距离一致。
-        width = 32
+        width = _CONTENT_PAD_PX * 2
         if icon:
-            width += 28 + 8
+            width += _ICON_PX + _ICON_GAP_PX
         if name:
-            width += fm.horizontalAdvance(self._character_name()) + 8
+            width += self._name_layout()[1] + _NAME_GAP_PX
         if info:
-            width += fm.horizontalAdvance(self._info_text()) + 8
+            placements = place_info_segments(
+                self._compose_info_segments(), start_x=width,
+                primary_fm=self._metrics_for("primary"),
+                value_fm=self._metrics_for("value"),
+                label_fm=self._metrics_for("label"))
+            if placements:
+                width = placements[-1].right
         if status:
-            width += 10
-        return max(120, width + _CAPSULE_INSET * 2)
+            width += _STATUS_GAP_PX + _STATUS_DOT_PX
+        natural = max(_MIN_CAPSULE_W, int(round(width)))
+        self._width_cache_key = key
+        self._width_cache = natural
+        return natural
+
+    def _name_layout(self) -> tuple[str, int]:
+        """角色名的显示文本与占位宽（≤96px 右省略）。D2 的 S1 直接整段去掉它。"""
+        name = self._character_name()
+        metrics = self._metrics_for("name")
+        width = int(metrics.horizontalAdvance(name))
+        if width <= _NAME_MAX_PX:
+            return name, width
+        elided = metrics.elidedText(name, Qt.TextElideMode.ElideRight, _NAME_MAX_PX)
+        return elided, int(metrics.horizontalAdvance(elided))
+
+    def _width_key(self) -> tuple:
+        """自然宽白名单键：**只有这些输入变化**才允许重算自然宽。
+
+        - 可见项 / 角色名（含省略后的文本与占位宽）/ 各段的 ``(id, label, box_text)``
+          —— 段增删与段模板变化都在这一项里；
+        - 主信息段的 ``text``：它超出样本时按现文案加宽（见 ``place_info_segments``）；
+        - 字号各层的度量指纹 + DPR：系统字体/DPI 一变必须重测（字变了盒子也要变）。
+
+        **采样值不在键里**（指标段的 ``text`` 被刻意排除）：它是内容层的事——
+        指标段盒宽由声明样本定死，读数在盒内右对齐伸缩。D2 的折叠态同样只体现为
+        "段列表变了"，不需要额外的键分量。
+        """
+        segments = self._compose_info_segments()
+        return (
+            self._visible_parts(),
+            self._name_layout(),
+            tuple(
+                (seg.seg_id, seg.label, seg.box_text,
+                 seg.text if seg.kind == "primary" else "")
+                for seg in segments
+            ),
+            self._fonts_key(),
+            round(self.devicePixelRatioF(), 3),
+        )
 
     def _update_size(self) -> None:
         self._set_free_geometry(QRect(self.pos(), self._rest_size()))
@@ -1214,6 +1623,19 @@ class DynamicIsland(QWidget):
             return QColor(0, 0, 0, 28)
         return QColor(255, 255, 255, 52)
 
+    def _divider_color(self) -> QColor:
+        """段间分隔竖线的颜色：比 keyline 再弱一档。
+
+        轮廓线管"窗在哪"，分隔线只管"段在哪"——两者同色会让胶囊边缘与段边界
+        抢注意力（暗 `#FFF`α36 / 亮 `#1F2328`α31 / glass `#232D3C`α36）。
+        """
+        style = str(self._cfg.get("style") or "dark")
+        if style == "light":
+            return QColor(31, 35, 40, 31)
+        if style == "glass":
+            return QColor(35, 45, 60, 36)
+        return QColor(255, 255, 255, 36)
+
     @staticmethod
     def _readable_card_background(background):
         """展开卡片底板：alpha 钳到下限 215。
@@ -1353,36 +1775,43 @@ class DynamicIsland(QWidget):
                 dot_size, dot_size))
 
     def _content_cache(self) -> QPixmap:
-        """内容层（图标/名称/信息/状态灯）的缓存位图。
+        """内容层（头像/角色名/信息段/状态灯）的缓存位图。
 
         为什么缓存（拖岛扫鱼实测定案）：paintEvent 均值 6.2ms，大头是 CJK
         文字的 shaping/回退字体解析；而内容只在刷新（时间跳变/余额刷新/
-        配置变更）时变化，拖拽/弹簧期间逐帧重画纯属浪费。缓存后每帧一次
-        blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
+        配置变更/采样值变化）时变化，拖拽/弹簧期间逐帧重画纯属浪费。缓存后每帧
+        一次 blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
         文字锐利口径不变）；squish 只调制胶囊外形、本来就不碰内容层。
-        key 覆盖所有影响像素的输入（可见项/文本/颜色/字体/DPR/宽度），
-        任一变化自动重建，无需显式失效钩子（头像换代走 _icon_pixmap_token）。
+
+        key 覆盖所有影响像素的输入（可见项/各段 text+state/字号指纹/颜色/DPR/
+        宽度），任一变化自动重建。**采样值变化只换这张位图**：窗口几何走
+        ``_capsule_width`` 的白名单，两者互不牵连。
         """
         icon, name, info, status = self._visible_parts()
+        segments = self._compose_info_segments()
         _background, primary_color, secondary_color = self._style_palette()
-        info_color = self._info_color(secondary_color)
+        # 主信息段（L1）：峰谷模式跟随设置的峰谷色，其余用主文字色
+        primary_text_color = self._info_color(primary_color)
+        name_text, _name_w = self._name_layout()
         dpr = self.devicePixelRatioF()
         key = (
             icon, name, info, status,
             self._icon_text() if icon else "",
-            self._character_name() if name else "",
-            self._info_text() if info else "",
+            name_text if name else "",
+            tuple((seg.seg_id, seg.text, seg.state) for seg in segments),
             self._accent_color().name() if icon else "",
             primary_color.name() if name else "",
-            info_color.name() if info else "",
+            primary_text_color.name() if segments else "",
+            secondary_color.name() if segments else "",
+            self._divider_color().name() if len(segments) > 1 else "",
             self._status_dot_color().name() if status else "",
-            self.font().toString(), dpr, self.width(),
+            self._fonts_key(), dpr, self.width(),
         )
         if self._content_pixmap is not None and self._content_cache_key == key:
             return self._content_pixmap
         # 内容层的命中路径不问 provider（否则拖拽期间每帧取图），只有重建时才问。
         # auto 模式 provider 返回 None 时也不写进 key，于是"没头像"的内容层照样
-        # 命中缓存，等下次真正重建（时间/余额/配置变化）时再重试取图。
+        # 命中缓存，等下次真正重建（时间/余额/配置/采样变化）时再重试取图。
         icon_pm = self._icon_pixmap_scaled(_ICON_PIXMAP_PX) if icon else None
         if icon_pm is not None:
             key = key + (self._icon_pixmap_token,)
@@ -1394,54 +1823,77 @@ class DynamicIsland(QWidget):
         pm.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(self.font())
         x = _CAPSULE_INSET + 13.0
+        baseline = _CAPSULE_HEIGHT / 2.0 + _BASELINE_DY
         painter.setPen(Qt.PenStyle.NoPen)
         if icon:
             painter.setBrush(self._accent_color())
-            painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - 26) / 2, 26, 26))
+            painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - _ICON_PX) / 2, _ICON_PX, _ICON_PX))
             if icon_pm is not None:
                 # 头像居中画进底圈：drawPixmap 不碰文字/emoji 字体栈
                 painter.drawPixmap(
-                    QPointF(x + (26 - _ICON_PIXMAP_PX) / 2.0,
+                    QPointF(x + (_ICON_PX - _ICON_PIXMAP_PX) / 2.0,
                             (_CAPSULE_HEIGHT - _ICON_PIXMAP_PX) / 2.0),
                     icon_pm)
             elif not self._icon_image_mode():
+                # emoji/文字图标沿用窗口默认字体（用户主动选 emoji 才走这条路）
+                painter.setFont(self.font())
                 painter.setPen(QColor(255, 255, 255))
                 fm = self.fontMetrics()
                 painter.drawText(
-                    QRectF(x, (_CAPSULE_HEIGHT - fm.height()) / 2 - 1, 26, fm.height()),
+                    QRectF(x, (_CAPSULE_HEIGHT - fm.height()) / 2 - 1, _ICON_PX, fm.height()),
                     Qt.AlignmentFlag.AlignCenter,
                     self._icon_text(),
                 )
                 painter.setPen(Qt.PenStyle.NoPen)
             # auto 模式 provider 没就绪：只画底圈，绝不回退画 🐳（那是白付
             # 一次 33MB 的 DirectWrite 彩色 emoji 字体栈税）
-            x += 26 + 8
-        painter.setPen(primary_color)
+            x += _ICON_PX + _ICON_GAP_PX
         if name:
-            text = self._character_name()
+            # 角色名：L3 12px 次色，右省略到 96px（名字是身份不是数据）
+            painter.setFont(self._font_for("name"))
+            painter.setPen(primary_color)
+            painter.drawText(QPointF(x, baseline), name_text)
+            x += _name_w + _NAME_GAP_PX
+        placements = place_info_segments(
+            segments, start_x=x,
+            primary_fm=self._metrics_for("primary"),
+            value_fm=self._metrics_for("value"),
+            label_fm=self._metrics_for("label"))
+        for placement in placements:
+            seg = placement.seg
+            if placement.divider_x is not None:
+                # 段间竖线：1×14px、槽位正中；首段前与状态点前都不画
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._divider_color())
+                painter.drawRect(QRectF(
+                    placement.divider_x,
+                    (_CAPSULE_HEIGHT - _DIVIDER_H_PX) / 2.0,
+                    _DIVIDER_W_PX, _DIVIDER_H_PX))
+            if seg.kind == "primary":
+                painter.setFont(self._font_for("primary"))
+                painter.setPen(primary_text_color)
+            else:
+                if seg.label:
+                    painter.setFont(self._font_for("label"))
+                    painter.setPen(secondary_color)
+                    painter.drawText(QPointF(placement.label_x, baseline), seg.label)
+                painter.setFont(self._font_for("value"))
+                # sampling/unknown/error 一律次色、不染告警色：胶囊上不做状态染色
+                # （状态差异交给状态点与卡片），平衡"安静"与"诚实的 --"
+                painter.setPen(primary_color if seg.state == island_segments.STATE_OK
+                               else secondary_color)
+            # 盒内右对齐 + 统一基线（所有字号层共用一条基线，见 _BASELINE_DY）
             painter.drawText(
-                QRectF(x, 0, self.fontMetrics().horizontalAdvance(text), _CAPSULE_HEIGHT),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                text,
-            )
-            x += self.fontMetrics().horizontalAdvance(text) + 8
-        if info:
-            info_text = self._info_text()
-            painter.setPen(info_color)
-            painter.drawText(
-                QRectF(x, 0, self.fontMetrics().horizontalAdvance(info_text), _CAPSULE_HEIGHT),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                info_text,
-            )
-            x += self.fontMetrics().horizontalAdvance(info_text) + 8
+                QPointF(placement.box_x + placement.box_w - placement.text_w, baseline),
+                placement.text)
+            x = placement.right
         if status:
-            dot_size = 10
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._status_dot_color())
-            painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - dot_size) / 2, dot_size, dot_size))
-            x += dot_size + 12
+            painter.drawEllipse(QRectF(
+                x + _STATUS_GAP_PX, (_CAPSULE_HEIGHT - _STATUS_DOT_PX) / 2,
+                _STATUS_DOT_PX, _STATUS_DOT_PX))
         painter.end()
         self._content_pixmap = pm
         self._content_cache_key = key
@@ -1506,8 +1958,26 @@ class DynamicIsland(QWidget):
         self._anim_timer.stop()
         self._dock_back_timer.stop()
         self._card_collapse_timer.stop()
-        # 网络槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，不 join）
+        # 网络槽/设备槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，
+        # 不 join；订阅保留，显示后 _sync_*_slot 幂等恢复）
         self._pause_network_slot()
+        self._pause_sys_slot()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """应用字体/DPI 变化：丢掉按字号层缓存的字体与度量（下次取值重建）。
+
+        度量缓存按对象身份缓存，字体真的换了却还拿旧度量，盒宽与内容层位图就会
+        继续用旧字号画——这是"字体指纹"白名单分量必须能变的前提。
+        """
+        super().changeEvent(event)
+        if event is not None and event.type() == QEvent.Type.FontChange:
+            self._clear_font_cache()
+
+    def _clear_font_cache(self) -> None:
+        self._fonts.clear()
+        self._font_metrics.clear()
+        self._width_cache_key = None
+        self._content_cache_key = None
 
     def showEvent(self, event) -> None:  # noqa: N802
         """重新显示：恢复信息轮询并立即刷新（沉睡期间的内容变化补上），
@@ -1517,6 +1987,7 @@ class DynamicIsland(QWidget):
         self._info_timer.start()
         self._schedule_next_balance_tier_refresh()
         self._sync_network_slot()
+        self._sync_sys_slot()
         self._refresh()
         # 原生窗口此刻已就绪；再延迟一拍重申一次 topmost——show 期间 Qt 还在
         # 收尾窗口排序，它可能覆盖同步那次（口径同 legacy window.py showEvent）
