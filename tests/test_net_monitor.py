@@ -392,6 +392,90 @@ def _live_net_threads() -> list[threading.Thread]:
     return [thread for thread in threading.enumerate() if thread.name == "pet-net-monitor"]
 
 
+def test_stale_generation_result_never_overwrites_new_snapshot():
+    """旧代在途探测晚到，不得覆盖新代快照（stop→start 只有停止事件隔离是不够的）。
+
+    复现路径：第一代卡在收包 → stop→start（第二代立刻出结果）→ 放行第一代。
+    第一代的样本带更大的时间戳，若共享快照/无代核验就会盖掉新代结果。
+    全程事件同步：不用 sleep 猜时序，"第一代已放弃发布"由它自己的 socket 关闭事件确认。
+    """
+    gate = threading.Event()      # 放行旧代的收包
+    entered = threading.Event()   # 旧代已进入收包
+    finished = threading.Event()  # 旧代已跑完最后一次发布尝试（线程收口）
+    sockets: list[FakeSocket] = []
+
+    class BlockingSocket(FakeSocket):
+        def recv(self, _size):
+            entered.set()
+            gate.wait(5.0)
+            return _reply_for(self)
+
+        def close(self):
+            super().close()
+            finished.set()
+
+    def factory(*_args):
+        sock = BlockingSocket() if not sockets else FakeSocket(auto_reply=True)
+        sockets.append(sock)
+        return sock
+
+    samples: list[nm.NetSample] = []
+    monitor = nm.NetMonitor(
+        interval=0.5,
+        counters=lambda: (0.0, 0.0),
+        socket_factory=factory,
+        smoothing=None,
+        on_sample=samples.append,
+    )
+    monitor.start()
+    try:
+        assert entered.wait(5.0), "旧代未进入收包"
+        monitor.stop(wait=False)
+        monitor.start()
+        assert _wait_until(lambda: bool(samples), timeout=5.0), "新代未出样本"
+        fresh = monitor.snapshot()
+        assert fresh is samples[-1]
+
+        gate.set()  # 放行旧代：它的结果晚于新代
+        assert finished.wait(5.0), "旧代未收口"
+        assert monitor.snapshot() is fresh, "旧代晚到的结果覆盖了新代快照"
+        assert samples[-1] is fresh, "旧代晚到的结果仍然触发了回调"
+    finally:
+        gate.set()
+        monitor.stop(wait=True)
+        monitor.close()
+
+
+def test_new_run_rebaselines_rate_instead_of_inheriting_old_meter():
+    """每一代自带 meter：新一代第一轮只建基线，不继承旧代的计数器基线。
+
+    若共用 meter，重置基准前计数器已跳变（1MB），新一代第一轮会算出假速率。
+    """
+    jumped = threading.Event()
+    samples: list[nm.NetSample] = []
+    monitor = nm.NetMonitor(
+        interval=0.5,
+        counters=lambda: (1_000_000.0, 0.0) if jumped.is_set() else (0.0, 0.0),
+        socket_factory=lambda *a: FakeSocket(auto_reply=True),
+        smoothing=None,
+        on_sample=samples.append,
+    )
+    monitor.start()
+    assert _wait_until(lambda: bool(samples), timeout=5.0), "第一代未出样本"
+    monitor.stop(wait=True)
+
+    jumped.set()  # 新一代开始前计数器跳变
+    monitor.start()
+    try:
+        assert _wait_until(lambda: len(samples) > 1, timeout=5.0), "第二代未出样本"
+        fresh = samples[1]
+        assert fresh.down_bps == 0.0, (
+            f"新一代第一轮必须重新建基线，实测 {fresh.down_bps} B/s（像是继承了旧 meter）")
+    finally:
+        monitor.stop(wait=True)
+        monitor.close()
+
+
 def test_monitor_thread_survives_sampling_error():
     """采样异常不得杀线程（否则槽永久停在最后一帧，看不出坏了）。"""
     calls = {"n": 0}

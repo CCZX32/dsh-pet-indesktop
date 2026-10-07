@@ -344,6 +344,14 @@ class NetMonitor:
     生命周期由调用方（灵动岛）按"开关开着且岛可见"驱动：隐藏 / 关闭即
     :meth:`stop`。停止只置事件，**不 join**——探测在途最多 1s，join 会把
     GUI 线程卡住（隐藏岛是常见交互）。
+
+    **代（generation）隔离**：``stop()`` 立刻允许 ``start()``，而上一轮线程可能
+    还卡在收包里——所以每轮自带 generation token、meter 与停止事件，发布快照前
+    核验"自己还是不是当前代"：
+
+    - 旧代晚到的结果被丢弃，不会用更晚的时间戳盖掉新代快照；
+    - 速率基线（``NetRateMeter``）也是每代一份，两代重叠读计数器不会把基线推来
+      推去（新一代重新建基线，宁可少报一个周期的速率，也不报错值）。
     """
 
     def __init__(
@@ -359,7 +367,8 @@ class NetMonitor:
     ):
         self._interval = clamp_interval(interval)
         self._clock = clock
-        self._meter = NetRateMeter(counters=counters, clock=clock, smoothing=smoothing)
+        self._counters = counters
+        self._smoothing = smoothing
         self._target = (str(target[0]), int(target[1]))
         self._socket_factory = socket_factory
         # 探测会话：采样线程每次 start 各带一份（见 _run），这里的一份只给
@@ -368,6 +377,7 @@ class NetMonitor:
         self._on_sample = on_sample
         self._lock = threading.Lock()
         self._snapshot: NetSample | None = None
+        self._generation, self._meter = self._new_generation()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
 
@@ -391,6 +401,15 @@ class NetMonitor:
         self._interval = clamp_interval(interval)
         return self._interval
 
+    def _new_generation(self) -> tuple[object, NetRateMeter]:
+        """开一代新采样：token（身份）+ 独立 meter（基线不跨代）。"""
+        return object(), NetRateMeter(
+            counters=self._counters, clock=self._clock, smoothing=self._smoothing)
+
+    def _retire_generation(self) -> None:
+        """换代：在途的旧代结果从此不再被接受（stop 时也走这里）。"""
+        self._generation, self._meter = self._new_generation()
+
     def _new_prober(self) -> UdpLatencyProbe:
         return UdpLatencyProbe(
             self._target, timeout=probe_timeout_for(self._interval),
@@ -405,11 +424,16 @@ class NetMonitor:
     # ------------------------------------------------------------ 采样
     def sample_once(self, now: float | None = None,
                     prober: UdpLatencyProbe | None = None) -> NetSample:
-        """同步采样一轮（线程循环与测试共用同一实现）。"""
+        """同步采样一轮（当前代；线程循环与测试共用同一实现）。"""
+        return self._sample(
+            self._generation, self._meter,
+            prober if prober is not None else self._shared_prober(), now)
+
+    def _sample(self, generation, meter: NetRateMeter,
+                prober: UdpLatencyProbe, now: float | None = None) -> NetSample:
         moment = self._clock() if now is None else float(now)
-        prober = prober if prober is not None else self._shared_prober()
         prober.timeout = probe_timeout_for(self._interval)
-        rate = self._meter.sample(moment)
+        rate = meter.sample(moment)
         outcome = prober.measure(now=moment)
         sample = NetSample(
             down_bps=rate.down_bps,
@@ -418,39 +442,52 @@ class NetMonitor:
             latency_lost=outcome.lost,
             sampled_at=moment,
         )
+        self._publish(generation, sample)
+        return sample
+
+    def _publish(self, generation, sample: NetSample) -> bool:
+        """发布一次采样；**只认当前代**（旧代晚到的结果直接丢弃）。"""
         with self._lock:
+            if self._generation is not generation:
+                return False
             self._snapshot = sample
         if callable(self._on_sample):
             try:
                 self._on_sample(sample)
             except Exception:  # pragma: no cover - 回调是宿主注入面，异常不外溢
                 logger.debug("网络槽：采样回调异常", exc_info=True)
-        return sample
+        return True
 
     # ------------------------------------------------------------ 线程
     def start(self) -> bool:
         if self.running:
             return False
-        # 每次 start 一份独立的停止事件：紧接着 stop→start（隐藏后马上显示）
-        # 时，上一轮线程只认自己的事件，不会被新一轮 clear() 复活成第二条常驻线程。
+        # 每次 start 一份独立的停止事件 + 一代独立的 generation/meter：紧接着
+        # stop→start（隐藏后马上显示）时，上一轮线程只认自己的事件（不会被新一轮
+        # clear() 复活成第二条常驻线程），晚到的结果也会被 _publish 按代拒收。
         event = threading.Event()
         self._stop_event = event
+        self._retire_generation()
+        generation, meter = self._generation, self._meter
         self._thread = threading.Thread(
-            target=self._run, args=(event,), daemon=True, name="pet-net-monitor",
+            target=self._run, args=(event, generation, meter),
+            daemon=True, name="pet-net-monitor",
         )
         self._thread.start()
         return True
 
     def stop(self, *, wait: bool = False, timeout: float = 2.0) -> None:
-        """置停止事件；``wait=True`` 仅在测试 / 退出路径用（会阻塞至多 timeout）。
+        """置停止事件并换代；``wait=True`` 仅在测试 / 退出路径用（阻塞至多 timeout）。
 
         默认不 join：探测在途最多 1s，在 GUI 线程 join 会把隐藏岛卡住。socket
-        由线程自己收口（``_run`` 的 finally），所以这里也不碰它。
+        由线程自己收口（``_run`` 的 finally），所以这里也不碰它；换代保证仍在途的
+        旧代结果不会写进 ``snapshot()``。
         """
         event, self._stop_event = self._stop_event, None
         if event is not None:
             event.set()
         thread, self._thread = self._thread, None
+        self._retire_generation()
         if wait and thread is not None:
             thread.join(timeout)
 
@@ -461,13 +498,13 @@ class NetMonitor:
         if prober is not None:
             prober.close()
 
-    def _run(self, stop: threading.Event) -> None:
+    def _run(self, stop: threading.Event, generation, meter: NetRateMeter) -> None:
         prober = self._new_prober()
         try:
             while not stop.is_set() and self._stop_event is stop:
                 started = self._clock()
                 try:
-                    self.sample_once(prober=prober)
+                    self._sample(generation, meter, prober)
                 except Exception:
                     logger.exception("网络槽：采样异常（线程继续）")
                 sleep = max(0.05, self._interval - (self._clock() - started))
