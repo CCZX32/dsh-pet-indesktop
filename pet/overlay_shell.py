@@ -4019,14 +4019,19 @@ class OverlayShell(QObject):
     def _consume_settings_command(self) -> None:
         """消费一条设置进程指令（幂等；无指令 = 空转）。
 
-        指令语义：``target`` 为空 = 退出全部子肥鱼（设置页「一键退出子肥鱼」）；
-        否则只退那个 slot 身份（身份已不在活跃清单 = 空操作，只留日志）。
+        指令语义：``exit_spawned_pets`` 的 ``target`` 为空 = 退出全部子肥鱼（设置页
+        「一键退出子肥鱼」），否则只退那个 slot 身份（身份已不在活跃清单 = 空操作，
+        只留日志）；``apply_settings_reset`` = 按刚写下的默认值对齐这一只的运行态
+        （见 :meth:`apply_settings_reset`）。
         """
         config_dir = self._spawn_config_dir()
         if not config_dir:
             return
         command = overlay_settings_command.consume_command(config_dir)
         if command is None:
+            return
+        if command.get("command") == overlay_settings_command.CMD_APPLY_SETTINGS_RESET:
+            self.apply_settings_reset(command.get("target"))
             return
         if command.get("command") != overlay_settings_command.CMD_EXIT_SPAWNED_PETS:
             return  # consume 已按白名单过滤，这里只是防御
@@ -4042,6 +4047,28 @@ class OverlayShell(QObject):
             return
         logging.info("overlay: 收到设置进程指令 → 退出子肥鱼 slot-%s", target)
         self.exit_pet(sprite)
+
+    def apply_settings_reset(self, slot=None) -> None:
+        """「恢复默认设置」后的重置级运行态对齐：这一只回默认落位。
+
+        与 legacy ``AppShell.apply_settings_reset`` 同一条指令、同一口径（issue #220
+        M10）：位置键已被重置成 null（没有位置记忆），运行期不跟着对齐的话，正常退出
+        时 ``save_position()`` 会把重置前的旧位置写回磁盘，重置被静默抵消。
+
+        落点用既有的「回到右下角」（``_go_default_corner``，托盘/右键菜单同一条命令，
+        主宠与子宠都可用）：`slot` 为空 = 主身份，否则是那一只子身份；目标已不活跃
+        = 没有运行态要对齐，直接跳过。刻意不读配置里的 rx/ry 决定落点——本方法可能
+        由 D12 指令驱动，而指令与主进程去抖中的外部 reload 是两条时序。
+        """
+        if slot is None:
+            target = self.sprite
+        else:
+            target = next((item for item in self._spawned
+                           if self._spawned_slots.get(item) == int(slot)), None)
+        if target is None:
+            logging.info("overlay: 重置对齐目标（slot=%s）不在场，跳过", slot)
+            return
+        self._go_default_corner(target)
 
     def _teardown_settings_command_watch(self) -> None:
         """释放指令 watcher 与轮询定时器（stop / aboutToQuit / 测试收口共用）。"""

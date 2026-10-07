@@ -451,10 +451,15 @@ CHAT_SECRET_FIELDS = ("api_key", "api_key_ref", "vision_api_key", "vision_api_ke
 
 
 def chat_secret_carryover(chat: Any) -> dict[str, dict]:
-    """提取 chat.providers 下各 provider 的密钥类字段（供重置时原样带过去）。
+    """提取 chat.providers 下各 provider 的密钥类字段 + 识别用的显示名。
 
-    返回 ``{provider_id: {字段: 值}}``，只收集非空值；返回空 dict = 没有密钥要保留。
-    只读，不改传入数据（重置换掉 ``self.data`` 时旧值已不在原处，必须先取出来）。
+    返回 ``{provider_id: {字段: 值}}``（凭据字段 + 可选的 ``name``），只收集非空值；
+    返回空 dict = 没有凭据要保留。只读，不改传入数据（重置换掉 ``self.data`` 时旧值
+    已不在原处，必须先取出来）。
+
+    ``name`` 不是凭据，但重置后要给非默认 provider 重建一个凭据容器，光有 provider_id
+    用户认不出那是哪个服务商（id 多为 ``api-2`` 这类自动名）；它只在重建时用来当骨架名，
+    已存在的 provider 只回填凭据、不覆盖名字（名字属于"其余配置"，按重置口径回默认）。
     """
     providers = chat.get("providers") if isinstance(chat, dict) else None
     if not isinstance(providers, dict):
@@ -463,13 +468,17 @@ def chat_secret_carryover(chat: Any) -> dict[str, dict]:
     for provider_id, provider in providers.items():
         if not isinstance(provider, dict):
             continue
-        secrets = {
+        kept = {
             field: provider[field]
             for field in CHAT_SECRET_FIELDS
             if str(provider.get(field) or "").strip()
         }
-        if secrets:
-            carried[str(provider_id)] = secrets
+        if not kept:
+            continue
+        name = str(provider.get("name") or "").strip()
+        if name:
+            kept["name"] = name[:60]
+        carried[str(provider_id)] = kept
     return carried
 
 
@@ -731,7 +740,15 @@ def atomic_replace_with_retry(temp, target, attempts: int = 5) -> None:
 #: 白名单外的键维持旧口径（null 视为"未提供"，保留内存现值）——它们大多是数值/
 #: 字符串键，消费者直接 ``float()``/``int()``/``str()`` 强转或区间夹取，采纳 None
 #: 会在运行期抛异常（"修一个键顺手炸一片"）。新增键前先确认其全部消费者吃 None。
-_NULL_ACCEPTING_KEYS = frozenset({"context_menu_layout"})
+#:
+#: 2026-10-07 加入位置三键（issue #220 M10）：``reset_to_defaults`` 把 rx/ry/
+#: screen_name 写成 null 表达"没有位置记忆"（新装/重置后应落默认角落）。消费者本来
+#: 就是这个口径：``window_placement.restore_position`` 见 None 即 ``_default_corner_
+#: pos``，``overlay_shell._restore_position``/``_spawn_sprite_pos`` 同样按 None 分支，
+#: ``window_placement.screen_available(host, None)`` 回落当前屏。不采纳则运行期内存里
+#: 一直留着**重置前**的位置：之后任何一次 ``restore_position``（换屏/副屏上线）都会
+#: 把桌宠送回旧位置，与刚写下的默认值自相矛盾。
+_NULL_ACCEPTING_KEYS = frozenset({"context_menu_layout", "rx", "ry", "screen_name"})
 
 
 class Config:
@@ -1180,18 +1197,28 @@ class Config:
           config watcher 看到的要么是重置前、要么是重置后的完整文件，没有中间态；
         - 落盘失败整体回滚内存（返回 False），不留"内存已是默认、磁盘还是旧值"的错位。
 
-        保留集按 provider 归位：只有重置后仍存在的 provider 才接受回填（默认集里的
-        ``openai-main``）。自定义 provider 的条目会被重置掉——它的 keyring 条目是外部
-        状态，本方法从不触碰 ``SecretStore``，所以密钥本身没有丢，只是配置里不再引用它。
+        保留集的落点（缺一即"文案承诺保留密钥、行为却丢密钥"）：
+        - 默认集里已有的 provider（``openai-main``）：只回填凭据字段，名字/地址/模型等
+          其余字段按重置口径回默认；
+        - 默认集里没有的 provider（用户自建/中转站）：重建一个**只装凭据**的最小条目
+          （显示名 + 凭据），否则凭据无处安放——keyring 不可用时明文只存在内存里，
+          条目一没了明文就永久丢失。骨架之外一律不留（地址/模型回默认模板），所以它
+          不是"看起来配好了"的服务商，只是钥匙的容器，也不会被自动选中
+          （``active_provider`` 回默认那个）。
+        本方法从不触碰 ``SecretStore``：keyring 条目是外部状态，删它才是数据丢失。
         """
         carried = chat_secret_carryover(self.data.get("chat"))
         previous = self.data
         self.data = self._initial_data()
         providers = self.data["chat"]["providers"]
-        for provider_id, secrets in carried.items():
+        for provider_id, kept in carried.items():
+            kept = dict(kept)
+            name = kept.pop("name", None)
             provider = providers.get(provider_id)
-            if isinstance(provider, dict):
-                provider.update(secrets)
+            if not isinstance(provider, dict):
+                provider = {"name": name or provider_id}
+                providers[provider_id] = provider
+            provider.update(kept)
         if not self.save():
             self.data = previous
             return False

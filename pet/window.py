@@ -395,6 +395,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.on_restore_fun_windows = None
         self.on_spawn_pet = None
         self.on_clear_spawned_pets = None
+        # 由 app 注入：「恢复默认设置」后的运行态对齐（位置回默认落位，issue #220）
+        self.on_settings_reset = None
         self.on_hidden = None  # 由 app 注入：用户主动隐藏时弹托盘提示
         self.on_exit_window = None  # 由 app 注入：批5.2「退出这只」窗级退出回调
         self._position_listeners = []

@@ -13,6 +13,11 @@ settings.lock 单实例）里点「一键退出子肥鱼」无法跨进程删 sp
 ``clear_spawned_pets`` / ``exit_pet``。4.4b 起**两个拓扑共用这一条通道**（多进程
 多宠退役层删除后不再有跨进程子宠；见 modern_settings_dialog._on_clear_spawned_pets）。
 
+第二条指令 ``CMD_APPLY_SETTINGS_RESET``（issue #220 M10）走同一条通道，语义是
+「设置页刚把全部设置恢复默认，请做一次重置级运行态对齐」（当前 = 位置回默认落位）：
+位置类键 ``rx/ry`` 被重置成 null（没有位置记忆），运行期不跟着对齐的话，本次退出
+``save_position()`` 会把重置前的旧位置写回磁盘、重置被静默抵消。
+
 硬约束（本模块承载的纯逻辑部分）：
 
 - **原子写**：临时文件 + ``os.replace``（命名与 ``overlay_spawn_state`` /
@@ -52,9 +57,12 @@ TOPOLOGY_OVERLAY = "overlay"
 COMMAND_FILENAME = "overlay-settings-command.json"
 COMMAND_VERSION = 1
 
-# 已知指令：设置页「一键退出子肥鱼」（全部子肥鱼 / 指定 slot 身份）。
+# 已知指令：设置页「一键退出子肥鱼」（全部子肥鱼 / 指定 slot 身份）、
+# 「恢复默认设置」后的运行态对齐（issue #220 M10：位置回默认落位等，
+# 见 pet/settings_reset_defaults.py）。
 CMD_EXIT_SPAWNED_PETS = "exit_spawned_pets"
-KNOWN_COMMANDS = frozenset({CMD_EXIT_SPAWNED_PETS})
+CMD_APPLY_SETTINGS_RESET = "apply_settings_reset"
+KNOWN_COMMANDS = frozenset({CMD_EXIT_SPAWNED_PETS, CMD_APPLY_SETTINGS_RESET})
 
 # 指令保鲜窗口：超过即视为"写下时主进程不在跑"。
 DEFAULT_MAX_AGE_S = 120.0
