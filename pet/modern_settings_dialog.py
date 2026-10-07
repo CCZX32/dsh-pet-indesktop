@@ -171,6 +171,7 @@ from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
 from . import settings_reset_defaults
+from . import settings_search
 
 
 # 语言配置页只展示用户能理解的事件名称；内部 key 仍用于保存和渲染。
@@ -2059,7 +2060,7 @@ class ModernSettingsDialog(QDialog):
             self._search_index = -1
             self.search_status.hide()
             return
-        matches = [row for row in self._search_rows if query in f"{row.label.text()} {row.hint_label.text()} {row.objectName()}".lower()]
+        matches = settings_search.find_matches(self._search_rows, query)
         if not matches:
             self._search_matches = []
             self._search_index = -1
