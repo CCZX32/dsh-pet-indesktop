@@ -173,6 +173,15 @@ ip-api.com**——把出口 IP 交给谁是有取舍的，境内源够用时不�
 
 ### 3.2 岛上槽位接入方式（按既有信息槽惯例，未发明第二套）
 
+> **【2026-10-07 就地标注 · 语义已废止】** 本节描述的「`island_network_enabled` 开启即由
+> 网络信息**接管**信息槽内容」已被 **灵动岛 P1 段化重设计**（`feature/island-segment-redesign`，
+> 报告 [`PR-REPORT-ISLAND-P1-SEGMENT-REDESIGN-2026-10-07.md`](PR-REPORT-ISLAND-P1-SEGMENT-REDESIGN-2026-10-07.md)）
+> 废止：信息槽改为段序列（主信息段恒在 + `island_metrics` 指标段），网络只是其中一个
+> 指标段，不再接管；`island_network_enabled` 已单向迁移进 `island_metrics`；「网络槽开着时
+> 隐藏信息槽内容/自定义短文本两行」的依赖逻辑也已删除（`info_mode` 始终生效）。定宽槽串
+> （速率 5 列 / 延迟 5 列）与「隐藏即休眠」两条契约仍然成立并被段化架构沿用。以下原文
+> 保留作历史对照。
+
 灵动岛现有信息槽架构是：`show_info` 控制显隐 + `info_mode` 选内容（时间/余额峰谷/余额/
 自定义），文案由 `_info_text()` 出、胶囊宽度按文本宽度算。本次接入的方式：
 
