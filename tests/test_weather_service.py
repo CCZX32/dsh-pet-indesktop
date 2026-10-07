@@ -56,15 +56,17 @@ class _App:
 
 
 class _Reading:
-    """可注入取数器：记录调用线程与城市，按需返回/抛错。"""
+    """可注入取数器：记录调用线程/城市/地区码，按需返回或抛错。"""
 
     def __init__(self, reading=None, error=None):
         self.reading = reading
         self.error = error
         self.calls: list[tuple[str, str]] = []
+        self.codes: list[str] = []
 
-    def fetch(self, city, *, deadline=None):
+    def fetch(self, city, *, code="", deadline=None):
         self.calls.append((city, threading.current_thread().name))
+        self.codes.append(code)
         if self.error is not None:
             raise self.error
         return self.reading
@@ -198,7 +200,7 @@ def test_default_executor_fetches_off_the_gui_thread():
     seen: dict = {}
 
     class _ThreadProbe(_Reading):
-        def fetch(self, city, *, deadline=None):
+        def fetch(self, city, *, code="", deadline=None):
             self.calls.append((city, threading.current_thread().name))
             seen["thread"] = threading.current_thread()
             done.set()
@@ -237,7 +239,69 @@ def test_bubble_is_skipped_when_the_host_is_already_destroyed():
     service.show_weather(host)
     bridge = service._bridge
     shiboken6.delete(host)
-    bridge._show(True, "鹿城 晴 16.6℃")  # 迟到回调：不得触碰已销毁对象
+    bridge.done.emit(True, "鹿城 晴 16.6℃")  # 迟到回调：不得触碰已销毁对象
+
+
+def test_late_result_after_host_destroyed_releases_the_busy_gate():
+    """M6：宿主销毁也必须结算请求——否则忙门永锁，换新宿主后点不动。"""
+    import shiboken6
+    from PySide6.QtWidgets import QWidget
+
+    class _WidgetHost(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.bubbles: list[str] = []
+
+        def show_bubble(self, text, duration_ms=3200, **_kwargs):
+            self.bubbles.append(str(text))
+
+    pending: list = []
+    client = _Reading(_reading())
+    host = _WidgetHost()
+    service = WeatherService(_App({"weather_city": "鹿城"}, win=host), client=client,
+                             run_async=lambda work: pending.append(work))
+    service.show_weather(host)
+    bridge = service._bridge
+    shiboken6.delete(host)
+    bridge.done.emit(False, "天气获取失败：宿主没了")     # 结果回来时宿主已死
+
+    assert service._busy is False, "请求已结束，忙门必须释放"
+    assert service._bridge is None, "旧 bridge 必须断开释放"
+
+    new_host = _WidgetHost()
+    service.show_weather(new_host)
+    assert len(pending) == 2, "换新宿主后必须还能再发起取数"
+    pending[1]()
+    assert new_host.bubbles == ["鹿城 晴 16.6℃，北风 1级，湿度 67%（中国天气网）"]
+
+
+def test_thread_start_failure_also_releases_the_busy_gate():
+    client = _Reading(_reading())
+    host = _Host()
+    shell = _App({"weather_city": "鹿城"}, win=host)
+
+    def _boom(_work):
+        raise RuntimeError("no threads left")
+
+    service = WeatherService(shell, client=client, run_async=_boom)
+    service.show_weather(host)
+    assert service._busy is False
+    assert "天气获取失败" in host.texts()[-1]
+
+
+def test_known_area_code_is_passed_to_the_client():
+    """m1 落到服务层：配置里的地区码要一路传到取数客户端（同名城市靠它认人）。"""
+    client = _Reading(_reading())
+    host = _Host()
+    shell = _App({
+        "weather_city": "朝阳 · 辽宁",
+        "weather_city_list": ["朝阳 · 辽宁"],
+        "weather_city_codes": {"朝阳 · 辽宁": "101071201"},
+    }, win=host)
+    service = WeatherService(shell, client=client, run_async=_sync)
+    service.show_weather(host)
+    assert client.calls[0][0] == "朝阳 · 辽宁"
+    assert client.codes == ["101071201"]
 
 
 def test_client_is_created_lazily_and_reused():

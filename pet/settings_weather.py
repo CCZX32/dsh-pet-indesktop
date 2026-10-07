@@ -10,9 +10,11 @@
 「点击显示余额」同类——都是"桌宠替你看一眼外部数据"的互动面，正好是互动域
 （``settings_interaction``）的第三个同级任务。
 
-**配置键（config.py 顶层平铺 3 个）**：``weather_enabled`` / ``weather_city`` /
-``weather_city_list``；默认口径（含"为什么不猜一个默认城市"）见 config.py 的注释。
-城市名的归一化只有一处实现（``pet/weather.py``），设置页、右键菜单、取数共用。
+**配置键（config.py 顶层平铺 4 个）**：``weather_enabled`` / ``weather_city`` /
+``weather_city_list`` / ``weather_city_codes``；默认口径（含"为什么不猜一个默认
+城市"）见 config.py 的注释。城市名的归一化只有一处实现（``pet/weather.py``），
+设置页、右键菜单、取数共用；``weather_city_codes``（地区码）由菜单添加城市时写入，
+本页保存时按列表收敛（删掉的城市不留身份）。
 """
 
 from __future__ import annotations
@@ -25,7 +27,13 @@ from .settings_widgets import (
     ToggleSwitch,
     mark_main_pet_only,
 )
-from .weather import MAX_CITIES, normalize_city_list, normalize_city_name
+from .weather import (
+    MAX_CITIES,
+    normalize_city_codes,
+    normalize_city_list,
+    normalize_city_name,
+    same_city,
+)
 
 
 def create_weather_controls(dialog) -> None:
@@ -75,7 +83,7 @@ def build_weather_rows(dialog) -> list[SettingRow]:
             "weather_city_list",
             f"城市列表（最多 {MAX_CITIES} 个）",
             "每行一个。右键菜单「天气城市」里点一下即可切换，当前城市打勾；"
-            "带行政区后缀的名字会自动归一化（鹿城区 → 鹿城）。",
+            "列表保留你写的名字，取数时对带行政区后缀的名字（鹿城区）会自动再试一次。",
             dialog.weather_city_list_edit,
             stacked=True,
         ),
@@ -109,3 +117,10 @@ def save_weather_settings(dialog) -> None:
             listed = listed + [city]
     config.set("weather_city", city)
     config.set("weather_city_list", listed)
+    # 地区码表跟着列表收敛：不在列表里的城市，身份（地区码）也一起清掉——
+    # 否则"删掉再重加同名城市"会带着旧码去取数（同名城市选哪项都白搭）。
+    codes = normalize_city_codes(config.get("weather_city_codes"))
+    kept = {label: code for label, code in codes.items()
+            if any(same_city(label, name) for name in listed)}
+    if kept != codes:
+        config.set("weather_city_codes", kept)

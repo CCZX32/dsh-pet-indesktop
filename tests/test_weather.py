@@ -87,50 +87,74 @@ def _client(http, *, clock=time.monotonic):
     return W.WeatherClient(http=http, clock=clock)
 
 
-# ---------------------------------------------------------------- 1. 城市名容错
+# ---------------------------------------------------------------- 1. 城市名与列表
+# M1（终审）：存储层**保留用户输入/选择的原名**，归一化必须幂等——此前每次整表
+# 归一化都重新剥一次后缀，「景德镇市」→「景德镇」→「景德」，用户只是改了别的设置
+# 城市名就被继续改坏；「新乡」「景德镇」这类真名也会被当成后缀裁掉。
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("鹿城区", "鹿城"),
-        ("  北京市  ", "北京"),
-        ("浙江省", "浙江"),
-        ("温州市", "温州"),
+        ("鹿城区", "鹿城区"),      # 存储层不动后缀（归一化只做空白/宽窄字符）
+        ("  北京市  ", "北京市"),
+        ("浙江省", "浙江省"),
         ("鹿城", "鹿城"),
+        ("新乡", "新乡"),          # 「乡」是后缀字，但新乡是真名
+        ("景德镇", "景德镇"),      # 「镇」是后缀字，但景德镇是真名
+        ("景德镇市", "景德镇市"),
         ("", ""),
         (None, ""),
-        ("市", "市"),          # 剥后缀会剥空 → 保留原样，不退化成空串
-        ("乌鲁木齐县", "乌鲁木齐"),
-        ("New York", "New York"),  # 非中文无后缀，原样
+        ("市", "市"),
+        ("New York", "New York"),
     ],
 )
-def test_normalize_city_name_strips_administrative_suffix(raw, expected):
+def test_normalize_city_name_keeps_the_users_original_name(raw, expected):
     assert W.normalize_city_name(raw) == expected
 
 
-def test_city_name_variants_keeps_original_first_and_dedups():
+def test_normalize_city_name_is_idempotent_on_every_sample():
+    """同一输入两次归一结果必须相等——否则"保存别的设置"会继续侵蚀城市名。"""
+    for raw in ("景德镇市", "鹿城区", "新乡", "乌鲁木齐县", "  北京市 ", "New York", ""):
+        once = W.normalize_city_name(raw)
+        assert W.normalize_city_name(once) == once, raw
+
+
+def test_suffix_variants_are_query_only_and_never_shorten_storage():
+    """后缀变体只作为**查询回退**存在：存储值不受影响，变体本身也不改原值。"""
+    assert W.strip_city_suffix("鹿城区") == "鹿城"
+    assert W.strip_city_suffix("乌鲁木齐县") == "乌鲁木齐"
+    assert W.strip_city_suffix("新乡") == "新"
+    assert W.strip_city_suffix("鹿城") == "鹿城"
+    assert W.normalize_city_name("新乡") == "新乡"  # 剥后缀没有回写
+
     assert W.city_name_variants("鹿城区") == ("鹿城区", "鹿城")
+    assert W.city_name_variants("新乡") == ("新乡", "新")
     assert W.city_name_variants("鹿城") == ("鹿城",)
     assert W.city_name_variants("") == ()
-    # 手填时用归一化名存储（见 normalize_city_name 用例），这里只保证顺序语义
-    assert W.city_name_variants("  杭州市 ") == ("杭州市", "杭州")
 
 
-def test_normalize_city_list_trims_dedups_and_caps():
+def test_normalize_city_list_is_idempotent_and_keeps_names_intact():
     assert W.normalize_city_list([" 北京 ", "北京", "", "   ", "上海"]) == ["北京", "上海"]
     assert W.normalize_city_list(None) == []
     assert W.normalize_city_list("北京") == []
     assert W.normalize_city_list(["北京", 42, None]) == ["北京"]
     assert len(W.normalize_city_list([f"城市{i}" for i in range(30)])) == W.MAX_CITIES
-    # 名字过长按上限截断，避免手改配置塞进超长串
     assert W.normalize_city_list(["北" * 40]) == ["北" * W.MAX_CITY_NAME]
+    # 真名不被裁短 + 反复归一稳定
+    once = W.normalize_city_list(["景德镇市", "新乡", "鹿城区"])
+    assert once == ["景德镇市", "新乡", "鹿城区"]
+    assert W.normalize_city_list(once) == once
 
 
-def test_add_city_appends_normalizes_and_rejects_duplicates():
+def test_add_city_keeps_the_original_name_and_rejects_duplicates():
     cities, error = W.add_city(["北京"], " 鹿城区 ")
-    assert cities == ["北京", "鹿城"] and error == ""
+    assert cities == ["北京", "鹿城区"] and error == ""
 
     cities, error = W.add_city(["北京", "鹿城"], "鹿城")
     assert cities == ["北京", "鹿城"] and error == W.CITY_EXISTS_TEXT
+
+    # 同一城市的不同写法视为同一个：不会同时进列表
+    cities, error = W.add_city(["鹿城"], "鹿城")
+    assert error == W.CITY_EXISTS_TEXT
 
     cities, error = W.add_city([], "   ")
     assert cities == [] and error == W.CITY_EMPTY_TEXT
@@ -157,6 +181,43 @@ def test_current_city_falls_back_to_first_list_entry():
     assert W.current_city({"weather_city": "", "weather_city_list": ["北京", "上海"]}) == "北京"
     assert W.current_city({"weather_city": "  ", "weather_city_list": []}) == ""
     assert W.current_city({}) == ""
+
+
+# ------------------------------------------------ 城市身份（地区码 / 歧义标签，m1）
+def test_city_label_only_disambiguates_when_the_name_is_ambiguous():
+    assert W.city_label("北京", "北京", ambiguous=True) == "北京"
+    assert W.city_label("北京", "北京市", ambiguous=True) == "北京"
+    assert W.city_label("鹿城", "浙江", ambiguous=False) == "鹿城"
+    assert W.city_label("朝阳", "辽宁", ambiguous=True) == "朝阳 · 辽宁"
+    assert W.city_label("朝阳", "", ambiguous=True) == "朝阳"
+
+
+def test_base_city_name_strips_the_disambiguation_suffix():
+    assert W.base_city_name("朝阳 · 辽宁") == "朝阳"
+    assert W.base_city_name("朝阳（辽宁）") == "朝阳"  # 手改配置的老写法也认
+    assert W.base_city_name("北京") == "北京"
+    assert W.base_city_name("") == ""
+
+
+def test_city_label_is_stable_under_normalization():
+    """标签必须过一遍存储归一化——否则「（」被 NFKC 折成「(」会让地区码表对不上号。"""
+    label = W.city_label("朝阳", "辽宁", ambiguous=True)
+    assert W.normalize_city_name(label) == label
+    assert W.base_city_name(W.normalize_city_name(label)) == "朝阳"
+
+
+def test_normalize_city_codes_keeps_only_usable_pairs():
+    assert W.normalize_city_codes({"朝阳 · 辽宁": "101071201"}) == {"朝阳 · 辽宁": "101071201"}
+    assert W.normalize_city_codes(["x"]) == {}
+    assert W.normalize_city_codes({42: "1", "北京": 5, "": "1", "上海": ""}) == {}
+    assert W.normalize_city_codes({"北京": " 101010100 "}) == {"北京": "101010100"}
+
+
+def test_city_code_for_reads_the_config_map():
+    assert W.city_code_for({"weather_city_codes": {"北京": "101010100"}}, "北京") == "101010100"
+    assert W.city_code_for({"weather_city_codes": {"北京": "101010100"}}, "上海") == ""
+    assert W.city_code_for({}, "北京") == ""
+    assert W.city_code_for({"weather_city_codes": "垃圾"}, "北京") == ""
 
 
 # ---------------------------------------------------------------- 2. 码表映射
@@ -210,6 +271,26 @@ def test_pick_candidate_prefers_exact_name_match():
     # 归一化后的查询同样是精确命中（鹿城区 → 鹿城 由调用方剥后缀，这里再兜一层）
     assert W.pick_candidate(candidates, "鹿城区").code == "101210710"
     assert W.pick_candidate([], "鹿城") is None
+
+
+def test_exact_only_picking_protects_real_names_from_the_suffix_variant():
+    """回退变体必须**精确**命中：否则「新乡」搜不到时会用「新」前缀命中别的城市。"""
+    payload = (
+        '([{"ref":"101240101~jiangxi~新余~Xinyu~新余~Xinyu~790~338000~XY~江西"},'
+        '{"ref":"101180101~henan~新乡~Xinxiang~新乡~Xinxiang~373~453000~XX~河南"}])'
+    )
+    candidates = W.parse_search_payload(payload)
+    assert W.pick_candidate(candidates, "新") is not None        # 宽松匹配会命中
+    assert W.pick_candidate(candidates, "新", exact_only=True) is None
+    assert W.pick_candidate(candidates, "新乡", exact_only=True).code == "101180101"
+
+
+def test_candidates_keep_code_and_region_for_identity():
+    candidates = W.parse_search_payload(CN_SEARCH_鹿城)
+    assert [(c.code, c.name, c.region) for c in candidates] == [
+        ("101210710", "鹿城", "浙江"),
+        ("101210701009", "滨江街道", "浙江"),
+    ]
 
 
 def test_parse_cn_reading_extracts_current_conditions():
@@ -298,6 +379,41 @@ def test_fetch_raises_naming_both_sources_when_every_source_fails():
     assert "超时" in message
 
 
+# ------------------------------------------- 按身份取数（同名城市选哪项中哪项，m1）
+CN_CURRENT_朝阳辽宁 = (
+    'var dataSK={"nameen":"chaoyang","cityname":"朝阳","city":"101071201","temp":"11.1",'
+    '"WD":"南风","WS":"2级","SD":"48%","time":"03:10","weather":"晴"}'
+)
+
+
+def test_known_area_code_is_fetched_directly_without_the_ambiguous_search():
+    """已知地区码 → 直接按码取实况：同名城市（朝阳 北京 / 辽宁）各自中自己那条。"""
+    http = _FakeHttp([("d1.weather.com.cn/sk_2d/101071201", CN_CURRENT_朝阳辽宁)])
+    reading = _client(http).fetch("朝阳 · 辽宁", code="101071201")
+    assert reading.city == "朝阳" and reading.temperature == "11.1℃"
+    assert http.urls() == ["http://d1.weather.com.cn/sk_2d/101071201.html"]
+    assert all(call["use_proxy"] is False for call in http.calls)
+
+
+def test_known_area_code_falls_back_to_the_name_search_when_the_code_fails():
+    http = _FakeHttp([("d1.weather.com.cn/sk_2d/101071201", TimeoutError("timed out")),
+                      ("toy1.weather.com.cn", CN_SEARCH_鹿城),
+                      ("d1.weather.com.cn/sk_2d/101210710", CN_CURRENT_鹿城)])
+    reading = _client(http).fetch("鹿城", code="101071201")
+    assert reading.city == "鹿城" and reading.source == W.SOURCE_CN
+
+
+def test_ambiguous_label_is_queried_by_its_base_name():
+    """「朝阳 · 辽宁」上源 B 时不能把标签当城市名去搜。"""
+    http = _FakeHttp([("toy1.weather.com.cn", TimeoutError("timed out")),
+                      ("geocoding-api.open-meteo.com", OM_GEOCODE_北京),
+                      ("api.open-meteo.com", OM_CURRENT_北京)])
+    _client(http).fetch("朝阳 · 辽宁")
+    geocode = [call["url"] for call in http.calls if "geocoding" in call["url"]][0]
+    assert "name=%E6%9C%9D%E9%98%B3&" in geocode      # 只查「朝阳」
+    assert "%E8%BE%BD%E5%AE%81" not in geocode        # 不带「辽宁」
+
+
 def test_fetch_never_fires_a_request_with_an_exhausted_budget():
     """预算已耗尽 → 直接按失败收场，一次请求都不发（用户等待有上界）。"""
     clock = _Clock()
@@ -350,3 +466,52 @@ def test_timeout_and_city_limit_constants_are_the_documented_ones():
     assert W.HTTP_TIMEOUT == 6.0
     assert W.MAX_CITIES == 12
     assert W.TOTAL_BUDGET_SECONDS > W.HTTP_TIMEOUT
+
+
+# ------------------------------------------------ 响应体有界读取与总截止（m12）
+class _Reader:
+    """分块读取替身：按脚本吐块，并记录每次调用。"""
+
+    def __init__(self, chunks, *, clock=None, chunk_cost=0.0):
+        self.chunks = list(chunks)
+        self.calls = 0
+        self._clock = clock
+        self._chunk_cost = chunk_cost
+
+    def __call__(self, size):
+        self.calls += 1
+        if self._clock is not None and self._chunk_cost:
+            self._clock.now += self._chunk_cost
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+def test_read_bounded_returns_the_whole_body_when_small():
+    reader = _Reader([b"abc", b"def"])
+    assert W.read_bounded(reader, chunk=4) == b"abcdef"
+    assert reader.calls == 3          # 末次空块 = EOF
+
+
+def test_read_bounded_aborts_when_the_body_exceeds_the_cap():
+    oversized = b"x" * (W.MAX_BODY_BYTES + 1)
+    with pytest.raises(W.WeatherError) as info:
+        W.read_bounded(_Reader([oversized]), chunk=1024)
+    assert "过大" in str(info.value)
+    assert str(W.MAX_BODY_BYTES // (1024 * 1024)) in str(info.value)
+
+
+def test_read_bounded_aborts_when_the_deadline_passes_mid_transfer():
+    """慢速持续滴流也不能拖过总截止：每块之间检查截止时间。"""
+    clock = _Clock()
+    reader = _Reader([b"a" * 64] * 50, clock=clock, chunk_cost=1.0)
+    with pytest.raises(W.WeatherError) as info:
+        W.read_bounded(reader, deadline=clock.now + 3.0, clock=clock, chunk=64)
+    assert "超时" in str(info.value)
+    assert reader.calls <= 5, "超过截止后必须停止读，而不是把整个响应拖完"
+
+
+def test_read_bounded_without_a_deadline_still_caps_the_size():
+    assert W.read_bounded(_Reader([b"ok"]), chunk=2) == b"ok"
+
+
+def test_describe_error_passes_weather_errors_through():
+    assert W.describe_error(W.WeatherError("响应体过大（超过 2MB）")) == "响应体过大（超过 2MB）"

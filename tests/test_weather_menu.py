@@ -67,9 +67,9 @@ class _FakeDialog(QObject):
 
     search_requested = Signal(str)
 
-    def __init__(self, name="", *, query="", accepted=True):
+    def __init__(self, name="", *, code="", region="", query="", accepted=True):
         super().__init__()
-        self._name = name
+        self._entry = {"name": name, "code": code, "region": region} if name else {}
         self._query = query
         self._accepted = accepted
         self.begun = 0
@@ -80,8 +80,11 @@ class _FakeDialog(QObject):
             self.search_requested.emit(self._query)
         return 1 if self._accepted else 0
 
+    def chosen_entry(self) -> dict:
+        return dict(self._entry)
+
     def chosen_name(self) -> str:
-        return self._name
+        return str(self._entry.get("name") or "")
 
     def begin_search(self) -> None:
         self.begun += 1
@@ -181,11 +184,32 @@ def test_delete_city_submenu_removes_the_city_and_moves_the_current_one():
 def test_add_city_flow_adds_selects_persists_and_shows_weather():
     pet = _Pet({"weather_city": "", "weather_city_list": []})
     added = M.add_city_flow(pet, dialog_factory=_factory("鹿城区"))
-    assert added == "鹿城", "手填带后缀的城市名归一化后再存（鹿城区 → 鹿城）"
-    assert pet.cfg.get("weather_city_list") == ["鹿城"]
-    assert pet.cfg.get("weather_city") == "鹿城"
+    assert added == "鹿城区", "存储层保留用户输入的原名（M1：不再剥成「鹿城」）"
+    assert pet.cfg.get("weather_city_list") == ["鹿城区"]
+    assert pet.cfg.get("weather_city") == "鹿城区"
     assert pet.cfg.saves == 1
     assert len(pet.shown) == 1
+
+
+def test_add_city_flow_remembers_the_area_code_for_same_name_cities():
+    """m1：候选的**地区码**要跟着城市一起存下来，否则同名城市下次查询还中第一条。"""
+    pet = _Pet({"weather_city": "", "weather_city_list": []})
+    added = M.add_city_flow(
+        pet, dialog_factory=_factory("朝阳 · 辽宁", code="101071201", region="辽宁"))
+    assert added == "朝阳 · 辽宁"
+    assert pet.cfg.get("weather_city_list") == ["朝阳 · 辽宁"]
+    assert pet.cfg.get("weather_city_codes") == {"朝阳 · 辽宁": "101071201"}
+
+
+def test_removing_a_city_also_drops_its_area_code():
+    pet = _Pet({
+        "weather_city": "北京",
+        "weather_city_list": ["北京", "朝阳 · 辽宁"],
+        "weather_city_codes": {"朝阳 · 辽宁": "101071201"},
+    })
+    M.remove_city_from_config(pet, "朝阳 · 辽宁")
+    assert pet.cfg.get("weather_city_list") == ["北京"]
+    assert pet.cfg.get("weather_city_codes") == {}
 
 
 def test_add_city_flow_reports_the_cap_instead_of_silently_dropping_it():
@@ -209,7 +233,7 @@ def test_add_city_flow_does_nothing_when_the_dialog_is_cancelled():
 def test_open_add_city_dialog_threads_search_results_back_into_the_dialog():
     """对话框请求搜索 → 注入的搜索函数在调用线程执行 → 结果回填对话框。"""
     pet = _Pet({})
-    dialog = _FakeDialog("鹿城", query="鹿城")
+    dialog = _FakeDialog("鹿城", code="101210710", region="浙江", query="鹿城")
     queries: list[str] = []
 
     def searcher(query):
@@ -220,12 +244,18 @@ def test_open_add_city_dialog_threads_search_results_back_into_the_dialog():
         pet, dialog_factory=lambda _parent=None: dialog, search=searcher,
         run_async=lambda work: work(),
     )
-    assert chosen == "鹿城"
+    assert chosen == {"name": "鹿城", "code": "101210710", "region": "浙江"}
     assert queries == ["鹿城"]
     assert dialog.begun == 1
     assert dialog.results_seen == [
         ([W.CityCandidate(code="101210710", name="鹿城", region="浙江")], "")
     ]
+
+
+def test_open_add_city_dialog_returns_no_entry_when_cancelled():
+    pet = _Pet({})
+    assert not M.open_add_city_dialog(
+        pet, dialog_factory=_factory("鹿城", accepted=False))
 
 
 # ---------------------------------------------------------------- 城市对话框
@@ -253,7 +283,53 @@ def test_city_dialog_disables_search_while_pending_and_restores_it():
         [W.CityCandidate(code="101210710", name="鹿城", region="浙江")], "")
     assert dialog.search_btn.isEnabled() is True
     assert dialog.chosen_name() == "鹿城"
-    assert [dialog.results.item(i).text() for i in range(dialog.results.count())] == ["鹿城（浙江）"]
+    assert [dialog.results.item(i).text() for i in range(dialog.results.count())] == ["鹿城"]
+
+
+def test_city_dialog_disambiguates_same_name_candidates_with_their_region():
+    """m1：同名候选（朝阳 北京 / 辽宁）必须能区分，且选哪项就带回哪项的地区码。"""
+    dialog = M.WeatherCityDialog()
+    dialog.name_edit.setText("朝阳")
+    dialog.set_search_results([
+        W.CityCandidate(code="101010300", name="朝阳", region="北京"),
+        W.CityCandidate(code="101071201", name="朝阳", region="辽宁"),
+    ], "")
+    labels = [dialog.results.item(i).text() for i in range(dialog.results.count())]
+    assert labels == ["朝阳 · 北京", "朝阳 · 辽宁"]
+    assert dialog.chosen_entry()["code"] == "101010300"   # 默认选中第一项
+
+    dialog.results.setCurrentRow(1)
+    assert dialog.chosen_entry() == {"name": "朝阳 · 辽宁", "code": "101071201",
+                                     "region": "辽宁"}
+
+
+def test_city_dialog_keeps_plain_names_when_there_is_no_collision():
+    dialog = M.WeatherCityDialog()
+    dialog.name_edit.setText("鹿城")
+    dialog.set_search_results(
+        [W.CityCandidate(code="101210710", name="鹿城", region="浙江")], "")
+    assert dialog.chosen_entry() == {"name": "鹿城", "code": "101210710", "region": "浙江"}
+
+
+def test_editing_the_query_drops_the_stale_candidate_and_selection():
+    """m2：搜北京后又改成上海，绝不能还把北京当选择结果添加进去。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog = M.WeatherCityDialog()
+    dialog.name_edit.setText("北京")
+    dialog.set_search_results(
+        [W.CityCandidate(code="101010100", name="北京", region="北京")], "")
+    assert dialog.chosen_name() == "北京"
+
+    # 用户动键盘（Backspace 是真实键盘编辑，会发 textEdited）→ 旧候选必须作废
+    QTest.keyClick(dialog.name_edit, Qt.Key.Key_Backspace)
+    assert dialog.results.count() == 0, "旧候选必须随输入作废"
+    assert dialog.results.currentItem() is None
+
+    dialog.name_edit.setText("上海")
+    assert dialog.chosen_name() == "上海", "改成上海后不能再把北京当结果"
+    assert dialog.status_label.text() == M.SEARCH_IDLE_TEXT
 
 
 def test_city_dialog_offers_manual_entry_when_the_search_finds_nothing():
@@ -263,7 +339,7 @@ def test_city_dialog_offers_manual_entry_when_the_search_finds_nothing():
     assert dialog.results.count() == 0
     assert "请求超时" in dialog.status_label.text()
     assert "直接添加" in dialog.status_label.text()
-    assert dialog.chosen_name() == "鹿城"
+    assert dialog.chosen_name() == "鹿城区"
     assert dialog.add_btn.isEnabled() is True
 
 
@@ -288,11 +364,6 @@ def test_start_search_feeds_the_dialog_through_the_injected_searcher():
     assert queries == ["鹿城"]
     assert dialog.chosen_name() == "鹿城"
     assert dialog.search_btn.isEnabled() is True
-
-
-def test_open_add_city_dialog_returns_the_chosen_name():
-    pet = _Pet({})
-    assert M.open_add_city_dialog(pet, dialog_factory=_factory("鹿城")) == "鹿城"
 
 
 # ---------------------------------------------------------------- 注册表

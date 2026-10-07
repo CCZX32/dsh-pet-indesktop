@@ -94,15 +94,47 @@ def test_controls_round_trip_from_config(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------- 保存
-def test_save_writes_the_three_keys_and_normalizes_the_list(dialog):
+def test_save_writes_the_three_keys_and_keeps_names_as_typed(dialog):
     dialog.weather_enabled_check.setChecked(False)
     dialog.weather_city_edit.setText("鹿城区")
     dialog.weather_city_list_edit.setPlainText("北京\n 鹿城 \n北京\n\n上海")
 
     assert dialog._write_config() is True
     assert dialog.config.get("weather_enabled") is False
-    # 手填带后缀 → 归一化；列表去空行、去重、保序
+    # M1：城市名保留用户输入的原名（不再被剥成「鹿城」）
+    assert dialog.config.get("weather_city") == "鹿城区"
     assert dialog.config.get("weather_city_list") == ["北京", "鹿城", "上海"]
+
+
+def test_saving_other_rows_never_erodes_the_stored_city_name(dialog):
+    """M1 的整表归一化回归：反复保存（每次都跑 _normalize_pet_settings）名字不变。"""
+    dialog.weather_city_edit.setText("景德镇市")
+    dialog.weather_city_list_edit.setPlainText("新乡\n景德镇")
+    assert dialog._write_config() is True
+    for _ in range(3):
+        assert dialog._write_config() is True
+    assert dialog.config.get("weather_city") == "景德镇市"
+    assert dialog.config.get("weather_city_list") == ["新乡", "景德镇"]
+
+
+def test_save_drops_area_codes_of_cities_that_are_no_longer_listed(tmp_path, monkeypatch):
+    """地区码表跟着城市列表收敛：删掉的城市不能留着身份（否则重加会串号）。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    config.set("weather_city_list", ["北京", "上海"])
+    config.set("weather_city", "北京")
+    config.set("weather_city_codes", {"北京": "101010100", "上海": "101020100"})
+    dlg = settings_mod.ModernSettingsDialog(config, include_ai=True)
+    try:
+        dlg.weather_city_list_edit.setPlainText("北京")
+        assert dlg._write_config() is True
+        assert dlg.config.get("weather_city_codes") == {"北京": "101010100"}
+    finally:
+        dlg.close()
+        app.processEvents()
 
 
 def test_save_caps_the_city_list_and_keeps_the_current_city_listed(dialog):
