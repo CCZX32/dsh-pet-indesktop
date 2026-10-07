@@ -3455,22 +3455,43 @@ class AppShell:
         """打开「网络信息」弹窗（非模态单例；数据只在打开时取一次，不轮询）。"""
         from .network_info_dialog import NetworkInfoDialog
 
-        if getattr(self, "network_info_dialog", None) is None:
+        dialog = getattr(self, "network_info_dialog", None)
+        if dialog is not None and not shiboken6.isValid(dialog):
+            # 已销毁但收口信号还没到（或父宠物先走一步带走子窗）：先清掉再新建，
+            # 否则复用路径会在死对象上抛 "Internal C++ object already deleted"。
+            dialog = None
+            self.network_info_dialog = None
+        if dialog is None:
             # parent 必须是 QWidget：overlay 拓扑下 self.win 是 sprite 壳（QObject），
             # 直接当 parent 会在 QDialog 构造期 TypeError（同待办面板）。
             parent = self.win
             dialog = NetworkInfoDialog(parent if isinstance(parent, QWidget) else None)
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.finished.connect(self._network_info_finished)
+            # 父窗销毁（或任何 C++ 侧析构）不一定发 finished，但一定会发 destroyed：
+            # 用带对象身份的收口兜住，避免单例长期指向失效对象。
+            dialog.destroyed.connect(
+                lambda *_args, owner=self, target=dialog:
+                    owner._network_info_destroyed(target))
             self.network_info_dialog = dialog
         inst = self.instance
         if inst is not None:
-            inst._present_dialog(self.network_info_dialog)
+            inst._present_dialog(dialog)
         else:
-            self.network_info_dialog.show()
+            dialog.show()
 
     def _network_info_finished(self, _result: int) -> None:
+        """正常关闭（关窗即释放单例；必要时由 destroyed 再兜一次）。"""
         self.network_info_dialog = None
+
+    def _network_info_destroyed(self, dialog) -> None:
+        """窗口被销毁时收口单例；**只认当前持有的那一个**。
+
+        身份核对不可省：旧窗的 destroyed 可能晚于新窗创建（先销毁、再点菜单开新窗），
+        无脑清空会把新实例一起丢掉，之后每次点击都新建一个窗口。
+        """
+        if getattr(self, "network_info_dialog", None) is dialog:
+            self.network_info_dialog = None
 
     def trigger_voice_chime_now(self, text: str = "") -> None:
         """手动报时：设置页试听入口与菜单编排加回的「立即报时」共用（该菜单项默认隐藏）。

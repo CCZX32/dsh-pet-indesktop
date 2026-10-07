@@ -336,6 +336,18 @@ class DynamicIsland(QWidget):
         return net_monitor.clamp_interval(
             self.config.get("network_probe_interval_seconds", net_monitor.DEFAULT_INTERVAL_SECONDS))
 
+    def _net_active(self) -> bool:
+        """网络槽的**有效**开关：网络槽开着 AND 信息槽可见（岛可见性另算，用 isVisible）。
+
+        信息槽被关掉时网络文案根本画不出来（``_visible_parts`` 的第 3 位），
+        继续跑采样线程只是白烧 psutil 的 23ms/秒与探测包——所以"显示信息槽"是
+        三态里的一态，不是只看网络开关。
+        """
+        if not self._net_enabled():
+            return False
+        _icon, _name, info, _status = self._visible_parts()
+        return bool(info)
+
     def _edge_dock_enabled(self) -> bool:
         return bool(self._cfg.get("edge_dock", True))
 
@@ -567,12 +579,13 @@ class DynamicIsland(QWidget):
     def _sync_network_slot(self) -> None:
         """按配置启停网络槽的采样线程与读取定时器（幂等）。
 
-        关闭 → 彻底收口（线程停、socket 关、快照丢弃，信息槽回到 ``info_mode``）；
-        开启但岛不可见 → 只留对象、不采样（同 hideEvent 的"隐藏即休眠"口径）。
-        采样间隔变化（设置页改 ``network_probe_interval_seconds``）即时生效，
-        不重建线程。
+        有效开关 = 岛可见 AND 显示信息槽 AND 网络槽开着（见 ``_net_active``）；
+        任一不满足即停采样——关闭 → 彻底收口（线程停、socket 关、快照丢弃，信息槽
+        回到 ``info_mode``），只是暂时不可见 → 保留对象不采样（同 hideEvent 的
+        "隐藏即休眠"口径）。采样间隔变化（设置页改
+        ``network_probe_interval_seconds``）即时生效，不重建线程。
         """
-        if not self._net_enabled():
+        if not self._net_active():
             self._pause_network_slot()
             if self._net_monitor is not None:
                 self._net_monitor.close()

@@ -244,3 +244,78 @@ def test_open_network_info_is_single_process_level_dialog(tmp_path, quiet_dialog
         if shell.network_info_dialog is not None:
             shell.network_info_dialog.close()
             shell.network_info_dialog = None
+
+
+def test_open_network_info_recovers_after_dialog_destroyed_with_parent(tmp_path, quiet_dialog):
+    """随父宠物销毁（不发 finished）后，单例不得仍指向失效对象。
+
+    复现：C++ 侧被销毁（等价于父 QWidget 析构带走子窗）→ 再点菜单必须给出新窗，
+    而不是在复用路径上抛 "Internal C++ object already deleted"。
+    """
+    import shiboken6
+
+    from pet.app import AppShell
+
+    shell = AppShell(app, Config(tmp_path))
+    try:
+        shell.open_network_info()
+        first = shell.network_info_dialog
+        shiboken6.delete(first)  # 销毁不发 finished（destroyed 才发）
+        app.processEvents()
+        assert shell.network_info_dialog is None, "销毁信号必须收口单例"
+
+        shell.open_network_info()
+        second = shell.network_info_dialog
+        assert isinstance(second, _QuietDialog) and second is not first
+        assert second.refreshed == 1, "重开的弹窗照常取数"
+    finally:
+        if shell.network_info_dialog is not None:
+            shell.network_info_dialog.close()
+            shell.network_info_dialog = None
+
+
+def test_open_network_info_replaces_singleton_that_was_destroyed_silently(
+        tmp_path, quiet_dialog):
+    """收口信号没到（例如别的线程/时序缝隙销毁）时，复用前自查失效对象，不得抛。"""
+    import shiboken6
+
+    from pet.app import AppShell
+
+    shell = AppShell(app, Config(tmp_path))
+    try:
+        shell.open_network_info()
+        first = shell.network_info_dialog
+        shiboken6.delete(first)
+        app.processEvents()
+        shell.network_info_dialog = first  # 人为塞回：模拟 destroyed 未送达
+        shell.open_network_info()
+        second = shell.network_info_dialog
+        assert isinstance(second, _QuietDialog) and second is not first
+    finally:
+        if shell.network_info_dialog is not None:
+            shell.network_info_dialog.close()
+            shell.network_info_dialog = None
+
+
+def test_stale_destroyed_signal_does_not_clear_new_dialog(tmp_path, quiet_dialog):
+    """旧窗晚到的 destroyed 不得清掉新实例（对象身份核对）。"""
+    import shiboken6
+
+    from pet.app import AppShell
+
+    shell = AppShell(app, Config(tmp_path))
+    try:
+        shell.open_network_info()
+        first = shell.network_info_dialog
+        shiboken6.delete(first)
+        app.processEvents()
+        shell.open_network_info()
+        second = shell.network_info_dialog
+        assert second is not None and second is not first
+
+        shell._network_info_destroyed(first)  # 旧窗的收口信号晚到
+        assert shell.network_info_dialog is second
+    finally:
+        if shell.network_info_dialog is not None:
+            shell.network_info_dialog.close()
+            shell.network_info_dialog = None

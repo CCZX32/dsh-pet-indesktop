@@ -192,6 +192,53 @@ def test_network_slot_sleeps_when_hidden_and_resumes_on_show(tmp_path, monkeypat
         island.close()
 
 
+def test_network_slot_honours_show_info_switch(tmp_path, monkeypatch):
+    """三态回归：岛可见 + 显示信息槽 + 网络槽开关，缺一都不采样。
+
+    关掉「显示信息槽」时网络文案根本画不出来（_visible_parts 的第 3 位），
+    继续跑采样线程只是白烧计数器读取与探测包。
+    """
+    island, made = _island(tmp_path, monkeypatch, island_network_enabled=True)
+    island_cfg = dict(island.config.get("dynamic_island"))
+    try:
+        island.show()
+        app.processEvents()
+        assert made[0].started is True
+        assert island._net_timer.isActive() is True
+
+        # 关掉「显示信息槽」：采样与定时器一起停
+        island.config.set("dynamic_island", {**island_cfg, "show_info": False})
+        island.refresh_from_config()
+        assert island._net_timer.isActive() is False, "信息槽关了不该继续刷新"
+        assert made[0].stops >= 1, "信息槽关了不该继续采样"
+        assert island._net_sample is None
+
+        # 再打开：恢复采样（信息槽内容回到 info_mode 之外由开关决定）
+        island.config.set("dynamic_island", {**island_cfg, "show_info": True})
+        island.refresh_from_config()
+        island.show()
+        app.processEvents()
+        assert island._net_timer.isActive() is True
+        assert made[-1].started is True
+    finally:
+        island.close()
+
+
+def test_network_slot_honours_island_visibility(tmp_path, monkeypatch):
+    """岛不可见（隐藏）时同样不采样：可见性是第三个条件。"""
+    island, made = _island(tmp_path, monkeypatch, island_network_enabled=True)
+    try:
+        island.show()
+        app.processEvents()
+        assert island._net_timer.isActive() is True
+        island.hide()
+        app.processEvents()
+        assert island._net_timer.isActive() is False
+        assert made[0].stops >= 1
+    finally:
+        island.close()
+
+
 # ---------------------------------------------------------------- 配置变更
 def test_network_slot_disabled_by_config_change_closes_worker(tmp_path, monkeypatch):
     island, made = _island(tmp_path, monkeypatch, island_network_enabled=True)
