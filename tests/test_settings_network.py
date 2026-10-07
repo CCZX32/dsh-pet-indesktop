@@ -2,8 +2,8 @@
 """设置页「网络信息 / 灵动岛指标」的行/依赖/保存契约（issue #172 + P1 Slice C）。
 
 断言走真实 ``ModernSettingsDialog``（设置窗口这个公开 seam），不碰私有调用顺序：
-默认值呈现、指标三开关与 ``island_metrics`` 的对应、依赖显隐（岛关 → 信息槽关 →
-指标行）、保存回写（典范序）、脏值不炸设置页、子宠页置灰。
+默认值呈现、指标四开关（含 P3 的 GPU 占位行）与 ``island_metrics`` 的对应、
+依赖显隐（岛关 → 信息槽关 → 指标行）、保存回写（典范序）、脏值不炸设置页、子宠页置灰。
 
 ``island_metrics`` 是**唯一**的指标真值（旧键 ``island_network_enabled`` 只在归一化
 阶段单向迁移一次，设置页不再写它）。
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 import pet.modern_settings_dialog as settings_mod
 from pet import net_monitor
 from pet.config import Config
-from pet.island_segments import CPU, MEM, NETWORK
+from pet.island_segments import CPU, GPU, MEM, NETWORK
 
 app = QApplication.instance() or QApplication([])
 
@@ -223,9 +223,9 @@ def test_save_writes_metrics_and_reloads(tmp_path, monkeypatch):
 
 
 def test_save_writes_the_canonical_metric_order(tmp_path, monkeypatch):
-    """三个复选框折成列表：按固定典范序 [network, cpu, mem] 过滤勾选态。
+    """四个复选框折成列表：按固定典范序 [network, cpu, mem, gpu] 过滤勾选态。
 
-    复选框不表达顺序（拖动排序是后续版本的事），所以"勾了哪三个"必须落成唯一
+    复选框不表达顺序（拖动排序是后续版本的事），所以"勾了哪几个"必须落成唯一
     可预测的列表——顺序随勾选先后漂移会让岛上的段序在保存后莫名变化。
     """
     dialog, cfg = _dialog(tmp_path, monkeypatch)
@@ -252,7 +252,7 @@ def test_save_with_every_toggle_off_writes_an_empty_list(tmp_path, monkeypatch):
     dialog, cfg = _dialog(tmp_path, monkeypatch, island_metrics=[NETWORK, CPU, MEM])
     try:
         for toggle in (dialog.island_network_check, dialog.island_cpu_check,
-                       dialog.island_mem_check):
+                       dialog.island_mem_check, dialog.island_gpu_check):
             toggle.setChecked(False)
         dialog._write_config()
     finally:
@@ -320,6 +320,99 @@ def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
         for control in child_controls:
             assert control.isEnabled() is False
             assert control.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dlg in (master, child):
+            dlg.close()
+            dlg.deleteLater()
+        app.processEvents()
+
+
+# ---------------------------------------------------------------- GPU 占位行（P3 Slice F1）
+def test_gpu_row_exists_and_is_searchable(tmp_path, monkeypatch):
+    """GPU 占位行与 cpu/mem 同款：一行一开关、可搜索、文案如实说没数据源。
+
+    它跟 cpu/mem 走**同一份** ``_METRIC_ROWS``（行装配/依赖/搜索/置灰全部复用），
+    所以这里断言的是"它真的进了那张表"，而不是另开一条平行通道。
+    """
+    dialog, _cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        row = _row(dialog, "island_gpu")
+        assert "灵动岛指标" in row.label.text()
+        assert "GPU" in row.label.text()
+        hint = row.hint_label.text()
+        assert "不占位" in hint, "要写明勾了之后胶囊上没有它"
+        assert "原因" in hint, "要写明卡片里会说明原因"
+
+        names = {r.objectName() for r in dialog._search_rows}
+        assert "settingRow_island_gpu" in names
+        assert [r.objectName() for r in dialog._search_rows
+                if "gpu" in r.label.text().lower()] == ["settingRow_island_gpu"]
+    finally:
+        dialog.close()
+
+
+def test_gpu_row_defaults_off_and_follows_the_same_dependency_chain(tmp_path, monkeypatch):
+    """默认关闭；显隐跟「岛开关 × 信息槽开关」走（与 cpu/mem 逐行同款）。"""
+    dialog, _cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        assert dialog.island_gpu_check.isChecked() is False
+        dialog.island_enabled_check.setChecked(True)
+        dialog.island_info_check.setChecked(True)
+        assert not _row(dialog, "island_gpu").isHidden()
+        dialog.island_info_check.setChecked(False)
+        assert _row(dialog, "island_gpu").isHidden()
+        dialog.island_info_check.setChecked(True)
+        dialog.island_enabled_check.setChecked(False)
+        assert _row(dialog, "island_gpu").isHidden()
+    finally:
+        dialog.close()
+
+
+def test_gpu_round_trips_through_save_and_reopen(tmp_path, monkeypatch):
+    """勾 GPU → 保存 → 重启读回：它在 ``island_metrics`` 里，且再开设置页仍是勾选态。"""
+    dialog, cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.island_gpu_check.setChecked(True)
+        dialog._write_config()
+    finally:
+        dialog.close()
+    assert cfg.get("island_metrics") == [GPU], "典范序里 gpu 排在三个内置 id 之后"
+    assert Config(base=tmp_path).get("island_metrics") == [GPU]
+
+    again, _cfg2 = _dialog(tmp_path, monkeypatch)
+    try:
+        assert again.island_gpu_check.isChecked() is True
+    finally:
+        again.close()
+
+
+def test_save_writes_gpu_after_the_other_metrics(tmp_path, monkeypatch):
+    """四个复选框折成一个列表：典范序 [network, cpu, mem, gpu]。
+
+    gpu 排在**末尾**是刻意的：老用户的三项相对次序不许因为加了一行而被重排
+    （列表序 = 用户优先级，保存一次就把段序改掉是用户看不见的破坏）。
+    """
+    dialog, cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.island_gpu_check.setChecked(True)
+        dialog.island_mem_check.setChecked(True)
+        dialog.island_cpu_check.setChecked(True)
+        dialog.island_network_check.setChecked(True)
+        dialog._write_config()
+    finally:
+        dialog.close()
+    assert cfg.get("island_metrics") == [NETWORK, CPU, MEM, GPU]
+
+
+def test_gpu_row_is_main_pet_only(tmp_path, monkeypatch):
+    """子宠页：gpu 与另三个指标开关同属进程级键 → 一并置灰。"""
+    master, _cfg = _dialog(tmp_path, monkeypatch)
+    child = settings_mod.ModernSettingsDialog(
+        Config(base=tmp_path, instance_id="slot-1"), include_ai=True)
+    try:
+        assert master.island_gpu_check.isEnabled() is True
+        assert child.island_gpu_check.isEnabled() is False
+        assert child.island_gpu_check.toolTip() == "仅主桌宠可设置"
     finally:
         for dlg in (master, child):
             dlg.close()

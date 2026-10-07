@@ -180,10 +180,12 @@ _CARD_STATUS_DOT_GAP = 6  # 概览区状态点与状态文字的间距
 #: （"3 秒前" → "00 秒前"），所以采样值永远改不动卡片宽（与胶囊宽度白名单同纪律）。
 _CARD_UPDATED_SAMPLE = "00 秒前"
 #: 卡片里每段的人话名字（胶囊里网络段是纯 glyph 无 label，卡片得说清是哪一段）。
+#: GPU 是 P3 Slice F1 的占位段：它进不了胶囊，只在这张表里有个名字（卡片原因行）。
 _CARD_METRIC_NAMES = {
     island_segments.NETWORK: "网络",
     island_segments.CPU: "CPU",
     island_segments.MEM: "内存",
+    island_segments.GPU: "GPU",
 }
 #: 卡片里的**单位全称**（k3 §5.3：胶囊只给紧凑读数，量纲在卡片说清）。
 #: 刻意短：这一列和"来源 · 更新时间"共用一个详情列，写长了会把更新时间挤掉
@@ -542,9 +544,12 @@ class DynamicIsland(QWidget):
         # 只活在这里，不进段对象（段是每拍现算的数据，不是累积状态）。折叠态会
         # 停掉被折段的采样，靠它把告警保持住——chip 告警点因此不会一闪即灭。
         self._alert_severity: dict[str, str] = {}
-        # 「已知但当前不可用」的段 id → 原因（P2 Slice E5）：胶囊不占位、卡片写原因。
-        # E5 阶段内置段都可用（表空），P3 的 GPU 占位往这里登记。
-        self._unavailable_reasons: dict[str, str] = {}
+        # 「已知但当前不可用」的段 id → 原因（P2 Slice E5 的机制）：胶囊不占位、
+        # 卡片写原因。GPU 自 P3 Slice F1 起登记在这（本版本没有数据源，如实标注）；
+        # 其余内置段都可用，所以表里只有它一条。
+        self._unavailable_reasons: dict[str, str] = {
+            island_segments.GPU: island_segments.GPU_UNAVAILABLE_REASON,
+        }
         self._geo_from: QRect | None = None
         self._geo_to: QRect | None = None
         self._geo_t = 0.0
@@ -2092,25 +2097,18 @@ class DynamicIsland(QWidget):
                         state=island_segments.STATE_UNKNOWN)
 
     def _unavailable_segments(self) -> dict[str, str]:
-        """**已知但当前不可用**的段 id → 原因（P2 Slice E5 的机制，P3 的 GPU 铺路）。
+        """**已知但当前不可用**的段 id → 原因（P2 Slice E5 的机制 + P3 的 GPU 占位）。
 
-        E5 阶段内置段都可用，表是空的；F1 与测试往 ``_unavailable_reasons`` 里塞
-        条目（GPU 无数据源 → 原因串）即可生效。口径是**已知 id 才走这条**：这类段
-        胶囊里连占位都不画（不是 ``--``，是"不存在"），只在卡片 B 区留一行
+        表在 ``__init__`` 里铺好，目前只有 ``gpu``（本版本没接数据源，见
+        ``island_segments.GPU_UNAVAILABLE_REASON``）；测试与将来的其他能力占位
+        往 ``_unavailable_reasons`` 里塞条目即可生效。口径是**已知 id 才走这条**：
+        这类段胶囊里连占位都不画（不是 ``--``，是"不存在"），只在卡片 B 区留一行
         「该指标不可用 + 原因」。未知 id 依旧降级成胶囊 ``--`` 段
         （见 :meth:`_unknown_segment`），既有行为一个像素都不动。
         """
+        known = self._metric_ids()   # 提在推导式外：表里每多一项就少读一次配置
         return {key: str(value) for key, value in self._unavailable_reasons.items()
-                if key in self._metric_ids()}
-
-    @staticmethod
-    def _unknown_segment(metric_id: str) -> _InfoSeg:
-        """未实现的段 id（配置残留）：降级成 unknown 态 ``--`` 段，不崩不留洞。"""
-        return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=metric_id,
-                        label=metric_id[:island_segments.LABEL_MAX_CHARS],
-                        text=island_segments.UNKNOWN_TEXT,
-                        box_text=island_segments.UNKNOWN_TEXT,
-                        state=island_segments.STATE_UNKNOWN)
+                if key in known}
 
     def _compose_info_segments(self) -> list[_InfoSeg]:
         """把"这一帧要画的信息"组合成段列表（数据，不是绘制串）。

@@ -17,7 +17,7 @@ modern_settings_dialog.py 行数预算刚校准到零余量，所以本功能的
 - ``network_info_menu_enabled`` 只属于「菜单」——它决定右键菜单里那一项显不显示，
   与岛上的指标段无关；两处不复制对方的状态。
 
-依赖显隐：三个指标行跟着「岛开关 × 信息槽开关」走，间隔行只跟网络开关走。
+依赖显隐：四个指标行跟着「岛开关 × 信息槽开关」走，间隔行只跟网络开关走。
 「信息槽内容 / 自定义短文本」两行**不受**网络开关影响——网络段自 P1 Slice D1 起
 是普通指标段，不再接管信息槽（"网络接管"旧语义已删），info_mode 始终生效。
 """
@@ -37,12 +37,14 @@ _MIN_INTERVAL = net_monitor.MIN_INTERVAL_SECONDS
 _MAX_INTERVAL = net_monitor.MAX_INTERVAL_SECONDS
 _DEFAULT_INTERVAL = net_monitor.DEFAULT_INTERVAL_SECONDS
 
-#: 三个指标行：``(段 id, 行 objectName 键, 行 label, 行 hint)``。
+#: 指标行：``(段 id, 行 objectName 键, 行 label, 行 hint)``。
 #: **本元组的顺序就是写回 ``island_metrics`` 的固定典范序**（唯一来源，下面的
 #: ``_METRIC_ORDER`` 从它派生）：复选框不表达顺序（拖动排序留给后续版本），
-#: 三个布尔态只能折成一个列表，那就定死一序——否则"先勾内存再勾网络"会让保存后
+#: 几个布尔态只能折成一个列表，那就定死一序——否则"先勾内存再勾网络"会让保存后
 #: 的段序随勾选先后漂移，用户看不出为什么岛上的顺序变了。要自定义顺序等排序 UI。
-#: 行 label 一律含「灵动岛指标」，CPU / 内存各自一行（设置搜索按 label 命中）。
+#: **新行一律追加在末尾**（P3 的 gpu 就是这么加的）：把新行插进中间会让老用户
+#: 保存一次就把自己的段序重排一次——那是用户看不见的破坏。
+#: 行 label 一律含「灵动岛指标」，CPU / 内存各一行（设置搜索按 label 命中）。
 _METRIC_ROWS = (
     (
         island_segments.NETWORK,
@@ -65,6 +67,14 @@ _METRIC_ROWS = (
         "灵动岛指标 · 内存",
         "在岛上加一段内存占用百分比。与 CPU 共用同一条后台采样线程和同一份系统"
         "快照（不同系统的「已用」口径以系统自身为准）；关掉即不采样。",
+    ),
+    (
+        island_segments.GPU,
+        "island_gpu",
+        "灵动岛指标 · GPU",
+        "能力占位：本版本未接入 GPU 采集，所以勾上之后胶囊上不占位、也不采样"
+        "（不伪造读数、不占一个空槽）；展开卡片里会写明这一段的不可用原因。"
+        "开关本身照常保存——将来接入数据源后，勾选状态直接生效，不用再改一次配置。",
     ),
 )
 
@@ -96,7 +106,7 @@ def _traffic_hint(interval_seconds: float) -> str:
 def create_network_controls(dialog) -> None:
     """在对话框上创建本功能的控件（幂等；行由下面两个 build_* 装配）。"""
     if getattr(dialog, "island_network_check", None) is None:
-        # 三个指标开关读的是 island_metrics 的成员关系（列表没有的顺序不表达，
+        # 四个指标开关读的是 island_metrics 的成员关系（列表没有的顺序不表达，
         # 复选框只表达"在不在"）
         selected = _checked_metrics(dialog)
         for metric_id in _METRIC_ORDER:
@@ -171,11 +181,11 @@ def _spin_value(dialog) -> float:
 
 
 def build_island_network_rows(dialog) -> list[SettingRow]:
-    """岛侧行：三个指标开关（各行 objectName 前缀 settingRow_island_*）+ 间隔行。
+    """岛侧行：四个指标开关（各行 objectName 前缀 settingRow_island_*）+ 间隔行。
 
-    每个指标一行：SettingRow 只有一个 label/一个 buddy 控件，三个开关挤一行会让
-    后两个开关拿不到可见的标签与可访问名（label.setBuddy 一位一控），故拆成
-    三行、label 统一带「灵动岛指标」前缀（设置搜索按 label 命中）。
+    每个指标一行：SettingRow 只有一个 label/一个 buddy 控件，四个开关挤一行会让
+    后几个开关拿不到可见的标签与可访问名（label.setBuddy 一位一控），故拆成
+    四行、label 统一带「灵动岛指标」前缀（设置搜索按 label 命中）。
 
     行随域导航每次重建（行壳随旧页 deleteLater，控件对象复用），与 island /
     file_interpret 行的重建口径一致。
@@ -231,7 +241,7 @@ def _install_visibility(dialog, rows: list[SettingRow]) -> None:
         island_on = bool(dialog.island_enabled_check.isChecked())
         info_on = bool(dialog.island_info_check.isChecked())
         net_on = bool(dialog.island_network_check.isChecked())
-        # 三个指标行同进同出（都是"信息槽上的附加段"）；间隔行只跟网络开关走——
+        # 四个指标行同进同出（都是"信息槽上的附加段"）；间隔行只跟网络开关走——
         # CPU / 内存段不产生探测包，没有间隔可言。
         for _metric_id, key, _title, _hint in _METRIC_ROWS:
             apply(key, island_on and info_on, "island_info_slot_shown")
@@ -254,9 +264,10 @@ def _install_visibility(dialog, rows: list[SettingRow]) -> None:
 def save_network_settings(dialog) -> None:
     """_write_config 委托：把指标列表与另两键写回 config（保存时调用一次）。
 
-    列表按**固定典范序** ``[network, cpu, mem]`` 过滤勾选态生成（取舍见
-    ``_METRIC_ORDER``）；旧键 ``island_network_enabled`` 不再写——它是归一化阶段的
-    一次性迁移来源，在设置页再写一遍就会重新长出"第二个真值"。
+    列表按**固定典范序** ``[network, cpu, mem, gpu]`` 过滤勾选态生成（取舍与
+    "新行追加在末尾"的理由见 ``_METRIC_ORDER``）；旧键 ``island_network_enabled``
+    不再写——它是归一化阶段的一次性迁移来源，在设置页再写一遍就会重新长出
+    "第二个真值"。
     """
     if getattr(dialog, "island_network_check", None) is None:
         return

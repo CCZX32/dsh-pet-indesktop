@@ -19,7 +19,7 @@ import pytest
 
 from pet import config as config_mod
 from pet.config import Config
-from pet.island_segments import CPU, MEM, NETWORK
+from pet.island_segments import CPU, GPU, MEM, NETWORK
 
 
 def _dirty_config(tmp_path, raw: dict) -> Config:
@@ -76,31 +76,35 @@ def test_key_survives_reload_round_trip(tmp_path):
     ([CPU, CPU, MEM, CPU], [CPU, MEM]),
     ([MEM, CPU, MEM], [MEM, CPU]),
     # 未知 id 丢弃（配置里残留了没实现的段：不抛、不阻止启动）
-    (["gpu", "temp", CPU, ""], [CPU]),
+    # 注意 "gpu" 自 P3 Slice F1 起是**已知 id**（能力占位），不再是未知样本
+    (["vram", "temp", CPU, ""], [CPU]),
     # 三员合法全保留，顺序原样（列表序 = 用户优先级）
     ([NETWORK, CPU, MEM], [NETWORK, CPU, MEM]),
     ([MEM, NETWORK], [MEM, NETWORK]),
+    # GPU 占位（P3 Slice F1）：已知 id 所以保留——"不可用"是岛与卡片层的事，
+    # 不是配置层的脏值（见 tests/test_island_gpu_placeholder.py）
+    ([GPU, CPU], [GPU, CPU]),
 ])
 def test_dirty_values_are_normalized(tmp_path, raw, expected):
     cfg = _dirty_config(tmp_path, {"island_metrics": raw})
     assert cfg.data["island_metrics"] == expected
 
 
-def test_all_three_builtin_ids_are_kept_in_order(tmp_path):
-    """段数**不设上限**（产品决策）：三个内置 id 一个都不许被裁掉。
+def test_all_four_builtin_ids_are_kept_in_order(tmp_path):
+    """段数**不设上限**（产品决策）：四个内置 id 一个都不许被裁掉。
 
-    合法 id 目前只有三员，构造不出"超额"样本——所以这条断言的是"全保留且保序"，
-    超限截断的护栏在本 slice 有意不存在（布局层收缩流水线负责兜宽度）。
+    合法 id 目前只有四员（含 P3 的 gpu 占位），构造不出"超额"样本——所以这条断言
+    的是"全保留且保序"，超限截断的护栏有意不存在（布局层收缩流水线负责兜宽度）。
     """
-    cfg = _dirty_config(tmp_path, {"island_metrics": [MEM, CPU, NETWORK]})
-    assert cfg.data["island_metrics"] == [MEM, CPU, NETWORK]
-    assert len(cfg.data["island_metrics"]) == 3
+    cfg = _dirty_config(tmp_path, {"island_metrics": [MEM, GPU, CPU, NETWORK]})
+    assert cfg.data["island_metrics"] == [MEM, GPU, CPU, NETWORK]
+    assert len(cfg.data["island_metrics"]) == 4
 
 
 def test_set_path_normalizes_too(tmp_path):
     """set() 路径（设置页写回）同样归一：脏值不得落盘。"""
     cfg = Config(base=tmp_path)
-    cfg.set("island_metrics", ["gpu", CPU, CPU, 7])
+    cfg.set("island_metrics", ["vram", CPU, CPU, 7])
     assert cfg.data["island_metrics"] == [CPU]
     cfg.set("island_metrics", "cpu")
     assert cfg.data["island_metrics"] == []
@@ -118,7 +122,7 @@ def test_normalization_is_idempotent(tmp_path):
     """连续两次归一结果相同（保存任何设置都会跑整表归一化）。"""
     cfg = _dirty_config(tmp_path, {
         "island_network_enabled": True,
-        "island_metrics": ["gpu", MEM, MEM, 7, NETWORK],
+        "island_metrics": ["vram", MEM, MEM, 7, NETWORK],
     })
     first = list(cfg.data["island_metrics"])
     for _ in range(3):

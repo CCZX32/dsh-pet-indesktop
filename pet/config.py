@@ -664,10 +664,13 @@ def _clean_dynamic_island_data(value) -> dict:
     return result
 
 
-#: 灵动岛附加指标的合法 id（P1 三员；P3 的 GPU 占位另算）。唯一来源是
+#: 灵动岛附加指标的合法 id（P1 三员 + P3 的 GPU 占位）。唯一来源是
 #: ``island_segments`` 的常量——这里再抄一份字面量迟早与段注册表漂移。
+#: ``gpu`` 是**已知但恒不可用**的段（本版本没接数据源）：它进了白名单，所以勾选
+#: 不会被归一化吃掉；而"不可用"是岛与卡片层的事（不占位 + 卡片原因行）。
 _ISLAND_METRIC_IDS = frozenset({
     island_segments.NETWORK, island_segments.CPU, island_segments.MEM,
+    island_segments.GPU,
 })
 
 

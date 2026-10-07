@@ -383,16 +383,21 @@ def test_error_snapshot_maps_to_error_state(tmp_path, monkeypatch):
 
 
 def test_unknown_metric_id_becomes_a_dash_segment(tmp_path, monkeypatch):
-    """配置里残留了没实现的段：降级成 unknown 态 ``--`` 段，不崩也不留洞。"""
-    island, _made = _island(_StubConfig(island_metrics=["gpu", "temperature"]), monkeypatch)
+    """配置里残留了没实现的段：降级成 unknown 态 ``--`` 段，不崩也不留洞。
+
+    样本用 ``vram``（不是 ``gpu``）：``gpu`` 自 P3 Slice F1 起是**已知 id**
+    （能力占位：胶囊不占位、卡片写原因，见 ``tests/test_island_gpu_placeholder.py``），
+    拿它当"未实现的段"会测到另一条路径。
+    """
+    island, _made = _island(_StubConfig(island_metrics=["vram", "temperature"]), monkeypatch)
     try:
         segments = island._compose_info_segments()
-        assert [segment.seg_id for segment in segments] == [_PRIMARY, "gpu", "temperature"]
-        gpu = _seg(segments, "gpu")
-        assert gpu.kind == "metric"
-        assert gpu.label == "gpu"
-        assert gpu.text == "--" and gpu.box_text == isl.UNKNOWN_TEXT
-        assert gpu.state == isl.STATE_UNKNOWN
+        assert [segment.seg_id for segment in segments] == [_PRIMARY, "vram", "temperature"]
+        vram = _seg(segments, "vram")
+        assert vram.kind == "metric"
+        assert vram.label == "vram"
+        assert vram.text == "--" and vram.box_text == isl.UNKNOWN_TEXT
+        assert vram.state == isl.STATE_UNKNOWN
         assert _seg(segments, "temperature").label == "temper", "label 上限 6 字符"
     finally:
         island.close()
