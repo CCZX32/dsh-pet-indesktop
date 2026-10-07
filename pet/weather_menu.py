@@ -20,9 +20,17 @@
 配置、``set``/``save`` 经 ``__getattr__`` 转发到主配置对象）。因此城市列表是
 全局设置：右键任意一只肥鱼加/删城市，所有肥鱼共用同一份清单。
 
+**城市身份**：每项存的是**显示标签**（同名歧义时形如「朝阳 · 辽宁」），配套的地区
+码落在 ``weather_city_codes`` 里——取数按码直取，所以"同名城市选哪项中哪项"
+（终审 m1）。删除城市会一并清掉它的地区码。
+
+**名字不改写**（终审 M1）：加城市存的是用户输入/源给出的**原名**，不改后缀；
+带后缀的名字在查询侧自动再试一次（``weather.city_name_variants``）。
+
 **联网**：只有「添加城市…」的搜索会联网（走 ``WeatherClient.search_cities``，即
 国内源直连那一条），后台线程执行、结果经 queued 信号回填对话框；搜索不阻塞菜单
-关闭流程。
+关闭流程。用户一改输入框，旧候选与旧选择立即作废（终审 m2）——否则"搜北京后改
+上海"会把北京当成结果添加进去。
 
 **口径**（与余额/音乐菜单一致）：动作 ``close_on_trigger``，回调在原生菜单跟踪
 循环结束后才执行（macOS 上菜单未关时建顶层窗口/弹对话框会被 AppKit 抑制）。
@@ -51,10 +59,13 @@ from PySide6.QtWidgets import (
 from .weather import (
     WeatherClient,
     add_city,
+    city_label,
     current_city,
+    normalize_city_codes,
     normalize_city_list,
     normalize_city_name,
     remove_city,
+    same_city,
 )
 
 log = logging.getLogger(__name__)
@@ -92,8 +103,23 @@ def _show_weather(pet) -> None:
         callback(pet)
 
 
-def apply_added_city(pet, name) -> tuple[bool, str]:
-    """把城市写进列表并设为当前城市；返回 ``(是否成功, 失败原因)``。"""
+def _remember_code(cfg, name: str, code: str) -> None:
+    """记下城市 → 地区码（同名城市靠它区分身份）；没有码就什么都不动。"""
+    code = str(code or "").strip()
+    label = normalize_city_name(name)
+    if not code or not label:
+        return
+    codes = normalize_city_codes(cfg.get("weather_city_codes"))
+    codes[label] = code
+    cfg.set("weather_city_codes", codes)
+
+
+def apply_added_city(pet, name, *, code: str = "") -> tuple[bool, str]:
+    """把城市写进列表并设为当前城市；返回 ``(是否成功, 失败原因)``。
+
+    ``code`` = 选中候选的地区码（m1）：**同名城市选哪项就存哪项的身份**，
+    下一次取数直接按码取，而不是回到检索接口的第一条。
+    """
     cfg = _config_of(pet)
     if cfg is None:
         return False, "配置不可用"
@@ -101,8 +127,10 @@ def apply_added_city(pet, name) -> tuple[bool, str]:
     updated, error = add_city(cities, name)
     if error:
         return False, error
+    stored = normalize_city_name(name)
     cfg.set("weather_city_list", updated)
-    cfg.set("weather_city", normalize_city_name(name))
+    cfg.set("weather_city", stored)
+    _remember_code(cfg, stored, code)
     _save(cfg)
     return True, ""
 
@@ -125,7 +153,10 @@ def switch_city(pet, city) -> None:
 
 
 def remove_city_from_config(pet, city) -> None:
-    """从列表删掉城市；删的是当前城市时当前切到剩下的第一个（列表空了就清空）。"""
+    """从列表删掉城市；删的是当前城市时当前切到剩下的第一个（列表空了就清空）。
+
+    顺手清掉它的地区码（同名城市删一个不该把另一个的身份也留着）。
+    """
     cfg = _config_of(pet)
     if cfg is None:
         return
@@ -133,6 +164,10 @@ def remove_city_from_config(pet, city) -> None:
     remaining, new_current = remove_city(cities, city, current_city(cfg))
     cfg.set("weather_city_list", remaining)
     cfg.set("weather_city", new_current)
+    codes = normalize_city_codes(cfg.get("weather_city_codes"))
+    kept = {label: code for label, code in codes.items() if not same_city(label, city)}
+    if kept != codes:
+        cfg.set("weather_city_codes", kept)
     _save(cfg)
 
 
@@ -192,6 +227,10 @@ class WeatherCityDialog(QDialog):
         self.search_btn.clicked.connect(self._request_search)
         self.name_edit.returnPressed.connect(self._request_search)
         self.name_edit.textChanged.connect(self._refresh_add_enabled)
+        # 用户改动输入 → 旧候选与旧选择一律作废（m2：搜北京后改成上海，不能再
+        # 把北京当结果添加）。用 textEdited（只有真键盘编辑才发）而不是
+        # textChanged，否则程序化 setText 也会把我们自己的回填流程打断。
+        self.name_edit.textEdited.connect(self._on_text_edited)
         self.results.itemSelectionChanged.connect(self._refresh_add_enabled)
         self.add_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
@@ -201,14 +240,29 @@ class WeatherCityDialog(QDialog):
     def typed_name(self) -> str:
         return self.name_edit.text().strip()
 
-    def chosen_name(self) -> str:
-        """最终要添加的城市名：选中的候选优先，否则用归一化后的手填值。"""
+    def chosen_entry(self) -> dict:
+        """最终要添加的条目：``{name, code, region}``；取消/空输入返回 ``{}``。
+
+        name 是**显示标签**（同名歧义时带地区，如「朝阳 · 辽宁」），code 是源 A
+        地区码——身份跟着它走（m1）。
+        """
         item = self.results.currentItem()
         if item is not None:
-            selected = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
-            if selected:
-                return selected
-        return normalize_city_name(self.typed_name())
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("name"):
+                return dict(data)
+        typed = normalize_city_name(self.typed_name())
+        return {"name": typed, "code": "", "region": ""} if typed else {}
+
+    def chosen_name(self) -> str:
+        """最终要添加的城市名（显示标签）。"""
+        return str(self.chosen_entry().get("name") or "")
+
+    def _on_text_edited(self, _text: str = "") -> None:
+        if self.results.count():
+            self.results.clear()
+        self.status_label.setText(SEARCH_IDLE_TEXT)
+        self._refresh_add_enabled()
 
     def begin_search(self) -> None:
         self.search_btn.setEnabled(False)
@@ -218,12 +272,20 @@ class WeatherCityDialog(QDialog):
         """回填搜索结果（GUI 线程调用）。空结果/失败时保留手填这条路。"""
         self.search_btn.setEnabled(True)
         self.results.clear()
+        # 同名候选（朝阳 北京 / 辽宁）必须能区分：只有重名时才附地区，避免
+        # 平时把列表撑成「鹿城 · 浙江」这种啰嗦标签。
+        names = [normalize_city_name(candidate.name) for candidate in results or ()]
+        duplicated = {name for name in names if names.count(name) > 1}
         for candidate in results or ():
-            label = candidate.name
-            if candidate.region and candidate.region not in label:
-                label = f"{candidate.name}（{candidate.region}）"
+            base = normalize_city_name(candidate.name)
+            label = city_label(candidate.name, candidate.region,
+                               ambiguous=base in duplicated)
             item = QListWidgetItem(label, self.results)
-            item.setData(Qt.ItemDataRole.UserRole, candidate.name)
+            item.setData(Qt.ItemDataRole.UserRole, {
+                "name": label,
+                "code": str(candidate.code or ""),
+                "region": str(candidate.region or ""),
+            })
         if self.results.count():
             self.results.setCurrentRow(0)
             self.status_label.setText(
@@ -290,9 +352,11 @@ def _run_in_thread(work) -> None:
     threading.Thread(target=work, daemon=True, name="pet-weather-search").start()
 
 
-def open_add_city_dialog(pet, *, dialog_factory=None, search=None, run_async=None) -> str:
-    """打开「添加城市」对话框，返回用户选定的城市名（取消返回空串）。
+def open_add_city_dialog(pet, *, dialog_factory=None, search=None, run_async=None) -> dict:
+    """打开「添加城市」对话框，返回用户选定的条目（取消返回 ``{}`` / None）。
 
+    条目 = ``{name, code, region}``：``name`` 是显示标签（同名歧义时带地区），
+    ``code`` 是源 A 地区码——取数靠它认人（m1）。
     ``search`` / ``run_async`` / ``dialog_factory`` 可注入：测试用假对话框与假
     搜索函数，生产路径默认走 ``WeatherClient.search_cities``（国内源直连）。
     """
@@ -306,8 +370,9 @@ def open_add_city_dialog(pet, *, dialog_factory=None, search=None, run_async=Non
         lambda query: start_search(dialog, query, searcher, runner=run_async)
     )
     if dialog.exec() != QDialog.DialogCode.Accepted:
-        return ""
-    return dialog.chosen_name()
+        return {}
+    entry = dialog.chosen_entry()
+    return dict(entry) if isinstance(entry, dict) and entry.get("name") else {}
 
 
 def add_city_flow(pet, *, dialog_factory=None, search=None, run_async=None,
@@ -317,12 +382,13 @@ def add_city_flow(pet, *, dialog_factory=None, search=None, run_async=None,
     返回实际加进去的城市名（取消/失败返回空串）；失败原因经 ``notify`` 告知用户
     （上限 12、重名这类"没生效"的原因绝不静默）。
     """
-    name = open_add_city_dialog(
+    entry = open_add_city_dialog(
         pet, dialog_factory=dialog_factory, search=search, run_async=run_async
-    )
+    ) or {}
+    name = str(entry.get("name") or "")
     if not name:
         return ""
-    ok, error = apply_added_city(pet, name)
+    ok, error = apply_added_city(pet, name, code=str(entry.get("code") or ""))
     if not ok:
         (notify or (lambda text: _notify(pet, text)))(error)
         return ""

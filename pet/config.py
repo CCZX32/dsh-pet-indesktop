@@ -901,6 +901,10 @@ class Config:
             "weather_enabled": True,  # 天气功能总开关
             "weather_city": "",  # 当前城市（空 = 还没选，菜单会引导去添加）
             "weather_city_list": [],  # 城市清单（全局，上限 12，见 weather.MAX_CITIES）
+            # 城市 → 中国天气网地区码。存在的意义是**同名城市**（朝阳 北京 / 辽宁）
+            # 的身份：只有名字时每次查询都会命中检索接口的第一条，用户选了第二项
+            # 也白选。机器维护（添加城市时写入），手改无害。
+            "weather_city_codes": {},
             **DEFAULT_COLLISION_SETTINGS,
             "media_prewarm": "balanced",  # full / balanced / minimal 素材首帧预热力度
             # 批10-A3：默认 32→8MB。预测式预热（批10-A1）落地后，首帧 LRU 只需
@@ -1148,6 +1152,7 @@ class Config:
             "weather_enabled",
             "weather_city",
             "weather_city_list",
+            "weather_city_codes",
             "character_aliases",
             "character_profiles",
             "chat_always_on_top",
@@ -1460,14 +1465,21 @@ class Config:
         self.data["edge_probe_enabled"] = _bool_or_default(self.data.get("edge_probe_enabled"), False)
         # 静止放手下落（#219）：同族布尔键，防手改字符串布尔误开。
         self.data["drop_gravity"] = _bool_or_default(self.data.get("drop_gravity"), False)
-        # 天气三键（issue #209）：布尔走 _bool_or_default（防字符串 "false" 被
-        # bool() 误开），城市名/城市清单复用 weather 模块自己的归一化（剥行政区
-        # 后缀、去重、截断、上限 12）——单一来源，避免设置页/菜单/取数各洗一遍。
-        from .weather import normalize_city_list, normalize_city_name
+        # 天气四键（issue #209 + 终审 M1）：布尔走 _bool_or_default（防字符串
+        # "false" 被 bool() 误开）；城市名/清单只做**幂等**的存储归一化（宽窄字符、
+        # 空白、长度），**不剥行政区后缀**——剥离不幂等，每次保存别的设置都会再剥
+        # 一层（景德镇市 → 景德镇 → 景德），「新乡」「景德镇」这类真名也会被裁掉。
+        # 后缀容错只在查询侧做（weather.city_name_variants）。
+        from .weather import (
+            normalize_city_codes,
+            normalize_city_list,
+            normalize_city_name,
+        )
 
         self.data["weather_enabled"] = _bool_or_default(self.data.get("weather_enabled"), True)
         self.data["weather_city"] = normalize_city_name(self.data.get("weather_city"))
         self.data["weather_city_list"] = normalize_city_list(self.data.get("weather_city_list"))
+        self.data["weather_city_codes"] = normalize_city_codes(self.data.get("weather_city_codes"))
         self.data["agent_link"] = _clean_agent_link_data(self.data.get("agent_link"))
         # 音乐关联 / 消费统计（#129 新增的 5 键）：此前只在默认值与 reload 白名单
         # 里登记、没进归一化——手改成脏值后数值键会让设置页构造直接抛
@@ -1658,6 +1670,7 @@ class Config:
             "weather_enabled",
             "weather_city",
             "weather_city_list",
+            "weather_city_codes",
         }:
             self._normalize_pet_settings()
 

@@ -158,6 +158,7 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "voice_chime_voice",
         "voice_chime_volume",
         "weather_city",
+        "weather_city_codes",
         "weather_city_list",
         "weather_enabled",
     }
@@ -284,9 +285,9 @@ def test_set_normalizes_music_and_cost_keys(tmp_path):
     assert cfg.data["agent_cost_enabled"] is True
 
 
-# ------------------------------------------------- 天气三键（issue #209）
+# ------------------------------------------------- 天气四键（issue #209）
 def _dirty_weather_config(tmp_path):
-    """把天气三键写成脏值落盘，再走真实加载路径（reload + _normalize_pet_settings）。"""
+    """把天气键写成脏值落盘，再走真实加载路径（reload + _normalize_pet_settings）。"""
     cfg_dir = tmp_path / config_mod.APP_DIR_NAME
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "config.json").write_text(
@@ -296,6 +297,7 @@ def _dirty_weather_config(tmp_path):
                 "weather_enabled": "false",
                 "weather_city": "  鹿城区  ",
                 "weather_city_list": ["北京", "北京", " 鹿城区 ", "", 42, "上海"],
+                "weather_city_codes": {"鹿城区": " 101210710 ", "北京": "", "": "x"},
             },
             ensure_ascii=False,
         ),
@@ -305,29 +307,82 @@ def _dirty_weather_config(tmp_path):
 
 
 def test_dirty_weather_keys_are_normalized(tmp_path):
-    """脏 config.json 加载后：布尔判真、城市名归一化、列表去空去重。"""
+    """脏 config.json 加载后：布尔判真、城市名归一化（**不剥后缀**）、列表去空去重。"""
     cfg = _dirty_weather_config(tmp_path)
 
     assert cfg.data["weather_enabled"] is False, "'false' 不得被 bool() 误开"
-    assert cfg.data["weather_city"] == "鹿城"
-    assert cfg.data["weather_city_list"] == ["北京", "鹿城", "上海"]
+    assert cfg.data["weather_city"] == "鹿城区"
+    assert cfg.data["weather_city_list"] == ["北京", "鹿城区", "上海"]
+    assert cfg.data["weather_city_codes"] == {"鹿城区": "101210710"}
 
 
 def test_set_normalizes_weather_keys(tmp_path):
-    """set() 的归一化名单同样覆盖天气三键（设置页/菜单写回不得绕过钳制）。"""
+    """set() 的归一化名单同样覆盖天气键（设置页/菜单写回不得绕过钳制）。"""
     from pet.weather import MAX_CITIES, normalize_city_list
 
     cfg = Config(base=tmp_path)
     cfg.set("weather_enabled", "yes")
     assert cfg.data["weather_enabled"] is True
     cfg.set("weather_city", "乌鲁木齐县")
-    assert cfg.data["weather_city"] == "乌鲁木齐"
+    assert cfg.data["weather_city"] == "乌鲁木齐县"
     cfg.set("weather_city_list", [f"城市{i}" for i in range(MAX_CITIES + 5)])
     assert cfg.data["weather_city_list"] == normalize_city_list(
         [f"城市{i}" for i in range(MAX_CITIES + 5)]
     )
     cfg.set("weather_city_list", "北京")
     assert cfg.data["weather_city_list"] == []
+    cfg.set("weather_city_codes", {"景德镇市": "101240801", "坏": 5})
+    assert cfg.data["weather_city_codes"] == {"景德镇市": "101240801"}
+
+
+# --------------------------------------- M1：城市名归一化幂等、不被别的设置改坏
+def test_repeated_normalization_never_erodes_the_city_name(tmp_path):
+    """保存任何设置都会跑整表归一化：城市名必须一次定形，之后一直不变。
+
+    回归的正是终审 M1 的实测：``景德镇市`` → ``景德镇`` → ``景德``（每次保存
+    别的设置都继续剥一层），以及「新乡」「景德镇」被当后缀裁掉。
+    """
+    cfg = Config(base=tmp_path)
+    cfg.set("weather_city", "景德镇市")
+    cfg.set("weather_city_list", ["新乡", "景德镇", "鹿城区"])
+    assert cfg.data["weather_city"] == "景德镇市"
+    assert cfg.data["weather_city_list"] == ["新乡", "景德镇", "鹿城区"]
+
+    for _ in range(5):
+        cfg._normalize_pet_settings()
+        assert cfg.data["weather_city"] == "景德镇市"
+        assert cfg.data["weather_city_list"] == ["新乡", "景德镇", "鹿城区"]
+
+
+def test_setting_an_unrelated_key_leaves_the_weather_city_alone(tmp_path):
+    """改一个跟天气无关的设置（会触发整表归一化）不得动城市名。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("weather_city", "景德镇市")
+    cfg.set("weather_city_codes", {"景德镇市": "101240801"})
+
+    cfg.set("pet_opacity", 90)
+    cfg.set("bubble_text_scale", 120)
+
+    assert cfg.data["weather_city"] == "景德镇市"
+    assert cfg.data["weather_city_codes"] == {"景德镇市": "101240801"}
+
+
+def test_city_name_normalization_is_a_fixed_point_on_load_and_reload(tmp_path):
+    """落盘 → 重载 → 再落盘 不得改变城市名（跨重启也不侵蚀）。"""
+    cfg_dir = tmp_path / config_mod.APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps(
+            {"version": 4, "weather_city": "景德镇市", "weather_city_list": ["新乡"]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    first = Config(base=tmp_path)
+    first.save()
+    second = Config(base=tmp_path)
+    assert second.data["weather_city"] == "景德镇市"
+    assert second.data["weather_city_list"] == ["新乡"]
 
 
 # ------------------------------------------------- 自启目标（harness_launch_target）

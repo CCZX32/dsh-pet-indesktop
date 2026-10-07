@@ -37,6 +37,7 @@ from .weather import (
     TOTAL_BUDGET_SECONDS,
     WeatherClient,
     WeatherError,
+    city_code_for,
     current_city,
 )
 
@@ -51,22 +52,22 @@ def _run_in_thread(work) -> None:
 
 
 class _WeatherBridge(QObject):
-    """后台线程 → GUI 线程的结果桥（queued 信号，见模块头）。"""
+    """后台线程 → GUI 线程的结果桥（queued 信号，见模块头）。
+
+    ``done`` 的槽固定是服务自己的结算入口：**无论宿主还在不在**，请求生命周期
+    都在这里收尾（M6）。
+    """
 
     done = Signal(bool, str)
 
     def __init__(self, service, host) -> None:
         super().__init__()
         self._service = service
-        self._host = host
-        self.done.connect(self._show)
+        self.host = host
+        self.done.connect(self._settle)
 
-    def _show(self, ok: bool, text: str) -> None:
-        host = self._host
-        # 异步回调可能晚于窗口销毁（切角色/退出）：先探活再触碰 Qt 对象
-        if host is None or not shiboken6.isValid(host):
-            return
-        self._service._deliver(host, ok, str(text))
+    def _settle(self, ok: bool, text: str) -> None:
+        self._service._settle(self, ok, str(text))
 
 
 class WeatherService:
@@ -114,21 +115,21 @@ class WeatherService:
         host = self._bubble_host(parent)
         if host is None:
             return
+        code = city_code_for(config, city)
         self._busy = True
         bridge = _WeatherBridge(self, host)
         self._bridge = bridge
         try:
-            self._run_async(lambda: self._worker(bridge, city))
-        except Exception:  # noqa: BLE001 - 起线程失败也必须解忙、并如实冒泡
-            self._busy = False
+            self._run_async(lambda: self._worker(bridge, city, code))
+        except Exception:  # noqa: BLE001 - 起线程失败也必须结算并如实冒泡
             log.exception("天气取数线程启动失败")
             bridge.done.emit(False, "天气获取失败：取数线程没起来")
 
-    def _worker(self, bridge, city: str) -> None:
+    def _worker(self, bridge, city: str, code: str = "") -> None:
         """后台线程体：取数（含预算）→ 结果文本交回 GUI 线程。"""
         deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
         try:
-            reading = self.client().fetch(city, deadline=deadline)
+            reading = self.client().fetch(city, code=code, deadline=deadline)
         except WeatherError as exc:
             bridge.done.emit(False, str(exc))
             return
@@ -139,9 +140,21 @@ class WeatherService:
         bridge.done.emit(True, reading.bubble_text())
 
     # ------------------------------------------------------------ 落地
-    def _deliver(self, host, ok: bool, text: str) -> None:
-        """GUI 线程：解忙并冒泡（成功/失败只是时长与日志级别不同）。"""
-        self._busy = False
+    def _settle(self, bridge, ok: bool, text: str) -> None:
+        """请求收尾（GUI 线程）：**任何**结束路径都先结算，再决定要不要冒泡。
+
+        M6 的教训：此前只有"宿主还活着"的路径会解忙门，宿主在飞行中被销毁
+        （切角色/退出/换拓扑）时忙门永锁，之后换新宿主再点也没反应。现在
+        结算与呈现解耦——成功 / 失败 / 宿主已死 / 线程异常都在这里释放忙门并
+        断开旧 bridge。
+        """
+        if self._bridge is bridge:
+            self._bridge = None
+            self._busy = False
+        host = bridge.host
+        if host is None or not shiboken6.isValid(host):
+            log.info("天气结果到达时宿主已不存在，仅结算忙门：%s", text)
+            return
         self._bubble(host, text, self.BUBBLE_DURATION_MS if ok else self.FAILURE_DURATION_MS,
                      ok=ok)
 
