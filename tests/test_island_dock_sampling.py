@@ -23,7 +23,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt
 from PySide6.QtGui import QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
@@ -165,6 +165,22 @@ def _assert_sampling_on(island: DynamicIsland) -> None:
 def _avail():
     screen = QGuiApplication.primaryScreen()
     return screen.availableGeometry() if screen is not None else None
+
+
+class _FakeScreen:
+    """固定 2560×1440 的假屏：拖拽停靠测试的落点必须离四边远超 40px 停靠阈值。
+
+    为什么不用真实/offscreen 屏：offscreen 默认屏只有 800×800，而退化后端字体
+    把岛撑到 ~730px 宽——拖到"屏中心"后左右缘距屏幕边只剩 ~36px，落进 40px
+    停靠阈值被误判成靠左/右停靠（E7 加宽 13px 后从 43px 跌过线）。屏宽 2560
+    时中心落点距四边 ≥700px，判定与环境字体无关。
+    """
+
+    def __init__(self, width=2560, height=1440):
+        self._rect = QRect(0, 0, width, height)
+
+    def availableGeometry(self):
+        return self._rect
 
 
 def _mouse(kind, widget, global_pos, button=Qt.MouseButton.LeftButton,
@@ -312,7 +328,14 @@ def test_clicking_the_strip_peek_resumes_sampling(tmp_path, monkeypatch):
 def test_drag_to_edge_stops_sampling_and_dragging_away_resumes(tmp_path, monkeypatch):
     """真实拖拽路径：拖到上边缘停靠 → 全停；拖离 → 恢复订阅 + 首轮 ``--``。"""
     island, _made = _island(tmp_path, monkeypatch, metrics=[NETWORK, CPU, MEM])
-    available = _avail()
+    fake_screen = _FakeScreen()
+    # 两处选屏都要钉：心跳/夹取走 _current_screen，松手落点走 _screen_at(光标)
+    monkeypatch.setattr(
+        type(island), "_current_screen", lambda self: fake_screen)
+    monkeypatch.setattr(
+        type(island), "_screen_at", lambda self, _pos: fake_screen)
+    island.refresh_from_config()
+    available = fake_screen.availableGeometry()
     assert available is not None
     try:
         island.show()

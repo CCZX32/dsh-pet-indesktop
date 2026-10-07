@@ -1642,11 +1642,16 @@ class DynamicIsland(QWidget):
         return plan
 
     def _compute_row_plan(self):
-        """按可见项与预算算一次行计划（纯函数调用，除缓存外不改状态）。"""
+        """按可见项与预算算一次行计划（纯函数调用，除缓存外不改状态）。
+
+        右侧账目（E7 修正）：``trail`` 无条件含与左侧对称的 19px 内容边距——
+        修复前状态点右缘 = 窗口宽（右半 6px 画出胶囊轮廓）、``show_status``
+        关时末段直接顶窗口边；补 19 后右缘与左侧同为「6 内缩 + 13 边距」。
+        """
         icon, name, _info, status = self._visible_parts()
         segments = self._compose_info_segments()
         lead = _CONTENT_PAD_PX + ((_ICON_PX + _ICON_GAP_PX) if icon else 0.0)
-        trail = (_STATUS_GAP_PX + _STATUS_DOT_PX) if status else 0.0
+        trail = _CONTENT_PAD_PX + ((_STATUS_GAP_PX + _STATUS_DOT_PX) if status else 0.0)
         return island_layout.plan_info_row(
             segments,
             lead_w=lead,
@@ -2413,14 +2418,20 @@ class DynamicIsland(QWidget):
                 # +N chip：描边无填充、圆角 9、高 18，文字居中且无竖线（K3 §3.3）
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(self._divider_color(), 1))
+                chip_top = (_CAPSULE_HEIGHT - _CHIP_H_PX) / 2.0
                 painter.drawRoundedRect(
-                    QRectF(placement.box_x,
-                           (_CAPSULE_HEIGHT - _CHIP_H_PX) / 2.0,
+                    QRectF(placement.box_x, chip_top,
                            placement.box_w, _CHIP_H_PX),
                     _CHIP_RADIUS_PX, _CHIP_RADIUS_PX)
                 painter.setFont(self._font_for("label"))
                 painter.setPen(secondary_color)
-                painter.drawText(QPointF(placement.text_x, baseline), placement.text)
+                # chip 文字在**盒内光学居中**（E7 修正）：chip 是容器图元、不与行内
+                # 文字比邻，统一基线规则不适用盒内——沿用行基线会让文字在 18px 盒
+                # 里偏高 2.5px（审计实测墨中心 19.5 vs 盒中心 22）。
+                chip_fm = painter.fontMetrics()
+                chip_baseline = chip_top + (
+                    _CHIP_H_PX + chip_fm.ascent() - chip_fm.descent()) / 2.0
+                painter.drawText(QPointF(placement.text_x, chip_baseline), placement.text)
                 if placement.alert_dot_x is not None:
                     # 折叠不埋没告警：被折段含 warn/crit 时 chip 左侧点 4px 色点
                     # （取最高级）。点落在盒内已有内边距里，不改盒宽。
