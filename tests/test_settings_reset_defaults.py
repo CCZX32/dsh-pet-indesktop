@@ -367,7 +367,10 @@ def test_reset_confirm_box_copy_states_kept_items_and_irreversibility(qapp, tmp_
         assert "不可撤销" in text
         assert "API Key" in text, "保留项必须逐项写明"
         assert "钥匙串" in text, "保留的 keyring 引用要说清楚"
-        assert "只装密钥的条目" in text, "自定义服务商的凭据容器语义要写准"
+        # 2026-10-07 第一刀：「只装密钥的条目」拗口句改顺，语义不变——
+        # 各服务商的密钥仍保留，自定义服务商只保留密钥本身（地址/模型回默认）。
+        assert "每个自定义服务商只保留密钥本身" in text, "各服务商密钥仍保留，其余设置回默认"
+        assert "地址、模型等其它设置会恢复默认" in text
         assert "立即回默认落位" in text, "位置立即生效必须写明"
         assert "开机自启按默认关闭" in text, "系统登录项会被改，必须写明"
         assert "重启后生效" in text, "重启生效的键必须与控制事实现状一致"

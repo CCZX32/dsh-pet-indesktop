@@ -1627,6 +1627,9 @@ def test_compact_agent_sound_controls_reflow_inside_their_setting_row(tmp_path, 
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
     dialog.agent_sound_check.setChecked(True)
+    # 2026-10-07 第一刀：Agent 折叠框改默认折叠，折叠态下的子行不参与布局（宽度是陈旧
+    # 值），本用例量的是可见态的行内回流，故先展开（几何断言本身逐字不变）。
+    dialog.agent_link_box.set_expanded(True)
     dialog.resize(720, 760)
     automation_index = next(
         index for index in range(dialog.sidebar.count())

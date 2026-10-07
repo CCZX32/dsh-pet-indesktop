@@ -103,14 +103,14 @@ def build_music_player_rows(dialog) -> list[SettingRow]:
 
 
 def browser_media_supported() -> bool:
-    """「浏览器媒体会话参与歌词」是否在本平台可用——SMTC 是 Windows 专属。"""
+    """「浏览器媒体会话参与歌词」是否在本平台可用——系统媒体控制是 Windows 专属。"""
     return sys.platform == "win32"
 
 
 def browser_media_rows(dialog) -> list[SettingRow]:
     """「浏览器媒体会话参与歌词」设置行（**仅 Windows**）。
 
-    SMTC 是 Windows 专属能力：非 Windows 上这个开关既无效也不该出现
+    系统媒体控制是 Windows 专属能力：非 Windows 上这个开关既无效也不该出现
     （SETTINGS-CHANGE-GATES §4「永久不支持的能力不创建控件」）。控件本体也只在
     Windows 创建（``settings_pet_controls``），所以这里以「控件在不在」为准——
     与 ``cursor_hidden_passthrough`` 的处置一致，不会出现"控件在、行不在"的
@@ -147,10 +147,11 @@ def foobar_lyrics_rows(dialog) -> list[SettingRow]:
 
     行文案里必须如实写清三条，否则用户会以为是"功能坏了"：
 
-    1. **推荐路线**是给 foobar 装 SMTC 组件（如 foo_mediacontrol）——那条路走现有
-       的 SMTC 采样，比窗口标题可靠得多；本开关是给不想装组件的人用的替代路线。
+    1. **推荐路线**是给 foobar 装媒体控制组件（如 foo_mediacontrol）——那条路走现有
+       的系统媒体控制采样（机制见 ``pet/now_playing.py``），比窗口标题可靠得多；
+       本开关是给不想装组件的人用的替代路线。
     2. 窗口标题分辨不出播放状态：foobar 开着但没在播时，可能仍显示上一首。
-    3. 只在没有其它播放器（SMTC 在播会话）时才生效，不会抢走正在听的那首歌。
+    3. 只在没有其它播放器（系统媒体控制在播会话）时才生效，不会抢走正在听的那首歌。
     """
     check = getattr(dialog, "foobar_lyrics_check", None)
     edit = getattr(dialog, "foobar_title_format_edit", None)
@@ -163,22 +164,37 @@ def foobar_lyrics_rows(dialog) -> list[SettingRow]:
         SettingRow(
             "foobar_lyrics",
             "foobar2000 歌词",
-            "foobar2000 默认不向系统上报播放信息，这里改为读它的窗口标题，只在"
-            "没有其它播放器在播时生效。更可靠的路线是给 foobar 装支持系统媒体控制"
-            "（SMTC）的组件（如 foo_mediacontrol）——装好后本开关不需要打开。"
-            "已知局限：窗口标题分辨不出它是否在播，foobar 没在播时可能仍显示上一首。",
+            "foobar2000 默认不会告诉系统正在播什么，所以读不到歌词。本开关通过读取"
+            "播放器窗口标题来获取歌曲信息，只在没有其它播放器在播时生效。更推荐的"
+            "路线：给 foobar 安装「媒体控制插件」（让系统能识别播放信息，可搜索 "
+            "foo_mediacontrol 插件）——装好后不需要打开本开关。局限：窗口标题看不出"
+            "是否正在播放，停止播放后可能仍显示上一首。",
             check,
         ),
         SettingRow(
             "foobar_title_format",
-            "foobar2000 窗口标题格式",
-            "留空 = 自动（歌名与歌手顺序不可知时不猜，两种顺序都能搜到）。若歌词"
-            "对不上，把 foobar「显示 → 默认用户界面 → 窗口标题」里的那串原样填进来"
-            "（例如 %artist% - %title%），就能精确切分歌名与歌手。",
+            "播放器标题格式（高级）",
+            "通常留空即可。如果歌词经常对不上，把 foobar「显示 → 默认用户界面 → "
+            "窗口标题」里配置的那串格式表达式原样复制到这里（类似 %artist% - %title% "
+            "这样的格式），帮助识别歌名与歌手；匹配不上时仍会自动按原样尝试。",
             edit,
             stacked=True,
         ),
     ]
+
+
+#: 「音乐关联」里的高级折叠组名——播放器路径与标题格式是**故障恢复入口**（歌词对不上
+#: /换了安装位置时来改），组名必须直说，不藏。
+PLAYER_GROUP_TITLE = "播放器路径与标题格式（高级）"
+#: 非 Windows 上不存在「标题格式」行：组名跟着退化，不留一个提不到的行名。
+PLAYER_GROUP_TITLE_NO_FOOBAR = "播放器路径（高级）"
+
+
+def advanced_group_title(dialog) -> str:
+    """高级折叠组标题：按平台上有没有「标题格式」这一行决定（无该行就不提它）。"""
+    if not foobar_lyrics_supported() or getattr(dialog, "foobar_title_format_edit", None) is None:
+        return PLAYER_GROUP_TITLE_NO_FOOBAR
+    return PLAYER_GROUP_TITLE
 
 
 def save_music_player_settings(dialog) -> None:

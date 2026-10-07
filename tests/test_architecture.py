@@ -234,7 +234,13 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-08 再调到 2426（#172 对齐：菜单入口改运行时置灰——CONTEXT.md 的
 # Runtime Disabled）：编排器状态列随开关显示「已停用」——`_sync_menu_action_states`
 # +2 行（读开关）与开关接线 +1 行。实测 2426。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2426
+# 2026-10-07 上调到 2470（设置页信息架构第一刀，+44）：常规域「启动项（高级）」+
+# 桌宠域「播放器路径与标题格式（高级）」两条高级组装配、桌面组件域把探测间隔拆进
+# 「网络延迟检测（高级）」（含"全行被依赖隐藏的组整组收起"的 3 行）、_search_settings
+# 补 `SettingsSection(advanced=True)` 自动展开分支与「命中行被前置开关隐藏」的说明
+# 助手，另含 harness 自启目标与静止放手下落两处定稿文案（净行数含注释折行）。
+# 文案/分组行按文件约定只随实测校准，不为达标压缩行宽；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2470
 
 
 def _read(name: str) -> str:

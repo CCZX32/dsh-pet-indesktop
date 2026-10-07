@@ -91,9 +91,9 @@ def _fit_spin_to_content(spin) -> None:
 def _interval_hint(dialog) -> str:
     """间隔行的文案（"每天多少流量"跟着当前值算，不写死）。"""
     return (
-        f"延迟探测间隔（{_MIN_INTERVAL:g}–{_MAX_INTERVAL:g} 秒）。越短越灵敏、流量越多："
-        f"当前设置约 {_traffic_hint(_spin_value(dialog))}。"
-        "探测目标固定为 223.5.5.5（阿里公共 DNS，境内），不发往国外地址。"
+        f"延迟检测间隔（{_MIN_INTERVAL:g}–{_MAX_INTERVAL:g} 秒）。间隔越短反应越快、流量越多："
+        f"当前约 {_traffic_hint(_spin_value(dialog))}（随设置实时更新）。"
+        "检测目标是固定的境内服务（阿里云），不是你的访问网站。"
     )
 
 
@@ -126,9 +126,9 @@ def build_island_network_rows(dialog) -> list[SettingRow]:
         SettingRow(
             "island_network",
             "信息槽显示网络",
-            "开启后岛的信息槽改为显示 ↓下行 / ↑上行速率与延迟：速率读网卡字节计数器"
-            "（零流量），延迟用 UDP 往返探测（每次约 0.16 KB）。默认关闭——开着会持续"
-            "发探测包；关闭后信息槽回到「信息槽内容」选的内容。",
+            "开启后灵动岛显示 ↓下行 / ↑上行速率与网络延迟。速率监测不产生额外流量，"
+            "延迟检测每次约 0.16 KB。默认关闭——开启后会持续检测；关闭后信息槽恢复"
+            "显示「信息槽内容」选的内容。",
             dialog.island_network_check,
         ),
         SettingRow(

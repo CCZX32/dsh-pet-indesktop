@@ -235,6 +235,12 @@ DIALOGUE_PARAMS = {
 # 与 persona_template.PARAMETERS 保持同一真相源：调用点注入什么，这里就宣称什么。
 DIALOGUE_KEY_PARAMS = dict(PARAMETERS)
 
+# 搜索命中「被前置开关藏起来」的行时，指向必须先去打开的那一项（依赖不满足绝不
+# 自动改配置）。只登记会成为搜索目标的隐藏行；新加依赖时按需补一行。
+_SEARCH_HIDDEN_PREREQUISITES = {
+    "network_probe_interval": "island_network",
+}
+
 
 def dialogue_params_hint(key: str) -> str:
     """「可用参数」提示文案：区分保证注入与条件注入（仅上游记录提供时可用）。"""
@@ -477,17 +483,18 @@ class ModernSettingsDialog(QDialog):
         # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。
         if self._harness_desktop_available:
             harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：自动与「仅 dsh 服务」都是只把 dsh 服务拉起来"
-                "（不开浏览器、不开桌面端界面），想在自启时进界面要显式选「dsh web 界面」或「桌面端界面」。"
-                "右键菜单/托盘的「启动 dsh web 界面」「启动桌面端界面」是你点哪项就起哪项，"
-                "不受本项影响；「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
+                "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+                "也可以显式选择打开 web 界面或桌面端。右键菜单的手动启动不受此设置影响。"
+                "仅主桌宠可设置。"
             )
         else:
+            # 非 Windows 分支保留本平台事实：桌面端置灰（DESKTOP_SUPPORTED=False），
+            # dsh web 界面仍可选——不写成「只有服务可选」（那与下拉框实际能力不符）。
             harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：自动与「仅 dsh 服务」都是只把 dsh 服务拉起来、"
-                "不开浏览器；本平台暂不支持自动拉起桌面端（本版本仅 Windows），所以「桌面端界面」置灰，"
-                "想在自启时进界面要显式选「dsh web 界面」。右键菜单里的「启动桌面端界面」会如实提示不支持、"
-                "不会静默改开网页。「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
+                "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+                "本平台暂不支持自动拉起桌面端（本版本仅 Windows），「桌面端界面」置灰，"
+                "想在自启时进界面只能显式选「dsh web 界面」。"
+                "右键菜单的手动启动不受此设置影响。仅主桌宠可设置。"
             )
         launch_rows = [
             SettingRow("autostart", "开机自启", autostart_desc, self.autostart_check),
@@ -659,7 +666,7 @@ class ModernSettingsDialog(QDialog):
                 "音乐关联",
                 [
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
-                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
+                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制，酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
                 ] + settings_music.browser_media_rows(self) + settings_music.foobar_lyrics_rows(self),
                 behavior_content,
@@ -670,7 +677,7 @@ class ModernSettingsDialog(QDialog):
                 "拖拽与弹射",
                 [
                     SettingRow("drag_physics", "拖动物理", "启用拖拽惯性、重力和边缘反弹。", self.drag_physics_check),
-                    SettingRow("drop_gravity", "静止放手下落", "松开鼠标时若几乎没动（速度低于甩出死区），宠物不再停在半空，而是以零初速受重力自然落下、落地静止。贴地松手不弹跳；与「拖动物理」无关：关掉拖动物理时甩出的惯性仍不生效。", self.drop_gravity_check),
+                    SettingRow("drop_gravity", "静止放手下落", "松开鼠标时如果宠物几乎没移动，它不再停在半空，而是自然落下、落地静止；贴地松手不会弹起。与「拖动物理」无关：关掉拖动物理后甩出惯性依然不生效。", self.drop_gravity_check),
                     SettingRow("throw_strength", "甩出力度", "控制桌宠被甩出或弹射发射时的最大速度限制。", self.throw_strength_select),
                     SettingRow("slingshot_enabled", "弹弓弹射", "拖拽桌宠时点击右键进入蓄力瞄准，松开左键弹射飞出（Esc或右键取消）。", self.slingshot_check),
                     SettingRow("lock_position", "锁定位置", "桌宠固定不动，无法拖动（点击互动仍有效）。", self.lock_position_check),
@@ -1756,8 +1763,11 @@ class ModernSettingsDialog(QDialog):
 
         general = page_content(
             [
-                ("应用启动", claim("autostart", "harness_autostart", "harness_launch_target")),
+                ("应用启动", claim("autostart")),
                 ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
+                # 首屏只回答"第一天会问的问题"：凡答案涉及 harness/dsh 的（自启服务、
+                # 自启目标）都是第 N 天才用的，进折叠——不是藏功能，是按"第几天用到"分层。
+                ("启动项（高级）", claim("harness_autostart", "harness_launch_target"), True),
                 # 「多开」分组已随拓扑收口 Phase A 隐藏（见上方注释）
             ]
         )
@@ -1771,16 +1781,20 @@ class ModernSettingsDialog(QDialog):
             "collision_impulse_cap",
             "collision_sound_volume",
         )
+        # 音乐关联的故障恢复参数（标题格式 + 播放器路径）另立高级组：组名直说用途。
+        # 组序裁定：高频组按使用频率递减（音乐关联第 2），高级组永远垫底。
+        music_advanced = (
+            claim("foobar_title_format") + settings_music.build_music_player_rows(self))
         pet = page_content(
             [
                 ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
+                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics", "foobar_title_format")
-                 + settings_music.build_music_player_rows(self)),
                 ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                 ("边缘探头", claim("edge_probe")),
                 ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
                 ("多开碰撞", collision_primary),
+                (settings_music.advanced_group_title(self), music_advanced, True),
                 ("碰撞参数（高级）", collision_advanced, True),
             ]
         )
@@ -1834,7 +1848,21 @@ class ModernSettingsDialog(QDialog):
         menu.setProperty("contentMaxWidth", 1240)
         island_rows = list(old_pages.get("灵动岛", QWidget()).findChildren(SettingRow))
         claimed.update(island_rows)
-        desktop_components = page_content([("桌面胶囊（灵动岛）", island_rows)])
+        # 网络延迟检测（高级）只能在**最终域装配处**拆：旧岛页整节会被摊平进同一个
+        # 「桌面胶囊（灵动岛）」卡片（R2 §一-2）。只拆探测间隔行，其余岛行不动。
+        interval_rows = [row for row in island_rows
+                         if row.objectName() == "settingRow_network_probe_interval"]
+        island_rows = [row for row in island_rows if row not in interval_rows]
+        desktop_components = page_content(
+            [
+                ("桌面胶囊（灵动岛）", island_rows),
+                ("网络延迟检测（高级）", interval_rows, True),
+            ]
+        )
+        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是一条误导标题）。
+        for section in desktop_components.findChildren(SettingsSection):
+            if section.rows and all(row.isHidden() for row in section.rows):
+                section.setVisible(False)
 
         ai_sections = None
         if self.ai_page is not None:
@@ -1926,7 +1954,8 @@ class ModernSettingsDialog(QDialog):
                        self.agent_cost_check),
         ]
         agent_box.add_group("提示音效", claim_prefix("agent_sound_"))
-        agent_box.set_expanded(True)
+        # 默认折叠：6 行提示音效不该首屏铺开；消费统计是独立一级分组，留在框外。
+        agent_box.set_expanded(False)
         self.agent_link_box = agent_box
         # 这些行已被上面的折叠框认领，必须登记，否则会再落进「待分类」。
         claimed.update(agent_cost_rows)
@@ -2038,6 +2067,9 @@ class ModernSettingsDialog(QDialog):
             if isinstance(ancestor, CollapsibleGroup):
                 # 命中折叠框内的行：先自动展开，否则搜索结果存在但看不见。
                 ancestor.set_expanded(True)
+            elif isinstance(ancestor, SettingsSection) and ancestor.advanced:
+                # 高级折叠组同理：不展开等于折了搜不到（新老全部 advanced 组一体生效）。
+                ancestor.toggle.setChecked(True)
             if isinstance(ancestor, SettingsTabContainer):
                 ancestor.activate_for_descendant(row)
                 break
@@ -2045,8 +2077,20 @@ class ModernSettingsDialog(QDialog):
         scroll = page.findChild(QScrollArea, "settingsScroll")
         if scroll is not None:
             scroll.ensureWidgetVisible(row, 0, 24)
-        self.search_status.setText(f"{self._search_index + 1}/{len(matches)} · {row.label.text()}")
+        # 依赖不满足的行：只给可见说明，绝不替用户改配置（R2 §一-3）。
+        note = "" if row.isVisibleTo(page) else f"（{self._hidden_prerequisite_note(row)}）"
+        self.search_status.setText(
+            f"{self._search_index + 1}/{len(matches)} · {row.label.text()}{note}")
         self.search_status.show()
+
+    def _hidden_prerequisite_note(self, row: SettingRow) -> str:
+        """命中行被前置开关隐藏时，指名要先去打开的那一项。"""
+        key = row.objectName()[len("settingRow_"):]
+        source_id = _SEARCH_HIDDEN_PREREQUISITES.get(key)
+        source = self.findChild(SettingRow, f"settingRow_{source_id}") if source_id else None
+        if source is None:
+            return "当前被前置开关隐藏"
+        return f"需先开启「{source.label.text()}」"
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.search_edit and event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

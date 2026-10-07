@@ -267,7 +267,9 @@ def test_harness_target_offers_service_item_and_auto_says_headless(tmp_path, mon
 
     row = dialog.findChild(settings_mod.SettingRow, "settingRow_harness_launch_target")
     hint = row.hint_label.text()
-    assert "自动" in hint and "不开浏览器" in hint, "说明里必须写清 auto = 只起服务不开浏览器"
+    # 2026-10-07 第一刀：定稿把重复表述「（不开浏览器、不开桌面端界面）」收敛成
+    # 「不打开界面」，语义断言不变（auto = 只起服务、不进界面）。
+    assert "自动" in hint and "不打开界面" in hint, "说明里必须写清 auto = 只起服务不进界面"
 
     select.setCurrentData("service")
     assert dialog._write_config() is True

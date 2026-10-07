@@ -43,8 +43,12 @@ def test_network_rows_exist_with_documented_copy(tmp_path, monkeypatch):
         text = toggle.hint_label.text() + interval.hint_label.text()
         assert "0.16 KB" in text, "必须写明单次探测的流量成本"
         assert "MB/天" in text, "必须写明按间隔折算的日流量"
-        assert "223.5.5.5" in text, "必须写明探测目标（境内，不默认打国外）"
-        assert "223.5.5.5" in interval.hint_label.text()
+        # 2026-10-07 第一刀：间隔行不再写死 223.5.5.5（IP 属实现细节），改为如实说明
+        # 「检测目标是固定的境内服务（阿里云）」，语义要求不变：用户要知道不默认打国外。
+        assert "检测目标是固定的境内服务（阿里云）" in interval.hint_label.text(), (
+            "必须写明探测目标是境内服务（阿里云），不默认打国外"
+        )
+        assert "不是你的访问网站" in interval.hint_label.text()
         assert "1 KB" in menu.hint_label.text() and "不轮询" in menu.hint_label.text()
     finally:
         dialog.close()
