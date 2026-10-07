@@ -2,6 +2,9 @@
 """独立灵动岛胶囊窗口。
 
 - 常驻顶层小窗，可显示图标、名称、信息槽、状态灯；
+- 信息槽是一行**段**（主信息段 + ``island_metrics`` 的指标段 + 折叠 ``+N`` chip）：
+  窄屏时按收缩流水线逐级让位（省名字 → 名字隐藏 → 尾部整段折 +N → 省 custom
+  主信息），被折段同时撤销采样；段数据/落位/收缩判定全在 ``island_layout.py``；
 - 支持拖拽、四边停靠半隐藏（收成细条、鼠标靠近滑出）、位置持久化；
 - 单击胶囊按 ``click_action`` 展开卡片（余额/最近消息/快捷按钮）或切换桌宠显隐；
   桌宠隐藏时（``hidden_chat`` 开启）单击改为弹岛对话气泡（island_chat.py）；
@@ -17,7 +20,6 @@ import logging
 import math
 import sys
 import time
-from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
@@ -30,7 +32,14 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import catalog, island_segments, net_monitor, sys_monitor
+from . import catalog, island_layout, island_segments, net_monitor, sys_monitor
+from .island_layout import (
+    _BASELINE_DY, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX, _DEVICE_LABELS,
+    _DIVIDER_H_PX, _DIVIDER_W_PX, _ICON_GAP_PX, _ICON_PX, _NAME_GAP_PX,
+    _NAME_MAX_PX, _NETWORK_BOX_SAMPLE, _PRIMARY_ELIDE_PX, _PRIMARY_SAMPLES,
+    _STATUS_DOT_PX, _STATUS_GAP_PX, _SYS_METRIC_IDS, _InfoSeg,
+    place_info_segments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,10 +184,11 @@ def _native_reassert_topmost(window) -> bool:
         return False
 
 
-# ---------------------------------------------------------------- 段管线（P1 D1）
+# ---------------------------------------------------------------- 段管线（P1 D1/D2）
 # 胶囊内容行 = 头像 + 角色名 + 主信息段 + 指标段… + 状态点（见设计稿 §1.1）。
-# 下面的常量与两个纯函数是"行内几何"的全部来源：``_capsule_width`` 用它们算自然
-# 宽，paintEvent 用它们落位——**同一份几何只有一个来源**，绘制层不做度量。
+# 行内几何、段数据与收缩判定全部下沉在 ``pet/island_layout.py``（零 Qt 纯函数层，
+# 度量对象注入、替身上可验）；本文件只管"什么时候重算、拿什么值来算、画到
+# QPainter 上"——所以这里只剩字体与绘制相关的常量。
 #: 字号阶梯（逻辑 px；``setPixelSize`` 不用 pt——pt 要过一次 DPI 换算的二次取整）。
 #: L1 主信息 / L2 指标数值 / L3 角色名 / L4 段标签·单位。
 _FONT_LAYERS = {
@@ -187,126 +197,6 @@ _FONT_LAYERS = {
     "name": (12, QFont.Weight.Normal),
     "label": (10, QFont.Weight.Normal),
 }
-#: 统一基线：所有字号层级共用一条（胶囊垂直中心线下方 5px，见设计稿 §2.1）。
-#: 逐字号各自垂直居中会在单位跨档（10↔13px 混排）时上下跳。
-_BASELINE_DY = 5.0
-#: 段间竖线：槽位 19px = 9 + 1 + 9，竖线 1×14 垂直居中。
-_SEG_SLOT_PX = 19.0
-_DIVIDER_W_PX = 1.0
-_DIVIDER_H_PX = 14.0
-#: 内容行内边距左右各 19px（= 6 内缩 + 13 内容边距，沿用既有视觉）。
-_CONTENT_PAD_PX = 19.0
-_ICON_PX = 26.0
-_ICON_GAP_PX = 8.0
-#: 角色名上限 96px（超出右省略）：名字是身份不是数据，不该吃掉指标空间。
-_NAME_MAX_PX = 96
-_NAME_GAP_PX = 10.0
-_STATUS_DOT_PX = 8.0
-_STATUS_GAP_PX = 10.0
-#: 自然宽下限（沿用既有 120px：极小内容下岛仍是可点可拖的胶囊）。
-_MIN_CAPSULE_W = 120
-
-#: 主信息段的测宽样本（按模式取最坏形态）。time 定宽是"时间不推邻居"的前提；
-#: balance 的样本取 ``balance.format_balance`` 的真实单行形态（带 ¥ 与 5 位整数），
-#: 比它更长的串（带充值/赠送明细）按现文案加宽而不静默吃字（见 place_info_segments）。
-_PRIMARY_SAMPLES = {
-    "time": "88:88",
-    "balance": "余额 ¥88888.88",
-    "balance_tier": "低谷 → 88:88",
-}
-#: 网络段盒宽样本：用真格式化器的**最坏档位**生成（速率 5 列上限 + 4 位毫秒），
-#: 手写样本会和 ``format_network_slot`` 的定宽契约漂移。
-_NETWORK_BOX_SAMPLE = net_monitor.format_network_slot(
-    1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)
-#: 设备槽段的标签（数值样本取 ``sys_monitor.MAX_TEXT``，与格式化器同源）。
-_DEVICE_LABELS = {island_segments.CPU: "CPU", island_segments.MEM: "内存"}
-#: 设备槽段 id（订阅 key 同 id；cpu/mem 共用一条采样线程）。
-_SYS_METRIC_IDS = (island_segments.CPU, island_segments.MEM)
-
-
-@dataclass(frozen=True)
-class _InfoSeg:
-    """一个待渲染段（主信息段或指标段）——**数据不是绘制串**。
-
-    ``text`` 是"四态兜底之后"的显示文案（非 ``ok`` 一律同宽 ``--``）；``box_text``
-    是测宽样本（指标段 = 声明的最坏形态，主信息段 = 模式样本）。段列表是数据，
-    D2 的收缩流水线只需过滤列表（折尾段 / 省名字），不必改绘制。
-    """
-
-    kind: str        # "primary" / "metric"
-    seg_id: str      # "primary" / "network" / "cpu" / "mem" / 配置里的未知 id
-    label: str       # 段标签（L4 10px 层；主信息段为空）
-    text: str        # 当前显示文案（运行期值）
-    box_text: str    # 测宽样本（指标段 = max_text；主信息段 = 模式最坏形态）
-    state: str       # island_segments 的状态词表
-
-
-@dataclass(frozen=True)
-class _SegPlacement:
-    """一段在内容行里的落位（纯几何：绘制层只做装配，不做度量）。"""
-
-    seg: _InfoSeg
-    text: str            # 盒内实际绘制的文案（超宽时已右省略到盒宽）
-    text_w: int          # 上述文案的实测宽（盒内右对齐用）
-    label_x: float
-    label_w: int
-    box_x: float
-    box_w: int
-    divider_x: float | None   # 段前竖线的 x；首段为 None（竖线只出现在"段 ∧ 段"）
-
-    @property
-    def right(self) -> float:
-        return self.box_x + self.box_w
-
-
-def _box_sample(seg: _InfoSeg, value_fm) -> str:
-    """段盒的测宽样本：指标段恒为声明样本，主信息段取样本与现文案的较宽者。
-
-    指标段盒宽**与当前读数无关**，这就是"数字跳动不推邻居"的全部机制；主信息段
-    允许被现文案撑宽——``HH:mm`` 这类等宽形态由样本兜住（值变化不改宽），而余额
-    明细那种超长串宁可让岛变宽也不静默吃字（右省略由 D2 的 S3 负责 custom）。
-    """
-    if seg.kind != "primary":
-        return seg.box_text
-    if int(value_fm.horizontalAdvance(seg.text)) <= int(value_fm.horizontalAdvance(seg.box_text)):
-        return seg.box_text
-    return seg.text
-
-
-def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
-    """把段序列摆成一行（纯函数）：段间 19px 槽位、竖线居中、盒内右对齐。
-
-    为什么不用 ``island_segments.measure_segment_width``：那个函数只收**一个**
-    度量对象（Slice A 的契约假设"标签与数值同字体"），而排版是两档字号——标签
-    10px、数值 13px、主信息 14px。用 10px 度量数值会把盒子量小（13px 的字塞不
-    进去，每帧吃一次右省略 warning），用 13px 度量标签又让段宽虚胖。所以标签宽走
-    ``label_fm`` + :data:`island_segments.LABEL_GAP_PX`，数值盒宽走
-    :func:`island_segments.format_field_box`（同一套 ``max_text`` 语义，且自带
-    "超宽右省略 + warning"的硬护栏）。
-
-    ``start_x`` 是内容行里第一个段的起点（头像/角色名之后），返回值里的 x 全是
-    绝对坐标——绘制层只按它落笔。
-    """
-    placements: list[_SegPlacement] = []
-    x = float(start_x)
-    for index, seg in enumerate(segments):
-        metrics = primary_fm if seg.kind == "primary" else value_fm
-        display, box_w = island_segments.format_field_box(
-            seg.text, _box_sample(seg, metrics), metrics)
-        label_w = int(label_fm.horizontalAdvance(seg.label)) if seg.label else 0
-        gap = island_segments.LABEL_GAP_PX if seg.label else 0
-        divider_x = None
-        if index > 0:
-            divider_x = x + (_SEG_SLOT_PX - _DIVIDER_W_PX) / 2.0
-            x += _SEG_SLOT_PX
-        box_x = x + label_w + gap
-        placements.append(_SegPlacement(
-            seg=seg, text=display, text_w=int(metrics.horizontalAdvance(display)),
-            label_x=x, label_w=label_w, box_x=box_x, box_w=box_w,
-            divider_x=divider_x,
-        ))
-        x = box_x + box_w
-    return placements
 
 
 class DynamicIsland(QWidget):
@@ -379,13 +269,20 @@ class DynamicIsland(QWidget):
         # 内容层位图缓存（paintEvent 的文字绘制是实测大头，见 _content_cache）
         self._content_pixmap: QPixmap | None = None
         self._content_cache_key: tuple | None = None
-        # 段管线的字体/宽度缓存：字号层懒建（_FONT_LAYERS），度量对象按层缓存；
-        # 自然宽按白名单键缓存（见 _capsule_width / _width_key）——采样值变化
-        # 进不了这个键，所以"数字跳动不推邻居"是结构保证而不是纪律。
+        # 段管线的字体/行计划缓存：字号层懒建（_FONT_LAYERS），度量对象按层缓存；
+        # 行计划（含收缩级）按白名单键缓存（见 _row_plan / _plan_inputs）——采样值
+        # 变化进不了这个键，所以"数字跳动不推邻居"是结构保证而不是纪律。
         self._fonts: dict[str, QFont] = {}
         self._font_metrics: dict[str, QFontMetrics] = {}
-        self._width_cache_key: tuple | None = None
-        self._width_cache = 0
+        self._plan_inputs_key: tuple | None = None
+        self._plan = None
+        # 折叠态（收缩流水线折进 +N 的段 id）：采样订阅跟着它走——看不见的段
+        # 不该继续烧 psutil/探测包（见 _sync_fold_sampling）。
+        self._folded_metrics: frozenset[str] = frozenset()
+        # 设备槽订阅的影子计数（订阅集合自己记一份：底座只回报计数，问不出
+        # "这个 key 是不是刚订阅的"），用于"恢复首轮显示 --"。
+        self._sys_subscribed: set[str] = set()
+        self._sys_pending: set[str] = set()
         self._geo_from: QRect | None = None
         self._geo_to: QRect | None = None
         self._geo_t = 0.0
@@ -492,13 +389,16 @@ class DynamicIsland(QWidget):
             self.config.get("network_probe_interval_seconds", net_monitor.DEFAULT_INTERVAL_SECONDS))
 
     def _net_active(self) -> bool:
-        """网络槽的**有效**开关：网络段在列表里 AND 信息槽可见（岛可见性另算）。
+        """网络槽的**有效**开关：网络段在列表里 AND 信息槽可见 AND 没被折进 +N。
 
         信息槽被关掉时一条信息段都画不出来（``_visible_parts`` 的第 3 位），
         继续跑采样线程只是白烧 psutil 的 23ms/秒与探测包——所以"显示信息槽"是
-        三态里的一态，不是只看网络段在不在列表里。
+        三态里的一态，不是只看网络段在不在列表里。窄屏收缩把它折进 +N
+        （``_folded_metrics``）时同理：看不见的段不采样，展开时再订阅。
         """
         if not self._net_enabled():
+            return False
+        if island_segments.NETWORK in self._folded_metrics:
             return False
         _icon, _name, info, _status = self._visible_parts()
         return bool(info)
@@ -789,22 +689,32 @@ class DynamicIsland(QWidget):
         return sys_monitor.SysMonitor(interval=interval)
 
     def _sys_metric_ids(self) -> tuple[str, ...]:
-        """``island_metrics`` 里的设备槽成员（cpu/mem；保序，去重）。"""
+        """设备槽的**订阅集合**：``island_metrics`` 里的 cpu/mem 去掉被折进 +N 的。
+
+        保序、去重（列表序 = 优先级），折叠只影响"要不要订阅"——被折的段还在
+        配置里，只是看不见了（见 :meth:`_sync_fold_sampling`）。
+        """
         return tuple(metric_id for metric_id in self._metric_ids()
-                     if metric_id in _SYS_METRIC_IDS)
+                     if metric_id in _SYS_METRIC_IDS
+                     and metric_id not in self._folded_metrics)
 
     def _sys_active(self) -> bool:
-        """设备槽的**有效**开关：段在列表里 AND 信息槽可见（可见性另算）。"""
+        """设备槽的**有效**开关：段在列表里且没被折 AND 信息槽可见（可见性另算）。"""
         return bool(self._sys_metric_ids()) and bool(self._visible_parts()[2])
 
     def _sync_sys_slot(self) -> None:
         """按配置启停设备槽的订阅、采样线程与读取定时器（幂等）。
 
-        订阅**按段**计：段在列表里就 subscribe、不在就 unsubscribe——0 订阅时
-        底座只空转计时、不产生任何 syscall（关掉指标段就该真的零开销）。
+        订阅**按段**计：段在列表里且没被折就 subscribe、否则 unsubscribe——0 订阅
+        时底座只空转计时、不产生任何 syscall（关掉/折掉指标段就该真的零开销）。
         段全撤 / 信息槽关闭 → 彻底收口（线程停、快照丢弃）；只是暂时不可见 →
         保留对象与订阅、停线程（同 hideEvent 的"隐藏即休眠"口径）。采样间隔固定
         1Hz（不可配，见 ``sys_monitor.clamp_interval``），不重建线程。
+
+        订阅集合自己记一份影子（``_sys_subscribed``）：底座只回报订阅**计数**，
+        问不出"这个 key 是不是刚订阅的"。刚订阅的段进 ``_sys_pending``，在拿到
+        一份**新快照**之前按四态报 ``--``——展开恢复的段不显示折叠前的陈旧读数
+        （与网络段重建采样器后首轮 ``--`` 同一口径）。
         """
         if not self._sys_active():
             self._unsubscribe_sys()
@@ -813,6 +723,8 @@ class DynamicIsland(QWidget):
                 self._sys_monitor.close()
                 self._sys_monitor = None
             self._sys_sample = None
+            self._sys_subscribed = set()
+            self._sys_pending = set()
             return
         monitor = self._sys_monitor
         if monitor is None:
@@ -824,6 +736,9 @@ class DynamicIsland(QWidget):
                 monitor.subscribe(metric_id)
             else:
                 monitor.unsubscribe(metric_id)
+        self._sys_pending = ((self._sys_pending | (set(enabled) - self._sys_subscribed))
+                             & set(enabled))
+        self._sys_subscribed = set(enabled)
         self._sys_timer.setInterval(max(200, int(round(monitor.interval * 1000))))
         if self.isVisible():
             monitor.start()
@@ -850,6 +765,9 @@ class DynamicIsland(QWidget):
 
         同 ``_tick_network``：**绝不调 ``_update_size``**（``CPU 9%→100%`` 只在
         盒内左扩，不推邻居）；内容层位图按 ``_content_cache`` 的 key 自行重建。
+
+        新快照到手才清 ``_sys_pending``：刚（重新）订阅的段在这一刻之前一直报
+        ``--``——"采样中"与"拿折叠前的旧读数冒充它一直在采"必须分得开。
         """
         monitor = self._sys_monitor
         if monitor is None:
@@ -858,6 +776,7 @@ class DynamicIsland(QWidget):
         if sample is None or sample == self._sys_sample:
             return
         self._sys_sample = sample
+        self._sys_pending.clear()
         self.update()
 
     # ------------------------------------------------------------ 卡片
@@ -1238,24 +1157,32 @@ class DynamicIsland(QWidget):
         按模式取测宽样本：时间为 ``88:88`` 定宽（数字不推邻居），余额/峰谷取真实
         最长单行形态，custom 用配置文本自身。现文案超过样本时按现文案加宽（见
         :func:`place_info_segments`），定宽靠样本而不是靠截断。
+
+        **只有 custom 允许被收缩省略**（``elide_px``）：时间/余额/峰谷是定宽主信息，
+        它们是产品契约的锚点，收缩不得动（见设计稿 §3.2 保底级）。
         """
         mode = str(self._cfg.get("info_mode") or "time")
         if mode == "custom":
             text = str(self._cfg.get("custom_text") or "").strip() or "自定义"
             sample = text
+            elide_px = _PRIMARY_ELIDE_PX
         elif mode == "balance_tier":
             text = self._balance_tier_display_text()
             sample = _PRIMARY_SAMPLES["balance_tier"]
+            elide_px = 0
         elif mode == "balance":
             text = self._balance_text
             sample = _PRIMARY_SAMPLES["balance"]
+            elide_px = 0
         else:
             from PySide6.QtCore import QTime
 
             text = QTime.currentTime().toString("HH:mm")
             sample = _PRIMARY_SAMPLES["time"]
-        return _InfoSeg(kind="primary", seg_id="primary", label="", text=text,
-                        box_text=sample, state=island_segments.STATE_OK)
+            elide_px = 0
+        return _InfoSeg(kind=island_layout.KIND_PRIMARY, seg_id="primary", label="", text=text,
+                        box_text=sample, state=island_segments.STATE_OK,
+                        elide_px=elide_px)
 
     def _network_segment(self) -> _InfoSeg:
         """网络段：定宽槽串（``format_network_slot`` 的 5 列契约）直接进字段盒。
@@ -1271,17 +1198,18 @@ class DynamicIsland(QWidget):
                 sample.down_bps, sample.up_bps, sample.latency_ms,
                 lost=sample.latency_lost)
             state = island_segments.STATE_OK
-        return _InfoSeg(kind="metric", seg_id=island_segments.NETWORK, label="",
+        return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=island_segments.NETWORK, label="",
                         text=text, box_text=_NETWORK_BOX_SAMPLE, state=state)
 
     def _device_segment(self, metric_id: str) -> _InfoSeg:
         """CPU / 内存段：读数来自共享的 ``SysMonitor`` 快照（无快照 = sampling）。
 
         有快照但该字段是 None（CPU 差分首样本）也算 sampling——"还没读数"与
-        "读数是 0"必须分得开（``--`` 不伪造 0）。
+        "读数是 0"必须分得开（``--`` 不伪造 0）。刚被恢复（重新订阅）的段同样先报
+        sampling：见 ``_sys_pending``。
         """
         sample = self._sys_sample
-        if sample is None:
+        if sample is None or metric_id in self._sys_pending:
             state, value = island_segments.STATE_SAMPLING, None
         elif sample.state != island_segments.STATE_OK:
             state, value = island_segments.STATE_ERROR, None
@@ -1292,14 +1220,15 @@ class DynamicIsland(QWidget):
                      else island_segments.STATE_SAMPLING)
         formatter = (sys_monitor.format_cpu if metric_id == island_segments.CPU
                      else sys_monitor.format_mem)
-        return _InfoSeg(kind="metric", seg_id=metric_id, label=_DEVICE_LABELS[metric_id],
+        return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=metric_id,
+                        label=_DEVICE_LABELS[metric_id],
                         text=self._state_text(state, formatter(value)),
                         box_text=sys_monitor.MAX_TEXT, state=state)
 
     @staticmethod
     def _unknown_segment(metric_id: str) -> _InfoSeg:
         """未实现的段 id（配置残留）：降级成 unknown 态 ``--`` 段，不崩不留洞。"""
-        return _InfoSeg(kind="metric", seg_id=metric_id,
+        return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=metric_id,
                         label=metric_id[:island_segments.LABEL_MAX_CHARS],
                         text=island_segments.UNKNOWN_TEXT,
                         box_text=island_segments.UNKNOWN_TEXT,
@@ -1310,8 +1239,10 @@ class DynamicIsland(QWidget):
 
         首段恒为主信息段（信息槽内容由 ``info_mode`` 决定），其后按
         ``island_metrics`` 的列表序追加指标段。信息槽整体关掉时返回空列表——
-        "没有段"与"首段不是 primary"是两件事。D2 的收缩流水线只需过滤这个列表
-        （折尾段、省名字）而不必改绘制。
+        "没有段"与"首段不是 primary"是两件事。
+
+        这是**未收缩**的全量列表（宽度白名单与采样口径都以它为准）；实际画出来的
+        行由 :meth:`_row_plan` 给出的收缩结果决定（折尾段 → +N chip、省名字）。
         """
         if not self._visible_parts()[2]:
             return []
@@ -1405,76 +1336,154 @@ class DynamicIsland(QWidget):
         scaled.setDevicePixelRatio(dpr)
         return scaled
 
-    def _capsule_width(self) -> int:
-        """自然宽 = 内容行各件宽之和（左右各 19px 内边距，见设计稿 §1.1）。
+    def _shrink_budget(self) -> int:
+        """收缩触发线：岛所在屏的可用宽 − 32px（两侧各留一个 ``_EDGE_MARGIN``）。
 
-        宽度白名单的落地：**只在 :meth:`_width_key` 变化时重算一次**（缓存），
-        而采样值进不了那个键——所以"数字跳动不推邻居"是结构保证。指标段盒宽 =
-        声明样本的实测盒宽，读数在盒内右对齐伸缩；主信息段盒宽 = 样本与现文案的
-        较宽者（长余额串按现文案加宽，不静默吃字）。
+        无 640 硬帽（产品决策：爱用多少用多少，小屏由收缩流水线兜底）。多屏
+        按**岛当前所在屏**取——跨屏迁移后由 :meth:`_update_size` 重算（拖拽过程中
+        宽度冻结，不重算）。拿不到屏信息时返回 0 = 不收缩，交给 clamp 兜底。
         """
-        key = self._width_key()
-        if self._width_cache_key == key:
-            return self._width_cache
-        icon, name, info, status = self._visible_parts()
-        width = _CONTENT_PAD_PX * 2
-        if icon:
-            width += _ICON_PX + _ICON_GAP_PX
-        if name:
-            width += self._name_layout()[1] + _NAME_GAP_PX
-        if info:
-            placements = place_info_segments(
-                self._compose_info_segments(), start_x=width,
-                primary_fm=self._metrics_for("primary"),
-                value_fm=self._metrics_for("value"),
-                label_fm=self._metrics_for("label"))
-            if placements:
-                width = placements[-1].right
-        if status:
-            width += _STATUS_GAP_PX + _STATUS_DOT_PX
-        natural = max(_MIN_CAPSULE_W, int(round(width)))
-        self._width_cache_key = key
-        self._width_cache = natural
-        return natural
+        screen = self._current_screen()
+        if screen is None:
+            return 0
+        return int(screen.availableGeometry().width()) - _EDGE_MARGIN * 2
 
-    def _name_layout(self) -> tuple[str, int]:
-        """角色名的显示文本与占位宽（≤96px 右省略）。D2 的 S1 直接整段去掉它。"""
-        name = self._character_name()
-        metrics = self._metrics_for("name")
-        width = int(metrics.horizontalAdvance(name))
-        if width <= _NAME_MAX_PX:
-            return name, width
-        elided = metrics.elidedText(name, Qt.TextElideMode.ElideRight, _NAME_MAX_PX)
-        return elided, int(metrics.horizontalAdvance(elided))
+    def _plan_inputs(self) -> tuple:
+        """行计划的**输入白名单**（也是它的缓存键）：只有这些变化才允许重算。
 
-    def _width_key(self) -> tuple:
-        """自然宽白名单键：**只有这些输入变化**才允许重算自然宽。
-
-        - 可见项 / 角色名（含省略后的文本与占位宽）/ 各段的 ``(id, label, box_text)``
-          —— 段增删与段模板变化都在这一项里；
-        - 主信息段的 ``text``：它超出样本时按现文案加宽（见 ``place_info_segments``）；
-        - 字号各层的度量指纹 + DPR：系统字体/DPI 一变必须重测（字变了盒子也要变）。
+        - 可见项 / 角色名（含静止态省略后的文本与占位宽）/ 各段的
+          ``(id, label, box_text, 主信息 text)`` —— 段增删与段模板变化都在这一项里；
+        - 字号各层的度量指纹 + DPR：系统字体/DPI 一变必须重测（字变了盒子也要变）；
+        - 收缩预算（屏可用宽 − 32px）：换屏 / 跨屏迁移后要重算收缩级。
 
         **采样值不在键里**（指标段的 ``text`` 被刻意排除）：它是内容层的事——
-        指标段盒宽由声明样本定死，读数在盒内右对齐伸缩。D2 的折叠态同样只体现为
-        "段列表变了"，不需要额外的键分量。
+        指标段盒宽由声明样本定死，读数在盒内右对齐伸缩。收缩级是这些输入的
+        纯函数（见 ``island_layout.plan_info_row``），所以它也不必单独进键。
         """
         segments = self._compose_info_segments()
         return (
             self._visible_parts(),
             self._name_layout(),
             tuple(
-                (seg.seg_id, seg.label, seg.box_text,
-                 seg.text if seg.kind == "primary" else "")
+                (seg.seg_id, seg.label, seg.box_text, seg.elide_px,
+                 seg.text if seg.kind == island_layout.KIND_PRIMARY else "")
                 for seg in segments
             ),
             self._fonts_key(),
             round(self.devicePixelRatioF(), 3),
+            self._shrink_budget(),
         )
 
+    def _row_plan(self):
+        """内容行的行计划（含收缩级）——**自然宽与绘制的唯一来源**。
+
+        按 :meth:`_plan_inputs` 缓存：采样值变化命中同一个键，一次都不重算几何。
+        拖拽中冻结（拖曳期间不重算收缩级：内容先跳而窗口没变宽，比"松手才换档"
+        更容易被看成卡顿）；计划一变就同步折叠态对应的采样订阅。
+        """
+        key = self._plan_inputs()
+        if self._plan_inputs_key == key:
+            return self._plan
+        if self._dragging and self._plan is not None:
+            return self._plan
+        plan = self._compute_row_plan()
+        self._plan_inputs_key = key
+        self._plan = plan
+        self._sync_fold_sampling(plan)
+        return plan
+
+    def _compute_row_plan(self):
+        """按可见项与预算算一次行计划（纯函数调用，除缓存外不改状态）。"""
+        icon, name, _info, status = self._visible_parts()
+        segments = self._compose_info_segments()
+        lead = _CONTENT_PAD_PX + ((_ICON_PX + _ICON_GAP_PX) if icon else 0.0)
+        trail = (_STATUS_GAP_PX + _STATUS_DOT_PX) if status else 0.0
+        return island_layout.plan_info_row(
+            segments,
+            lead_w=lead,
+            trail_w=trail,
+            name_text=self._character_name() if name else "",
+            available_w=self._shrink_budget(),
+            primary_fm=self._metrics_for("primary"),
+            value_fm=self._metrics_for("value"),
+            label_fm=self._metrics_for("label"),
+            name_fm=self._metrics_for("name"),
+        )
+
+    def _capsule_width(self) -> int:
+        """自然宽 = 行计划给出的宽度（左右各 19px 内边距，见设计稿 §1.1）。
+
+        宽度白名单的落地：**只在 :meth:`_plan_inputs` 变化时重算一次**（缓存），
+        而采样值进不了那个键——所以"数字跳动不推邻居"是结构保证。指标段盒宽 =
+        声明样本的实测盒宽，读数在盒内右对齐伸缩；主信息段盒宽 = 样本与现文案的
+        较宽者（长余额串按现文案加宽，不静默吃字）。收缩（省名字 / 折 +N / 省
+        custom 主信息）只改段列表与名字态，同样从这条路径出去。
+        """
+        return self._row_plan().width
+
+    def _name_layout(self) -> tuple[str, int]:
+        """角色名的**静止态**显示文本与占位宽（≤96px 右省略）。
+
+        这是宽度白名单里的"名字分量"；S1（收到 40px）与 S2（整段隐藏）在
+        ``island_layout.plan_info_row`` 里另算——三处省略共用
+        :func:`island_layout.elide_to_width` 同一份实现，串不会各自漂移。
+        """
+        metrics = self._metrics_for("name")
+        display = island_layout.elide_to_width(
+            self._character_name(), _NAME_MAX_PX, metrics)
+        return display, int(metrics.horizontalAdvance(display))
+
+    def _width_key(self) -> tuple:
+        """自然宽白名单键：**只有这些输入变化**才允许重算自然宽。
+
+        内容 = 输入白名单（见 :meth:`_plan_inputs`）+ 本次收缩的**结构签名**
+        （级 / 名字实际显示态 / 折叠段）。签名是输入的纯函数，加进来是为了让
+        "折叠↔展开"这类结构变化在白名单上肉眼可见地可验（它同时也是
+        :meth:`_row_plan` 的缓存键的一部分，两者不可能不一致）。
+        """
+        plan = self._row_plan()
+        return self._plan_inputs() + (plan.level, plan.name, plan.folded)
+
     def _update_size(self) -> None:
-        self._set_free_geometry(QRect(self.pos(), self._rest_size()))
+        """重算窗口几何（宽度白名单的落点；采样值永不走到这里）。
+
+        两条纪律：
+
+        - **拖拽中短路**：拖曳期间宽度冻结（松手落定后由 mouseReleaseEvent 重算），
+          否则 island 会在光标底下随内容/换屏抽动；
+        - **伸长按三分区锚点**：自由胶囊变宽时固定"贴屏那一侧的边"（左 1/3 固定
+          左缘 / 右 1/3 固定右缘 / 中间固定中心，见 :func:`island_layout.anchored_x`）
+          ——贴边的岛直接向右长会先长出屏再被 clamp 顶回来。停靠细条与展开卡片
+          不走锚点：它们的几何由 ``_target_rect`` 贴边决定。
+        """
+        if self._dragging:
+            return
+        size = self._rest_size()
+        x = self.x()
+        if self._mode == "normal":
+            screen = self._current_screen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                x = island_layout.anchored_x(
+                    x=x, width=self.width(), new_width=size.width(),
+                    screen_left=available.left(), screen_width=available.width())
+        self._set_free_geometry(QRect(QPoint(x, self.y()), size))
         self._apply_fixed_size()
+
+    def _sync_fold_sampling(self, plan) -> None:
+        """折叠态变化 → 采样订阅跟着走（被折进 +N 的段撤销订阅）。
+
+        性能契约而不是视觉细节：看不见的段不该继续烧 psutil/探测包（见设计稿
+        §3.2 的"采样联动"）。展开时按既有 ``_sync_*_slot`` 路径重新订阅——
+        网络段是整条采样器重建、设备槽按 id 重新订阅且首轮报 sampling（不拿折叠
+        前的读数假装"它一直在采"），两处都在 ``_sync_*_slot`` 里收口。
+        """
+        folded = frozenset(plan.folded)
+        if folded == self._folded_metrics:
+            return
+        self._folded_metrics = folded
+        self._sync_network_slot()
+        self._sync_sys_slot()
 
     def _rest_size(self) -> QSize:
         width = self._capsule_width()
@@ -1775,7 +1784,7 @@ class DynamicIsland(QWidget):
                 dot_size, dot_size))
 
     def _content_cache(self) -> QPixmap:
-        """内容层（头像/角色名/信息段/状态灯）的缓存位图。
+        """内容层（头像/角色名/信息段/chip/状态灯）的缓存位图。
 
         为什么缓存（拖岛扫鱼实测定案）：paintEvent 均值 6.2ms，大头是 CJK
         文字的 shaping/回退字体解析；而内容只在刷新（时间跳变/余额刷新/
@@ -1783,16 +1792,22 @@ class DynamicIsland(QWidget):
         一次 blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
         文字锐利口径不变）；squish 只调制胶囊外形、本来就不碰内容层。
 
-        key 覆盖所有影响像素的输入（可见项/各段 text+state/字号指纹/颜色/DPR/
-        宽度），任一变化自动重建。**采样值变化只换这张位图**：窗口几何走
-        ``_capsule_width`` 的白名单，两者互不牵连。
+        key 覆盖所有影响像素的输入（可见项/名字态/各段 text+state/字号指纹/颜色/
+        DPR/宽度），任一变化自动重建——**收缩结果（折了哪几段、名字显不显示）
+        由段列表与名字进 key**，所以折叠↔展开必然换位图。采样值变化只重建这张
+        位图，窗口几何走 ``_capsule_width`` 的白名单，两者互不牵连。
         """
         icon, name, info, status = self._visible_parts()
-        segments = self._compose_info_segments()
+        plan = self._row_plan()
+        # 计划只给结构，文案取**当刻**的段列表（见 island_layout.apply_shrink）：
+        # 读数每秒在变，计划里的那份快照一转眼就过期
+        segments = island_layout.apply_shrink(
+            plan, self._compose_info_segments(),
+            primary_fm=self._metrics_for("primary"))
         _background, primary_color, secondary_color = self._style_palette()
         # 主信息段（L1）：峰谷模式跟随设置的峰谷色，其余用主文字色
         primary_text_color = self._info_color(primary_color)
-        name_text, _name_w = self._name_layout()
+        name_text = plan.name
         dpr = self.devicePixelRatioF()
         key = (
             icon, name, info, status,
@@ -1849,12 +1864,13 @@ class DynamicIsland(QWidget):
             # auto 模式 provider 没就绪：只画底圈，绝不回退画 🐳（那是白付
             # 一次 33MB 的 DirectWrite 彩色 emoji 字体栈税）
             x += _ICON_PX + _ICON_GAP_PX
-        if name:
-            # 角色名：L3 12px 次色，右省略到 96px（名字是身份不是数据）
+        if name and name_text:
+            # 角色名：L3 12px 次色，静止态右省略到 96px、收缩态收到 40px 或整段隐藏
+            # （名字是身份不是数据）——文本与占位宽都来自行计划，绘制层不自己省略
             painter.setFont(self._font_for("name"))
             painter.setPen(primary_color)
             painter.drawText(QPointF(x, baseline), name_text)
-            x += _name_w + _NAME_GAP_PX
+            x += plan.name_w + _NAME_GAP_PX
         placements = place_info_segments(
             segments, start_x=x,
             primary_fm=self._metrics_for("primary"),
@@ -1863,14 +1879,28 @@ class DynamicIsland(QWidget):
         for placement in placements:
             seg = placement.seg
             if placement.divider_x is not None:
-                # 段间竖线：1×14px、槽位正中；首段前与状态点前都不画
+                # 段间竖线：1×14px、槽位正中；首段前、chip 前与状态点前都不画
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(self._divider_color())
                 painter.drawRect(QRectF(
                     placement.divider_x,
                     (_CAPSULE_HEIGHT - _DIVIDER_H_PX) / 2.0,
                     _DIVIDER_W_PX, _DIVIDER_H_PX))
-            if seg.kind == "primary":
+            if seg.kind == island_layout.KIND_CHIP:
+                # +N chip：描边无填充、圆角 9、高 18，文字居中且无竖线（K3 §3.3）
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(self._divider_color(), 1))
+                painter.drawRoundedRect(
+                    QRectF(placement.box_x,
+                           (_CAPSULE_HEIGHT - _CHIP_H_PX) / 2.0,
+                           placement.box_w, _CHIP_H_PX),
+                    _CHIP_RADIUS_PX, _CHIP_RADIUS_PX)
+                painter.setFont(self._font_for("label"))
+                painter.setPen(secondary_color)
+                painter.drawText(QPointF(placement.text_x, baseline), placement.text)
+                x = placement.right
+                continue
+            if seg.kind == island_layout.KIND_PRIMARY:
                 painter.setFont(self._font_for("primary"))
                 painter.setPen(primary_text_color)
             else:
@@ -1884,9 +1914,7 @@ class DynamicIsland(QWidget):
                 painter.setPen(primary_color if seg.state == island_segments.STATE_OK
                                else secondary_color)
             # 盒内右对齐 + 统一基线（所有字号层共用一条基线，见 _BASELINE_DY）
-            painter.drawText(
-                QPointF(placement.box_x + placement.box_w - placement.text_w, baseline),
-                placement.text)
+            painter.drawText(QPointF(placement.text_x, baseline), placement.text)
             x = placement.right
         if status:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -1976,7 +2004,7 @@ class DynamicIsland(QWidget):
     def _clear_font_cache(self) -> None:
         self._fonts.clear()
         self._font_metrics.clear()
-        self._width_cache_key = None
+        self._plan_inputs_key = None
         self._content_cache_key = None
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -2100,6 +2128,12 @@ class DynamicIsland(QWidget):
                     abs(rect.left() - available.left()),
                     abs(available.right() - rect.right()),
                     _DOCK_THRESHOLD, edge)
+            # 松手落定：解除拖拽冻结并重算几何——跨屏迁移后收缩级按**新屏**重算
+            #（拖拽过程中刻意冻结，见 _update_size）。放在停靠判定之后：判定看的是
+            # 用户挑的那个落点，不该被"刚落定的收缩"改判。标志先翻再动几何，与桥的
+            # "松手先翻标志、再发几何回调"口径一致（_emit_geometry_changed 在尾）
+            self._dragging = False
+            self._update_size()
             self._save_dock_edge(edge)
             self._save_position()
             if edge != "none":

@@ -127,11 +127,18 @@ def test_dependency_visibility_chains_island_info_network(tmp_path, monkeypatch)
 
         net.setChecked(True)
         assert not _row(dialog, "network_probe_interval").isHidden()
-        # 网络槽接管信息槽内容：内容选择行隐掉（不留"改了没反应"的控件）
-        assert _row(dialog, "dynamic_island_info_mode").isHidden()
-        assert _row(dialog, "dynamic_island_custom_text").isHidden()
-
+        # 网络段**不再接管**信息槽内容（P1 Slice D1 已删掉接管，info_mode 始终生效）：
+        # 内容选择行保持可见——把它隐掉才是真正的"改了没反应"（P1 Slice D2 修正）
+        assert not _row(dialog, "dynamic_island_info_mode").isHidden()
+        # 「自定义短文本」只跟内容选择走（选 custom 才显示），与网络开关无关
+        dialog.island_info_mode_select.setCurrentIndex(
+            dialog.island_info_mode_select.findData("custom"))
+        assert not _row(dialog, "dynamic_island_custom_text").isHidden()
         net.setChecked(False)
+        assert not _row(dialog, "dynamic_island_custom_text").isHidden(), \
+            "网络开关不再影响内容选择两行"
+        dialog.island_info_mode_select.setCurrentIndex(
+            dialog.island_info_mode_select.findData("time"))
         assert _row(dialog, "dynamic_island_info_mode").isHidden() is False
         assert _row(dialog, "network_probe_interval").isHidden()
 

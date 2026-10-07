@@ -17,10 +17,9 @@ modern_settings_dialog.py 行数预算刚校准到零余量，所以本功能的
 - ``network_info_menu_enabled`` 只属于「菜单」——它决定右键菜单里那一项显不显示，
   与岛上的指标段无关；两处不复制对方的状态。
 
-依赖显隐：网络段开着时「信息槽内容 / 自定义短文本」不生效（内容被网络信息接管），
-这里用同族机制（``_set_setting_rows_visible`` 的 dependency 位是 AND 叠加的）挂上
-自己那一位，不抢 ``settings_pet_controls`` 的权——两边各写各的依赖键，结果按 AND
-合成，与调用顺序无关。
+依赖显隐：三个指标行跟着「岛开关 × 信息槽开关」走，间隔行只跟网络开关走。
+「信息槽内容 / 自定义短文本」两行**不受**网络开关影响——网络段自 P1 Slice D1 起
+是普通指标段，不再接管信息槽（"网络接管"旧语义已删），info_mode 始终生效。
 """
 from __future__ import annotations
 
@@ -49,9 +48,9 @@ _METRIC_ROWS = (
         island_segments.NETWORK,
         "island_network",
         "灵动岛指标 · 网络",
-        "开启后岛的信息槽改为显示 ↓下行 / ↑上行速率与延迟：速率读网卡字节计数器"
-        "（零流量），延迟用 UDP 往返探测（每次约 0.16 KB）。默认关闭——开着会持续"
-        "发探测包；关闭后信息槽回到「信息槽内容」选的内容。",
+        "在岛上加一段 ↓下行 / ↑上行速率与延迟（信息槽内容另有其行，不受本开关影响）："
+        "速率读网卡字节计数器（零流量），延迟用 UDP 往返探测（每次约 0.16 KB）。"
+        "默认关闭——开着会持续发探测包。",
     ),
     (
         island_segments.CPU,
@@ -238,11 +237,10 @@ def _install_visibility(dialog, rows: list[SettingRow]) -> None:
             apply(key, island_on and info_on, "island_info_slot_shown")
         apply("network_probe_interval", island_on and info_on and net_on,
               "island_network_on")
-        # 网络段开着时信息槽内容不由 info_mode 决定：同族依赖位把它隐掉，避免
-        # 留下"改了没反应"的控件（关掉网络段后自动恢复）。
-        dialog._set_setting_rows_visible(
-            ("dynamic_island_info_mode", "dynamic_island_custom_text"), not net_on,
-            dependency="island_network_off")
+        # 「信息槽内容 / 自定义短文本」两行**不受**网络开关影响（P1 Slice D2）：
+        # 网络段自 D1 起是普通指标段，不再接管信息槽，info_mode 始终生效——
+        # 这里曾经把两行隐掉，那是"网络接管信息槽"旧语义的残留，会让用户改了
+        # 内容选择却看不出效果（真正的"改了没反应"）。
 
     dialog._island_network_sync = sync
     if not getattr(dialog, "_island_network_visibility_wired", False):

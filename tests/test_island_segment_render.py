@@ -32,7 +32,8 @@ from pet import catalog
 from pet import island_segments as isl
 from pet import net_monitor, sys_monitor
 from pet.config import Config
-from pet.dynamic_island import DynamicIsland, _InfoSeg, place_info_segments
+from pet.dynamic_island import DynamicIsland
+from pet.island_layout import _InfoSeg, place_info_segments
 from pet.island_segments import CPU, MEM, NETWORK
 
 app = QApplication.instance() or QApplication([])
