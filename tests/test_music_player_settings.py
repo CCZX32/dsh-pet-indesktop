@@ -405,3 +405,61 @@ def test_foobar_controls_are_main_pet_only(monkeypatch, tmp_path):
             dialog.close()
             dialog.deleteLater()
         app.processEvents()
+
+
+def test_browser_media_control_is_main_pet_only(monkeypatch, tmp_path):
+    """子宠页：「浏览器媒体会话参与歌词」与 foobar 同 `_SOURCE_SWITCHES` 组 → 同规置灰。
+
+    两个键的读取形态完全一致（``music_lyric_controller`` 的
+    ``self.win.cfg.get(...)``），只处置其中一个会留下同一行块里一个同样不生效的
+    兄弟开关。
+    """
+    from pet import settings_music
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_music.sys, "platform", "win32")   # 控件仅在 Windows 建
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        assert master.music_browser_media_check is not None, "用例前置：Windows 下应建出控件"
+        assert master.music_browser_media_check.isEnabled() is True
+        assert child.music_browser_media_check.isEnabled() is False
+        assert child.music_browser_media_check.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+
+
+def test_music_player_pickers_are_main_pet_only(tmp_path):
+    """子宠页：播放器路径两键是进程级（右键菜单读 host 配置面）→ 置灰。
+
+    「自动检测」按钮只服务这两行（填进去也没人读），一并置灰，免得留个点了没用的
+    入口；主宠页两个选择器与按钮都不受影响。
+    """
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        for picker in _pickers(master):
+            assert picker.isEnabled() is True
+        assert master.music_player_detect_btn.isEnabled() is True
+
+        for picker in _pickers(child):
+            assert picker.isEnabled() is False
+            assert picker.toolTip() == "仅主桌宠可设置"
+        assert child.music_player_detect_btn.isEnabled() is False
+        assert child.music_player_detect_btn.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()

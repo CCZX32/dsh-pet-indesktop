@@ -65,6 +65,14 @@ def create_music_player_controls(dialog) -> None:
     button.setObjectName("musicPlayerDetectButton")
     button.clicked.connect(lambda: start_detect(dialog))
     dialog.music_player_detect_btn = button
+    # 两个路径键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，右键菜单读 host 配置面、
+    # 由 _SpriteConfig 转发到主配置）：子宠页改了不生效 ⇒ 置灰。「自动检测」按钮只
+    # 服务这两行（搜到的路径填进没人读的控件），一并置灰，免得留个点了没用的入口。
+    mark_main_pet_only(
+        dialog,
+        *(getattr(dialog, _PICKER_ATTR[key]) for key in PLAYER_KEYS),
+        button,
+    )
 
 
 def build_music_player_rows(dialog) -> list[SettingRow]:
@@ -114,6 +122,9 @@ def browser_media_rows(dialog) -> list[SettingRow]:
     check = getattr(dialog, "music_browser_media_check", None)
     if check is None or not browser_media_supported():
         return []
+    # 与 foobar 两键同规（同一 _SOURCE_SWITCHES 组、同一读取形态）：进程级歌词源
+    # 开关，子宠页写了不生效 ⇒ 置灰。控件本体建在 settings_pet_controls。
+    mark_main_pet_only(dialog, check)
     return [
         SettingRow(
             "music_browser_media",
