@@ -2702,6 +2702,12 @@ class AgentLinkManager(QObject):
                     monitor.schedule_link_refresh_check()
             elif not should_run and monitor._running:
                 monitor.stop()
+                if key == "dsh":
+                    # 通道关闭语义（6.1sol 终审）：监视器停了之后，锁存在呈现侧的
+                    # 状态（待确认环/错误点/工作点）再没有人会来改——必须随通道
+                    # 一起清。复用 offline 收敛管线：岛状态点复位（AppShell 转发）
+                    # 与常驻交互气泡一并收口，与"探测到 DSH 离线"同一路径。
+                    self._on_dsh_converged_state("", "offline", "link-disabled")
 
     def _install_dsh_worker(self, token: int) -> None:
         """后台线程：安装 DSH 桥接插件，完成后信号回主线程。"""

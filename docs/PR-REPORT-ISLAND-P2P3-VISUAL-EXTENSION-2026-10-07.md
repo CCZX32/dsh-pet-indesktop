@@ -65,7 +65,7 @@ P3 把段体系开放给第三方。八个 slice 各自 test-first，全部实�
 
 ## 三、实现要点
 
-- **告警滞回的推进点在样本到达一刻**（`_tick_sys → _update_alert_severity`），不在绘制期
+- **告警滞回的推进点在 GUI 读取快照一刻**（`_tick_sys → _update_alert_severity`；按 UI 读取拍，色随显示值——R1 语义裁决），不在绘制期
   惰性算——两次读数之间不绘制是常态，惰性算会漏拍退化成「每次从零开始」（实测 92→91
   被错算成 warn 的假信号就是这么抓到的）。
 - **chip 告警级取当刻段列表**而非缓存计划：`_plan_inputs` 刻意不含采样值/severity，
@@ -219,3 +219,56 @@ test-first 收口；另有裁决记录如下。
 ### 本轮验证
 
 聚焦（岛+设置+架构）577 passed；ruff 干净；全量 **5287 passed, 11 skipped**（723s，含本轮 12 个新用例）。
+
+---
+
+## 十、终审四票轮（2026-10-07，第二轮评审与三关核验）
+
+四票全面审查（用户指定：Agents-A1 / 书生·glm-5.3 / ops5.5 / 6.1sol），每条发现过
+**三关核验**（证据关=代码实证防幻觉、检查面关=补全上下文防以偏概全、
+语义关=以施工单/裁决稿为准防理解错误）。处置全账如下。
+
+### 票况
+
+| 票 | 状态 | 发现数（采纳/驳回） |
+|---|---|---|
+| ops5.5 | ✅ 出票 | 3 应修 + 2 建议 + 1 nit → **采纳 3**（M1/M3/N1），**驳回 3**（M2/S1/S2 误报） |
+| 6.1sol（第二轮） | ✅ 出票 | 3 应修 + 2 建议 + 1 nit → **全部采纳** |
+| Agents-A1 | ✅ 出票（第三次尝试） | 2 阻塞 + 3 应修 + 2 建议 + 2 nit → **驳回 8**（详见下），采纳 C2（补测试） |
+| 书生/glm-5.3 | ❌ 渠道配额三连 429（01:30 重置） | 换 poke2api/glm-5.3（同模型付费渠道）出票，结果待回填 |
+
+### 驳回记录（幻觉/误报的判别账）
+
+- **ops5.5 M2**（拖拽中完成瞬态表不销毁）：`_arm_dot_done` 隐藏态不点表、singleShot
+  到点自毁、hideEvent 停表——它描述的泄漏路径不存在，且引用的 `_mark_task_done`
+  函数名根本不存在（函数名级幻觉）。
+- **ops5.5 S1**（淡化判据漏 primary elide_px）：`_plan_inputs` 的段元组自 D2 起就含
+  `elide_px`，`_structure_key` 只剔现文案——它读错了键的构成。
+- **ops5.5 S2**（迁移重复追加 network）：它引的代码里 `if NETWORK not in metrics`
+  防重检查就在原地，描述的场景与所引代码自相矛盾。
+- **A1 B1**（hideEvent 不停淡化表）：`hideEvent` 第 3244 行 `_stop_content_fade()`
+  就在它引的行号区间里（它自己引的证据区间包含了答案）。
+- **A1 B2**（`_strip_sampling_off` 初始态不一致）：监视器创建本身走 `_sync_*_slot`
+  闸门，「启动即停靠不建采样器」有 E6 专例锁死；且 `_sync_content_sampling()` 有
+  9 个调用点含它点名的 `_apply_position`/`mouseMoveEvent`。
+- **A1 C1**（`_sys_active` 不查 isVisible）：那是文档化的「隐藏即休眠」语义——
+  可见性只管 start/暂停，不收口（E6 施工单明写）。
+- **A1 C3**（迁移可能先于清理）：代码顺序就是先 `_clean_island_metrics` 后追加。
+- **A1 D1/D2**：无具体证据的泛指（注释风格是本项目考古惯例；调用点已覆盖）。
+- **A1 nit**（滞回注释 2pt）：全文无 "2pt"，注释本就是 3pt。
+
+### 采纳修复（R3 批，全部 test-first）
+
+| # | 来源 | 修复 |
+|---|---|---|
+| closeEvent 收口两条采样器 | ops5.5 M1 | `closeEvent` 调 monitor.close()（有界 join 的收口路径才走得到），`test_close_event_closes_both_monitors` |
+| 滞回「折叠保持 / 恢复清零」 | ops5.5 M3 | 与 E2「折叠不埋没告警」调和：折叠保持 severity（chip 点唯一来源）、**恢复订阅那一刻**清零（92 折掉掉到 85 恢复按新序列判 warn），`test_unsubscribing_a_metric_clears_its_hysteresis_memory` |
+| hover 真实序列 | 6.1sol #1 | 我的 R1-5 修法漏了「先进入、后展开」主路径（enterEvent 在 normal 态就发生过了）；改自记 `_cursor_inside` 旗帜（`underMouse()` 由窗口系统置位，合成事件下不可验），`expand_card` 按旗帜决定起不起 15s 表 |
+| DSH 关闭发 offline | 6.1sol #2 | `apply_config` 停 dsh 监视器时经 `_on_dsh_converged_state("", "offline", "link-disabled")` 复用 offline 管线——岛锁存态（待确认环/错误点）与常驻气泡一并复位，`TestDshDisableResetsPresentationState` |
+| 全折故障保持 | 6.1sol #3 | `_sys_error_hold`：收口袋时留住最近故障（**只在有快照时改写**——同一次刷新收口袋会被调两遍，第二遍快照已 None 会把刚留住的抹掉，实测复现）；`_device_segment` 与卡片原因行都读它，`test_full_fold_preserves_the_last_sampling_error` |
+| 测试诚实化 ×2 | 6.1sol #4/#5 | 包络测试改真·临界预算（先找折叠边界再退一步）+ 每拍换时间戳（同值短路会让"50 拍"只剩 1 拍）；FontChange 测试改内部字号层常量（部件字体不影响岛的像素层，不换字体就是假绿） |
+| 来源映射 | ops5.5 N1 | `test_island_review_fixes.py` 文件头补逐轮评审来源表 |
+
+### 本轮验证
+
+聚焦（岛+设置+架构+agent_link+纪律）868 passed；ruff 干净；全量 **5292 passed, 11 skipped**（813s，含 R3 全部新用例）。

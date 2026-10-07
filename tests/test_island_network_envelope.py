@@ -67,10 +67,16 @@ class _FakeScreen:
         return self._rect
 
 
+_SEQ = {"n": 0}
+
+
 def _sample(down, up, latency):
+    """每拍都换时间戳：``_tick_network`` 对同一份快照有同值短路，
+    时间戳不变的话"50 拍"实际只有第一拍在走（6.1sol 终审指出的测试自欺欺人）。"""
+    _SEQ["n"] += 1
     return net_monitor.NetSample(
         down_bps=down, up_bps=up, latency_ms=latency,
-        latency_lost=False, sampled_at=1.0)
+        latency_lost=False, sampled_at=float(_SEQ["n"]))
 
 
 def _island(monkeypatch, screen_width):
@@ -95,13 +101,21 @@ def _island(monkeypatch, screen_width):
 
 
 def _critical_width(island, screen):
-    """实测搜索「网络段刚好不被折叠」的最窄屏宽（真实字体，不写死 px）。"""
+    """实测搜索「网络段刚好不被折叠」的**最窄**屏宽（真实字体，不写死 px）。
+
+    从宽往窄找到**第一次开始折叠**的屏宽，再退一步——那才是真正"再窄 2px
+    就折"的临界档（6.1sol 终审：修复前的写法第一轮就返回 1500，根本没进
+    临界区，振荡路径一步都没走到）。
+    """
     for width in range(1500, 150, -2):
         screen._rect = QRect(0, 0, width, 768)
         island.refresh_from_config()
-        if not island._row_plan().folded:
-            return width
-    raise AssertionError("找不到网络段不被折叠的屏宽")
+        if island._row_plan().folded:
+            screen._rect = QRect(0, 0, width + 2, 768)
+            island.refresh_from_config()
+            assert not island._row_plan().folded, "回退一步后应刚好不折"
+            return width + 2
+    raise AssertionError("1500px 内找不到折叠边界（字体太窄？）")
 
 
 def test_beyond_envelope_readings_never_change_the_plan(monkeypatch):

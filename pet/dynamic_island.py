@@ -540,6 +540,10 @@ class DynamicIsland(QWidget):
         # "这个 key 是不是刚订阅的"），用于"恢复首轮显示 --"。
         self._sys_subscribed: set[str] = set()
         self._sys_pending: set[str] = set()
+        # 被折前最后一拍是采样故障的保持表（metric_id → 原因），见 ③①
+        self._sys_error_hold: dict[str, str] = {}
+        # 光标是否在岛内（自记 hover 旗帜，见 expand_card 的 hover 暂停与 enter/leaveEvent）
+        self._cursor_inside = False
         # 逐指标的**上一拍告警级**（""|warn|crit，P2 Slice E2）：滞回要的"上一拍"
         # 只活在这里，不进段对象（段是每拍现算的数据，不是累积状态）。折叠态会
         # 停掉被折段的采样，靠它把告警保持住——chip 告警点因此不会一闪即灭。
@@ -1092,18 +1096,42 @@ class DynamicIsland(QWidget):
             if self._sys_monitor is not None:
                 self._sys_monitor.close()
                 self._sys_monitor = None
+            # 收口袋之前：最近一份快照是故障就把故障留住（6.1sol 终审——
+            # 「折叠不埋没告警」不能只靠 severity：error 态段的 chip 点会随
+            # 快照清空而消失）。故障不是 severity，它是状态；留住后
+            # ``_device_segment`` 在无快照且仍被折时如实报 error。
+            # **只在有快照时改写保持表**：本分支在同一次刷新里可能被调两遍
+            # （折叠同步 + 刷新直连），第二遍快照已是 None，若清空会把
+            # 第一遍刚留住的故障抹掉（实测复现）。
+            if self._sys_sample is not None:
+                if self._sys_sample.state != island_segments.STATE_OK:
+                    reason = str(getattr(self._sys_sample, "error_reason", "") or "")
+                    self._sys_error_hold = {
+                        mid: reason for mid in self._sys_subscribed}
+                else:
+                    self._sys_error_hold = {}
             self._sys_sample = None
             self._sys_subscribed = set()
             self._sys_pending = set()
+            # 滞回记忆**不清**：全折后 chip 告警点只靠它亮（E2）；恢复订阅时
+            # 由 enabled 分支的 restoring 清算新序列的账（M3）。
             return
         monitor = self._sys_monitor
         if monitor is None:
             monitor = self._make_sys_monitor(sys_monitor.DEFAULT_INTERVAL_SECONDS)
             self._sys_monitor = monitor
         enabled = self._sys_metric_ids()
+        restoring = set(enabled) - self._sys_subscribed
         for metric_id in _SYS_METRIC_IDS:
             if metric_id in enabled:
                 monitor.subscribe(metric_id)
+                if metric_id in restoring:
+                    # 恢复订阅 = 新的采样序列（ops5.5 评审 M3）：滞回记忆与故障
+                    # 保持都在这一刻清——92 折掉、掉到 85 恢复时按旧记忆会保 crit，
+                    # 按新序列是 warn。**折叠（退订）时不清**：被折段的 severity
+                    # 是 chip 告警点的唯一来源（E2「折叠不埋没告警」）。
+                    self._alert_severity.pop(metric_id, None)
+                    self._sys_error_hold.pop(metric_id, None)
             else:
                 monitor.unsubscribe(metric_id)
         self._sys_pending = ((self._sys_pending | (set(enabled) - self._sys_subscribed))
@@ -1576,6 +1604,9 @@ class DynamicIsland(QWidget):
             reason = str(getattr(self._sys_sample, "error_reason", "") or "").strip()
             if reason:
                 return reason
+        held = self._sys_error_hold.get(metric_id, "").strip()
+        if held:
+            return held
         return "采样失败"
 
     def _unavailable_row(self, metric_id: str, reason: str) -> _CardMetricRow:
@@ -1729,7 +1760,13 @@ class DynamicIsland(QWidget):
         self._card_box.show()
         self._sync_card_labels()
         self._animate_to(self._target_rect())
-        self._card_collapse_timer.start()
+        # hover 暂停的第一现场（6.1sol 终审：「先进入胶囊、再单击展开」是最常见
+        # 路径——enterEvent 早在 normal 态就发生过了，展开后鼠标没动不会再来一次；
+        # 不看 hover 状态就会在用户正读着卡片时被 15s 表收掉）。用自记的
+        # ``_cursor_inside`` 而不是 underMouse()：后者由窗口系统置位，语义相同但
+        # 在合成事件下不可验（自记旗帜走 enter/leave 两个 handler，路径唯一）。
+        if not self._cursor_inside:
+            self._card_collapse_timer.start()
         # 卡片开着时每秒刷一次"更新时间"与状态文字（收起/隐藏即停表，同完成瞬态）
         self._card_tick_timer.start()
         self._sync_content_sampling()
@@ -2081,7 +2118,13 @@ class DynamicIsland(QWidget):
         """
         sample = self._sys_sample
         if sample is None or metric_id in self._sys_pending:
-            state, value = island_segments.STATE_SAMPLING, None
+            if metric_id in self._sys_error_hold:
+                # 被折前最后一拍是采样故障（``_sys_error_hold``，见
+                # ``_sync_sys_slot`` 收口袋）：折叠不埋没故障——chip 告警点
+                # 与卡片原因行靠这条保持，直到恢复订阅/新快照到达。
+                state, value = island_segments.STATE_ERROR, None
+            else:
+                state, value = island_segments.STATE_SAMPLING, None
         elif sample.state != island_segments.STATE_OK:
             state, value = island_segments.STATE_ERROR, None
         else:
@@ -3238,6 +3281,9 @@ class DynamicIsland(QWidget):
         self._card_tick_timer.stop()
         self._stop_dot_done_timer()
         self._stop_content_fade()
+        # 光标旗帜随隐藏复位（A1 第二票 R3）：隐藏期间光标真实位置不可知，
+        # 不复位的话显示后 expand_card 会拿陈旧 True 误判「鼠标在岛内」不起 15s 表
+        self._cursor_inside = False
         # 网络槽/设备槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，
         # 不 join；订阅保留，显示后 _sync_*_slot 幂等恢复）
         self._pause_network_slot()
@@ -3269,6 +3315,22 @@ class DynamicIsland(QWidget):
         self._plan_inputs_key = None
         self._content_cache_key = None
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """窗口销毁：两条采样器主动收口（ops5.5 评审 M1）。
+
+        线程是 daemon、进程退时不阻塞，但 ``close()`` 的有界 join 与订阅清理是
+        设计好的收口路径（``sys_monitor.close``/``net_monitor.close``），只在配置
+        变更分支被调到的话，窗口销毁这条路就永远走不到——补上，与
+        ``pet/window.py`` 退出收口径一致。幂等：两处都判 None。
+        """
+        if self._net_monitor is not None:
+            self._net_monitor.close()
+            self._net_monitor = None
+        if self._sys_monitor is not None:
+            self._sys_monitor.close()
+            self._sys_monitor = None
+        super().closeEvent(event)
+
     def showEvent(self, event) -> None:  # noqa: N802
         """重新显示：恢复信息轮询并立即刷新（沉睡期间的内容变化补上），
         几何直接归位（隐藏可能打断了停靠/展开动画）。"""
@@ -3290,6 +3352,7 @@ class DynamicIsland(QWidget):
 
     # ------------------------------------------------------------ 悬停
     def enterEvent(self, event) -> None:  # noqa: N802
+        self._cursor_inside = True
         # 展开卡片时不悬停放大（整窗缩放会截掉贴边的卡片底板，见 paintEvent）
         self._hover_scale_target = 1.0 if self._mode == "expanded" else 1.02
         if self._mode == "expanded":
@@ -3305,6 +3368,7 @@ class DynamicIsland(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
+        self._cursor_inside = False
         self._hover_scale_target = 1.0
         if self._mode == "expanded":
             self._card_collapse_timer.start()
