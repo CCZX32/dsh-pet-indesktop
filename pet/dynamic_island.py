@@ -243,6 +243,14 @@ _FONT_LAYERS = {
     "name": (12, QFont.Weight.Normal),
     "label": (10, QFont.Weight.Normal),
 }
+#: 单位盒的降色系数（裁决稿 §二-5：单位弱化靠"10px + α×70%"双管，缺一档就是
+#: 13px 与 10px 之间的"差 1px、弱化不足"）。
+_UNIT_ALPHA = 0.7
+#: 设备槽段的**数值盒**样本：``sys_monitor.MAX_TEXT`` 经同一条「值/单位分离」路径
+#: 拆掉单位的那一半（单位本身取 ``island_segments.PERCENT_UNIT`` 声明值，单位盒宽
+#: 由布局层另算，见 ``island_layout.place_info_segments``）。
+_DEVICE_VALUE_SAMPLE = island_segments.split_value_unit(
+    sys_monitor.MAX_TEXT, island_segments.PERCENT_UNIT)[0]
 
 
 class DynamicIsland(QWidget):
@@ -1331,6 +1339,12 @@ class DynamicIsland(QWidget):
         有快照但该字段是 None（CPU 差分首样本）也算 sampling——"还没读数"与
         "读数是 0"必须分得开（``--`` 不伪造 0）。刚被恢复（重新订阅）的段同样先报
         sampling：见 ``_sys_pending``。
+
+        格式化器仍输出合并串（``38%``，卡片与其他消费方照用），这里用同一条
+        「值/单位分离」路径把它拆成"数值盒的 38 + 单位盒的 %"。**单位取声明值**
+        而不是拆分结果：拆分对兜底串 ``--`` 返回空单位，跟着读数走就会在采样态
+        与 ok 态之间差一个单位盒宽（状态切换跳宽）；声明值进宽度白名单键，
+        读数不进。
         """
         sample = self._sys_sample
         if sample is None or metric_id in self._sys_pending:
@@ -1344,10 +1358,13 @@ class DynamicIsland(QWidget):
                      else island_segments.STATE_SAMPLING)
         formatter = (sys_monitor.format_cpu if metric_id == island_segments.CPU
                      else sys_monitor.format_mem)
+        text, _unit = island_segments.split_value_unit(
+            self._state_text(state, formatter(value)), island_segments.PERCENT_UNIT)
         return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=metric_id,
                         label=_DEVICE_LABELS[metric_id],
-                        text=self._state_text(state, formatter(value)),
-                        box_text=sys_monitor.MAX_TEXT, state=state)
+                        text=text,
+                        box_text=_DEVICE_VALUE_SAMPLE, state=state,
+                        unit=island_segments.PERCENT_UNIT)
 
     @staticmethod
     def _unknown_segment(metric_id: str) -> _InfoSeg:
@@ -1476,7 +1493,8 @@ class DynamicIsland(QWidget):
         """行计划的**输入白名单**（也是它的缓存键）：只有这些变化才允许重算。
 
         - 可见项 / 角色名（含静止态省略后的文本与占位宽）/ 各段的
-          ``(id, label, box_text, 主信息 text)`` —— 段增删与段模板变化都在这一项里；
+          ``(id, label, box_text, 单位, 主信息 text)`` —— 段增删与段模板变化都在
+          这一项里（单位是模板面：它进的是盒宽样本，不是读数）；
         - 字号各层的度量指纹 + DPR：系统字体/DPI 一变必须重测（字变了盒子也要变）；
         - 收缩预算（屏可用宽 − 32px）：换屏 / 跨屏迁移后要重算收缩级。
 
@@ -1489,7 +1507,7 @@ class DynamicIsland(QWidget):
             self._visible_parts(),
             self._name_layout(),
             tuple(
-                (seg.seg_id, seg.label, seg.box_text, seg.elide_px,
+                (seg.seg_id, seg.label, seg.box_text, seg.unit, seg.elide_px,
                  seg.text if seg.kind == island_layout.KIND_PRIMARY else "")
                 for seg in segments
             ),
@@ -1770,6 +1788,22 @@ class DynamicIsland(QWidget):
         return QColor(255, 255, 255, 36)
 
     @staticmethod
+    def _unit_color(base: QColor) -> QColor:
+        """单位盒的颜色：与数值同色、alpha ×70%（裁决稿 §二-5 的"单位弱化"）。
+
+        弱化靠双管——字号降到 10px 层（L4）+ 这里按比例降色；缺了降色，13px 与
+        10px 之间只差 1px，"弱化不足"。
+
+        用 QColor 的 alpha 而不是 ``painter.setOpacity``：内容层是缓存位图，绘制
+        中途的 opacity 一旦忘记还原就会污染后面的图元（状态点/竖线），而 alpha
+        只作用在这几个字形上，且能被测试直接断言。**不改传进来的颜色对象**——
+        调用方复用的主文字色不该被这里就地改坏。
+        """
+        color = QColor(base)
+        color.setAlpha(round(color.alpha() * _UNIT_ALPHA))
+        return color
+
+    @staticmethod
     def _readable_card_background(background):
         """展开卡片底板：alpha 钳到下限 215。
 
@@ -2000,7 +2034,7 @@ class DynamicIsland(QWidget):
         一次 blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
         文字锐利口径不变）；squish 只调制胶囊外形、本来就不碰内容层。
 
-        key 覆盖所有影响像素的输入（可见项/名字态/各段 text+state/字号指纹/颜色/
+        key 覆盖所有影响像素的输入（可见项/名字态/各段 text+单位+state/字号指纹/颜色/
         DPR/宽度），任一变化自动重建——**收缩结果（折了哪几段、名字显不显示）
         由段列表与名字进 key**，所以折叠↔展开必然换位图。采样值变化只重建这张
         位图，窗口几何走 ``_capsule_width`` 的白名单，两者互不牵连。
@@ -2021,7 +2055,7 @@ class DynamicIsland(QWidget):
             icon, name, info, status,
             self._icon_text() if icon else "",
             name_text if name else "",
-            tuple((seg.seg_id, seg.text, seg.state) for seg in segments),
+            tuple((seg.seg_id, seg.text, seg.unit, seg.state) for seg in segments),
             self._accent_color().name() if icon else "",
             primary_color.name() if name else "",
             primary_text_color.name() if segments else "",
@@ -2111,6 +2145,7 @@ class DynamicIsland(QWidget):
             if seg.kind == island_layout.KIND_PRIMARY:
                 painter.setFont(self._font_for("primary"))
                 painter.setPen(primary_text_color)
+                value_color = primary_text_color
             else:
                 if seg.label:
                     painter.setFont(self._font_for("label"))
@@ -2119,10 +2154,17 @@ class DynamicIsland(QWidget):
                 painter.setFont(self._font_for("value"))
                 # sampling/unknown/error 一律次色、不染告警色：胶囊上不做状态染色
                 # （状态差异交给状态点与卡片），平衡"安静"与"诚实的 --"
-                painter.setPen(primary_color if seg.state == island_segments.STATE_OK
+                value_color = (primary_color if seg.state == island_segments.STATE_OK
                                else secondary_color)
+                painter.setPen(value_color)
             # 盒内右对齐 + 统一基线（所有字号层共用一条基线，见 _BASELINE_DY）
             painter.drawText(QPointF(placement.text_x, baseline), placement.text)
+            if placement.unit_text:
+                # 单位盒：左对齐贴数值盒（+1px）、10px 层、值色 α×70%——只有"值盒
+                # 右对齐 + 单位盒左对齐"才做得到 9%→100% 时个位不动（裁决稿 §二-5）
+                painter.setFont(self._font_for("label"))
+                painter.setPen(self._unit_color(value_color))
+                painter.drawText(QPointF(placement.unit_x, baseline), placement.unit_text)
             x = placement.right
         if status:
             painter.setPen(Qt.PenStyle.NoPen)

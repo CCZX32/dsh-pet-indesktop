@@ -48,6 +48,11 @@ LABEL_MAX_CHARS = 6
 LABEL_GAP_PX = 4
 #: 四种兜底态共用的占位文案（与 max_text 同盒宽语义，不占位异常宽、不伪造 0）。
 UNKNOWN_TEXT = "--"
+#: 百分比段的单位（cpu / 内存）。单位是**段契约的呈现元素**而不是格式化器的一部分：
+#: 数值进数值盒、单位进单位盒（双盒排版见 ``island_layout.place_info_segments``）。
+#: 格式化器仍输出合并串（``sys_monitor.format_cpu/format_mem``）——卡片与其他消费方
+#: 用同一个串，兼容面不因拆盒而破。
+PERCENT_UNIT = "%"
 #: 右省略符。用单字符 …（``...`` 会白占两列，盒宽紧张时更早截断）。
 ELLIPSIS = "…"
 #: 字体指纹的探针串：度量对象不暴露字体（QFontMetrics 没有 ``font()``），
@@ -228,6 +233,23 @@ def _elide_right(text: str, box_width: int, font_metrics) -> str:
 
 
 # ---------------------------------------------------------------- 四态兜底呈现
+def split_value_unit(merged: str, unit: str) -> tuple[str, str]:
+    """把格式化器的合并串拆成 ``(数值, 单位)``——段契约的「值/单位分离」输出。
+
+    合并串照旧由格式化器提供（卡片与其他消费方用它，兼容面不破），这个函数只给
+    胶囊的双盒排版用：数值进右对齐的数值盒、单位进左对齐的单位盒（见
+    ``island_layout.place_info_segments``）。
+
+    ``unit`` 为空、整串就是单位本身、或不以该单位结尾（兜底串 ``--``）时把整串
+    当数值、单位为空——四态兜底的 ``--`` 因此不会拆出一个孤零零的单位。注意单位
+    **盒宽**由段自行声明（``_InfoSeg.unit``）：拆分结果只用来剥掉数值盒里的单位，
+    单位盒宽不跟着读数走，否则采样态与 ok 态会差一个单位盒宽（状态切换跳宽）。
+    """
+    if not unit or merged == unit or not merged.endswith(unit):
+        return merged, ""
+    return merged[: -len(unit)], unit
+
+
 def render_compact(seg: SegmentSnapshot) -> str | None:
     """胶囊上的紧凑文案；``unsupported`` 段返回 ``None``（调用方跳过、不占位）。
 

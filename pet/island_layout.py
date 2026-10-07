@@ -16,7 +16,8 @@
 三块内容：
 
 - :class:`_InfoSeg` / :class:`_SegPlacement` / :func:`place_info_segments`：
-  段的落位（段间 19px 槽位、竖线居中、字段盒右对齐、chip 居中）；
+  段的落位（段间 19px 槽位、竖线居中、字段盒右对齐、**有单位时数值盒 + 单位盒
+  双盒**、chip 居中）；
 - :func:`plan_info_row`：收缩流水线（名字省略 → 名字隐藏 → 尾部整段折 +N →
   custom 主信息省略 → 保底），返回"可见段集 + 折叠段 + 名字态"；
 - :func:`apply_shrink`：把计划的结构套到**当刻**的段列表上——这是绘制层与测宽层
@@ -41,6 +42,9 @@ _DIVIDER_H_PX = 14.0
 _CONTENT_PAD_PX = 19.0
 _ICON_PX = 26.0
 _ICON_GAP_PX = 8.0
+#: 数值盒与单位盒之间的固定间距（裁决稿 §二-5：k3 的「紧贴数字 1px」落在盒上，
+#: 数值盒右对齐 + 单位盒取最宽单位左对齐，两盒之间留 1px）。
+_UNIT_GAP_PX = 1.0
 #: 角色名上限（静止态）96px（超出右省略）：名字是身份不是数据，不该吃掉指标空间。
 #: D2 收缩的第一级把它收紧到 :data:`_NAME_SHRINK_PX`，第二级整段隐藏。
 _NAME_MAX_PX = 96
@@ -69,7 +73,9 @@ _PRIMARY_SAMPLES = {
 #: 不取 G 级病态最坏形态：那会让典型读数（K 级 + 两位毫秒）在盒内留出大块空白。
 _NETWORK_BOX_SAMPLE = net_monitor.format_network_slot(
     1023 * 1024 ** 2, 1023 * 1024 ** 2, 999.0)
-#: 设备槽段的标签（数值样本取 ``sys_monitor.MAX_TEXT``，与格式化器同源）。
+#: 设备槽段的标签（数值盒样本与单位盒内容见 ``DynamicIsland._device_segment``：
+#: ``sys_monitor.MAX_TEXT`` 经 ``island_segments.split_value_unit`` 拆成值/单位两半，
+#: 与格式化器同源）。
 _DEVICE_LABELS = {island_segments.CPU: "CPU", island_segments.MEM: "内存"}
 #: 设备槽段 id（订阅 key 同 id；cpu/mem 共用一条采样线程）。
 _SYS_METRIC_IDS = (island_segments.CPU, island_segments.MEM)
@@ -96,6 +102,12 @@ class _InfoSeg:
     是测宽样本（指标段 = 声明的最坏形态，主信息段 = 模式样本）。段列表是数据，
     收缩流水线只过滤/替换这个列表（折尾段、加 chip、省名字），不改绘制。
 
+    ``unit`` 是**单位盒**里画的串（cpu/mem 的 ``%``，见 ``island_segments`` 的
+    「值/单位分离」）：有单位时这一段的排版是"数值盒 + 1px + 单位盒"两个盒子，
+    ``box_text`` 因此只声明**数值**的样本宽（单位宽另算，见 :func:`place_info_segments`）。
+    单位是模板面（进宽度白名单键）而读数不是——段自己声明单位，拆出来的值只影响
+    盒内字形，不影响盒宽。
+
     ``elide_px`` 是"超宽时允许右省略到多少 px"：0 = 永不省略（时间/余额/峰谷这类
     定宽主信息、以及所有指标段——指标段本来就靠字段盒截断护栏兜），>0 = 收缩
     保底级可省略到该上限（custom 主信息）。
@@ -104,15 +116,21 @@ class _InfoSeg:
     kind: str        # "primary" / "metric" / "chip"
     seg_id: str      # "primary" / "network" / "cpu" / "mem" / 配置里的未知 id / "chip"
     label: str       # 段标签（L4 10px 层；主信息段与 chip 为空）
-    text: str        # 当前显示文案（运行期值）
+    text: str        # 当前显示文案（运行期值；有单位时只含数值那半）
     box_text: str    # 测宽样本（指标段 = max_text；主信息段 = 模式最坏形态）
     state: str       # island_segments 的状态词表
     elide_px: int = 0  # 超宽可右省略到的上限（0 = 永不省略）
+    unit: str = ""     # 单位盒的串（"" = 该段没有单位盒）
 
 
 @dataclass(frozen=True)
 class _SegPlacement:
-    """一段在内容行里的落位（纯几何：绘制层只做装配，不做度量）。"""
+    """一段在内容行里的落位（纯几何：绘制层只做装配，不做度量）。
+
+    有单位的段占**两个盒子**：``box_x/box_w`` 是数值盒（右对齐），
+    ``unit_x/unit_w`` 是单位盒（左对齐、紧贴数值盒 1px）。``unit_w`` 取"各段最宽
+    单位"的实测宽，所以同一行里所有单位盒左右缘对齐；无单位的段 ``unit_x=None``。
+    """
 
     seg: _InfoSeg
     text: str            # 盒内实际绘制的文案（超宽时已右省略到盒宽）
@@ -122,10 +140,15 @@ class _SegPlacement:
     box_x: float
     box_w: int
     divider_x: float | None   # 段前竖线的 x；首段与 chip 前为 None
+    unit_x: float | None = None   # 单位盒左缘；None = 该段没有单位盒
+    unit_w: int = 0               # 单位盒宽（各段最宽单位实测；无单位时 0）
 
     @property
     def right(self) -> float:
-        return self.box_x + self.box_w
+        """段右缘：无单位 = 数值盒右缘；有单位 = 单位盒右缘。"""
+        if self.unit_x is None:
+            return self.box_x + self.box_w
+        return self.unit_x + self.unit_w
 
     @property
     def text_x(self) -> float:
@@ -133,6 +156,18 @@ class _SegPlacement:
         if self.seg.kind == KIND_CHIP:
             return self.box_x + (self.box_w - self.text_w) / 2.0
         return self.box_x + self.box_w - self.text_w
+
+    @property
+    def unit_text(self) -> str:
+        """单位盒里**实际绘制**的串：非 ``ok`` 态不画（盒宽仍占，见 :attr:`right`）。
+
+        四态兜底的呈现口径是"只有 ``--``"（见 ``island_segments.render_compact``），
+        给未知读数配一个孤零零的 ``%`` 是伪造结构；但盒宽是模板面——不占宽就会在
+        采样态↔ok 态之间跳宽。
+        """
+        if self.unit_x is None or self.seg.state != island_segments.STATE_OK:
+            return ""
+        return self.seg.unit
 
 
 def _box_sample(seg: _InfoSeg, value_fm) -> str:
@@ -178,6 +213,19 @@ def elide_to_width(text: str, limit_px: int, font_metrics) -> str:
     return text[:low] + island_segments.ELLIPSIS
 
 
+def _unit_box_width(segments, label_fm) -> int:
+    """一行里**单位盒的统一宽** = 各段单位实测宽的最大者（0 = 这一行没有单位）。
+
+    取统一宽而不是逐段实测：一行的单位盒左缘本来就贴在各自数值盒右缘（数值宽
+    可变），统一宽至少让右缘对齐——"各段最宽单位"是 ops5.5 双盒的原始口径。单位
+    与标签同走 10px 层（见 ``dynamic_island._FONT_LAYERS``），所以度量对象复用
+    ``label_fm`` 即可。
+    """
+    widths = [int(label_fm.horizontalAdvance(seg.unit))
+              for seg in segments if seg.unit]
+    return max(widths) if widths else 0
+
+
 def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
     """把段序列摆成一行（纯函数）：段间 19px 槽位、竖线居中、盒内对齐。
 
@@ -189,10 +237,17 @@ def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
     :func:`island_segments.format_field_box`（同一套 ``max_text`` 语义，且自带
     "超宽右省略 + warning"的硬护栏）。
 
+    有单位的段（cpu/mem 的 ``%``）是**双盒**：数值盒（``box_x/box_w``，右对齐）
+    + :data:`_UNIT_GAP_PX` + 单位盒（``unit_x/unit_w``，左对齐、统一取各段最宽
+    单位实测）。拆盒的全部意义是"``9% → 100%`` 时数值盒右缘不动"——盒宽由样本
+    定死，读数只在数值盒里左扩。
+
     ``start_x`` 是内容行里第一个段的起点（头像/角色名之后），返回值里的 x 全是
     绝对坐标——绘制层只按它落笔。chip 不画竖线（它是段序列的收尾标记，不是新数据
     段），盒宽自带左右内边距，文字居中。
     """
+    segments = tuple(segments)
+    unit_w = _unit_box_width(segments, label_fm)
     placements: list[_SegPlacement] = []
     x = float(start_x)
     for index, seg in enumerate(segments):
@@ -213,12 +268,14 @@ def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
             divider_x = x + (_SEG_SLOT_PX - _DIVIDER_W_PX) / 2.0
             x += _SEG_SLOT_PX
         box_x = x + label_w + gap
+        unit_x = box_x + box_w + _UNIT_GAP_PX if seg.unit else None
         placements.append(_SegPlacement(
             seg=seg, text=display, text_w=int(metrics.horizontalAdvance(display)),
             label_x=x, label_w=label_w, box_x=box_x, box_w=box_w,
             divider_x=divider_x,
+            unit_x=unit_x, unit_w=unit_w if unit_x is not None else 0,
         ))
-        x = box_x + box_w
+        x = placements[-1].right
     return placements
 
 
@@ -299,7 +356,8 @@ def _elide_primary_segment(seg: _InfoSeg, font_metrics) -> _InfoSeg:
     if text == seg.text:
         return seg
     return _InfoSeg(kind=seg.kind, seg_id=seg.seg_id, label=seg.label, text=text,
-                    box_text=text, state=seg.state, elide_px=seg.elide_px)
+                    box_text=text, state=seg.state, elide_px=seg.elide_px,
+                    unit=seg.unit)
 
 
 def plan_info_row(

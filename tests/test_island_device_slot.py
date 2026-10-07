@@ -288,8 +288,9 @@ def test_sample_flows_into_both_segments(tmp_path, monkeypatch):
 
         made[0].sample = _sys_sample(cpu=37.5, mem=61.2)
         island._tick_sys()
-        assert _segment(island, CPU).text == sm.format_cpu(37.5)
-        assert _segment(island, MEM).text == sm.format_mem(61.2)
+        # Slice E4 双盒：数值与单位分居两盒，拼回去仍是格式化器的合并串
+        assert _segment(island, CPU).text + _segment(island, CPU).unit == sm.format_cpu(37.5)
+        assert _segment(island, MEM).text + _segment(island, MEM).unit == sm.format_mem(61.2)
 
         # 值没变（同一份快照对象）→ 什么都不做（静止时零重绘）
         island._sys_sample = made[0].sample

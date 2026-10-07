@@ -330,14 +330,17 @@ def test_cpu_and_mem_segments_use_the_shared_snapshot(tmp_path, monkeypatch):
         before = island._compose_info_segments()
         assert _seg(before, CPU).label == "CPU"
         assert _seg(before, MEM).label == "内存"
-        assert _seg(before, CPU).box_text == sys_monitor.MAX_TEXT
+        assert _seg(before, CPU).box_text + _seg(before, CPU).unit == sys_monitor.MAX_TEXT
         assert {_seg(before, CPU).state, _seg(before, MEM).state} == {isl.STATE_SAMPLING}
 
         made[0].sample = _sys_sample(cpu=37.5, mem=61.2)
         island._tick_sys()
         after = island._compose_info_segments()
-        assert _seg(after, CPU).text == "38%" and _seg(after, CPU).state == isl.STATE_OK
-        assert _seg(after, MEM).text == "61%" and _seg(after, MEM).state == isl.STATE_OK
+        # Slice E4 双盒：数值盒拿 38、单位盒拿 %，拼回去 = 格式化器的合并串
+        assert _seg(after, CPU).text == "38" and _seg(after, CPU).unit == "%"
+        assert _seg(after, CPU).state == isl.STATE_OK
+        assert _seg(after, MEM).text == "61" and _seg(after, MEM).unit == "%"
+        assert _seg(after, MEM).state == isl.STATE_OK
     finally:
         island.close()
 
@@ -355,7 +358,7 @@ def test_cpu_first_differential_sample_stays_sampling(tmp_path, monkeypatch):
         segments = island._compose_info_segments()
         assert _seg(segments, CPU).text == "--"
         assert _seg(segments, CPU).state == isl.STATE_SAMPLING
-        assert _seg(segments, MEM).text == "61%", "内存读数不受 CPU 基线影响"
+        assert _seg(segments, MEM).text == "61", "内存读数不受 CPU 基线影响"
     finally:
         island.close()
 
@@ -511,7 +514,7 @@ def test_sampling_change_rebuilds_content_but_never_resizes(tmp_path, monkeypatc
         island._sys_monitor.sample = _sys_sample(cpu=97.0, mem=12.0)
         island._tick_sys()
 
-        assert _seg(island._compose_info_segments(), CPU).text == "97%", "读数没进段里"
+        assert _seg(island._compose_info_segments(), CPU).text == "97", "读数没进段里"
         assert island.geometry() == geometry, "采样值变化不得改窗口几何"
         assert island._width_key() == width_key, "采样值不在自然宽白名单里"
         assert island._content_cache() is not pixmap, "内容层必须按新读数重建"

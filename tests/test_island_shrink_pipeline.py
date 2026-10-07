@@ -507,7 +507,7 @@ def test_unfolded_segment_resubscribes_and_starts_from_dashes(tmp_path, monkeypa
         sys_stub.sample = _sys_sample()
         island._tick_sys()
         assert island._row_plan().folded == (), "宽屏不折叠"
-        assert _segment(island, MEM).text == "61%"
+        assert _segment(island, MEM).text == "61"
 
         # 只折尾部（内存）、CPU 还活着：共享采样器不重建，陈旧读数的坑正在这里
         _width, plan = _narrow_to(island, screen, lambda p: p.folded == (MEM,))
@@ -528,7 +528,7 @@ def test_unfolded_segment_resubscribes_and_starts_from_dashes(tmp_path, monkeypa
         sys_stub.sample = _sys_sample(cpu=7.0, mem=8.0, sampled_at=2.0)
         island._tick_sys()
         assert _segment(island, MEM).state == isl.STATE_OK
-        assert _segment(island, MEM).text == "8%"
+        assert _segment(island, MEM).text == "8"
     finally:
         island.close()
 
