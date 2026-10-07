@@ -22,6 +22,7 @@ import logging
 import math
 import sys
 import time
+from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
@@ -52,9 +53,10 @@ _EDGE_MARGIN = 16
 _DOCK_THRESHOLD = 40
 _STRIP_THICKNESS = 16
 _STRIP_SIDE = 64  # 左右停靠时竖条的长度
-_CARD_WIDTH = 340
-_CARD_HEIGHT = 148
+_CARD_WIDTH = 340      # 卡片宽下限（沿用现状视觉记忆）
+_CARD_WIDTH_MAX = 420  # 卡片宽上限（k3 §5.1：防长来源说明把卡片拉成横幅）
 _CARD_AUTO_COLLAPSE_MS = 15_000
+_CARD_TICK_MS = 1000   # 卡片开着时的每秒 tick：刷新"更新时间"，收起即停表
 _DOCK_BACK_MS = 800
 _BREATHE_AFTER_EVENT_S = 5.0
 
@@ -155,6 +157,57 @@ _BEVEL_SHADOW_GLASS = (35, 50, 60, 26)        # #23323C α26：带蓝相的暗�
 # 到点即销毁（停表纪律，同 _dot_done_timer）。
 _CONTENT_FADE_MS = 130       # 时长（施工单窗口 120-150ms）
 _CONTENT_FADE_TICK_MS = 16   # ~60fps，与 _ANIM_TICK_MS 同口径
+
+# ---- 展开卡片四分区（P2 Slice E5；裁决稿 §一-10 + §四 k3 卡片四分区）----
+# 分工硬规则：胶囊 = 一眼（定宽读数），卡片 = 看懂（单位全称/来源口径/更新时间只在
+# 卡片）。四分区自上而下 = 概览（主读数 + 状态文字）/ 指标详情（每段一行）/ 最近消息
+# / 操作。高度**全部按字体度量实测**（k3 §5.2，不再有固定的 148）；每一区自带横分隔线
+# 与上下间距，所以"没有指标段"时整区连分隔线一起消失，不会留下一条悬空的线。
+_CARD_MARGIN_X = 16       # 内容左右边距（沿用现状 _build_card 的阅读边距）
+_CARD_MARGIN_TOP = 6
+_CARD_MARGIN_BOTTOM = 12
+_CARD_LINE_GAP = 2        # 同一区内相邻行的行距
+_CARD_SECTION_GAP = 8     # 分区到横分隔线的距离（线上下各一档，k3 §5.1）
+_CARD_SEP_PX = 1          # 横分隔线厚度（色 = 段间竖线色，见 _divider_color）
+_CARD_COL_GAP = 8         # 指标详情三列之间的间距
+_CARD_NAME_COL_MAX = 44   # 段名列宽上限（超宽右省略，值列左缘因此对齐）
+_CARD_ROW_PAD_Y = 2       # 指标行的上下内边距（行高 = 实测行高 + 2×它）
+_CARD_DETAIL_MIN_PX = 96   # 详情列的最小可用宽（值列取宽时给它留下的底线）
+_CARD_MESSAGE_MAX_LINES = 2   # 最近消息最多两行（k3 §5.1，沿用现状限高）
+_CARD_BUTTON_H = 28       # 操作行按钮高（k3 §5.1）
+_CARD_STATUS_DOT_GAP = 6  # 概览区状态点与状态文字的间距
+#: 详情列宽样本里的"更新时间"占位：宽度只吃这个固定串、不吃真实读数
+#: （"3 秒前" → "00 秒前"），所以采样值永远改不动卡片宽（与胶囊宽度白名单同纪律）。
+_CARD_UPDATED_SAMPLE = "00 秒前"
+#: 卡片里每段的人话名字（胶囊里网络段是纯 glyph 无 label，卡片得说清是哪一段）。
+_CARD_METRIC_NAMES = {
+    island_segments.NETWORK: "网络",
+    island_segments.CPU: "CPU",
+    island_segments.MEM: "内存",
+}
+#: 卡片里的**单位全称**（k3 §5.3：胶囊只给紧凑读数，量纲在卡片说清）。
+#: 刻意短：这一列和"来源 · 更新时间"共用一个详情列，写长了会把更新时间挤掉
+#: （宽度的上限是 420，见 _CARD_WIDTH_MAX）。
+_CARD_UNIT_FULL = {
+    island_segments.NETWORK: "速率 KB/s · 延迟 ms",
+    island_segments.CPU: "百分比",
+    island_segments.MEM: "百分比",
+}
+#: 概览区的状态文字（E1 五态语义的字面化；颜色仍走 ``_status_dot_style``）。
+#: ``_DOT_HIDDEN`` 不在这张表里——它要分"桌宠隐藏"与"DSH 离线"两种说法。
+_CARD_STATUS_TEXT = {
+    _DOT_IDLE: "空闲",
+    _DOT_WORKING: "工作中",
+    _DOT_DONE: "刚完成",
+    _DOT_WAITING: "待确认",
+    _DOT_ERROR: "出错",
+}
+#: 四态兜底/不可用段在详情列的整句说明（顶掉"单位 · 来源 · 时间"三段）。
+_CARD_UNAVAILABLE_NOTE = "该指标不可用"
+_CARD_UNKNOWN_REASON = "未注册的段 id"
+#: 段的**来源口径**（k3 §5.3：卡片说清"这个数从哪来"，胶囊一个字都不提）。
+_CARD_SOURCE_SYS = "本机 psutil 采样"
+_CARD_SOURCE_NET = "网卡计数 + DNS RTT"
 
 
 def _status_error_glyph_path(rect: QRectF) -> QPainterPath:
@@ -260,18 +313,112 @@ def _native_reassert_topmost(window) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class _CardMetricRow:
+    """卡片 B 区一行（指标详情）——**数据不是绘制串**，三列文案一次算清。
+
+    三列 = 段名 / 当前值**合并串** / 详情（单位全称 · 来源口径 · 更新时间）。
+    ``value_sample`` 与 ``detail_sample`` 是**宽度账目**用的声明样本（值列吃段自己
+    声明的 ``box_text``，详情列把更新时间换成固定样本）——卡片宽由它们算出，
+    **真实读数一个都不进**：采样值因此永远改不动卡片几何（与胶囊的宽度白名单
+    同一条纪律）。``note`` 非空时顶掉详情三段（四态兜底/不可用段写整句原因）。
+    """
+
+    seg_id: str
+    name: str
+    value: str
+    value_sample: str = ""
+    unit_full: str = ""
+    source: str = ""
+    updated: str = ""
+    state: str = island_segments.STATE_OK
+    severity: str = ""
+    note: str = ""
+
+    @property
+    def detail(self) -> str:
+        """详情列现文案：单位全称 · 来源 · 更新时间（空项自动省略）。"""
+        if self.note:
+            return self.note
+        return " · ".join(
+            part for part in (self.unit_full, self.source, self.updated) if part)
+
+    @property
+    def detail_short(self) -> str:
+        """详情列的**降级文案**：放不下时先省掉单位全称，保住来源与更新时间。
+
+        降级顺序是刻意的：单位缩写在值列里已经看得见（``38%``/``↓ 2.4M``），而
+        "这个数从哪来、什么时候采的"是卡片独有、胶囊上一个字都没有的信息——空间
+        不够时先舍重复表述，再走右省略兜底。
+        """
+        if self.note:
+            return self.note
+        return " · ".join(part for part in (self.source, self.updated) if part)
+
+    @property
+    def detail_sample(self) -> str:
+        """详情列宽样本：更新时间换固定样本，读数变字不改宽。"""
+        if self.note:
+            return self.note
+        return " · ".join(
+            part for part in (self.unit_full, self.source, _CARD_UPDATED_SAMPLE)
+            if part)
+
+
+class _CardSeparator(QWidget):
+    """卡片横分隔线（1px）：色 = 段间竖线色，左右由容器边距管着不出头。
+
+    自绘而不是 QFrame/样式表：颜色要跟着 ``_divider_color`` 的三风格分支走，
+    自绘是唯一不依赖"样式表是否恰好命中这个控件"的画法（k3 §7 的横分隔线就是
+    竖分隔线同色）。
+    """
+
+    def __init__(self, island: "DynamicIsland", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._island = island
+        self.setFixedHeight(_CARD_SEP_PX)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._island._divider_color())
+        painter.end()
+
+
+class _CardStatusDot(QWidget):
+    """概览区的 8px 状态点：**直接复用**胶囊的 ``_paint_status_dot``。
+
+    形状+颜色双通道是 E1 的语汇（实心 = 空闲/工作/完成，空心环 = 待确认/隐藏/
+    离线，红实心+感叹 = 错误）。卡片里跟胶囊画同一枚图元，两处不可能漂移成
+    两套样子——重画一遍路径才是漂移的开始。
+    """
+
+    def __init__(self, island: "DynamicIsland", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._island = island
+        self.setFixedSize(int(_STATUS_DOT_PX), int(_STATUS_DOT_PX))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._island._paint_status_dot(
+            painter, QRectF(0, 0, _STATUS_DOT_PX, _STATUS_DOT_PX))
+        painter.end()
+
+
 # ---------------------------------------------------------------- 段管线（P1 D1/D2）
 # 胶囊内容行 = 头像 + 角色名 + 主信息段 + 指标段… + 状态点（见设计稿 §1.1）。
 # 行内几何、段数据与收缩判定全部下沉在 ``pet/island_layout.py``（零 Qt 纯函数层，
 # 度量对象注入、替身上可验）；本文件只管"什么时候重算、拿什么值来算、画到
 # QPainter 上"——所以这里只剩字体与绘制相关的常量。
 #: 字号阶梯（逻辑 px；``setPixelSize`` 不用 pt——pt 要过一次 DPI 换算的二次取整）。
-#: L1 主信息 / L2 指标数值 / L3 角色名 / L4 段标签·单位。
+#: L1 主信息 / L2 指标数值 / L3 角色名（卡片里当段名列）/ L4 段标签·单位 /
+#: L5 卡片辅助文字（单位全称·来源·更新时间·最近消息·状态文字，k3 §5.1 的 11px 档）。
 _FONT_LAYERS = {
     "primary": (14, QFont.Weight.DemiBold),
     "value": (13, QFont.Weight.Medium),
     "name": (12, QFont.Weight.Normal),
     "label": (10, QFont.Weight.Normal),
+    "aux": (11, QFont.Weight.Normal),
 }
 #: 单位盒的降色系数（裁决稿 §二-5：单位弱化靠"10px + α×70%"双管，缺一档就是
 #: 13px 与 10px 之间的"差 1px、弱化不足"）。
@@ -395,6 +542,9 @@ class DynamicIsland(QWidget):
         # 只活在这里，不进段对象（段是每拍现算的数据，不是累积状态）。折叠态会
         # 停掉被折段的采样，靠它把告警保持住——chip 告警点因此不会一闪即灭。
         self._alert_severity: dict[str, str] = {}
+        # 「已知但当前不可用」的段 id → 原因（P2 Slice E5）：胶囊不占位、卡片写原因。
+        # E5 阶段内置段都可用（表空），P3 的 GPU 占位往这里登记。
+        self._unavailable_reasons: dict[str, str] = {}
         self._geo_from: QRect | None = None
         self._geo_to: QRect | None = None
         self._geo_t = 0.0
@@ -414,7 +564,10 @@ class DynamicIsland(QWidget):
         self._card_collapse_timer.setInterval(_CARD_AUTO_COLLAPSE_MS)
         self._card_collapse_timer.timeout.connect(self.collapse_card)
 
-        self._build_card()
+        # 卡片开着时的每秒 tick（只刷新"更新时间"/状态文字，收起即停表）
+        self._card_tick_timer = QTimer(self)
+        self._card_tick_timer.setInterval(_CARD_TICK_MS)
+        self._card_tick_timer.timeout.connect(self._on_card_tick)
 
         self._info_timer = QTimer(self)
         self._info_timer.setInterval(30_000)
@@ -455,6 +608,11 @@ class DynamicIsland(QWidget):
             if focus_changed is not None:
                 focus_changed.connect(self._on_own_window_focused)
             app.applicationStateChanged.connect(self._on_application_state_changed)
+
+        # 卡片建在**所有定时器与采样器就位之后**：卡片高度是实测出来的，而实测要
+        # 走段管线（`_capsule_width` → `_row_plan` → 采样订阅同步），早建就会在
+        # `_net_timer` 还不存在时碰到订阅分支（见 _plan_inputs / _sync_network_slot）。
+        self._build_card()
 
         self._apply_position()
         self._sync_network_slot()
@@ -702,9 +860,14 @@ class DynamicIsland(QWidget):
             timer.deleteLater()
 
     def set_last_message(self, text: str) -> None:
-        """记录最近一条 AI 消息（展开卡片里显示摘要）。"""
+        """记录最近一条 AI 消息（展开卡片里显示摘要）。
+
+        摘要行数会随文案变化（最多两行），卡片开着时高度得跟着——高度是实测的，
+        消息长了卡片就该高一点（k3 §5.2 的"按内容实测"在消息区同样成立）。
+        """
         self._last_message = str(text or "").strip()
         self._sync_card_labels()
+        self._resize_card_if_needed()
 
     def notify_event(self, kind: str = "generic") -> None:
         """事件动效入口：reply / balance / tier / generic。尊重 event_effects 开关。"""
@@ -997,72 +1160,520 @@ class DynamicIsland(QWidget):
             self._alert_severity[metric_id] = island_segments.alert_severity(
                 metric_id, value, self._alert_severity.get(metric_id, ""))
 
-    # ------------------------------------------------------------ 卡片
+    # ------------------------------------------------------------ 卡片四分区（P2 Slice E5）
     def _build_card(self) -> None:
-        """展开卡片：余额/峰谷两行 + 最近消息 + 三个快捷按钮。默认隐藏。"""
+        """展开卡片：概览 / 指标详情 / 最近消息 / 操作 四分区。默认隐藏。
+
+        分区自上而下装进一个固定间距的竖排（间距 0）：每区自带横分隔线与上下
+        间距、并被钉上**实测**的固定高（见 :meth:`_sync_card_heights`），所以
+        "没有指标段就整区连分隔线一起消失"是免费的，卡片高度也就等于账目的和
+        （测试拿 ``layout().sizeHint().height()`` 与 ``_card_height()`` 对账）。
+        卡片底板仍由窗口 ``paintEvent`` 统一绘制（圆角连续），容器自身透明。
+        """
         self._card_box = QWidget(self)
         self._card_box.setObjectName("dynamic-island-card")
-        # 卡片底板由窗口 paintEvent 统一绘制（圆角连续），控件容器自身透明
         self._card_box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._card_box.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(self._card_box)
-        layout.setContentsMargins(16, 6, 16, 12)
-        layout.setSpacing(4)
-        self._card_balance_label = QLabel(self._card_box)
-        self._card_tier_label = QLabel(self._card_box)
-        self._card_message_label = QLabel(self._card_box)
+        layout.setContentsMargins(_CARD_MARGIN_X, _CARD_MARGIN_TOP,
+                                  _CARD_MARGIN_X, _CARD_MARGIN_BOTTOM)
+        layout.setSpacing(0)
+
+        # ---- A 概览区：主读数（大号）+ 峰谷 + 状态点与状态文字 ----
+        self._card_overview = QWidget(self._card_box)
+        overview = QVBoxLayout(self._card_overview)
+        overview.setContentsMargins(0, 0, 0, 0)
+        overview.setSpacing(_CARD_LINE_GAP)
+        self._card_balance_label = QLabel(self._card_overview)
+        self._card_tier_label = QLabel(self._card_overview)
+        self._card_status_row = QWidget(self._card_overview)
+        status_line = QHBoxLayout(self._card_status_row)
+        status_line.setContentsMargins(0, 0, 0, 0)
+        status_line.setSpacing(_CARD_STATUS_DOT_GAP)
+        self._card_status_dot = _CardStatusDot(self, self._card_status_row)
+        self._card_status_label = QLabel(self._card_status_row)
+        status_line.addWidget(self._card_status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_line.addWidget(self._card_status_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_line.addStretch(1)
+        for widget in (self._card_balance_label, self._card_tier_label,
+                       self._card_status_row):
+            overview.addWidget(widget)
+
+        # ---- B 指标详情区：每段一行（段名 / 当前值合并串 / 单位·来源·更新时间）----
+        self._card_metrics = QWidget(self._card_box)
+        metrics = QVBoxLayout(self._card_metrics)
+        # 只留上边距：下行间距由"分隔线之后的那一档"给（= 线上下各 8px）
+        metrics.setContentsMargins(0, _CARD_SECTION_GAP, 0, 0)
+        metrics.setSpacing(0)
+        self._card_metrics_layout = metrics
+        metrics.addWidget(_CardSeparator(self, self._card_metrics))
+        metrics.addSpacing(_CARD_SECTION_GAP)
+        self._card_row_widgets: list[QWidget] = []
+        self._card_row_labels: list[tuple[QLabel, QLabel, QLabel]] = []
+        self._card_rows_key: tuple | None = None
+
+        # ---- C 最近消息（沿用现状内容：一行摘要、最多两行）----
+        self._card_message_box = QWidget(self._card_box)
+        message = QVBoxLayout(self._card_message_box)
+        message.setContentsMargins(0, _CARD_SECTION_GAP, 0, 0)
+        message.setSpacing(0)
+        message.addWidget(_CardSeparator(self, self._card_message_box))
+        message.addSpacing(_CARD_SECTION_GAP)
+        self._card_message_label = QLabel(self._card_message_box)
         self._card_message_label.setWordWrap(True)
-        self._card_message_label.setMaximumHeight(34)
-        for label in (self._card_balance_label, self._card_tier_label,
-                      self._card_message_label):
-            layout.addWidget(label)
-        layout.addSpacing(2)
+        message.addWidget(self._card_message_label)
+
+        # ---- D 操作行（沿用现状三个按钮，高钉 28px 进账目）----
+        self._card_actions = QWidget(self._card_box)
+        actions = QVBoxLayout(self._card_actions)
+        actions.setContentsMargins(0, _CARD_SECTION_GAP, 0, 0)
+        actions.setSpacing(0)
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
-        self._card_toggle_btn = QPushButton("显隐桌宠", self._card_box)
-        self._card_chat_btn = QPushButton("聊天", self._card_box)
-        self._card_settings_btn = QPushButton("设置", self._card_box)
+        self._card_toggle_btn = QPushButton("显隐桌宠", self._card_actions)
+        self._card_chat_btn = QPushButton("聊天", self._card_actions)
+        self._card_settings_btn = QPushButton("设置", self._card_actions)
         self._card_toggle_btn.clicked.connect(self._on_card_toggle)
         self._card_chat_btn.clicked.connect(self._on_card_chat)
         self._card_settings_btn.clicked.connect(self._on_card_settings)
         for btn in (self._card_toggle_btn, self._card_chat_btn,
                     self._card_settings_btn):
             button_row.addWidget(btn)
-        layout.addLayout(button_row)
+        actions.addLayout(button_row)
+
+        for section in (self._card_overview, self._card_metrics,
+                        self._card_message_box, self._card_actions):
+            layout.addWidget(section)
         self._card_box.hide()
         self._sync_card_labels()
 
     def _sync_card_labels(self) -> None:
+        """刷新四区文案与结构（展开 / 配置刷新 / 卡片开着时的每秒 tick）。
+
+        结构重建（B 区行控件与各区固定高）只在**结构签名**变化时发生：每秒的
+        tick 只改文字，"更新时间"走字时行的骨架与卡片几何一动不动。
+        """
         if not hasattr(self, "_card_box"):
             return
         _bg, primary, secondary = self._style_palette()
-        primary_hex = primary.name() if isinstance(primary, QColor) else "#e5eaf5"
-        secondary_hex = secondary.name() if isinstance(secondary, QColor) else "#a0aabe"
+        primary_color, secondary_color = QColor(primary), QColor(secondary)
         accent_hex = self._accent_color().name()
-        self._card_balance_label.setStyleSheet(
-            f"color: {primary_hex}; font-weight: bold; font-size: 14px;")
-        self._card_tier_label.setStyleSheet(f"color: {secondary_hex}; font-size: 11px;")
-        self._card_message_label.setStyleSheet(f"color: {secondary_hex}; font-size: 11px;")
+        # 字体走字号层（与胶囊同一份源）、颜色走主题函数：卡片不自己发明一套
+        self._card_balance_label.setFont(self._font_for("primary"))
+        for label in (self._card_tier_label, self._card_status_label,
+                      self._card_message_label):
+            label.setFont(self._font_for("aux"))
+        self._apply_card_style(self._card_balance_label,
+                               f"color: {primary_color.name()};")
+        self._apply_card_style(self._card_tier_label,
+                               f"color: {secondary_color.name()};")
+        self._apply_card_style(self._card_status_label,
+                               f"color: {self._status_dot_color().name()};")
+        self._apply_card_style(self._card_message_label,
+                               f"color: {secondary_color.name()};")
         # 按钮：圆角 8px、描边跟随主题色、悬停加亮；不用系统默认灰按钮
         button_style = (
-            f"QPushButton {{ color: {primary_hex}; background: transparent;"
+            f"QPushButton {{ color: {primary_color.name()}; background: transparent;"
             f" border: 1px solid {accent_hex}; border-radius: 8px;"
-            f" padding: 4px 10px; font-size: 12px; }}"
+            f" padding: 4px 10px; }}"
             f"QPushButton:hover {{ background: {accent_hex}; color: #ffffff; }}"
-            f"QPushButton:pressed {{ background: {secondary_hex}; }}"
+            f"QPushButton:pressed {{ background: {secondary_color.name()}; }}"
         )
         for btn in (self._card_toggle_btn, self._card_chat_btn,
                     self._card_settings_btn):
-            btn.setStyleSheet(button_style)
+            btn.setFont(self._font_for("name"))
+            self._apply_card_style(btn, button_style)
+            btn.setFixedHeight(_CARD_BUTTON_H)
+        self._card_toggle_btn.setText("隐藏桌宠" if self._pet_visible else "显示桌宠")
+        # ---- A 概览 ----
         self._card_balance_label.setText(self._balance_text)
         self._card_tier_label.setText(self._balance_tier_text)
-        message = self._last_message or "（暂无最近消息）"
-        # 摘要最多两行，超出省略（标签限高 34px 配合 wordWrap）
-        metrics = self._card_message_label.fontMetrics()
-        elided = metrics.elidedText(
-            message, Qt.TextElideMode.ElideRight, max(40, (_CARD_WIDTH - 32) * 2))
-        self._card_message_label.setText(elided)
-        self._card_toggle_btn.setText("隐藏桌宠" if self._pet_visible else "显示桌宠")
+        self._card_status_label.setText(self._card_status_text())
+        # ---- B 指标详情 ----
+        # 行数据**一趟只算一次**（每次都要过段管线与行计划）：往下传，别在
+        # 宽度/高度/文案各算一遍——每秒 tick 会走这条路，重复计算是白烧 CPU
+        rows = self._card_metric_rows()
+        self._sync_card_rows(rows, primary_color, secondary_color)
+        # ---- C 最近消息（最多两行，超出右省略）----
+        self._card_message_label.setText(self._card_message_display())
+        # ---- 各区固定高（账目的落点）----
+        self._sync_card_heights(rows)
+        self._card_status_dot.update()
+
+    @staticmethod
+    def _apply_card_style(widget, style: str) -> None:
+        """只在校样式串真的变了才 ``setStyleSheet``。
+
+        Qt 的 ``setStyleSheet`` 不做同值短路：每次都重新 polish 控件（实测 13 个
+        控件 ≈ 1.4ms）。卡片每秒 tick 会走一遍样式同步，同值也重设就是白烧 CPU。
+        """
+        if widget.styleSheet() != style:
+            widget.setStyleSheet(style)
+
+    def _card_status_text(self) -> str:
+        """概览区的状态文字（E1 五态的字面化；点与文字同源同色）。
+
+        ``_DOT_HIDDEN`` 走两支说法：空心环在胶囊上只说"没有可看的东西"，卡片上
+        得说清是桌宠被藏了还是 DSH 没在跑。
+        """
+        state = self._status_dot_state()
+        if state == _DOT_HIDDEN:
+            return "桌宠已隐藏" if not self._pet_visible else "DSH 离线"
+        return _CARD_STATUS_TEXT.get(state, "")
+
+    def _card_message_text(self) -> str:
+        """最近消息原文（空则占位句）——行数与省略都以它为源。"""
+        return self._last_message or "（暂无最近消息）"
+
+    def _card_message_display(self) -> str:
+        """消息的显示文案：按"两行宽"右省略，配合 wordWrap 与钉死的高度限两行。"""
+        return island_layout.elide_to_width(
+            self._card_message_text(),
+            self._card_content_width() * _CARD_MESSAGE_MAX_LINES,
+            self._metrics_for("aux"))
+
+    def _card_message_lines(self) -> int:
+        """消息行数（1..``_CARD_MESSAGE_MAX_LINES``）：按真实度量算换行，不写死。"""
+        metrics = self._metrics_for("aux")
+        bounds = metrics.boundingRect(
+            QRect(0, 0, max(1, self._card_content_width()), 0),
+            int(Qt.TextFlag.TextWordWrap), self._card_message_text())
+        spacing = max(1, metrics.lineSpacing())
+        lines = -(-int(bounds.height()) // spacing)
+        return max(1, min(_CARD_MESSAGE_MAX_LINES, lines))
+
+    # ------------------------------------------------------------ 卡片账目（高度/宽度）
+    def _card_overview_height(self) -> int:
+        """A 区高 = 主读数行 + 峰谷行 + 状态行，逐行实测（+ 两处行距）。"""
+        metrics = self._metrics_for("aux")
+        status_h = max(metrics.height(), int(_STATUS_DOT_PX))
+        return (self._metrics_for("primary").height()
+                + _CARD_LINE_GAP + metrics.height()
+                + _CARD_LINE_GAP + status_h)
+
+    def _card_metrics_height(self, rows=None) -> int:
+        """B 区高 = 上下各一档分区间距 + 1px 分隔线 + N×行高；N=0 时整区不占位。"""
+        count = len(self._card_metric_rows() if rows is None else rows)
+        if not count:
+            return 0
+        return 2 * _CARD_SECTION_GAP + _CARD_SEP_PX + count * self._card_row_height()
+
+    def _card_message_height(self, lines: int | None = None) -> int:
+        """C 区高 = 上下各一档分区间距 + 1px 分隔线 + 消息行高（1..2 行）。"""
+        count = self._card_message_lines() if lines is None else lines
+        return (2 * _CARD_SECTION_GAP + _CARD_SEP_PX
+                + count * self._metrics_for("aux").lineSpacing())
+
+    def _card_actions_height(self) -> int:
+        """D 区高 = 一档分区间距 + 按钮高。"""
+        return _CARD_SECTION_GAP + _CARD_BUTTON_H
+
+    def _card_height(self) -> int:
+        """卡片区高度（**声明值**）= 上边距 + 各区实测高 + 下边距。
+
+        每一项都是度量出来的（行高 = 字体行高、消息高 = 实测行数 × 行距、按钮高
+        = 钉死的 28px），所以"高度按内容实测"是可复算的账；测试用
+        ``_card_box.layout().sizeHint().height()`` 与它逐像素对账（布局的固定高就是
+        按这里的数设的，两者不等就是账目错了）。
+        """
+        rows = self._card_metric_rows()
+        total = (_CARD_MARGIN_TOP + self._card_overview_height()
+                 + self._card_metrics_height(rows) + self._card_message_height()
+                 + self._card_actions_height() + _CARD_MARGIN_BOTTOM)
+        return total
+
+    def _sync_card_heights(self, rows=None) -> None:
+        """把各区/各行固定高按账目落下去（唯一让"账目 = 实际布局"成立的地方）。"""
+        rows = self._card_metric_rows() if rows is None else rows
+        metrics = self._metrics_for("aux")
+        lines = self._card_message_lines()
+        self._card_overview.setFixedHeight(self._card_overview_height())
+        self._card_balance_label.setFixedHeight(self._metrics_for("primary").height())
+        self._card_tier_label.setFixedHeight(metrics.height())
+        self._card_status_row.setFixedHeight(max(metrics.height(), int(_STATUS_DOT_PX)))
+        self._card_metrics.setFixedHeight(max(1, self._card_metrics_height(rows)))
+        self._card_metrics.setVisible(bool(rows))
+        self._card_message_box.setFixedHeight(self._card_message_height(lines))
+        self._card_message_label.setFixedHeight(lines * metrics.lineSpacing())
+        self._card_actions.setFixedHeight(self._card_actions_height())
+
+    def _card_row_baseline(self) -> int:
+        """B 区行的共享基线（相对行顶）= 内边距 + 值列（13px）的 ascent。"""
+        return _CARD_ROW_PAD_Y + self._metrics_for("value").ascent()
+
+    def _card_row_offset(self, layer: str) -> int:
+        """某一列的文字下移量 = ``基线 − 该层 ascent``：三列因此**同底**。
+
+        QLabel 默认按行盒垂直居中，12/13/11px 三档字号的底线会各差 1px 上下；
+        这里按基线定位（``AlignTop`` + 顶部内边距）而不是逐列居中——与胶囊
+        "所有字号层共用一条基线"同一条纪律（E7 审计第 8 项的口径）。
+        """
+        return max(0, self._card_row_baseline() - self._metrics_for(layer).ascent())
+
+    def _card_row_height(self) -> int:
+        """B 区行高 = max(各列 offset + 该层行高) + 一个内边距（纯实测，不写死）。"""
+        bottom = 0
+        for layer in ("name", "value", "aux"):
+            metrics = self._metrics_for(layer)
+            bottom = max(bottom, self._card_row_offset(layer) + metrics.height())
+        return bottom + _CARD_ROW_PAD_Y
+
+    def _card_content_width(self) -> int:
+        """卡片内容区宽度（左右各去掉一档内容边距）。"""
+        return max(1, self._card_width() - 2 * _CARD_MARGIN_X)
+
+    def _card_name_col_width(self, rows) -> int:
+        """B 区段名列宽 = 各段名实测的较宽者（上限 ``_CARD_NAME_COL_MAX``）。"""
+        metrics = self._metrics_for("name")
+        return min(_CARD_NAME_COL_MAX,
+                   max(int(metrics.horizontalAdvance(row.name)) for row in rows))
+
+    def _card_value_col_width(self, rows, *, limit: int) -> int:
+        """B 区值列宽 = 各段**声明样本**实测的较宽者（上限 ``limit``）。
+
+        样本是段自己声明的最坏读数（``_InfoSeg.box_text``），当前读数一个都不进
+        ——与胶囊的字段盒同一条纪律："9% → 100%" 改不动任何几何。
+        """
+        metrics = self._metrics_for("value")
+        widest = max(int(metrics.horizontalAdvance(row.value_sample)) for row in rows)
+        return max(0, min(widest, limit))
+
+    def _card_detail_col_sample_width(self, rows) -> int:
+        """B 区详情列宽样本（单位全称 · 来源 · 固定的更新时间样本）实测宽。"""
+        metrics = self._metrics_for("aux")
+        return max(int(metrics.horizontalAdvance(row.detail_sample)) for row in rows)
+
+    def _card_width(self) -> int:
+        """卡片宽 = max(胶囊自然宽, 最宽指标行 + 32)，钳进 [``_CARD_WIDTH``, 420]。
+
+        三列全部由**声明样本**算出（段声明的 box_text / 静态来源串 / 固定的
+        "00 秒前"），读数一个都不进——采样值永远改不动卡片几何，卡片宽度因此与
+        胶囊的宽度白名单同一纪律。衡量不到（一行都没有）时回到 340 下限。
+        """
+        rows = self._card_metric_rows()
+        if not rows:
+            return max(self._capsule_width(), _CARD_WIDTH)
+        needed = (2 * _CARD_MARGIN_X
+                  + self._card_name_col_width(rows) + _CARD_COL_GAP
+                  + self._card_value_col_width(rows, limit=1 << 20) + _CARD_COL_GAP
+                  + self._card_detail_col_sample_width(rows))
+        return max(self._capsule_width(),
+                   max(_CARD_WIDTH, min(_CARD_WIDTH_MAX, int(needed))))
+
+    def _card_column_widths(self, rows) -> tuple[int, int, int]:
+        """B 区三列的实际宽度（(名, 值, 详情)）——三者和**恰好等于内容宽**。
+
+        分配顺序：段名列 → 详情列（先要它声明的宽，至少 ``_CARD_DETAIL_MIN_PX``，
+        但给值列留够 ``_CARD_VALUE_MIN_PX``）→ 值列拿剩下的。为什么详情列优先：
+        它是卡片存在的理由（单位·来源·时间只在卡片有），而值列在胶囊上已经有了；
+        卡片宽被 420 钳住时该先省值列。两列的现文案都按各自列宽右省略，所以行宽
+        恒等于内容宽——"内容画出轮廓"在这条路径上不可能发生。
+        """
+        content = self._card_content_width()
+        if not rows:
+            return 0, 0, content
+        name_w = self._card_name_col_width(rows)
+        head = name_w + 2 * _CARD_COL_GAP
+        # 值列先拿它声明的宽度（它是胶囊同款的"定宽字段盒"，截断一个读数是最不该
+        # 发生的坏），但给详情列留够 _CARD_DETAIL_MIN_PX
+        limit = max(1, content - head - _CARD_DETAIL_MIN_PX)
+        value_w = self._card_value_col_width(rows, limit=limit)
+        return name_w, value_w, max(0, content - head - value_w)
+
+    # ------------------------------------------------------------ 卡片 B 区数据
+    def _card_metric_rows(self) -> list[_CardMetricRow]:
+        """B 区的行数据（**未收缩的全量段**：胶囊折进 +N 的段卡片照列全）。
+
+        数据源与胶囊段同一处（``_compose_info_segments`` 的指标段），所以"值"必然
+        是同一个合并串；单位全称/来源/更新时间是卡片独有的上下文（k3 §5.3：这些
+        信息只在卡片，不进胶囊）。已知但不可用的段（``_unavailable_segments``）
+        按配置序插在它本该在的位置——胶囊里没有它，卡片里有它的原因行。
+        """
+        segments = {seg.seg_id: seg for seg in self._compose_info_segments()
+                    if seg.kind == island_layout.KIND_METRIC}
+        unavailable = self._unavailable_segments()
+        # 折叠态问一次就够（``_row_plan`` 每次都要过一遍输入白名单，逐段问会白烧
+        # 三次字体指纹 + 屏查询）
+        folded = self._row_plan().folded
+        rows: list[_CardMetricRow] = []
+        for metric_id in self._metric_ids():
+            if metric_id in unavailable:
+                rows.append(self._unavailable_row(metric_id, unavailable[metric_id]))
+            elif metric_id in segments:
+                rows.append(self._card_row_for_segment(segments[metric_id], folded))
+        return rows
+
+    @staticmethod
+    def _card_row_name(seg) -> str:
+        """段名：内置段查人话名字表，其余沿用胶囊的口径（label 或 id 前 6 字符）。"""
+        return _CARD_METRIC_NAMES.get(seg.seg_id) or seg.label or \
+            seg.seg_id[:island_segments.LABEL_MAX_CHARS]
+
+    def _card_row_for_segment(self, seg, folded: tuple = ()) -> _CardMetricRow:
+        """一个指标段 → 一行卡片数据。
+
+        "当前值合并串" = ``段文案 + 单位``：E4 把合并串拆成"数值盒 + 单位盒"供胶囊
+        排版，但格式化器的合并串仍是唯一真值（``split_value_unit`` 只在以单位结尾时
+        拆分，拼回来逐字相同）——卡片不再自己格式化一遍，免得两处漂移。
+        """
+        ok = seg.state == island_segments.STATE_OK
+        value = seg.text + (seg.unit if ok else "")
+        value_sample = seg.box_text + (seg.unit if seg.unit else "")
+        source = ""
+        updated = ""
+        if seg.seg_id == island_segments.NETWORK:
+            source = _CARD_SOURCE_NET
+            sampled_at = self._net_sample.sampled_at if self._net_sample is not None else None
+        elif seg.seg_id in _SYS_METRIC_IDS:
+            source = _CARD_SOURCE_SYS
+            sampled_at = self._sys_sample.sampled_at if self._sys_sample is not None else None
+        else:
+            sampled_at = None
+        note = ""
+        if seg.state == island_segments.STATE_OK:
+            updated = self._card_updated_text(sampled_at)
+        elif seg.state == island_segments.STATE_SAMPLING:
+            # 冷启动/刚恢复订阅的首轮：胶囊上是 ``--``，卡片在来源行注「采样中」
+            # （k3 §6.3 的四态口径），不写成"不可用"——它不是不会来，是还没来。
+            # 例外：被胶囊折进 +N 的段根本没在采样（性能契约），卡片是唯一还看得见
+            # 它的地方，如实说"暂停"而不是拿"采样中"糊弄（采样闸门语义不动）。
+            updated = ("已折叠 · 暂停采样" if seg.seg_id in folded else "采样中")
+        elif seg.state == island_segments.STATE_ERROR:
+            note = f"{_CARD_UNAVAILABLE_NOTE}：{self._card_sample_error_reason(seg.seg_id)}"
+        else:
+            # 未注册的段 id（配置残留）：胶囊按 ``--`` 降级段占位，卡片说清原因
+            note = f"{_CARD_UNAVAILABLE_NOTE}：{_CARD_UNKNOWN_REASON}"
+        return _CardMetricRow(
+            seg_id=seg.seg_id, name=self._card_row_name(seg), value=value,
+            value_sample=value_sample,
+            unit_full=_CARD_UNIT_FULL.get(seg.seg_id, ""), source=source,
+            updated=updated, state=seg.state, severity=seg.severity, note=note)
+
+    def _card_sample_error_reason(self, metric_id: str) -> str:
+        """采样失败的原因：设备槽快照自带 ``error_reason``，没有就如实说"采样失败"。"""
+        if metric_id in _SYS_METRIC_IDS and self._sys_sample is not None:
+            reason = str(getattr(self._sys_sample, "error_reason", "") or "").strip()
+            if reason:
+                return reason
+        return "采样失败"
+
+    def _unavailable_row(self, metric_id: str, reason: str) -> _CardMetricRow:
+        """已知但不可用的一段 → 卡片原因行（胶囊里它一个像素都不占）。"""
+        return _CardMetricRow(
+            seg_id=metric_id,
+            name=_CARD_METRIC_NAMES.get(metric_id)
+            or metric_id[:island_segments.LABEL_MAX_CHARS],
+            value=island_segments.UNKNOWN_TEXT,
+            value_sample=island_segments.UNKNOWN_TEXT,
+            state=island_segments.STATE_UNSUPPORTED,
+            note=f"{_CARD_UNAVAILABLE_NOTE}：{reason}")
+
+    @staticmethod
+    def _card_updated_text(sampled_at) -> str:
+        """更新时间（"3 秒前"）：读数什么时候采的，卡片说清。"""
+        if sampled_at is None:
+            return "未采样"
+        elapsed = max(0.0, time.monotonic() - float(sampled_at))
+        if elapsed < 1.0:
+            return "刚刚"
+        if elapsed < 60.0:
+            return f"{int(elapsed)} 秒前"
+        if elapsed < 3600.0:
+            return f"{int(elapsed // 60)} 分钟前"
+        return f"{int(elapsed // 3600)} 小时前"
+
+    def _card_value_color(self, row, primary_color: QColor, secondary_color: QColor) -> QColor:
+        """B 区值列颜色：ok 态跟随告警色（与胶囊同一套），非 ok 态一律次色不染色。
+
+        非 ok 态不染红是 E2 的口径（胶囊上段的错误保持安静），卡片上段的错误靠
+        详情列的整句原因说话——红色在这个产品里只属于状态点与告警数值。
+        """
+        if row.state != island_segments.STATE_OK:
+            return QColor(secondary_color)
+        alert = self._alert_color(row.severity)
+        return QColor(alert) if alert is not None else QColor(primary_color)
+
+    def _card_row_signature(self, rows) -> tuple:
+        """B 区行控件的重建判据：行的身份/状态 + 字号 + 卡片宽（**文字不进**）。"""
+        return (tuple((row.seg_id, row.state, row.note) for row in rows),
+                self._fonts_key(), self._card_width())
+
+    def _card_detail_display(self, row, detail_w: int) -> str:
+        """详情列的现文案：整句放不下就先省单位全称，再放不下才右省略。"""
+        detail_fm = self._metrics_for("aux")
+        if detail_fm.horizontalAdvance(row.detail) <= detail_w:
+            return row.detail
+        return island_layout.elide_to_width(row.detail_short, detail_w, detail_fm)
+
+    def _sync_card_rows(self, rows, primary_color: QColor, secondary_color: QColor) -> None:
+        """B 区行：签名变了才重建控件，其余只改三列文字（每秒 tick 不重建）。"""
+        if self._card_row_signature(rows) != self._card_rows_key:
+            self._rebuild_card_rows(rows)
+        name_w, value_w, detail_w = self._card_column_widths(rows)
+        detail_color = self._unit_color(secondary_color)
+        for row, (name_label, value_label, detail_label) in zip(
+                rows, self._card_row_labels):
+            name_label.setText(island_layout.elide_to_width(
+                row.name, name_w, self._metrics_for("name")))
+            self._apply_card_style(name_label, f"color: {secondary_color.name()};")
+            value_label.setText(island_layout.elide_to_width(
+                row.value, value_w, self._metrics_for("value")))
+            self._apply_card_style(value_label, "color: {};".format(
+                self._card_value_color(row, primary_color, secondary_color).name()))
+            detail_label.setText(self._card_detail_display(row, detail_w))
+            self._apply_card_style(detail_label, f"color: {detail_color.name()};")
+
+    def _rebuild_card_rows(self, rows) -> None:
+        """重建 B 区行控件：三列宽钉死（和 = 内容宽），文字按各自列宽右省略。
+
+        列宽钉死是"内容不画出轮廓"的机器保证：任何超宽读数在进 QLabel 之前就已
+        按列宽省略，行宽恒等于内容宽。
+        """
+        for widget in self._card_row_widgets:
+            widget.setParent(None)
+            widget.deleteLater()
+        self._card_row_widgets = []
+        self._card_row_labels = []
+        name_w, value_w, detail_w = self._card_column_widths(rows)
+        row_h = self._card_row_height()
+        for _row in rows:
+            widget = QWidget(self._card_metrics)
+            widget.setFixedHeight(row_h)
+            line = QHBoxLayout(widget)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(_CARD_COL_GAP)
+            labels = []
+            for layer, width in (("name", name_w), ("value", value_w),
+                                 ("aux", detail_w)):
+                label = QLabel(widget)
+                label.setFont(self._font_for(layer))
+                label.setFixedWidth(width)
+                label.setAlignment(Qt.AlignmentFlag.AlignLeft
+                                   | Qt.AlignmentFlag.AlignTop)
+                label.setContentsMargins(0, self._card_row_offset(layer), 0, 0)
+                line.addWidget(label)
+                labels.append(label)
+            self._card_metrics_layout.addWidget(widget)
+            self._card_row_widgets.append(widget)
+            self._card_row_labels.append((labels[0], labels[1], labels[2]))
+        self._card_rows_key = self._card_row_signature(rows)
+
+    def _resize_card_if_needed(self) -> None:
+        """卡片内容高度变化后重新锁定窗口尺寸——**只在几何动画静止时**。
+
+        展开动画进行中重设固定尺寸会把 0.18s 的滑移整段吃掉（动画还没走完窗口
+        就跳到终点），所以判据带 ``_geo_to``。
+        """
+        if self._mode == "expanded" and self._geo_to is None:
+            self._apply_fixed_size()
+
+    def _on_card_tick(self) -> None:
+        """卡片开着时的每秒 tick：刷新更新时间/状态文字，并让高度跟上内容。
+
+        停表纪律同完成瞬态：收起与隐藏都停表，静止时零定时器开销。
+        """
+        self._sync_card_labels()
+        self._resize_card_if_needed()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1098,6 +1709,8 @@ class DynamicIsland(QWidget):
         self._sync_card_labels()
         self._animate_to(self._target_rect())
         self._card_collapse_timer.start()
+        # 卡片开着时每秒刷一次"更新时间"与状态文字（收起/隐藏即停表，同完成瞬态）
+        self._card_tick_timer.start()
         self._sync_content_sampling()
         self.card_expanded.emit()
 
@@ -1107,6 +1720,7 @@ class DynamicIsland(QWidget):
         if self._mode != "expanded":
             return
         self._card_collapse_timer.stop()
+        self._card_tick_timer.stop()
         self._card_box.hide()
         self._mode = "docked" if self.dock_edge != "none" else "normal"
         self._hover_peek = False
@@ -1477,6 +2091,27 @@ class DynamicIsland(QWidget):
                         box_text=island_segments.UNKNOWN_TEXT,
                         state=island_segments.STATE_UNKNOWN)
 
+    def _unavailable_segments(self) -> dict[str, str]:
+        """**已知但当前不可用**的段 id → 原因（P2 Slice E5 的机制，P3 的 GPU 铺路）。
+
+        E5 阶段内置段都可用，表是空的；F1 与测试往 ``_unavailable_reasons`` 里塞
+        条目（GPU 无数据源 → 原因串）即可生效。口径是**已知 id 才走这条**：这类段
+        胶囊里连占位都不画（不是 ``--``，是"不存在"），只在卡片 B 区留一行
+        「该指标不可用 + 原因」。未知 id 依旧降级成胶囊 ``--`` 段
+        （见 :meth:`_unknown_segment`），既有行为一个像素都不动。
+        """
+        return {key: str(value) for key, value in self._unavailable_reasons.items()
+                if key in self._metric_ids()}
+
+    @staticmethod
+    def _unknown_segment(metric_id: str) -> _InfoSeg:
+        """未实现的段 id（配置残留）：降级成 unknown 态 ``--`` 段，不崩不留洞。"""
+        return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=metric_id,
+                        label=metric_id[:island_segments.LABEL_MAX_CHARS],
+                        text=island_segments.UNKNOWN_TEXT,
+                        box_text=island_segments.UNKNOWN_TEXT,
+                        state=island_segments.STATE_UNKNOWN)
+
     def _compose_info_segments(self) -> list[_InfoSeg]:
         """把"这一帧要画的信息"组合成段列表（数据，不是绘制串）。
 
@@ -1484,13 +2119,20 @@ class DynamicIsland(QWidget):
         ``island_metrics`` 的列表序追加指标段。信息槽整体关掉时返回空列表——
         "没有段"与"首段不是 primary"是两件事。
 
+        **已知但不可用的段（``_unavailable_segments``）不在这里**：它进不了段列表，
+        所以胶囊连 ``--`` 占位都不会画（收缩流水线看不到它、+N 也折不到它）。
+        这是"不占位"的机器保证——不是靠某个分支不画，而是它根本不在列表里。
+
         这是**未收缩**的全量列表（宽度白名单与采样口径都以它为准）；实际画出来的
         行由 :meth:`_row_plan` 给出的收缩结果决定（折尾段 → +N chip、省名字）。
         """
         if not self._visible_parts()[2]:
             return []
+        unavailable = self._unavailable_segments()
         segments = [self._primary_segment()]
         for metric_id in self._metric_ids():
+            if metric_id in unavailable:
+                continue
             if metric_id == island_segments.NETWORK:
                 segments.append(self._network_segment())
             elif metric_id in _DEVICE_LABELS:
@@ -1783,9 +2425,15 @@ class DynamicIsland(QWidget):
         self._sync_sys_slot()
 
     def _rest_size(self) -> QSize:
+        """静止尺寸：收起 = 胶囊自然宽；展开 = 卡片宽 × (胶囊高 + 卡片高)。
+
+        卡片态两轴都是**实测**的：宽 = max(胶囊自然宽, 最宽指标行 + 32)（钳在
+        340..420，见 :meth:`_card_width`），高 = ``_CAPSULE_HEIGHT`` + 四分区账目
+        的和（见 :meth:`_card_height`）——不再有固定的 148。
+        """
         width = self._capsule_width()
         if self._mode == "expanded":
-            return QSize(max(width, _CARD_WIDTH), _CAPSULE_HEIGHT + _CARD_HEIGHT)
+            return QSize(self._card_width(), _CAPSULE_HEIGHT + self._card_height())
         return QSize(width, _CAPSULE_HEIGHT)
 
     def _apply_fixed_size(self) -> None:
@@ -2572,6 +3220,7 @@ class DynamicIsland(QWidget):
         self._anim_timer.stop()
         self._dock_back_timer.stop()
         self._card_collapse_timer.stop()
+        self._card_tick_timer.stop()
         self._stop_dot_done_timer()
         self._stop_content_fade()
         # 网络槽/设备槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，
@@ -2588,6 +3237,11 @@ class DynamicIsland(QWidget):
         super().changeEvent(event)
         if event is not None and event.type() == QEvent.Type.FontChange:
             self._clear_font_cache()
+            # 卡片各区高度是按字体度量实测的：字号一变必须重算（否则行高、三列
+            # 基线与卡片高都停在旧字号上；卡片只在展开态可见，所以只在展开态重排）
+            if getattr(self, "_mode", "") == "expanded":
+                self._sync_card_labels()
+                self._resize_card_if_needed()
 
     def _clear_font_cache(self) -> None:
         self._fonts.clear()
@@ -2601,6 +3255,11 @@ class DynamicIsland(QWidget):
         super().showEvent(event)
         self._finish_animations()
         self._info_timer.start()
+        if self._mode == "expanded":
+            # 隐藏期间卡片还开着（hideEvent 停了每秒 tick）：显示回来就接上，
+            # 否则"更新时间"会冻在隐藏那一刻
+            self._card_tick_timer.start()
+            self._sync_card_labels()
         self._schedule_next_balance_tier_refresh()
         self._sync_network_slot()
         self._sync_sys_slot()
