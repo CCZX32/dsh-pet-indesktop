@@ -535,6 +535,10 @@ class PetInstance:
         win.on_clear_spawned_pets = (
             self._slot_wrap(self.shell.clear_spawned_pets)
             if not self.config.instance_id else None)
+        # 「恢复默认设置」后的重置级运行态对齐：进程内设置页直接调这里（独立设置
+        # 进程没有窗可依附，走 D12 指令通道 → AppShell._consume_settings_command）。
+        win.on_settings_reset = self._slot_wrap(
+            lambda: self.shell.apply_settings_reset(self))
         win.on_open_todo_panel = self._slot_wrap(self.shell.open_todo_panel)
         # 网络信息（issue #172）：右键菜单入口 → 进程级弹窗（overlay 侧由
         # SpriteMenuFacade.on_network_info 走同一方法）。
@@ -1781,6 +1785,21 @@ class AppShell:
         command = overlay_settings_command.consume_command(config_dir)
         if command is None:
             return
+        if command.get("command") == overlay_settings_command.CMD_APPLY_SETTINGS_RESET:
+            target = command.get("target")
+            if target is None:
+                logging.info("收到设置进程指令 → 按默认值对齐主桌宠运行态")
+                self.apply_settings_reset(self.instance)
+                return
+            for inst in list(self._instances):
+                slot = overlay_settings_command.slot_from_instance_id(
+                    str(getattr(inst.config, "instance_id", "") or ""))
+                if slot == int(target):
+                    logging.info("收到设置进程指令 → 按默认值对齐 slot-%s 运行态", target)
+                    self.apply_settings_reset(inst)
+                    return
+            logging.info("收到设置进程指令 → slot-%s 已不在活跃清单，跳过", target)
+            return
         if command.get("command") != overlay_settings_command.CMD_EXIT_SPAWNED_PETS:
             return  # consume 已按白名单过滤，这里只是防御
         target = command.get("target")
@@ -1798,6 +1817,33 @@ class AppShell:
                 self._on_window_exit_requested(inst, defer_heavy_teardown=True)
                 return
         logging.info("收到设置进程指令 → slot-%s 已不在活跃清单，跳过", target)
+
+    def apply_settings_reset(self, instance=None) -> None:
+        """「恢复默认设置」后的重置级运行态对齐（当前 = 位置回默认落位）。
+
+        为什么不能只走普通刷新：重置把位置三键写成 null（没有位置记忆），启动路径
+        遇到 null 会落默认角落，但**运行中的窗口不会自己动**；随后任何一次正常退出
+        都会 ``win.save_position()``（本文件 ``_on_about_to_quit`` /
+        ``_on_window_exit_requested``），把运行态几何写回磁盘——重置前的旧位置就
+        这样被"合法地"写回去，重置被静默抵消（issue #220 M10）。
+
+        落点用既有的「回到右下角」（``win.go_default_corner``，右键菜单/托盘同一
+        条命令）：它一次做完"取消在途移动与物理 → 落默认角落 → 落盘"，所以对齐后
+        运行态与磁盘都是默认落位，退出写回不会把旧位置带回来，换屏触发的位置恢复
+        也不会再把桌宠送回旧位置。
+
+        刻意**不读**配置里的 rx/ry 决定落点：本方法可能由 D12 指令驱动，而指令与
+        主进程去抖中的外部 reload 是两条时序（指令先到就会读到重置前的旧位置，
+        "对齐"变成原地不动）。重置的语义本来就是"回默认落位"，与配置读时序无关。
+
+        触发点两条（见 pet/settings_reset_defaults）：进程内设置页直接调窗回调，
+        独立设置进程走 D12 指令；两者都只在"用户刚重置"那一刻发生。
+        """
+        inst = instance if instance is not None else getattr(self, "instance", None)
+        win = getattr(inst, "win", None)
+        corner = getattr(win, "go_default_corner", None)
+        if callable(corner):
+            corner()
 
     def _install_config_watcher(self) -> None:
         """盯 config.json 所在目录 + 文件，把外部写盘合并进运行期（幂等）。

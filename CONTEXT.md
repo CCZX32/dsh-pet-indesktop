@@ -90,9 +90,13 @@ _Avoid_: Module page, Windows settings page
 **Settings Reset**:
 The whole-settings recovery command in the Settings System sidebar. It restores
 every persistent preference to its factory default in one atomic write and keeps
-only the AI provider credentials (`api_key`/`vision_api_key` and their keyring
-references), then closes the settings window so the running pet applies the
-defaults through the normal config-reload path. There is no per-page reset.
+only the AI provider credentials — every provider's key fields plus, for
+providers outside the default set, a credential-only entry that holds the name
+and the key (`base_url`/`model` return to the default template). It then closes
+the settings window, syncs the system login item to the reset value, and asks
+the running pet to align its runtime position to the new default so the exit-time
+position save cannot write the pre-reset position back. Character and asset
+settings take effect on restart. There is no per-page reset.
 _Avoid_: Per-page reset, credential reset
 
 **Report Gate**:
