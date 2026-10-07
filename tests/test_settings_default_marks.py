@@ -8,8 +8,9 @@
 
 1. 全默认配置下**整窗没有任何标记**（默认态与改动前一致）；
 2. 改不同类型控件的值 → 恰好对应数量的标记出现，且默认值文本正确；
-3. 单项重置后控件值 == 默认、标记消失，且**保存前 Config 与磁盘都没被动过**
-   （重置只改控件，落盘仍走「保存并退出」那条既有路径）；
+3. 单项重置只改控件值：延迟写回行**保存前 Config 与磁盘都没被动过**，即时生效行
+   （``click_sound_enabled``）重置后**立即**写盘——落盘时机跟着该行自己的保存语义，
+   重置不新增写回路径；
 4. 重置后保存并退出 → 新开的 Config 读回默认值（round trip 不绕开既有写回）；
 5. 子宠页的进程级行依旧置灰且**不提供重置入口**（同页的 per-slot 行不受影响）；
 6. 被依赖开关隐藏的行不显示标记；前置开关重新打开后标记回来（不做可见性记账）；
@@ -208,7 +209,7 @@ def test_line_edit_row_is_supported(env):
     assert "默认：" not in row.hint_label.text()
 
 
-# —— ③ 单项重置：只改控件，保存前不碰 Config / 磁盘 ——————————————
+# —— ③ 单项重置：只改控件；落盘时机跟着该行自己的保存语义 ————————
 
 def test_single_reset_keeps_config_and_disk_untouched(env):
     dialog, cfg, tmp_path = env
@@ -229,11 +230,41 @@ def test_single_reset_keeps_config_and_disk_untouched(env):
     assert row.hint_label.text() == original_hint  # hint 恢复原文，不残留默认值小字
     # 保存前不碰 Config：内存与磁盘都还是出厂值
     assert cfg.get("balance_refresh_minutes") == 0
-    config_path = tmp_path / "dsh-pet" / "config.json"
+    config_path = cfg.dir / "config.json"
     if config_path.exists():
         assert json.loads(config_path.read_text(encoding="utf-8"))[
             "balance_refresh_minutes"
         ] == 0
+
+
+def test_single_reset_of_an_immediate_save_row_writes_through_at_once(env):
+    """重置的落盘时机 = 该行自己的保存语义，本刀不另立一套写回路径。
+
+    ``click_sound_enabled`` 是「即时生效」开关：``settings_pet_controls`` 把
+    ``toggled`` 直连到 ``_apply_click_sound_enabled_now``，控件一动就写盘。重置
+    把控件拨回默认值时同样走这条路——**立即**落盘，而不是等设置窗关闭。这是该行
+    本来就有的语义（重置只是把控件设回默认值），tooltip / 模块 docstring 已按此
+    如实表述，不再宣称「保存并退出时才生效」。延迟写回行（上一条用例）一字未动。
+    """
+    dialog, cfg, _tmp = env
+    row = _row(dialog, "click_sound")
+    _reveal(dialog, row)
+    assert row.control.isChecked() is True, "前提：这一项出厂默认是开"
+
+    # 前置：先证明这一行真的是即时落盘型（不是本用例假设出来的）
+    row.control.setChecked(False)
+    app.processEvents()
+    assert cfg.get("click_sound_enabled") is False, "前提：即时型开关改一下就落盘"
+
+    row.default_reset_button.click()
+    app.processEvents()
+
+    assert row.control.isChecked() is True
+    assert row.modified_mark.isHidden()
+    # 重置后立即落盘（不是"保存并退出时才生效"）
+    assert cfg.get("click_sound_enabled") is True
+    config_path = cfg.dir / "config.json"
+    assert json.loads(config_path.read_text(encoding="utf-8"))["click_sound_enabled"] is True
 
 
 # —— ④ 保存并退出后读回默认 ————————————————————————————————————
@@ -365,6 +396,39 @@ def test_supported_rows_without_default_are_a_frozen_set(env):
     }
     registered = {_row_key(row) for row, _c, _d in dialog._default_mark_rows}
     assert supported - registered == set(NO_DEFAULT_ROWS)
+
+
+def test_macos_only_rows_align_with_the_same_snapshot(tmp_path, monkeypatch):
+    """平台专属行同样要对得上：darwin 下建整窗再跑一遍覆盖率快照。
+
+    本机是 Windows，macOS 专属行（「显示 Dock 图标」）在这里根本不存在——行键
+    （``dock_icon``）与配置键（``show_dock_icon``）不同名，漏进映射表只会在
+    macOS 上以「快照多出一个行键」的形式变红。故按既有平台分支测试模式
+    （``test_desktop_pet_features.py::test_dock_icon_visibility_defaults_on_...``）
+    模拟 darwin 建窗，用同一份口径复验。
+    """
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(settings_mod.sys, "platform", "darwin")
+    dialog = settings_mod.ModernSettingsDialog(Config(base=tmp_path), include_ai=True)
+    dialog.show()
+    app.processEvents()
+    try:
+        supported = {
+            _row_key(row) for row in dialog.findChildren(SettingRow)
+            if _is_supported(row.control)
+        }
+        registered = {_row_key(row) for row, _c, _d in dialog._default_mark_rows}
+        assert "dock_icon" in supported, "前提：darwin 下 Dock 图标行真的建出来了"
+        unregistered = supported - registered
+        assert unregistered == set(NO_DEFAULT_ROWS), (
+            f"darwin 专属行缺默认值映射：{sorted(unregistered - set(NO_DEFAULT_ROWS))}"
+        )
+        # 走完整链路：从行键查到默认值，且值就是配置里那个真默认
+        row = _row(dialog, "dock_icon")
+        assert settings_default_marks._row_default_value(row.control, "dock_icon") == (True, True)
+    finally:
+        dialog.close()
+        app.processEvents()
 
 
 # —— 默认值来源护栏 ——————————————————————————————————————————

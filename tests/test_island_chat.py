@@ -306,6 +306,43 @@ def test_shell_show_pets_from_island_chat(tmp_path):
         _teardown_shell(shell)
 
 
+def test_shell_show_pets_from_island_chat_restores_the_overlay_window(tmp_path):
+    """overlay 拓扑：「显示桌宠」必须真的把桌宠显示回来，不能只改岛的状态。
+
+    旧实现只对 ``instances[].win`` 调 ``win.show()``——overlay 下每只 ``win`` 恒为
+    None（PetWindow 不构造），循环一只都命不中，宠物连窗带 sprite 都没恢复，却照样
+    把岛标成可见并关掉气泡（岛状态与屏幕事实相反，用户再点一次也无处可恢复）。
+    恢复面是唯一合成窗的 ``OverlayShell.set_pet_visible(True)``，本用例用真壳 +
+    真合成窗断言它被走到。
+    """
+    from tests.test_overlay_spawn import _make_persistent_shell
+
+    _qapp()
+    shell = _make_shell(tmp_path)
+    overlay, _made = _make_persistent_shell(tmp_path / "overlay")
+    try:
+        shell._sync_dynamic_island()
+        shell._overlay_shell = overlay      # overlay 拓扑：恢复面在壳上
+        overlay.set_pet_visible(False)      # 桌宠已隐藏（一个可见面都不剩）
+        assert overlay.overlay.isVisible() is False
+        shell.island.set_pet_visible(False)
+
+        shell._show_island_chat(activate=True)
+        bubble = shell.island_chat
+        assert bubble is not None and bubble.isVisible()
+
+        shell._show_pets_from_island_chat()
+        QApplication.processEvents()
+
+        assert overlay.overlay.isVisible() is True, \
+            "overlay 下点「显示桌宠」必须把合成窗恢复可见（旧实现的 win.show() 循环恒空转）"
+        assert shell.island._pet_visible is True, "岛状态与实际可见性一致"
+        assert not bubble.isVisible()
+    finally:
+        overlay._delete_runtime_marker()
+        _teardown_shell(shell)
+
+
 def test_shell_auto_pop_on_global_chat_finished_when_hidden(tmp_path):
     """桌宠隐藏 + 回复到达：自动弹预览气泡（不激活）；回复文本进展示层。"""
     _qapp()

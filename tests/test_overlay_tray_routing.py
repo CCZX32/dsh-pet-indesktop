@@ -103,6 +103,21 @@ def _teardown(shell) -> None:
         shell.tray.hide()
 
 
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    """宽预算轮询等托盘命令落地（``shared.run_after_menu_closed`` 的延迟派发）。
+
+    托盘条目一律「菜单先关、回调延到菜单关闭后执行」：触发后必须先证明**没有**
+    内联执行，再用本函数等它真的执行——不赌固定 sleep。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 class _FakeContextEvent:
     def __init__(self, pos):
         self._pos = QPoint(pos)
@@ -150,7 +165,9 @@ def test_tray_lists_per_pet_submenus_and_routes_exit_this(tmp_path):
             assert {"回到右下角", "退出这只"} <= set(_labels(sub)), label
 
         _action(subs[_child_label(shell, first)], "退出这只").trigger()
-        assert shell._spawned == [second], "只该退掉被点的那一只"
+        assert shell._spawned == [first, second], "菜单还开着，退出动作不许内联执行"
+        assert _wait_until(lambda: shell._spawned == [second]), \
+            "菜单关闭后只该退掉被点的那一只"
         assert first not in shell.overlay.sprites
         assert shell.sprite in shell.overlay.sprites
 
@@ -166,7 +183,9 @@ def test_tray_exit_this_on_main_pet_promotes_first_child(tmp_path):
     try:
         first, second = _spawn_two(shell)
         _action(_submenus(_tray_menu(shell))[MAIN_LABEL], "退出这只").trigger()
-        assert shell.sprite is first                      # 列表头提升为主
+        assert shell.sprite is not first, "菜单还开着，退出主宠不许内联执行"
+        assert _wait_until(lambda: shell.sprite is first), \
+            "菜单关闭后列表头提升为主"
         assert shell._spawned == [second]
         subs = _submenus(_tray_menu(shell))
         assert set(subs) == {MAIN_LABEL, _child_label(shell, second)}
@@ -183,7 +202,8 @@ def test_tray_default_corner_targets_clicked_pet(tmp_path):
         expected = shell._default_corner_pos(shell._bounds, first.rect())
         _action(_submenus(_tray_menu(shell))[_child_label(shell, first)],
                 "回到右下角").trigger()
-        assert first.pos == expected
+        assert first.pos != expected, "菜单还开着，归位不许内联执行"
+        assert _wait_until(lambda: first.pos == expected), "菜单关闭后必须归位"
         assert shell.sprite.pos == before, "主宠不该被逐只动作带走"
     finally:
         _teardown(shell)
@@ -210,15 +230,19 @@ def test_tray_aggregate_entries_and_quit(tmp_path):
         _spawn_two(shell)
         shell.overlay.show()
         _action(_tray_menu(shell), "退出子肥鱼").trigger()
-        assert shell._spawned == []
+        assert shell._spawned != [], "菜单还开着，退出子肥鱼不许内联执行"
+        assert _wait_until(lambda: shell._spawned == []), "菜单关闭后必须清空子肥鱼"
 
         toggle = _action(_tray_menu(shell), "显示 / 隐藏")
         toggle.trigger()
-        assert not shell.overlay.isVisible()
+        assert shell.overlay.isVisible(), "菜单还开着，显隐不许内联执行"
+        assert _wait_until(lambda: not shell.overlay.isVisible()), "菜单关闭后隐藏"
+        toggle = _action(_tray_menu(shell), "显示 / 隐藏")
         toggle.trigger()
-        assert shell.overlay.isVisible()
+        assert _wait_until(lambda: shell.overlay.isVisible()), "菜单关闭后显示"
 
-        # 「退出」必须走当前 app（F5：菜单持有的回调不能是旧对象）
+        # 「退出」必须走当前 app（F5：菜单持有的回调不能是旧对象）；它刻意不延迟
+        # 派发（不是窗面动作，legacy 托盘同为裸 addAction），故触发即生效。
         shell.app = SimpleNamespace(quit=lambda: quit_calls.append(1))
         shell._refresh_tray_menu()
         _action(_tray_menu(shell), "退出").trigger()
@@ -286,21 +310,25 @@ def test_tray_menu_has_mouse_through_and_autostart(tmp_path):
         auto = _action(menu, "开机自启")
         assert auto.isCheckable()
 
-        # 穿透：走壳的用户意愿收编入口（记意愿 + 持久化 + 复合重算）
+        # 穿透：走壳的用户意愿收编入口（记意愿 + 持久化 + 复合重算）——按派发
+        # 契约延到菜单关闭后执行，故触发后先证明没内联、再轮询等落地。
         assert shell._config.get("mouse_through", False) is False
         through.trigger()
-        assert through.isChecked() is True
-        assert shell._config.get("mouse_through") is True
+        assert through.isChecked() is True, "勾选态必须即时翻转"
+        assert shell._config.get("mouse_through", False) is False, \
+            "菜单还开着，穿透开关不许内联落地"
+        assert _wait_until(lambda: shell._config.get("mouse_through") is True)
         assert shell.overlay.mouse_through is True
         through.trigger()
-        assert shell.overlay.mouse_through is False
+        assert _wait_until(lambda: shell.overlay.mouse_through is False)
 
         # 开机自启：转发到实例的 _set_autostart(enabled, 壳)——壳具 show_bubble 宿主面
         calls: list = []
         shell._instance._set_autostart = (
             lambda enabled, win=None: calls.append((enabled, win)) or True)
         auto.trigger()
-        assert len(calls) == 1, "勾选必须真的写系统登录项"
+        assert calls == [], "菜单还开着，系统登录项不许内联写"
+        assert _wait_until(lambda: len(calls) == 1), "勾选必须真的写系统登录项"
         assert calls[0][0] == auto.isChecked()
         assert calls[0][1] is shell, "失败提示的宿主必须是壳（overlay 无 PetWindow）"
     finally:

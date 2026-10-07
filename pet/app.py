@@ -2784,11 +2784,22 @@ class AppShell:
         return True
 
     def _show_pets_from_island_chat(self) -> None:
-        """岛对话气泡里的「显示桌宠」：恢复全部窗并同步岛状态。"""
-        for inst in getattr(self, "_instances", []):
-            win = getattr(inst, "win", None)
-            if win is not None:
-                win.show()
+        """岛对话气泡里的「显示桌宠」：恢复全部窗并同步岛状态。
+
+        overlay 拓扑下 ``instances[].win`` 恒为 None（PetWindow 不构造），旧的全窗
+        ``show()`` 循环一只都命不中——宠物实际没恢复，岛却被直接标成可见。恢复面是
+        唯一合成窗，那里走壳自己的 ``set_pet_visible(True)``（``overlay.show()`` +
+        共享子系统 resume + 岛状态同步，与岛单击 toggle 同一条路，见
+        ``overlay_shell.py`` 的 ``set_pet_visible``）。
+        """
+        overlay = getattr(self, "_overlay_shell", None)
+        if overlay is not None:
+            overlay.set_pet_visible(True)
+        else:
+            for inst in getattr(self, "_instances", []):
+                win = getattr(inst, "win", None)
+                if win is not None:
+                    win.show()
         island = getattr(self, "island", None)
         if island is not None and shiboken6.isValid(island):
             island.set_pet_visible(True)
@@ -2827,12 +2838,41 @@ class AppShell:
         overlay = getattr(self, "_overlay_shell", None)
         if overlay is not None:
             # overlay 拓扑：instances[].win 恒为 None（PetWindow 不构造），
-            # 聚合可见态由唯一合成窗承担。
-            return overlay.overlay.isVisible()
+            # 聚合可见态由唯一合成窗承担。但合成窗是**常驻**透明全屏窗——逐只
+            # 显隐（OverlayShell.set_sprite_visible）只翻 sprite.visible、不关它，
+            # 故窗口可见只是必要条件：还要至少剩一只可见 sprite（见下）。
+            window = getattr(overlay, "overlay", None)
+            if window is None:
+                return False
+            try:
+                if not window.isVisible():
+                    return False
+            except RuntimeError:
+                return False  # 原生窗口已销毁：没有可见面
+            return self._overlay_sprite_visible(overlay)
         return any(
             inst.win is not None and getattr(inst.win, "isVisible", lambda: True)()
             for inst in self._instances
         )
+
+    @staticmethod
+    def _overlay_sprite_visible(shell) -> bool:
+        """合成窗里是否至少有一只可见 sprite（主宠与子宠同等计入）。
+
+        逐只藏光全部 sprite 后窗口仍 ``isVisible()``，此时桌宠在屏幕上其实一只
+        都没有——聚合若判可见，岛会把快速对话锚到不可见的 sprite，隐藏期该弹的
+        岛气泡也不再弹。可见性读壳自己的 ``_sprite_visible``（同一判据，含鸭式
+        sprite 的兜底）；没有 sprite 清单的精简装配/测试替身退回「窗口可见即可见」。
+        """
+        sprites = list(getattr(getattr(shell, "overlay", None), "sprites", ()) or ())
+        if not sprites:
+            return True
+        probe = getattr(shell, "_sprite_visible", None)
+        for sprite in sprites:
+            visible = probe(sprite) if callable(probe) else getattr(sprite, "visible", True)
+            if visible:
+                return True
+        return False
 
     def _toggle_pet_from_island(self) -> None:
         # overlay 拓扑：inst.win 全为 None，旧循环拿不到任何窗——路由到

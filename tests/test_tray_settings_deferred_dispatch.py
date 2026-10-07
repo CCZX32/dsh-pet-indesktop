@@ -25,6 +25,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QPointF
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -369,3 +370,190 @@ def test_tray_autostart_check_waits_for_menu_close(tmp_path):
         assert calls[0][1] is win, "失败提示的宿主必须是本窗"
     finally:
         _close_tray(tray, menu)
+
+
+# ------------------------------------------------ overlay 托盘全条目：同一契约
+def _overlay_tray(tmp_path):
+    """overlay 拓扑的托盘 + 菜单（overlay 下用户**实际看到**的那一份）。
+
+    overlay 不构造 PetWindow，托盘挂在 ``OverlayShell`` 上：先前这批修复只覆盖了
+    legacy 的 ``AppShell._build_tray``，本文件的其余用例也都打在 legacy 托盘上——
+    于是 overlay 拓扑下的裸 ``addAction`` / ``toggled`` 一直没被回归覆盖。
+    """
+    from tests.test_overlay_spawn import _make_persistent_shell
+
+    shell, _made = _make_persistent_shell(tmp_path)
+    menu = shell.tray.contextMenu()
+    assert menu is not None
+    return shell, menu
+
+
+def _close_overlay_tray(shell) -> None:
+    """收口：菜单（生灭后可能已重建，故从托盘重取）+ 指令 watcher + 运行标记。"""
+    if getattr(shell, "tray", None) is not None:
+        menu = shell.tray.contextMenu()
+        if menu is not None:
+            try:
+                menu.close()
+            except RuntimeError:
+                pass  # 菜单已随生灭重建销毁：跳过
+        shell.tray.hide()
+    shell._teardown_settings_command_watch()
+    shell._delete_runtime_marker()
+    app.processEvents()
+
+
+def test_overlay_tray_show_hide_waits_for_menu_close(tmp_path):
+    """overlay 托盘「显示 / 隐藏」：动的是合成窗，同样菜单先关再切。"""
+    shell, menu = _overlay_tray(tmp_path)
+    try:
+        shell.overlay.show()
+        app.processEvents()
+        assert shell.overlay.isVisible(), "前提：合成窗可见"
+        _open_menu(menu)
+
+        _entry(menu, "显示 / 隐藏").trigger()
+        assert shell.overlay.isVisible(), "菜单还开着，显隐动作不许内联执行"
+        assert not menu.isVisible(), "点击后菜单必须先关"
+
+        assert _wait_until(lambda: not shell.overlay.isVisible()), \
+            "菜单关闭后必须切换一次显隐"
+    finally:
+        _close_overlay_tray(shell)
+
+
+def test_overlay_tray_return_to_corner_waits_for_menu_close(tmp_path):
+    """overlay 托盘「回到右下角」：移动主 sprite，同样不内联执行。"""
+    shell, menu = _overlay_tray(tmp_path)
+    try:
+        expected = shell._default_corner_pos(shell._bounds, shell.sprite.rect())
+        shell.sprite.set_pos(QPointF(0, 0))
+        before = QPointF(shell.sprite.pos)
+        _open_menu(menu)
+
+        _entry(menu, "回到右下角").trigger()
+        assert shell.sprite.pos == before, "菜单还开着，归位不许内联执行"
+        assert not menu.isVisible(), "点击后菜单必须先关"
+
+        assert _wait_until(lambda: shell.sprite.pos == expected), \
+            "菜单关闭后必须归位一次"
+    finally:
+        _close_overlay_tray(shell)
+
+
+@pytest.mark.parametrize("label,delta", [
+    ("生小肥鱼", +1),
+    ("退出子肥鱼", -1),
+])
+def test_overlay_tray_pet_lifecycle_waits_for_menu_close(tmp_path, label, delta):
+    """overlay 托盘「生小肥鱼 / 退出子肥鱼」：生灭 sprite 与各自库，同样延迟派发。"""
+    shell, menu = _overlay_tray(tmp_path)
+    try:
+        if delta < 0:
+            shell.spawn_pet()                # 前置：先有一只子肥鱼可退
+            menu = shell.tray.contextMenu()  # 生灭会重建菜单，重取
+        before = len(shell._spawned)
+        _open_menu(menu)
+
+        _entry(menu, label).trigger()
+        assert len(shell._spawned) == before, f"{label}：菜单还开着不许内联执行"
+        assert not menu.isVisible(), "点击后菜单必须先关"
+
+        assert _wait_until(lambda: len(shell._spawned) == before + delta), \
+            f"菜单关闭后必须生灭一次（{label}）"
+    finally:
+        _close_overlay_tray(shell)
+
+
+def test_overlay_tray_per_pet_submenu_waits_for_menu_close(tmp_path):
+    """逐只子菜单三项与顶层同族：子菜单也是同一个原生跟踪会话的一部分。
+
+    「显示这只」是勾选条目：勾选态即时翻转（用户看得到），逐只显隐延到菜单关闭后。
+    """
+    shell, menu = _overlay_tray(tmp_path)
+    try:
+        first = None
+        shell.spawn_pet()
+        shell.spawn_pet()
+        first, second = shell._spawned[0], shell._spawned[1]
+        menu = shell.tray.contextMenu()
+        sub = _submenu(menu, f"小肥鱼 [slot-{shell._spawned_slots[first]}]")
+        corner = _entry(sub, "回到右下角")
+        show_this = _entry(sub, "显示这只")
+        exit_this = _entry(sub, "退出这只")
+        assert show_this.isCheckable(), "「显示这只」必须可勾选"
+        assert show_this.isChecked() is True, "前提：这只当前可见"
+        expected = shell._default_corner_pos(shell._bounds, first.rect())
+        first.set_pos(QPointF(0, 0))
+        before_pos = QPointF(first.pos)
+        shell.sprite.set_pos(QPointF(11, 13))   # 主宠挪开：错路由时位置不会碰巧相等
+        main_pos = QPointF(shell.sprite.pos)
+        _open_menu(menu)
+
+        show_this.trigger()                 # 取消勾选 = 隐藏这只
+        assert show_this.isChecked() is False, "勾选态必须即时翻转"
+        assert shell._sprite_visible(first) is True, \
+            "菜单还开着，逐只显隐不许内联执行"
+        assert _wait_until(lambda: shell._sprite_visible(first) is False), \
+            "菜单关闭后必须把这只藏起来"
+        assert shell._sprite_visible(shell.sprite) is True, "只影响被点的那只"
+
+        shell.set_sprite_visible(first, True)
+        _open_menu(menu)
+        corner.trigger()
+        assert first.pos == before_pos, "菜单还开着，归位不许内联执行"
+        assert _wait_until(lambda: first.pos == expected), "菜单关闭后必须归位"
+        assert shell.sprite.pos == main_pos, "主宠不该被逐只动作带走"
+
+        _open_menu(menu)
+        exit_this.trigger()
+        assert shell._spawned == [first, second], "菜单还开着，退出这只不许内联执行"
+        assert _wait_until(lambda: shell._spawned == [second]), \
+            "菜单关闭后只该退掉被点的那一只"
+        assert first not in shell.overlay.sprites
+    finally:
+        _close_overlay_tray(shell)
+
+
+def test_overlay_tray_menu_open_syncs_check_marks_without_side_effects(tmp_path):
+    """overlay 托盘弹出只同步勾选态看相，绝不顺手执行副作用。
+
+    旧接线（``toggled``）在弹出前那次程序化 ``setChecked`` 也会触发副作用：开一次
+    菜单就把老鼠穿透的复合重算与系统登录项重写一遍。副作用改挂 ``triggered`` 后，
+    程序化同步不发这个信号——勾选态接线不变，改动只落在"不再误触发"。
+    """
+    shell, menu = _overlay_tray(tmp_path)
+    autostart_calls: list = []
+    try:
+        shell._instance._set_autostart = (
+            lambda enabled, target=None: (autostart_calls.append(enabled), True)[1])
+        shell._autostart_enabled = lambda: True
+        shell._config.set("mouse_through", True)
+        shell.overlay.mouse_through = False     # 前提：窗面尚未应用该意愿
+        menu.aboutToShow.emit()
+        app.processEvents()
+
+        assert _entry(menu, "鼠标穿透").isChecked() is True, "勾选态跟着配置走"
+        assert _entry(menu, "开机自启").isChecked() is True, "勾选态跟着系统登录项走"
+        assert shell.overlay.mouse_through is False, "弹菜单不得动穿透开关"
+        assert autostart_calls == [], "弹菜单不得写系统登录项"
+    finally:
+        _close_overlay_tray(shell)
+
+
+def test_overlay_tray_quit_entry_stays_inline(tmp_path):
+    """「退出」刻意不延迟派发：它不是窗面动作，legacy 托盘同为裸 addAction。
+
+    这条把"有意不改"钉住：将来若有人顺手把它也改成延迟派发，本用例会提醒先想清楚
+    ——退出发生在原生菜单跟踪会话里不需要 AppKit 放行（会话随进程一起结束）。
+    """
+    shell, menu = _overlay_tray(tmp_path)
+    quit_calls: list = []
+    try:
+        shell.app = SimpleNamespace(quit=lambda: quit_calls.append(1))
+        shell._refresh_tray_menu()
+        menu = shell.tray.contextMenu()
+        _entry(menu, "退出").trigger()
+        assert quit_calls == [1], "「退出」触发即生效（无延迟派发）"
+    finally:
+        _close_overlay_tray(shell)

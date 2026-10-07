@@ -95,7 +95,7 @@ recovery
 | 判定 | 行当前值 ≠ `Config` 出厂默认 → 该行进入「已修改」态（标记 + 默认值小字 + 重置入口）；默认态三者全不呈现 |
 | 默认值来源 | `Config._initial_data()`（唯一真相源）。新增 `pet/settings_default_marks.py` 只登记「行 → 配置键路径」，**一个默认值都不写**；对账用例见 `tests/test_settings_default_marks.py` |
 | 覆盖 | 四类控件（ToggleSwitch / ModernSelect / BrowserSpinBox / QLineEdit）共 136 行中的 120 行有可比默认值；其余 16 行（AI 服务商逐条目字段、`island_metrics` 列表成员、台词编辑层记忆）没有单一默认值 ⇒ 不显示标记，清单钉在测试快照 `NO_DEFAULT_ROWS` |
-| 单项重置 | 只把控件值设回默认；落盘仍走「保存并退出」的既有 `_write_config`，不绕过保存流、不另开写回路径；不弹确认框（代价低、可再改回）。全量「恢复默认设置…」流程未动 |
+| 单项重置 | 只把控件值设回默认；落盘时机跟着**该行自己的保存语义**走——即时生效型开关（`click_sound_enabled` / `agent_link.sound_enabled`，控件 `toggled` 已直连宿主的 `_apply_*_enabled_now`）改一下就写盘，其余行随设置窗关闭的既有 `_write_config` 写回（`closeEvent` / Esc 也写）；本刀不新增写回路径、不绕过保存流；不弹确认框（代价低、可再改回）。全量「恢复默认设置…」流程未动 |
 | 禁改项 | 子宠页的进程级 / `mark_main_pet_only` 行照旧置灰，且不给重置入口；依赖隐藏行不显示标记（可见性由 Qt 传播，不做额外记账） |
 | 不做 | 四类之外的控件（QDoubleSpinBox / QComboBox / 颜色与路径选择器 / 复合控件）整行不参与，既不显示标记也不报错；未纳入的行等于「没有可比默认值」，不视为漏改 |
 | 不适用 | 新增设置项、迁移、平台 capability matrix、披露层级——本刀没有对应改动 |
@@ -107,6 +107,8 @@ recovery
 3. **布局与可访问性**：三档宽度（720 / 900 / 1200）+ 真实 Windows GUI（`windows` 平台插件、SF Pro Text 13px）实测——标记与重置按钮都在行内、不与控件重叠、行高按新增一行文本增高；重置按钮有 `accessibleName`（含行标题）与键盘焦点。明暗主题复用既有 `settingHint` / `QPushButton` 令牌，无新增 QSS 面。
 4. **跨平台**：无平台分支（四类控件的判定与 `Config` 默认值跨平台同源）；真实 GUI 验收仅本机 Windows，macOS / Linux 未跑（不推断）。
 5. **视觉与文档**：本记录即变更记录；代表截图未产出（本会话无图像复核手段，改用程序化几何断言 + 真实 GUI 实测数字，见第 3 条）；未改 Shared UX Contract / Settings System / Menu Action Model，`CONTEXT.md` 无需更新。
+
+补记（终审修复批，同日）：本刀有两处表述与现实不符，按现实更正，行为零改动——① 单项重置的落盘时机改为如实表述（见上表「单项重置」行）：即时生效型开关重置后立即写盘，其余随设置窗关闭写回；`pet/settings_widgets.py` 的按钮 tooltip 与 `pet/settings_default_marks.py` 的模块 docstring 同步更正。② macOS 专属行「显示 Dock 图标」原缺默认值映射（行键 `dock_icon` ≠ 配置键 `show_dock_icon`）：macOS 上该行既不出「已修改」标记也不能改回默认，且覆盖率快照必红；映射已补，并加了一条 darwin 模拟下的快照用例（`tests/test_settings_default_marks.py::test_macos_only_rows_align_with_the_same_snapshot`）。
 
 ### 2026-10-08 — 设置页第四刀：搜索增强（折叠组标题 + 口语别名入索引，纯呈现层）
 

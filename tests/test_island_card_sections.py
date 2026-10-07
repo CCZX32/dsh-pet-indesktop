@@ -169,9 +169,11 @@ def test_card_metric_row_carries_the_merged_value_and_full_context(tmp_path, mon
         assert rows[CPU].value == "38%", "卡片值是格式化器的合并串"
         assert rows[MEM].value == "61%"
         assert rows[CPU].unit_full == "百分比"
-        assert rows[CPU].source == "本机 psutil 采样"
+        assert rows[CPU].source == "本机采样"
         assert rows[CPU].updated == "3 秒前"
-        assert rows[CPU].detail == "百分比 · 本机 psutil 采样 · 3 秒前"
+        assert rows[CPU].detail == "百分比 · 本机采样 · 3 秒前"
+        assert "psutil" not in rows[CPU].detail, \
+            "来源行说人话：采样库名是实现细节，不进用户视线（与网络段同口径）"
     finally:
         island.close()
 

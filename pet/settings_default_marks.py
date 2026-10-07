@@ -18,8 +18,11 @@ settings_quiet / settings_music / settings_file_interpret / settings_reset_defau
 - **没有可比默认值的行不显示标记**：逐服务商字段（api_url/model/api_key/…）、列表
   成员（island_network/cpu/mem/gpu 是 ``island_metrics`` 列表的成员）、UI 记忆
   （dialogue_scope）等，清单由 ``tests/test_settings_default_marks.py`` 的快照钉住。
-- **单项重置只改控件值**：落盘仍走「保存并退出」的既有写回路径（``_write_config``），
-  本模块不碰 ``Config``——所以点完重置、没保存就关掉，磁盘上不会有任何变化。
+- **单项重置只改控件值**：本模块不碰 ``Config``，也不新增任何写回路径——重置把控件
+  设回默认值后，落盘时机跟着**该行自己的保存语义**走，与本模块无关：即时生效型开关
+  （``click_sound_enabled`` / ``agent_link.sound_enabled`` 等，控件 ``toggled`` 直连
+  宿主的 ``_apply_*_enabled_now``）改一下就写盘；其余行随设置窗关闭的既有
+  ``_write_config`` 写回。
 - 标记与按钮只做 ``setVisible``：依赖隐藏交给 Qt 自己传播（父行不可见时标记也不
   呈现，父行重新显示后标记跟着回来），不做额外的可见性记账。
 """
@@ -108,6 +111,8 @@ _ROW_DEFAULT_PATHS: dict[str, str | tuple[str, float]] = {
     # 常规
     "autostart": "autostart_wanted",
     "stream_capture": "stream_capture_mode",
+    # macOS 专属行（darwin 分支才构造）：行键与配置键不同名，必须显式登记
+    "dock_icon": "show_dock_icon",
 }
 
 #: 「控件不在这四类里」的哨兵：区分它与 ModernSelect 合法的空数据（``None``）。
@@ -250,6 +255,7 @@ def refresh(dialog) -> None:
 
 
 def _reset_row(dialog, control: QWidget, default) -> None:
-    """单项重置：只把控件值设回默认，落盘仍归「保存并退出」那条既有路径。"""
+    """单项重置：只把控件值设回默认；落盘按该行自己的保存语义（即时生效型立即
+    写盘，其余随设置窗关闭的 ``_write_config`` 写回）。"""
     _apply_control_value(control, default)
     refresh(dialog)

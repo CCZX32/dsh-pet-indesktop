@@ -2932,33 +2932,57 @@ class OverlayShell(QObject):
         - 「桌宠设置」按主身份路由（D13）、「退出」= app.quit；
         - 「鼠标穿透」「开机自启」= legacy 托盘后段两项（穿透只有托盘/设置页能取消；
           自启勾选态按系统登录项实况，弹出前同步）。
+
+        **派发契约**（与 legacy 托盘 `3356d67` 同口径）：会动窗面/冒泡/系统登录项
+        的条目一律走 ``add_tray_action`` / ``add_tray_toggle``——菜单先关，回调延到
+        菜单真的不在之后再执行。macOS 的托盘菜单是 AppKit 原生 NSMenu 跟踪会话，
+        会话中新建/激活窗口会被抑制（issue #4 家族：点了没反应）；勾选项的副作用
+        挂 ``triggered`` 而不是 ``toggled``，弹出前那次程序化 ``setChecked`` 就不会
+        顺手重写配置/登录项。本壳是 overlay 拓扑下用户**实际看到**的托盘。
         """
         if self.tray is None:
             return
+
+        def add_tray_toggle(target: QMenu, label: str, checked, apply):
+            """可勾选托盘条目：勾选态即时翻转，副作用延到菜单关闭后执行。
+
+            与 ``app.py::_build_tray`` 的同型助手逐位一致（那里是嵌套函数，导不出来）。
+            ``add_tray_action`` 的回调在菜单关闭后执行，此时 ``isChecked()`` 已是用户
+            点出来的最终值——故 apply 收勾选态，而不是在连接时把它绑死。
+            """
+            action = add_tray_action(
+                target, label, lambda: apply(bool(action.isChecked())))
+            action.setCheckable(True)
+            action.setChecked(bool(checked))
+            return action
+
         menu = QMenu()
         # 气泡是置顶 Tool 窗口（层级高于菜单）：弹出前先隐藏（legacy 同款）
         menu.aboutToShow.connect(self._hide_bubble_for_menu)
         # 弹出前同步逐只勾选态（外部改过 sprite.visible 也能反映）
         menu.aboutToShow.connect(self._sync_tray_pet_visibility)
-        menu.addAction("显示 / 隐藏", self._toggle_pet_visible)
-        menu.addAction("回到右下角", lambda: self._go_default_corner(self.sprite))
+        # 本段无一条是纯记账：显隐要动合成窗、归位要动 sprite 位置、生/退桌宠要动
+        # sprite 与各自库（还可能冒泡），全按上面的派发契约走。
+        add_tray_action(menu, "显示 / 隐藏", self._toggle_pet_visible)
+        add_tray_action(menu, "回到右下角",
+                        lambda: self._go_default_corner(self.sprite))
         menu.addSeparator()
-        menu.addAction("生小肥鱼", self.spawn_pet)
-        menu.addAction("退出子肥鱼", self.clear_spawned_pets)
+        add_tray_action(menu, "生小肥鱼", self.spawn_pet)
+        add_tray_action(menu, "退出子肥鱼", self.clear_spawned_pets)
         visible_actions: list = []
         if self._spawned:
             menu.addSeparator()
             for sprite, label in self._pet_entries():
+                # 子菜单也是同一个原生跟踪会话的一部分，会话中做这些同样会被抑制：
+                # 三条子项与顶层同族（同一批窗面/显隐状态），一律延迟派发。
                 sub = menu.addMenu(label)
-                sub.addAction("回到右下角",
-                              lambda s=sprite: self._go_default_corner(s))
-                toggle = sub.addAction(
-                    "显示这只", lambda s=sprite: self.toggle_sprite_visible(s))
-                toggle.setCheckable(True)
-                toggle.setChecked(self._sprite_visible(sprite))
+                add_tray_action(sub, "回到右下角",
+                                lambda s=sprite: self._go_default_corner(s))
+                toggle = add_tray_toggle(
+                    sub, "显示这只", self._sprite_visible(sprite),
+                    lambda want, s=sprite: self.set_sprite_visible(s, want))
                 visible_actions.append((sprite, toggle))
-                sub.addAction("退出这只",
-                              lambda s=sprite: self.exit_pet(s))
+                add_tray_action(sub, "退出这只", lambda s=sprite: self.exit_pet(s))
         self._pet_visible_actions = visible_actions
         menu.addSeparator()
         # 与 legacy 托盘同口径：菜单先关、回调延到菜单关闭后执行（原生菜单跟踪
@@ -2966,20 +2990,21 @@ class OverlayShell(QObject):
         add_tray_action(menu, "桌宠设置",
                         lambda: self.open_settings_for(self.sprite))
         # legacy 托盘两项（app.py:3333-3343）：鼠标穿透的取消入口只有托盘/设置页，
-        # 开着时桌宠点不动；开机自启此前只有右键菜单有勾选项。
-        mouse_through = menu.addAction("鼠标穿透")
-        mouse_through.setCheckable(True)
-        mouse_through.setChecked(bool(self._config.get("mouse_through", False)))
-        mouse_through.toggled.connect(self._on_user_through_changed)
+        # 开着时桌宠点不动；开机自启此前只有右键菜单有勾选项。两项都写配置、写系统
+        # 登录项，按派发契约走勾选版助手。
+        mouse_through = add_tray_toggle(
+            menu, "鼠标穿透", bool(self._config.get("mouse_through", False)),
+            self._on_user_through_changed)
         menu.addSeparator()
-        autostart = menu.addAction("开机自启")
-        autostart.setCheckable(True)
-        autostart.setChecked(self._autostart_enabled())
-        autostart.toggled.connect(self._set_autostart_from_tray)
-        # 弹出前同步勾选态（设置页/右键菜单改过的不刷新会过期，legacy 同款）
+        autostart = add_tray_toggle(
+            menu, "开机自启", self._autostart_enabled(), self._set_autostart_from_tray)
+        # 弹出前同步勾选态（设置页/右键菜单改过的不刷新会过期，legacy 同款）。
+        # 只改看相、不触发副作用：副作用挂 triggered，程序化 setChecked 不发它。
         menu.aboutToShow.connect(
             lambda: self._sync_tray_toggle_checks(mouse_through, autostart))
         menu.addSeparator()
+        # 「退出」刻意不延迟：它不是窗面动作，而是结束本进程（会话中被抑制的对象
+        # 在退出路径上不存在），legacy 托盘同样是裸 addAction——两边同判断。
         menu.addAction("退出", self.app.quit)
         old = self._tray_menu
         self.tray.setContextMenu(menu)  # 新菜单先接管，旧菜单才允许释放（F5）

@@ -958,7 +958,10 @@ class SettingRow(QFrame):
         self.default_reset_button.setObjectName("settingDefaultReset")
         self.default_reset_button.setAutoDefault(False)
         self.default_reset_button.setDefault(False)
-        self.default_reset_button.setToolTip("把这一项改回默认值（保存并退出时生效）")
+        self.default_reset_button.setToolTip(
+            "把这一项改回默认值。保存时机跟这一项自己的语义一致：即时生效的开关会立刻"
+            "写入配置，其余项随设置窗关闭保存。"
+        )
         # 一页里有几十个同名按钮，读屏必须能说清是改哪一项（Tab 到才听得懂）
         self.default_reset_button.setAccessibleName(f"把「{title}」改回默认值")
         self.default_reset_button.hide()
