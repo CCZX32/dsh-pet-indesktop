@@ -89,7 +89,12 @@ class _FakeDialog(QObject):
     def begin_search(self) -> None:
         self.begun += 1
 
-    def set_search_results(self, results, error="") -> None:
+    def search_epoch(self) -> int:
+        # 版本校验由真对话框负责（见 ``WeatherCityDialog.set_search_results``）；
+        # 替身恒 0 = 结果永远属于当前版本，本用例只关心回填链路。
+        return 0
+
+    def set_search_results(self, results, error="", *, epoch=None) -> None:
         self.results_seen.append((results, error))
 
 
@@ -364,6 +369,66 @@ def test_start_search_feeds_the_dialog_through_the_injected_searcher():
     assert queries == ["鹿城"]
     assert dialog.chosen_name() == "鹿城"
     assert dialog.search_btn.isEnabled() is True
+
+
+def _type_into(line_edit, text: str, *, replace: bool = False) -> None:
+    """按真键盘路径输入（``textEdited`` 只有真编辑才发，``setText`` 不发）。
+
+    ``replace=True`` 先全选再打（等价用户 Ctrl+A 后重打），输入的字符覆盖旧内容。
+    不用 ``QTest.keyClicks``：它对非 ASCII 字符会在 Windows/offscreen 上原生
+    崩溃（进程静默退出），手工发 QKeyEvent 走的是同一条 QLineEdit 事件路径。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+
+    if replace:
+        line_edit.selectAll()
+    for char in text:
+        app.sendEvent(line_edit, QKeyEvent(
+            QKeyEvent.Type.KeyPress, Qt.Key.Key_unknown,
+            Qt.KeyboardModifier.NoModifier, char))
+
+
+def test_late_search_results_from_an_abandoned_query_are_dropped():
+    """W1：搜北京在飞时改成上海，迟到的北京结果不得回填、不得抢占选中。
+
+    改前：``_on_text_edited`` 只清**已显示**的候选，搜索线程手里的结果回来时
+    仍被无条件灌回（``setCurrentRow(0)``）——用户看到北京候选，点「添加」加进
+    去的也是北京，与终审 m2 的承诺相反。
+    """
+    beijing = W.CityCandidate(code="101010100", name="北京", region="北京")
+    dialog = M.WeatherCityDialog()
+    in_flight: list = []
+    _type_into(dialog.name_edit, "北京")
+    M.start_search(dialog, "北京", lambda _query: ([beijing], ""),
+                   runner=in_flight.append)
+    assert in_flight, "前提：搜索在飞（结果还没落地）"
+    assert dialog.search_btn.isEnabled() is False
+
+    _type_into(dialog.name_edit, "上海", replace=True)  # 用户在结果到达前改掉查询
+
+    in_flight[0]()  # 北京的结果现在才到
+
+    # 先钉复现：迟到结果**不得**回填候选（改前这里会拿到北京并选中第一项）
+    assert dialog.results.count() == 0, "迟到的旧结果不得回填候选"
+    assert dialog.results.currentItem() is None, "更不得抢占选中"
+
+    assert dialog.chosen_name() == "上海", "能添加的只能是当前输入"
+    assert dialog.status_label.text() == M.SEARCH_IDLE_TEXT
+    assert dialog.search_btn.isEnabled() is True, "改了输入就该能重新搜索，不许锁在「搜索中」"
+
+
+def test_results_of_the_current_query_still_land():
+    """反面：查询没被改过时结果照常回填（版本校验不得误伤正常路径）。"""
+    dialog = M.WeatherCityDialog()
+    _type_into(dialog.name_edit, "鹿城")
+    M.start_search(
+        dialog, "鹿城",
+        lambda _query: ([W.CityCandidate(code="101210710", name="鹿城", region="浙江")], ""),
+        runner=lambda work: work(),
+    )
+    assert dialog.chosen_name() == "鹿城"
+    assert [dialog.results.item(i).text() for i in range(dialog.results.count())] == ["鹿城"]
 
 
 # ---------------------------------------------------------------- 注册表

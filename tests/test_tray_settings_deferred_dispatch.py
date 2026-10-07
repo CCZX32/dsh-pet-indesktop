@@ -108,6 +108,37 @@ def test_legacy_tray_settings_entry_waits_for_menu_close(tmp_path, label, expect
         app.processEvents()
 
 
+@pytest.mark.parametrize(
+    "label,expected", [("AI 对话", "chat"), ("快速对话（气泡）", "quick")])
+def test_legacy_tray_chat_entry_waits_for_menu_close(tmp_path, label, expected):
+    """W4：托盘这两个开窗入口与设置入口同族，同样必须等菜单关闭后再派发。
+
+    它们是裸 ``menu.addAction(text, callback)``——回调在原生菜单跟踪会话里内联
+    执行，会话中新建窗口被 AppKit 抑制（同上：点了没反应）。
+    """
+    calls: list = []
+    shell = AppShell(app, Config(tmp_path), enable_chat=True)
+    shell.instance.open_chat = lambda *args, **kwargs: calls.append("chat")
+    shell.instance.open_quick_chat = lambda *args, **kwargs: calls.append("quick")
+    tray = shell._build_tray(_TrayWin(Config(tmp_path)))
+    menu = tray.contextMenu()
+    assert menu is not None
+    try:
+        menu.show()
+        app.processEvents()
+        assert menu.isVisible(), "前提：菜单在显示态"
+
+        _entry(menu, label).trigger()
+        assert calls == [], f"{label}：菜单还开着，回调不许内联执行"
+        assert not menu.isVisible(), f"{label}：点击后菜单必须先关"
+
+        assert _wait_until(lambda: calls == [expected]), f"菜单关闭后必须执行一次，实际 {calls}"
+    finally:
+        tray.hide()
+        menu.close()
+        app.processEvents()
+
+
 def test_overlay_tray_settings_entry_waits_for_menu_close(tmp_path):
     """overlay 拓扑的同一个入口（``OverlayShell._refresh_tray_menu``）同口径。"""
     from tests.test_overlay_spawn import _make_persistent_shell

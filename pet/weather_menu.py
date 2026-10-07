@@ -29,8 +29,10 @@
 
 **联网**：只有「添加城市…」的搜索会联网（走 ``WeatherClient.search_cities``，即
 国内源直连那一条），后台线程执行、结果经 queued 信号回填对话框；搜索不阻塞菜单
-关闭流程。用户一改输入框，旧候选与旧选择立即作废（终审 m2）——否则"搜北京后改
-上海"会把北京当成结果添加进去。
+关闭流程。**查询带版本号**（终审 m2 + W1）：用户一改输入框就自增版本、旧候选与
+旧选择立即作废，发起搜索时把当时的版本随结果一起带回，回来时对不上号的结果直接
+丢弃——否则"搜北京在飞时改成上海"会让迟到的北京结果回填并抢占选中，点「添加」
+加进去的就是北京。
 
 **口径**（与余额/音乐菜单一致）：动作 ``close_on_trigger``，回调在原生菜单跟踪
 循环结束后才执行（macOS 上菜单未关时建顶层窗口/弹对话框会被 AppKit 抑制）。
@@ -188,6 +190,8 @@ class WeatherCityDialog(QDialog):
         self.setWindowTitle("添加天气城市")
         self.setModal(True)
         self.setMinimumWidth(360)
+        # 查询版本号：每次编辑或发起搜索都自增（见 search_epoch / set_search_results）
+        self._query_epoch = 0
 
         self.name_edit = QLineEdit(self)
         self.name_edit.setObjectName("weatherCityName")
@@ -240,6 +244,15 @@ class WeatherCityDialog(QDialog):
     def typed_name(self) -> str:
         return self.name_edit.text().strip()
 
+    def search_epoch(self) -> int:
+        """当前的查询版本号（每次编辑输入或发起搜索都自增）。
+
+        ``start_search`` 发起时取一次，结果回来时由 :meth:`set_search_results`
+        比对：版本不同的结果属于**已被用户改掉的那次查询**，直接丢弃——终审 m2
+        只作废了已显示的候选，管不到还在飞的搜索线程。
+        """
+        return self._query_epoch
+
     def chosen_entry(self) -> dict:
         """最终要添加的条目：``{name, code, region}``；取消/空输入返回 ``{}``。
 
@@ -259,17 +272,33 @@ class WeatherCityDialog(QDialog):
         return str(self.chosen_entry().get("name") or "")
 
     def _on_text_edited(self, _text: str = "") -> None:
+        # 输入变了 = 新的查询版本：在飞的搜索结果一律作废（版本比对见
+        # set_search_results），并把搜索按钮放回可点——否则被作废的结果回来时
+        # 按钮永远停在「搜索中」，用户想重搜也点不动。
+        self._query_epoch += 1
+        self.search_btn.setEnabled(True)
         if self.results.count():
             self.results.clear()
         self.status_label.setText(SEARCH_IDLE_TEXT)
         self._refresh_add_enabled()
 
     def begin_search(self) -> None:
+        # 每次发起搜索也推进版本：上一次还在飞的结果（含同一输入重搜）从此作废
+        self._query_epoch += 1
         self.search_btn.setEnabled(False)
         self.status_label.setText("搜索中…")
 
-    def set_search_results(self, results, error: str = "") -> None:
-        """回填搜索结果（GUI 线程调用）。空结果/失败时保留手填这条路。"""
+    def set_search_results(self, results, error: str = "", *,
+                           epoch: int | None = None) -> None:
+        """回填搜索结果（GUI 线程调用）。空结果/失败时保留手填这条路。
+
+        ``epoch`` = 这条结果所属的查询版本（``start_search`` 发起时取）。与当前
+        版本不符说明它是**已被用户改掉的那次查询**的迟到结果，原地丢弃——否则
+        "搜北京在飞时改成上海"会让北京结果回填并抢占选中，点「添加」加进去的是
+        北京。不传 = 视为当前版本（直接调用方不做版本校验）。
+        """
+        if epoch is not None and int(epoch) != self._query_epoch:
+            return
         self.search_btn.setEnabled(True)
         self.results.clear()
         # 同名候选（朝阳 北京 / 辽宁）必须能区分：只有重名时才附地区，避免
@@ -315,14 +344,16 @@ class _SearchBridge(QObject):
 
     done = Signal(object, str)
 
-    def __init__(self, dialog, query: str) -> None:
+    def __init__(self, dialog, query: str, epoch: int) -> None:
         super().__init__()
         self._dialog = dialog
         self.done.connect(self._apply)
         self._query = query
+        self._epoch = int(epoch)
 
     def _apply(self, results, error) -> None:
-        self._dialog.set_search_results(results, error)
+        # 带上发起时的查询版本：对话框据此丢弃"这一版查询已被用户改掉"的结果
+        self._dialog.set_search_results(results, error, epoch=self._epoch)
 
     def run(self, searcher) -> None:
         try:
@@ -338,13 +369,16 @@ def start_search(dialog, query: str, searcher, runner=None) -> None:
     if not query:
         return
     runner = runner or _run_in_thread
-    bridge = _SearchBridge(dialog, query)
-    dialog._search_bridge = bridge  # 保活到结果落地
     dialog.begin_search()
+    # 版本号必须在 begin_search **之后**取：对话框的按钮路径已经先自增过一次
+    # （见 ``_request_search``），取早了会把自己这次搜索的结果判成迟到。
+    bridge = _SearchBridge(dialog, query, dialog.search_epoch())
+    dialog._search_bridge = bridge  # 保活到结果落地
     try:
         runner(lambda: bridge.run(searcher))
     except Exception as exc:  # noqa: BLE001 - 起线程失败也要把对话框从"搜索中"放出来
         log.exception("天气城市搜索线程启动失败")
+        # 线程没起来 = 这次搜索的版本就是当前版本，无需版本校验（直接报错放行）
         dialog.set_search_results([], f"{type(exc).__name__}: {exc}")
 
 

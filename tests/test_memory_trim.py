@@ -172,6 +172,12 @@ def _entry(pid: int, name: str, size_mb: float, *, child: bool = False):
         (8001, "edge.exe", 50, False, 9001, 5555, True, "trim", memory_trim.REASON_OK),
         # 9) 普通进程：回收
         (8002, "wechat.exe", 300, False, 9001, 5555, True, "trim", memory_trim.REASON_OK),
+        # 10) 读不出映像名：认不出关键名单（``_is_critical_name("")`` 恒 False），
+        #     按关键保护处理——绝不盲调（与"读不出工作集"同口径）
+        (8009, "", 300, False, 9001, 5555, True,
+         "skip", memory_trim.REASON_NAME_FAILED),
+        (8010, "   ", 300, False, 9001, 5555, True,
+         "skip", memory_trim.REASON_NAME_FAILED),
     ],
 )
 def test_decide_target_truth_table(pid, name, size_mb, child, own_pid, foreground,
@@ -302,6 +308,19 @@ def test_unreadable_working_set_is_counted_as_failure_and_never_trimmed():
     assert api.trimmed == [8002]
     assert [decision.pid for decision in report.failed] == [8005]
     assert report.failed[0].reason == memory_trim.REASON_QUERY_FAILED
+
+
+def test_unreadable_image_name_is_skipped_and_never_trimmed():
+    """名字读不出来 → 认不出关键名单，按关键保护跳过（绝不盲调）。"""
+    processes = [_entry(8002, "wechat.exe", 300), _entry(8009, "", 300)]
+    api = FakeApi(processes, children=set())
+
+    report = memory_trim.trim_working_sets(api, own_pid=os.getpid())
+
+    assert api.trimmed == [8002]
+    assert 8009 not in api.trimmed, "名字读不出的进程不许被回收"
+    assert [decision.pid for decision in report.skipped
+            if decision.reason == memory_trim.REASON_NAME_FAILED] == [8009]
 
 
 def test_trim_failure_lands_in_failed_count_without_raising():

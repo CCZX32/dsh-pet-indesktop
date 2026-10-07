@@ -1760,29 +1760,33 @@ class OverlayShell(QObject):
     def show_bubble(self, text: str, duration_ms: int = 3200,
                     subtitle: str | None = None, *, sticky: bool = False,
                     buttons: list | None = None, title_first: bool = False,
-                    width_locked: bool = False, **_ignored) -> None:
-        """向主 sprite 头顶冒泡（window.py:3850-3886 的 sprite 等价语义）。"""
+                    width_locked: bool = False, **_ignored) -> bool:
+        """向主 sprite 头顶冒泡（window.py:3850-3886 的 sprite 等价语义）。
+
+        返回是否真上了屏：不可见/飞行期/正挂提醒让路时为 False。免打扰结束的
+        汇报走 ``window_alerts.report_quiet_summary`` 的回退气泡面，它按这个
+        返回值确认交付——丢弃却报成功会把暂存排空（用户什么都没看到）。
+        """
         if not self.isVisible() or self._bubble_blocked():
-            return
+            return False
         if self._speech_bubble is None:
-            return
+            return False
         if not sticky and not buttons and self._alert_current is not None:
-            return  # 有提醒在展示：普通气泡让路，绝不覆盖审批弹窗
+            return False  # 有提醒在展示：普通气泡让路，绝不覆盖审批弹窗
         if sticky or buttons:
             self._sticky_bubble_active = True
             self._sticky_text = str(text)
             self._sticky_subtitle = str(subtitle or "")
             self._sticky_buttons = list(buttons) if buttons else None
-            self._show_bubble_text(self._sticky_text, 0,
-                                   subtitle=self._sticky_subtitle,
-                                   sticky=True, buttons=self._sticky_buttons)
-            return
+            return self._show_bubble_text(self._sticky_text, 0,
+                                          subtitle=self._sticky_subtitle,
+                                          sticky=True, buttons=self._sticky_buttons)
         self._apply_bubble_interactive()
         self.hold_bubble(duration_ms / 1000.0 + 2.0)
-        self._show_bubble_text(str(text), duration_ms,
-                               subtitle=str(subtitle or ""),
-                               title_first=title_first,
-                               width_locked=width_locked)
+        return self._show_bubble_text(str(text), duration_ms,
+                                      subtitle=str(subtitle or ""),
+                                      title_first=title_first,
+                                      width_locked=width_locked)
 
     def _show_bubble_text(self, text: str, duration_ms: int, **kwargs) -> bool:
         follower = getattr(self, "_bubble_follower", None)

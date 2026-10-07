@@ -21,6 +21,7 @@
    的子进程，抖它的工作集直接表现为掉帧——这条超出 issue 原文，但同属"不给
    自己制造缺页抖动"，是本节唯一一处主动加固；
 4. **系统关键进程**不碰（``SYSTEM_CRITICAL_NAMES``，逐条依据见常量注释）；
+   **读不出映像名**的进程按关键处理（认不出是不是名单里的进程就当成是，跳过）；
 5. 每个成功 ``OpenProcess`` 的句柄都在 ``finally`` 里 ``CloseHandle``——失败与
    提前跳过的路径同样收尾（单测钉死"打开 N 次 = 关闭 N 次"）；
 6. 权限不足的进程**安静跳过**并计入失败数，不抛异常、不打断整轮回收。
@@ -106,6 +107,7 @@ REASON_TOO_SMALL = "too-small"
 REASON_OK = "ok"
 REASON_OPEN_FAILED = "open-failed"
 REASON_QUERY_FAILED = "query-failed"
+REASON_NAME_FAILED = "name-failed"
 REASON_TRIM_FAILED = "trim-failed"
 
 ACTION_TRIM = "trim"
@@ -205,6 +207,7 @@ def decide_target(
 
     先判自己、再判"是不是别人的进程"（子进程/前台）、再判系统关键，最后才
     按大小筛——顺序错了就会出现"小进程因为太小而绕过安全跳过"这类洞。
+    名字读不出来（空串）同样归安全类：认不出它是不是关键进程，就按关键处理。
     """
     def _skip(reason: str) -> TrimDecision:
         return TrimDecision(entry.pid, entry.name, entry.working_set_bytes,
@@ -220,6 +223,11 @@ def decide_target(
         return _skip(REASON_FOREGROUND)
     if _is_critical_name(entry.name):
         return _skip(REASON_SYSTEM_CRITICAL)
+    if not str(entry.name or "").strip():
+        # 名字读不出来（``QueryFullProcessImageName`` 失败）：关键名单比对不了，
+        # 而读不出名字的多是受保护/系统进程。按关键保护处理——绝不盲调
+        # （与"读不出工作集"同口径：判据不成立就不动手）。
+        return _skip(REASON_NAME_FAILED)
     if entry.working_set_bytes < normalize_min_size_mb(min_size_mb) * 1024 * 1024:
         return _skip(REASON_TOO_SMALL)
     return TrimDecision(entry.pid, entry.name, entry.working_set_bytes,

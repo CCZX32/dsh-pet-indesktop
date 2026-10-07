@@ -93,9 +93,11 @@ def report_quiet_summary(host, items) -> bool:
     走 ``show_alert``（``alert_type="lifecycle"`` 属穿透类，不会被本模块的任何
     门禁拦下）而不是 ``show_bubble``：结束那一刻最常见的情形是"正挂着一条审批
     气泡"，直发气泡会被让路丢弃，走提醒队列才保证送达。宿主没有提醒队列面
-    （overlay 的 SpriteMenuFacade）时回退直发气泡。
+    （overlay 的 SpriteMenuFacade）时回退直发气泡——**这条回退也必须自证上屏**：
+    overlay 的气泡面在不可见/飞行期/正挂提醒时是当场丢弃的，无条件报成功会让
+    调用方把暂存排空而用户什么都没看到（本批自己立的交付确认制）。
 
-    返回是否确实发出了汇报（空暂存 = 无需打扰用户，返回 False）。
+    返回是否确实交付出去了（空暂存 = 无需打扰用户，返回 False）。
     """
     texts = [str(item).strip() for item in (items or []) if str(item).strip()]
     if not texts:
@@ -119,8 +121,9 @@ def report_quiet_summary(host, items) -> bool:
         return True
     bubble = getattr(host, "show_bubble", None)
     if callable(bubble):
-        bubble(text, duration_ms=quiet_mode.QUIET_SUMMARY_MS)
-        return True
+        # 取真实投递结果：False = 没上屏，调用方不得 ack（轮询表会重试）。
+        # 有 show_alert 的宿主（PetWindow / MultiWindowProxy）不走这一支。
+        return bool(bubble(text, duration_ms=quiet_mode.QUIET_SUMMARY_MS))
     return False
 
 

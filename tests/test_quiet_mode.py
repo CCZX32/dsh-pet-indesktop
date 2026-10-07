@@ -420,6 +420,65 @@ def test_end_quiet_mode_keeps_queue_when_report_cannot_be_delivered(win, monkeyp
     assert quiet_mode.shared_quiet_state().report_pending() is True
 
 
+def test_overlay_host_dropped_summary_is_not_acked(tmp_path):
+    """W2：overlay 形宿主（有 ``show_bubble`` 无 ``show_alert``）汇报被丢弃时不排空暂存。
+
+    改前：``report_quiet_summary`` 的回退分支调用完气泡就 ``return True``，而壳的
+    ``show_bubble`` 在不可见/飞行期/正挂提醒时直接丢弃且没有返回值——菜单拿到
+    这个假的"成功"去 ``ack_report``，暂存被排空而用户什么都没看到（违反本批
+    自己立的交付确认制）。
+    """
+    from pet.context_menus.shared import end_quiet_mode
+    from pet.sprite_menu_facade import SpriteMenuFacade
+    from tests.test_sprite_menu_facade import _make_shell
+
+    shell, _lib = _make_shell(tmp_path)
+    facade = SpriteMenuFacade(shell, shell.sprite)
+    try:
+        assert not hasattr(facade, "show_alert"), "前提：这一形宿主只有气泡面"
+        assert shell.isVisible() is False, "前提：壳不可见（隐藏 / 全屏自动避让）"
+
+        quiet_mode.shared_quiet_state().start(15)
+        quiet_mode.shared_quiet_state().remember("攒了一条")
+
+        assert end_quiet_mode(facade) == ["攒了一条"]
+        state = quiet_mode.shared_quiet_state()
+        assert state.pending_count() == 1, "没上屏就不许排空暂存"
+        assert state.report_pending() is True, "轮询表据此保持重试"
+        # 交付面本身的证据：这条宿主此刻确实吐不出气泡，回退分支必须读这个返回值
+        assert facade.show_bubble("测试") is False, "这条气泡此刻上不了屏"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_overlay_host_delivered_summary_is_acked(tmp_path):
+    """反面：气泡真的上屏时照常确认交付（不许因这次修复变成永远重试）。"""
+    from pet.context_menus.shared import end_quiet_mode
+    from pet.sprite_menu_facade import SpriteMenuFacade
+    from tests.test_sprite_bubble import FakeBubble
+    from tests.test_sprite_menu_facade import _make_shell
+
+    shell, _lib = _make_shell(tmp_path)
+    shell.sprite.bind_clip("idle1")
+    shell.sprite._rebuild_pixmap()
+    shell._bubble_follower.bubble = FakeBubble()
+    shell.overlay.show()
+    facade = SpriteMenuFacade(shell, shell.sprite)
+    try:
+        assert shell.isVisible() is True, "前提：壳可见"
+        quiet_mode.shared_quiet_state().start(15)
+        quiet_mode.shared_quiet_state().remember("攒了一条")
+
+        assert end_quiet_mode(facade) == ["攒了一条"]
+        state = quiet_mode.shared_quiet_state()
+        assert state.pending_count() == 0, "确实上屏了才排空"
+        assert state.report_pending() is False
+        assert "1 条提醒" in shell._bubble_follower.bubble.texts[-1][0]
+    finally:
+        shell.overlay.hide()
+        shell._delete_runtime_marker()
+
+
 # ---------------------------------------------------------------- 3. 接线
 
 

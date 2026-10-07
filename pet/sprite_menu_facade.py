@@ -169,18 +169,25 @@ class SpriteMenuFacade:
         if callable(save):
             save()
 
-    def _bubble(self, text: str, duration_ms: int = 3200) -> None:
+    def _bubble(self, text: str, duration_ms: int = 3200) -> bool:
+        """按壳的气泡面冒一条；返回是否真上了屏（拿不到壳的气泡面 = 没上屏）。"""
         show = getattr(self._shell, "show_bubble", None)
-        if callable(show):
-            try:
-                show(text, duration_ms=duration_ms)
-            except Exception:
-                log.debug("overlay: facade 气泡展示失败", exc_info=True)
+        if not callable(show):
+            return False
+        try:
+            return bool(show(text, duration_ms=duration_ms))
+        except Exception:
+            log.debug("overlay: facade 气泡展示失败", exc_info=True)
+            return False
 
     # 共享建造器（harness_launcher / 音乐启动桥）会把本对象当「pet 宿主」用
-    def show_bubble(self, text: str, duration_ms: int = 3200, **_ignored) -> None:
-        """宿主形气泡面（``launch_harness_gui`` / ``_MusicLaunchBridge`` 读它）。"""
-        self._bubble(str(text), duration_ms)
+    def show_bubble(self, text: str, duration_ms: int = 3200, **_ignored) -> bool:
+        """宿主形气泡面（``launch_harness_gui`` / ``_MusicLaunchBridge`` 读它）。
+
+        返回是否真上了屏：免打扰结束的汇报按它确认交付（见
+        ``window_alerts.report_quiet_summary``），丢弃却报成功会把暂存排空。
+        """
+        return self._bubble(str(text), duration_ms)
 
     @property
     def dialog_parent(self):

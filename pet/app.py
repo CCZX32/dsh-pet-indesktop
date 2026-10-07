@@ -3666,11 +3666,11 @@ class AppShell:
         island_action.toggled.connect(toggle_island)
 
         if self.enable_chat:
-            menu.addAction('AI 对话', self.instance.open_chat)
-            menu.addAction('快速对话（气泡）', self.instance.open_quick_chat)
-            # 托盘菜单是原生弹出（macOS 上是 NSMenu 跟踪会话），设置入口必须在
-            # 菜单关闭后才执行：会话中新建/激活窗口会被 AppKit 抑制（首次点击
-            # 无反应，issue #4 家族）。其余条目按最小面不动。
+            # 这三个入口都会新建/激活窗口，回调必须延到菜单关闭后执行：托盘菜单是
+            # 原生弹出（macOS 上是 NSMenu 跟踪会话），设置入口在会话中执行会被
+            # AppKit 抑制（首次点击无反应，issue #4 家族）。其余条目按最小面不动。
+            add_tray_action(menu, 'AI 对话', self.instance.open_chat)
+            add_tray_action(menu, '快速对话（气泡）', self.instance.open_quick_chat)
             add_tray_action(menu, 'AI 设置', self.instance.open_chat_settings)
         add_tray_action(menu, '桌宠设置', self.instance.open_modern_settings)
 
