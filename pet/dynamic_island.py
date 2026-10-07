@@ -135,6 +135,27 @@ _ALERT_CRIT_DARK = "#f2777a"    # 规格值：暗底 crit（与错误状态点�
 _ALERT_WARN_LIGHT = "#95702f"   # 亮底加深档：色相 38° 不变、亮度 158→98
 _ALERT_CRIT_LIGHT = "#964a4c"   # 亮底加深档：色相 358° 不变、亮度 181→112
 
+# ---- 胶囊软陶笔（P2 Slice E3，裁决稿 §四 k3 高光笔）----
+# 顶部 1px 内高光 + 底部 1px 内暗边：画在胶囊外形的**内缘**（既有 keyline 里侧
+# 再 1px），随 squish 形变——高光是"表面受光"不是轮廓线，跟外壳一起形变才有软陶
+# 厚度感。三风格各一档常量，与 _keyline_color/_divider_color 同款"按 style 分支"
+# 口径（不新增主题键、不乘 _opacity：keyline 也不乘，外壳质感不随内容透明度走）。
+_BEVEL_INSET = 1.5  # 笔路径内缩：1px 笔落在 keyline 里侧那一整行上（见 _paint_bevel）
+_BEVEL_HIGHLIGHT_DARK = (255, 255, 255, 26)   # 白 α26 ≈ 10%（k3 §7.1）
+_BEVEL_SHADOW_DARK = (0, 0, 0, 46)            # 黑 α46 ≈ 18%
+_BEVEL_HIGHLIGHT_LIGHT = (255, 255, 255, 230)  # 白底上的高光几乎不可见（k3 §7.2）
+_BEVEL_SHADOW_LIGHT = (0, 0, 0, 20)           # 亮风的厚度由底部黑暗边承托
+_BEVEL_HIGHLIGHT_GLASS = (255, 255, 255, 90)  # 玻璃已有强外描边，内高光减半防双线
+_BEVEL_SHADOW_GLASS = (35, 50, 60, 26)        # #23323C α26：带蓝相的暗边
+
+# ---- 结构变化淡化（P2 Slice E3；裁决稿 §一-6 + 主代理裁决 2026-10-07 单侧口径）----
+# 只在**结构变化**（段增删 / 折叠展开 / 主信息模式切换 / 收缩级变化）时淡化：旧内容
+# 位图按 (1-t) 渐出、新位图直绘就位（**不**按 t 渐入——两侧都混会让未变化的文字
+# 中途被稀释两成，见 _paint_capsule）；采样值换字零动画（硬规则）。驱动表起表才建、
+# 到点即销毁（停表纪律，同 _dot_done_timer）。
+_CONTENT_FADE_MS = 130       # 时长（施工单窗口 120-150ms）
+_CONTENT_FADE_TICK_MS = 16   # ~60fps，与 _ANIM_TICK_MS 同口径
+
 
 def _status_error_glyph_path(rect: QRectF) -> QPainterPath:
     """错误感叹矢量：两笔（竖杠 + 圆点），按点位矩形内相对坐标生成。
@@ -338,12 +359,27 @@ class DynamicIsland(QWidget):
         # 内容层位图缓存（paintEvent 的文字绘制是实测大头，见 _content_cache）
         self._content_pixmap: QPixmap | None = None
         self._content_cache_key: tuple | None = None
+        # 结构变化淡化（P2 Slice E3）：_content_drawn = 上一帧画出去的内容位图
+        # （下一次结构变化的"旧位图"），_content_fade_from = 正在渐出的那一张，
+        # _content_fade_t = 混合系数（1.0 = 无淡化，只画新位图），
+        # _fade_struct_key = 上一帧的结构签名（判据见 _structure_key）。
+        self._content_drawn: QPixmap | None = None
+        self._content_fade_from: QPixmap | None = None
+        self._content_fade_t = 1.0
+        self._content_fade_timer: QTimer | None = None
+        self._content_fade_last = 0.0
+        self._fade_struct_key: tuple | None = None
+        # 本帧画出去的结构签名（_content_cache 记录，_sync_content_fade 比对）
+        self._painted_structure: tuple | None = None
         # 段管线的字体/行计划缓存：字号层懒建（_FONT_LAYERS），度量对象按层缓存；
         # 行计划（含收缩级）按白名单键缓存（见 _row_plan / _plan_inputs）——采样值
         # 变化进不了这个键，所以"数字跳动不推邻居"是结构保证而不是纪律。
         self._fonts: dict[str, QFont] = {}
         self._font_metrics: dict[str, QFontMetrics] = {}
         self._plan_inputs_key: tuple | None = None
+        # 最近一次**问过**的输入键（`_row_plan` 每次调用都刷新，命中缓存也刷新）：
+        # 结构签名复用它，一帧只算一遍 `_plan_inputs`（那里有度量指纹与屏查询）
+        self._plan_inputs_seen: tuple | None = None
         self._plan = None
         # 折叠态（收缩流水线折进 +N 的段 id）：采样订阅跟着它走——看不见的段
         # 不该继续烧 psutil/探测包（见 _sync_fold_sampling）。
@@ -1541,6 +1577,10 @@ class DynamicIsland(QWidget):
         **采样值不在键里**（指标段的 ``text`` 被刻意排除）：它是内容层的事——
         指标段盒宽由声明样本定死，读数在盒内右对齐伸缩。收缩级是这些输入的
         纯函数（见 ``island_layout.plan_info_row``），所以它也不必单独进键。
+
+        段元组的**末位**只有主信息段非空（它是"值"：时间/余额在跳，进键是因为
+        现文案超样本时会加宽）。结构签名（:meth:`_structure_key`）要剔除的正是
+        这一位，改元组形状时两处必须一起改。
         """
         segments = self._compose_info_segments()
         return (
@@ -1564,6 +1604,7 @@ class DynamicIsland(QWidget):
         更容易被看成卡顿）；计划一变就同步折叠态对应的采样订阅。
         """
         key = self._plan_inputs()
+        self._plan_inputs_seen = key
         if self._plan_inputs_key == key:
             return self._plan
         if self._dragging and self._plan is not None:
@@ -1591,6 +1632,26 @@ class DynamicIsland(QWidget):
             label_fm=self._metrics_for("label"),
             name_fm=self._metrics_for("name"),
         )
+
+    def _structure_key(self, plan) -> tuple:
+        """结构签名（淡化的唯一判据）：宽度白名单键去掉主信息**现文案**。
+
+        为什么剔除现文案：时间/余额是"值"，每秒/每 30s 在跳；照字面拿整个
+        :meth:`_plan_inputs` 当判据，时间跳分与余额刷新都会各播一次淡化，违反
+        "采样值换字零动画"的硬规则。剔除之后剩下的分量正好是施工单列的四类
+        结构变化——段增删（段元组长度与 id 序）、折叠展开（level / folded / name）、
+        主信息模式切换（盒样本与省略宽是模板面）、收缩级变化（level 与预算）。
+
+        复用 ``_plan_inputs_seen``（:meth:`_row_plan` 本帧刚算过的那份）而不是重算：
+        重算一次实测 ~45µs，而绘制每帧都过这里（拖拽期 60fps）。后缀
+        level/name/folded 与 :meth:`_width_key` 同源（是输入的纯函数，加进来让
+        "折叠↔展开"这类结构变化在签名上肉眼可见）；拖拽中 :meth:`_row_plan` 返回
+        冻结计划，签名随之冻结——拖拽期间不播正靠这一点。
+        """
+        visible, name_layout, segments, fonts, dpr, budget = self._plan_inputs_seen
+        # 段元组末位 = 主信息现文案（见 _plan_inputs 的"值"分量说明）
+        return (visible, name_layout, tuple(item[:5] for item in segments),
+                fonts, dpr, budget, plan.level, plan.name, plan.folded)
 
     def _capsule_width(self) -> int:
         """自然宽 = 行计划给出的宽度（左右各 19px 内边距，见设计稿 §1.1）。
@@ -2086,6 +2147,109 @@ class DynamicIsland(QWidget):
                 (rect.width() - dot_size) / 2, (rect.height() - dot_size) / 2,
                 dot_size, dot_size))
 
+    # ------------------------------------------------------------ 软陶笔/淡化
+    def _bevel_colors(self) -> tuple[QColor, QColor]:
+        """软陶笔的 (上缘高光色, 下缘暗边色)——按 style 分支取常量（k3 §7.1-§7.3）。
+
+        与 ``_keyline_color`` / ``_divider_color`` 同款口径：按 style 给常量、
+        不新增主题键、不乘 ``_opacity``（keyline 也不乘——外壳质感是"表面"，
+        不跟内容透明度一起退）。亮底的白高光在纯白上几乎不可见，保留对称结构，
+        亮风的厚度由底部黑暗边承托；玻璃已有强外描边，内高光减半防双线感。
+        """
+        style = str(self._cfg.get("style") or "dark")
+        if style == "light":
+            return QColor(*_BEVEL_HIGHLIGHT_LIGHT), QColor(*_BEVEL_SHADOW_LIGHT)
+        if style == "glass":
+            return QColor(*_BEVEL_HIGHLIGHT_GLASS), QColor(*_BEVEL_SHADOW_GLASS)
+        return QColor(*_BEVEL_HIGHLIGHT_DARK), QColor(*_BEVEL_SHADOW_DARK)
+
+    def _paint_bevel(self, painter: QPainter, rect: QRectF, radius: float) -> None:
+        """软陶笔：胶囊内缘 1px 环，上半周走高光色、下半周走暗边色。
+
+        三条口径：
+
+        - **画在内缘不在外圈**：外圈已被 keyline 占住（它管"窗在哪"），笔在它里侧
+          再 1px（``_BEVEL_INSET``），两者互不盖色——内缩取 1.5 而不是 k3 写的 1：
+          1px 笔以路径为中线，内缘行号 = round(rect.top())+1，取 1.5 才让笔落在
+          keyline 里侧那一**整行**上（1.0 会落在半像素上，两行各分 50% 糊掉）。
+        - **上下半周用裁剪切**：圆角处的内缘是弧线，两条横线替代不了；裁剪是廉价且
+          锐利的切法（下半周紧接上半周结束处）。
+        - **随 squish 形变**：``rect`` 就是 ``_squished_capsule_rect`` 的产物，
+          笔跟外壳一起形变（高光是表面受光，不是贴纸）。
+        """
+        highlight, shadow = self._bevel_colors()
+        inner = rect.adjusted(_BEVEL_INSET, _BEVEL_INSET, -_BEVEL_INSET, -_BEVEL_INSET)
+        inner_radius = max(0.0, radius - _BEVEL_INSET)
+        half = rect.height() / 2.0
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setClipRect(QRectF(rect.left(), rect.top(), rect.width(), half))
+        painter.setPen(QPen(highlight, 1))
+        painter.drawRoundedRect(inner, inner_radius, inner_radius)
+        painter.setClipRect(QRectF(rect.left(), rect.top() + half, rect.width(), half))
+        painter.setPen(QPen(shadow, 1))
+        painter.drawRoundedRect(inner, inner_radius, inner_radius)
+        painter.restore()
+
+    def _sync_content_fade(self) -> None:
+        """比对**上一帧画出去的结构签名**：变了就起一次淡化。
+
+        签名由 :meth:`_content_cache` 在重建/命中时统一记录（见 ``_painted_structure``）
+        ——判据是"两帧之间画出去的结构不同"，不是"这一帧内容变了"：采样值/余额换字
+        进不了签名，所以"换字零动画"是结构保证而不是纪律。首帧只登记不播（没有旧
+        位图可渐出）。
+
+        拖拽中记签名但不播：拖拽期间内容变化频繁（读数/折叠输入都在动）而窗口几何
+        是冻结的，跟着播会把拖拽画成闪屏；签名照记，拖拽结束按**当时**的结构与绘制
+        结果比对——松手真的重排了收缩级就照常播一次（不是"补播"，是新的边沿）。
+        """
+        key = self._painted_structure
+        if key is None:
+            return
+        previous, self._fade_struct_key = self._fade_struct_key, key
+        if previous is None or previous == key or self._dragging:
+            return
+        if self._content_drawn is None:
+            return
+        self._start_content_fade(self._content_drawn)
+
+    def _start_content_fade(self, previous: QPixmap) -> None:
+        """起一次淡化：上一帧的位图按 (1-t) 渐出（``_CONTENT_FADE_MS``）。
+
+        新位图不参与系数——它始终直绘就位（见 ``_paint_capsule`` 的单侧口径）。
+        连发的结构变化从上一次的中点重开：先按收尾口径停掉旧表再建新表——两条表
+        同时推系数会让帧率翻倍、系数互相打架。
+        """
+        self._stop_content_fade()
+        self._content_fade_from = previous
+        self._content_fade_t = 0.0
+        self._content_fade_last = time.monotonic()
+        timer = QTimer(self)
+        timer.setInterval(_CONTENT_FADE_TICK_MS)
+        timer.timeout.connect(self._on_content_fade_tick)
+        self._content_fade_timer = timer
+        timer.start()
+
+    def _on_content_fade_tick(self) -> None:
+        """按真实帧间隔推进混合系数；到点即停表销毁（停表纪律，同完成瞬态）。"""
+        now = time.monotonic()
+        elapsed = now - self._content_fade_last
+        self._content_fade_last = now
+        self._content_fade_t = min(
+            1.0, self._content_fade_t + elapsed * 1000.0 / _CONTENT_FADE_MS)
+        if self._content_fade_t >= 1.0:
+            self._stop_content_fade()
+        self.update()
+
+    def _stop_content_fade(self) -> None:
+        """停表并销毁淡化定时器（幂等），并跳到终点帧（新位图全不透明）。"""
+        timer, self._content_fade_timer = self._content_fade_timer, None
+        self._content_fade_from = None
+        self._content_fade_t = 1.0
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
     def _content_cache(self) -> QPixmap:
         """内容层（头像/角色名/信息段/chip/状态灯）的缓存位图。
 
@@ -2103,6 +2267,10 @@ class DynamicIsland(QWidget):
         """
         icon, name, info, status = self._visible_parts()
         plan = self._row_plan()
+        # 本帧画出去的结构签名（淡化的判据，见 _sync_content_fade）：在这里记而
+        # 不在绘制处另算——本函数已经算过输入键与当刻计划，顺手就是免费（复用
+        # ``_plan_inputs_seen``，一帧只算一遍 _plan_inputs）
+        self._painted_structure = self._structure_key(plan)
         # 计划只给结构，文案取**当刻**的段列表（见 island_layout.apply_shrink）：
         # 读数每秒在变，计划里的那份快照一转眼就过期
         segments = island_layout.apply_shrink(
@@ -2302,8 +2470,36 @@ class DynamicIsland(QWidget):
 
         # 内容层（图标/名称/信息/状态灯）：缓存位图 blit——文字逐帧重画是
         # 实测大头（见 _content_cache）；内容绝不参与形变，口径与原"按未
-        # 形变静止位绘制"一致
-        painter.drawPixmap(0, 0, self._content_cache())
+        # 形变静止位绘制"一致。结构变化时旧位图渐出（判据见 _structure_key /
+        # _sync_content_fade）。
+        content = self._content_cache()
+        self._sync_content_fade()
+        outgoing = self._content_fade_from
+        if outgoing is not None and self._content_fade_t < 1.0:
+            # 单侧淡化（主代理裁决 2026-10-07）：旧位图按 (1-t) 渐出，**新位图始终
+            # 以 opacity 1.0 直绘**。两侧都按系数画会让"新旧都有的那部分"被混两次
+            # （α ≈ t+(1-t)²，t=0.5 时稀释 25%），未变化的文字整片变淡再回来——违反
+            # "耐看"。单侧口径下共用区逐像素等于新位图（零稀释零闪烁），新增/重排的
+            # 内容即时就位，旧结构残影按 (1-t) 渐隐，过渡仍读得出来。
+            #
+            # 旧位图多半来自**上一个结构**（宽度常不同），必须按新胶囊外形裁剪后
+            # 渐出：窗口是透明的，除了胶囊没有别的裁剪面，渐出的旧内容会悬在
+            # 胶囊外被看见（新位图由布局保证落在盒内，不需要裁）。
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, radius, radius)
+            painter.setClipPath(clip)
+            painter.setOpacity(1.0 - self._content_fade_t)
+            painter.drawPixmap(0, 0, outgoing)
+            painter.restore()
+            painter.drawPixmap(0, 0, content)
+        else:
+            painter.drawPixmap(0, 0, content)
+        self._content_drawn = content
+
+        # 软陶笔（P2 Slice E3）：内缘 1px 高光/暗边，画在内容之上、跟随形变、
+        # 不进内容缓存（每帧两笔固定成本，见 _paint_bevel）
+        self._paint_bevel(painter, rect, radius)
 
     # ------------------------------------------------------------ 显隐休眠
     def hideEvent(self, event) -> None:  # noqa: N802
@@ -2316,6 +2512,7 @@ class DynamicIsland(QWidget):
         self._dock_back_timer.stop()
         self._card_collapse_timer.stop()
         self._stop_dot_done_timer()
+        self._stop_content_fade()
         # 网络槽/设备槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，
         # 不 join；订阅保留，显示后 _sync_*_slot 幂等恢复）
         self._pause_network_slot()
