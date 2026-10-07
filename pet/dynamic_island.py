@@ -9,7 +9,9 @@
 - 单击胶囊按 ``click_action`` 展开卡片（余额/最近消息/快捷按钮）或切换桌宠显隐；
   桌宠隐藏时（``hidden_chat`` 开启）单击改为弹岛对话气泡（island_chat.py）；
 - 事件动效（``event_effects``）：AI 回复/余额刷新/峰谷切换时位移弹跳 +
-  表面轻压 + 短暂呼吸，静止时完全无定时器开销；dsh 工作时状态灯变蓝；
+  表面轻压 + 短暂呼吸，静止时完全无定时器开销；状态点是形状+颜色双通道五态
+  （空闲中性 / 工作·待确认跟主题色 / 完成绿 4s 瞬态 / 错误红+感叹 / 隐藏·离线空心环，
+  见 :func:`_status_error_glyph_path` 与 ``_status_dot_state``）；
 - ``bump()`` 供碰撞系统调用：被撞时表面压扁回弹（史莱姆果冻形变只作用于
   胶囊外形，文字图标保持锐利）+ 按撞击方向轻微踢动；
 - 外观：黑/白/玻璃质感自绘 + 背景不透明度 + 主题色（五级）。
@@ -25,14 +27,15 @@ from PySide6.QtCore import (
     QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter, QPen,
-    QPixmap,
+    QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from . import catalog, island_layout, island_segments, net_monitor, sys_monitor
+from .dsh_state import DshState
 from .island_layout import (
     _BASELINE_DY, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX, _DEVICE_LABELS,
     _DIVIDER_H_PX, _DIVIDER_W_PX, _ICON_GAP_PX, _ICON_PX, _NAME_GAP_PX,
@@ -102,6 +105,49 @@ _ICON_AUTO = "auto"
 _ICON_IMG_PREFIX = "img:"
 _ICON_PIXMAP_PX = 22  # 头像画进 26px 底圈内的尺寸
 _ICON_STRIP_PX = 16  # 左右停靠细条里的头像尺寸
+
+# ---- 状态点五态体系（P2 Slice E1，设计稿 §五定案）----
+# 形状+颜色**双通道**，同刻只画一个图元；优先级 错误 > 待确认 > 工作 > 空闲/隐藏，
+# 其中「完成」是空闲点位的 4s 替身（见 ``_status_dot_state``）。旧语义
+# 「8px 实心绿 = 宠物可见」废弃：绿留给「完成」，中性色（主题次色）表示空闲。
+_DOT_SOLID = "solid"    # 实心圆：空闲 / 工作 / 完成
+_DOT_HOLLOW = "hollow"  # 空心环：待确认 / 宠物隐藏 / DSH 离线
+_DOT_GLYPH = "glyph"    # 红实心 + 感叹矢量：错误
+_DOT_IDLE = "idle"
+_DOT_WORKING = "working"
+_DOT_DONE = "done"
+_DOT_WAITING = "waiting"
+_DOT_ERROR = "error"
+_DOT_HIDDEN = "hidden"
+_DOT_RING_PX = 1.5      # 空心环描边宽度（外缘仍占满 8px 足迹，尺寸不变）
+_DOT_DONE_MS = 4000     # 完成瞬态停留时长：4s 后回落，单次定时器随即销毁
+_DOT_DONE_COLOR = "#50dc78"    # 完成绿（沿用旧「可见绿灯」色值，语义改为完成）
+_DOT_ERROR_COLOR = "#f2777a"   # 错误红（与告警色体系的 crit 同色）
+_DOT_GLYPH_COLOR = "#ffffff"   # 感叹笔画色（红底上两种主题都清晰）
+_DOT_GLYPH_W_RATIO = 0.17      # 感叹笔画宽 / 点径（8px 点 → 1.36px）
+
+
+def _status_error_glyph_path(rect: QRectF) -> QPainterPath:
+    """错误感叹矢量：两笔（竖杠 + 圆点），按点位矩形内相对坐标生成。
+
+    两笔都是同一支圆头画笔（``RoundCap``）描出来的路径子段：竖杠是一段直线，
+    圆点是**近零长**直线——零长线段 Qt 不描圆头（探针实测无像素），故留
+    0.02px 让 cap 落地。用矢量而不是字符 ``!``：免字体回退税，且 8px 点位与
+    停靠细条里的同一图元逐像素一致。
+
+    比例取 0.18/0.46/0.82：圆头帽各向外延伸半个笔宽（≈0.7px），杠尾与点之间
+    必须剩下 ≥1px 的红分隔，否则 8px 点上两笔会糊成一根竖条。
+    """
+    cx = rect.center().x()
+    top = rect.top() + rect.height() * 0.18
+    bar_end = rect.top() + rect.height() * 0.46
+    dot_y = rect.top() + rect.height() * 0.82
+    path = QPainterPath()
+    path.moveTo(cx, top)
+    path.lineTo(cx, bar_end)
+    path.moveTo(cx, dot_y)
+    path.lineTo(cx, dot_y + 0.02)
+    return path
 
 
 def spring_step(
@@ -236,6 +282,12 @@ class DynamicIsland(QWidget):
         # 维持现状；纯桌宠版置 False 时 hidden_chat 单击路由回退展开卡片）
         self._chat_available = True
         self._agent_active = False
+        # 状态点五态体系的第三/第四输入（详见 _status_dot_state）：
+        # _dsh_state = DSH 八态收敛态（"" = 该通道从未被喂过，纯桌宠构建走旧粗粒度位）；
+        # _dot_done/_dot_done_timer = 完成瞬态的位与单次表（到点即停表销毁）
+        self._dsh_state = ""
+        self._dot_done = False
+        self._dot_done_timer: QTimer | None = None
         self._last_message = ""
         # 几何变化回调（果冻墙碰撞体挂这里跟踪拖拽/停靠滑动）：AppShell 注入。
         self.on_geometry_changed = None
@@ -501,13 +553,77 @@ class DynamicIsland(QWidget):
         self._chat_available = bool(available)
 
     def set_agent_active(self, active: bool) -> None:
-        """dsh/agent 工作状态：点亮蓝色状态灯；上升沿弹一下提示开工。"""
+        """旧的粗粒度活跃位（迁移期兼容层）：True → 工作态，False 下降沿 → 完成瞬态。
+
+        新五态体系由 :meth:`set_dsh_state`（真八态收敛，含 success/error/waiting）
+        驱动，本方法只服务未升级的调用方。粗粒度通道只有「活跃/非活跃」两个取值，
+        分不出 success/idle/error——下降沿是它唯一能提供的「任务结束」边沿，故按
+        **完成**渲染（绿点 4s 后回落空闲）；旧的「可见绿灯」语义已废弃。
+        """
         active = bool(active)
         rising = active and not self._agent_active
+        falling = (not active) and self._agent_active
         self._agent_active = active
         if rising:
             self._bounce(impulse=3.0)
+        if falling:
+            self._arm_dot_done()
         self.update()
+
+    def set_dsh_state(self, state: str) -> None:
+        """DSH 八态收敛态注入（五态状态点的权威输入，AppShell 按边沿喂入）。
+
+        事件源是既有派发链（``pet/dsh_state.py`` 收敛 → ``DshMonitor`` →
+        ``AgentLinkManager.dsh_state_changed`` → AppShell），这里**不**另开订阅、
+        不读原始事件流；待确认/待回答读的就是收敛器的 waiting 锁存位（gated：
+        只有带 requestId 的真 UI 级请求才到得了这个位）。
+
+        只做三件事：记态、完成瞬态起停、工作上升沿弹一下。**不动几何**——状态点
+        是纯绘制态，永不进宽度白名单键（见 :meth:`_content_cache`）。
+        """
+        value = str(state or "").strip()
+        if value == self._dsh_state:
+            return
+        previous = self._dsh_state
+        self._dsh_state = value
+        work_states = (DshState.WORKING.value, DshState.THINKING.value)
+        if value == DshState.SUCCESS.value:
+            self._arm_dot_done()
+        if self._dot_done and self._status_dot_state() != _DOT_DONE:
+            # 被更高优先级状态（错误/待确认/工作）顶掉：立即停表销毁，不留过期绿点
+            self._stop_dot_done_timer()
+        if value in work_states and previous not in work_states:
+            self._bounce(impulse=3.0)
+        self.update()
+
+    def _arm_dot_done(self) -> None:
+        """进入完成瞬态：绿点亮起 4s（单次 QTimer）。
+
+        隐藏态不点表（隐藏即休眠：隐藏期间零定时器空转，绿点也没人看得见）。
+        """
+        if not self.isVisible():
+            return
+        self._dot_done = True
+        timer = self._dot_done_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._on_dot_done_timeout)
+            self._dot_done_timer = timer
+        timer.start(_DOT_DONE_MS)
+
+    def _on_dot_done_timeout(self) -> None:
+        """完成瞬态到点：回落当刻应有状态（空闲/隐藏/工作…）。"""
+        self._stop_dot_done_timer()
+        self.update()
+
+    def _stop_dot_done_timer(self) -> None:
+        """停表并销毁完成瞬态定时器（幂等）：回落后不留空转表。"""
+        timer, self._dot_done_timer = self._dot_done_timer, None
+        self._dot_done = False
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
 
     def set_last_message(self, text: str) -> None:
         """记录最近一条 AI 消息（展开卡片里显示摘要）。"""
@@ -1672,12 +1788,98 @@ class DynamicIsland(QWidget):
         c.setAlpha(max(c.alpha(), 215))
         return c
 
+    def _status_dot_state(self) -> str:
+        """状态点五态解析（优先级 错误 > 待确认 > 工作 > 空闲/隐藏）。
+
+        输入是两个通道：``_dsh_state``（八态收敛，权威源，见 :meth:`set_dsh_state`）
+        与 ``_agent_active``（旧粗粒度活跃位，只在收敛态缺席时补位）。完成是**瞬态**：
+        它是空闲点位的 4s 替身（盖过空闲，但盖不过工作/待确认/错误/隐藏——那些一出现
+        就把它顶掉，见 :meth:`set_dsh_state` 的同源收口）。
+        """
+        state = self._dsh_state
+        if state == DshState.ERROR.value:
+            # 错误不能自动恢复：同刻只画一个图元时它必须最高优先
+            return _DOT_ERROR
+        if state in (DshState.WAITING_APPROVAL.value,
+                     DshState.WAITING_QUESTION.value):
+            # 待确认/待回答：读收敛器的锁存位（gated 口径在 dsh_state 里）
+            return _DOT_WAITING
+        if state in (DshState.WORKING.value,
+                     DshState.THINKING.value) or self._agent_active:
+            return _DOT_WORKING
+        if not self._pet_visible or state == DshState.OFFLINE.value:
+            # 宠物隐藏 / DSH 离线：没有可看的东西，空心环说实话。它盖过完成瞬态
+            # ——空心环是唯一能说明"宠物不在/DSH 没在跑"的信号，不让 4s 绿点把它
+            # 遮掉（完成只是空闲点位的临时替身，见下）
+            return _DOT_HIDDEN
+        if self._dot_done:
+            # 完成 = 空闲点位的 4s 替身（success 进入时亮，到点回落空闲）
+            return _DOT_DONE
+        return _DOT_IDLE
+
+    def _status_dot_style(self) -> tuple[str, QColor]:
+        """状态点的 (形状, 颜色)——绘制与内容层缓存键的唯一来源。"""
+        state = self._status_dot_state()
+        if state == _DOT_ERROR:
+            return _DOT_GLYPH, QColor(_DOT_ERROR_COLOR)
+        if state == _DOT_WAITING:
+            return _DOT_HOLLOW, self._accent_color()
+        if state == _DOT_WORKING:
+            return _DOT_SOLID, self._accent_color()
+        if state == _DOT_DONE:
+            return _DOT_SOLID, QColor(_DOT_DONE_COLOR)
+        if state == _DOT_HIDDEN:
+            return _DOT_HOLLOW, self._status_dot_neutral()
+        return _DOT_SOLID, self._status_dot_neutral()
+
+    def _status_dot_neutral(self) -> QColor:
+        """中性色 = 主题次色（空闲实心点与隐藏/离线空心环共用）。"""
+        _background, _primary, secondary = self._style_palette()
+        return QColor(secondary)
+
     def _status_dot_color(self) -> QColor:
-        if self._agent_active:
-            return QColor(64, 150, 255)
-        if self._pet_visible:
-            return QColor(80, 220, 120)
-        return QColor(130, 140, 155)
+        """状态点颜色（形状与优先级见 :meth:`_status_dot_style`）。"""
+        return self._status_dot_style()[1]
+
+    def _paint_status_dot(self, painter: QPainter, rect: QRectF) -> None:
+        """画状态点（8px 尺寸不变）：形状+颜色双通道，同刻只画一个图元。
+
+        空心环的描边内缩半个线宽，外缘仍占满整个 8px 足迹；感叹是矢量路径两笔
+        （见 :func:`_status_error_glyph_path`）。胶囊与停靠细条共用本方法——同一
+        图元语言，两处不可能画出两套样子。
+        """
+        shape, color = self._status_dot_style()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if shape == _DOT_HOLLOW:
+            pen = QPen(color, _DOT_RING_PX)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            inset = _DOT_RING_PX / 2.0
+            painter.drawEllipse(rect.adjusted(inset, inset, -inset, -inset))
+        else:
+            painter.setBrush(color)
+            painter.drawEllipse(rect)
+        if shape == _DOT_GLYPH:
+            ink = QColor(_DOT_GLYPH_COLOR)
+            ink.setAlpha(235)
+            pen = QPen(ink, rect.height() * _DOT_GLYPH_W_RATIO)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(pen)
+            painter.drawPath(_status_error_glyph_path(rect))
+        # 复位画笔/画刷：调用点后面还可能画别的东西
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _status_dot_key(self) -> tuple[str, str]:
+        """内容层缓存键的「状态点」分量：形状+颜色。
+
+        形状必须进键：空心环与实心点可能同色（中性环 vs 中性实心点），
+        但像素不同，同色也必须各自成键。它**不进**宽度白名单键。
+        """
+        shape, color = self._status_dot_style()
+        return shape, color.name()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -1762,8 +1964,7 @@ class DynamicIsland(QWidget):
         elif edge == "right":
             painter.drawRoundedRect(QRectF(rect.width() - 2, 6, 2, rect.height() - 12), 1, 1)
 
-        dot_size = 8
-        painter.setBrush(self._status_dot_color())
+        dot_size = _STATUS_DOT_PX
         if edge in ("left", "right"):
             # 竖条：上方角色图标、下方状态点。头像走 drawPixmap（不碰文字栈）；
             # emoji 文字模式维持原小字号（11px）防裁切；auto 模式 provider 没
@@ -1782,12 +1983,11 @@ class DynamicIsland(QWidget):
                     QRectF(0, 8, rect.width(), fm.height()),
                     Qt.AlignmentFlag.AlignCenter, self._icon_text())
                 painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._status_dot_color())
-            painter.drawEllipse(QRectF(
+            self._paint_status_dot(painter, QRectF(
                 (rect.width() - dot_size) / 2, rect.height() - dot_size - 8,
                 dot_size, dot_size))
         else:
-            painter.drawEllipse(QRectF(
+            self._paint_status_dot(painter, QRectF(
                 (rect.width() - dot_size) / 2, (rect.height() - dot_size) / 2,
                 dot_size, dot_size))
 
@@ -1827,7 +2027,7 @@ class DynamicIsland(QWidget):
             primary_text_color.name() if segments else "",
             secondary_color.name() if segments else "",
             self._divider_color().name() if len(segments) > 1 else "",
-            self._status_dot_color().name() if status else "",
+            self._status_dot_key() if status else "",
             self._fonts_key(), dpr, self.width(),
         )
         if self._content_pixmap is not None and self._content_cache_key == key:
@@ -1926,8 +2126,7 @@ class DynamicIsland(QWidget):
             x = placement.right
         if status:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._status_dot_color())
-            painter.drawEllipse(QRectF(
+            self._paint_status_dot(painter, QRectF(
                 x + _STATUS_GAP_PX, (_CAPSULE_HEIGHT - _STATUS_DOT_PX) / 2,
                 _STATUS_DOT_PX, _STATUS_DOT_PX))
         painter.end()
@@ -1986,7 +2185,7 @@ class DynamicIsland(QWidget):
 
     # ------------------------------------------------------------ 显隐休眠
     def hideEvent(self, event) -> None:  # noqa: N802
-        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起全部停表，
+        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起/完成瞬态全部停表，
         隐藏态零定时器空转。"""
         super().hideEvent(event)
         self._info_timer.stop()
@@ -1994,6 +2193,7 @@ class DynamicIsland(QWidget):
         self._anim_timer.stop()
         self._dock_back_timer.stop()
         self._card_collapse_timer.stop()
+        self._stop_dot_done_timer()
         # 网络槽/设备槽同样休眠：采样线程与读取定时器一起停（探测在途最多 1s，
         # 不 join；订阅保留，显示后 _sync_*_slot 幂等恢复）
         self._pause_network_slot()
