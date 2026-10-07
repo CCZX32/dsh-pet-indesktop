@@ -25,7 +25,7 @@ import pet.modern_settings_dialog as settings_mod
 from pet import settings_music, settings_reset_defaults
 from pet.config import Config
 from pet.modern_settings_dialog import SettingRow, SettingsSection
-from pet.settings_widgets import CollapsibleGroup
+from pet.settings_widgets import CollapsibleGroup, SettingsTabContainer
 
 app = QApplication.instance() or QApplication([])
 
@@ -39,8 +39,12 @@ _PRODUCTION_FILES = (
 )
 _FORBIDDEN_TOKENS = ("SMTC", "UDP", "223.5.5.5", "网卡字节计数器", "甩出死区", "零初速",
                      "只装密钥的条目")
-#: 桌宠域主视线组序（R2 §二 裁决序的前 7 项；高级组永远垫底，见下面用例）。
-_PET_PRIMARY_ORDER = ("显示", "音乐关联", "动画与移动", "拖拽与弹射", "边缘探头", "生小肥鱼", "多开碰撞")
+#: 桌宠域页内标签（第二刀 2026-10-08）**标签内**的组序；高级组永远垫底其所属标签页。
+#: 标签 1 的高级组标题随平台上有没有「标题格式」行动态取（用例里拼）。
+_PET_TAB_SECTIONS = {
+    "display_music": ("显示", "音乐关联"),
+    "motion_collision": ("动画与移动", "拖拽与弹射", "边缘探头", "生小肥鱼", "多开碰撞"),
+}
 
 
 def _dialog(tmp_path, monkeypatch):
@@ -81,10 +85,21 @@ def _page(dialog, domain):
     return index, dialog.pages.widget(index)
 
 
-def _page_sections(dialog, domain):
-    """域页里按布局顺序排列的 SettingsSection（真实呈现顺序，不是 child 顺序）。"""
+def _page_sections(dialog, domain, tab_key: str | None = None):
+    """域页里按布局顺序排列的 SettingsSection（真实呈现顺序，不是 child 顺序）。
+
+    页内标签域（桌宠/互动/菜单）里，组在**标签页内**：给 ``tab_key`` 取该标签的组，
+    缺省取当前激活标签。返回的 ``page`` 仍是整个域页（行祖先归属不受标签影响）。
+    """
     _index, page = _page(dialog, domain)
     content = page.findChild(QScrollArea, "settingsScroll").widget()
+    # 页内标签域的 scroll 内容就是标签容器本身（findChild 不含自身）。
+    tabs = content if isinstance(content, SettingsTabContainer) else content.findChild(
+        SettingsTabContainer, "settingsTaskTabs")
+    if tabs is not None:
+        if tab_key is not None:
+            tabs.setCurrentKey(tab_key)
+        content = tabs.stack.currentWidget()
     sections = []
     for position in range(content.layout().count()):
         widget = content.layout().itemAt(position).widget()
@@ -269,16 +284,27 @@ def test_v2_new_advanced_groups_are_advanced_and_collapsed(tmp_path, monkeypatch
         dialog.close()
 
 
-def test_v2_pet_domain_group_order_puts_music_second_and_advanced_last(tmp_path, monkeypatch):
-    """桌宠域组序 = 裁决序；两个高级组垫底且都在最后。"""
+def test_v2_pet_domain_group_order_is_per_tab_with_advanced_last(tmp_path, monkeypatch):
+    """桌宠域页内标签（第二刀）的组序：每组只属于一个标签，高级组垫底其标签页。
+
+    第一刀钉的是域级组序（7 个主视线组 + 2 个垫底高级组）；第二刀把域拆成
+    「显示与音乐 / 动作与碰撞」两个标签，组序断言下移到标签内——覆盖不削弱：
+    主视线组一个不少、相对顺序不变、两个高级组仍各自垫底。
+    """
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
-        _page_widget, sections = _page_sections(dialog, "桌宠")
-        titles = [_section_title(section) for section in sections]
-        assert titles[:len(_PET_PRIMARY_ORDER)] == list(_PET_PRIMARY_ORDER)
-        assert all(section.advanced is False for section in sections[:len(_PET_PRIMARY_ORDER)])
-        assert titles[len(_PET_PRIMARY_ORDER):] == [
-            settings_music.advanced_group_title(dialog), "碰撞参数（高级）"]
+        expected = {
+            "display_music": _PET_TAB_SECTIONS["display_music"]
+            + (settings_music.advanced_group_title(dialog),),
+            "motion_collision": _PET_TAB_SECTIONS["motion_collision"] + ("碰撞参数（高级）",),
+        }
+        for tab_key, titles in expected.items():
+            _page_widget, sections = _page_sections(dialog, "桌宠", tab_key)
+            assert [_section_title(section) for section in sections] == list(titles), (
+                f"标签 {tab_key} 的组序必须与裁决一致"
+            )
+            assert all(section.advanced is False for section in sections[:-1])
+            assert sections[-1].advanced is True, "高级组必须垫底其所属标签页"
     finally:
         dialog.close()
 
@@ -383,6 +409,13 @@ def test_v1_long_hints_fit_their_labels_at_compact_width(tmp_path, monkeypatch):
         for index in range(dialog.pages.count()):  # 每页都过一遍，行才拿到真实几何
             dialog.sidebar.setCurrentRow(index)
             app.processEvents()
+            page = dialog.pages.widget(index)
+            tabs = page if isinstance(page, SettingsTabContainer) else page.findChild(
+                SettingsTabContainer, "settingsTaskTabs")
+            if tabs is not None:  # 页内标签域：每个标签都要成为当前页才有真实几何
+                for tab_index in range(len(tabs.keys())):
+                    tabs.setCurrentIndex(tab_index)
+                    app.processEvents()
         for key in keys:
             label = _row(dialog, key).hint_label
             needed = label.heightForWidth(label.width())

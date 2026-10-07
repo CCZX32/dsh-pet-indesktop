@@ -1782,21 +1782,38 @@ class ModernSettingsDialog(QDialog):
             "collision_sound_volume",
         )
         # 音乐关联的故障恢复参数（标题格式 + 播放器路径）另立高级组：组名直说用途。
-        # 组序裁定：高频组按使用频率递减（音乐关联第 2），高级组永远垫底。
+        # 组序裁定：高频组按使用频率递减（标签 1 内音乐关联第 2），高级组垫底其标签页。
         music_advanced = (
             claim("foobar_title_format") + settings_music.build_music_player_rows(self))
-        pet = page_content(
-            [
-                ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
-                ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
-                ("边缘探头", claim("edge_probe")),
-                ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
-                ("多开碰撞", collision_primary),
-                (settings_music.advanced_group_title(self), music_advanced, True),
-                ("碰撞参数（高级）", collision_advanced, True),
-            ]
+        # 「桌宠」域（2026-10-08 第二刀）：域内是两个**互斥任务**——「它长什么样 /
+        # 唱不唱歌」与「它怎么动 / 怎么撞」，页内切成两个标签，首屏只管一个任务。
+        # 侧栏 10 域是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
+        # _search_settings 的 activate_for_descendant 自动切标签。
+        pet = SettingsTabContainer(self)
+        pet.addTab(
+            "display_music",
+            "显示与音乐",
+            page_content(
+                [
+                    ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
+                    ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
+                    (settings_music.advanced_group_title(self), music_advanced, True),
+                ]
+            ),
+        )
+        pet.addTab(
+            "motion_collision",
+            "动作与碰撞",
+            page_content(
+                [
+                    ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
+                    ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
+                    ("边缘探头", claim("edge_probe")),
+                    ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
+                    ("多开碰撞", collision_primary),
+                    ("碰撞参数（高级）", collision_advanced, True),
+                ]
+            ),
         )
         # 「互动」域（2026-09-22 分页）：整页在本模块构建（settings_interaction，
         # 行数预算原因），页内用任务标签分成「点击与音效 / 自言自语」两个同级任务；

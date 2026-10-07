@@ -239,8 +239,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 「网络延迟检测（高级）」（含"全行被依赖隐藏的组整组收起"的 3 行）、_search_settings
 # 补 `SettingsSection(advanced=True)` 自动展开分支与「命中行被前置开关隐藏」的说明
 # 助手，另含 harness 自启目标与静止放手下落两处定稿文案（净行数含注释折行）。
+# 2026-10-08 上调到 2495（设置页信息架构第二刀，+17）：桌宠域拆成两个页内标签
+# （显示与音乐 / 动作与碰撞），两个 addTab 的装配骨架 + 任务口径注释；组定义行一字
+# 未改（只是搬到各自标签的 page_content 里）。实测 2487。
 # 文案/分组行按文件约定只随实测校准，不为达标压缩行宽；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2470
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2495
 
 
 def _read(name: str) -> str:
