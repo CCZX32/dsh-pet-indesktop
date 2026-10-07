@@ -147,3 +147,38 @@ def test_search_finds_the_weather_rows_and_switches_to_the_tab(dialog):
     assert dialog.sidebar.currentItem().text() == "互动"
     assert tabs.currentKey() == "weather"
     assert _row(dialog, "weather_enabled").isVisibleTo(tabs) is True
+
+
+# ---------------------------------------------------------------- 子宠页作用域
+def _main_and_sub_dialogs(tmp_path, monkeypatch):
+    """主宠页 + 子宠页（``instance_id=slot-1``）两个设置对话框。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    master = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    child = settings_mod.ModernSettingsDialog(
+        Config(base=tmp_path, instance_id="slot-1"), include_ai=True)
+    return master, child
+
+
+def test_weather_controls_are_main_pet_only(tmp_path, monkeypatch):
+    """子宠页：天气三键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
+
+    子宠页保存写 ``config-slot-N.json``，而这些键的消费方一律读主配置，改了等于
+    没改；故如实置灰 + tooltip，主宠页不受影响。
+    """
+    master, child = _main_and_sub_dialogs(tmp_path, monkeypatch)
+    try:
+        for control in (master.weather_enabled_check, master.weather_city_edit,
+                        master.weather_city_list_edit):
+            assert control.isEnabled() is True
+        for control in (child.weather_enabled_check, child.weather_city_edit,
+                        child.weather_city_list_edit):
+            assert control.isEnabled() is False
+            assert control.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dlg in (master, child):
+            dlg.close()
+            dlg.deleteLater()
+        app.processEvents()

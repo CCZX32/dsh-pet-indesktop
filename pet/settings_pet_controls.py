@@ -218,6 +218,12 @@ def build_pet_controls(host) -> None:
     # 拖动物理关时低速松手同样是「原地放下」，用户要的下落不该被那个开关挡住。
     host.drop_gravity_check = ToggleSwitch(host)
     host.drop_gravity_check.setChecked(bool(host.config.get("drop_gravity", False)))
+    if not _is_overlay_topology():
+        # 静止放手下落只被 sprite 路径消费（pet_sprite；legacy 的 PetWindow 没有
+        # 对应行为）。捕获模式接通后 legacy 已是真实用户路径，开关摆在那里改了
+        # 没反应 ⇒ 如实置灰 + 说明（同节其它行 legacy 真的消费，保持可用）。
+        host.drop_gravity_check.setEnabled(False)
+        host.drop_gravity_check.setToolTip("仅单合成窗（overlay）拓扑生效")
     # 「单进程多开」开关不再创建（拓扑收口 Phase A：设置页隐藏；
     # 游离 ToggleSwitch 会被孤儿开关测试拦截）。
 

@@ -26,7 +26,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QMessageBox, QPushButton
 
 from . import music_players
-from .settings_widgets import ResourcePathPicker, SettingRow
+from .settings_widgets import ResourcePathPicker, SettingRow, mark_main_pet_only
 
 log = logging.getLogger("dsh-pet-standalone")
 
@@ -145,6 +145,9 @@ def foobar_lyrics_rows(dialog) -> list[SettingRow]:
     edit = getattr(dialog, "foobar_title_format_edit", None)
     if check is None or edit is None or not foobar_lyrics_supported():
         return []
+    # 两个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，歌词源解析读主配置）：
+    # 子宠页改了不生效，如实置灰（控件本体建在 settings_pet_controls）。
+    mark_main_pet_only(dialog, check, edit)
     return [
         SettingRow(
             "foobar_lyrics",

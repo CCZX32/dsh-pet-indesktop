@@ -602,3 +602,30 @@ def test_config_defaults_match_quiet_mode_constants(tmp_path):
     cfg = Config(base=tmp_path)
     assert cfg.get("quiet_minutes_default") == config_mod.DEFAULT_QUIET_MINUTES
     assert cfg.get("quiet_also_on_fullscreen") is config_mod.DEFAULT_QUIET_ALSO_ON_FULLSCREEN
+
+
+# ---------------------------------------------------------------- 子宠页作用域
+def test_quiet_controls_are_main_pet_only(qapp, tmp_path):
+    """子宠页：免打扰两键是进程级默认值（不在 PER_SLOT_SETTING_KEYS）→ 置灰。
+
+    子宠页保存写 ``config-slot-N.json``，而免打扰的消费方（右键菜单命令、全屏
+    联动、托盘的默认档）一律读主配置，改了等于没改；故如实置灰 + tooltip。
+    """
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        assert master.quiet_minutes_select.isEnabled() is True
+        assert master.quiet_also_on_fullscreen_check.isEnabled() is True
+        for control in (child.quiet_minutes_select,
+                        child.quiet_also_on_fullscreen_check):
+            assert control.isEnabled() is False
+            assert control.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        qapp.processEvents()

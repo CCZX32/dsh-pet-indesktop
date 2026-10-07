@@ -23,7 +23,7 @@ from .config import (
     QUIET_MINUTE_CHOICES,
 )
 from .quiet_mode import quiet_duration_label
-from .settings_widgets import SettingRow, ToggleSwitch
+from .settings_widgets import SettingRow, ToggleSwitch, mark_main_pet_only
 
 #: 设置行 objectName 键（``settingRow_<key>``），测试与搜索按它定位。
 ROW_KEYS = ("quiet_minutes_default", "quiet_also_on_fullscreen")
@@ -54,6 +54,9 @@ def create_quiet_controls(dialog) -> None:
         )
     )
     dialog.quiet_also_on_fullscreen_check = toggle
+    # 两个键都是**进程级默认值**（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）：
+    # 子宠页改了不生效，如实置灰（见 settings_widgets.mark_main_pet_only）。
+    mark_main_pet_only(dialog, selector, toggle)
 
 
 def build_quiet_rows(dialog) -> list[SettingRow]:

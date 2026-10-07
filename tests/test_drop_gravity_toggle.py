@@ -173,3 +173,62 @@ def test_settings_row_shows_configured_value(tmp_path):
         assert dialog.drop_gravity_check.isChecked() is True
     finally:
         dialog.deleteLater()
+
+
+# ---------------------------------------------------------------- ④ 拓扑作用域
+def _dialog_for(cfg):
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    return ModernSettingsDialog(cfg, include_ai=False)
+
+
+def test_row_disabled_when_capture_mode_makes_topology_legacy(tmp_path):
+    """捕获模式（主配置 stream_capture_mode=true → legacy 单窗）下该行置灰。
+
+    ``drop_gravity`` 只被 sprite 路径消费（``pet_sprite``），legacy 的
+    ``PetWindow`` 没有对应行为——捕获模式接通后 legacy 是真实用户路径，开关摆在
+    那里改了没反应，故如实置灰 + 说明；同节的其它行（拖动物理/甩出力度等）
+    legacy 真的消费，保持可用。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    cfg = Config(base=tmp_path)
+    cfg.set("stream_capture_mode", True)
+    assert cfg.save()
+    cmd_mod.reset_topology_snapshot()
+    try:
+        assert cmd_mod.is_overlay_topology() is False, "用例前置：捕获模式已生效"
+        dialog = _dialog_for(cfg)
+        try:
+            assert dialog.drop_gravity_check.isEnabled() is False
+            assert dialog.drop_gravity_check.toolTip() == "仅单合成窗（overlay）拓扑生效"
+            assert dialog.drag_physics_check.isEnabled() is True
+            assert dialog.throw_strength_select.isEnabled() is True
+        finally:
+            dialog.deleteLater()
+    finally:
+        cmd_mod.reset_topology_snapshot()
+
+
+def test_row_disabled_under_explicit_legacy_env(tmp_path, monkeypatch):
+    """显式 ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）同拓扑同语义：同样置灰。"""
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
+    dialog = _dialog_for(Config(base=tmp_path))
+    try:
+        assert dialog.drop_gravity_check.isEnabled() is False
+        assert dialog.drop_gravity_check.toolTip() == "仅单合成窗（overlay）拓扑生效"
+    finally:
+        dialog.deleteLater()
+
+
+def test_row_enabled_under_overlay_topology(tmp_path, monkeypatch):
+    """对照：overlay（默认拓扑）下可点、无禁用 tooltip（证明上两条非空转）。"""
+    monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
+    cfg = Config(base=tmp_path)
+    assert cfg.get("stream_capture_mode", False) is False
+    dialog = _dialog_for(cfg)
+    try:
+        assert dialog.drop_gravity_check.isEnabled() is True
+        assert dialog.drop_gravity_check.toolTip() == ""
+    finally:
+        dialog.deleteLater()

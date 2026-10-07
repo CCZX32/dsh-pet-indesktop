@@ -375,3 +375,33 @@ def test_save_source_settings_skips_missing_widgets(tmp_path):
     settings_music.save_source_settings(host)
 
     assert cfg.get("foobar_lyrics_enabled") is True, "缺控件不该把开关写成 False"
+
+
+def test_foobar_controls_are_main_pet_only(monkeypatch, tmp_path):
+    """子宠页：foobar 两键是进程级歌词源开关（不在 PER_SLOT_SETTING_KEYS）→ 置灰。
+
+    子宠页保存写 ``config-slot-N.json``，而歌词源解析读主配置，改了等于没改；
+    故如实置灰 + tooltip，主宠页不受影响。
+    """
+    from pet import settings_music
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_music.sys, "platform", "win32")   # 两键仅在 Windows 建
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        assert master.foobar_lyrics_check is not None, "用例前置：Windows 下应建出控件"
+        assert master.foobar_lyrics_check.isEnabled() is True
+        assert master.foobar_title_format_edit.isEnabled() is True
+        for control in (child.foobar_lyrics_check, child.foobar_title_format_edit):
+            assert control is not None
+            assert control.isEnabled() is False
+            assert control.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()

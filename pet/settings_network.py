@@ -25,6 +25,7 @@ from .settings_widgets import (
     BrowserDoubleSpinBox,
     SettingRow,
     ToggleSwitch,
+    mark_main_pet_only,
 )
 
 #: 探测间隔的展示口径（真值口径在 net_monitor.clamp_interval，不在这里重写一份）
@@ -66,6 +67,12 @@ def create_network_controls(dialog) -> None:
         dialog.network_info_menu_check = ToggleSwitch(dialog)
         dialog.network_info_menu_check.setChecked(
             bool(dialog.config.get("network_info_menu_enabled", True)))
+
+    # 三个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，采样器/岛/右键菜单一律读
+    # 主配置）：子宠页改了不生效，如实置灰。
+    mark_main_pet_only(dialog, getattr(dialog, "island_network_check", None),
+                       getattr(dialog, "network_probe_interval_spin", None),
+                       getattr(dialog, "network_info_menu_check", None))
 
 
 def _fit_spin_to_content(spin) -> None:

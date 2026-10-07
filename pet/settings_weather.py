@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget
 
-from .settings_widgets import SettingRow, SettingsSection, ToggleSwitch
+from .settings_widgets import (
+    SettingRow,
+    SettingsSection,
+    ToggleSwitch,
+    mark_main_pet_only,
+)
 from .weather import MAX_CITIES, normalize_city_list, normalize_city_name
 
 
@@ -43,6 +48,10 @@ def create_weather_controls(dialog) -> None:
     dialog.weather_city_list_edit.setPlainText(
         "\n".join(normalize_city_list(dialog.config.get("weather_city_list")))
     )
+    # 三个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，右键菜单与「查看天气」
+    # 一律读主配置）：子宠页改了不生效，如实置灰。
+    mark_main_pet_only(dialog, dialog.weather_enabled_check,
+                       dialog.weather_city_edit, dialog.weather_city_list_edit)
 
 
 def build_weather_rows(dialog) -> list[SettingRow]:

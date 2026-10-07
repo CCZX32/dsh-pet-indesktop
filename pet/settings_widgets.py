@@ -1405,6 +1405,31 @@ def _line_edit(text: str = "", *, password: bool = False, width: int = 240) -> Q
         edit.setEchoMode(QLineEdit.EchoMode.Password)
     return edit
 
+#: 子宠页对**进程级/全局**设置统一置灰时的说明（与 ``modern_settings_dialog`` 对
+#: harness 自启的「仅主桌宠可设置」同口径，文案逐字一致）。
+MAIN_PET_ONLY_TOOLTIP = "仅主桌宠可设置"
+
+
+def mark_main_pet_only(dialog, *controls) -> None:
+    """子宠页把**进程级/全局**设置的控件置灰（主宠页一个都不动）。
+
+    背景：子宠的独立设置进程写的是 ``config-slot-N.json``，而
+    ``PER_SLOT_SETTING_KEYS`` 之外的键运行时一律读**主配置**（overlay 的
+    ``_SpriteConfig`` 只对 per-slot 键逐 sprite 取源）。这些键在子宠页改了等于
+    没改——与其留着"能保存、运行时不消费"的死开关，不如如实置灰 + tooltip 说明
+    该去哪儿改。
+
+    ``dialog.config.instance_id`` 非空即子宠页（主身份是空串）。平台条件不满足时
+    控件不存在（传 None）→ 静默跳过；幂等，可随行重建反复调用。
+    """
+    if not getattr(getattr(dialog, "config", None), "instance_id", None):
+        return
+    for control in controls:
+        if control is None:
+            continue
+        control.setEnabled(False)
+        control.setToolTip(MAIN_PET_ONLY_TOOLTIP)
+
 class QuickLaunchItemRow(QWidget):
     """Two-line quick-launch row; the owning list keeps selection and drag."""
 

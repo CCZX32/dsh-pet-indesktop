@@ -179,3 +179,29 @@ def test_network_rows_are_searchable(tmp_path, monkeypatch):
         assert "settingRow_network_info_menu" in names
     finally:
         dialog.close()
+
+
+# ---------------------------------------------------------------- 子宠页作用域
+def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
+    """子宠页：网络三键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
+
+    子宠页保存写 ``config-slot-N.json``，而采样器/岛/右键菜单一律读主配置，改了
+    等于没改；故如实置灰 + tooltip，主宠页不受影响。
+    """
+    master, _cfg = _dialog(tmp_path, monkeypatch)
+    child = settings_mod.ModernSettingsDialog(
+        Config(base=tmp_path, instance_id="slot-1"), include_ai=True)
+    try:
+        for control in (master.island_network_check, master.network_probe_interval_spin,
+                        master.network_info_menu_check):
+            assert control.isEnabled() is True
+        for control in (child.island_network_check,
+                        child.network_probe_interval_spin,
+                        child.network_info_menu_check):
+            assert control.isEnabled() is False
+            assert control.toolTip() == "仅主桌宠可设置"
+    finally:
+        for dlg in (master, child):
+            dlg.close()
+            dlg.deleteLater()
+        app.processEvents()
