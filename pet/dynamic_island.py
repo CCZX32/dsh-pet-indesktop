@@ -384,6 +384,9 @@ class DynamicIsland(QWidget):
         # 折叠态（收缩流水线折进 +N 的段 id）：采样订阅跟着它走——看不见的段
         # 不该继续烧 psutil/探测包（见 _sync_fold_sampling）。
         self._folded_metrics: frozenset[str] = frozenset()
+        # 上一次同步时的停靠细条态（P2 Slice E6）：细条一样是"看不见"，
+        # 采样同样全停（见 _sync_content_sampling）。
+        self._strip_sampling_off = False
         # 设备槽订阅的影子计数（订阅集合自己记一份：底座只回报计数，问不出
         # "这个 key 是不是刚订阅的"），用于"恢复首轮显示 --"。
         self._sys_subscribed: set[str] = set()
@@ -474,6 +477,19 @@ class DynamicIsland(QWidget):
     def _click_action(self) -> str:
         return str(self._cfg.get("click_action") or "expand")
 
+    def _strip_hidden(self) -> bool:
+        """**停靠细条态**：胶囊收成细条、内容一个像素都不画。
+
+        判据与绘制层同源——``paintEvent`` 走 ``_paint_strip`` 的那个分支、
+        ``_apply_fixed_size`` 压成细条的那个分支、``_target_rect`` 取细条矩形的
+        那个分支用的都是 ``_mode == "docked" and not _hover_peek``。hover 滑出的
+        完整胶囊**不算**：那是内容可见、读数在画，采样照跑。
+
+        用途是采样闸门（P2 Slice E6）：看不见的段不采样是性能契约，细条态是
+        "全部看不见"的极端，所以它整条收口（退订口径与折叠态同一套）。
+        """
+        return self._mode == "docked" and not self._hover_peek
+
     def _hidden_chat_enabled(self) -> bool:
         """桌宠隐藏时的对话气泡开关（点击岛弹气泡 + 回复到达自动预览）。"""
         return bool(self._cfg.get("hidden_chat", True))
@@ -498,16 +514,19 @@ class DynamicIsland(QWidget):
             self.config.get("network_probe_interval_seconds", net_monitor.DEFAULT_INTERVAL_SECONDS))
 
     def _net_active(self) -> bool:
-        """网络槽的**有效**开关：网络段在列表里 AND 信息槽可见 AND 没被折进 +N。
+        """网络槽的**有效**开关：段在列表里 AND 信息槽可见 AND 没被折 AND 不在细条态。
 
         信息槽被关掉时一条信息段都画不出来（``_visible_parts`` 的第 3 位），
         继续跑采样线程只是白烧 psutil 的 23ms/秒与探测包——所以"显示信息槽"是
         三态里的一态，不是只看网络段在不在列表里。窄屏收缩把它折进 +N
-        （``_folded_metrics``）时同理：看不见的段不采样，展开时再订阅。
+        （``_folded_metrics``）时同理：看不见的段不采样，展开时再订阅。停靠细条态
+        （``_strip_hidden``，P2 Slice E6）是同一逻辑的极端档：那时候整行内容都不画。
         """
         if not self._net_enabled():
             return False
         if island_segments.NETWORK in self._folded_metrics:
+            return False
+        if self._strip_hidden():
             return False
         _icon, _name, info, _status = self._visible_parts()
         return bool(info)
@@ -740,6 +759,9 @@ class DynamicIsland(QWidget):
             self._hover_peek = False
             self._apply_fixed_size()
             self._apply_position()
+        # 采样闸门放在最后：上面两段都可能改 _mode（停靠边切换 / 关掉靠边半隐藏），
+        # 早于它们同步就会拿着过期的细条态去收口或恢复（P2 Slice E6）
+        self._sync_content_sampling()
         self._refresh()
 
     # ------------------------------------------------------------ 余额峰谷
@@ -872,7 +894,9 @@ class DynamicIsland(QWidget):
                      and metric_id not in self._folded_metrics)
 
     def _sys_active(self) -> bool:
-        """设备槽的**有效**开关：段在列表里且没被折 AND 信息槽可见（可见性另算）。"""
+        """设备槽的**有效**开关：段在列表里且没被折 AND 信息槽可见 AND 不在细条态。"""
+        if self._strip_hidden():
+            return False
         return bool(self._sys_metric_ids()) and bool(self._visible_parts()[2])
 
     def _sync_sys_slot(self) -> None:
@@ -1074,6 +1098,7 @@ class DynamicIsland(QWidget):
         self._sync_card_labels()
         self._animate_to(self._target_rect())
         self._card_collapse_timer.start()
+        self._sync_content_sampling()
         self.card_expanded.emit()
 
     def collapse_card(self, *, animate: bool = True) -> None:
@@ -1092,6 +1117,7 @@ class DynamicIsland(QWidget):
             self._geo_to = None
             self._set_free_geometry(self._target_rect())
             self._apply_fixed_size()
+        self._sync_content_sampling()    # 收进细条 = 内容全不画 → 全停采样
 
     # ------------------------------------------------------------ 动效核心
     def _bounce(self, impulse: float = 4.0) -> None:
@@ -1728,6 +1754,29 @@ class DynamicIsland(QWidget):
         self._sync_network_slot()
         self._sync_sys_slot()
 
+    def _sync_content_sampling(self) -> None:
+        """停靠细条态变化 → 采样订阅跟着走（细条态内容全不画 = 全停采样）。
+
+        P2 Slice E6（P1 D2 的越界发现转正）。退订口径与折叠态**完全一致**
+        （``_sync_*_slot`` 的收口分支：网络段整条 close、设备槽按 id unsubscribe，
+        0 订阅零 syscall）；出细条按同一条路径恢复订阅，首轮按四态报 ``--``——
+        细条期间的陈旧读数不许被端出来假装"它一直在采"。
+
+        调用点 = **所有会翻 ``_mode`` / ``_hover_peek`` 的地方**（两处标志一变，
+        细条态就可能翻转）：``_apply_position``（构造与设置保存到停靠边）、
+        ``expand_card`` / ``collapse_card``、``refresh_from_config``（关掉
+        「靠边半隐藏」的复位）、``mouseMoveEvent``（拖出停靠）、``mouseReleaseEvent``
+        （细条单击滑出 / 拖拽落定停靠）、``enterEvent`` / ``_dock_back``（hover
+        滑出与收回）。状态记忆在 ``_strip_sampling_off``，与折叠态同一套
+        "变了才同步"的口径——重复调用是幂等的。
+        """
+        hidden = self._strip_hidden()
+        if hidden == self._strip_sampling_off:
+            return
+        self._strip_sampling_off = hidden
+        self._sync_network_slot()
+        self._sync_sys_slot()
+
     def _rest_size(self) -> QSize:
         width = self._capsule_width()
         if self._mode == "expanded":
@@ -1818,6 +1867,7 @@ class DynamicIsland(QWidget):
             target = self._target_rect()
             self._set_free_geometry(target)
             self._apply_fixed_size()
+        self._sync_content_sampling()
 
     def _clamp_to_screen(self) -> None:
         if self._mode == "docked" and not self._hover_peek:
@@ -2556,6 +2606,7 @@ class DynamicIsland(QWidget):
             self._dock_back_timer.stop()
             self._hover_peek = True
             self._animate_to(self._target_rect())
+            self._sync_content_sampling()   # 滑出 = 内容重新可见 → 恢复采样
         self._ensure_anim_timer()
         super().enterEvent(event)
 
@@ -2570,6 +2621,7 @@ class DynamicIsland(QWidget):
         if self._mode == "docked" and self._hover_peek:
             self._hover_peek = False
             self._animate_to(self._target_rect())
+            self._sync_content_sampling()   # 收回细条 = 内容全不画 → 全停采样
 
     # ------------------------------------------------------------ 鼠标
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -2604,6 +2656,7 @@ class DynamicIsland(QWidget):
                 self._mode = "normal"
                 self._hover_peek = False
                 self._apply_fixed_size()
+                self._sync_content_sampling()   # 拖出细条 = 内容重新可见 → 恢复采样
         if self._dragging and self._drag_offset is not None:
             self.move(global_pos - self._drag_offset)
             self._emit_geometry_changed()
@@ -2673,6 +2726,8 @@ class DynamicIsland(QWidget):
         self._press_global = None
         self._drag_offset = None
         self._dragging = False
+        # 分支决定完模式再同步采样：细条单击 → 滑出（恢复）、拖拽落定 → 停靠（全停）
+        self._sync_content_sampling()
         self._emit_geometry_changed()
         event.accept()
 
