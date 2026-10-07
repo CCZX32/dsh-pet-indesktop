@@ -62,10 +62,13 @@ _PRIMARY_SAMPLES = {
     "balance": "余额 ¥88888.88",
     "balance_tier": "低谷 → 88:88",
 }
-#: 网络段盒宽样本：用真格式化器的**最坏档位**生成（速率 5 列上限 + 4 位毫秒），
-#: 手写样本会和 ``format_network_slot`` 的定宽契约漂移。
+#: 网络段盒宽样本：用真格式化器生成（手写样本会和 ``format_network_slot`` 的定宽
+#: 契约漂移）。取「千兆满速 + 近秒级延迟」这一**现实包络**（5 列全宽数字 + 3 位
+#: 毫秒）——包络内读数在盒内右对齐伸缩、不推邻居；包络外（G 级速率 / 四位毫秒）
+#: 由 ``DynamicIsland._network_segment`` 的 max(样本, 现文案) 加宽兜住，不静默省略。
+#: 不取 G 级病态最坏形态：那会让典型读数（K 级 + 两位毫秒）在盒内留出大块空白。
 _NETWORK_BOX_SAMPLE = net_monitor.format_network_slot(
-    1023 * 1024 ** 3, 1023 * 1024 ** 3, 1000.0)
+    1023 * 1024 ** 2, 1023 * 1024 ** 2, 999.0)
 #: 设备槽段的标签（数值样本取 ``sys_monitor.MAX_TEXT``，与格式化器同源）。
 _DEVICE_LABELS = {island_segments.CPU: "CPU", island_segments.MEM: "内存"}
 #: 设备槽段 id（订阅 key 同 id；cpu/mem 共用一条采样线程）。

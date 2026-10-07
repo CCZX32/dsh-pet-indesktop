@@ -1188,6 +1188,10 @@ class DynamicIsland(QWidget):
         """网络段：定宽槽串（``format_network_slot`` 的 5 列契约）直接进字段盒。
 
         没有 label（↓↑ 是槽串自带的 glyph），采样还没出第一轮时按四态显示 ``--``。
+        盒宽 = 样本与现文案的**较宽者**：样本兜住「千兆满速 + 近秒级延迟」包络内
+        的所有读数（盒内右对齐、数字跳动不推邻居）；包络外（G 级速率 / 四位毫秒）
+        宁可让岛变宽也不静默吃字——与主信息段同一口径，``box_text`` 本就在宽度
+        白名单键里，加宽走正规几何路径。
         """
         sample = self._net_sample
         if sample is None:
@@ -1198,8 +1202,12 @@ class DynamicIsland(QWidget):
                 sample.down_bps, sample.up_bps, sample.latency_ms,
                 lost=sample.latency_lost)
             state = island_segments.STATE_OK
+        box = _NETWORK_BOX_SAMPLE
+        value_fm = self._metrics_for("value")
+        if int(value_fm.horizontalAdvance(text)) > int(value_fm.horizontalAdvance(box)):
+            box = text
         return _InfoSeg(kind=island_layout.KIND_METRIC, seg_id=island_segments.NETWORK, label="",
-                        text=text, box_text=_NETWORK_BOX_SAMPLE, state=state)
+                        text=text, box_text=box, state=state)
 
     def _device_segment(self, metric_id: str) -> _InfoSeg:
         """CPU / 内存段：读数来自共享的 ``SysMonitor`` 快照（无快照 = sampling）。

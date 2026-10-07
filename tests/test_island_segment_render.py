@@ -27,6 +27,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 import pet.dynamic_island as island_mod
+import pet.island_layout as island_layout_mod
 from pet import balance as balance_mod
 from pet import catalog
 from pet import island_segments as isl
@@ -283,6 +284,38 @@ def test_network_segment_is_a_metric_segment_not_an_info_takeover(tmp_path, monk
         assert grown.text == net_monitor.format_network_slot(2048.0, 512.0, 23.0)
         assert grown.box_text  # 定宽样本：盒宽与读数无关
         assert len(grown.box_text) >= len(grown.text), "样本必须覆盖定宽槽串的最坏形态"
+    finally:
+        island.close()
+
+
+def test_network_box_sample_is_a_realistic_envelope(tmp_path, monkeypatch):
+    """盒宽样本取「千兆满速 + 近秒级延迟」的现实包络，不是 G 级的病态最坏形态。
+
+    样本串决定盒宽：包络定得太宽，典型读数（K 级速率 + 两位毫秒）右对齐后会在
+    段内留下大块空白（P1 实机截图自审发现的视觉缺陷）；包络外（G 级速率 /
+    四位毫秒）由 max(样本, 现文案) 加宽兜住，永不静默省略。
+    """
+    cfg = _config(tmp_path)
+    cfg.set("island_metrics", [NETWORK])
+    island, made = _island(cfg, monkeypatch)
+    try:
+        island.show()
+        app.processEvents()
+        # 包络内（千兆满速 + 三位毫秒）：盒宽恒为声明样本，与读数无关
+        made[0].sample = _net_sample(
+            down=500 * 1024 ** 2, up=120 * 1024 ** 2, latency=250.0)
+        island._tick_network()
+        within = _seg(island._compose_info_segments(), NETWORK)
+        assert within.box_text == island_layout_mod._NETWORK_BOX_SAMPLE
+        assert "G" not in island_layout_mod._NETWORK_BOX_SAMPLE, (
+            "样本不取 G 级病态形态（典型读数会在盒内留出大块空白）")
+        # 包络外（G 级速率 / 四位毫秒）：盒跟现文案走，不省略、不静默吃字
+        made[0].sample = _net_sample(
+            down=1023 * 1024 ** 3, up=1023 * 1024 ** 3, latency=1000.0)
+        island._tick_network()
+        beyond = _seg(island._compose_info_segments(), NETWORK)
+        assert beyond.box_text == beyond.text
+        assert "…" not in beyond.text
     finally:
         island.close()
 
