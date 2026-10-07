@@ -15,7 +15,8 @@
 给桌宠加一个**进程级**的免打扰：右键 →「免打扰」→ 选 15/30/60/120 分钟（30 为默认档），
 期间**普通提醒**不冒泡、不弹系统通知，而是进一个**有界暂存队列**；到点或「提前结束」时
 用**一条**气泡汇报暂存内容（`免打扰期间有 N 条提醒：…`）。全局全屏播放时也等效进入免打扰
-（可关：`quiet_also_on_fullscreen`）。
+（可关：`quiet_also_on_fullscreen`）。 *〔2026-10-07 终审修复对齐（`87e9adb`）：汇报改为
+**交付确认制**（有交付目标才排空，否则保留暂存重试）→ §9.2〕*
 
 关键设计取舍：**免打扰只压「普通提醒」这一个语义类别**。审批 / 提问 / interaction /
 lifecycle / turn·end / task_complete / execution-failed / agent·request-error / session·end /
@@ -74,7 +75,7 @@ balance 这些**状态类**事件一律穿透（免打扰期间该批的还是�
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
 | `pet/quiet_mode.py`（新） | +292 / −0 | 进程级纯状态机：`QuietState`（倒计时/档位/暂存队列 + 全屏等效标志，**注入时钟**可无 sleep 测试）、`QuietTicker`（QObject + 1Hz QTimer，**只在免打扰生效期间运行**）、`shared_quiet_state()` 单例。多宠共享一份 → 抑制天然是进程级的。 |
-| `pet/settings_quiet.py`（新） | +94 / −0 | 设置页「免打扰」两行的控件 / 行装配 / 保存（与 `settings_music` / `settings_file_interpret` 同口径；因行数预算独立成模块）。 |
+| `pet/settings_quiet.py`（新） | +94 / −0 | 设置页「免打扰」两行的控件 / 行装配 / 保存（与 `settings_music` / `settings_file_interpret` 同口径；因行数预算独立成模块）。 *〔2026-10-07 终审修复对齐（`ddbea79`）：+4 / −1，两键在子宠页置灰 → §9.1〕* |
 | `pet/window_alerts.py` | +93 / −0 | 新增 `quiet_blocked(host)`（唯一判据转发 + 取配置）、`defer_quiet(text)`（入暂存队列）、`report_quiet_summary(host, items)`（一条气泡汇报）；`show_alert` 在 `isVisible()` 判定**之前**按 `alert_survives_suppression` 分流——**放在可见性之前是刻意的**：全屏避让会藏起桌宠，先走「不可见」分支就把提醒丢掉/改道了，暂存队列永远收不到东西；`pump_alerts` 把免打扰前已入队的普通提醒一并转存。顶层 `from . import quiet_mode`。 |
 | `pet/config.py` | +40 / −0 | `QUIET_MINUTE_CHOICES=(15,30,60,120)` / `DEFAULT_QUIET_MINUTES=30` / `DEFAULT_QUIET_ALSO_ON_FULLSCREEN=True` / `QUIET_QUEUE_LIMIT=20` + `normalize_quiet_minutes()`（档位**唯一来源**，菜单/设置页/倒计时共用，避免两处漂移）；新键 `quiet_minutes_default` / `quiet_also_on_fullscreen` 进默认值 dict、reload 白名单、`set()` 归一化名单、`_normalize_pet_settings`（档位取最近档、布尔防 `"false"` 误开）。 |
 | `pet/context_menus/shared.py` | +65 / −0 | `add_quiet_mode_menu()`：子菜单标题（开启时带剩余时间）、四档（标「默认」/「进行中」）、「提前结束（剩余 …）」（未开启置灰）；`end_quiet_mode(pet)` 提前结束并汇报。 |
@@ -142,7 +143,7 @@ balance 这些**状态类**事件一律穿透（免打扰期间该批的还是�
 |---|---|---|
 | `quiet_blocked(host)` 单次判定 | **0.42 µs**（预热后 20 万次均值） | 新增 |
 | 门控调用频率 | 等于提醒/气泡**事件本身**的频率（分钟级），非每帧 | 新增（离散） |
-| `QuietTicker` 轮询成本 | 1Hz QTimer，**只在免打扰生效期间存在**；未生效时不建表、不跑 | 新增（仅生效期） |
+| `QuietTicker` 轮询成本 | 1Hz QTimer，**只在免打扰生效期间存在**；未生效时不建表、不跑。 *〔2026-10-07 终审修复对齐（`87e9adb`）：结算未确认交付期间**继续跑**（重试到有交付目标），存活区间 = 免打扰窗口 ∪ 待交付窗口 → §9.2〕* | 新增（仅生效期） |
 | 空闲（免打扰关）稳态开销 | 零——唯一新增是两次 `Config.get` 判空与一个布尔短路 | 既有路径不变 |
 | 暂存队列内存 | 有界 deque，上限 **20** 条短文本（`QUIET_QUEUE_LIMIT`） | 新增（有界） |
 | 新增线程 / 网络 / 磁盘 / 系统调用 | **0 / 0 / 0 / 0**（ticker 是 Qt 定时器，不是线程） | — |
@@ -185,6 +186,9 @@ DPI 下的换行；原因与残留风险见第七节。免打扰设置的视觉�
 
 ## 六、测试与验证
 
+> *〔2026-10-07 终审修复对齐（`87e9adb`）：本节的用例清单与计数已过期，增量见 §9.3——
+> `tests/test_quiet_mode.py` +372/−16（45 → 57 例）〕*
+
 **红 → 绿（先写测试、后写实现）**
 
 回退命令（保留新模块与 config，避免整体 import 失败掩盖信号）：
@@ -226,6 +230,9 @@ FAILED test_settings_rows_live_in_automation_domain_and_round_trip # 无设置�
 
 ## 七、已知限制与后续
 
+> *〔2026-10-07 终审修复对齐（`87e9adb`）：新增一条——汇报依赖「有交付目标」，
+> 详见 §9.4〕*
+
 1. **全屏联动依赖既有开关**：`quiet_also_on_fullscreen` 复用的是「全屏时自动隐藏」的探针；
    该开关关掉时全屏探测不跑，本项也就不生效。设置页 hint 已如实写明这条依赖，**没有另起
    第二套全屏检测**。
@@ -261,3 +268,54 @@ FAILED test_settings_rows_live_in_automation_domain_and_round_trip # 无设置�
   一起压掉（表现为「点了没反应」）。`window_alerts.py` 的 docstring 已写明。
 - **分支状态**：本提交经 `589d25f` 并入 `integration/2026-10-07-night-batch`；
   分支未 push、PR 未开。
+
+
+## 九、终审修复对齐（2026-10-07 追加）
+
+> 按 [`PR-REPORT-TEMPLATE.md`](PR-REPORT-TEMPLATE.md) 的「后续轮次在同一文档追加新章节、
+> 保留新旧对照，不要重写覆盖」约定**追加**：上文记录的是各提交当时的树，本节只记终审修复
+> 带来的增量。上文对应位置已就地加注「2026-10-07 终审修复对齐（提交 `<sha>`）」。
+
+### 9.1 §2 修改文件说明的增量
+
+`ddbea79`（+25 新增 `pet/settings_widgets.py`，四模块各接一处）——§2 的 `settings_quiet.py`
+行（+94）现在另有 **+4 / −1**：
+
+- 免打扰两键（默认档位 selector + 全屏联动 toggle）在**子宠页置灰** + tooltip
+  「仅主桌宠可设置」。理由：子宠的独立设置进程写 `config-slot-N.json`，而这两个键**不在**
+  `PER_SLOT_SETTING_KEYS` 里，overlay 的 `_SpriteConfig` 只对 per-slot 键逐 sprite 取源
+  → 运行期读的是主配置，子宠页改了等于没改，原先属「能保存、运行时不消费」的静默死开关。
+  这是**有意不加进** `PER_SLOT_SETTING_KEYS`：免打扰是进程级语义，不是逐宠偏好。
+- 收口函数是新增的 `settings_widgets.mark_main_pet_only()`（幂等；主宠页一个不动；控件因
+  平台条件不存在时静默跳过）。
+
+### 9.2 抑制真值表与性能分析的增量（`87e9adb`）
+
+`87e9adb` 改了 7 个文件：`pet/quiet_mode.py` +67/−23、`pet/multi_window_shared.py` +39/−6、
+`pet/app.py` +11/−3、`pet/context_menus/shared.py` +17/−4、`pet/overlay_shell.py` +9/−2、
+`pet/festival_service.py` +6/−6、`pet/voice_chime_service.py` +6/−5。**四点推翻上文的旧口径**：
+
+| # | 上文口径 | 现行口径 |
+|---|---|---|
+| 1 | §1/§3.1「到点或提前结束即**排空**暂存并汇报」 | **交付确认制**：`take_report` 只给快照，排空发生在 `ack_report`；没有可交付目标（`MultiWindowProxy.has_presentation_target` 为假 / `show_alert` 返回无窗接手）时**保留暂存、1Hz 表下一拍重试**。旧口径的实测后果：退出全屏是「先结算、后恢复窗口」，汇报只投向可见窗而此刻窗还隐藏着 ⇒ 暂存已排空、提醒**静默丢失** |
+| 2 | §3.2 第 1 条「分流提到 `show_alert` 的可见性判定之前」（只覆盖 `show_alert`） | **分流先于呈现筛选**推广到全部通道：节日/报时的判定原先在 `isVisible` 分支**内**（宿主隐藏即落到系统通知，压不住也不进队列）；共享联动代理先按可见窗筛选，隐藏窗的普通提醒在**到达门控之前**就被丢掉。两处改为判定先于可见性/呈现目标筛选 |
+| 3 | §3.1 未提入场时序 | **入场锁边沿**：`start` 与 `set_fullscreen(True)` 入场即置位——此前首个 1Hz tick 之前退出全屏会留下「暂存非空、永不汇报」的死状态（测试手工调 `check_end` 才补上） |
+| 4 | §3.1 真值表「提前结束」行 = 结束并汇报 | **`end_now` 只停计时**，不再自行排空/汇报：提前结束与到期、退出全屏走**同一条**交付链，避免两条路径各丢一次或各报一次 |
+
+**§4 性能分析的增量**：上文「`QuietTicker` 只在免打扰生效期间运行」需要补一句——**结算未确认
+交付期间它继续跑**（重试直到有交付目标）。即表的存活区间由「免打扰窗口」扩为「免打扰窗口 ∪
+待交付窗口」。稳态仍为零（不进免打扰就不建表），无新增线程/网络/磁盘。
+
+### 9.3 §6 测试与验证的增量
+
+`tests/test_quiet_mode.py` **+372 / −16**（45 → 57 例）。新增覆盖：全屏进 → 暂存 → 全屏出 →
+恢复 → 收到汇报的完整组合链（真实扇出顺序 + 真实代理 + 真实 `SharedSubsystems` 处理链）、
+overlay 拓扑结算次序（监听器在状态翻转那一刻读 overlay 可见性）、**无交付目标时不清空不停表**、
+目标恢复后补报、隐藏代理/隐藏宿主的节日与报时入队、入场边沿三例。
+
+### 9.4 §7 已知限制与后续的增量
+
+- 第 1 条（全屏联动依赖既有开关）不变。
+- **新增**：**汇报依赖「有交付目标」**。所有窗口都隐藏（或该拓扑下无可见窗）期间，暂存的
+  提醒不会丢，但要等到有目标才交付；1Hz 表在此期间保持运行（这是 §9.2 第 1 条的成本）。
+- §7 第 3 条的两个待产品拍板口径（自言自语/点击台词穿透、音频不压）**未变**。

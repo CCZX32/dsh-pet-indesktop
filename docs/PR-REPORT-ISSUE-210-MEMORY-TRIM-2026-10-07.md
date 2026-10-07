@@ -105,6 +105,8 @@
 1. **访问权限用最小必要集合**：`PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA`
    （`0x1100`），显式拒绝升级成 `PROCESS_ALL_ACCESS` / `QUERY_INFORMATION`。
 2. **句柄类型必须纠正**：`HANDLE` 的 `restype=c_void_p`——默认 `c_int` 会截断 64 位句柄。
+   *〔2026-10-07 终审修复对齐（`9dbc893`）：本条纪律当时**只落到了 `OpenProcess`/`CloseHandle`**，
+   进程树快照三件套漏在外面（真实缺陷：句柄泄漏）——现已补齐签名 + 统一失效判定，见 §9.1〕*
 3. **句柄纪律**：编排里 `CloseHandle` 只出现在**唯一一处 `finally`**；单测断言
    「成功 `OpenProcess` 数 == `CloseHandle` 数」，含跳过与失败路径；进程树快照的句柄同样在
    `finally` 收尾。
@@ -150,6 +152,8 @@
 1. **ctypes 接线真机跑通**：`Win32ProcessApi()` 三个 DLL 加载 + `argtypes` 全部被真实函数
    接受；`list_pids()` 枚举 404 个 pid，`foreground_pid()` 有值，`image_name` /
    `working_set_bytes` 对自身进程正常返回（此前单元替身无法覆盖 `argtypes` 合法性）。
+   *〔2026-10-07 终审修复对齐（`9dbc893`）：这条真机探针**没有覆盖 `own_child_pids` 走的
+   进程树快照路径**，而该路径当时正缺签名（真实缺陷）——补证见 §9.4〕*
 2. **`PROCESS_MEMORY_COUNTERS` 布局校验**：6 个进程读数与 PowerShell `WorkingSet64`
    逐字节一致（ratio 1.000）——证明结构体定义没写错。
 3. **端到端（只对自己 spawn 的子进程下手）**：`open_process`（TRIM_ACCESS）成功 →
@@ -183,6 +187,9 @@
 
 ## 六、测试与验证
 
+> *〔2026-10-07 终审修复对齐（`9dbc893`）：本节计数已过期，增量见 §9.2——
+> `tests/test_memory_trim.py` +146/−0（46 → **54** 例，含签名级回归）〕*
+
 **红 → 绿（先写测试、后写实现）**
 
 ```text
@@ -211,6 +218,9 @@ $ git stash pop
 无新增第三方依赖（`ctypes` 是标准库）；无打包改动。
 
 ## 七、已知限制与后续
+
+> *〔2026-10-07 终审修复对齐（`9dbc893`）：新增一条「快照三件套曾缺 ctypes 签名」（**已修**，
+> 留档），详见 §9.3〕*
 
 1. **多实例互回收**：多开桌宠实例时，实例 A 会回收实例 B 的工作集——只保护「自己」这一个
    pid，不做同程序实例识别。若产品在意，需要加「同镜像名实例」识别（一行判据，但要定义
@@ -245,3 +255,66 @@ $ git stash pop
   保留，否则该测试立刻红。
 - **分支状态**：本提交经 `95bd2f3` 并入 `integration/2026-10-07-night-batch`；
   分支未 push、PR 未开。
+
+
+## 九、终审修复对齐（2026-10-07 追加）
+
+> 按 [`PR-REPORT-TEMPLATE.md`](PR-REPORT-TEMPLATE.md) 的「后续轮次在同一文档追加新章节、
+> 保留新旧对照，不要重写覆盖」约定**追加**：上文记录的是各提交当时的树，本节只记终审修复
+> 带来的增量。上文对应位置已就地加注「2026-10-07 终审修复对齐（提交 `<sha>`）」。
+>
+> **定位说明**：本节对应的上文位置是 **§3.2 第 2 条（句柄类型必须纠正）** 与
+> **§5 第 1 条（ctypes 接线真机跑通）**——上文 **§7 并没有一条「ABI 可疑」**，故按
+> "确曾存在、现已修"补记在 §9.3 的 §7 增量里，而不是去改一条不存在的限制。
+
+### 9.1 事实：同一类缺陷在快照三件套上确实存在过（`9dbc893`）
+
+`pet/memory_trim.py` **+35 / −2**。上文 §3.2 第 2 条警告过「`HANDLE` 的 `restype` 必须是
+`c_void_p`，默认 `c_int` 会截断 64 位句柄」，但这条纪律当时**只落到了 `OpenProcess` /
+`CloseHandle`**：进程树快照三件套漏在外面。
+
+| 函数 | 旧实现 | 后果 |
+|---|---|---|
+| `CreateToolhelp32Snapshot` | **无 argtypes/restype** | 快照句柄按默认 `c_int` 接收 → **64 位句柄被截断**；`INVALID_HANDLE_VALUE(-1)` 也可能读成正数 ⇒ **「快照失败」被当成有效句柄**：句柄泄漏，后续 `Process32*` 拿着垃圾句柄 |
+| `Process32FirstW` / `Process32NextW` | 无签名 | 入口指针宽度未声明 |
+| 失效判定 | `handle == c_void_p(-1).value` | 只在「本机恰好返回无符号全 1」时成立 |
+
+**修法**：三个函数补签名（快照句柄走 `c_void_p`，与既有 `OpenProcess`/`CloseHandle` 同口径；
+`Process32FirstW`/`NextW` 入口按 `POINTER(_ProcessEntry32W)` 声明、`restype=c_int`）；失效判定
+收敛到单一 `_invalid_handle()`——**NULL / −1 / 无符号全 1 / 32 位全 1（截断形态）一律算失效**，
+`own_child_pids` 与 `CloseHandle` **共用**它，失效句柄**不再进 `CloseHandle`**。
+
+### 9.2 §6 测试与验证的增量
+
+`tests/test_memory_trim.py` **+146 / −0**（46 → **54** 例）。新增：三件套的**签名断言**
+（句柄 `restype` 必须是指针宽度、入口必须是 `LPPROCESSENTRY32W`）、五种失效表示下返回空集合
+且**不碰** `CloseHandle`/`Process32FirstW`、合法高位句柄不被误杀、判定函数真值表。
+
+**顺带修正一处错误的替身**（属上文 §6 的"替身面"问题，不是产品缺陷）：`Process32FirstW` /
+`NextW` 原本各持一个游标，等于把「快照里只有第一个进程」喂给被测代码——共用游标后才是真枚举
+语义。这条修正说明上文 §6 的 `test_own_child_pids_walks_the_process_tree` 当时**只验证了单节点
+枚举**，其覆盖强度低于报告的表述。
+
+### 9.3 §7 已知限制与后续的增量
+
+- **新增（已修，留档）**：**快照三件套曾缺 ctypes 签名**（见 §9.1）——属真实缺陷（句柄泄漏
+  路径），现已随 `9dbc893` 修复并加了签名级回归。上文 §7 没有列出这条，是因为写报告时真机
+  探针只覆盖了 `Win32ProcessApi()` 建对象与 `list_pids`/`foreground_pid`/`image_name`/
+  `working_set_bytes`（`OpenProcess` 系），**没有覆盖 `own_child_pids` 走的那条快照路径**。
+- §7 第 1 条（多实例互回收）**未变**：只保护「自己」这一个 pid，不做同程序实例识别。
+- §7 第 5 条（非 Windows 无实现）**未变**。
+
+### 9.4 §5 实机运行记录的增量（`9dbc893` 的真机证据）
+
+上文 §5 第 1 条写「三个 DLL 加载 + `argtypes` 全部被真实函数接受」——这句在新签名到位后才
+**完整成立**。补三条真机证据：
+
+```text
+三个函数的签名在真实 Win32 函数上生效
+对自建子进程 own_child_pids 仍能命中
+连续 200 次快照后本进程句柄数 138 → 138（无泄漏）
+CreateFileW 双向验证：指针语义返回 18446744073709551615、截断语义返回 -1，两者都被判失效
+```
+
+第 4 条是关键——它用同一台机器上的两种语义形态**双向**验证了 `_invalid_handle()` 的真值表，
+而不是只赌"本机恰好返回全 1"。

@@ -393,6 +393,8 @@ AssertionError: 已有实例在运行：不得建到 AppShell 这一层  # legac
 
 - **影响面**：拓扑判定（`is_overlay_topology`）、启动分流、单实例门、设置页一处
   开关与一处子宠页置灰、`PetWindow` 的窗口能力位与重启级判断。
+  *〔2026-10-07 终审修复对齐（`ddbea79`）：现另有**一处拓扑条件置灰**——非 overlay 下
+  `drop_gravity` 置灰（捕获模式接通使 legacy 成为真实路径的同族收口），见 §9〕*
   **默认用户（未勾选捕获模式）路径逐字节不变**：默认分支上 `stream_capture_mode`
   为假 → `is_overlay_topology()` 仍返回 True（等价于旧的 env-only 结果）→ 走
   `OverlayShell`，多宠照常。
@@ -412,3 +414,37 @@ AssertionError: 已有实例在运行：不得建到 AppShell 这一层  # legac
   `AGENTS.md` 的"全量门"改动），因此走了：两轮**独立**审查（6.1sol 主审 + A1 交叉
   审，结论分别为"需修后可合"与"未见阻断性问题"）+ 六条修复 + 修复后真进程复核 +
   全量套件 + 受影响族 3 遍。整合分支终全量 **4413 passed, 11 skipped**。
+
+
+## 九、终审修复对齐（2026-10-07 追加）
+
+> 按 [`PR-REPORT-TEMPLATE.md`](PR-REPORT-TEMPLATE.md) 的「后续轮次在同一文档追加新章节、
+> 保留新旧对照」约定**追加**：上文正文不改，本节只记后续收口对本文叙述的影响。
+
+### 9.1 捕获模式多了一处**拓扑条件**置灰（`ddbea79` 的 M5）
+
+`drop_gravity`（静止放手下落，#219）只被 sprite 路径消费（`pet_sprite` /
+`BehaviorController`），legacy 的 `PetWindow` **没有对应行为**。**捕获模式接通后 legacy 已是
+真实用户路径**，所以 `pet/settings_pet_controls.py` 在**非 overlay 拓扑**（捕获模式，或显式
+`PET_RENDER_TOPOLOGY=legacy`）下把该开关 `setEnabled(False)` + tooltip
+**「仅单合成窗（overlay）拓扑生效」**（判定走 `overlay_settings_command.is_overlay_topology()`，
+与本文 §一 的拓扑判定**同一判据**）。
+
+**对本文的影响**：§八「影响面」列的「设置页一处开关与一处子宠页置灰」现在**多一处拓扑条件
+置灰**。它**不是 Phase A 引入的**，而是 Phase A 把 legacy 变成真实路径之后的**同族收口**——
+即本次接通带走了一条"以前不会有人踩、现在会"的死开关。
+
+### 9.2 两个置灰维度是独立的（避免误读）
+
+| 维度 | 判据 | 生效范围 |
+|---|---|---|
+| **拓扑维度**（本节） | `is_overlay_topology()` | 非 overlay（捕获模式 / 显式 env legacy）下 `drop_gravity` 置灰 |
+| **子宠维度**（`ddbea79` + `a25858e` 的 `mark_main_pet_only`） | `dialog.config.instance_id` 非空 | 子宠页把进程级/全局键置灰 + 「仅主桌宠可设置」 |
+
+两者**可同时生效**（捕获模式下的子宠页两处都会灰）。同节的**拖动物理 / 甩出力度**等
+legacy **真的消费**，保持可用——刻意不"一刀切"。
+
+### 9.3 与本文「重启级」语义的关系
+
+该开关的可用性在**设置页构建时**按当时的拓扑求值，因此与本文 §六「取消勾选并保存 →
+窗口当场不变」同属**重启级**语义：拓扑变了要**重启**才反映到这一行的可用状态。
