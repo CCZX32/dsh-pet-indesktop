@@ -732,7 +732,7 @@ class PetInstance:
 
     def open_quick_chat(self) -> None:
         """打开快速对话气泡；与完整聊天窗共用会话历史。"""
-        if not self.enable_chat or self.win is None:
+        if not self.enable_chat:
             return
         # 桌宠全部隐藏：气泡锚不到桌宠，改弹到灵动岛上（岛是对话代理）。
         # singleShot 与下方同口径：Cocoa 菜单跟踪期间延迟到菜单关闭再弹。
@@ -740,6 +740,14 @@ class PetInstance:
         if shell is not None and not shell._aggregate_pet_visible() \
                 and shell._island_chat_available():
             QTimer.singleShot(0, lambda: shell._show_island_chat(activate=True))
+            return
+        if self.win is None:
+            # overlay 拓扑（恒不建 PetWindow）：气泡锚不到老窗口——改走 overlay 壳
+            # 的 sprite 锚定路径（与 sprite 右键菜单同一条），否则岛卡片「聊天」/
+            # 托盘「快速对话（气泡）」点了没反应。无壳 = 异常中间态，安静不炸。
+            overlay = getattr(shell, "_overlay_shell", None) if shell is not None else None
+            if overlay is not None:
+                QTimer.singleShot(0, overlay.open_quick_chat)
             return
         # Cocoa 原生 QMenu 跟踪期间 activePopupWidget() 可能为 None，且其
         # 嵌套事件循环会把这个 singleShot 留到菜单关闭后再派发。若是 Qt

@@ -1278,3 +1278,39 @@ def test_runtime_marker_written_on_first_show(tmp_path, app):
     data = json.loads(marker.read_text(encoding="utf-8"))
     assert data["pid"] == os.getpid()
     win.close()
+
+
+def test_open_quick_chat_routes_to_overlay_shell_when_win_none(tmp_path, app, monkeypatch):
+    """overlay 拓扑（``win`` 恒 None、不建 PetWindow）：快速对话必须改走 overlay
+    壳的 sprite 锚定路径——锚到隐藏/不存在的 PetWindow 等于点了没反应（岛卡片
+    「聊天」与托盘「快速对话（气泡）」共用本缝，2026-10-08 实机发现的回归）。"""
+    shell, config, _handle = _make_primary_with_slot(tmp_path)
+    inst = PetInstance(shell, config, enable_chat=True, slot_id=None)
+    inst.win = None  # overlay 拓扑恒为 None（不建 PetWindow）
+    monkeypatch.setattr(shell, "_aggregate_pet_visible", lambda: True)
+
+    calls = []
+
+    class _FakeOverlay:
+        def open_quick_chat(self, sprite=None):
+            calls.append(sprite)
+            return True
+
+    shell._overlay_shell = _FakeOverlay()
+    inst.open_quick_chat()
+    deadline = time.time() + 2.0
+    while not calls and time.time() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert calls == [None], "win=None 时必须路由到 overlay 壳（sprite=None = 主宠）"
+
+
+def test_open_quick_chat_win_none_without_overlay_is_quiet_noop(tmp_path, app, monkeypatch):
+    """反面：win=None 且没有 overlay 壳（异常中间态）——安静不炸，不抛异常。"""
+    shell, config, _handle = _make_primary_with_slot(tmp_path)
+    inst = PetInstance(shell, config, enable_chat=True, slot_id=None)
+    inst.win = None
+    monkeypatch.setattr(shell, "_aggregate_pet_visible", lambda: True)
+    shell._overlay_shell = None
+    inst.open_quick_chat()  # 不抛即过
+    QApplication.processEvents()
