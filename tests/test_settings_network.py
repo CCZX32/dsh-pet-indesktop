@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""设置页「网络信息」三键的行/依赖/保存契约（issue #172）。
+"""设置页「网络信息 / 灵动岛指标」的行/依赖/保存契约（issue #172 + P1 Slice C）。
 
 断言走真实 ``ModernSettingsDialog``（设置窗口这个公开 seam），不碰私有调用顺序：
-默认值呈现、依赖显隐（岛关 → 信息槽关 → 网络槽）、保存回写、脏值不炸设置页。
+默认值呈现、指标三开关与 ``island_metrics`` 的对应、依赖显隐（岛关 → 信息槽关 →
+指标行）、保存回写（典范序）、脏值不炸设置页、子宠页置灰。
+
+``island_metrics`` 是**唯一**的指标真值（旧键 ``island_network_enabled`` 只在归一化
+阶段单向迁移一次，设置页不再写它）。
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from PySide6.QtWidgets import QApplication
 import pet.modern_settings_dialog as settings_mod
 from pet import net_monitor
 from pet.config import Config
+from pet.island_segments import CPU, MEM, NETWORK
 
 app = QApplication.instance() or QApplication([])
 
@@ -54,10 +59,55 @@ def test_network_rows_defaults_match_config(tmp_path, monkeypatch):
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
         assert dialog.island_network_check.isChecked() is False
+        assert dialog.island_cpu_check.isChecked() is False
+        assert dialog.island_mem_check.isChecked() is False
         assert dialog.network_info_menu_check.isChecked() is True
         assert dialog.network_probe_interval_spin.value() == 1.0
         assert dialog.network_probe_interval_spin.minimum() == 0.5
         assert dialog.network_probe_interval_spin.maximum() == 60.0
+    finally:
+        dialog.close()
+
+
+def test_metric_toggles_reflect_the_configured_list(tmp_path, monkeypatch):
+    """开关初值 = ``island_metrics`` 成员关系（不是旧键）。"""
+    dialog, _cfg = _dialog(tmp_path, monkeypatch, island_metrics=[CPU, MEM])
+    try:
+        assert dialog.island_cpu_check.isChecked() is True
+        assert dialog.island_mem_check.isChecked() is True
+        assert dialog.island_network_check.isChecked() is False
+    finally:
+        dialog.close()
+
+
+def test_legacy_network_key_shows_up_checked_after_migration(tmp_path, monkeypatch):
+    """老用户升级：配置里只有旧键 True → 迁移进列表，设置页照常显示"网络已勾选"。"""
+    dialog, cfg = _dialog(tmp_path, monkeypatch, island_network_enabled=True)
+    try:
+        assert cfg.get("island_metrics") == [NETWORK]
+        assert dialog.island_network_check.isChecked() is True
+        assert dialog.island_cpu_check.isChecked() is False
+    finally:
+        dialog.close()
+
+
+def test_interval_row_is_keyed_to_the_network_toggle(tmp_path, monkeypatch):
+    """间隔行只跟「网络」开关走：CPU / 内存开关与探测间隔无关。"""
+    dialog, _cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.island_enabled_check.setChecked(True)
+        dialog.island_info_check.setChecked(True)
+        assert _row(dialog, "network_probe_interval").isHidden()
+
+        dialog.island_cpu_check.setChecked(True)
+        dialog.island_mem_check.setChecked(True)
+        assert _row(dialog, "network_probe_interval").isHidden(), "CPU/内存不产生探测包"
+
+        dialog.island_network_check.setChecked(True)
+        assert not _row(dialog, "network_probe_interval").isHidden()
+
+        dialog.island_network_check.setChecked(False)
+        assert _row(dialog, "network_probe_interval").isHidden()
     finally:
         dialog.close()
 
@@ -71,6 +121,8 @@ def test_dependency_visibility_chains_island_info_network(tmp_path, monkeypatch)
         island_on.setChecked(True)
         info_on.setChecked(True)
         assert not _row(dialog, "island_network").isHidden()
+        assert not _row(dialog, "island_cpu").isHidden()
+        assert not _row(dialog, "island_mem").isHidden()
         assert _row(dialog, "network_probe_interval").isHidden(), "网络槽关着：间隔行隐藏"
 
         net.setChecked(True)
@@ -85,11 +137,15 @@ def test_dependency_visibility_chains_island_info_network(tmp_path, monkeypatch)
 
         info_on.setChecked(False)
         assert _row(dialog, "island_network").isHidden()
+        assert _row(dialog, "island_cpu").isHidden()
+        assert _row(dialog, "island_mem").isHidden()
         info_on.setChecked(True)
         assert not _row(dialog, "island_network").isHidden()
 
         island_on.setChecked(False)
         assert _row(dialog, "island_network").isHidden()
+        assert _row(dialog, "island_cpu").isHidden()
+        assert _row(dialog, "island_mem").isHidden()
     finally:
         dialog.close()
 
@@ -138,7 +194,8 @@ def test_interval_spin_is_not_clipped_at_larger_fonts(tmp_path, monkeypatch):
         dialog.close()
 
 
-def test_save_writes_three_keys_and_reloads(tmp_path, monkeypatch):
+def test_save_writes_metrics_and_reloads(tmp_path, monkeypatch):
+    """保存写 ``island_metrics``（不再写旧键），落盘后重启读回同一列表。"""
     dialog, cfg = _dialog(tmp_path, monkeypatch)
     try:
         dialog.island_network_check.setChecked(True)
@@ -148,13 +205,52 @@ def test_save_writes_three_keys_and_reloads(tmp_path, monkeypatch):
     finally:
         dialog.close()
 
-    assert cfg.get("island_network_enabled") is True
+    assert cfg.get("island_metrics") == [NETWORK]
     assert cfg.get("network_probe_interval_seconds") == 3.5
     assert cfg.get("network_info_menu_enabled") is False
+    assert cfg.get("island_network_enabled") is False, "旧键不再是第二写入来源"
     restored = Config(base=tmp_path)
-    assert restored.get("island_network_enabled") is True
+    assert restored.get("island_metrics") == [NETWORK]
     assert restored.get("network_probe_interval_seconds") == 3.5
     assert restored.get("network_info_menu_enabled") is False
+
+
+def test_save_writes_the_canonical_metric_order(tmp_path, monkeypatch):
+    """三个复选框折成列表：按固定典范序 [network, cpu, mem] 过滤勾选态。
+
+    复选框不表达顺序（拖动排序是后续版本的事），所以"勾了哪三个"必须落成唯一
+    可预测的列表——顺序随勾选先后漂移会让岛上的段序在保存后莫名变化。
+    """
+    dialog, cfg = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.island_mem_check.setChecked(True)
+        dialog.island_network_check.setChecked(True)
+        dialog._write_config()
+    finally:
+        dialog.close()
+    assert cfg.get("island_metrics") == [NETWORK, MEM], "勾选先后不影响写回顺序"
+
+    dialog2, cfg2 = _dialog(tmp_path / "all", monkeypatch)
+    try:
+        dialog2.island_mem_check.setChecked(True)
+        dialog2.island_cpu_check.setChecked(True)
+        dialog2.island_network_check.setChecked(True)
+        dialog2._write_config()
+    finally:
+        dialog2.close()
+    assert cfg2.get("island_metrics") == [NETWORK, CPU, MEM]
+
+
+def test_save_with_every_toggle_off_writes_an_empty_list(tmp_path, monkeypatch):
+    dialog, cfg = _dialog(tmp_path, monkeypatch, island_metrics=[NETWORK, CPU, MEM])
+    try:
+        for toggle in (dialog.island_network_check, dialog.island_cpu_check,
+                       dialog.island_mem_check):
+            toggle.setChecked(False)
+        dialog._write_config()
+    finally:
+        dialog.close()
+    assert cfg.get("island_metrics") == []
 
 
 def test_dirty_interval_does_not_break_settings_page(tmp_path, monkeypatch):
@@ -170,20 +266,34 @@ def test_dirty_interval_does_not_break_settings_page(tmp_path, monkeypatch):
 
 
 def test_network_rows_are_searchable(tmp_path, monkeypatch):
-    """行进了设置搜索索引（objectName 约定），否则用户搜不到。"""
+    """行进了设置搜索索引（objectName 约定），否则用户搜不到。
+
+    搜索命中面 = 行 label + hint + objectName，所以「灵动岛指标」必须落在 label
+    上；CPU / 内存各自一行，用户搜「CPU」「内存」都能命中。
+    """
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
         names = {row.objectName() for row in dialog._search_rows}
         assert "settingRow_island_network" in names
+        assert "settingRow_island_cpu" in names
+        assert "settingRow_island_mem" in names
         assert "settingRow_network_probe_interval" in names
         assert "settingRow_network_info_menu" in names
+
+        labels = [row.label.text() for row in dialog._search_rows
+                  if row.objectName().startswith("settingRow_island_")]
+        assert all("灵动岛指标" in label for label in labels)
+        hits = [row for row in dialog._search_rows if "cpu" in row.label.text().lower()]
+        assert [row.objectName() for row in hits] == ["settingRow_island_cpu"]
+        assert [row.objectName() for row in dialog._search_rows
+                if "内存" in row.label.text()] == ["settingRow_island_mem"]
     finally:
         dialog.close()
 
 
 # ---------------------------------------------------------------- 子宠页作用域
 def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
-    """子宠页：网络三键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
+    """子宠页：指标与网络键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
 
     子宠页保存写 ``config-slot-N.json``，而采样器/岛/右键菜单一律读主配置，改了
     等于没改；故如实置灰 + tooltip，主宠页不受影响。
@@ -192,12 +302,15 @@ def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
     child = settings_mod.ModernSettingsDialog(
         Config(base=tmp_path, instance_id="slot-1"), include_ai=True)
     try:
-        for control in (master.island_network_check, master.network_probe_interval_spin,
-                        master.network_info_menu_check):
+        master_controls = (master.island_network_check, master.island_cpu_check,
+                           master.island_mem_check, master.network_probe_interval_spin,
+                           master.network_info_menu_check)
+        child_controls = (child.island_network_check, child.island_cpu_check,
+                          child.island_mem_check, child.network_probe_interval_spin,
+                          child.network_info_menu_check)
+        for control in master_controls:
             assert control.isEnabled() is True
-        for control in (child.island_network_check,
-                        child.network_probe_interval_spin,
-                        child.network_info_menu_check):
+        for control in child_controls:
             assert control.isEnabled() is False
             assert control.toolTip() == "仅主桌宠可设置"
     finally:

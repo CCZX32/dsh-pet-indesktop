@@ -27,6 +27,7 @@ import pytest
 
 from pet import config as config_mod
 from pet.config import Config
+from pet.island_segments import CPU, NETWORK
 
 # reload() 白名单键集合现状快照（与 pet/config.py reload() 的
 # "for key in (...)" 元组一致；任何增删必须同步更新本快照）。
@@ -85,6 +86,7 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "harness_launch_target",
         "idle_low_fps_enabled",
         "idle_low_fps_threshold",
+        "island_metrics",
         "island_network_enabled",
         "lock_position",
         "media_prewarm",
@@ -190,6 +192,7 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 免打扰 2（quiet_minutes_default/quiet_also_on_fullscreen）、回收内存 2
 # （mem_skip_foreground/mem_min_size_mb）、动画菜单 1（anim_menu_stay_open）。
 # 后实测（2026-10-07 夜间整合后复测）：白名单字面量 139 + 特例 5 = 144。
+# 2026-10-07 P1 Slice C 加灵动岛指标 1（island_metrics，列表序=优先级），白名单 140。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 
@@ -444,9 +447,9 @@ def test_set_normalizes_weather_keys(tmp_path):
     )
     cfg.set("weather_city_list", "北京")
     assert cfg.data["weather_city_list"] == []
-# ------------------------------------------------- 网络信息（issue #172 三键）
+# ------------------------------------------- 网络信息 / 灵动岛指标（#172 + Slice C）
 def _dirty_network_config(tmp_path, raw: dict) -> Config:
-    """把网络信息三键写成脏值落盘，再走真实加载路径（reload + 归一化）。"""
+    """把网络信息诸键写成脏值落盘，再走真实加载路径（reload + 归一化）。"""
     cfg_dir = tmp_path / config_mod.APP_DIR_NAME
     cfg_dir.mkdir(parents=True, exist_ok=True)
     payload = {"version": 4}
@@ -457,14 +460,18 @@ def _dirty_network_config(tmp_path, raw: dict) -> Config:
 
 
 def test_network_keys_defaults_are_off_probe_and_on_menu(tmp_path):
-    """默认值即产品契约：延迟探测默认关（要发包）、菜单入口默认开。"""
+    """默认值即产品契约：延迟探测默认关（要发包）、菜单入口默认开。
+
+    指标列表（``island_metrics``，P1 Slice C）默认空：附加指标一个都不加。
+    """
     cfg = Config(base=tmp_path)
+    assert cfg.data["island_metrics"] == []
     assert cfg.data["island_network_enabled"] is False
     assert cfg.data["network_probe_interval_seconds"] == 1.0
     assert cfg.data["network_info_menu_enabled"] is True
 
 
-@pytest.mark.parametrize("raw,expected_island,expected_menu", [
+@pytest.mark.parametrize("raw,expected_network,expected_menu", [
     ("false", False, False),
     ("no", False, False),
     ("true", True, True),
@@ -474,10 +481,16 @@ def test_network_keys_defaults_are_off_probe_and_on_menu(tmp_path):
     (1, False, True),
 ])
 def test_dirty_network_boolean_keys_are_not_truthy_by_string(
-        tmp_path, raw, expected_island, expected_menu):
-    """bool("false") is True —— 字符串布尔必须按字面语义归一（同族键同规）。"""
+        tmp_path, raw, expected_network, expected_menu):
+    """bool("false") is True —— 字符串布尔必须按字面语义归一（同族键同规）。
+
+    旧键 ``island_network_enabled`` 自 P1 Slice C 起只做**单向迁移**，所以这里
+    断言迁移后的真值落点：判真 → ``island_metrics`` 含 network；判假 → 列表不动；
+    无论哪种，旧键归一化后恒为 False（不再是第二写入来源）。
+    """
     cfg = _dirty_network_config(tmp_path / f"island-{raw}", {"island_network_enabled": raw})
-    assert cfg.data["island_network_enabled"] is expected_island
+    assert cfg.data["island_network_enabled"] is False
+    assert (NETWORK in cfg.data["island_metrics"]) is expected_network
     cfg2 = _dirty_network_config(tmp_path / f"menu-{raw}", {"network_info_menu_enabled": raw})
     assert cfg2.data["network_info_menu_enabled"] is expected_menu
 
@@ -501,6 +514,7 @@ def test_set_normalizes_network_keys(tmp_path):
     cfg = Config(base=tmp_path)
     cfg.set("island_network_enabled", "false")
     assert cfg.data["island_network_enabled"] is False
+    assert cfg.data["island_metrics"] == []
     cfg.set("network_probe_interval_seconds", 0.01)
     assert cfg.data["network_probe_interval_seconds"] == pytest.approx(0.5)
     cfg.set("network_info_menu_enabled", "off")
@@ -508,14 +522,14 @@ def test_set_normalizes_network_keys(tmp_path):
 
 
 def test_network_keys_survive_reload_round_trip(tmp_path):
-    """落盘 → 重启加载：三键是普通白名单键，reload 后不得被默认值冲掉。"""
+    """落盘 → 重启加载：指标列表与另两键都是普通白名单键，不得被默认值冲掉。"""
     cfg = Config(base=tmp_path)
-    cfg.set("island_network_enabled", True)
+    cfg.set("island_metrics", [NETWORK, CPU])
     cfg.set("network_probe_interval_seconds", 3.0)
     cfg.set("network_info_menu_enabled", False)
     assert cfg.save() is True
     restored = Config(base=tmp_path)
-    assert restored.data["island_network_enabled"] is True
+    assert restored.data["island_metrics"] == [NETWORK, CPU]
     assert restored.data["network_probe_interval_seconds"] == pytest.approx(3.0)
     assert restored.data["network_info_menu_enabled"] is False
     cfg.set("weather_city_codes", {"景德镇市": "101240801", "坏": 5})

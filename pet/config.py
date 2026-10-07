@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import catalog
+from . import catalog, island_segments
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -664,6 +664,32 @@ def _clean_dynamic_island_data(value) -> dict:
     return result
 
 
+#: 灵动岛附加指标的合法 id（P1 三员；P3 的 GPU 占位另算）。唯一来源是
+#: ``island_segments`` 的常量——这里再抄一份字面量迟早与段注册表漂移。
+_ISLAND_METRIC_IDS = frozenset({
+    island_segments.NETWORK, island_segments.CPU, island_segments.MEM,
+})
+
+
+def _clean_island_metrics(value) -> list:
+    """``island_metrics`` 归一化：非 list → ``[]``；非 str 丢弃；去重保首次序；未知 id 丢弃。
+
+    **不设上限**（产品决策）：段数不设上限，超出屏宽的由布局层收缩流水线兜
+    （``island_segments`` 的折叠契约），这里截断只会把用户的选择悄悄吃掉。
+    返回**新列表**：迁移会就地追加 network，别名共享会改到调用方的对象。
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        # bool/int 不是 str（isinstance 天然把 True 挡在外面，不做字符串化）
+        if not isinstance(item, str) or item not in _ISLAND_METRIC_IDS:
+            continue
+        if item not in cleaned:  # 去重保首次序 = 保用户优先级
+            cleaned.append(item)
+    return cleaned
+
+
 def _clean_character_profiles(value) -> dict:
     """角色档案：当前先承载 click_talk_bindings，后续可扩展头像/人设字段。"""
     if not isinstance(value, dict):
@@ -920,11 +946,21 @@ class Config:
             "character_profiles": {},  # 角色档案：{角色id: {click_talk_bindings: {动画id: [台词]}}}
             "chat_always_on_top": False,  # 聊天窗置顶
             "dynamic_island": _default_dynamic_island_data(),
+            # —— 灵动岛附加指标（P1 Slice C）——
+            # 岛胶囊上附加指标段的**有序列表**（段 id 字符串）。**列表序 = 用户
+            # 优先级 = 收缩时尾部先被折叠**；合法 id 三员：network / cpu / mem
+            # （常量在 island_segments，不在这里写第二份字面量）。默认空 = 只要
+            # 主信息，升级用户不会突然多出指标。
+            "island_metrics": [],
             # —— 网络信息（issue #172）——
             # 灵动岛信息槽改显「延迟 + 上下行网速」。默认关：延迟探测每秒要发一次
             # 小包（单次往返在网约 160 字节，含 IP/UDP 头），属"要花流量"的能力，
             # 必须用户显式开启；网速读网卡计数器本身零流量，但它和延迟同槽展示，
             # 故同一个开关。
+            # **已废弃为写入来源**（P1 Slice C）：真值搬到 island_metrics 的 network
+            # 成员，本键只在**归一化阶段单向迁移**一次（判真 → 追加 network，然后
+            # 自己置回 False；加载与 set() 都会跑归一化）。保留键名只为降级读取
+            # 不炸档：旧版仍按它判断。
             "island_network_enabled": False,
             # 延迟探测间隔（秒），由 net_monitor.clamp_interval 夹到 [0.5, 60]。
             "network_probe_interval_seconds": 1.0,
@@ -1235,6 +1271,7 @@ class Config:
             "character_profiles",
             "chat_always_on_top",
             "dynamic_island",
+            "island_metrics",
             "island_network_enabled",
             "network_probe_interval_seconds",
             "network_info_menu_enabled",
@@ -1531,6 +1568,16 @@ class Config:
             self.data.get("network_probe_interval_seconds"))
         self.data["network_info_menu_enabled"] = _bool_or_default(
             self.data.get("network_info_menu_enabled"), True)
+        # 灵动岛附加指标（P1 Slice C）：列表归一化 + 旧键 island_network_enabled
+        # 的**单向迁移**。迁移只在旧键判真时发生一次（把 network 追加到尾部，列表序
+        # 是用户优先级，不插队），随后旧键置回 False——列表成为唯一真值，旧键不再是
+        # 第二写入来源；判假时列表原样（新用户与已迁移用户零影响）。
+        metrics = _clean_island_metrics(self.data.get("island_metrics"))
+        if self.data["island_network_enabled"]:
+            if island_segments.NETWORK not in metrics:
+                metrics.append(island_segments.NETWORK)
+            self.data["island_network_enabled"] = False
+        self.data["island_metrics"] = metrics
         for prefix in ("chat_background", "modern_chat_background"):
             opacity_key = f"{prefix}_opacity"
             fill_key = f"{prefix}_fill"
@@ -1811,6 +1858,7 @@ class Config:
             "weather_city",
             "weather_city_list",
             "weather_city_codes",
+            "island_metrics",
             "island_network_enabled",
             "network_probe_interval_seconds",
             "network_info_menu_enabled",

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import catalog, net_monitor
+from . import catalog, island_segments, net_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ class DynamicIsland(QWidget):
         self._info_timer.timeout.connect(self._refresh)
         self._info_timer.start()
 
-        # 网络槽（``island_network_enabled``，默认关）：采样在后台线程里跑
+        # 网络段（``island_metrics`` 的 network 成员，默认关）：采样在后台线程里跑
         # （psutil 计数器单次调用实测 23ms，不能进 16ms 的动画帧预算），
         # 这里只按探测间隔读一次快照、文本变了才重绘。
         self._net_monitor: net_monitor.NetMonitor | None = None
@@ -323,14 +323,19 @@ class DynamicIsland(QWidget):
         return bool(self._cfg.get("event_effects", True))
 
     def _net_enabled(self) -> bool:
-        """网络槽开关（``island_network_enabled``，默认关）。
+        """网络段开关：``island_metrics`` 里有没有 network（默认关）。
 
         开启时**信息槽直接改显网络信息**（下行/上行速率 + 延迟），关闭时回到
-        ``info_mode`` 选的内容。这样"开关"是网络槽的唯一所有者：用户不会遇到
-        "开关开了但信息槽还显示时间"这种看不出生效的状态；设置页在网络槽开着
+        ``info_mode`` 选的内容。这样"开关"是网络段的唯一所有者：用户不会遇到
+        "开关开了但信息槽还显示时间"这种看不出生效的状态；设置页在网络段开着
         时会隐掉「信息槽内容」那一行（开着时它不生效，见 settings_network）。
+
+        真值只有一个来源：列表的成员关系（P1 Slice C 起）。旧键
+        ``island_network_enabled`` 只在归一化阶段单向迁移进列表，这里不再读它；
+        非列表值（手改配置 / 桩对象）一律按"没开"处理，不做子串匹配。
         """
-        return bool(self.config.get("island_network_enabled", False))
+        metrics = self.config.get("island_metrics", [])
+        return isinstance(metrics, (list, tuple)) and island_segments.NETWORK in metrics
 
     def _net_interval(self) -> float:
         return net_monitor.clamp_interval(
