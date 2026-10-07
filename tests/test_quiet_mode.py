@@ -94,33 +94,47 @@ def test_duration_choices_and_remaining_label():
     assert quiet_mode.format_remaining(-3) == "00:00"
 
 
-def test_expiry_ends_quiet_and_returns_queued_once():
-    """到点自动结束：暂存提醒结算一次，第二次结算不再报（幂等，防重复气泡）。"""
+def test_expiry_ends_quiet_and_keeps_queue_until_delivered():
+    """到点自动结束：快照交出去，**排空要等交付确认**（先排空再交付 = 丢提醒）。"""
     clock = FakeClock()
     state = quiet_mode.QuietState(clock=clock)
     state.start(15)
     state.remember("一条普通提醒")
 
-    assert state.check_end() is None, "仍在免打扰中：不结算"
+    assert state.take_report() is None, "仍在免打扰中：没有待汇报"
     assert state.manual_active() is True
     assert state.remaining_label() != "00:00"
 
     clock.advance(15 * 60)
     assert state.manual_active() is False, "到点即自动结束"
-    assert state.check_end() == ["一条普通提醒"]
-    assert state.check_end() is None, "同一次结束不得汇报两遍"
+
+    assert state.take_report() == ["一条普通提醒"]
+    assert state.pending_count() == 1, "未确认交付前不得排空"
+    assert state.report_pending() is True
+    assert state.take_report() == ["一条普通提醒"], "确认前反复取到同一份快照（重试语义）"
+
+    state.ack_report()
+    assert state.pending_count() == 0
+    assert state.report_pending() is False
+    assert state.take_report() is None, "同一轮不得汇报两遍"
 
 
-def test_early_end_returns_queued_and_is_not_reported_twice():
+def test_early_end_only_stops_the_timer_and_leaves_the_queue_intact():
+    """提前结束只停计时：暂存与交付状态不动（汇报走与到期同一条链）。"""
     clock = FakeClock()
     state = quiet_mode.QuietState(clock=clock)
     state.start(60)
     state.remember("甲")
     state.remember("乙")
 
-    assert state.end_now() == ["甲", "乙"]
+    assert state.end_now() is True
     assert state.manual_active() is False
-    assert state.check_end() is None, "提前结束已汇报过，轮询表不该再报一遍"
+    assert state.pending_count() == 2, "提前结束不得顺手排空（排空只发生在交付确认后）"
+
+    assert state.take_report() == ["甲", "乙"]
+    state.ack_report()
+    assert state.pending_count() == 0
+    assert state.end_now() is False, "已结束后再点提前结束 = 无操作"
 
 
 def test_reselecting_duration_restarts_instead_of_stacking():
@@ -157,11 +171,52 @@ def test_fullscreen_exit_ends_quiet_and_reports():
     state = quiet_mode.QuietState(clock=FakeClock())
     state.set_fullscreen(True)
     state.remember("全屏期间的提醒")
-    assert state.check_end() is None
 
     state.set_fullscreen(False)
-    assert state.check_end() == ["全屏期间的提醒"]
-    assert state.check_end() is None
+    assert state.take_report() == ["全屏期间的提醒"]
+    state.ack_report()
+    assert state.take_report() is None
+
+
+def test_fullscreen_exit_before_the_first_tick_still_reports():
+    """m5：入场即锁边沿——首个 1Hz tick 之前就退出全屏，那一轮也必须汇报得出去。
+
+    边沿若只由轮询表第一拍去补，这里会留下「暂存 1 条、reports=0」的死状态。
+    """
+    state = quiet_mode.QuietState(clock=FakeClock())
+    state.set_fullscreen(True)
+    state.remember("一条普通提醒")
+
+    state.set_fullscreen(False)   # 一拍都没跑过
+    assert state.take_report() == ["一条普通提醒"], "入场边沿必须已经锁好"
+    state.ack_report()
+
+
+def test_manual_quiet_ended_before_the_first_tick_still_reports():
+    """同一纪律的手动路径：开启后立刻提前结束也要报得出这一轮。"""
+    state = quiet_mode.QuietState(clock=FakeClock())
+    state.start(15)
+    state.remember("一条普通提醒")
+    state.end_now()
+
+    assert state.take_report() == ["一条普通提醒"]
+    state.ack_report()
+
+
+def test_expiry_before_the_first_tick_still_reports():
+    """钟直接跨过到期点（轮询表一拍都没跑，例如事件循环停摆）时同样要报得出去。
+
+    这条钉的是 ``start()`` 自己的入场锁：靠"结算时再补边沿"的话，这里会留下
+    暂存 1 条、永远不汇报的死状态。
+    """
+    clock = FakeClock()
+    state = quiet_mode.QuietState(clock=clock)
+    state.start(15)
+    state.remember("一条普通提醒")
+    clock.advance(15 * 60)
+
+    assert state.take_report() == ["一条普通提醒"]
+    state.ack_report()
 
 
 def test_fullscreen_does_not_queue_when_flag_disabled():
@@ -169,7 +224,10 @@ def test_fullscreen_does_not_queue_when_flag_disabled():
     state = quiet_mode.QuietState()
     state.set_fullscreen(True)
     assert state.suppression_active(also_on_fullscreen=False) is False
-    assert state.check_end(also_on_fullscreen=False) is None
+    # 入场边沿与配置键无关（状态机不读配置）：开关关掉时结算拿到的是**空快照**，
+    # 调用方据此确认"无事可报"，不会冒泡。这样配置读取仍然只发生在判据一处。
+    assert state.take_report(also_on_fullscreen=False) == []
+    assert state.pending_count() == 0
 
 
 # ---------------------------------------------------------------- 2. 抑制真值表
@@ -307,7 +365,11 @@ def test_quiet_drains_prequeued_ordinary_alerts(win):
     win.hide_bubble()
 
     assert win._alert_current is None, "免打扰期间不得再冒出排队的普通提醒"
-    assert quiet_mode.shared_quiet_state().drain() == ["第二条"]
+    state = quiet_mode.shared_quiet_state()
+    assert state.pending_count() == 1, "转存进暂存队列的是排队那条"
+    state.end_now()
+    assert state.take_report() == ["第二条"]
+    state.ack_report()
 
 
 def test_quiet_does_not_touch_self_talk_or_link_bubbles(win):
@@ -343,6 +405,19 @@ def test_end_quiet_mode_reports_and_clears(win):
     assert end_quiet_mode(win) == ["卡住了"]
     assert quiet_mode.shared_quiet_state().pending_count() == 0
     assert "1 条提醒" in _shown_texts(win)[-1]
+
+
+def test_end_quiet_mode_keeps_queue_when_report_cannot_be_delivered(win, monkeypatch):
+    """宿主交不出去时不得排空：暂存留着，轮询表稍后重试（先排空再丢弃禁止）。"""
+    from pet.context_menus.shared import end_quiet_mode
+
+    quiet_mode.shared_quiet_state().start(15)
+    quiet_mode.shared_quiet_state().remember("卡住了")
+    monkeypatch.setattr(window_alerts, "report_quiet_summary", lambda host, items: False)
+
+    assert end_quiet_mode(win) == ["卡住了"]
+    assert quiet_mode.shared_quiet_state().pending_count() == 1
+    assert quiet_mode.shared_quiet_state().report_pending() is True
 
 
 # ---------------------------------------------------------------- 3. 接线
@@ -502,23 +577,304 @@ def test_appshell_fullscreen_broadcast_flips_quiet(qapp):
     assert quiet_mode.shared_quiet_state().suppression_active() is False
 
 
+# ------------------------------------------------- M2/M3：全屏往返 + 隐藏宿主
+# 组合链此前是盲区：纯状态机与"可见的 PetWindow"各自测过，但「全屏进入 → 隐藏
+# → 暂存 → 全屏退出 → 恢复显示 → 收到汇报」这条真实链路没人跑。它恰好踩在
+# 「结算早于恢复可见性 / 代理由可见性筛目标」的交界上。
+
+
+class _ProxyShell:
+    """``MultiWindowProxy`` 的最小宿主：一只真实 PetWindow。"""
+
+    def __init__(self, config, win) -> None:
+        self.config = config
+        self.instances = [type("Instance", (), {"win": win})()]
+
+
+class _AppShellStub:
+    """``AppShell._on_shared_fullscreen`` 的最小实例（只用到 _shared/_instances）。"""
+
+    def __init__(self, win) -> None:
+        self._shared = object()
+        self._instances = [type("Instance", (), {"win": win})()]
+
+
+class _HiddenHost:
+    """隐藏窗的最小宿主形（节日/报时服务只读 ``cfg`` 与 ``isVisible``）。"""
+
+    def __init__(self, cfg, *, visible: bool) -> None:
+        self.cfg = cfg
+        self._visible = bool(visible)
+
+    def isVisible(self) -> bool:  # noqa: N802 - 对齐 Qt API
+        return self._visible
+
+
+def _make_proxy(win):
+    from pet.multi_window_shared import MultiWindowProxy
+
+    return MultiWindowProxy(_ProxyShell(win.cfg, win))
+
+
+def _wire_quiet_pipeline(tmp_path, *, qapp):
+    """真实 proxy + 真实 QuietTicker + 真实 SharedSubsystems 结束处理器。
+
+    只装配，不替产品写逻辑：汇报链完全走 ``SharedSubsystems._on_quiet_ended``
+    与 ``MultiWindowProxy``。
+    """
+    from pet.multi_window_shared import SharedSubsystems
+    from tests.pet_window_fakes import make_pet_window
+
+    win = make_pet_window(tmp_path, runtime_id="slot-quiet-chain")
+    win._speech_bubble = RecordingBubble()
+    proxy = _make_proxy(win)
+    ticker = quiet_mode.QuietTicker(also_on_fullscreen=lambda: True, interval_ms=10)
+    stub = type("Subs", (), {"proxy": proxy})()
+    ticker.ended.connect(lambda items: SharedSubsystems._on_quiet_ended(stub, items))
+    return win, proxy, ticker
+
+
+def test_fullscreen_round_trip_delivers_report_after_window_restored(qapp, tmp_path):
+    """全屏进 → 隐藏+暂存 → 全屏出 → 恢复显示 → 收到汇报（真实扇出顺序）。"""
+    from pet.app import AppShell
+
+    win, proxy, ticker = _wire_quiet_pipeline(tmp_path, qapp=qapp)
+    shell = _AppShellStub(win)
+    try:
+        assert win.isVisible() is True
+
+        # 进入全屏：真实扇出隐藏窗口（全屏避让），免打扰等效同时立闸
+        AppShell._on_shared_fullscreen(shell, True)
+        assert win.isVisible() is False
+        assert quiet_mode.shared_quiet_state().suppression_active() is True
+
+        # 全屏期间的普通提醒走共享代理入口：此刻窗口不可见，代理筛不到目标，
+        # 提醒必须仍然进暂存队列（分流在可见性筛选之前）
+        proxy.show_alert("卡住了", duration_ms=6000, sticky=False, alert_type="watchdog")
+        assert win._alert_current is None
+        assert quiet_mode.shared_quiet_state().pending_count() == 1
+
+        # 退出全屏：窗口先恢复显示，随后才结算并汇报
+        AppShell._on_shared_fullscreen(shell, False)
+        assert win.isVisible() is True
+        assert quiet_mode.shared_quiet_state().pending_count() == 0, "交付确认后才排空"
+        assert "1 条提醒" in _shown_texts(win)[-1]
+    finally:
+        ticker.stop()
+        win.close()
+        qapp.processEvents()
+
+
+def test_report_waits_for_a_presentation_target_instead_of_being_dropped(qapp, tmp_path):
+    """免打扰结束但**没有任何可见目标**时：不得排空，目标一出现就补报。"""
+    win, _proxy, ticker = _wire_quiet_pipeline(tmp_path, qapp=qapp)
+    try:
+        quiet_mode.shared_quiet_state().set_fullscreen(True)
+        quiet_mode.shared_quiet_state().remember("卡住了")
+        win.hide()
+        qapp.processEvents()
+
+        quiet_mode.shared_quiet_state().set_fullscreen(False)
+        _pump(qapp, 0.2)
+        assert quiet_mode.shared_quiet_state().pending_count() == 1, "无交付目标时不得排空"
+        assert win._alert_current is None
+
+        win.show()
+        qapp.processEvents()
+        _spin(qapp, lambda: quiet_mode.shared_quiet_state().pending_count() == 0)
+        assert "1 条提醒" in _shown_texts(win)[-1]
+    finally:
+        ticker.stop()
+        win.close()
+        qapp.processEvents()
+
+
+def test_hidden_proxy_queues_ordinary_alert_during_quiet(qapp, tmp_path):
+    """M3：共享代理先筛可见窗——免打扰分流必须在筛选**之前**（隐藏窗也要进队列）。"""
+    from tests.pet_window_fakes import make_pet_window
+
+    win = make_pet_window(tmp_path, runtime_id="slot-hidden-proxy")
+    win._speech_bubble = RecordingBubble()
+    win.hide()
+    qapp.processEvents()
+    try:
+        quiet_mode.shared_quiet_state().start(15)
+
+        delivered = _make_proxy(win).show_alert(
+            "卡住了", duration_ms=6000, sticky=False, alert_type="watchdog")
+
+        assert delivered is True, "进了暂存队列也算接手"
+        assert win._alert_current is None
+        assert quiet_mode.shared_quiet_state().pending_count() == 1
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_proxy_reports_no_delivery_when_no_visible_window(qapp, tmp_path):
+    """没有可见目标时 ``show_alert`` 明说没交付（汇报据此保留重试）。"""
+    from pet.config import Config
+
+    proxy = _make_proxy(_HiddenHost(Config(base=tmp_path), visible=False))
+    assert proxy.has_presentation_target() is False
+    assert proxy.show_alert("一条", sticky=False, alert_type="watchdog") is False
+
+
+def test_festival_reminder_on_hidden_host_is_queued_not_notified(qapp, tmp_path):
+    """M3：隐藏宿主 + 免打扰 → 节日提醒进暂存队列，不再落到系统通知。"""
+    from pet.config import Config
+    from pet.festival_service import FestivalReminderService
+
+    notified: list[tuple] = []
+    win = _HiddenHost(Config(base=tmp_path), visible=False)
+    app = type("App", (), {
+        "win": win,
+        "system_notify": lambda *args, **kwargs: notified.append(args),
+    })()
+    stub = type("Svc", (), {"_app": app, "BUBBLE_DURATION_MS": 12000})()
+
+    quiet_mode.shared_quiet_state().start(15)
+    FestivalReminderService._bubble(stub, "今天是某某节")
+
+    assert notified == [], "免打扰期间连系统通知也要压住"
+    state = quiet_mode.shared_quiet_state()
+    assert state.pending_count() == 1
+    state.end_now()
+    assert state.take_report() == ["今天是某某节"]
+
+
+def test_voice_chime_bubble_on_hidden_host_is_queued_not_notified(qapp, tmp_path):
+    """M3：报时气泡同规（隐藏宿主 + 免打扰 → 暂存、不发通知；语音通道不受影响）。"""
+    from pet.config import Config
+    from pet.voice_chime_service import VoiceChimeService
+
+    notified: list[tuple] = []
+    win = _HiddenHost(Config(base=tmp_path), visible=False)
+    app = type("App", (), {
+        "win": win,
+        "system_notify": lambda *args, **kwargs: notified.append(args),
+    })()
+    stub = type("Svc", (), {
+        "_app": app, "_cfg": {"show_bubble": True}, "BUBBLE_DURATION_MS": 8000,
+    })()
+
+    quiet_mode.shared_quiet_state().start(15)
+    VoiceChimeService._bubble(stub, "现在是下午三点")
+
+    assert notified == []
+    state = quiet_mode.shared_quiet_state()
+    assert state.pending_count() == 1
+    state.end_now()
+    assert state.take_report() == ["现在是下午三点"]
+
+def test_overlay_fullscreen_exit_settles_after_overlay_is_shown(qapp):
+    """overlay 拓扑同序：退场结算必须晚于 ``overlay.show()``。
+
+    用监听器在「免打扰状态翻转那一刻」读 overlay 可见性，直接钉住次序（只看
+    最终状态的话，先后颠倒的实现也能蒙混过关）。
+    """
+    from PySide6.QtWidgets import QWidget
+
+    from pet.overlay_shell import OverlayShell
+
+    overlay = QWidget()
+    overlay.resize(80, 80)
+    overlay.show()
+    shell = type("Shell", (), {
+        "_auto_hidden": False,
+        "overlay": overlay,
+        "_hide_bubble_for_visibility": lambda self: None,
+        "_set_all_clips_paused": lambda self, on: None,
+        "_pause_shared_subsystems": lambda self: None,
+        "_pause_warm_all": lambda self: None,
+        "_note_sprite_visibility_changed": lambda self: None,
+        "_restore_sticky_bubble": lambda self: None,
+        "_resume_shared_subsystems": lambda self: None,
+        "_resume_warm_all": lambda self: None,
+    })()
+    state = quiet_mode.shared_quiet_state()
+    visible_at_settle: list[bool] = []
+
+    def _record():
+        visible_at_settle.append(overlay.isVisible())
+
+    state.add_listener(_record)
+    try:
+        OverlayShell._on_fullscreen_changed(shell, True)
+        assert state.fullscreen() is True
+        assert overlay.isVisible() is False, "全屏避让照旧隐藏 overlay"
+
+        visible_at_settle.clear()
+        OverlayShell._on_fullscreen_changed(shell, False)
+        assert overlay.isVisible() is True
+        assert state.fullscreen() is False
+        assert visible_at_settle == [True], "退场结算那一刻 overlay 必须已经恢复显示"
+    finally:
+        state.remove_listener(_record)
+        overlay.close()
+        qapp.processEvents()
+
+
+def _acking_subscriber(state, reported: list, *, delivered=None):
+    """把 ended 收成「汇报 → 确认交付」两段（生产里由 SharedSubsystems 做）。"""
+    def _on_ended(items):
+        reported.append(list(items))
+        if delivered is None or delivered(items):
+            state.ack_report()
+    return _on_ended
+
+
 def test_ticker_reports_queued_alerts_when_quiet_expires(qapp):
-    """真实事件循环：到期后轮询表结算一次、汇报暂存提醒并自行停表。"""
+    """真实事件循环：到期后轮询表结算一次、汇报暂存提醒并自行停表。
+
+    刻意**不**在测试里手工替产品推进结算：到期边沿由产品自己（入场锁定 +
+    1Hz 轮询）建立，测试只观察 ``ended``。
+    """
     clock = FakeClock()
     state = quiet_mode.QuietState(clock=clock)
     ticker = quiet_mode.QuietTicker(state=state, interval_ms=10)
     reported: list[list[str]] = []
-    ticker.ended.connect(reported.append)
+    ticker.ended.connect(_acking_subscriber(state, reported))
     try:
         state.start(15)
         state.remember("攒了一条")
         assert ticker.active() is True, "免打扰一开始，轮询表就该跑起来"
-        _spin(qapp, lambda: state.check_end() is None and state.manual_active())
+        _pump(qapp, 0.1)                      # 让轮询表真的跑几拍
+        assert reported == [], "免打扰期间不汇报"
 
         clock.advance(15 * 60)
         _spin(qapp, lambda: bool(reported))
         assert reported == [["攒了一条"]]
+        assert state.pending_count() == 0, "确认交付后才排空"
         _spin(qapp, lambda: not ticker.active())
+    finally:
+        ticker.stop()
+
+
+def test_ticker_keeps_retrying_until_delivery_is_confirmed(qapp):
+    """交付未确认（没有可交付目标）时不清空、不停表，稍后仍然报得出去。
+
+    这是「不得先 drain 后丢弃」的运行期保证：即便某一拍交付失败，提醒只是晚到。
+    """
+    clock = FakeClock()
+    state = quiet_mode.QuietState(clock=clock)
+    ticker = quiet_mode.QuietTicker(state=state, interval_ms=10)
+    reported: list[list[str]] = []
+    accept = {"value": False}
+    ticker.ended.connect(_acking_subscriber(state, reported, delivered=lambda _items: accept["value"]))
+    try:
+        state.start(15)
+        state.remember("攒了一条")
+        clock.advance(15 * 60)
+        _spin(qapp, lambda: bool(reported))
+        _pump(qapp, 0.15)                     # 又跑若干拍：始终交付不成功
+        assert state.pending_count() == 1, "未确认交付不得排空"
+        assert ticker.active() is True, "未确认交付不得提前停表"
+
+        accept["value"] = True                # 目标可用（例如桌宠恢复显示）
+        _spin(qapp, lambda: state.pending_count() == 0)
+        _spin(qapp, lambda: not ticker.active())
+        assert set(reported[-1]) == {"攒了一条"}, "重试只重发同一份快照"
     finally:
         ticker.stop()
 

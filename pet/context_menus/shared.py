@@ -624,7 +624,11 @@ def add_quiet_mode_menu(menu: QMenu, pet, *, icons: bool = True) -> QMenu:
 
 
 def end_quiet_mode(pet) -> list[str]:
-    """提前结束免打扰并汇报暂存提醒（返回被汇报的提醒文案）。
+    """提前结束免打扰并汇报暂存提醒（返回本轮待汇报的提醒文案）。
+
+    与到期、退出全屏走**同一条交付链**：``end_now``（只停止计时）→
+    ``take_report``（取快照）→ 汇报成功才 ``ack_report``（排空）。交付失败时
+    暂存原样保留，交给进程级轮询表在目标可用时重试——先排空再丢弃是不允许的。
 
     走 ``pet`` 的宿主面汇报：菜单建造器的 pet 既可能是 PetWindow 也可能是
     overlay 的 SpriteMenuFacade，两者都有气泡/提醒面（由 window_alerts 择优）。
@@ -632,9 +636,18 @@ def end_quiet_mode(pet) -> list[str]:
     from .. import quiet_mode
     from .. import window_alerts
 
-    items = quiet_mode.shared_quiet_state().end_now()
-    window_alerts.report_quiet_summary(pet, items)
-    return items
+    state = quiet_mode.shared_quiet_state()
+    state.end_now()
+    items = state.take_report()
+    if items is None:
+        # 仍处于（全屏等效）免打扰：此刻不该汇报，退出全屏时由轮询表接手。
+        return []
+    if not items:
+        state.ack_report()
+        return []
+    if window_alerts.report_quiet_summary(pet, items):
+        state.ack_report()
+    return list(items)
 
 
 def add_agent_link_menu(menu: QMenu, pet) -> None:

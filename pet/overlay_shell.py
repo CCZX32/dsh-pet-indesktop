@@ -3451,10 +3451,12 @@ class OverlayShell(QObject):
                      hit, self._auto_hidden, why)
         # 免打扰（issue #208）：全屏 = 等效免打扰的唯一来源（与 legacy 的
         # AppShell._on_shared_fullscreen 同一处判定，不另起探测）。
+        # 入场先立闸（隐藏动作自身带出的呈现不漏门控）；退场等 overlay 真正
+        # 显示回来之后再结算——结束汇报只投向可见目标，早一拍就是汇报给空气。
         from . import quiet_mode
 
-        quiet_mode.note_fullscreen(bool(hit))
         if hit:
+            quiet_mode.note_fullscreen(True)
             if not self._auto_hidden and self.overlay.isVisible():
                 self._auto_hidden = True
                 self._hide_bubble_for_visibility()
@@ -3463,7 +3465,8 @@ class OverlayShell(QObject):
                 self._pause_shared_subsystems()
                 self._pause_warm_all()
                 self._note_sprite_visibility_changed()
-        elif self._auto_hidden:
+            return
+        if self._auto_hidden:
             self._auto_hidden = False
             self.overlay.show()
             self._restore_sticky_bubble()
@@ -3471,6 +3474,10 @@ class OverlayShell(QObject):
             self._set_all_clips_paused(False)
             self._resume_warm_all()
             self._note_sprite_visibility_changed()
+        # 退场结算：**无条件**落在最后（手动隐藏时上面那一支不走，但免打扰的
+        # 等效状态必须落下，否则全屏标志永远停在 True）。此刻 overlay 若已恢复
+        # 显示，结束汇报才交付出得去。
+        quiet_mode.note_fullscreen(False)
 
     def _cursor_transition_blocked(self) -> bool:
         """拖拽进行中（window._cursor_transition_blocked 等价）。"""
