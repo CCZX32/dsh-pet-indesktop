@@ -2270,12 +2270,16 @@ class AppShell:
 
     def _on_dsh_state_changed(self, from_state: str, to_state: str) -> None:
         """订阅 DSH 统一状态变化（共享 Agent 联动管理器转发；收敛器是纯逻辑，
-        读方是 DshMonitor 自身）。AppShell 侧只剩灵动岛的 agent 活跃指示——
+        读方是 DshMonitor 自身）。AppShell 侧只剩灵动岛的状态点——
         thinking/attention 注入联动管线与 offline 收口常驻气泡都在管理器内部完成。
+
+        转发的是**收敛态原文**（八态），不再压成活跃布尔：状态点五态体系（空闲/
+        工作/待确认/完成/错误）与优先级判定在岛内解析（``set_dsh_state``），
+        这里不做第二套映射。
         """
         island = getattr(self, "island", None)
         if island is not None and shiboken6.isValid(island):
-            island.set_agent_active(to_state in ("working", "thinking"))
+            island.set_dsh_state(to_state)
 
     # ------------------------------------------------------------ 退出收口
     def _on_about_to_quit(self) -> None:

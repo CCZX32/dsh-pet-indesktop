@@ -3978,3 +3978,130 @@ class TestUnifiedEventEnvelopeSchema:
                          "event": "llm/retry", "failure": {"code": "429"}})
 
         assert got and got[0].code == "429"
+
+
+class TestDshDisableResetsPresentationState:
+    """关闭 DSH 联动必须复位呈现侧锁存状态（6.1sol 终审 R3）。
+
+    监视器停了之后，「待确认环 / 错误点 / 工作点」再没有人会来改——通道关闭
+    语义 = 复用 offline 收敛管线一并收口（岛状态点复位 + 常驻交互气泡撤销）。
+    """
+
+    def test_disabling_dsh_emits_offline_through_the_converged_pipeline(
+            self, tmp_path, monkeypatch):
+        import threading
+
+        from pet.agent_link import AgentLinkManager, DshMonitor
+
+        app = QApplication.instance() or QApplication([])
+        bubbles = []
+        cfg = Config(base=tmp_path)
+
+        class Win:
+            def show_bubble(self, text, duration_ms=3000):
+                bubbles.append(text)
+
+            def isVisible(self):
+                return True
+
+        mgr = AgentLinkManager(Win(), cfg)
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            lambda *a, **kw: QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(
+            DshMonitor, "install_bridge", classmethod(lambda cls: (True, "ok")))
+        monkeypatch.setattr(
+            DshMonitor, "uninstall_bridge", classmethod(lambda cls: True))
+        try:
+            states = []
+            mgr.dsh_state_changed.connect(
+                lambda from_s, to_s: states.append(to_s))
+            # 直接开监视器（apply_config 是本修复的落点，不走 set_enabled 的安装链）
+            cfg.set("agent_link", {"dsh": True})
+            mgr.apply_config()
+            app.processEvents()
+            assert mgr.monitors["dsh"]._running
+            # 联动在跑时的某个锁存态（待确认）——关闭后不允许残留
+            mgr._on_dsh_converged_state("idle", "waiting_approval", "test")
+            states.clear()
+            cfg.set("agent_link", {"dsh": False})
+            mgr.apply_config()
+            app.processEvents()
+            assert not mgr.monitors["dsh"]._running
+            assert "offline" in states, (
+                f"关闭联动必须经收敛管线发 offline（复位呈现侧锁存），实际 {states}")
+            # 终态允许是 offline 或 idle：监视器收口线程会异步补一个 idle 收敛态，
+            # 两者都能复位待确认/错误/工作的锁存（岛的 set_dsh_state 对二者同效）
+            assert states[-1] in ("offline", "idle"), (
+                f"关闭后的终态必须能复位锁存状态，实际序列 {states}")
+            assert "waiting_approval" not in states[-2:], "锁存态不得是终态"
+        finally:
+            mgr.shutdown()
+
+
+class TestDshLateQueuedSignalsAreIsolated:
+    """astra 保底 B1：监视器停止后，已入队的旧收敛信号不得覆盖 offline 复位。"""
+
+    def test_queued_stale_signal_after_disable_is_dropped(self, tmp_path, monkeypatch):
+        from PySide6.QtCore import QTimer
+
+        from pet.agent_link import AgentLinkManager, DshMonitor
+
+        app = QApplication.instance() or QApplication([])
+        cfg = Config(base=tmp_path)
+
+        class Win:
+            def show_bubble(self, text, duration_ms=3000):
+                pass
+
+            def isVisible(self):
+                return True
+
+        mgr = AgentLinkManager(Win(), cfg)
+        try:
+            states = []
+            mgr.dsh_state_changed.connect(lambda _f, to_s: states.append(to_s))
+            cfg.set("agent_link", {"dsh": True})
+            mgr.apply_config()
+            app.processEvents()
+            assert mgr.monitors["dsh"]._running
+
+            # worker 已 emit waiting_approval（排在 Qt 队列里），GUI 还没泵到
+            QTimer.singleShot(0, lambda: mgr.monitors["dsh"].dsh_state_changed.emit(
+                "idle", "waiting_approval", "worker/late"))
+            # 用户此刻关闭联动：stop + 同步 offline 复位（先入队）
+            cfg.set("agent_link", {"dsh": False})
+            mgr.apply_config()
+            app.processEvents()   # 泵队列：旧信号到达——必须被闸门丢弃
+            app.processEvents()
+            assert states[-1] == "offline", (
+                f"迟到的旧信号覆盖了 offline 复位：{states}")
+            assert "waiting_approval" not in states[states.index("offline"):]
+        finally:
+            mgr.shutdown()
+
+    def test_offline_from_a_running_monitor_still_passes(self, tmp_path, monkeypatch):
+        """闸门不误伤：监视器在跑时的真 offline（DSH 断线）照常收敛。"""
+        from pet.agent_link import AgentLinkManager
+
+        app = QApplication.instance() or QApplication([])
+        cfg = Config(base=tmp_path)
+
+        class Win:
+            def show_bubble(self, text, duration_ms=3000):
+                pass
+
+            def isVisible(self):
+                return True
+
+        mgr = AgentLinkManager(Win(), cfg)
+        try:
+            states = []
+            mgr.dsh_state_changed.connect(lambda _f, to_s: states.append(to_s))
+            cfg.set("agent_link", {"dsh": True})
+            mgr.apply_config()
+            app.processEvents()
+            mgr._on_dsh_converged_state("working", "offline", "probe/lost")
+            assert states == ["offline"]
+        finally:
+            mgr.shutdown()

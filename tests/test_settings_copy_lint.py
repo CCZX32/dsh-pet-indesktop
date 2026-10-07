@@ -62,6 +62,11 @@ _ROW_WHITELIST: dict[str, frozenset[str]] = {
     # 流量/内存单位。
     "island_network": frozenset({"KB"}),
     "dynamic_island_icon_value": frozenset({"MB"}),
+    # 岛指标段名：CPU/GPU 是用户日常词汇（段就叫这个名），不是实现黑话；
+    # 内存行的 hint 如实说「与 CPU 共用同一条采样线程」。
+    "island_cpu": frozenset({"CPU"}),
+    "island_mem": frozenset({"CPU"}),
+    "island_gpu": frozenset({"GPU"}),
     # 「AI 回复到达」是对话功能在用户侧的通用说法。
     "dynamic_island_hidden_chat": frozenset({"AI"}),
     "dynamic_island_event_effects": frozenset({"AI"}),

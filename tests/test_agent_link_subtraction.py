@@ -272,6 +272,10 @@ def _make_live_manager(tmp_path, monkeypatch):
     win = _InteractionWin()
     mgr = AgentLinkManager(win, cfg, min_interval=0.0)
     mon = mgr.monitors["dsh"]
+    # 仿真活体监视器：收敛管线（含 _on_dsh_converged_state 的迟到信号隔离闸）
+    # 只放行「监视器在跑」的信号——手动驱动 _poll/emit 的测试必须把 _running
+    # 置真，否则等于在测一条生产上不存在的路径（worker 不在跑却还在发信号）。
+    mon._running = True
     bridge_dir = mon.events_dir
     bridge_dir.mkdir(parents=True, exist_ok=True)
     mon._tailer._initial_backfill_done = True

@@ -270,6 +270,13 @@ def test_pure_logic_modules_do_not_import_qt():
         # 2026-10-07 加入 music_title：标题清洗/解析是取词链路的前处理，规则要能
         # 脱离 Qt 单独跑真值表（误伤防护的用例都是纯字符串）。
         "music_title.py",
+        # 2026-10-07 加入 island_segments/sys_monitor（灵动岛段契约 P1）：段注册
+        # 契约与 CPU/内存采样核心必须零 Qt——采样跑在后台线程，测宽靠调用方
+        # 注入的 QFontMetrics（依赖注入，本模块不 import PySide6）。
+        # 2026-10-07 加入 island_layout（P1 Slice D2 下沉）：段数据/落位/收缩流水线
+        # 是纯几何，度量对象同样注入——收缩逐级触发/逆序恢复这些规则要能在没有
+        # 窗口、没有真实字体、没有屏幕的替身上直接验，就必须零 Qt。
+        "island_segments.py", "sys_monitor.py", "island_layout.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

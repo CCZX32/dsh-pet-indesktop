@@ -633,9 +633,9 @@ class ModernSettingsDialog(QDialog):
                 island_content,
             )
         )
-        # 网络信息（issue #172）：控件/行/保存在 settings_network（行数预算原因）。
+        # 灵动岛指标（issue #172 + P1 Slice C）：控件/行/保存在 settings_network（行数预算原因）。
         island_layout.addWidget(SettingsSection(
-            "网络信息", settings_network.build_island_network_rows(self), island_content))
+            "桌面组件", settings_network.build_island_network_rows(self), island_content))
         island_layout.addStretch(1)
         self._add_page("灵动岛", "island", self._page_shell("灵动岛", island_content))
 

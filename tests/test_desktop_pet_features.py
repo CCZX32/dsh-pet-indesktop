@@ -2906,6 +2906,7 @@ def test_dsh_converged_state_wiring_drives_thinking(tmp_path, monkeypatch):
     owner = AppShell(QApplication.instance(), Config(tmp_path))
     manager = owner._shared.agent_link
     monitor = manager.monitors["dsh"]
+    monitor._running = True  # 仿真活体监视器（迟到信号隔离闸只放活在跑的信号）
 
     notified: list[str] = []
     dismissed: list[bool] = []

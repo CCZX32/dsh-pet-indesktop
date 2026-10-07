@@ -176,7 +176,10 @@ def test_v1_rewritten_rows_carry_the_final_wording(tmp_path, monkeypatch):
 
         slot = _row(dialog, "island_network").hint_label.text()
         assert "速率监测不产生额外流量，延迟检测每次约 0.16 KB。" in slot
-        assert "关闭后信息槽恢复显示「信息槽内容」选的内容。" in slot
+        # 合并岛段化后：网络是独立指标段，不再与信息槽内容互相挤占（旧架构那句
+        # 「关闭后信息槽恢复显示…」随旧耦合一起作废）。
+        assert "信息槽内容另有其行，不受本开关影响" in slot
+        assert "网卡字节计数器" not in slot and "UDP" not in slot
 
         drop = _row(dialog, "drop_gravity").hint_label.text()
         assert drop.startswith("松开鼠标时如果宠物几乎没移动，它不再停在半空，而是自然落下、落地静止；")
@@ -492,7 +495,7 @@ def test_v4_search_reports_the_hidden_dependency_without_changing_config(tmp_pat
         page = _current_page(dialog)
         assert dialog.sidebar.currentItem().text() == "桌面组件"
         assert row.isVisibleTo(page) is False, "网络槽没开时这一行本就该隐藏"
-        assert dialog.search_status.text() == "1/1 · 延迟探测间隔（需先开启「信息槽显示网络」）"
+        assert dialog.search_status.text() == "1/1 · 延迟探测间隔（需先开启「灵动岛指标 · 网络」）"
         # 依赖不满足绝不替用户改配置
         assert cfg.get("island_network_enabled") is False
         assert dialog.island_network_check.isChecked() is False
