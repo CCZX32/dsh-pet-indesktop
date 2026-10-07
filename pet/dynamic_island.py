@@ -37,10 +37,10 @@ from PySide6.QtWidgets import (
 from . import catalog, island_layout, island_segments, net_monitor, sys_monitor
 from .dsh_state import DshState
 from .island_layout import (
-    _BASELINE_DY, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX, _DEVICE_LABELS,
-    _DIVIDER_H_PX, _DIVIDER_W_PX, _ICON_GAP_PX, _ICON_PX, _NAME_GAP_PX,
-    _NAME_MAX_PX, _NETWORK_BOX_SAMPLE, _PRIMARY_ELIDE_PX, _PRIMARY_SAMPLES,
-    _STATUS_DOT_PX, _STATUS_GAP_PX, _SYS_METRIC_IDS, _InfoSeg,
+    _BASELINE_DY, _CHIP_ALERT_DOT_PX, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX,
+    _DEVICE_LABELS, _DIVIDER_H_PX, _DIVIDER_W_PX, _ICON_GAP_PX, _ICON_PX,
+    _NAME_GAP_PX, _NAME_MAX_PX, _NETWORK_BOX_SAMPLE, _PRIMARY_ELIDE_PX,
+    _PRIMARY_SAMPLES, _STATUS_DOT_PX, _STATUS_GAP_PX, _SYS_METRIC_IDS, _InfoSeg,
     place_info_segments,
 )
 
@@ -125,6 +125,15 @@ _DOT_DONE_COLOR = "#50dc78"    # 完成绿（沿用旧「可见绿灯」色值�
 _DOT_ERROR_COLOR = "#f2777a"   # 错误红（与告警色体系的 crit 同色）
 _DOT_GLYPH_COLOR = "#ffffff"   # 感叹笔画色（红底上两种主题都清晰）
 _DOT_GLYPH_W_RATIO = 0.17      # 感叹笔画宽 / 点径（8px 点 → 1.36px）
+
+# ---- 段数值告警色体系（P2 Slice E2，裁决稿 §三 ops5.5）----
+# 两级告警色只染**数值**（含 E4 单位盒跟随值色）：阈值与滞回在 island_segments
+# （纯判定），这里只管"哪一级用什么色"。亮底主题按同一色相加深档而不是新增主题
+# 键——沿用 _divider_color/_keyline_color 那套"按 style 分支给常量"的既有口径。
+_ALERT_WARN_DARK = "#f0b44c"    # 规格值：暗底 warn（琥珀）
+_ALERT_CRIT_DARK = "#f2777a"    # 规格值：暗底 crit（与错误状态点同色）
+_ALERT_WARN_LIGHT = "#95702f"   # 亮底加深档：色相 38° 不变、亮度 158→98
+_ALERT_CRIT_LIGHT = "#964a4c"   # 亮底加深档：色相 358° 不变、亮度 181→112
 
 
 def _status_error_glyph_path(rect: QRectF) -> QPainterPath:
@@ -343,6 +352,10 @@ class DynamicIsland(QWidget):
         # "这个 key 是不是刚订阅的"），用于"恢复首轮显示 --"。
         self._sys_subscribed: set[str] = set()
         self._sys_pending: set[str] = set()
+        # 逐指标的**上一拍告警级**（""|warn|crit，P2 Slice E2）：滞回要的"上一拍"
+        # 只活在这里，不进段对象（段是每拍现算的数据，不是累积状态）。折叠态会
+        # 停掉被折段的采样，靠它把告警保持住——chip 告警点因此不会一闪即灭。
+        self._alert_severity: dict[str, str] = {}
         self._geo_from: QRect | None = None
         self._geo_to: QRect | None = None
         self._geo_t = 0.0
@@ -901,7 +914,28 @@ class DynamicIsland(QWidget):
             return
         self._sys_sample = sample
         self._sys_pending.clear()
+        self._update_alert_severity(sample)
         self.update()
+
+    def _update_alert_severity(self, sample) -> None:
+        """按新快照推进各指标的告警级（滞回要的"上一拍"状态，P2 Slice E2）。
+
+        必须在**样本到达的那一刻**算（``_tick_sys`` 是读数的唯一入口），不能在
+        绘制时惰性算：两次读数之间不绘制是常态（窗口隐藏、值没变不 update），
+        惰性算会把中间那拍整个漏掉，滞回退化成"每次都从零开始"——92 降 91 会被
+        误判成首次越过 warn 线而画成黄，正好是滞回要防的事。
+
+        折叠不影响这里：快照是 cpu/mem 共享的，被折段的读数照旧推进它的告警级
+        （哪怕这一段自己已经退订、显示退回 ``--``）——chip 告警点靠这条活着。
+        快照报 error（读数全 None）时跳过：无读数不褪色，保持上一拍。
+        """
+        if sample.state != island_segments.STATE_OK:
+            return
+        for metric_id in _SYS_METRIC_IDS:
+            value = (sample.cpu_percent if metric_id == island_segments.CPU
+                     else sample.mem_percent)
+            self._alert_severity[metric_id] = island_segments.alert_severity(
+                metric_id, value, self._alert_severity.get(metric_id, ""))
 
     # ------------------------------------------------------------ 卡片
     def _build_card(self) -> None:
@@ -1345,6 +1379,11 @@ class DynamicIsland(QWidget):
         而不是拆分结果：拆分对兜底串 ``--`` 返回空单位，跟着读数走就会在采样态
         与 ok 态之间差一个单位盒宽（状态切换跳宽）；声明值进宽度白名单键，
         读数不进。
+
+        ``severity``（告警级）不在这里算，而是**读** ``self._alert_severity``——那一拍
+        的账在样本到达时（``_update_alert_severity``）就记好了。这样做有两个必要
+        的效果：滞回不会因为"两次读数之间没绘制"而漏拍；被折进 +N 的段退订后显示
+        退回 ``--``，但它的告警级照旧推进/保持，chip 告警点不会一闪即灭。
         """
         sample = self._sys_sample
         if sample is None or metric_id in self._sys_pending:
@@ -1364,7 +1403,8 @@ class DynamicIsland(QWidget):
                         label=_DEVICE_LABELS[metric_id],
                         text=text,
                         box_text=_DEVICE_VALUE_SAMPLE, state=state,
-                        unit=island_segments.PERCENT_UNIT)
+                        unit=island_segments.PERCENT_UNIT,
+                        severity=self._alert_severity.get(metric_id, ""))
 
     @staticmethod
     def _unknown_segment(metric_id: str) -> _InfoSeg:
@@ -1787,6 +1827,27 @@ class DynamicIsland(QWidget):
             return QColor(35, 45, 60, 36)
         return QColor(255, 255, 255, 36)
 
+    def _alert_color(self, severity: str) -> QColor | None:
+        """告警级的**数值**色（``""``/未识别 → None，表示不染色）。
+
+        暗底直接用规格值（``#F0B44C`` / ``#F2777A``）；亮底与玻璃底按**同一色相
+        加深档**——那两个底色接近白，规格色在白底上对比度只有 1.85:1 / 2.73:1，
+        13px 数字读不出来。加深档取"色相不变、亮度下降"（38°/358° 不变，
+        158→98 / 181→112），白底对比度 4.53:1 / 6.21:1。口径跟着既有主题函数
+        （``_divider_color`` / ``_keyline_color`` 同款 style 分支），不新增主题键。
+
+        只返回颜色，不改任何传入对象——调用方复用的主文字色不该被就地改坏
+        （与 :meth:`_unit_color` 同一纪律）。
+        """
+        if severity == island_segments.ALERT_CRIT:
+            dark, light = _ALERT_CRIT_DARK, _ALERT_CRIT_LIGHT
+        elif severity == island_segments.ALERT_WARN:
+            dark, light = _ALERT_WARN_DARK, _ALERT_WARN_LIGHT
+        else:
+            return None
+        style = str(self._cfg.get("style") or "dark")
+        return QColor(light if style in ("light", "glass") else dark)
+
     @staticmethod
     def _unit_color(base: QColor) -> QColor:
         """单位盒的颜色：与数值同色、alpha ×70%（裁决稿 §二-5 的"单位弱化"）。
@@ -2034,10 +2095,11 @@ class DynamicIsland(QWidget):
         一次 blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
         文字锐利口径不变）；squish 只调制胶囊外形、本来就不碰内容层。
 
-        key 覆盖所有影响像素的输入（可见项/名字态/各段 text+单位+state/字号指纹/颜色/
-        DPR/宽度），任一变化自动重建——**收缩结果（折了哪几段、名字显不显示）
-        由段列表与名字进 key**，所以折叠↔展开必然换位图。采样值变化只重建这张
-        位图，窗口几何走 ``_capsule_width`` 的白名单，两者互不牵连。
+        key 覆盖所有影响像素的输入（可见项/名字态/各段 text+单位+state+severity/
+        字号指纹/颜色/DPR/宽度），任一变化自动重建——**收缩结果（折了哪几段、名字
+        显不显示）由段列表与名字进 key**，所以折叠↔展开必然换位图（chip 的告警级
+        随 chip 段自己的 ``severity`` 一起进 key）。采样值变化只重建这张位图，
+        窗口几何走 ``_capsule_width`` 的白名单，两者互不牵连。
         """
         icon, name, info, status = self._visible_parts()
         plan = self._row_plan()
@@ -2055,7 +2117,8 @@ class DynamicIsland(QWidget):
             icon, name, info, status,
             self._icon_text() if icon else "",
             name_text if name else "",
-            tuple((seg.seg_id, seg.text, seg.unit, seg.state) for seg in segments),
+            tuple((seg.seg_id, seg.text, seg.unit, seg.state, seg.severity)
+                  for seg in segments),
             self._accent_color().name() if icon else "",
             primary_color.name() if name else "",
             primary_text_color.name() if segments else "",
@@ -2140,6 +2203,17 @@ class DynamicIsland(QWidget):
                 painter.setFont(self._font_for("label"))
                 painter.setPen(secondary_color)
                 painter.drawText(QPointF(placement.text_x, baseline), placement.text)
+                if placement.alert_dot_x is not None:
+                    # 折叠不埋没告警：被折段含 warn/crit 时 chip 左侧点 4px 色点
+                    # （取最高级）。点落在盒内已有内边距里，不改盒宽。
+                    alert_color = self._alert_color(seg.severity)
+                    if alert_color is not None:
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(alert_color)
+                        painter.drawEllipse(QRectF(
+                            placement.alert_dot_x,
+                            (_CAPSULE_HEIGHT - _CHIP_ALERT_DOT_PX) / 2.0,
+                            _CHIP_ALERT_DOT_PX, _CHIP_ALERT_DOT_PX))
                 x = placement.right
                 continue
             if seg.kind == island_layout.KIND_PRIMARY:
@@ -2156,6 +2230,12 @@ class DynamicIsland(QWidget):
                 # （状态差异交给状态点与卡片），平衡"安静"与"诚实的 --"
                 value_color = (primary_color if seg.state == island_segments.STATE_OK
                                else secondary_color)
+                if seg.state == island_segments.STATE_OK:
+                    # 告警只染**数值**（单位盒跟随值色，见下面的 _unit_color）：
+                    # label / 段间竖线 / 段底一律不沾（裁决稿 §三）
+                    alert_color = self._alert_color(seg.severity)
+                    if alert_color is not None:
+                        value_color = alert_color
                 painter.setPen(value_color)
             # 盒内右对齐 + 统一基线（所有字号层共用一条基线，见 _BASELINE_DY）
             painter.drawText(QPointF(placement.text_x, baseline), placement.text)

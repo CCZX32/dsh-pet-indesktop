@@ -16,6 +16,9 @@
 - **四态兜底呈现**：``ok`` 才有真读数；``sampling``/``unknown``/``error`` 一律
   同宽 ``--``（区别只在卡片与颜色，纯逻辑层同文），``unsupported`` 直接不占位。
   ``--`` 与 max_text 同盒宽语义，所以状态切换不改岛宽——不跳。
+- **告警级判定**：CPU/内存的占用率有普适阈值（warn/crit 两级 + 3pt 滞回，见
+  :func:`alert_severity`），网络段的延迟/速率没有，所以这张阈值表只收前者；
+  判断只吃"读数 + 上一拍"，是纯函数——滞回状态归调用方持有。
 
 本模块零 Qt 依赖（度量对象按鸭子类型接收）：跑在后台线程/单测替身上都能用，
 真实 QFontMetrics 只在测宽时由调用方传进来。
@@ -23,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +44,27 @@ STATE_UNKNOWN = "unknown"
 STATE_ERROR = "error"
 STATE_UNSUPPORTED = "unsupported"
 STATES = frozenset({STATE_OK, STATE_SAMPLING, STATE_UNKNOWN, STATE_ERROR, STATE_UNSUPPORTED})
+
+# ---------------------------------------------------------------- 告警色体系（P2 Slice E2）
+#: 告警级词表（段的 ``severity`` 取值）：``""`` = 正常，两级告警 ``warn`` / ``crit``。
+#: 它是**呈现面**的契约（绘制层的数值色 + chip 告警点），与 ``state`` 正交：
+#: ``state`` 说"这个读数可不可信"，``severity`` 说"这个可信读数危不危险"。
+ALERT_WARN = "warn"
+ALERT_CRIT = "crit"
+#: 两级告警的词表（同 ``STATES`` 的用法）：查"这个串是不是告警级"。
+ALERT_LEVELS = frozenset({ALERT_WARN, ALERT_CRIT})
+#: 逐指标的两级阈值 ``(warn, crit)``（百分比）。**只收有普适阈值的指标**：
+#: CPU/内存的占用率是跨机器可比的量纲；网络段的延迟与速率差几个数量级
+#: （家宽 vs 机房），给死线就是伪精确，所以它刻意不在这张表里。
+ALERT_THRESHOLDS = {
+    CPU: (80.0, 92.0),
+    MEM: (85.0, 95.0),
+}
+#: 滞回带宽（pt）：升过线才上色、降过"线 − 3"才褪色。79/80 反复横跳不再闪色。
+ALERT_HYSTERESIS = 3.0
+#: 告警级的序（取最高级用）：越危险越大。
+_ALERT_LEVELS = {"": 0, ALERT_WARN: 1, ALERT_CRIT: 2}
+_ALERT_BY_LEVEL = ("", ALERT_WARN, ALERT_CRIT)
 
 #: label 长度上限（11px 标签的排版预算）。
 LABEL_MAX_CHARS = 6
@@ -264,3 +289,58 @@ def render_compact(seg: SegmentSnapshot) -> str | None:
         return None
     body = seg.text if seg.state == STATE_OK else UNKNOWN_TEXT
     return f"{seg.label}{body}"
+
+
+# ---------------------------------------------------------------- 告警级判定
+def alert_thresholds(metric_id: Any) -> tuple[float, float] | None:
+    """该指标的 ``(warn, crit)`` 阈值；没声明过阈值的段返回 ``None``（永不告警）。"""
+    return ALERT_THRESHOLDS.get(metric_id)
+
+
+def alert_severity(metric_id: Any, value: Any, previous: str = "") -> str:
+    """一个读数对应的告警级（``""`` / ``warn`` / ``crit``）——**纯函数 + 上一拍**。
+
+    - **升过线才上色**：``≥ warn`` 线上 warn、``≥ crit`` 线上 crit；
+    - **降过"线 − 3"才褪色**：已在某一级的段要跌到 ``阈值 − ALERT_HYSTERESIS``
+      以下才降一档。边界抖动（79/80/81 反复横跳）因此不会闪色——滞回要靠
+      ``previous``，它是**上一拍的返回值**，由绘制层存在岛实例上（不进段对象：
+      段是每拍现算的数据，不是累积状态）；
+    - **无读数不褪色**：``value`` 为 None / NaN / 无穷 / 不可转数字时原样返回
+      ``previous``——"还没读数"不等于"读数降到安全值"（与四态兜底的 ``--``
+      不伪造 0 同口径）。折叠态会停掉被折段的采样，这条让告警不因停采样而凭空
+      消失（chip 告警点的前提）；
+    - **没阈值的指标恒无色**：网络段的延迟/速率没有普适阈值，``previous`` 也不还。
+    """
+    limits = alert_thresholds(metric_id)
+    if limits is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return previous
+    if not math.isfinite(number):
+        return previous
+    warn_line, crit_line = limits
+    level = _ALERT_LEVELS.get(previous, 0)
+    if number >= crit_line:
+        return ALERT_CRIT
+    if level >= _ALERT_LEVELS[ALERT_CRIT] and number >= crit_line - ALERT_HYSTERESIS:
+        return ALERT_CRIT
+    if number >= warn_line:
+        return ALERT_WARN
+    if level >= _ALERT_LEVELS[ALERT_WARN] and number >= warn_line - ALERT_HYSTERESIS:
+        return ALERT_WARN
+    return ""
+
+
+def highest_severity(severities) -> str:
+    """取一组告警级里的**最高级**（``chip_alert`` 用它：折叠只报最危险的那一段）。
+
+    未识别的串按无色处理（不抛）：级别是绘制层的词表，脏值不该让整条岛炸掉。
+    """
+    top = 0
+    for severity in severities:
+        level = _ALERT_LEVELS.get(severity, 0)
+        if level > top:
+            top = level
+    return _ALERT_BY_LEVEL[top]

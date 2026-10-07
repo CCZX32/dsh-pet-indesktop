@@ -219,16 +219,17 @@ def test_plan_without_info_segments_only_shrinks_the_name():
 
 
 def test_chip_carries_the_alert_flag_when_a_folded_segment_errors():
-    """折叠不埋没告警：被折段里有 error → chip 左侧色点（P2 告警色接上时亮）。"""
+    """折叠不埋没告警：被折段里有 error → chip 左侧色点（告警级已从 bool 升格为
+    ``""|warn|crit``：error 态一律按 crit 算，见 ``island_layout._folded_alert``）。"""
     segments = [_primary(), _metric(CPU, "CPU", "--", "888%", state=isl.STATE_ERROR),
                 _metric(MEM, "内存")]
     plan = _plan(segments, 250)
     assert plan.folded == (MEM,)
-    assert plan.chip_alert is False, "折掉的是内存，CPU 的 error 还在画"
+    assert plan.chip_alert == "", "折掉的是内存，CPU 的 error 还在画"
 
     plan = _plan(segments, 200)
     assert CPU in plan.folded and MEM in plan.folded
-    assert plan.chip_alert is True
+    assert plan.chip_alert == isl.ALERT_CRIT
 
 
 # ------------------------------------------------------------ chip 的落位

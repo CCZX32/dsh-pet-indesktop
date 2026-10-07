@@ -92,6 +92,15 @@ _CHIP_H_PX = 18.0
 _CHIP_RADIUS_PX = 9.0
 _CHIP_PAD_PX = 6.0
 _CHIP_MIN_W_PX = 26
+#: chip 告警点（裁决稿 §三）：被折段含告警时在 chip 左侧点一颗 4px 色点。
+#: **画在 chip 盒已有的内边距里**（文字左右各 6px，共 12px 松弛 ≥ 内侧 3px +
+#: 点 4px + 与文字间距 3px = 10px），所以它一个像素都不改盒宽——色变与宽变
+#: 彻底解耦（宽度白名单键里根本没有 severity）。
+_CHIP_ALERT_DOT_PX = 4.0
+_CHIP_ALERT_INSET_PX = 3.0
+_CHIP_ALERT_GAP_PX = 3.0
+#: 色点占据的文字起点（点 + 间距）：chip 文字从它开始居中，不压到点。
+_CHIP_ALERT_FOOTPRINT_PX = _CHIP_ALERT_INSET_PX + _CHIP_ALERT_DOT_PX + _CHIP_ALERT_GAP_PX
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,13 @@ class _InfoSeg:
     ``elide_px`` 是"超宽时允许右省略到多少 px"：0 = 永不省略（时间/余额/峰谷这类
     定宽主信息、以及所有指标段——指标段本来就靠字段盒截断护栏兜），>0 = 收缩
     保底级可省略到该上限（custom 主信息）。
+
+    ``severity`` 是告警级（``""|warn|crit``，见 ``island_segments.alert_severity``）：
+    它是**呈现面**——只决定数值（与单位盒）的颜色，以及 chip 自己那一颗色点。
+    与 ``unit`` 同一纪律：进内容缓存键（色变 → 位图重建）、**不进宽度白名单键**
+    （色不变宽）。指标段的值由 ``_device_segment`` 从岛上的"上一拍告警级"
+    （``DynamicIsland._update_alert_severity``）透传，chip 段由被折段的最高级透传
+    （见 :func:`chip_segment`）。
     """
 
     kind: str        # "primary" / "metric" / "chip"
@@ -121,6 +137,7 @@ class _InfoSeg:
     state: str       # island_segments 的状态词表
     elide_px: int = 0  # 超宽可右省略到的上限（0 = 永不省略）
     unit: str = ""     # 单位盒的串（"" = 该段没有单位盒）
+    severity: str = ""  # 告警级（""|warn|crit）：只染数值，不改宽
 
 
 @dataclass(frozen=True)
@@ -130,6 +147,10 @@ class _SegPlacement:
     有单位的段占**两个盒子**：``box_x/box_w`` 是数值盒（右对齐），
     ``unit_x/unit_w`` 是单位盒（左对齐、紧贴数值盒 1px）。``unit_w`` 取"各段最宽
     单位"的实测宽，所以同一行里所有单位盒左右缘对齐；无单位的段 ``unit_x=None``。
+
+    ``alert_dot_x`` 只有带告警的 chip 段有值（被折段含 warn/crit）：它是色点
+    左缘的绝对 x。色点占的是 chip 盒**内含**的内边距，所以它不影响 ``box_x`` /
+    ``box_w`` / :attr:`right`——宽度白名单因此对 severity 完全免疫。
     """
 
     seg: _InfoSeg
@@ -142,6 +163,7 @@ class _SegPlacement:
     divider_x: float | None   # 段前竖线的 x；首段与 chip 前为 None
     unit_x: float | None = None   # 单位盒左缘；None = 该段没有单位盒
     unit_w: int = 0               # 单位盒宽（各段最宽单位实测；无单位时 0）
+    alert_dot_x: float | None = None  # chip 告警点左缘；None = 这一行没有告警点
 
     @property
     def right(self) -> float:
@@ -152,9 +174,16 @@ class _SegPlacement:
 
     @property
     def text_x(self) -> float:
-        """文案落笔的 x：字段盒内右对齐；chip 是容器，文字居中。"""
+        """文案落笔的 x：字段盒内右对齐；chip 是容器，文字居中。
+
+        chip 带告警点时，居中的**可用区**从色点右缘之后起算（``text_x`` 因此
+        右移，文字不压点）；chip 盒本身的宽与缘不受影响。
+        """
         if self.seg.kind == KIND_CHIP:
-            return self.box_x + (self.box_w - self.text_w) / 2.0
+            left = self.box_x
+            if self.alert_dot_x is not None:
+                left += _CHIP_ALERT_FOOTPRINT_PX
+            return left + (self.box_x + self.box_w - left - self.text_w) / 2.0
         return self.box_x + self.box_w - self.text_w
 
     @property
@@ -244,7 +273,8 @@ def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
 
     ``start_x`` 是内容行里第一个段的起点（头像/角色名之后），返回值里的 x 全是
     绝对坐标——绘制层只按它落笔。chip 不画竖线（它是段序列的收尾标记，不是新数据
-    段），盒宽自带左右内边距，文字居中。
+    段），盒宽自带左右内边距，文字居中；带告警（``seg.severity``）时色点画在 chip
+    盒内的左内边距里，文字在色点右侧居中——两者都不改盒宽。
     """
     segments = tuple(segments)
     unit_w = _unit_box_width(segments, label_fm)
@@ -252,6 +282,7 @@ def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
     x = float(start_x)
     for index, seg in enumerate(segments):
         metrics = primary_fm if seg.kind == KIND_PRIMARY else value_fm
+        alert_dot_x = None
         if seg.kind == KIND_CHIP:
             # chip 的文字走标签字号层（10px），盒宽自带左右内边距
             metrics = label_fm
@@ -268,12 +299,15 @@ def place_info_segments(segments, *, start_x, primary_fm, value_fm, label_fm):
             divider_x = x + (_SEG_SLOT_PX - _DIVIDER_W_PX) / 2.0
             x += _SEG_SLOT_PX
         box_x = x + label_w + gap
+        if seg.kind == KIND_CHIP and seg.severity in island_segments.ALERT_LEVELS:
+            alert_dot_x = box_x + _CHIP_ALERT_INSET_PX
         unit_x = box_x + box_w + _UNIT_GAP_PX if seg.unit else None
         placements.append(_SegPlacement(
             seg=seg, text=display, text_w=int(metrics.horizontalAdvance(display)),
             label_x=x, label_w=label_w, box_x=box_x, box_w=box_w,
             divider_x=divider_x,
             unit_x=unit_x, unit_w=unit_w if unit_x is not None else 0,
+            alert_dot_x=alert_dot_x,
         ))
         x = placements[-1].right
     return placements
@@ -306,7 +340,7 @@ class ShrinkPlan:
     segments_x: float                # 首段的绝对起点（绘制层照它落笔）
     width: int                       # 该级下的自然宽（未截断）
     elide_primary: bool = False      # 主信息是否按 elide_px 省略（custom 才会开）
-    chip_alert: bool = False         # 被折段里有 error → chip 左侧预留告警点
+    chip_alert: str = ""             # 被折段的最高告警级（""|warn|crit → chip 色点）
 
     @property
     def folded_count(self) -> int:
@@ -318,6 +352,12 @@ def apply_shrink(plan: ShrinkPlan, segments, *, primary_fm) -> tuple[_InfoSeg, .
 
     ``segments`` 是调用方刚刚组合出来的段列表（文案是当前值），计划只负责"折掉
     尾巴几段、主信息省不省"——所以读数每一秒在变也不影响这一行画哪些段。
+
+    chip 的告警级也取**当刻**段列表（不是 ``plan.chip_alert``）：计划按
+    ``_plan_inputs`` 缓存，而那个键刻意不含采样值与 severity（宽度白名单的纪律），
+    于是"读数变、四舍五入后的文本没变、severity 变了"这一拍会命中旧计划——照抄
+    计划里的告警级等于让 chip 色点停在上一拍的账上。段列表是当刻的，取它就没有
+    这个窗口；chip 的 ``+N`` 文案仍按计划的折叠数（结构面）。
     """
     segments = tuple(segments)
     keep = len(segments)
@@ -332,20 +372,26 @@ def apply_shrink(plan: ShrinkPlan, segments, *, primary_fm) -> tuple[_InfoSeg, .
         for index, seg in enumerate(segments[:keep])
     ]
     if plan.folded_count and keep:
-        row.append(chip_segment(plan.folded_count))
+        alert = island_segments.highest_severity(
+            _folded_alert(seg) for seg in segments[keep:])
+        row.append(chip_segment(plan.folded_count, alert))
     return tuple(row)
 
 
-def chip_segment(folded_count: int) -> _InfoSeg:
+def chip_segment(folded_count: int, alert: str = "") -> _InfoSeg:
     """``+N`` chip 段（N = 被折段数）：段序列的收尾标记。
 
     它不是数据段——没有 label、不参与再次折叠、不画竖线、文字居中，只声明
     "还有 N 段在卡片里"。建模成段是为了让落位/测宽走**同一条**排版代码路径
     （见 :func:`place_info_segments`），绘制层不必为它开一套几何。
+
+    ``alert`` 是被折段的**最高告警级**（``""|warn|crit``，见 :func:`plan_info_row`）：
+    它透传进段的 ``severity``，绘制层据此在 chip 左侧点色点、落位层据此给文字
+    让位——折叠不埋没告警。色点画在盒内已有内边距里，**不占额外宽**。
     """
     text = f"+{int(folded_count)}"
     return _InfoSeg(kind=KIND_CHIP, seg_id=_CHIP_ID, label="", text=text,
-                    box_text=text, state=island_segments.STATE_OK)
+                    box_text=text, state=island_segments.STATE_OK, severity=alert)
 
 
 def _elide_primary_segment(seg: _InfoSeg, font_metrics) -> _InfoSeg:
@@ -357,7 +403,19 @@ def _elide_primary_segment(seg: _InfoSeg, font_metrics) -> _InfoSeg:
         return seg
     return _InfoSeg(kind=seg.kind, seg_id=seg.seg_id, label=seg.label, text=text,
                     box_text=text, state=seg.state, elide_px=seg.elide_px,
-                    unit=seg.unit)
+                    unit=seg.unit, severity=seg.severity)
+
+
+def _folded_alert(seg: _InfoSeg) -> str:
+    """一个被折段贡献给 chip 的告警级。
+
+    ``state=error`` 的段一律按 ``crit`` 算：读数拿不到（``--`` + 原因）本身就是
+    要人打开卡片看的故障，折叠不能把它吞掉——这是 D2 ``chip_alert`` 的原始语义，
+    E2 只是把"有没有告警"细化成"最高是哪一级"。
+    """
+    if seg.state == island_segments.STATE_ERROR:
+        return island_segments.ALERT_CRIT
+    return seg.severity
 
 
 def plan_info_row(
@@ -392,8 +450,10 @@ def plan_info_row(
         # 折叠顺序 = 尾部优先（folded[0] 是第一个被牺牲的那一段）
         sacrificed = tuple(reversed(metrics[len(visible):])) if folded_count else ()
         folded = tuple(seg.seg_id for seg in sacrificed)
+        chip_alert = island_segments.highest_severity(
+            _folded_alert(seg) for seg in sacrificed)
         if folded_count:
-            row.append(chip_segment(folded_count))
+            row.append(chip_segment(folded_count, chip_alert))
         name_w = int(name_fm.horizontalAdvance(name)) if name else 0
         x = float(lead_w) + (name_w + _NAME_GAP_PX if name else 0.0)
         placements = place_info_segments(row, start_x=x, primary_fm=primary_fm,
@@ -405,8 +465,7 @@ def plan_info_row(
             segments_x=x, folded=folded,
             width=max(_MIN_CAPSULE_W, int(round(end + trail_w))),
             elide_primary=elide_primary,
-            chip_alert=any(seg.state == island_segments.STATE_ERROR
-                           for seg in sacrificed),
+            chip_alert=chip_alert,
         )
 
     candidates: list[ShrinkPlan] = []
