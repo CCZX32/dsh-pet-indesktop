@@ -3659,14 +3659,28 @@ class AppShell:
         # 气泡是置顶 Tool 窗口（层级高于原生菜单 popup），托盘菜单弹出前
         # 先隐藏气泡，避免气泡盖住菜单
         menu.aboutToShow.connect(lambda: win.hide_speech_bubble())
-        menu.addAction('显示 / 隐藏', toggle_visible)
-        menu.addAction('回到右下角', lambda: win.go_default_corner())
 
-        island_action = menu.addAction('灵动岛')
-        island_action.setCheckable(True)
-        island_action.setChecked(bool(
-            self.config.get("dynamic_island", {}).get("enabled", True)
-        ))
+        def add_tray_toggle(target: QMenu, label: str, checked, apply):
+            """可勾选托盘条目：勾选态照旧即时翻转，副作用延到菜单关闭后。
+
+            ``add_tray_action`` 的回调在菜单关闭后执行，此时 ``isChecked()`` 已是
+            用户点出来的最终值——故 apply 收勾选态，而不是在连接时把它绑死。
+            勾选态的接线保持原样（``setCheckable`` + 初始 ``setChecked`` + 弹出前
+            ``sync_tray_checks`` 同步）；旧接线挂 ``toggled`` 连副作用，弹出前的那次
+            程序化 ``setChecked`` 也会把它触发一遍（开一次菜单就把配置/系统登录项
+            重写一遍），挂 ``triggered`` 没有这个副作用。
+            """
+            action = add_tray_action(target, label, lambda: apply(bool(action.isChecked())))
+            action.setCheckable(True)
+            action.setChecked(bool(checked))
+            return action
+
+        # 本段全部条目都会动窗口面（显示/激活桌宠窗、重建角色窗面、开关岛窗）或
+        # 冒泡/系统登录项：托盘菜单是原生弹出（macOS 上是 NSMenu 跟踪会话），
+        # 会话中做这些会被 AppKit 抑制（首次点击无反应，issue #4 家族），故一律
+        # 走 add_tray_action——菜单先关，回调延到菜单真的不在之后再执行。
+        add_tray_action(menu, '显示 / 隐藏', toggle_visible)
+        add_tray_action(menu, '回到右下角', lambda: win.go_default_corner())
 
         def toggle_island(enabled: bool) -> None:
             island_cfg = dict(self.config.get("dynamic_island", {}) or {})
@@ -3675,12 +3689,12 @@ class AppShell:
             self.config.save()
             self._sync_dynamic_island()
 
-        island_action.toggled.connect(toggle_island)
+        island_action = add_tray_toggle(
+            menu, '灵动岛',
+            bool(self.config.get("dynamic_island", {}).get("enabled", True)),
+            toggle_island)
 
         if self.enable_chat:
-            # 这三个入口都会新建/激活窗口，回调必须延到菜单关闭后执行：托盘菜单是
-            # 原生弹出（macOS 上是 NSMenu 跟踪会话），设置入口在会话中执行会被
-            # AppKit 抑制（首次点击无反应，issue #4 家族）。其余条目按最小面不动。
             add_tray_action(menu, 'AI 对话', self.instance.open_chat)
             add_tray_action(menu, '快速对话（气泡）', self.instance.open_quick_chat)
             add_tray_action(menu, 'AI 设置', self.instance.open_chat_settings)
@@ -3689,26 +3703,25 @@ class AppShell:
         m_char = track_menu(menu.addMenu('切换角色'))
         current = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
         for cid in catalog.list_available_characters():
-            act = m_char.addAction(cid)
+            act = add_tray_action(
+                m_char, cid, lambda cid=cid: self.instance.switch_character(cid))
             act.setCheckable(True)
             act.setChecked(cid == current)
-            act.triggered.connect(lambda checked=False, cid=cid: self.instance.switch_character(cid))
 
-        mouse_through = menu.addAction('鼠标穿透')
-        mouse_through.setCheckable(True)
-        mouse_through.setChecked(bool(self.config.get('mouse_through', False)))
-        mouse_through.toggled.connect(win.set_mouse_through)
+        mouse_through = add_tray_toggle(
+            menu, '鼠标穿透', bool(self.config.get('mouse_through', False)),
+            win.set_mouse_through)
 
         menu.addSeparator()
 
-        auto = menu.addAction('开机自启')
-        auto.setCheckable(True)
-        auto.setChecked(autostart_mod.is_enabled())
-        auto.toggled.connect(lambda enabled: self.instance._set_autostart(enabled, win))
+        auto = add_tray_toggle(
+            menu, '开机自启', autostart_mod.is_enabled(),
+            lambda enabled: self.instance._set_autostart(enabled, win))
 
         def sync_tray_checks() -> None:
             # 设置对话框/右键菜单里改过的开关，弹出托盘菜单前同步复选状态
-            #（托盘菜单在 _build_tray 时一次性构建，不复用则不刷新会过期）
+            #（托盘菜单在 _build_tray 时一次性构建，不复用则不刷新会过期）。
+            # 只改看相、不触发副作用：副作用挂 triggered，程序化 setChecked 不发它。
             mouse_through.setChecked(bool(self.config.get('mouse_through', False)))
             auto.setChecked(autostart_mod.is_enabled())
             island_action.setChecked(bool(

@@ -208,8 +208,10 @@ _CARD_STATUS_TEXT = {
 _CARD_UNAVAILABLE_NOTE = "该指标不可用"
 _CARD_UNKNOWN_REASON = "未注册的段 id"
 #: 段的**来源口径**（k3 §5.3：卡片说清"这个数从哪来"，胶囊一个字都不提）。
+#: 口径一律用人话：网络段的读网卡计数器 / 探 DNS 都是实现细节（设置页那一刀
+#: 的去黑话同约定），用户要知道的只是"本机采出来的"。
 _CARD_SOURCE_SYS = "本机 psutil 采样"
-_CARD_SOURCE_NET = "网卡计数 + DNS RTT"
+_CARD_SOURCE_NET = "本机采样"
 
 
 def _status_error_glyph_path(rect: QRectF) -> QPainterPath:

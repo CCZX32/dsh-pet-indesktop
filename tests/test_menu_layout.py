@@ -1224,8 +1224,13 @@ def test_sound_and_festival_search_jump_to_owning_domains(tmp_path, monkeypatch)
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
     try:
-        # (查询词, 应跳到的域, 命中行是否应可见)：只有「碰撞参数（高级）」里的行
-        # 藏在默认收起的 disclosure 后面（搜索不展开 disclosure），其余行可见。
+        # (查询词, 应跳到的域, 命中行要不要断言可见)：命中后搜索会**先**把命中行
+        # 所在的折叠框 / advanced 组展开、再把页内标签切到它所在的那一页
+        #（``modern_settings_dialog._search_settings``），所以「行藏在默认收起的
+        # 后面」已不是命中行不可见的理由；真正还不可见的只有被前置开关挡住的行，
+        # 那类行搜索状态栏会写明「需先开启「X」」。第三列的 False（碰撞音量）是
+        # 第一刀之前的留痕：当时它在默认收起的「碰撞参数（高级）」后面、搜索也不
+        # 展开，故没给它可见断言；现在它随页内标签一起可见，这一条只是不再断言。
         cases = (
             ("点击音效", "互动", True),
             ("音效音源", "互动", True),

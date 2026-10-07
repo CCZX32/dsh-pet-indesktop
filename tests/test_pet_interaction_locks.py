@@ -3,6 +3,8 @@
 窗口不透明度，以及托盘菜单复选状态与设置同步。"""
 from __future__ import annotations
 
+import time
+
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QFocusEvent, QKeyEvent, QMouseEvent, QPixmap
@@ -20,6 +22,20 @@ NAMES = [
     catalog.DRAG,
     "写代码",
 ]
+
+
+def _wait_for_dispatch(predicate, timeout: float = 3.0) -> bool:
+    """轮询等托盘条目的延后回调执行（``add_tray_action`` 的语义是「晚一个事件
+    循环且要等菜单真关」，同步断言必须改成轮询；预算与
+    ``test_tray_settings_deferred_dispatch._wait_until`` 同口径）。"""
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 def test_slingshot_geometry_stays_inside_window_for_all_pull_directions():
@@ -398,17 +414,23 @@ def test_tray_menu_syncs_mouse_through_from_config(tmp_path):
     menu = tray.contextMenu()
     action = next(a for a in menu.actions() if a.text() == "鼠标穿透")
     assert action.isChecked() is False
-    # 设置对话框里改了鼠标穿透 → config 变化 → 托盘菜单弹出前同步
+    # 设置对话框里改了鼠标穿透 → config 变化 → 托盘菜单弹出前同步勾选态
+    #（同步只改看相：副作用挂 triggered，程序化 setChecked 不再误触发它）
     config.set("mouse_through", True)
     menu.aboutToShow.emit()
     assert action.isChecked() is True
-    # 反向：托盘里点掉 → config 落盘
-    action.setChecked(False)
-    assert config.get("mouse_through") is False
-    # “回到右下角”应路由到该窗的 go_default_corner
+    assert config.get("mouse_through") is True, "弹出前同步不得反过来写配置"
+    # 反向：托盘里点掉 → config 落盘。托盘条目是「菜单关闭后派发」
+    #（原生菜单跟踪会话里改窗面/冒泡会被 AppKit 抑制），故点击后要轮询等它执行。
+    action.trigger()
+    assert action.isChecked() is False, "勾选态即时翻转"
+    assert _wait_for_dispatch(lambda: config.get("mouse_through") is False), \
+        "菜单关闭后必须把鼠标穿透落盘"
+    # “回到右下角”应路由到该窗的 go_default_corner（同样菜单关闭后派发）
     home = next(a for a in menu.actions() if a.text() == "回到右下角")
     home.trigger()
-    assert win.corner_calls == 1
+    assert _wait_for_dispatch(lambda: win.corner_calls == 1), \
+        "菜单关闭后必须路由到该窗的 go_default_corner"
     tray.hide()
     app.processEvents()
 

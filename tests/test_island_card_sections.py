@@ -177,7 +177,7 @@ def test_card_metric_row_carries_the_merged_value_and_full_context(tmp_path, mon
 
 
 def test_card_shows_network_row_with_its_own_source(tmp_path, monkeypatch):
-    """网络段行：值是 5 列槽串（跨模块契约），来源口径是网卡计数器 + DNS 探测。"""
+    """网络段行：值是 5 列槽串（跨模块契约），来源行与 CPU/内存同结构且无实现黑话。"""
     cfg = _config(tmp_path)
     cfg.set("island_metrics", [NETWORK])
     island = _island(cfg, monkeypatch)
@@ -188,8 +188,11 @@ def test_card_shows_network_row_with_its_own_source(tmp_path, monkeypatch):
         row = _rows(island)[NETWORK]
         assert row.value == net_monitor.format_network_slot(2048.0, 512.0, 23.0)
         assert row.unit_full == "速率 KB/s · 延迟 ms"
-        assert row.source == "网卡计数 + DNS RTT"
+        assert row.source == "本机采样"
         assert row.updated == "2 秒前"
+        assert row.detail == "速率 KB/s · 延迟 ms · 本机采样 · 2 秒前"
+        assert "网卡" not in row.detail and "DNS" not in row.detail, \
+            "来源行说人话：读网卡计数器 / 探 DNS 都是实现细节，不进用户视线"
         assert row.name == "网络", "胶囊里网络是纯 glyph，卡片得有名字"
     finally:
         island.close()
