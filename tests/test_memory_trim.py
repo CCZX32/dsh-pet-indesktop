@@ -543,6 +543,152 @@ def test_own_child_pids_is_empty_when_snapshot_fails():
     assert api.own_child_pids(1) == frozenset(), "快照失败只失去 extra 保护，不得抛"
 
 
+# --------------------------------------------------- 句柄按指针语义判定（m6 回归）
+class _SigFunction:
+    """可声明 ``argtypes`` / ``restype`` 的假 Win32 函数（真 ctypes 函数支持这两项）。
+
+    只有把函数做成**实例属性**（而非绑定方法）才能设这两个属性——绑定方法会抛
+    AttributeError，而 ``_configure_signatures`` 遇到它就会放弃剩余声明，于是
+    "签名没补齐"这件事在旧替身上根本测不出来。
+    """
+
+    def __init__(self, impl) -> None:
+        self._impl = impl
+        self.argtypes = None
+        self.restype = None
+        self.calls: list[tuple] = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        return self._impl(*args)
+
+
+class _SigLibrary:
+    def __init__(self, **functions) -> None:
+        for name, impl in functions.items():
+            setattr(self, name, _SigFunction(impl))
+
+    def fn(self, name: str) -> _SigFunction:
+        return getattr(self, name)
+
+
+def _signature_tracking_api(snapshot_raw=0x3000):
+    """三库全套替身（每个函数都能记录签名声明），快照返回值可注入。"""
+    kernel32 = _SigLibrary(
+        OpenProcess=lambda access, inherit, pid: 0x1234,
+        CloseHandle=lambda handle: 1,
+        QueryFullProcessImageNameW=lambda handle, flags, buffer, size: 0,
+        CreateToolhelp32Snapshot=lambda flags, pid: snapshot_raw,
+        Process32FirstW=lambda handle, entry: 0,
+        Process32NextW=lambda handle, entry: 0,
+    )
+    psapi = _SigLibrary(
+        EnumProcesses=lambda buffer, size, needed: 0,
+        GetProcessMemoryInfo=lambda handle, counters, size: 0,
+        EmptyWorkingSet=lambda handle: 0,
+    )
+    user32 = _SigLibrary(
+        GetForegroundWindow=lambda: 0,
+        GetWindowThreadProcessId=lambda hwnd, out: 0,
+    )
+    api = memory_trim.Win32ProcessApi(
+        kernel32=kernel32, psapi=psapi, user32=user32,
+    )
+    return api, kernel32, psapi, user32
+
+
+def test_snapshot_functions_declare_pointer_sized_signatures():
+    """进程树快照三件套必须显式声明签名（否则句柄按 32 位 c_long 截断）。
+
+    ``CreateToolhelp32Snapshot`` 返回句柄/``INVALID_HANDLE_VALUE``，默认 restype
+    （``c_int``）会把 64 位值截断：高位句柄丢失、``-1`` 可能读成正数，于是
+    "快照失败"被当成有效句柄——快照句柄泄漏 + 后续 Process32* 拿着垃圾句柄。
+    """
+    _api, kernel32, _psapi, _user32 = _signature_tracking_api()
+
+    snapshot = kernel32.fn("CreateToolhelp32Snapshot")
+    assert snapshot.restype is ctypes.c_void_p, "句柄必须按指针接收（同 OpenProcess）"
+    assert snapshot.argtypes == [ctypes.c_uint32, ctypes.c_uint32]
+    assert ctypes.sizeof(snapshot.restype) == ctypes.sizeof(ctypes.c_void_p) > 4
+
+    for name in ("Process32FirstW", "Process32NextW"):
+        spec = kernel32.fn(name)
+        assert spec.restype is ctypes.c_int, "BOOL 返回值"
+        assert spec.argtypes == [
+            ctypes.c_void_p, ctypes.POINTER(memory_trim._ProcessEntry32W),
+        ], "快照句柄 + LPPROCESSENTRY32W 必须显式声明"
+
+
+@pytest.mark.parametrize(
+    "raw", [-1, memory_trim._INVALID_HANDLE, 0xFFFFFFFF, None, 0],
+)
+def test_invalid_snapshot_returns_empty_without_closing_anything(raw):
+    """``INVALID_HANDLE_VALUE`` 的判定不许赌"当前机器恰好返回 -1"。
+
+    符号位随平台/转换路径变化（``c_int`` 截断给 -1、指针语义给 0xFFFF...FFFF），
+    两种表示都必须判为失效：返回空集合，且**绝不**对失效句柄 CloseHandle。
+    """
+    api, kernel32, _psapi, _user32 = _signature_tracking_api(snapshot_raw=raw)
+
+    assert api.own_child_pids(1) == frozenset()
+    assert kernel32.fn("CloseHandle").calls == [], "失效句柄不得进 CloseHandle"
+    assert kernel32.fn("Process32FirstW").calls == [], "失效句柄不得进 Process32FirstW"
+
+
+def test_high_bit_snapshot_handle_is_still_valid():
+    """反过来也要成立：合法的高位句柄不得被"一律当失效"误杀。"""
+    high_bit = 0x7FF0000000001000
+    api, kernel32, _psapi, _user32 = _signature_tracking_api(snapshot_raw=high_bit)
+    first, next_ = _snapshot_walker([(1, 0), (2, 1)])
+    kernel32.Process32FirstW._impl = first
+    kernel32.Process32NextW._impl = next_
+
+    assert api.own_child_pids(1) == frozenset({2})
+    assert kernel32.fn("CloseHandle").calls == [(high_bit,)], "合法句柄必须收尾"
+
+
+def _snapshot_walker(entries):
+    """``First``/``Next`` 共用一个游标（真 Win32 的进程枚举就是一个游标）。
+
+    两个独立游标是错的替身：First 会把整张表走完、Next 立刻返回 0，等于把
+    "快照里只有第一个进程"喂给被测代码。
+    """
+    state = {"index": 0}
+
+    def _fill(entry):
+        if state["index"] >= len(entries):
+            return 0
+        pid, parent = entries[state["index"]]
+        state["index"] += 1
+        target = entry._obj
+        target.dwSize = ctypes.sizeof(memory_trim._ProcessEntry32W)
+        target.th32ProcessID = pid
+        target.th32ParentProcessID = parent
+        return 1
+
+    def first(handle, entry):
+        state["index"] = 0
+        return _fill(entry)
+
+    def next_(handle, entry):
+        return _fill(entry)
+
+    return first, next_
+
+
+def test_invalid_handle_judgment_covers_both_representations():
+    """判定函数本身：NULL / -1 / 无符号全 1 / 32 位全 1 失效，合法高位句柄有效。"""
+    invalid = memory_trim._invalid_handle
+
+    assert invalid(0) is True
+    assert invalid(None) is True
+    assert invalid(-1) is True
+    assert invalid(memory_trim._INVALID_HANDLE) is True
+    assert invalid(0xFFFFFFFF) is True, "32 位全 1（截断形态）同样是失效句柄"
+    assert invalid(0x7FF0000000001000) is False
+    assert invalid(0x1234) is False
+
+
 def test_process_memory_counters_layout_matches_win32_header():
     """cb 会交给 API 校验，结构大小错一位就是垃圾数据/调用失败。"""
     assert ctypes.sizeof(memory_trim._ProcessMemoryCounters) == (

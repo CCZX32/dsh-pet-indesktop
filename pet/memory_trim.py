@@ -58,6 +58,24 @@ TRIM_ACCESS = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA
 
 TH32CS_SNAPPROCESS = 0x00000002
 _INVALID_HANDLE = ctypes.c_void_p(-1).value
+_INVALID_HANDLE_MASK = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+_INVALID_HANDLE_VALUES = frozenset({
+    _INVALID_HANDLE,  # 指针宽度全 1：64 位下 0xFFFF…FFFF
+    0xFFFFFFFF,  # 32 位机器上的真身，也是 64 位下按 c_int/dword 截断后的样子
+})
+
+
+def _invalid_handle(handle) -> bool:
+    """句柄失效判定：NULL 与 ``INVALID_HANDLE_VALUE`` 都算，按**指针语义**比较。
+
+    ctypes 把 NULL 给成 ``None``、把非空指针给成 ``int``，而那个 int 的取值取决于
+    转换路径（``restype=c_int`` 截断出 -1/0xFFFFFFFF，指针语义给出 0xFFFF…FFFF）
+    ——所以先按指针宽度取模，再比全部已知的失效表示，不赌"当前机器恰好返回哪一个"。
+    """
+    if not handle:
+        return True
+    return (int(handle) & _INVALID_HANDLE_MASK) in _INVALID_HANDLE_VALUES
+
 
 SYSTEM_CRITICAL_NAMES = frozenset({
     # 内核态伪进程：没有真实工作集，OpenProcess 无意义或直接失败
@@ -284,6 +302,19 @@ class Win32ProcessApi:
                 ctypes.POINTER(ctypes.c_uint32),
             ]
             k32.QueryFullProcessImageNameW.restype = ctypes.c_int
+            # 进程树快照三件套：句柄一律走 c_void_p（同 OpenProcess/CloseHandle），
+            # 默认 restype=c_int 会把 64 位句柄截断、并让 INVALID_HANDLE_VALUE 的
+            # 判定依赖"当前机器恰好返回 -1"——那正是快照句柄泄漏/误判的来源。
+            k32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+            k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            k32.Process32FirstW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32W),
+            ]
+            k32.Process32FirstW.restype = ctypes.c_int
+            k32.Process32NextW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_ProcessEntry32W),
+            ]
+            k32.Process32NextW.restype = ctypes.c_int
             psapi.EnumProcesses.argtypes = [
                 ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
                 ctypes.POINTER(ctypes.c_uint32),
@@ -319,7 +350,9 @@ class Win32ProcessApi:
         return self._kernel32.OpenProcess(TRIM_ACCESS, 0, int(pid)) or 0
 
     def close_handle(self, handle) -> None:
-        if handle:
+        # 失效句柄不进 CloseHandle：CloseHandle(INVALID_HANDLE_VALUE) 是未定义行为
+        # （调试器下会抛异常），NULL 也必须静默跳过。
+        if not _invalid_handle(handle):
             self._kernel32.CloseHandle(handle)
 
     def image_name(self, handle) -> str:
@@ -360,7 +393,7 @@ class Win32ProcessApi:
         多清理几个进程，也不让整轮回收因为一次快照失败而中断。
         """
         handle = self._kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if not handle or handle == _INVALID_HANDLE:
+        if _invalid_handle(handle):
             return frozenset()
         try:
             parents: dict[int, int] = {}
