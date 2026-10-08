@@ -3087,7 +3087,14 @@ class AgentLinkManager(QObject):
             # 与 busy→idle 同一条完成确认（800ms + 冷却 + _fire_done），
             # 零新增定时器。success 只存在于这条原始状态流（_last_raw），
             # 不进 VALID_STATES——那是所有监视器共用的归一入口。
-            self._schedule_done_check(agent_key)
+            # 例外：本 busy 周期出现过硬失败（execution/failed）——失败提醒已经
+            # 收口，紧跟的这条 turn/end 不得再排定完成确认。桥接判定失败后先写
+            # execution/failed，随后仍无条件转发 turn/end，收敛器把一切 turn/end
+            # 收敛为 success；不拦就是失败回合弹「已完成本轮任务」+ done 音效
+            # （误报成功），且那 800ms 还会占掉完成冷却、吃掉下一回合的真实完成
+            # 提醒。标记在下一个 busy 入口清除，下一回合照常恢复。
+            if agent_key not in self._saw_error:
+                self._schedule_done_check(agent_key)
 
         # 去抖：同一 Agent 连续相同状态只生效第一次
         last = self._last_applied.get(agent_key)
@@ -4409,7 +4416,22 @@ class AgentLinkManager(QObject):
           - tool_failed：工具调用最终失败
         模型访问失败抑制只认真正的模型访问失败（errorCode 属限流类码或消息含限流关键字），
         重试耗尽失败不并入模型访问失败抑制——那是另一条语义（failure.retry），不重复提醒。
+
+        本方法同时是本回合硬失败的**打标点**（GUI 侧、按 agent；execution/failed
+        到 AgentLinkManager 只有这一条既有分发链路）：桥接在 turn/end 判定
+        reason.kind === "error" 后先写 execution/failed，随后仍无条件转发同一条
+        turn/end，收敛器把一切 turn/end 收敛为 success——不打标就是失败回合照样
+        排定完成确认、800ms 后弹「已完成本轮任务」并播 done 音效（误报成功）。
+        两个标记与 error 周期（``_on_agent_state`` 的 busy→error 分支）同款：
+        ``_saw_error`` 掐掉 done 音效、``_saw_alert`` 把收尾文案切离「已完成」
+        口径——失败回合的完成确认不止 success 边沿一条（桥接的 AgentStatus 聚合
+        基线与 session/event 是两条通道，idle 可能先于 execution/failed 落地，
+        busy→idle 会先排定确认；那条路径没有 success 边沿可拦，只能靠文案标记）。
+        打标放在最前，先于可见性/模型访问抑制的早退：失败是本回合的客观事实，
+        与提醒是否呈现无关（隐藏期改道灵动岛、抑制期都不能因此误报成功）。
         """
+        self._saw_error.add(agent_key)
+        self._saw_alert.add(agent_key)
         if not hasattr(self.win, "isVisible") or not self.win.isVisible():
             return
         payload = payload if isinstance(payload, dict) else {}

@@ -3924,6 +3924,10 @@ class TestDshTurnEndSuccessCompletion:
     ``success`` 只走 ``_last_raw`` 这条**原始状态流**（所有消费方按
     ``in _BUSY_STATES`` 判定，无等值白名单）；**不得**加进 ``VALID_STATES``
     ——那是所有监视器共用的归一入口，加值会改 Claude/Cursor 的判决口径。
+
+    本类同时钉住这条完成契约的**反向**：硬失败回合不得误报成功——桥接判定失败
+    后先写 ``execution/failed``、随后仍无条件转发 ``turn/end``，收敛器一律收敛
+    ``success``，不拦就是「失败提醒 + 800ms 后弹已完成本轮任务 + done 音效」。
     """
 
     _SOUND_PATHS = {
@@ -4152,6 +4156,150 @@ class TestDshTurnEndSuccessCompletion:
         finally:
             mgr.shutdown()
         assert sounds.count("done.wav") == 1, sounds
+
+    # ------------------------------------------------------------------
+    # 硬失败回合（execution/failed）不得误报成功
+    # ------------------------------------------------------------------
+    #
+    # 桥接在 turn/end 判定 reason.kind === "error" 后**先**写 execution/failed，
+    # **随后**仍无条件把同一条 turn/end 作为状态事件转发（STATE_EVENT_TYPES）；
+    # 收敛器把一切 turn/end 收敛为 success。execution/failed 的 pet 侧处理只弹
+    # 失败提醒、不注入原始状态流，于是 success 边沿看到的 prev_raw 仍是 busy——
+    # 失败回合照样排定完成确认，800ms 后弹「已完成本轮任务」并播 done 音效。
+    #
+    # 契约：execution/failed 的 GUI 落点（AgentLinkManager._on_execution_failed，
+    # 按 agent 打标）给该 Agent 打 _saw_error（掐 done 音效 / success 边沿的完成
+    # 确认）+ _saw_alert（收尾文案切离「已完成」口径）；两个标记在下一次 busy
+    # 入口一起清除，下一回合照常恢复。
+
+    @staticmethod
+    def _failed_turn_records(session: str = "s-1") -> list[dict]:
+        """失败回合的五条真实记录（与桥接写盘顺序一致）。"""
+        return [
+            {"event": "turn/start", "sessionId": session},
+            {"event": "tool/call", "sessionId": session, "tool": "bash", "callId": "call-1"},
+            {"event": "tool/result", "sessionId": session, "tool": "bash",
+             "callId": "call-1", "ok": False, "errorCode": "E_BASH",
+             "errorMessage": "exit status 1"},
+            {"event": "execution/failed", "sessionId": session,
+             "failureType": "tool_failed", "errorCode": "E_BASH",
+             "errorMessage": "exit status 1"},
+            {"event": "turn/end", "sessionId": session},
+        ]
+
+    def test_failed_turn_reports_failure_without_done(self, tmp_path, monkeypatch):
+        """⑦ 失败序列：只出失败提醒，不排定完成确认（无成功气泡、无 done 音效）。"""
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()                     # 在线基线 → idle
+            self._write(mon.events_dir, *self._failed_turn_records())
+            mon._poll()
+            assert any("工具执行失败" in b or "本轮运行失败" in b for b in bubbles), bubbles
+            assert "dsh" in mgr._saw_error, "execution/failed 必须在 manager 侧按 agent 打标"
+            assert mon._converger.current_state is DshState.SUCCESS, \
+                "turn/end 仍收敛 success（收敛器语义不动，抑制发生在呈现侧）"
+            assert "dsh" not in mgr._done_pending, "硬失败回合不得排定完成确认"
+            bubbles.clear()
+            sounds.clear()
+            self._pump(app, 1.2)                    # 超过 800ms 确认窗：不得有完成气泡/音效
+            assert bubbles == [], bubbles
+            assert sounds == [], sounds
+        finally:
+            mgr.shutdown()
+
+    def test_next_turn_after_failed_turn_plays_done_again(self, tmp_path, monkeypatch):
+        """⑧ 失败回合之后的下一个正常回合：清标后恢复完成气泡 + done 音效。"""
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._failed_turn_records())
+            mon._poll()
+            assert "dsh" not in mgr._done_pending
+            bubbles.clear()
+            sounds.clear()
+            self._write(mon.events_dir,
+                        {"event": "turn/start", "sessionId": "s-1"},
+                        {"event": "tool/call", "sessionId": "s-1", "tool": "bash"},
+                        {"event": "turn/end", "sessionId": "s-1"})
+            mon._poll()
+            assert "dsh" not in mgr._saw_error, "下一回合进入 busy 必须清掉上一轮的硬失败标记"
+            assert "dsh" in mgr._done_pending, "正常回合必须重新排定完成确认"
+            assert self._wait_until(app, lambda: any("已完成本轮任务" in b for b in bubbles)), bubbles
+        finally:
+            mgr.shutdown()
+        assert sounds.count("done.wav") == 1, sounds
+
+    def test_busy_reentry_after_failed_turn_clears_marker(self, tmp_path, monkeypatch):
+        """⑨ execution/failed 之后又出现新的 busy（重试后成功）→ 既有清标语义。
+
+        依据 ``_on_agent_state`` 的 busy 入口（pet/agent_link.py:3070-3072）：
+        进入 working/thinking 时，只要前一个原始状态不是 error 就 discard
+        ``_saw_error``——标记只跨「error→working」存活，其余 busy 入口一律算新
+        一轮。所以硬失败标记被「失败后再次干活」清掉，该回合的 turn/end 恢复排定
+        完成确认（⑧ 已钉住清标后能播出去，本条只钉清标触发点）。
+
+        注：实测桥接只在 turn/end 判定后写 execution/failed（与 turn/end 同一批
+        紧邻写盘），真实序列里两者之间不会插入 busy；这里用 AgentStatus 基线
+        （``{"event": "AgentStatus", "state": ...}``，桥接 aggregateWrite 的真实
+        形状）合成「失败后回 idle 再干活」这一段，钉住的是标记生命周期本身。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._failed_turn_records()[:-1])   # 不含 turn/end
+            mon._poll()
+            assert "dsh" in mgr._saw_error, "硬失败标记已打"
+            self._write(mon.events_dir,
+                        {"event": "AgentStatus", "state": "idle"},
+                        {"event": "AgentStatus", "state": "working"},
+                        {"event": "turn/end", "sessionId": "s-1"})
+            mon._poll()
+            assert "dsh" not in mgr._saw_error, "非 error 的 busy 入口必须清标（3072 既有语义）"
+            assert "dsh" in mgr._done_pending, "清标后本回合的成功收尾恢复排定"
+        finally:
+            mgr.shutdown()
+
+    def test_failed_turn_with_idle_before_execution_failed_never_claims_success(
+            self, tmp_path, monkeypatch):
+        """⑩ 失败回合的第二条完成路径：AgentStatus idle 先于 execution/failed 落地。
+
+        桥接的 AgentStatus 聚合基线（agent 对象状态监听）与 session/event 流
+        （turn/end、execution/failed）是两条独立通道，idle 可能先到。此时
+        ``busy→idle`` 已经排定了完成确认（既有契约），随后 execution/failed 打标，
+        turn/end 到达时 prev_raw 已不是 busy——success 边沿根本不排定，收尾走的
+        就是这条已排定的确认。它没有 success 边沿可拦，只能靠标记把 done 音效
+        （``_fire_done`` 的 ``_saw_error`` 闸）与收尾文案（``_saw_alert`` 决定
+        说「已完成本轮任务」还是「停了，看一眼」）一并改掉。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._failed_turn_records()[:3],
+                        {"event": "AgentStatus", "state": "idle"})     # 聚合基线先到
+            mon._poll()
+            assert "dsh" in mgr._done_pending, "busy→idle 仍按既有契约排定完成确认"
+            self._write(mon.events_dir, *self._failed_turn_records()[3:])   # failed + turn/end
+            mon._poll()
+            assert mgr._last_raw.get("dsh") == "success"
+            bubbles.clear()
+            sounds.clear()
+            assert self._wait_until(app, lambda: "dsh" not in mgr._done_pending), \
+                "busy→idle 排定的确认必须真的到期（否则下面的负向断言是空转）"
+            self._pump(app, 0.3)                    # 确认窗余量
+        finally:
+            mgr.shutdown()
+        assert bubbles, "确认到期必须走到收尾出口（非成功口径）"
+        assert sounds.count("done.wav") == 0, sounds
+        assert not any("已完成本轮任务" in b or "执行完成" in b or "已顺利完成" in b
+                       for b in bubbles), bubbles
 
 
 # ============================================================================
