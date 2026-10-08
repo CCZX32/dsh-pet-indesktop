@@ -1718,4 +1718,3 @@ def test_resample_after_disable_enable_is_processed(qapp, monkeypatch):
     finally:
         ctrl.shutdown()
 
-
