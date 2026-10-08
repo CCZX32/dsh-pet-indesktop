@@ -395,24 +395,19 @@ def test_single_dominant_prefix_is_not_split():
         _close_all(root)
 
 
-# ---------------------------------------------------------------- 两条路径 parity
-def test_legacy_and_modern_layouts_group_identically():
-    """legacy 扁平布局与 modern 注册表共用同一分组建造器：家族结构逐项一致。"""
+# ---------------------------------------------------------------- 分组结构（单一布局）
+def test_modern_layout_groups_the_random_action_list():
+    """现代注册表树里，长清单被前缀分族（不丢项、不留空家族）。"""
     acts_names = _synthetic_group_acts()
-    legacy_pet = _FakePet(acts=acts_names, context_menu_template="legacy")
-    modern_pet = _FakePet(acts=acts_names, context_menu_template="modern")
-    legacy = _build_menu(legacy_pet)
-    modern = _build_menu(modern_pet)
+    pet = _FakePet(acts=acts_names)
+    menu = _build_menu(pet)
     try:
-        legacy_acts = _find(legacy, "动画 · 随机动作").menu()
-        modern_acts = _find(
-            _find(modern, "播放动画").menu(), "随机动作").menu()
-        legacy_families = _family_members(legacy_acts)
-        modern_families = _family_members(modern_acts)
-        assert legacy_families == modern_families
-        assert "" not in legacy_families and len(legacy_families) > 1
+        acts = _find(_find(menu, "播放动画").menu(), "随机动作").menu()
+        families = _family_members(acts)
+        assert "" not in families and len(families) > 1
+        assert sum(len(members) for members in families.values()) == len(acts_names)
     finally:
-        _close_all(legacy, modern)
+        _close_all(menu)
 
 
 # ---------------------------------------------------------------- 清单来源

@@ -346,6 +346,64 @@ def test_pet_tree_has_zero_retired_layer_imports():
     )
 
 
+# 旧版右键菜单退役层（2026-10-08 全量退役，见
+# docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md）。
+# 守卫分三层，同多进程层先例：
+#   ① 退役文件必须**不存在**（删除刀不许被静默回退）；
+#   ② 整个 pet/ 树不得再 import 退役模块；
+#   ③ 退役符号（旧版建造器 / 旧模板装载 / 模板切换 / 模板键）不得在任何一行
+#      重新出现——包括函数体、字符串与注释：这些符号一旦回潮，就意味着
+#      "配置里那个键又有人读了"或"又有一棵菜单树按它分流"，正是本次删掉的东西。
+RETIRED_LEGACY_MENU_PATHS = (
+    "context_menus/legacy.py",
+    "context_menus/menu_styles/legacy.py",
+    "menu_templates/legacy.json",
+    "menu_templates/modern.json",
+)
+RETIRED_LEGACY_MENU_MODULES = (
+    "context_menus.legacy",
+    "menu_styles.legacy",
+)
+RETIRED_LEGACY_MENU_SYMBOLS = (
+    "build_legacy_menu",
+    "apply_legacy_menu_style",
+    "load_menu_template",
+    "normalize_template_id",
+    "add_template_switch",
+)
+
+
+def test_retired_legacy_menu_files_are_gone():
+    """退役的旧版菜单文件必须不存在（防"删了又被合回来"）。"""
+    present = [rel for rel in RETIRED_LEGACY_MENU_PATHS
+               if (PET_DIR / rel).exists()]
+    assert not present, (
+        "旧版右键菜单退役层文件回潮（已全量删除）：\n" + "\n".join(present)
+    )
+
+
+def test_pet_tree_has_zero_retired_legacy_menu_references():
+    """整个 pet/ 树零退役菜单符号：谁再把旧版建造器/模板装载/模板键写回来，
+    这里就红——比"文件不存在"更严，挡住"换个文件名复活"与"注释里留老路"。"""
+    offenders = []
+    for path in sorted(PET_DIR.rglob("*.py")):
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            for retired in RETIRED_LEGACY_MENU_SYMBOLS:
+                if re.search(rf"\b{retired}\b", line):
+                    offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue
+            for retired in RETIRED_LEGACY_MENU_MODULES:
+                if re.search(rf"\b{re.escape(retired)}\b", stripped):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "pet/ 内仍有旧版右键菜单退役层引用（架构倒退）：\n"
+        + "\n".join(offenders)
+    )
+
+
 def _overlay_new_path_modules() -> tuple[str, ...]:
     """新路径模块清单：overlay_* / sprite_* / pet_sprite / tick_* / island_bridge。
 

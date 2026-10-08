@@ -579,26 +579,25 @@ def test_default_duration_setting_moves_the_menu_marker(qapp, tmp_path):
     assert "30 分钟（默认）" not in labels
 
 
-@pytest.mark.parametrize("template", ["legacy", "modern"])
-def test_both_window_menu_paths_expose_quiet_entry(qapp, tmp_path, template):
-    """窗口侧 legacy 与 modern 两条菜单路径都要有免打扰入口。
+def test_window_menu_path_exposes_quiet_entry(qapp, tmp_path):
+    """窗口侧菜单要有免打扰入口。
 
     overlay（facade）路径由 ``test_sprite_menu_parity.py`` 锁死——facade 直接复用
     context_menus 的同一套建造器，两条路径共用这一处菜单结构。
+    旧版扁平布局退役后只剩这一条窗口侧路径（2026-10-08）。
     """
     from PySide6.QtWidgets import QMenu
 
     from pet.context_menu import populate_context_menu
     from tests.pet_window_fakes import make_pet_window
 
-    window = make_pet_window(tmp_path, runtime_id=f"slot-{template}")
-    window.cfg.set("context_menu_template", template)
+    window = make_pet_window(tmp_path, runtime_id="slot-quiet")
     menu = QMenu()
     populate_context_menu(menu, window)
 
     titles = [action.text() for action in menu.actions()]
     titles += [a.menu().title() for a in menu.actions() if a.menu() is not None]
-    assert any(title.startswith("免打扰") for title in titles), f"{template} 菜单缺少免打扰入口"
+    assert any(title.startswith("免打扰") for title in titles), "菜单缺少免打扰入口"
     window.close()
     qapp.processEvents()
 
@@ -625,20 +624,19 @@ def test_overlay_facade_host_can_build_quiet_menu(qapp, tmp_path):
     ]
 
 
-def test_legacy_menu_entry_is_a_submenu_with_durations(qapp, tmp_path):
+def test_menu_entry_is_a_submenu_with_durations(qapp, tmp_path):
     from PySide6.QtWidgets import QMenu
 
     from pet.context_menu import populate_context_menu
     from tests.pet_window_fakes import make_pet_window
 
-    window = make_pet_window(tmp_path, runtime_id="slot-legacy-sub")
-    window.cfg.set("context_menu_template", "legacy")
+    window = make_pet_window(tmp_path, runtime_id="slot-quiet-sub")
     menu = QMenu()
     populate_context_menu(menu, window)
 
     submenus = [a.menu() for a in menu.actions() if a.menu() is not None]
     quiet = [s for s in submenus if s.title().startswith("免打扰")]
-    assert quiet, "legacy 菜单缺少免打扰子菜单"
+    assert quiet, "菜单缺少免打扰子菜单"
     assert [a.text() for a in quiet[0].actions() if a.text()][:4] == [
         "15 分钟", "30 分钟（默认）", "1 小时", "2 小时",
     ]

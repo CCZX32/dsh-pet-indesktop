@@ -92,18 +92,18 @@ def system_ui_font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) 
 
 
 def inherit_menu_style(parent: QMenu, submenu: QMenu) -> None:
-    style_id = str(parent.property("menuStyle") or "legacy")
-    if style_id == "modern":
-        from .modern import apply_modern_menu_style
+    """把父菜单的现代外观原样套到子菜单上。
 
-        apply_modern_menu_style(submenu, {
-            "theme": parent.property("modernTheme") or "system",
-            "density": parent.property("modernDensity") or "standard",
-            "corner_radius": parent.property("modernCornerRadius") or 12,
-            **dict(parent.property("modernAppearance") or {}),
-        })
-    else:
-        from .legacy import apply_legacy_menu_style
+    旧版样式（``menuStyle == "legacy"``）随旧版菜单退役后不复存在：本函数
+    永远落现代分支，``menuStyle`` 缺失/为空时也按现代处理——否则任何
+    "父菜单还没打上 modern 属性"的子菜单都会静默掉样式（树里一处没套上，
+    那棵子树就露原生外观）。
+    """
+    from .modern import apply_modern_menu_style
 
-        apply_legacy_menu_style(submenu)
-        submenu.setFont(parent.font())
+    apply_modern_menu_style(submenu, {
+        "theme": parent.property("modernTheme") or "system",
+        "density": parent.property("modernDensity") or "standard",
+        "corner_radius": parent.property("modernCornerRadius") or 12,
+        **dict(parent.property("modernAppearance") or {}),
+    })

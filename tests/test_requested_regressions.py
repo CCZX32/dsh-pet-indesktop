@@ -992,10 +992,10 @@ def test_build_scripts_bundle_menu_templates_and_chat_styles():
         assert "menu_templates" in text, f"{name} 必须打包 pet/menu_templates"
         assert "legacy_styles.qss" in text, f"{name} 必须打包 legacy_styles.qss"
         assert "modern_styles.qss" in text, f"{name} 必须打包 modern_styles.qss"
-    # 兜底：模板 JSON 缺失时 load_menu_template 必须回退内置模板而非抛异常
-    import pet.context_menu as context_menu_mod
-    assert context_menu_mod.load_menu_template("modern")["id"] == "modern"
-    assert context_menu_mod.load_menu_template("legacy")["id"] == "legacy"
+    # 兜底：默认菜单布局 JSON 必须能按资源方式读出来（右键菜单的唯一布局来源；
+    # 旧版菜单退役后 pet/menu_templates 下只剩它）
+    from pet.menu_layout import load_default_menu_layout
+    assert load_default_menu_layout()["layout_id"] == "modern-default-v1"
 
 
 def test_store_fun_asset_keeps_bundled_paths_relative(tmp_path):
@@ -1115,13 +1115,13 @@ def test_modern_settings_save_writes_autostart_wanted(tmp_path, monkeypatch):
     app.processEvents()
 
 
-def test_legacy_menu_autostart_persists_wanted_flag(tmp_path, monkeypatch):
-    """旧版菜单的「开机自启」必须记录 autostart_wanted（启动自检提醒依赖它）。
+def test_menu_autostart_persists_wanted_flag(tmp_path, monkeypatch):
+    """右键菜单的「开机自启」必须记录 autostart_wanted（启动自检提醒依赖它）。
 
-    新版注册表（registry 的 autostart 项）、设置页与托盘都写这个键，旧版建造器
-    调用共享建造器时漏传 pet——勾旧版菜单的自启只写系统登录项、不写配置，
-    ``pet/app.py`` 的自检（``autostart_wanted`` 为真但系统项被安全软件清掉 →
-    提醒用户重新启用）因此永远看不到用户勾过。
+    注册表（registry 的 autostart 项）、设置页与托盘都写这个键；共享建造器被
+    直调时漏传 pet 就会只写系统登录项、不写配置——``pet/app.py`` 的自检
+    （``autostart_wanted`` 为真但系统项被安全软件清掉 → 提醒用户重新启用）
+    因此永远看不到用户勾过。
 
     真 QMenu + 真 Config + 真 PetWindow 建菜单，只把系统登录项边界（autostart
     模块）打桩；断言配置落盘，而不只是内存里的 Config 对象。
@@ -1141,14 +1141,15 @@ def test_legacy_menu_autostart_persists_wanted_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(shared_mod.autostart_mod, "set_enabled",
                         lambda enabled: applied.append(bool(enabled)) or True)
     config = Config(base=tmp_path)
-    config.set("context_menu_template", "legacy")
     config.save()
     assert config.get("autostart_wanted") is False
     win = lc.PetWindow(lc.FakeLibrary(), config)
     menu = QMenu()
     try:
         populate_context_menu(menu, win)
-        action = next(a for a in menu.actions() if a.text() == "开机自启")
+        action = next(a for action in menu.actions()
+                      if action.menu() is not None
+                      for a in action.menu().actions() if a.text() == "开机自启")
         action.setChecked(True)
         assert applied == [True], "系统登录项照常写入"
         assert config.get("autostart_wanted") is True

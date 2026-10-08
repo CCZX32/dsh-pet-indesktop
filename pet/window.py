@@ -86,7 +86,7 @@ from . import window_alerts
 from .animation_thumbnail import decode_representative_frame
 from .speech_bubble import PetSpeechBubble, list_self_talk_images
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
-from .context_menu import normalize_template_id, populate_context_menu as _populate_context_menu
+from .context_menu import populate_context_menu as _populate_context_menu
 from .context_menus.shared import release_menu_tree, take_deferred_menu_callbacks
 from . import physics as physics_mod
 from .click_sound import (
@@ -3888,12 +3888,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._schedule_self_talk()
         # Phase 1：主动识屏/Agent 联动按配置懒装配或同步。
         self.sync_optional_services()
-
-    def set_context_menu_template(self, template_id: str) -> None:
-        """Persist the selected right-click menu template for the next open."""
-        template_id = normalize_template_id(template_id)
-        self.cfg.set('context_menu_template', template_id)
-        self.cfg.save()
 
     def set_chat_status(self, state: str, text: str = '') -> None:
         if not text:

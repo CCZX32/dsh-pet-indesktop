@@ -1,21 +1,17 @@
 # -*- coding: utf-8 -*-
-"""SpriteMenuFacade：context_menus 建造器的 pet 形适配面（模板感知版）。
+"""SpriteMenuFacade：context_menus 建造器的 pet 形适配面。
 
-context_menus 的两套建造器都以 PetWindow 的方法面为输入：
-``legacy.build_legacy_menu``（扁平旧版布局）与 ``modern.build_modern_menu``
-（Menu Action Model：注册表 + 用户编排 + 图标/分组）。本类把这套面映射到
-OverlayShell + 被点 sprite + 行为控制器，使**两套建造器原样复用**——菜单结构
-只写一次（在 context_menus 里），新旧路径语义逐点一致，overlay 不再自带一份
-会漂移的硬编码布局（模板感知前的缺陷：无论设置里选什么模板都出 legacy 扁平
-布局，且 legacy 清单大半条目缺失）。
+``context_menus.modern.build_modern_menu``（Menu Action Model：注册表 + 用户
+编排 + 图标/分组）以 PetWindow 的方法面为输入；本类把这套面映射到 OverlayShell
++ 被点 sprite + 行为控制器，使**同一个建造器原样复用**——菜单结构只写一次
+（在 context_menus 里），窗口路径与 overlay 路径语义逐点一致，overlay 不再自带
+一份会漂移的硬编码布局。旧版扁平布局及它的模板分发已于 2026-10-08 全量退役
+（见 docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md）。
 
-模板分发与 ``pet/context_menu.py::populate_context_menu`` **同一判定**：
-``Config.context_menu_template`` → ``normalize_template_id`` →
-``load_menu_template`` → legacy 走扁平布局、modern 走注册表；样式安装（响应式
-样式 / 停留交互 / modern 外观与勾选指示）也逐条对齐，避免"设置里显示新版、
-右键出来是旧版"。
+样式安装与 ``pet/context_menu.py::populate_context_menu`` 逐条对齐（现代外观 /
+勾选指示 / 响应式样式 / 停留交互），两条路径出的菜单因此长得一样。
 
-路由表（legacy 窗侧面 → overlay 落点，逐项等价说明见各方法 docstring）：
+路由表（窗口侧方法面 → overlay 落点，逐项等价说明见各方法 docstring）：
 
     cfg/scale/change_scale/playback_speed/set_playback_speed  → 被点 sprite + 各自那份 config
     on_open_chat / on_open_chat_settings                      → PetInstance.open_chat*
@@ -27,7 +23,6 @@ OverlayShell + 被点 sprite + 行为控制器，使**两套建造器原样复�
     trigger_golden_spin / look_at_screen / rename_character   → 壳的 sprite 等价实现（作用被点 sprite）
     install_music_lyric / _music_lyric                        → 壳的音乐（歌词）宿主
     set_edge_probe_enabled                                    → config（探头世界每 tick 热读）
-    set_context_menu_template / reopen_context_menu           → config + 菜单原位重开
 
 4.2c D13：菜单作用对象 = 右键命中的那一只（``sprite`` 参数）。设置入口按它
 自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」直接接
@@ -48,8 +43,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QInputDialog, QMenu
 
 from . import catalog
-from .context_menu import load_menu_template, normalize_template_id
-from .context_menus import build_legacy_menu, build_modern_menu
+from .context_menus import build_modern_menu
 from .context_menus.menu_styles import (
     apply_modern_menu_style,
     install_modern_check_indicators,
@@ -300,16 +294,6 @@ class SpriteMenuFacade:
         if not self._chat_enabled():
             return None
         return _first_callable(self._hosts(), ("open_chat_settings",))
-
-    @property
-    def on_open_legacy_settings(self):
-        """legacy 布局的旧设置槽：``PetInstance._wire_window`` 恒注入 ``None``。
-
-        逐点对齐（否则 overlay 会凭空多出/少掉一个设置入口）；槽位为空时
-        ``build_legacy_menu`` 回退到 ``on_open_modern_settings``，legacy 模板的
-        「桌宠设置」因此仍落在下面那条逐 sprite 的开设置入口上。
-        """
-        return None
 
     @property
     def on_open_modern_settings(self):
@@ -669,15 +653,10 @@ class SpriteMenuFacade:
         installer = getattr(host, "install_music_lyric", None)
         return installer() if callable(installer) else None
 
-    # ---------------------------------------------------------------- 菜单模板
-    def set_context_menu_template(self, template_id: str) -> None:
-        """写配置即生效（口径同 window.py ``set_context_menu_template``）。"""
-        self.cfg.set("context_menu_template", normalize_template_id(template_id))
-        self._save()
-
+    # ---------------------------------------------------------------- 菜单原位重开
     def reopen_context_menu(self, menu) -> None:
-        """切换模板后按原位立即重开（window.py ``reopen_context_menu`` 的
-        overlay 等价物：壳层关旧菜单 + 延迟重开，菜单里选新版马上看到新版）。"""
+        """按原位立即重开右键菜单（window.py ``reopen_context_menu`` 的 overlay
+        等价物：壳层关旧菜单 + 延迟重开）。"""
         window = getattr(self._shell, "overlay", None)
         reopen = getattr(window, "reopen_context_menu", None)
         if callable(reopen) and menu is not None:
@@ -722,63 +701,31 @@ def _move_before_quit(menu: QMenu, action) -> None:
             return
 
 
-def _move_after_label(menu: QMenu, label: str, action) -> bool:
-    """把新增项插到指定条目之后；锚点在当前模板里不存在时返回 False。"""
-    actions = menu.actions()
-    for index, candidate in enumerate(actions):
-        if candidate is action:
-            continue
-        if candidate.text() == label:
-            menu.removeAction(action)
-            following = actions[index + 1] if index + 1 < len(actions) else None
-            if following is not None and following is not action:
-                menu.insertAction(following, action)
-            else:
-                menu.addAction(action)
-            return True
-    return False
-
-
 def build_sprite_full_menu(shell, sprite=None) -> QMenu:
-    """overlay 全量右键菜单：按 ``context_menu_template`` 走 legacy/modern 建造器。
+    """overlay 全量右键菜单：现代建造器（注册表 + 用户编排）原样复用。
 
     ``sprite`` = 被点中的那一条（4.2c D13 由 ``ShellOverlayWindow.contextMenuEvent``
     透传）；动作面里作用于"某一只"的入口（桌宠设置 / 退出这只）按它路由。
 
-    条件显示与 legacy 窗侧逐点一致（聊天门 / win32+聊天门 / 音乐服务门），
+    条件显示与窗口侧逐点一致（聊天门 / win32+聊天门 / 音乐服务门），
     ``tests/test_sprite_menu_parity.py`` 用真实 PetWindow 的同条件菜单树锁死。
+    「隐藏桌宠」不再由本函数补位：它随注册表的 ``hide_pet`` 落在「桌宠控制」
+    子菜单里，与窗口侧同一棵树（补位会变成同名重项）。
     """
     facade = SpriteMenuFacade(shell, sprite)
     cfg = facade.cfg
-    template_id = normalize_template_id(cfg.get("context_menu_template", "modern"))
-    template = load_menu_template(template_id)
     menu = QMenu()
-    if template_id == "legacy":
-        build_legacy_menu(menu, facade, template)
-        install_responsive_menu_style(menu)
-        install_stay_open_interaction(menu)
-        # 旧布局缺的这个入口由这里补（legacy.py 自身没有；删掉就是实机可见的
-        # 功能回退——用户当前菜单里这项本来就在）：隐藏桌宠的 overlay 语义
-        # （set_pet_visible）没有别的菜单入口。
-        # 「桌宠设置」不在这里补：legacy 建造器已在旧版设置槽位为空时回退到
-        # on_open_modern_settings（见 pet/context_menus/legacy.py），再补一条
-        # 就是旧版菜单里两个同名入口。
-        hide_action = _add_action(
-            menu, "隐藏桌宠", None, facade.hide, close_on_trigger=True)
-        if not _move_after_label(menu, "退出子肥鱼", hide_action):
-            _move_before_quit(menu, hide_action)
-    else:
-        apply_modern_menu_style(
-            menu, cfg.get("context_menu_appearance", {}) or {})
-        build_modern_menu(menu, facade, template)
-        install_modern_check_indicators(menu)
-        install_responsive_menu_style(menu)
-        install_stay_open_interaction(menu)
+    apply_modern_menu_style(
+        menu, cfg.get("context_menu_appearance", {}) or {})
+    build_modern_menu(menu, facade)
+    install_modern_check_indicators(menu)
+    install_responsive_menu_style(menu)
+    install_stay_open_interaction(menu)
     if not facade.music_service_available:
-        # 音乐服务不存在 → 整组隐藏（legacy 建造器无条件注入该组，故在此收口）
+        # 音乐服务宿主不可达 → 整组隐藏（注册表不按宿主能力过滤，在这里收口）
         _drop_music_group(menu)
-    # 「退出这只」只在多宠时出现（legacy parity：单窗不注入该入口，只有 app.quit
-    # 语义的「退出」）——没有子肥鱼时它等价于「退出」，不重复列出
+    # 「退出这只」只在多宠时出现（窗口侧单窗不注入该入口，只有 app.quit 语义的
+    # 「退出」）——没有子肥鱼时它等价于「退出」，不重复列出
     if getattr(shell, "_spawned", None):
         exit_action = _add_action(menu, "退出这只", None, facade.on_exit_pet,
                                   close_on_trigger=True)

@@ -509,45 +509,42 @@ def test_modern_default_layout_places_weather_beside_the_other_tools():
 
 
 # ---------------------------------------------------------------- 两条 facade
-def test_real_petwindow_legacy_menu_contains_weather_entries(tmp_path):
-    """legacy 扁平布局（真 PetWindow + 真建造器）里两个入口都在。"""
+def test_real_petwindow_menu_contains_weather_entries(tmp_path):
+    """真 PetWindow + 真建造器：两个天气入口都在现代树里。"""
     import tests.test_sprite_menu_parity as parity
     from pet.config import Config
-    from pet.context_menu import load_menu_template
-    from pet.context_menus import build_legacy_menu
 
     config = Config(base=tmp_path)
     win = parity._reference_window(config)
     try:
         menu = QMenu()
-        build_legacy_menu(menu, win, load_menu_template("legacy"))
+        parity.build_modern_menu(menu, win)
         labels = _labels(menu)
         assert "查看天气" in labels and "天气城市" in labels
     finally:
         win.close()
 
 
-def test_real_petwindow_legacy_menu_greys_weather_when_switched_off(tmp_path):
-    """真窗口 + 真 legacy 建造器：总开关关掉后两个天气入口都置灰、不可点。
+def test_real_petwindow_menu_greys_weather_when_switched_off(tmp_path):
+    """真窗口 + 真建造器：总开关关掉后两个天气入口都置灰、不可点。
 
-    修复前：置灰门只在新版注册表里，legacy 直调共享建造器 → 关闭态下用户仍能
-    从旧版菜单进入城市搜索、把城市写进配置（与实际停用状态自相矛盾）。
+    置灰门必须落在**共享建造器**里而不是只在新版注册表：否则任何直调共享
+    建造器的入口都会在关闭态下仍能进入城市搜索、把城市写进配置（与实际停用
+    状态自相矛盾）。
     """
     import tests.test_sprite_menu_parity as parity
     from pet.config import Config
-    from pet.context_menu import load_menu_template
-    from pet.context_menus import build_legacy_menu
 
     config = Config(base=tmp_path)
     config.set("weather_enabled", False)
     win = parity._reference_window(config)
     try:
         menu = QMenu()
-        build_legacy_menu(menu, win, load_menu_template("legacy"))
+        parity.build_modern_menu(menu, win)
         show = _find(menu, "查看天气")
         cities = _find(menu, "天气城市")
-        assert show.isEnabled() is False, "旧版菜单的「查看天气」必须置灰"
-        assert cities.isEnabled() is False, "旧版菜单的「天气城市」必须置灰（添加城市不可达）"
+        assert show.isEnabled() is False, "「查看天气」必须置灰"
+        assert cities.isEnabled() is False, "「天气城市」必须置灰（添加城市不可达）"
         assert show.toolTip() == M.WEATHER_DISABLED_REASON
     finally:
         win.close()

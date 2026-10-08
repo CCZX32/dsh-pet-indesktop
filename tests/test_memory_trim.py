@@ -863,23 +863,22 @@ def test_modern_menu_offers_memory_trim_on_windows_only(app, monkeypatch):
     app.processEvents()
 
 
-def test_legacy_menu_offers_memory_trim_on_windows_only(app, monkeypatch):
-    from pet.context_menu import load_menu_template
-    from pet.context_menus import build_legacy_menu
+def test_shared_builder_offers_memory_trim_on_windows_only(app, monkeypatch):
+    """平台门在**共享建造器**里（供任何直调它的入口复用），不只是注册表判定。"""
+    from pet.context_menus.shared import add_memory_trim
 
-    template = load_menu_template("legacy")
     pet = _Pet()
     monkeypatch.setattr(shared_mod.autostart_mod, "is_enabled", lambda: False)
 
     monkeypatch.setattr(sys, "platform", "win32")
     menu = QMenu()
-    build_legacy_menu(menu, pet, template)
+    add_memory_trim(menu, pet)
     windows_labels = [action.text() for action in menu.actions()]
     menu.close()
 
     monkeypatch.setattr(sys, "platform", "darwin")
     other_menu = QMenu()
-    build_legacy_menu(other_menu, pet, template)
+    add_memory_trim(other_menu, pet)
     other_labels = [action.text() for action in other_menu.actions()]
     other_menu.close()
 

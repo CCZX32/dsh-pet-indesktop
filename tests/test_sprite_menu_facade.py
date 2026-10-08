@@ -114,19 +114,17 @@ def _recursive_labels(container) -> set:
 
 
 def test_full_menu_builds_with_capability_items(tmp_path):
-    """两种模板下窗口能力条目都在（结构由 context_menus 建造器决定）。"""
+    """窗口能力条目都在（结构由 context_menus 建造器决定）。"""
     shell, _ = _make_shell(tmp_path)
     try:
-        for template in ("legacy", "modern"):
-            shell._config.set("context_menu_template", template)
-            menu = build_sprite_full_menu(shell)
-            labels = _recursive_labels(menu)
-            # 「鼠标穿透」已随上游 ea17bfa 从右键全菜单移除（入口收敛到
-            # 设置页/托盘菜单/命中右键小菜单 sprite_menu.py:58），不再断言。
-            for expected in ("回到右下角", "窗口置顶", "不移动",
-                             "开机自启", "隐藏桌宠", "桌宠设置", "退出"):
-                assert expected in labels, f"{template} 菜单缺项: {expected}"
-            assert menu._facade is not None  # F5 保活
+        menu = build_sprite_full_menu(shell)
+        labels = _recursive_labels(menu)
+        # 「鼠标穿透」已随上游 ea17bfa 从右键全菜单移除（入口收敛到
+        # 设置页/托盘菜单/命中右键小菜单 sprite_menu.py:58），不再断言。
+        for expected in ("回到右下角", "窗口置顶", "不移动",
+                         "开机自启", "隐藏桌宠", "桌宠设置", "退出"):
+            assert expected in labels, f"菜单缺项: {expected}"
+        assert menu._facade is not None  # F5 保活
     finally:
         shell._delete_runtime_marker()
 

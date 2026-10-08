@@ -586,7 +586,7 @@ def add_proactive_menu(menu: QMenu, pet) -> None:
     _toggle('dry-run 验证模式', pro_cfg.get('dry_run', False),
             lambda on: pet.set_proactive_option('dry_run', on))
     sub.addSeparator()
-    open_settings = getattr(pet, 'on_open_modern_settings', None) or getattr(pet, 'on_open_legacy_settings', None)
+    open_settings = getattr(pet, 'on_open_modern_settings', None)
     if open_settings is not None:
         add_action(sub, '打开设置…', None, open_settings, close_on_trigger=True)
 
@@ -1350,16 +1350,6 @@ def open_deepseek_web() -> bool:
 
 def add_deepseek_web(menu: QMenu, *, icons: bool = True):
     return add_action(menu, "打开网页版 DeepSeek", "web" if icons else None, open_deepseek_web, close_on_trigger=True)
-
-
-def add_template_switch(menu: QMenu, pet, label: str, target: str, *, icons: bool = True):
-    def switch_and_reopen() -> None:
-        pet.set_context_menu_template(target)
-        reopen = getattr(pet, "reopen_context_menu", None)
-        if callable(reopen):
-            reopen(menu)
-
-    return add_action(menu, label, "template" if icons else None, switch_and_reopen)
 
 
 def add_quit(menu: QMenu, pet, *, icons: bool = True):

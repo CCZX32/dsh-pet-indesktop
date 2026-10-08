@@ -81,12 +81,10 @@ class _TargetInstance(parity._StubInstance):
         return lib
 
 
-def _make_shell(tmp_path, *, template="legacy", chat=True, values=None,
-                app_shell=None):
+def _make_shell(tmp_path, *, chat=True, values=None, app_shell=None):
     config = Config(base=tmp_path)
     for key, value in (values or {}).items():
         config.set(key, value)
-    config.set("context_menu_template", template)
     instance = _TargetInstance(config, chat=chat, app_shell=app_shell)
     screen = cap.FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040))
     shell = OverlayShell(
@@ -252,7 +250,6 @@ def test_golden_spin_targets_clicked_sprite(tmp_path):
     shell, _instance, _config = _make_shell(tmp_path)
     try:
         child = _spawn_child(shell)
-        shell._config.set("context_menu_template", "modern")
         menu = build_sprite_full_menu(shell, child)
 
         _require(menu, "黄金回旋").trigger()
@@ -330,7 +327,7 @@ def test_hide_main_keeps_whole_window_semantics(tmp_path):
 # ---------------------------------------------------------------- G 看看屏幕
 def test_look_screen_remembers_clicked_sprite(tmp_path, monkeypatch):
     """「看看屏幕」记住发起者；答复气泡落**发起者自己**那只（B7b 起子宠有气泡）。"""
-    shell, _instance, _config = _make_shell(tmp_path, template="modern")
+    shell, _instance, _config = _make_shell(tmp_path)
     started: list = []
 
     class _Thread:
@@ -378,8 +375,7 @@ def test_balance_and_update_get_shell_as_parent(tmp_path, monkeypatch):
         raise RuntimeError("offline")
 
     monkeypatch.setattr(app_mod.updater, "latest_release", _release)
-    shell, instance, _config = _make_shell(
-        tmp_path, template="modern", app_shell=mini)
+    shell, instance, _config = _make_shell(tmp_path, app_shell=mini)
     mini.instance = instance
     bubbles: list = []
     monkeypatch.setattr(

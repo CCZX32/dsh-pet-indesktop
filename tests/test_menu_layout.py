@@ -1887,7 +1887,7 @@ def test_menu_preview_and_runtime_qmenu_share_the_same_layout_structure():
     app = QApplication.instance() or QApplication([])
     editor = MenuLayoutEditor(layout, available_actions=MENU_ACTIONS.ids)
     runtime_menu = QMenu()
-    build_modern_menu(runtime_menu, FakePet(), {})
+    build_modern_menu(runtime_menu, FakePet())
     resolved = resolve_menu_layout(
         layout,
         registered_actions=MENU_ACTIONS.ids,
