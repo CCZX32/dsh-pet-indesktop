@@ -16,13 +16,16 @@ test_architecture.py``）没有余量，而本功能的主体是一段页内跳�
 - **跳转条只做「页内直达到区」**：不做新导航层、不改侧栏 10 域契约、不动任何行键。
   点一下把目标区顶到视口上沿（``setValue``），不用 ``ensureWidgetVisible``——后者
   只保证「看得见」，长卡片会把目标压在屏幕下沿，等于没跳。
+- **页尾留白是「顶对齐」这条口径的必要条件**：滚动范围的尽头是「内容底边贴视口
+  底边」，页尾那一组最多滚到 ``视口高 - 该组高``，够不到 y=8。展开时序再对也没用
+  ——范围本身就不够（``_PastEndPadding``）。
 - **组描述是「这里是什么」的一句人话**：文案全部集中在本模块的 ``SECTION_GUIDE``，
   控件只负责呈现；高级组收起时描述照常可见（否则要先展开才知道里面是什么）。
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import (
     QLabel,
     QLayout,
@@ -256,10 +259,11 @@ class _FlowLayout(QLayout):
 class _SettingsAnchorBar(QWidget):
     """页头标题下方那一排 chip：一个可见分区一格，点一下顶对齐滚过去。"""
 
-    def __init__(self, heading_host: QWidget, scroll: QScrollArea):
+    def __init__(self, heading_host: QWidget, scroll: QScrollArea, padding: _PastEndPadding):
         super().__init__(heading_host)
         self.setObjectName("settingsPageAnchors")
         self._scroll = scroll
+        self._padding = padding
         self._layout = _FlowLayout(self)
         self._chips: list[QPushButton] = []
         self._blocks: list[tuple[str, QWidget]] = []
@@ -306,31 +310,51 @@ class _SettingsAnchorBar(QWidget):
         """顶对齐滚到该区；目标是高级组 / 折叠框时先展开（口径同搜索跳转）。"""
         self._reveal(block)
         content = self._scroll.widget()
+        self._settle(block, content)
+        # 从上次重算到现在，内容可能变过（展开、依赖开关放出一整组行…）：留白不够
+        # 就会被旧 maximum 截住，先按当前内容补足。
+        self._padding.sync()
+        self._settle(block, content)
         y = block.mapTo(content, QPoint(0, 0)).y() - 8
         self._scroll.verticalScrollBar().setValue(max(0, y))
 
-    def _reveal(self, block: QWidget) -> None:
-        if isinstance(block, CollapsibleGroup):
-            if block.is_expanded():
-                return
-            block.set_expanded(True)
-        elif isinstance(block, SettingsSection) and block.advanced:
-            if block.toggle.isChecked():
-                return
-            block.toggle.setChecked(True)
-        else:
-            return
-        # 展开把下面所有块都推下去了：先把布局算一遍再取 y，否则量到的是旧位置。
-        content = self._scroll.widget()
-        layout = content.layout()
-        if layout is not None:
-            layout.activate()
-        # 只 activate 布局还不够：它按内容**旧的**高度重排，量出来的 y 落在半更新的
-        # 布局上（实测页尾目标少算 74px，滚过去仍差那么多）；滚动范围也要等内容真的
-        # resize 才更新，否则 setValue 会被旧 maximum 截住。adjustSize() 让内容按新
-        # sizeHint 真 resize，布局与滚动范围一次到位——同步、不需要定时器，
-        # 也就没有「延后一拍时目标已被销毁」的悬空问题。
+    def _settle(self, block: QWidget, content: QWidget) -> None:
+        """把布局推平到「量坐标即最终坐标」。
+
+        两步都要：
+
+        - ``adjustSize()``：让滚动内容按 sizeHint 真 resize。只 ``activate()`` 布局不够
+          ——它按内容**旧的**高度重排，量出来的 y 落在半更新的位置上（实测展开收起组时
+          少算 74px；页面刚被展示出来时「模型与连接」少算 100px，720×500 下一次点击
+          落不到 y=8）。同步、不需要定时器，也就没有「延后一拍时目标已被销毁」的悬空。
+        - 从块往上逐层 ``activate()``：``adjustSize()`` 只保证**滚动内容**这一层的尺寸
+          落定，下面每一层（页内标签的 stack 页、页里的块）要等事件循环才重排，此时量
+          y 会落在半更新的布局上：实测 1600×1000 的标签页多算 252px，一次点击直接越过
+          目标滚到空白处（目标视口 y 从 8 变成 -244）。
+        """
         content.adjustSize()
+        self._activate_layouts(block, content)
+
+    def _reveal(self, block: QWidget) -> None:
+        """目标是收起的高级组 / 折叠框就先展开，否则滚过去是一片空白。"""
+        if isinstance(block, CollapsibleGroup):
+            if not block.is_expanded():
+                block.set_expanded(True)
+        elif isinstance(block, SettingsSection) and block.advanced:
+            if not block.toggle.isChecked():
+                block.toggle.setChecked(True)
+
+    @staticmethod
+    def _activate_layouts(block: QWidget, content: QWidget) -> None:
+        """从 ``block`` 往上到 ``content``（含）逐层重排，量坐标前先把布局推平。"""
+        node = block.parentWidget()
+        while node is not None:
+            layout = node.layout()
+            if layout is not None:
+                layout.activate()
+            if node is content:
+                return
+            node = node.parentWidget()
 
     # ---------------------------------------------------------------- 跟手
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
@@ -339,11 +363,123 @@ class _SettingsAnchorBar(QWidget):
         return super().eventFilter(watched, event)
 
 
+# ------------------------------------------------------------------- 页尾留白
+#: 页尾留白的高度上限（屏数）。实际上限由公式自动保证（``<= 视口高 - 8 - 尾组高``），
+#: 这个常量只是「离谱值不许出现」的兜底。
+PAST_END_MAX_SCREENS = 1.0
+
+
+class _PastEndPadding(QObject):
+    """在滚动内容末尾挂一块留白，让**页尾那一组**也能被顶到视口 y=8。
+
+    **为什么需要**：不用这块留白时，滚动范围的尽头是「内容底边贴视口底边」，于是页尾
+    那一组的顶部最多只能滚到 ``视口高 - 该组高``——900×700 实测「碰撞参数（高级）」
+    只能到 y=255、「余额与服务状态」只能到 y=191，目标是 8。这不是展开时序问题：
+    ``_SettingsAnchorBar`` 的 ``_settle()`` 已经能让布局与滚动范围落定，是**范围本身
+    小于目标**（``desired=1189`` > ``maximum=942``）。
+
+    **高度按「刚好够最后一组顶对齐」算**，不拍固定值：
+
+        P = 目标上限 - 布局最小高
+
+    其中「目标上限」= ``尾组顶 y - 8 + 视口高``（滚动范围要够到这个值），「布局最小高」
+    是留白归零后 ``root.minimumSizeHint()``。**基准取最小高而不是渲染高**，是因为
+    ``QScrollArea`` 把内容高定成 ``max(视口高, 布局最小高, 按视口宽渲染的高)``：
+    只有「最小高」会随留白 1:1 增长，拿渲染高当基准会自欺——页内标签域的内容高会被
+    「按视口宽渲染的高」永久钉在一个比真实布局大的值上（切标签/缩窗口都不会回退），
+    用渲染高算出来的留白加到布局里根本抬不动滚动范围（实测 1200×900 下补 440px，
+    内容高纹丝不动）。
+
+    - 只补差额，不凭空造空白；``P <= 视口高 - 8 - 尾组高``，天然不超过一屏。
+    - **留白是页内容布局的下外边距，不是一块占位控件**：控件会额外吃掉一段布局间距
+      （``QVBoxLayout`` 的 ``spacing``），于是留白为 0 的页面也会凭空长高一段——那只
+      会把「刚好装得下」的页面挤出一个滚动条。外边距只改布局自己的尺寸，不留痕迹。
+    - **内容本来就装得下时补 0**：那种页面根本不滚动，每一组都已经看得见，再挂留白
+      只会凭空变出滚动条（短页面的显隐不受本功能影响）。
+    - 视口尺寸变了要重算：事件过滤器盯 viewport 的 Resize / Show。
+    - 页内标签各是一份页内容（``SettingsTabContainer`` 的 stack），每份各挂一块，
+      换标签时一并重算（``currentKeyChanged``）。
+    - **手滚到页尾会多出一块空白，这是有意代价**（编辑器式 scroll-past-end）：
+      「任何一组都能一次点击顶对齐」与「滚到底正好是内容底边」不可兼得。
+    """
+
+    def __init__(self, scroll: QScrollArea):
+        super().__init__(scroll)
+        content = scroll.widget()
+        tabs = tab_container(content)
+        roots = (
+            [tabs.stack.widget(i) for i in range(tabs.stack.count())]
+            if tabs is not None else [content]
+        )
+        self._scroll = scroll
+        self._roots = [root for root in roots if root is not None and root.layout() is not None]
+        self._syncing = False
+        if not self._roots:
+            return
+        if tabs is not None:
+            tabs.currentKeyChanged.connect(self.sync)
+        scroll.viewport().installEventFilter(self)
+        self.sync()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            self.sync()
+        return super().eventFilter(watched, event)
+
+    def sync(self, *_args) -> None:
+        """按当前视口尺寸重算每块留白（重入保护：改留白会让滚动条出现/消失）。"""
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            viewport = self._scroll.viewport().size()
+            for root in self._roots:
+                self._apply(root, self._height_for(root, viewport))
+        finally:
+            self._syncing = False
+        for root in self._roots:
+            root.updateGeometry()
+
+    @staticmethod
+    def _apply(root: QWidget, height: int) -> None:
+        layout = root.layout()
+        margins = layout.contentsMargins()
+        if margins.bottom() != height:
+            layout.setContentsMargins(margins.left(), margins.top(), margins.right(), height)
+
+    @staticmethod
+    def _height_for(root: QWidget, viewport: QSize) -> int:
+        """这块留白该多高；页面本来就装得下就给 0（见类说明）。"""
+        layout = root.layout()
+        _PastEndPadding._apply(root, 0)
+        layout.activate()
+        minimum_height = root.minimumSizeHint().height()
+        # 「本来就装得下」= 两个口径都不超过视口：布局最小高（不换行也算得下的高度）与
+        # 按视口宽渲染出来的高（``heightForWidth``，换行标签的实际高度）。这里**不能**
+        # 用「当前有没有滚动条」来放行：刚构造时布局未落定、或被留白自己顶出一个滚动条，
+        # 都会让判据自证成立，短页面从此长出一屏空白还退不回去（实测把 1600×900 的
+        # 「常规」页挤出滚动条，页面标题与内容不再居中对齐）。
+        rendered_height = root.heightForWidth(viewport.width())
+        if viewport.height() <= 0 or max(minimum_height, rendered_height) <= viewport.height():
+            return 0
+        blocks = [child for child in _layout_children(root)
+                  if isinstance(child, (SettingsSection, CollapsibleGroup))]
+        if not blocks:
+            return 0
+        last_top = blocks[-1].mapTo(root, QPoint(0, 0)).y() - 8
+        # 留白加在末尾、不改任何块的位置，所以「尾组顶 y」不受留白影响：一次算准，
+        # 不需要迭代收敛。基准取最小高（随留白 1:1 增长的那个），见类说明。
+        return max(0, min(last_top - minimum_height + viewport.height(),
+                           int(viewport.height() * PAST_END_MAX_SCREENS)))
+
+
 def install(dialog) -> None:
-    """给每个设置域页装跳转条、给每个分区注入描述（域装配末尾调一次）。
+    """给每个设置域页装跳转条、注入组描述、挂页尾留白（域装配末尾调一次）。
+
+    页尾留白不依赖跳转条：内容够长的页面都该能滚到底，短页面按公式补 0、不受影响。
 
     没有 ``settingsScroll`` 的页（如「更新」的命令面板）自然跳过：那不是设置表单，
-    没有「区」可直达，也没有分区要写描述。
+    没有「区」可直达，没有分区要写描述，也没有页尾要留白。
     """
     for index in range(dialog.pages.count()):
         page = dialog.pages.widget(index)
@@ -351,7 +487,8 @@ def install(dialog) -> None:
         if scroll is None:
             continue
         apply_descriptions(scroll.widget())
+        padding = _PastEndPadding(scroll)
         heading_host = getattr(page, "heading_host", None)
         if heading_host is None:
             continue
-        _SettingsAnchorBar(heading_host, scroll)
+        _SettingsAnchorBar(heading_host, scroll, padding)

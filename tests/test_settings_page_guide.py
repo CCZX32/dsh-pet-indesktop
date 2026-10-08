@@ -508,6 +508,92 @@ def test_clicking_a_chip_top_aligns_a_collapsed_group_in_one_click(tmp_path, mon
         dialog.close()
 
 
+def _past_end_padding(dialog, domain: str, tab_key: str | None = None) -> int:
+    """域页（页内标签域则是标签页）滚动内容末尾那块留白的高度（布局下外边距）。"""
+    return _content(dialog, domain, tab_key).layout().contentsMargins().bottom()
+
+
+def test_the_last_group_of_a_page_can_be_top_aligned_in_one_click(tmp_path, monkeypatch):
+    """页尾那一组也要一次点击顶到 y=8（普通组与收起的高级组各一条）。
+
+    回归（终审问题 1）：滚动范围的尽头是「内容底边贴视口底边」，页尾那一组最多滚到
+    ``视口高 - 该组高``——900×700 实测「碰撞参数（高级）」只能到 y=255（desired 1189 >
+    maximum 942）、「余额与服务状态」只能到 y=191。展开时序没问题，是范围不够；
+    内容末尾那块留白就是补这个差额的。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.show()
+        for size in ((720, 500), (900, 700)):
+            dialog.resize(*size)
+            app.processEvents()
+            for domain, tab_key, title in (
+                ("AI 与对话", None, "余额与服务状态"),
+                ("桌宠", "motion_collision", "碰撞参数（高级）"),
+            ):
+                _page_widget, bar = _select(dialog, domain)
+                scroll = _page(dialog, domain).findChild(QScrollArea, "settingsScroll")
+                target = _section(dialog, domain, title, tab_key)
+                assert scroll.verticalScrollBar().maximum() > 0, "内容不够长，测不出滚动"
+
+                next(chip for chip in _chips(bar) if chip.text() == title).click()
+                app.processEvents()
+                landed = target.mapTo(scroll.viewport(), QPoint(0, 0)).y()
+                assert landed == 8, (
+                    f"{size} 下「{domain}／{title}」一次点击后落在视口 y={landed}（目标 8）："
+                    f"滚动范围仍不够（maximum={scroll.verticalScrollBar().maximum()}）"
+                )
+    finally:
+        dialog.close()
+
+
+def test_past_end_padding_follows_the_viewport_size(tmp_path, monkeypatch):
+    """留白高度跟着视口重算，且不超过一屏（编辑器式 scroll-past-end 的上限）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        app.processEvents()
+        _page_widget, _bar = _select(dialog, "AI 与对话")
+        scroll = _page(dialog, "AI 与对话").findChild(QScrollArea, "settingsScroll")
+        tall = _past_end_padding(dialog, "AI 与对话")
+        assert tall > 0, "这一页内容明显超过一屏，留白不该是 0"
+        assert tall <= scroll.viewport().height(), "留白超过一屏"
+
+        dialog.resize(720, 500)
+        app.processEvents()
+        short = _past_end_padding(dialog, "AI 与对话")
+        assert 0 < short <= scroll.viewport().height(), "留白超过一屏"
+        assert short != tall, (
+            f"视口变成 {scroll.viewport().height()} 后留白没重算（还是 {tall}）"
+        )
+    finally:
+        dialog.close()
+
+
+def test_pages_that_already_fit_get_no_past_end_padding(tmp_path, monkeypatch):
+    """本来就装得下的页面留白必须是 0：为「顶对齐」凭空造出一个滚动条是回退。
+
+    宽窗口下这两页装得下——留白一加就会挤出滚动条，页面标题与内容不再居中
+    （``test_menu_layout.test_wide_settings_title_tracks_the_centered_page_content``
+    就是被这条咬到的）。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(1600, 900)
+        dialog.show()
+        app.processEvents()
+        for domain in ("常规", "文件识别"):
+            _page_widget, _bar = _select(dialog, domain)
+            scroll = _page(dialog, domain).findChild(QScrollArea, "settingsScroll")
+            assert scroll.verticalScrollBar().maximum() == 0, f"「{domain}」本该不滚动"
+            assert _past_end_padding(dialog, domain) == 0, (
+                f"「{domain}」装得下，留白却给了 {_past_end_padding(dialog, domain)}px"
+            )
+    finally:
+        dialog.close()
+
+
 def test_chip_follows_its_group_being_hidden_by_a_dependency(tmp_path, monkeypatch):
     """整组被前置开关藏起来时，它的 chip 一起藏（不留在页头当死链）。"""
     dialog = _dialog(tmp_path, monkeypatch)
