@@ -2991,12 +2991,16 @@ class AgentLinkManager(QObject):
           通用 attention 气泡跳过，防止双弹；
         - waiting_question 只更新状态（岛指示/动画），不弹通用气泡——
           常驻问题气泡已由 ``_on_question_request`` 呈现（同事件双弹回归）。
+
+        **转发给岛的状态要过真实性翻译**（见 :meth:`_island_state_for`）：硬失败
+        回合的 turn/end 在收敛器里仍是 success，但对用户而言是失败——原样转发会让
+        岛亮绿点 + 卡片「刚完成」，与同屏的失败提醒自相矛盾。
         """
         if source_event != "link-disabled":
             mon = self.monitors.get("dsh")
             if mon is None or not mon._running:
                 return  # 迟到/孤儿信号：监视器已停，见 docstring 的隔离说明
-        self.dsh_state_changed.emit(from_state, to_state)
+        self.dsh_state_changed.emit(from_state, self._island_state_for(to_state))
         if to_state == "offline":
             self.dismiss_all_interactions()
             return
@@ -3018,6 +3022,26 @@ class AgentLinkManager(QObject):
                                agent_key="dsh", name=self.AGENT_NAMES["dsh"]),
                 important=True,
             )
+
+    def _island_state_for(self, to_state: str) -> str:
+        """收敛态 → 灵动岛状态：把「硬失败回合的假 success」翻译成 error。
+
+        桥接在 turn/end 判定 ``reason.kind === "error"`` 后先写一条
+        ``execution/failed``、**随后仍无条件**把同一条 turn/end 作为状态事件转发
+        （桥端 STATE_EVENT_TYPES），收敛器把一切 turn/end 收敛为 success——收敛器
+        语义不改（八态是它的契约），但呈现在岛上的那一格必须说真话：原样转发会让
+        岛走 ``set_dsh_state("success")`` → ``_arm_dot_done`` 点亮绿点 4s 并把状态
+        文案写成「刚完成」，与同一拍弹出的失败提醒自相矛盾。
+
+        判据复用既有的 ``_saw_error`` 标记：``_on_execution_failed`` 在同一批
+        记录里先于 turn/end 落盘（GUI 侧按 agent 打标），真失败必然已置位。
+        **只翻译 success 一个值**——其它态（含真 error）原样转发，正常回合没有该
+        标记、绿点照旧；下一个回合一进 busy 就清标（见 ``_on_agent_state`` 的
+        busy 入口），不需要额外复位。
+        """
+        if to_state == "success" and "dsh" in self._saw_error:
+            return "error"
+        return to_state
 
     def _on_dsh_converged_user_message(self, session_id: str, text: str) -> None:
         """真人消息 = 对话开始：与状态边沿竞态解耦的稳定触发点。

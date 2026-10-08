@@ -4209,6 +4209,70 @@ class TestDshTurnEndSuccessCompletion:
         finally:
             mgr.shutdown()
 
+    def test_failed_turn_sends_error_not_success_to_the_island(self, tmp_path, monkeypatch):
+        """⑩ 岛侧：失败回合的 turn/end 必须翻译成 error，不得亮绿点「刚完成」。
+
+        收敛器语义不动（``turn/end`` 仍收敛 success，⑦ 已钉住），翻译只发生在
+        ``_on_dsh_converged_state`` 的 emit 处——那是灵动岛 ``set_dsh_state`` 的
+        唯一入口。原样转发 ``success`` 会让岛走 ``_arm_dot_done``（绿点 4s + 卡片
+        「刚完成」），与同屏的失败提醒自相矛盾。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        converged = []
+        mgr.dsh_state_changed.connect(lambda f, t: converged.append((f, t)))
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._failed_turn_records())
+            mon._poll()
+            assert mon._converger.current_state is DshState.SUCCESS, "收敛器语义不动"
+            assert "dsh" in mgr._saw_error
+            assert ("working", "success") not in converged, \
+                f"失败回合不得给岛转发 success（绿点/「刚完成」）：{converged}"
+            assert converged[-1] == ("working", "error"), converged
+        finally:
+            mgr.shutdown()
+
+    def test_normal_turn_still_sends_success_to_the_island(self, tmp_path, monkeypatch):
+        """⑪ 非回归：正常成功回合的岛绿点照旧（翻译只认失败标记）。"""
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        converged = []
+        mgr.dsh_state_changed.connect(lambda f, t: converged.append((f, t)))
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir,
+                        {"event": "turn/start", "sessionId": "s-1"},
+                        {"event": "tool/call", "sessionId": "s-1", "tool": "bash"},
+                        {"event": "turn/end", "sessionId": "s-1"})
+            mon._poll()
+            assert ("working", "success") in converged, converged
+            assert ("working", "error") not in converged, converged
+        finally:
+            mgr.shutdown()
+
+    def test_failed_turn_without_turn_end_leaves_island_channel_alone(self, tmp_path, monkeypatch):
+        """⑫ 钉住既有语义：execution/failed 后没有 turn/end 时不产生成功边沿。
+
+        这条路径上岛看到的是最后一个真实事件态（working），错误红点的呈现由
+        ``_on_agent_state`` 的 busy→error 负责——本修复**不**在这里发明新状态。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        converged = []
+        mgr.dsh_state_changed.connect(lambda f, t: converged.append((f, t)))
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._failed_turn_records()[:-1])
+            mon._poll()
+            assert "dsh" in mgr._saw_error
+            assert converged == [("", "idle"), ("idle", "thinking"), ("thinking", "working")], converged
+        finally:
+            mgr.shutdown()
+
     def test_next_turn_after_failed_turn_plays_done_again(self, tmp_path, monkeypatch):
         """⑧ 失败回合之后的下一个正常回合：清标后恢复完成气泡 + done 音效。"""
         monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
