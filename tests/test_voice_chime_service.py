@@ -101,12 +101,16 @@ class _FakePlayer:
     def __init__(self) -> None:
         self.sources: list[str] = []
         self.plays = 0
+        self.stops = 0
 
     def setSource(self, url) -> None:  # noqa: N802 - 对齐 Qt API
         self.sources.append(url.toLocalFile() if hasattr(url, "toLocalFile") else str(url))
 
     def play(self) -> None:
         self.plays += 1
+
+    def stop(self) -> None:
+        self.stops += 1
 
 
 class _FakeAudioOut:
@@ -1097,3 +1101,22 @@ def test_speak_self_talk_falls_back_when_local_playback_fails(tmp_path, monkeypa
     assert shell.speak_self_talk(text) is True
     assert played, "先尝试本地文件"
     assert spoken == [text], "本地播不了要回退在线合成"
+
+
+def test_stop_halts_currently_playing_audio(tmp_path, monkeypatch):
+    """stop() 必须停住正在播放的音频，没有播放器时也不许抛。
+
+    关闭开关 / 应用退出走 stop()：此前只置标志、清队列、停 timer，全文件没有
+    一处 _player.stop —— 正在出声的这一段会一直放到自然结束（退出路径上还
+    可能触碰正在析构的窗口）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    assert service._play_only(str(tmp_path / "chime.mp3")) is True
+    assert service._player.plays == 1
+
+    service.stop()
+    assert service._player.stops == 1, "正在播放的音频必须被停住"
+
+    # 从未播放过（播放器还没创建）：stop 仍须安全
+    service._player = None
+    service.stop()

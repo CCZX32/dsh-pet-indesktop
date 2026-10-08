@@ -328,8 +328,16 @@ class VoiceChimeService:
         self._timer.start()
 
     def stop(self) -> None:
-        """停止调度；飞行中的合成结果一并作废（见 _on_synthesized）。"""
+        """停止调度；正在播放的音频一并停住，飞行中的合成结果作废（见 _on_synthesized）。"""
         self._stopped = True
+        # 正在出声的这一段必须立刻停：关掉开关/退出后继续放完，用户听到的就是
+        # "关不掉"；退出路径上播放器还可能正被析构。
+        player = self._player
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                logger.debug("停止语音播放失败（播放器可能已析构）", exc_info=True)
         # 待播队列同样作废：关掉开关/退出后不该再补播一条排队的语音。
         self._pending_speech = None
         self._queued_fire = None
