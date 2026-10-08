@@ -1098,7 +1098,10 @@ def test_completion_that_started_playback_leaves_queue_to_end_of_media(tmp_path,
         _WorkerSpy.instances[0].out_path).name], "第一条不得被待播语音顶掉"
     assert service._pending_speech == second, "起了播 → 留给 EndOfMedia，不在此出队"
 
-    service._terminal_statuses = ("END",)      # 第一条播完 → EndOfMedia 照常接上
+    # 第一条播完：通道回到空闲（实机那一刻是 StoppedState + EndOfMedia），"END" 这一拍
+    # 才允许出队——判据现在是出队口内部的统一占用判据，故这里把替身切成"未接管"。
+    monkeypatch.setattr(service, "_player_engaged", lambda: False)
+    service._terminal_statuses = ("END",)
     service._on_media_status("END")
 
     assert service._pending_speech is None
@@ -1150,6 +1153,157 @@ def test_player_engaged_covers_just_started_playback(tmp_path, monkeypatch):
     assert service._player_engaged() is False, "一段播完（通道空出）→ 未接管"
     service._player = None
     assert service._player_engaged() is False, "无播放器 → 未接管"
+
+
+def test_channel_guard_keeps_speech_queued_across_completions(tmp_path, monkeypatch):
+    """通道不空闲时出队必须原样留队：待播语音不得迁进 _queued_fire（P2-1）。
+
+    复现链：预合成在飞 → 豁免语音入队 → 报时到点被 busy 门拦下、排进 _queued_fire
+    → 预合成**失败**、结算时报时走即时合成起来（_busy=True）→ 此刻若无占用判据，
+    待播语音会被 _fire 撞 busy 门**迁移进 _queued_fire**；下一次结算（报时合成完成、
+    刚起播，那一刻 ``playbackState`` 恰好还是 StoppedState）``_drain_queued_fire``
+    若无判据就直接 _fire 它 → setSource+play **顶掉还在播的报时**（音源被替换，
+    原来的那一段永远等不到 EndOfMedia）。
+
+    断言的是不变量本身：通道不空闲 ⇒ 队列字段原样不动，等真空闲的那一拍（END）。
+    ``_player_engaged`` 由用例显式驱动——"刚起播"这一状态的判据真值由
+    ``test_player_engaged_covers_just_started_playback`` 用真实枚举锁住。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    exempt = "今天也要认真工作呀。"
+    cached_exempt = _cache_mp3(service, exempt)
+    engaged = {"now": False}
+    monkeypatch.setattr(service, "_player_engaged", lambda: engaged["now"])
+
+    # 09:59:30 距 10:00 只 30s → 预合成在飞
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+    assert len(_WorkerSpy.instances) == 1, "预合成在飞（通道被占）"
+    precache = _WorkerSpy.instances[0]
+
+    assert service.speak(exempt, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == exempt, "合成在飞 → 豁免语音入队"
+
+    service._on_tick(datetime(2026, 9, 15, 10, 0, 0))        # 报时到点，被 busy 门拦下
+    assert service._queued_fire is not None, "报时排队待补"
+
+    precache.finish(error="precache boom")                   # 预合成失败 → 报时即时合成
+    _qapp().processEvents()
+    assert len(_WorkerSpy.instances) == 2, "报时走即时合成回退"
+    chime_worker = _WorkerSpy.instances[1]
+    assert service._pending_speech == exempt, \
+        "报时合成已起来（通道不空闲）→ 豁免语音必须原样留队，不得迁进 _queued_fire"
+    assert service._queued_fire is None, "更不得迁入 _queued_fire（迁进去就再无 END 出口）"
+
+    engaged["now"] = True                                    # 报时合成完成 → 起播
+    chime_worker.finish()
+    _qapp().processEvents()
+    assert service._player.plays == 1
+    assert [Path(s).name for s in service._player.sources] == [Path(chime_worker.out_path).name]
+    assert service._pending_speech == exempt, "刚起播 → 豁免语音仍留队，不得顶掉报时"
+    assert service._queued_fire is None
+
+    engaged["now"] = False                                   # 报时播完 → EndOfMedia
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._pending_speech is None
+    assert [Path(s).name for s in service._player.sources][-1] == cached_exempt.name
+    assert service._player.plays == 2, "通道真空闲后豁免语音才出队出声"
+
+
+def test_queued_fire_left_queued_is_played_at_end_of_media(tmp_path, monkeypatch):
+    """被占用判据留队的报时排队项，在通道空出的那一拍（EndOfMedia）必须补播。
+
+    ``_queued_fire`` 只在合成在飞时被写入；若那次合成完成时**起了播**，判据会把它
+    留队——END 是此后唯一还会到来的"通道空出"信号，不在这里结算就等于这声报时被
+    推迟到下一次合成为止（最坏是下一个报时点，即静默丢报时）。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    engaged = {"now": False}
+    monkeypatch.setattr(service, "_player_engaged", lambda: engaged["now"])
+
+    assert service.speak("今天是中秋节。", log_tag="节日提醒") is True   # 合成在飞
+    assert len(_WorkerSpy.instances) == 1
+    service._on_tick(datetime(2026, 9, 15, 10, 0, 0))                  # 到点报时被拦下
+    assert service._queued_fire is not None
+
+    engaged["now"] = True
+    _WorkerSpy.instances[0].finish()                                    # 合成完成 → 起播
+    _qapp().processEvents()
+    assert service._player.plays == 1
+    assert service._queued_fire is not None, "刚起播 → 报时排队项留队（不顶掉这一段）"
+
+    engaged["now"] = False
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._queued_fire is None, "EndOfMedia 是通道空出的一拍 → 排队项必须结算"
+    assert len(_WorkerSpy.instances) == 2, "排队报时走即时合成（缓存未命中）"
+    _WorkerSpy.instances[1].finish()
+    _qapp().processEvents()
+
+    assert service._player.plays == 2, "排队报时补播出声"
+
+
+def test_stale_busy_release_drains_pending_speech(tmp_path, monkeypatch):
+    """合成超时自愈释放 _busy 后也必须结算待播队列（P2-2，第五类不出队出口）。
+
+    worker 挂死不回调时 ``_busy`` 被 watchdog 复位，此后不会有合成完成回调；若自愈
+    只结算 ``_queued_fire``，待在 ``_pending_speech`` 里的豁免语音就永远没人出队
+    （免打扰期间它进不来第二次合成，也没有 EndOfMedia）。
+    """
+    import time as _time
+
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    hung = "今天是中秋节。"
+    exempt = "今天也要认真工作呀。"
+    cached_exempt = _cache_mp3(service, exempt)
+
+    assert service.speak(hung, log_tag="节日提醒") is True   # worker 挂起、永不回调
+    assert len(_WorkerSpy.instances) == 1
+    _quiet().start(15)
+    assert service.speak(exempt, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == exempt
+
+    service._busy_since = _time.monotonic() - (svc_mod._SYNTH_TIMEOUT_S + 1)  # 推过超时
+    service._on_tick(datetime(2026, 9, 15, 9, 30, 0))       # 20s tick 驱动超时自愈
+
+    assert service._busy is False, "超时自愈必须复位合成锁"
+    assert service._pending_speech is None, "自愈后同样要结算待播队列（不滞留）"
+    assert service._player.plays == 1, "豁免的那条照常出队出声"
+    assert [Path(s).name for s in service._player.sources] == [cached_exempt.name]
+
+
+def test_just_started_playback_keeps_new_speech_out_of_the_channel(tmp_path, monkeypatch):
+    """刚起播那一刻（LoadingMedia）也算通道被占：speak/play_file 都不得抢通道。
+
+    那一刻 ``playbackState`` 仍是 StoppedState（实机探针见
+    ``test_player_engaged_covers_just_started_playback``）：沿用只判 ``playbackState``
+    的旧判据会让这一瞬间的 speak() 直发合成、play_file() 直发本地播报，把刚起播的
+    那一段顶掉。这里驱动判据本身，锁住两个入口都读它。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    monkeypatch.setattr(service, "_player_engaged", lambda: True)   # 刚起播
+
+    assert service.speak("今天是中秋节。", log_tag="节日提醒") is True
+    assert service._pending_speech == "今天是中秋节。", "通道被占 → 必须入队"
+    assert _WorkerSpy.instances == [], "不得直发合成（那会起第二路音频）"
+
+    wav = tmp_path / "line.wav"
+    wav.write_bytes(b"RIFF0000WAVE")
+    assert service.play_file(str(wav)) is False, "通道被占 → 本地播报让路（不排队）"
 
 
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):

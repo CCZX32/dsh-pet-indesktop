@@ -25,10 +25,13 @@
   （``_quiet_muted``，判据仍是 ``quiet_mode``），预合成一并跳过（省一次
   TTS 网络请求），被丢弃的只有声音——气泡语义不变（照旧进暂存队列）；
   点击自言自语属交互应答（issue #208），在调用侧显式豁免（豁免随队携带）。
-  凡是**合成完成却没起播**的结局（预合成、免打扰丢弃、合成失败、已停止）都没有
-  EndOfMedia 媒体终止事件，待播语音在 ``_on_synthesized`` 的 finally 收口里统一
-  出队（``_drain_pending_speech``，唯一出队口）：豁免的那条照常出声，尊重免打扰的
-  那条被 ``_fire`` 的闸现读再丢一次。
+- **通道真空闲 = 无合成在飞（``_busy`` False）∧ 播放器未接管
+  （``_player_engaged``）**——本模块唯一的占用判据（``_channel_idle``）。两个补播
+  队列（``_queued_fire`` 到点报时、``_pending_speech`` 外部播报）共用它：不空闲就
+  **原样留队**，等下一拍（合成完成 / EndOfMedia 终止 / 合成超时自愈）再来。凡是
+  **合成完成却没起播**的结局（预合成、免打扰丢弃、合成失败、已停止）都没有
+  EndOfMedia 媒体终止事件，正是靠这三拍里的另外两拍兜住：豁免的那条照常出声，
+  尊重免打扰的那条被 ``_fire`` 的闸现读再丢一次。
 """
 
 from __future__ import annotations
@@ -401,9 +404,9 @@ class VoiceChimeService:
         """向本服务（进程内唯一的音频通道）提交一段**纯语音**播报，不含气泡。
 
         供节日提醒等功能复用：合成、缓存、播放与报时**共用同一套**，因此结构上
-        不可能与报时叠音。通道忙（合成中或正在出声）时不打断，进深度 1 的待播队列，
-        当前一段播完后自动播；队列已有待播时后来的覆盖前面的（只留最新一条，避免
-        堆积出已过期的内容）。
+        不可能与报时叠音。通道不空闲（合成中、正在出声，或刚起播而媒体仍在加载）
+        时不打断，进深度 1 的待播队列，当前一段播完后自动播；队列已有待播时后来的
+        覆盖前面的（只留最新一条，避免堆积出已过期的内容）。
 
         排队同样受免打扰契约约束，且契约**随队携带**：尊重免打扰的那条（默认）
         在入队时就过闸——免打扰期间**丢弃、不入队**（与 ``_fire`` 同语义，不留到
@@ -428,7 +431,8 @@ class VoiceChimeService:
         stripped = (text or "").strip()
         if not stripped:
             return False
-        if self._busy or self._player_busy():
+        # 唯一占用判据（通道真空闲 = 无合成在飞 ∧ 播放器未接管）：不空闲就排队。
+        if not self._channel_idle():
             if respect_quiet and self._quiet_muted():
                 # 入队即丢弃（与 _fire 的「丢弃不补播」同语义）：排队的节日语音在
                 # 免打扰结束后出队补播，等于把一条过期提醒翻出来。
@@ -456,7 +460,8 @@ class VoiceChimeService:
         target = Path(path)
         if not target.is_file():
             return False
-        if self._busy or self._player_busy():
+        # 唯一占用判据（同 speak 的入口门）：刚起播也算被占，否则会顶掉那一段。
+        if not self._channel_idle():
             logger.info("%s：音频通道忙，本次本地播报跳过：%s", log_tag, target.name)
             return False
         return self._play_only(str(target))
@@ -638,6 +643,10 @@ class VoiceChimeService:
             # 合成在飞（多为本次报时的预合成）：排队待补，不得直接丢弃——
             # 到点回退即时合成正经此路径（_on_tick 在预合成未完成时调 _fire，
             # 被 busy 门挡死曾导致到点静默丢报时且 _last_slot 已盖戳不再重试）。
+            # 这里**只判合成在飞、不判播放器**（判据刻意不是 _channel_idle）：本方法
+            # 是"到点即报 / 立即报时"的入口，缓存命中在上面已直接起播——在下面加
+            # 播放器判据会让同一方法里两条路径自相矛盾，还会把时间敏感的报时推迟到
+            # 当前音频播完。通道占用的收敛点在两个出队口，不在这里。
             self._queued_fire = (sentence, now, bubble_text, show_bubble, role, respect_quiet)
             logger.info("语音报时合成在飞，排队待补：%s", sentence[:20])
             return
@@ -674,22 +683,25 @@ class VoiceChimeService:
         finally:
             # 任何结局（完成/失败/已停止）都必须结算排队项：_stopped 时
             # _drain 内部丢弃，其余情况补播——不能让到点报时静默消失。
-            # 顺序刻意为「先 _drain_queued_fire」：待补播的报时若在此起了合成，
-            # 待播 speech 会被 _fire 的 busy 门重新入队（豁免随队携带），等下一轮
-            # 出队——报时优先，且条目不丢。
+            # 两处判据都在 drain 内部（_channel_idle），调用点不再各自判：
+            # 起了播的完成 → 通道被接管 → 两个队列都原样留队（EndOfMedia 再结算）；
+            # 没起播的完成（预合成 / 免打扰丢弃 / 合成失败 / 已停止）→ 通道空出却
+            # 没有 EndOfMedia → 就在此结清。
+            # 顺序是「先 _drain_queued_fire」：待补播的报时若在此起了合成，待播语音
+            # 会被留队（豁免随队携带），等下一拍——报时优先，且条目不丢。
             self._drain_queued_fire()
-            # 统一出队口：_handle_synthesized 起了播（_play_only/_play_and_bubble）
-            # → 通道已被接管 → 跳过（EndOfMedia 会照常出队）；凡是**没起播**的完成
-            # 结局（预合成、免打扰丢弃、合成失败、已停止）→ 通道空出却没有
-            # EndOfMedia → 在此就地出队（豁免的被 _fire 照常播，尊重免打扰的被
-            # _fire 现读再丢一次，_stopped 由 _drain_pending_speech 内部丢弃）。
-            # 判据用 _player_engaged 而非 _player_busy：本行正是"刚 play() 完"那一刻，
-            # playbackState 还没转成 PlayingState，后者会误判为通道空出（见该方法）。
-            if not self._player_engaged():
-                self._drain_pending_speech()
+            self._drain_pending_speech()
 
     def _drain_queued_fire(self) -> None:
-        """补播被 busy 门拦下的排队播报（若有）；stop() 后一律丢弃。"""
+        """补播被 busy 门拦下的排队播报（若有）；通道不空闲则留队，stop() 后丢弃。
+
+        出队口之一（另两处：:meth:`_on_media_status` 的终止态、:meth:`_on_synthesized`
+        的 finally 收口），三处共用同一条判据 :meth:`_channel_idle`。
+        """
+        # 通道不空闲就**原样留队**（字段一律不动），等下一拍：合成完成 / EndOfMedia /
+        # 合成超时自愈。——刚起播那一刻也算不空闲，否则会顶掉刚起播的那一段。
+        if not self._channel_idle():
+            return
         # getattr 守卫：object.__new__ 构造的测试替身没有 __init__ 属性
         queued = getattr(self, "_queued_fire", None)
         self._queued_fire = None
@@ -789,29 +801,15 @@ class VoiceChimeService:
             logger.exception("外部播报播放失败：%s", path)
             return False
 
-    def _player_busy(self) -> bool:
-        """音频通道当前是否正在出声（判断能否立即播报）。"""
-        if self._player is None:
-            return False
-        try:
-            from PySide6.QtMultimedia import QMediaPlayer
-
-            return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        except Exception:
-            return False
-
     def _player_engaged(self) -> bool:
-        """音频通道是否已被某一源**接管**（正在出声，或刚起播、媒体仍在加载）。
+        """播放器是否已**接管**音频通道（正在出声，或刚起播、媒体仍在加载）。
 
-        比 :meth:`_player_busy` 多认一个 ``LoadingMedia``：``playbackState`` 判不了
-        "刚起播"。实机实测（QMediaPlayer + QAudioOutput，offscreen）——``setSource``
-        后立刻 ``play()``，那一刻 ``playbackState`` 仍是 ``StoppedState``、
-        ``mediaStatus`` 为 ``LoadingMedia``，约 300ms 后才转成
-        ``PlayingState``/``BufferingMedia``。而 ``_on_synthesized`` 的 finally 正是在
-        "刚 play() 完"这一刻跑的：按 ``_player_busy`` 判会把刚接管的通道误判成空出，
-        于是待播语音当场抢播、把刚起播的那一段掐掉。
-
-        只给那个收口用：``speak``/``play_file`` 的"通道忙"判据语义不同，未改。
+        认 ``LoadingMedia`` 是必须的：``playbackState`` 判不了"刚起播"。实机实测
+        （QMediaPlayer + QAudioOutput，offscreen）——``setSource`` 后立刻 ``play()``，
+        那一刻 ``playbackState`` 仍是 ``StoppedState``、``mediaStatus`` 为
+        ``LoadingMedia``，约 300ms 后才转 ``PlayingState``/``BufferingMedia``；而本
+        模块的判据点（三个出队口与 speak/play_file 入口）恰恰可能落在那一刻，只看
+        ``playbackState`` 会把刚接管的通道当成空出，让新的语音顶掉刚起播的那一段。
         """
         if self._player is None:
             return False
@@ -823,12 +821,25 @@ class VoiceChimeService:
                 or self._player.mediaStatus() == QMediaPlayer.MediaStatus.LoadingMedia
             )
         except Exception:
-            # 拿不到判据（QtMultimedia 缺失 / 测试替身没有这些方法）时按"未接管"
-            # 处理：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
+            # 拿不到判据（QtMultimedia 缺失 / object.__new__ 测试替身没有这些方法）
+            # 时按"未接管"处理：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
             return False
 
+    def _channel_idle(self) -> bool:
+        """音频通道是否**真空闲**：无合成在飞 且 播放器未接管。
+
+        全模块唯一的占用判据：两个补播队列的出队口（不空闲就原样留队）与 speak /
+        play_file 的入口门（不空闲就排队 / 让路）都读它。``_fire`` 是唯一例外且是
+        刻意的（到点即报的入口，见那里的说明）。
+        """
+        return not self._busy and not self._player_engaged()
+
     def _on_media_status(self, status) -> None:
-        """媒体状态变化：终止态（播完/坏媒体）即"通道空出"，排空待播队列。
+        """媒体状态变化：终止态（播完/坏媒体）即"通道空出"，排空两个补播队列。
+
+        终止态是"这一段音频真的结束了"的唯一信号：此刻两个队列里被占用判据留过队
+        的条目都必须结算（报时优先，见 :meth:`_on_synthesized` 的同序说明）——否则
+        留队的报时排队项要等下一次合成完成才有下一拍，最坏等到下个报时点。
 
         **刻意不在本方法里 import QtMultimedia**：终止态枚举在 ``_ensure_player``
         成功创建播放器时缓存到 ``self._terminal_statuses``。这样本方法没有 Qt
@@ -838,25 +849,31 @@ class VoiceChimeService:
         """
         if status not in getattr(self, "_terminal_statuses", ()):
             return
+        self._drain_queued_fire()
         self._drain_pending_speech()
 
     def _drain_pending_speech(self) -> None:
-        """待播队列出队：补播那一条（若有）并消费掉队列字段。
+        """待播语音出队：通道真空闲时补播那一条（若有）并消费掉队列字段。
 
-        两个调用点，对应**通道已空出**的两种来源：
+        出队口之一，与 :meth:`_drain_queued_fire` 共用同一条判据（:meth:`_channel_idle`）
+        与同三个触发点：合成完成（:meth:`_on_synthesized` 的 finally）、媒体终止
+        （:meth:`_on_media_status`）、合成超时自愈（:meth:`_release_stale_busy`）。
+        凡是**合成完成却没起播**的结局（预合成、免打扰丢弃、合成失败、已停止）都
+        不会有 EndOfMedia，待播语音不能指望那个事件来出队，否则会无声滞留到被后续
+        偶然事件覆盖（豁免的那条被 ``_fire`` 照常播，尊重免打扰的那条被 ``_fire``
+        的闸现读再丢一次，``_stopped`` 在这里直接丢弃）。
 
-        - :meth:`_on_media_status` 的终止态（播完/坏媒体）——本征信号；
-        - :meth:`_on_synthesized` 的 finally 收口——凡是**合成完成却没起播**的
-          结局（预合成、免打扰丢弃、合成失败、已停止）都不会有 EndOfMedia，
-          待播语音不能指望那个事件来出队，否则会无声滞留到被后续偶然事件覆盖
-          （豁免的那条被 ``_fire`` 照常播，尊重免打扰的那条被 ``_fire`` 的闸
-          现读再丢一次，``_stopped`` 在这里直接丢弃）。收口处已用
-          ``_player_engaged()`` 排除"确实起了播"的那些——它们由 EndOfMedia 出队。
+        **通道不空闲就原样留队**（字段一律不动）：合成在飞时出队会被 ``_fire`` 的
+        busy 门迁进 ``_queued_fire``（离开了 END 的出口），播放器被接管时补播会顶掉
+        刚起播的那一段——两者都是本模块修过的坑，判据内置在这里，调用点不再各自判。
         """
-        pending = self._pending_speech
+        if not self._channel_idle():
+            return
+        # getattr 守卫：object.__new__ 构造的测试替身没有 __init__ 属性
+        pending = getattr(self, "_pending_speech", None)
         self._pending_speech = None
         # 随队携带的免打扰口径一并取出、并复位为默认值（与 _pending_speech 同生命周期）。
-        respect_quiet = self._pending_respect_quiet
+        respect_quiet = getattr(self, "_pending_respect_quiet", True)
         self._pending_respect_quiet = True
         if not pending or self._stopped:
             return
@@ -981,7 +998,10 @@ class VoiceChimeService:
         self._busy = False
         self._synthesis_role = "play"
         # 合成锁复位后结算排队项：挂死的合成不会再来回调，到点报时靠这里补。
+        # 两个队列同序结算（报时优先），判据在 drain 内部——这里是超时自愈这一拍，
+        # 不结算待播语音就会让它永远没人出队（挂死的合成也不会再产生 END）。
         self._drain_queued_fire()
+        self._drain_pending_speech()
 
     # ------------------------------------------------------------ 缓存维护
     def _prune_cache(self) -> None:
