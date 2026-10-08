@@ -1617,10 +1617,10 @@ class BaseAgentMonitor(QObject):
                 # 审批请求提醒：一次性事件，收到即发信号（不进入状态机，
                 # 因为 DSH 等审批时 agent 仍在 running，状态还是 working）。
                 # 只收桥接后的 UI 事件 approval/request 与兼容旧名
-                # approval/requested；裸 approval/asked 只是状态/审计信号（驱动
-                # dsh_state 锁存 waiting_approval），绝不驱动桌宠审批弹窗——普通
-                # 工具调用（如 pwsh 跑 Get-Location）被宿主标成 approval/asked
-                # 也不能误触发。减法后气泡是纯提示（无点选回写）。
+                # approval/requested；裸 approval/asked 只是状态/审计信号，绝不驱动
+                # 桌宠审批弹窗——普通工具调用（如 pwsh 跑 Get-Location）被宿主标成
+                # approval/asked 也不能误触发（收敛器同样不据此锁存审批态，见
+                # pet/dsh_state.py 的事件表）。减法后气泡是纯提示（无点选回写）。
                 if ev in ("approval/request", "approval/requested"):
                     self._emit(self.approval_requested, (self.agent_key, data))
                 # 审批已结束（approval/decided 会话事件 或 approval/resolved 帧）：

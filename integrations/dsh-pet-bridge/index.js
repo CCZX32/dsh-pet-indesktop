@@ -455,9 +455,11 @@ const STATE_EVENT_TYPES = new Set([
   "approval/decided",
 ]);
 
-// Extract step identifier from a DSH session/event for behavior pattern detection.
-// DSH events carry { turn, step, ... } in event.data; the behavior detector on the
-// pet side uses step to deduplicate parallel tool calls (same step → one decision).
+// Extract the step identifier from a DSH session/event.
+// DSH events carry { turn, step, ... } in event.data. The pet side keeps step as an
+// ordering/display field (activity bubble template {step}); the behavior-pattern
+// detector that used it to deduplicate parallel tool calls was removed in the
+// 2026-10 subtraction, so no control flow depends on it anymore.
 function stepOf(event) {
   const data = (event && event.data) || {};
   if (data && data.step !== undefined && data.step !== null) return data.step;
@@ -858,14 +860,15 @@ export function apply(ctx) {
         noteTurnRecovery(sessionKeyOf(_session, event));
       }
 
-      // 2) 审批请求：approval/asked 只是 DSH 的会话/审计信号（供 dsh_state 锁存
-      //    waiting_approval），**不代表 Web UI 存在待确认的真实审批，绝不能由此
-      //    驱动桌宠审批弹窗**——普通工具调用（如 pwsh 跑 Get-Location）一旦被宿主
-      //    标成 approval/asked，桥接再升级成 approval/request，桌宠就会挂出一个
-      //    永远等不到 approval/resolved 的 sticky 审批气泡。
+      // 2) 审批请求：approval/asked 只是 DSH 的会话/审计信号，**不代表 Web UI 存在
+      //    待确认的真实审批，绝不能由此驱动桌宠审批弹窗**——普通工具调用（如 pwsh
+      //    跑 Get-Location）一旦被宿主标成 approval/asked，桥接再升级成
+      //    approval/request，桌宠就会挂出一个永远等不到 approval/resolved 的 sticky
+      //    审批气泡。
       //    减法后桌宠侧不再有审批回写（mux 中继已删）：approval/asked 只经
-      //    STATE_EVENT_TYPES 转发为状态/审计事件（收敛器锁存 waiting_approval →
-      //    纯提示 attention 气泡），不写 approval/request。
+      //    STATE_EVENT_TYPES 转发为状态/审计事件，不写 approval/request。桌宠收敛器
+      //    也不拿它锁存 waiting_approval（普通工具调用同样带这个标记）——权威锁存源
+      //    是 cordis/request-run 与 approval/request，见 pet/dsh_state.py 的事件表。
       if (type === "approval/decided") {
         const data = event.data || {};
         writeInteractionResolved("approval", sessionId, { rpcId: data.rpcId, approvalId: data.approvalId, callId: data.callId }, data.outcome || data.decision || "approved");
@@ -1017,10 +1020,13 @@ export function apply(ctx) {
 
       // 3) 统一状态联动：转发 DSH 原始 session/event 类型为「简单事件」，
       //    桌宠侧 dsh_state.py 据此收敛为 thinking/working/waiting_approval/
-      //    success/error（审批锁存依赖 approval/asked 与 approval/decided 成对出现）。
+      //    success/error（审批锁存由 cordis/request-run 与 approval/request 进入、
+      //    approval/decided 解锁；裸 approval/asked 不参与收敛——普通工具调用也会
+      //    被宿主标上它，见 pet/dsh_state.py 的事件表）。
       //    注意 assistant/message、tool/call、tool/result、llm/retry 已在上方
       //    显式处理，不在 STATE_EVENT_TYPES 中，不会重复写入。
-      //    转发时携带 step（step/start、turn/start 等），供行为模式检测按 step 去重。
+      //    转发时携带 step（step/start、turn/start 等）：行为模式检测已删，step
+      //    只剩事件序号用途（桌宠活动气泡模板 {step}）。
       if (STATE_EVENT_TYPES.has(type)) {
       writeStateEvent(type, stepOf(event), sessionId, agentName);
       // 用户介入信号：approval/decided 或 thread_rolled_back 等用户主动干预事件

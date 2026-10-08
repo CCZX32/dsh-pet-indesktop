@@ -45,18 +45,20 @@ class EventPayloadTooLarge(ValueError):
 
 #: 语义键（按小写比对）：这些字段的值承载**控制流、错误语义与身份**，不是内容。
 #: 取名依据是各消费端真实读取的字段（persona_template.UPSTREAM_FIELDS 的"上游记录
-#: 字段"清单、agent_event_normalizer、ModelAccessTracker、stuck_detector、
-#: exploration_watchdog、agent_link 的字段读取）：
+#: 字段"清单、agent_event_normalizer、ModelAccessTracker、agent_link 的字段读取；
+#: 卡住检测 / 行为模式检测 / 探索看门狗三个检测器已在 2026-10 减法中删除，不再是
+#: 本集合的取名依据）：
 #: - 判决/状态：ok/timeout/retryExhausted/failureType…——剪坏 ok 会让
 #:   tracker._resets 与 normalizer 的 ok 判定把失败当成功；
 #: - 错误码与消息：errorCode/errorMessage/errorText/code/failure…——
 #:   ModelAccessTracker.is_model_access 在这上面跑限流/超时正则；
-#:   `message` 同在错误消息的位置上：两个消费端（model_access_tracker.py:52-54、
-#:   agent_event_normalizer.py:107-108）在 `failure` 不是 dict 时把整个 data 当
-#:   failure 用，读的就是**根级 message**。展示内容走 text/content，不在这里；
+#:   `message` 同在错误消息的位置上：两个消费端（model_access_tracker 的
+#:   is_model_access、agent_event_normalizer 的 llm/retry 分支）在 `failure`
+#:   不是 dict 时把整个 data 当 failure 用，读的就是**根级 message**。展示内容
+#:   走 text/content，不在这里；
 #: - 身份：sessionId/callId/requestId/rpcId/approvalId…——agent_link 用**字符串
-#:   相等**配对审批收尾（_on_normalized_event:2633、_on_approval_resolved:3608），
-#:   而登记端存的是未修剪的原始 payload，剪短即永不相等（审批关不掉/错配）；
+#:   相等**配对审批收尾（_on_normalized_event / _on_approval_resolved），而登记
+#:   端存的是未修剪的原始 payload，剪短即永不相等（审批关不掉/错配）；
 #: - 工具与来源枚举：tool/toolName/name/provider/model——归一化按 tool 字面量
 #:   判 ACTION/EXPLORATION。
 #: 注意 `failure` 这类容器在集合里：其内部键靠 `semantic` 逐层传递继续受保护

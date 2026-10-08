@@ -17,8 +17,11 @@ glob ``dsh*.jsonl``，兼容旧版单文件 ``dsh.jsonl``）。
 - **edge-trigger**：仅当状态真正变化时才产出；同状态重复事件去重。
 - **offline 恢复**：DSH 未运行（端口探测，见 ``candidate_ports``）时切
   offline；DSH 恢复后自动回 idle 并继续监听。
-- 阻塞型交互锁存：approval/asked 后忽略 working/thinking 直到
-  approval/decided（question 同理）；锁存超时兜底由 ``tick()`` 完成。
+- 阻塞型交互锁存：cordis/request-run（当前桥的权威审批请求）与 approval/request
+  （旧桥/自定义通道的 UI 级审批事件）进入 waiting_approval、approval/decided 解锁；
+  question/requested 进入 waiting_question、question/resolved 解锁。裸
+  approval/asked **不参与锁存**（普通工具调用也会被宿主打上这个标记，见
+  ``_EVENT_TO_STATE`` 的说明）；锁存超时兜底由 ``tick()`` 完成。
 
 输出以元组列表返回（不直接 emit 信号，Qt 边界全部留在 DshMonitor）：
 ``("state", from_state, to_state, source_event)`` 与
