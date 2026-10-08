@@ -245,9 +245,12 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-08 设置页第五刀（按区直找）批 1：恢复被域装配压平的旧页子分区（主动识屏
 # 15 行拆 4 组、语音报时 / 节日提醒各 12 行拆 3 组；行键表 20 行）+「自动化与联动」
 # 顶层改按下表顺序（删掉 15 行 insertWidget 倒插逻辑）+ page_content 支持已构造好的
-# QWidget，实测 2495（= 现预算，未上调）。按文件约定预算只随实测校准，不为达标压缩
-# 行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2495
+# QWidget，实测 2495（= 第二刀的预算值，未上调）。
+# 2026-10-08 上调到 2497（同刀批 2）：页内分区跳转条与组描述的接线——import 1 行 +
+# 域装配末尾 `settings_page_guide.install(self)` 及其注释 2 行；主体（跳转条、流式
+# 布局、SECTION_GUIDE 描述表）全在 pet/settings_page_guide.py，本文件只做接线。
+# 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2497
 
 
 def _read(name: str) -> str:

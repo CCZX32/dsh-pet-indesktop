@@ -2046,6 +2046,8 @@ class ModernSettingsDialog(QDialog):
             self._add_page(label, icon, self._page_shell(label, content))
         for page in old_pages.values():
             page.deleteLater()
+        # 域页全部装好之后再装「按区直找」：页头跳转条 + 每个分区的组描述。
+        settings_page_guide.install(self)
 
     def _clear_search_matches(self) -> None:
         for row in self._search_rows:

@@ -21,7 +21,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 import pet.modern_settings_dialog as settings_mod
 from pet import settings_page_guide
@@ -276,5 +277,293 @@ def test_desktop_island_keeps_its_single_flattened_card(tmp_path, monkeypatch):
         assert {"settingRow_dynamic_island_enabled", "settingRow_island_network",
                 "settingRow_island_cpu"} <= names, "岛行不分家，整表在同一张卡里"
         assert "settingRow_network_probe_interval" not in names
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------------ 页内分区跳转条
+def _select(dialog, domain: str):
+    index = next(i for i in range(dialog.sidebar.count())
+                 if dialog.sidebar.item(i).text() == domain)
+    dialog.sidebar.setCurrentRow(index)
+    app.processEvents()
+    page = dialog.pages.widget(index)
+    bars = page.findChildren(QWidget, "settingsPageAnchors")
+    assert len(bars) == 1, f"「{domain}」页必须有且只有一条跳转条，实得 {len(bars)}"
+    return page, bars[0]
+
+
+def _chips(bar) -> list[QPushButton]:
+    return bar.findChildren(QPushButton, "settingsPageAnchor")
+
+
+def _visible_chips(bar) -> list[QPushButton]:
+    return [chip for chip in _chips(bar) if not chip.isHidden()]
+
+
+def _blocks_of(domain_content: QWidget) -> list[tuple[str, QWidget]]:
+    """页内容顶层块（分区 / 折叠框），测试自己走布局顺序（不调被测函数自证）。"""
+    blocks = []
+    layout = domain_content.layout()
+    for position in range(layout.count()):
+        widget = layout.itemAt(position).widget()
+        if isinstance(widget, CollapsibleGroup):
+            blocks.append((widget.toggle.text(), widget))
+        elif isinstance(widget, SettingsSection):
+            blocks.append((_title_of(widget), widget))
+    return blocks
+
+
+def _all_groups(dialog) -> list[tuple[str, QWidget]]:
+    """对话框里所有分区 / 折叠框（含折叠框里的子分区），按域页布局顺序。"""
+    found: list[tuple[str, QWidget]] = []
+
+    def walk(node: QWidget) -> None:
+        for title, widget in _blocks_of(node):
+            found.append((title, widget))
+            if isinstance(widget, CollapsibleGroup):
+                walk(widget.body)
+
+    for index in range(dialog.pages.count()):
+        domain = dialog.sidebar.item(index).text()
+        scroll = _page(dialog, domain).findChild(QScrollArea, "settingsScroll")
+        if scroll is None:
+            continue
+        tabs = settings_page_guide.tab_container(scroll.widget())
+        if tabs is None:
+            walk(scroll.widget())
+            continue
+        for key in tabs.keys():
+            tabs.setCurrentKey(key)
+            walk(tabs.stack.currentWidget())
+        tabs.setCurrentKey(tabs.keys()[0])
+    return found
+
+
+def test_anchor_bar_appears_only_from_four_sections_up(tmp_path, monkeypatch):
+    """「当前页（或当前标签）≥4 个区」才显示跳转条：两三个区一眼扫得完。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(720, 500)
+        dialog.show()
+        app.processEvents()
+        shown, hidden = set(), set()
+        for index in range(dialog.sidebar.count()):
+            domain = dialog.sidebar.item(index).text()
+            dialog.sidebar.setCurrentRow(index)
+            app.processEvents()
+            bar = dialog.pages.widget(index).findChild(QWidget, "settingsPageAnchors")
+            assert bar is not None, f"「{domain}」页缺少跳转条（不足 4 区时它自己收起）"
+            blocks = _blocks_of(_content(dialog, domain))
+            assert len(_chips(bar)) == len(blocks), f"「{domain}」chip 数必须等于区数"
+            assert bar.isHidden() is (len(blocks) < 4), (
+                f"「{domain}」有 {len(blocks)} 个区，跳转条的显隐判反了")
+            (hidden if bar.isHidden() else shown).add(domain)
+        assert shown == {"AI 与对话", "自动化与联动", "语音"}
+        assert hidden == {"常规", "桌宠", "互动", "菜单", "桌面组件", "文件识别", "更新"}
+    finally:
+        dialog.close()
+
+
+def test_chips_name_their_section_and_take_keyboard_focus(tmp_path, monkeypatch):
+    """chip 文案 = 组标题；读屏名字说清跳到哪；可聚焦（键盘也能用）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        app.processEvents()
+        _page_widget, bar = _select(dialog, "语音")
+        blocks = _blocks_of(_content(dialog, "语音"))
+        assert [chip.text() for chip in _chips(bar)] == [title for title, _w in blocks]
+        for chip in _chips(bar):
+            assert chip.objectName() == "settingsPageAnchor"
+            assert chip.accessibleName() == f"跳到「{chip.text()}」分区"
+            assert chip.focusPolicy() == Qt.FocusPolicy.StrongFocus
+        # 桌面胶囊（灵动岛）在装配处被压平成单卡——它也只算一个区。
+        _page_widget, island_bar = _select(dialog, "桌面组件")
+        assert [chip.text() for chip in _chips(island_bar)] == [
+            "桌面胶囊（灵动岛）", "网络延迟检测（高级）"]
+    finally:
+        dialog.close()
+
+
+def test_clicking_a_chip_top_aligns_the_section(tmp_path, monkeypatch):
+    """点了把该区顶到视口上沿（8px 余量），不是「勉强可见」——长卡片里后者等于没跳。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(720, 500)
+        dialog.show()
+        app.processEvents()
+        page, bar = _select(dialog, "语音")
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        target = _section(dialog, "语音", "语音报时 · 说什么")
+        expected = target.mapTo(scroll.widget(), QPoint(0, 0)).y() - 8
+        assert scroll.verticalScrollBar().maximum() > 0, "内容不够长，测不出滚动"
+
+        chip = next(chip for chip in _chips(bar) if chip.text() == "语音报时 · 说什么")
+        chip.click()
+        app.processEvents()
+        assert scroll.verticalScrollBar().value() == max(0, expected)
+        assert target.mapTo(scroll.viewport(), QPoint(0, 0)).y() == 8
+    finally:
+        dialog.close()
+
+
+def test_clicking_a_chip_expands_a_collapsed_group_first(tmp_path, monkeypatch):
+    """目标是高级组 / 折叠框时先展开再滚（口径同搜索命中），否则滚过去是一片空白。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        dialog.pro_enabled_check.setChecked(True)  # 主动识屏细项要总开关打开才可见
+        app.processEvents()
+        _page_widget, bar = _select(dialog, "自动化与联动")
+
+        detail = _section(dialog, "自动化与联动", "主动识屏 · 细调（高级）")
+        assert detail.card.isHidden() is True, "高级组默认收起"
+        next(chip for chip in _chips(bar) if chip.text() == "主动识屏 · 细调（高级）").click()
+        app.processEvents()
+        assert detail.toggle.isChecked() is True
+        assert detail.card.isHidden() is False, "跳过去之后参数必须真的看得见"
+
+        assert dialog.agent_link_box.is_expanded() is False
+        next(chip for chip in _chips(bar) if chip.text() == "Agent 联动").click()
+        app.processEvents()
+        assert dialog.agent_link_box.is_expanded() is True
+        assert dialog.agent_link_box.body.isHidden() is False
+    finally:
+        dialog.close()
+
+
+def test_chip_follows_its_group_being_hidden_by_a_dependency(tmp_path, monkeypatch):
+    """整组被前置开关藏起来时，它的 chip 一起藏（不留在页头当死链）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        app.processEvents()
+        _page_widget, bar = _select(dialog, "自动化与联动")
+        chips = {chip.text(): chip for chip in _chips(bar)}
+        watched = ("主动识屏 · 什么时候看", "主动识屏 · 看哪些软件", "主动识屏 · 细调（高级）")
+
+        assert dialog.pro_enabled_check.isChecked() is False
+        for title in watched:
+            assert chips[title].isHidden() is True, f"「{title}」关了总开关就该藏"
+        dialog.pro_enabled_check.setChecked(True)
+        app.processEvents()
+        for title in watched:
+            assert chips[title].isHidden() is False, f"「{title}」开了总开关就该回来"
+        dialog.pro_enabled_check.setChecked(False)
+        app.processEvents()
+        for title in watched:
+            assert chips[title].isHidden() is True, f"「{title}」再关要能再藏"
+    finally:
+        dialog.close()
+
+
+def test_anchor_bar_rebuilds_when_the_in_page_tab_changes(tmp_path, monkeypatch):
+    """页内标签各是一组区：换标签就换成那一组的 chip，显隐门槛按该标签重算。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        app.processEvents()
+        page, bar = _select(dialog, "桌宠")
+        tabs = page.findChild(SettingsTabContainer)
+        assert tabs.keys() == ("display_music", "motion_collision")
+
+        assert tabs.currentKey() == "display_music"
+        assert [chip.text() for chip in _chips(bar)] == [
+            "显示", "音乐关联", "播放器路径与标题格式（高级）"]
+        assert bar.isHidden() is True, "「显示与音乐」只有 3 个区"
+
+        tabs.setCurrentKey("motion_collision")
+        app.processEvents()
+        assert bar.isHidden() is False
+        assert [chip.text() for chip in _chips(bar)] == [
+            "动画与移动", "拖拽与弹射", "边缘探头", "生小肥鱼", "多开碰撞", "碰撞参数（高级）"]
+
+        tabs.setCurrentKey("display_music")
+        app.processEvents()
+        assert bar.isHidden() is True
+        assert len(_chips(bar)) == 3
+    finally:
+        dialog.close()
+
+
+def test_anchor_bar_and_descriptions_fit_the_compact_window(tmp_path, monkeypatch):
+    """720×500（最小窗口）下 chip 不越界、描述不裁切（GATES §3）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(720, 500)
+        dialog.show()
+        app.processEvents()
+        for domain in ("AI 与对话", "自动化与联动", "语音"):
+            page, bar = _select(dialog, domain)
+            header = page.findChild(QWidget, "pageHeader")
+            assert bar.isHidden() is False
+            assert bar.width() <= header.width()
+            for chip in _visible_chips(bar):
+                rect = chip.geometry()
+                assert rect.left() >= 0 and rect.right() <= bar.width(), (
+                    f"「{chip.text()}」chip 超出跳转条宽度")
+            for label in page.findChildren(QLabel, "sectionDescription"):
+                if not label.isVisible():
+                    continue
+                assert label.heightForWidth(label.width()) <= label.height(), (
+                    f"组描述被纵向裁切：{label.text()[:16]}")
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------------------- 组描述
+def test_every_group_has_a_description(tmp_path, monkeypatch):
+    """覆盖率守卫：每个可见组都必须有一句描述（新增组漏写 = 红）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        groups = _all_groups(dialog)
+        assert len(groups) > 40, f"只扫到 {len(groups)} 个组，装配可能变了，本用例会假绿"
+        missing = [title for title, widget in groups if not widget.description_label.text().strip()]
+        assert not missing, f"这些组没有描述（请在 SECTION_GUIDE 里补一行）：{missing}"
+    finally:
+        dialog.close()
+
+
+def test_section_guide_has_no_stale_entries(tmp_path, monkeypatch):
+    """字典不许腐烂：每个键都得对上一个真实存在的组。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        titles = {title for title, _widget in _all_groups(dialog)}
+        stale = sorted(set(settings_page_guide.SECTION_GUIDE) - titles)
+        assert not stale, f"这些描述的组已经不存在了（请同步删除）：{stale}"
+    finally:
+        dialog.close()
+
+
+def test_section_descriptions_pass_the_copy_lint():
+    """描述也过一遍设置页黑话判据（与行文案同一把尺子）。"""
+    from tests.test_settings_copy_lint import _tokens
+
+    offenders = [
+        f"{title}: {sorted(_tokens(text))}"
+        for title, text in settings_page_guide.SECTION_GUIDE.items()
+        if _tokens(text)
+    ]
+    assert not offenders, "组描述里出现黑话（改文案）：\n" + "\n".join(offenders)
+
+
+def test_advanced_group_shows_its_description_while_collapsed(tmp_path, monkeypatch):
+    """高级组收起时也看得见「这里是什么」，否则要先展开才知道里面有没有要找的。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(900, 700)
+        dialog.show()
+        app.processEvents()
+        _select(dialog, "AI 与对话")
+        advanced = _section(dialog, "AI 与对话", "生成参数（高级）")
+        assert advanced.advanced is True
+        assert advanced.card.isHidden() is True
+        assert advanced.description_label.isVisibleTo(advanced) is True
+        assert advanced.description_label.text().strip()
     finally:
         dialog.close()
