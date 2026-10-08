@@ -167,6 +167,7 @@ from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
 from . import settings_network
+from . import settings_page_guide
 from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
@@ -1751,6 +1752,9 @@ class ModernSettingsDialog(QDialog):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(18)
             for section in sections:
+                if isinstance(section, QWidget):  # 已构造好的块（折叠框等）原样进布局
+                    layout.addWidget(section)
+                    continue
                 title, rows, *options = section
                 rows = [row for row in rows if row is not None]
                 if rows:
@@ -1867,7 +1871,7 @@ class ModernSettingsDialog(QDialog):
             ),
         )
         menu.setProperty("contentMaxWidth", 1240)
-        island_rows = list(old_pages.get("灵动岛", QWidget()).findChildren(SettingRow))
+        island_rows = settings_page_guide.rows_in_layout_order(old_pages.get("灵动岛", QWidget()))  # 布局顺序，不是创建顺序
         claimed.update(island_rows)
         # 网络延迟检测（高级）只能在**最终域装配处**拆：旧岛页整节会被摊平进同一个
         # 「桌面胶囊（灵动岛）」卡片（R2 §一-2）。只拆探测间隔行，其余岛行不动。
@@ -1935,26 +1939,32 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.setParent(self)
             self.ai_page.hide()
 
-        proactive_rows = list(old_pages.get("主动识屏", QWidget()).findChildren(SettingRow))
-        claimed.update(proactive_rows)
-        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
-        claimed.update(voice_chime_rows)
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        # 「主动识屏」「语音报时」「节日提醒」的旧页分区在域装配时被压平成单张卡片，这里按行键重组（行键以代码实际为准，顺序同旧页）。
+        proactive_sections = [
+            ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_preset")),
+            ("主动识屏 · 什么时候看", claim("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
+            ("主动识屏 · 看哪些软件", claim("proactive_whitelist", "proactive_whitelist_add", "proactive_memory_clear")),
+            ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
+                                       "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
+        ]
+        voice_sections = [
+            ("语音报时 · 何时报", claim("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times")),
+            ("语音报时 · 用什么声音", claim("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume")),
+            ("语音报时 · 说什么", claim("voice_chime_show_bubble", "voice_chime_show_quote", "voice_chime_custom_quotes_zh",
+                                   "voice_chime_custom_quotes_en", "voice_chime_preview")),
+        ]
+        festival_sections = [
+            ("节日提醒 · 开关", claim("festival_reminder_enabled", "festival_reminder_cn", "festival_reminder_solar_terms",
+                                  "festival_reminder_west", "festival_reminder_speak")),
+            ("节日提醒 · 时间", claim("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times")),
+            ("节日提醒 · 文案", claim("festival_reminder_show_quote", "festival_custom_quotes_cn", "festival_custom_quotes_west", "festival_preview")),
+        ]
         dialogue_rows = claim_prefix("dialogue_")
-        automation = page_content(
-            [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
-                ("主动感知", proactive_rows),
-                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
-                ("免打扰", settings_quiet.build_quiet_rows(self)),
-            ]
-        )
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
         # （见 _search_settings）。全局风格控件（表达风格/专属文案对象/模板 JSON）
         # 不是事件文案，单独放「文案风格与模板」小节。
-        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", automation)
+        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", self)
         phrase_edit_keys = set(self.dialogue_phrase_edits)
         phrase_rows = [row for row in dialogue_rows
                        if row.objectName()[len("settingRow_dialogue_"):] in phrase_edit_keys]
@@ -1964,10 +1974,9 @@ class ModernSettingsDialog(QDialog):
             phrases_box.add_group("事件气泡文案", phrase_rows)
         phrases_box.set_expanded(False)
         self.dialogue_phrases_box = phrases_box
-        automation_layout = automation.layout()
         # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
         # 用现成的 CollapsibleGroup.add_group，不需要新造控件。
-        agent_box = CollapsibleGroup("Agent 联动", automation)
+        agent_box = CollapsibleGroup("Agent 联动", self)
         agent_cost_rows = [
             SettingRow("agent_cost", "显示本轮消费",
                        "Agent 每轮结束时查询一次余额，与开始时的余额相减得出本轮消费。"
@@ -1984,33 +1993,26 @@ class ModernSettingsDialog(QDialog):
         # dialogue_* 里的全局风格控件（表达风格、专属文案对象、弹窗文案模板 JSON）
         # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
         # leftovers），若不显式放回本域就会从设置页里彻底消失。
-        # 顶层顺序：「文案风格与模板」（全局风格控件）在前，自定义台词折叠框随后。
-        insert_at = 0
-        if ungated_dialogue_rows:
-            automation_layout.insertWidget(
-                insert_at,
-                SettingsSection("文案风格与模板", ungated_dialogue_rows, automation),
-            )
-            insert_at += 1
-        automation_layout.insertWidget(insert_at, phrases_box)
-        # 顶层顺序：消费统计 → Agent 联动 → 文案风格 → 自定义台词。
-        # 「消费统计」独立成一级分组且排最前（直接可见，不藏在折叠框里）。
-        # 必须在上面的插入全部做完之后再插，否则会被后来的 insertWidget(0, ...) 挤下去。
-        cost_section = SettingsSection("消费统计", agent_cost_rows, automation)
-        automation_layout.insertWidget(0, cost_section)
-        automation_layout.insertWidget(1, agent_box)
+        # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
+        automation = page_content(
+            [
+                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
+                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
+                ("免打扰", settings_quiet.build_quiet_rows(self)),
+                *proactive_sections,
+                ("消费统计", agent_cost_rows),
+                agent_box,
+                ("文案风格与模板", ungated_dialogue_rows),
+                phrases_box,
+            ]
+        )
 
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
         # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、
         # 碰撞音效 2 行回「桌宠」碰撞组；Agent 提示音效（agent_sound_*）留在
         # Agent 联动折叠框内不动。
-        voice = page_content(
-            [
-                ("语音报时", voice_chime_rows),
-                ("节日提醒", festival_rows),
-            ]
-        )
+        voice = page_content(voice_sections + festival_sections)
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。

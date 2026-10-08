@@ -1041,7 +1041,7 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
         all_rows = dialog.findChildren(SettingRow)
         chime_rows = [r for r in all_rows if r.objectName().startswith("settingRow_voice_chime_")]
         festival_rows = [r for r in all_rows if r.objectName().startswith("settingRow_festival")]
-        # 语音报时页实测 12 行（基础设置 3 + 语音 7 + 台词/歌词 2）：锁「整组都在、
+        # 语音报时页实测 12 行（3 + 4 + 5）、节日提醒 12 行（5 + 3 + 4）：锁「整组都在、
         # 一个不漏」，行本身不动，只是被域收集机制 reparent 进「语音」域。
         assert len(chime_rows) == 12, "语音报时整组 12 行都必须在「语音」域"
         assert len(festival_rows) == 12, "节日提醒 12 行整体移入「语音」域"
@@ -1055,7 +1055,16 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
             label.text()
             for label in voice_page.findChildren(settings_mod.QLabel, "sectionTitle")
         ]
-        assert section_titles == ["语音报时", "节日提醒"]
+        # 2026-10-08 设置页「按区直找」：两个页各自的旧分区不再被压平成单张卡片，
+        # 各自拆回同类小分组（组名带页名前缀），顺序与旧页一致。
+        assert section_titles == [
+            "语音报时 · 何时报",
+            "语音报时 · 用什么声音",
+            "语音报时 · 说什么",
+            "节日提醒 · 开关",
+            "节日提醒 · 时间",
+            "节日提醒 · 文案",
+        ]
 
         # 音效类三组都不在「语音」域（各自回原功能分组，行本身仍照常存在）。
         for setting_id in (
