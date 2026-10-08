@@ -32,6 +32,15 @@
   **合成完成却没起播**的结局（预合成、免打扰丢弃、合成失败、已停止）都没有
   EndOfMedia 媒体终止事件，正是靠这三拍里的另外两拍兜住：豁免的那条照常出声，
   尊重免打扰的那条被 ``_fire`` 的闸现读再丢一次。
+- **代次作废旧合成**：回调协议（path/text/error）没有任务身份，故每次起合成与
+  watchdog 释放时递增 ``_synthesis_generation``，worker 回调由闭包带回动身时的
+  代次（信号首参）。代次不符 = 超时自愈已把这次合成作废，``_on_synthesized``
+  整条丢弃、一个字段都不碰——否则旧任务的回调会取走**新任务**的 role / 免打扰
+  口径 / busy 锁，让该静音的旧语音出声、应豁免的新语音被静音。
+- **播放时刻重判接管**：合成期间别的音频可以合法起播（报时走缓存例外，不看占用），
+  所以 ``_handle_synthesized`` 的两个播放出口在**动手播放那一刻**再判一次
+  ``_player_engaged()``：被接管就不 ``setSource``，改为回队（报时回 ``_queued_fire``、
+  外部播报回 ``_pending_speech``），等下一拍按上面的不变量出队。
 """
 
 from __future__ import annotations
@@ -267,13 +276,23 @@ class _AudioBridge:
         from PySide6.QtCore import QObject, Signal
 
         class _Signals(QObject):
-            synthesized = Signal(str, str, str)  # path, text, error
+            # generation 在首位：合成的任务身份，迟到回调靠它作废（见 _on_synthesized）。
+            synthesized = Signal(int, str, str, str)  # generation, path, text, error
 
         self.signals = _Signals()
 
-    def on_synthesized(self, path: str, text: str, error: str) -> None:
-        # 从后台线程调用：Qt 自动 queued 到 GUI 线程
-        self.signals.synthesized.emit(path, text, error)
+    def callback_for(self, generation: int):
+        """给**这一次**合成做回调载体：闭包捕获动身时的代次。
+
+        返回的是 worker 认识的三参回调 ``(path, text, error)``——代次不进 worker
+        协议，而是由闭包在 emit 时补进信号的首参，从而跨线程带到 GUI 线程的槽里
+        （跨线程只有 queued 信号这一条路，代次必须随信号走，不能事后查表）。
+        """
+        def done(path: str, text: str, error: str) -> None:
+            # 从后台线程调用：Qt 自动 queued 到 GUI 线程
+            self.signals.synthesized.emit(generation, path, text, error)
+
+        return done
 
 
 class VoiceChimeService:
@@ -310,6 +329,13 @@ class VoiceChimeService:
         # 本次合成是否尊重免打扰（True = 免打扰期间丢弃结果）。与 _synthesis_role
         # 同生命周期：合成开始时置位、回调里消费后复位为默认值。
         self._synthesis_respect_quiet = True
+        # 本次合成的时间戳：只在"播放时刻通道被接管、报时项回队"时原样带回
+        # _queued_fire（气泡文本随队携带，该字段本身对播放无影响）。同生命周期。
+        self._synthesis_now: datetime | None = None
+        # 合成**代次**：每次起合成与 watchdog 释放时递增，worker 回调由闭包带回
+        # 动身时的代次——回调协议只有 path/text/error，没有任务身份，代次就是身份。
+        # 迟到的旧任务回调据此整条丢弃（见 _on_synthesized），不再串到新任务上。
+        self._synthesis_generation = 0
         # 预合成状态：目标槽位 / 语音文本 / 气泡文本 / 缓存文件（到点命中即零延迟播放）
         self._precache_slot: str | None = None
         self._precache_text: str | None = None
@@ -469,11 +495,14 @@ class VoiceChimeService:
     # ------------------------------------------------------------ 调度
     def _on_tick(self, now: datetime | None = None) -> None:
         now = now or datetime.now()
+        # 兜底自愈：合成线程若异常未回调，_busy 会永久置位（后续语音只能不断入队、
+        # 通道再也不出声）。tick 是 20s 周期的常驻入口，超时即复位。
+        # **必须在 enabled 判定之前**：报时开关关掉、只剩节日提醒 / 点击自言时
+        # 本服务照样在跑同一个通道（AppShell 的懒创建门控），那时 watchdog 若被
+        # enabled 短路掉，唯一的自愈入口就永远执行不到，通道永不恢复。
+        self._release_stale_busy()
         if not self._cfg.get("enabled"):
             return
-        # 兜底自愈：合成线程若异常未回调，_busy 会永久置位（报时静默无声）。
-        # tick 是 20s 周期的常驻入口，超时即复位，让后续报时/预合成恢复可用。
-        self._release_stale_busy()
         slot = chime_slot(now, self._cfg)
         if slot:
             if slot == self._last_slot:
@@ -551,16 +580,14 @@ class VoiceChimeService:
         self._busy = True
         self._busy_since = time.monotonic()
         self._synthesis_role = "precache"
-        if self._bridge is None:
-            self._bridge = _AudioBridge()
-            self._bridge.signals.synthesized.connect(self._on_synthesized)
+        generation = self._next_synthesis_generation()
         worker = _TTSWorker(
             sentence,
             self._cfg["voice"],
             edge_rate_arg(self._cfg["rate"]),
             edge_pitch_arg(self._cfg["pitch"]),
             out_path,
-            self._bridge.on_synthesized,
+            self._worker_callback(generation),
         )
         logger.info("预合成下一报时音频（%ds 后）：%s", next_secs, out_path.name)
         worker.start()
@@ -654,25 +681,53 @@ class VoiceChimeService:
         self._busy_since = time.monotonic()
         self._synthesis_role = role
         self._synthesis_respect_quiet = respect_quiet
+        self._synthesis_now = now
         self._pending_bubble = bubble if show_bubble else None
         # 本次合成有效：清掉上一次 stop() 留下的作废标记，
         # 否则新起的合成结果会被当成"迟到结果"丢弃。
         self._stopped = False
-        if self._bridge is None:
-            self._bridge = _AudioBridge()
-            self._bridge.signals.synthesized.connect(self._on_synthesized)
+        generation = self._next_synthesis_generation()
         worker = _TTSWorker(
             sentence,
             voice,
             edge_rate_arg(self._cfg["rate"]),
             edge_pitch_arg(self._cfg["pitch"]),
             out_path,
-            self._bridge.on_synthesized,
+            self._worker_callback(generation),
         )
         worker.start()
 
+    def _worker_callback(self, generation: int):
+        """取本次合成的 worker 回调（顺带保证信号桥已建好并接到本服务）。"""
+        if self._bridge is None:
+            self._bridge = _AudioBridge()
+            self._bridge.signals.synthesized.connect(self._on_synthesized)
+        return self._bridge.callback_for(generation)
+
+    def _next_synthesis_generation(self) -> int:
+        """递增合成代次并返回：起合成与 watchdog 释放各调用一次。
+
+        代次变了 = 此前那次合成已作废（结果不再属于当前任务），它的迟到回调会被
+        :meth:`_on_synthesized` 整条丢弃。
+        """
+        # getattr 守卫：object.__new__ 构造的测试替身没有 __init__ 属性
+        generation = getattr(self, "_synthesis_generation", 0) + 1
+        self._synthesis_generation = generation
+        return generation
+
     # ------------------------------------------------------------ 播放
-    def _on_synthesized(self, path: str, text: str, error: str) -> None:
+    def _on_synthesized(self, generation: int, path: str, text: str, error: str) -> None:
+        """合成完成回调（GUI 线程）。首参是**动身时的代次**，用来认领本次任务。
+
+        代次不一致 = 这次合成的结果已作废（超时自愈释放过、当前在跑的是别的一路）：
+        整条丢弃——一个字段都不碰。否则旧任务会取走**新任务**的 role /
+        respect_quiet 与 busy 锁：该被静音的旧提醒出声、应豁免的新语音被静音。
+        """
+        if generation != getattr(self, "_synthesis_generation", None):
+            logger.debug("丢弃已作废旧合成的迟到结果（代次 %s，当前 %s）：%s",
+                         generation, getattr(self, "_synthesis_generation", None),
+                         Path(path).name)
+            return
         role = self._synthesis_role
         self._synthesis_role = "play"
         respect_quiet = self._synthesis_respect_quiet
@@ -754,9 +809,24 @@ class VoiceChimeService:
             # 这次完成不起播 = 通道空出，待播 speech 由 _on_synthesized 的 finally
             # 统一出队（本次是其中之一，见那里）。此处不得再调一次：双出队路径。
             return
+        # 播放那一刻重判通道占用：合成期间别的音频可以合法地起播——报时经缓存
+        # 例外（_fire 的缓存命中路径不看占用），合成前判过的空闲早已不作数。此刻
+        # setSource+play 会把在播的那一段顶掉（它的音源被替换、永远等不到
+        # EndOfMedia）。改为回队，等下一拍按既有不变量（_channel_idle）出队。
         if role == "speak":
             # 外部播报（节日提醒）：只出声，气泡由调用方自己展示。
+            if self._player_engaged():
+                logger.debug("播放时刻通道已被占用，外部播报回队待播：%s", text[:20])
+                self._pending_speech = text
+                self._pending_respect_quiet = respect_quiet
+                return
             self._play_only(path)
+            return
+        if self._player_engaged():
+            logger.debug("播放时刻通道已被占用，报时回队待播：%s", text[:20])
+            # 原 tuple 各字段原样带回（now 见 _synthesis_now 的说明）。
+            self._queued_fire = (text, self._synthesis_now, self._pending_bubble,
+                                self._pending_bubble is not None, role, respect_quiet)
             return
         self._play_and_bubble(path, text, self._pending_bubble)
 
@@ -765,6 +835,10 @@ class VoiceChimeService:
 
         ``text`` 为语音口播文本（中文数字）；气泡优先用 ``bubble_text``
         （阿拉伯数字文本），未传时回退 ``text`（兼容旧调用与测试）。
+
+        **本方法不判通道占用**：它是"把这一段交给播放器"的执行末端，占用判定归
+        调用方（``_handle_synthesized`` 的播放出口、``_fire`` 的缓存命中路径）。
+        在这里加判据会变成静默不播，而回队的语义只能由调用方给。
         """
         if not self._ensure_player():
             self._bubble(f"播放器不可用，音频已缓存：{Path(path).name}")
@@ -786,6 +860,9 @@ class VoiceChimeService:
 
         返回是否成功起播；失败只记日志——外部的气泡/提示由调用方决定，
         这里再插一条报时风格的气泡会与对方的展示重复。
+
+        **本方法不判通道占用**（同 :meth:`_play_and_bubble`）：占用判定与"回队"
+        的语义都在调用方（``_handle_synthesized`` 的播放出口）。
         """
         if not self._ensure_player():
             logger.warning("播放器不可用，外部播报跳过播放：%s", Path(path).name)
@@ -997,6 +1074,10 @@ class VoiceChimeService:
         logger.warning("语音合成超时未回调，复位合成锁（%.0fs）", _SYNTH_TIMEOUT_S)
         self._busy = False
         self._synthesis_role = "play"
+        # 代次递增 = 这次挂死的合成从此作废：它若日后才回调（网络超时后返回），
+        # 回调带的旧代次会被 _on_synthesized 认出来并整条丢弃，不会串到随后起的
+        # 新任务上（取走新任务的 role / respect_quiet / busy 锁）。
+        self._next_synthesis_generation()
         # 合成锁复位后结算排队项：挂死的合成不会再来回调，到点报时靠这里补。
         # 两个队列同序结算（报时优先），判据在 drain 内部——这里是超时自愈这一拍，
         # 不结算待播语音就会让它永远没人出队（挂死的合成也不会再产生 END）。
