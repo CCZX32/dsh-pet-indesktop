@@ -79,8 +79,8 @@ D:\dsh-pet\
 │   ├── voice_chime_service.py    # ★ 语音报时服务层（835 行，tick + 合成 + 播放）
 │   ├── voice_chime_settings.py   # ★ 语音报时设置页（239 行）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（237 行，中文 120 / 英文 96 条）
-│   ├── context_menus\            # 右键菜单（registry.py 动作注册 + legacy/modern/fun_entry）
-│   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json 为默认模板）
+│   ├── context_menus\            # 右键菜单（registry.py 动作注册 + modern/fun_entry/shared）
+│   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json，唯一布局来源）
 │   ├── chat\                     # AI 对话子系统（Chat 版打包变体）
 │   └── persona_presets\          # 角色台词预设
 ├── scripts\                      # 构建/校验脚本（build_onedir.ps1、slim_bundle.py 等 19 个）
