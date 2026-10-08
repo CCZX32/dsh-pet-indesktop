@@ -30,8 +30,9 @@ QWidget#settingsTaskTabBar {
     border-radius: 8px;
 }
 QPushButton#settingsTaskTab {
-    min-height: 26px;
-    padding: 0 12px;
+    min-height: 32px;
+    padding: 0 16px;
+    font-size: 13px;
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -45,8 +46,20 @@ QPushButton#settingsTaskTab:checked {
     font-weight: 600;
 }
 QPushButton#settingsTaskTab:focus { border: 2px solid #0a84ff; }
+QPushButton#settingsPageAnchor {
+    min-height: 24px;
+    padding: 0 10px;
+    font-size: 12px;
+    background: #2e2e35;
+    border: 2px solid transparent;
+    border-radius: 12px;
+    color: #b8b8c0;
+}
+QPushButton#settingsPageAnchor:hover { background: #3a3a42; color: #f0f0f5; }
+QPushButton#settingsPageAnchor:focus { border-color: #0a84ff; }
 QLabel#pageTitle { color: #f0f0f5; }
 QLabel#sectionTitle { color: #d8d8e0; }
+QLabel#sectionDescription { color: #8e8e97; }
 QFrame#settingsCard { background: #2a2a30; border: 1px solid #3a3a42; }
 QFrame#cardSeparator { background: #33333a; }
 QLabel#settingLabel { color: #e0e0e6; }
@@ -192,8 +205,9 @@ QWidget#settingsTaskTabBar {
     border-radius: 8px;
 }
 QPushButton#settingsTaskTab {
-    min-height: 26px;
-    padding: 0 12px;
+    min-height: 32px;
+    padding: 0 16px;
+    font-size: 13px;
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -207,6 +221,17 @@ QPushButton#settingsTaskTab:checked {
     font-weight: 600;
 }
 QPushButton#settingsTaskTab:focus { border: 2px solid #0a84ff; }
+QPushButton#settingsPageAnchor {
+    min-height: 24px;
+    padding: 0 10px;
+    font-size: 12px;
+    background: #f0f1f3;
+    border: 2px solid transparent;
+    border-radius: 12px;
+    color: #4e5257;
+}
+QPushButton#settingsPageAnchor:hover { background: #e5e7ea; color: #202020; }
+QPushButton#settingsPageAnchor:focus { border-color: #0a84ff; }
 QListWidget#settingsSidebar::item:selected {
     background: #e3e5e8;
     color: #171717;
@@ -217,9 +242,14 @@ QLabel#pageTitle {
     color: #171717;
 }
 QLabel#sectionTitle {
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 600;
+    padding-top: 6px;
     color: #2b2b2b;
+}
+QLabel#sectionDescription {
+    font-size: 12px;
+    color: #8a8d93;
 }
 QFrame#settingsCard {
     background: #ffffff;

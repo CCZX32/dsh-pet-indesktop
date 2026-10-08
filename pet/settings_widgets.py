@@ -1246,8 +1246,18 @@ class SettingsDisclosureHeader(QPushButton):
     def _sync_chevron(self, expanded: bool) -> None:
         self.chevron.setText("⌄" if expanded else "›")
 
+def _section_description_label(text: str, parent: QWidget) -> QLabel:
+    """组标题下的一句人话（``sectionDescription``）：文案在调用方，这里只管呈现。"""
+    label = QLabel(str(text), parent)
+    label.setObjectName("sectionDescription")
+    label.setWordWrap(True)
+    label.setVisible(bool(text))
+    return label
+
+
 class SettingsSection(QWidget):
-    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False):
+    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False,
+                 description: str = ""):
         super().__init__(parent)
         self.advanced = advanced
         self.rows = list(rows)
@@ -1262,11 +1272,19 @@ class SettingsSection(QWidget):
             label = QLabel(title, self)
             label.setObjectName("sectionTitle")
             layout.addWidget(label)
+        # 描述是标题的兄弟而不是卡片的一部分：高级组收起时它照常看得见（否则
+        # 「这里是什么」要先展开才知道）。空串＝整条收起，与改动前逐位一致。
+        self.description_label = _section_description_label(description, self)
+        layout.addWidget(self.description_label)
         self.card = SettingsCard(rows, self)
         layout.addWidget(self.card)
         if self.toggle is not None:
             self.card.setVisible(False)
             self.toggle.toggled.connect(self._set_expanded)
+
+    def set_description(self, text: str) -> None:
+        self.description_label.setText(str(text))
+        self.description_label.setVisible(bool(text))
 
     def refresh_dependency_visibility(self) -> None:
         """Hide a section when every row is suppressed by a parent setting."""
@@ -1290,7 +1308,7 @@ class CollapsibleGroup(QWidget):
     既有视觉令牌与分隔线行为。
     """
 
-    def __init__(self, title: str, parent=None, *, expanded: bool = False):
+    def __init__(self, title: str, parent=None, *, expanded: bool = False, description: str = ""):
         super().__init__(parent)
         self.setObjectName("collapsibleGroup")
         layout = QVBoxLayout(self)
@@ -1298,6 +1316,9 @@ class CollapsibleGroup(QWidget):
         layout.setSpacing(7)
         self.toggle = SettingsDisclosureHeader(title, self)
         layout.addWidget(self.toggle)
+        # 与 SettingsSection 同口径：描述常驻在折叠头下面，收起时也看得见。
+        self.description_label = _section_description_label(description, self)
+        layout.addWidget(self.description_label)
         self.body = QWidget(self)
         self.body.setObjectName("collapsibleGroupBody")
         self.body_layout = QVBoxLayout(self.body)
@@ -1316,6 +1337,10 @@ class CollapsibleGroup(QWidget):
         self.groups.append(section)
         self.body_layout.addWidget(section)
         return section
+
+    def set_description(self, text: str) -> None:
+        self.description_label.setText(str(text))
+        self.description_label.setVisible(bool(text))
 
     def set_expanded(self, expanded: bool) -> None:
         self.toggle.setChecked(bool(expanded))
@@ -1348,6 +1373,9 @@ class _CurrentPageStack(QStackedWidget):
 
 class SettingsTabContainer(QWidget):
     """Keyboard-accessible in-page tabs for peer tasks within one domain."""
+
+    #: 当前标签变了（键，不是下标）：页内跳转条按当前标签重建自己要列的区。
+    currentKeyChanged = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1409,6 +1437,7 @@ class SettingsTabContainer(QWidget):
         self.stack.updateGeometry()
         self.stack.currentWidget().updateGeometry()
         self.updateGeometry()
+        self.currentKeyChanged.emit(self.currentKey())
 
     def setCurrentKey(self, key: str) -> None:  # noqa: N802
         if key in self._keys:

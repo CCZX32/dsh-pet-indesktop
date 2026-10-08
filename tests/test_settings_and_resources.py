@@ -303,7 +303,7 @@ def test_automation_domain_name_stays_stable(qapp, tmp_path):
         nav = _nav_item_indexes(dialog)
         assert "自动化与联动" in nav
         agent_page = dialog.pages.widget(nav["自动化与联动"])
-        # 非 Agent 组（待办提醒/主动感知/循环检测）仍保留：抽查关键 setting 行存在
+        # 非 Agent 组（待办提醒/主动识屏/免打扰）仍保留：抽查关键 setting 行存在
         for row_id in ("todo_reminder_enabled",):
             assert agent_page.findChild(SettingRow, f"settingRow_{row_id}") is not None
     finally:

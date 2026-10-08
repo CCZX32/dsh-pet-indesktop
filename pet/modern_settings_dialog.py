@@ -167,6 +167,7 @@ from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
 from . import settings_network
+from . import settings_page_guide
 from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
@@ -553,7 +554,7 @@ class ModernSettingsDialog(QDialog):
                     "后台服务",
                     [
                         SettingRow("balance_refresh", "余额自动刷新", "设置后台刷新间隔；0 分钟表示关闭。", self.balance_refresh_spin),
-                        SettingRow("balance_tier_mode", "峰谷提示文案", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
+                        SettingRow("balance_tier_mode", "高峰 / 空闲时段提示", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
                         SettingRow(
                             "balance_tier_peak", "高峰自定义文本", "仅“自定义”模式生效；留空回退默认“高峰”。", self.balance_tier_peak_edit, stacked=True
                         ),
@@ -584,9 +585,9 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_enabled", "启用灵动岛", "显示独立胶囊小窗；桌宠隐藏后仍可常驻。", self.island_enabled_check),
                     SettingRow("dynamic_island_icon", "显示图标", "在胶囊左侧显示角色图标。", self.island_icon_check),
                     SettingRow("dynamic_island_name", "显示名称", "显示当前角色名称。", self.island_name_check),
-                    SettingRow("dynamic_island_info", "显示信息槽", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
+                    SettingRow("dynamic_island_info", "显示中间信息栏", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
                     SettingRow("dynamic_island_status", "显示状态灯", "显示右侧状态圆点。", self.island_status_check),
-                    SettingRow("dynamic_island_info_mode", "信息槽内容", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
+                    SettingRow("dynamic_island_info_mode", "信息栏显示什么", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
                     SettingRow(
                         "dynamic_island_style",
                         "背景风格",
@@ -733,10 +734,10 @@ class ModernSettingsDialog(QDialog):
                         "多开桌宠之间发生碰撞物理互动。开启鼠标穿透的桌宠仍会参与碰撞，锁定位置的桌宠作为固定障碍。",
                         self.collision_enabled_check,
                     ),
-                    SettingRow("collision_restitution", "弹性系数", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
+                    SettingRow("collision_restitution", "撞后弹力", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
                     SettingRow("collision_friction", "摩擦系数", "擦边碰撞时的切向摩擦阻力（0~0.30，默认 0.08）。", self.collision_friction_spin),
-                    SettingRow("collision_mass_scale", "质量倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
-                    SettingRow("collision_impulse_cap", "冲量上限", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
+                    SettingRow("collision_mass_scale", "体重倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
+                    SettingRow("collision_impulse_cap", "最大撞击力度", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
                     SettingRow("collision_sound_enabled", "碰撞音效", "碰撞时播放音效反馈。", self.collision_sound_check),
                     SettingRow("collision_sound_volume", "碰撞音量", "调整碰撞音效播放音量。", self.collision_sound_volume_spin),
                 ],
@@ -752,7 +753,7 @@ class ModernSettingsDialog(QDialog):
         # 行数预算原因；组名与顺序的既有契约见 tests/test_menu_layout.py）。
         # Agent 联动：音效设置
         agent_sound_rows = [
-            SettingRow("agent_sound_enabled", "Agent 音效联动", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
+            SettingRow("agent_sound_enabled", "AI 编程助手提示音", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
             SettingRow("agent_sound_start", "开始工作提示音", "Agent 进入工作状态时播放。", self.agent_sound_start_widget, stacked=True),
             SettingRow("agent_sound_done", "任务完成提示音", "Agent 完成任务时播放。", self.agent_sound_done_widget, stacked=True),
             SettingRow("agent_sound_error", "发生错误提示音", "Agent 出现错误异常时播放。", self.agent_sound_error_widget, stacked=True),
@@ -934,7 +935,7 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "内容与布局",
                 [
-                    SettingRow("menu_template", "菜单模式", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
+                    SettingRow("menu_template", "菜单版本（新版 / 旧版）", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
                     SettingRow("context_menu_layout", "菜单编排", "调整显示、顺序和层级；左侧编辑，右侧同步预览。", self.menu_layout_editor, stacked=True),
                 ],
                 menu_content,
@@ -1248,7 +1249,7 @@ class ModernSettingsDialog(QDialog):
                         "她会偶尔看一眼你在用的软件并说句话。截图只在内存处理、不落盘、不写入会话。",
                         self.pro_enabled_check,
                     ),
-                    SettingRow("proactive_dry_run", "dry-run 验证模式", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
+                    SettingRow("proactive_dry_run", "试运行（只记日志、不花钱）", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
                     SettingRow(
                         "proactive_preset",
                         "陪伴节奏预设",
@@ -1263,9 +1264,9 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "频率参数（自定义预设时生效）",
                 [
-                    SettingRow("proactive_dwell", "窗口停留门限（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
-                    SettingRow("proactive_cooldown", "关怀冷却间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
-                    SettingRow("proactive_min_interval", "最小请求间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
+                    SettingRow("proactive_dwell", "在同一窗口停多久才看（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
+                    SettingRow("proactive_cooldown", "两次搭话至少间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
+                    SettingRow("proactive_min_interval", "两次识屏最短间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
                     SettingRow("proactive_daily_cap", "每日请求上限", "DeepSeek 视觉单次约 ¥0.003；上限 9999 约等于不限。", self.pro_cap_spin),
                 ],
                 content,
@@ -1281,7 +1282,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("proactive_pre_cue", "触发前先兆提示", "触发前先冒一句「让我看看……」。", self.pro_precue_check),
                     SettingRow(
                         "proactive_free",
-                        "识屏优先用独立视觉配置",
+                        "识屏用单独的看图模型",
                         "开：服务商配了独立视觉端点（如免费的智谱 GLM-4.6V-Flash）时识屏走它；关：始终跟随聊天模型。",
                         self.pro_free_check,
                     ),
@@ -1301,7 +1302,7 @@ class ModernSettingsDialog(QDialog):
                         stacked=True,
                     ),
                     SettingRow("proactive_whitelist_add", "快捷添加", "点击后 3 秒内切换到目标窗口，自动采样进程名/标题。", self.pro_add_btn),
-                    SettingRow("proactive_memory_clear", "陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
+                    SettingRow("proactive_memory_clear", "清空陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
                 ],
                 content,
             )
@@ -1751,6 +1752,9 @@ class ModernSettingsDialog(QDialog):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(18)
             for section in sections:
+                if isinstance(section, QWidget):  # 已构造好的块（折叠框等）原样进布局
+                    layout.addWidget(section)
+                    continue
                 title, rows, *options = section
                 rows = [row for row in rows if row is not None]
                 if rows:
@@ -1867,7 +1871,7 @@ class ModernSettingsDialog(QDialog):
             ),
         )
         menu.setProperty("contentMaxWidth", 1240)
-        island_rows = list(old_pages.get("灵动岛", QWidget()).findChildren(SettingRow))
+        island_rows = settings_page_guide.rows_in_layout_order(old_pages.get("灵动岛", QWidget()))  # 布局顺序，不是创建顺序
         claimed.update(island_rows)
         # 网络延迟检测（高级）只能在**最终域装配处**拆：旧岛页整节会被摊平进同一个
         # 「桌面胶囊（灵动岛）」卡片（R2 §一-2）。只拆探测间隔行，其余岛行不动。
@@ -1935,26 +1939,32 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.setParent(self)
             self.ai_page.hide()
 
-        proactive_rows = list(old_pages.get("主动识屏", QWidget()).findChildren(SettingRow))
-        claimed.update(proactive_rows)
-        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
-        claimed.update(voice_chime_rows)
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        # 「主动识屏」「语音报时」「节日提醒」的旧页分区在域装配时被压平成单张卡片，这里按行键重组（行键以代码实际为准，顺序同旧页）。
+        proactive_sections = [
+            ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_preset")),
+            ("主动识屏 · 什么时候看", claim("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
+            ("主动识屏 · 看哪些软件", claim("proactive_whitelist", "proactive_whitelist_add", "proactive_memory_clear")),
+            ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
+                                       "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
+        ]
+        voice_sections = [
+            ("语音报时 · 何时报", claim("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times")),
+            ("语音报时 · 用什么声音", claim("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume")),
+            ("语音报时 · 说什么", claim("voice_chime_show_bubble", "voice_chime_show_quote", "voice_chime_custom_quotes_zh",
+                                   "voice_chime_custom_quotes_en", "voice_chime_preview")),
+        ]
+        festival_sections = [
+            ("节日提醒 · 开关", claim("festival_reminder_enabled", "festival_reminder_cn", "festival_reminder_solar_terms",
+                                  "festival_reminder_west", "festival_reminder_speak")),
+            ("节日提醒 · 时间", claim("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times")),
+            ("节日提醒 · 文案", claim("festival_reminder_show_quote", "festival_custom_quotes_cn", "festival_custom_quotes_west", "festival_preview")),
+        ]
         dialogue_rows = claim_prefix("dialogue_")
-        automation = page_content(
-            [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
-                ("主动感知", proactive_rows),
-                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
-                ("免打扰", settings_quiet.build_quiet_rows(self)),
-            ]
-        )
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
         # （见 _search_settings）。全局风格控件（表达风格/专属文案对象/模板 JSON）
         # 不是事件文案，单独放「文案风格与模板」小节。
-        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", automation)
+        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", self)
         phrase_edit_keys = set(self.dialogue_phrase_edits)
         phrase_rows = [row for row in dialogue_rows
                        if row.objectName()[len("settingRow_dialogue_"):] in phrase_edit_keys]
@@ -1964,10 +1974,9 @@ class ModernSettingsDialog(QDialog):
             phrases_box.add_group("事件气泡文案", phrase_rows)
         phrases_box.set_expanded(False)
         self.dialogue_phrases_box = phrases_box
-        automation_layout = automation.layout()
         # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
         # 用现成的 CollapsibleGroup.add_group，不需要新造控件。
-        agent_box = CollapsibleGroup("Agent 联动", automation)
+        agent_box = CollapsibleGroup("Agent 联动", self)
         agent_cost_rows = [
             SettingRow("agent_cost", "显示本轮消费",
                        "Agent 每轮结束时查询一次余额，与开始时的余额相减得出本轮消费。"
@@ -1984,33 +1993,26 @@ class ModernSettingsDialog(QDialog):
         # dialogue_* 里的全局风格控件（表达风格、专属文案对象、弹窗文案模板 JSON）
         # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
         # leftovers），若不显式放回本域就会从设置页里彻底消失。
-        # 顶层顺序：「文案风格与模板」（全局风格控件）在前，自定义台词折叠框随后。
-        insert_at = 0
-        if ungated_dialogue_rows:
-            automation_layout.insertWidget(
-                insert_at,
-                SettingsSection("文案风格与模板", ungated_dialogue_rows, automation),
-            )
-            insert_at += 1
-        automation_layout.insertWidget(insert_at, phrases_box)
-        # 顶层顺序：消费统计 → Agent 联动 → 文案风格 → 自定义台词。
-        # 「消费统计」独立成一级分组且排最前（直接可见，不藏在折叠框里）。
-        # 必须在上面的插入全部做完之后再插，否则会被后来的 insertWidget(0, ...) 挤下去。
-        cost_section = SettingsSection("消费统计", agent_cost_rows, automation)
-        automation_layout.insertWidget(0, cost_section)
-        automation_layout.insertWidget(1, agent_box)
+        # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
+        automation = page_content(
+            [
+                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
+                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
+                ("免打扰", settings_quiet.build_quiet_rows(self)),
+                *proactive_sections,
+                ("消费统计", agent_cost_rows),
+                agent_box,
+                ("文案风格与模板", ungated_dialogue_rows),
+                phrases_box,
+            ]
+        )
 
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
         # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、
         # 碰撞音效 2 行回「桌宠」碰撞组；Agent 提示音效（agent_sound_*）留在
         # Agent 联动折叠框内不动。
-        voice = page_content(
-            [
-                ("语音报时", voice_chime_rows),
-                ("节日提醒", festival_rows),
-            ]
-        )
+        voice = page_content(voice_sections + festival_sections)
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -2044,6 +2046,8 @@ class ModernSettingsDialog(QDialog):
             self._add_page(label, icon, self._page_shell(label, content))
         for page in old_pages.values():
             page.deleteLater()
+        # 域页全部装好之后再装「按区直找」：页头跳转条 + 每个分区的组描述。
+        settings_page_guide.install(self)
 
     def _clear_search_matches(self) -> None:
         for row in self._search_rows:
