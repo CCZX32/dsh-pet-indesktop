@@ -828,7 +828,6 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
         on_show_balance = lambda self, parent=None: None
         on_check_update = lambda self, parent=None: None
         on_open_chat_settings = lambda self: None
-        on_open_legacy_settings = lambda self: None
         on_open_modern_settings = lambda self: None
         on_spawn_pet = lambda self: None
         idles = ["待机"]
@@ -930,7 +929,6 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
         cfg = FakeConfig()
         on_open_chat = None
         on_open_chat_settings = None
-        on_open_legacy_settings = None
         on_open_modern_settings = None
         on_spawn_pet = None
         idles = turns = moves = clicks = acts = []

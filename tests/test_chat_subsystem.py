@@ -752,7 +752,6 @@ def test_single_modern_menu_routes_to_selected_chat_dispatcher():
         def __init__(self):
             self.calls = []
             self.on_open_chat = lambda: self.calls.append("selected")
-            self.on_open_modern_chat = lambda: self.calls.append("unexpected")
 
         def __getattr__(self, _name):
             return lambda *_args, **_kwargs: None
