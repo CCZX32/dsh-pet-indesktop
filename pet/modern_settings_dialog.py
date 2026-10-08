@@ -587,7 +587,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_name", "显示名称", "显示当前角色名称。", self.island_name_check),
                     SettingRow("dynamic_island_info", "显示中间信息栏", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
                     SettingRow("dynamic_island_status", "显示状态灯", "显示右侧状态圆点。", self.island_status_check),
-                    SettingRow("dynamic_island_info_mode", "信息栏显示什么", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
+                    SettingRow("dynamic_island_info_mode", "信息栏显示什么", "选择信息栏显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
                     SettingRow(
                         "dynamic_island_style",
                         "背景风格",
@@ -598,7 +598,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_accent", "主题色", "图标底圈、事件闪光、停靠描边共用的点缀色。", self.island_accent_select),
                     SettingRow("dynamic_island_icon_value", "图标", "默认显示鱼本体头像；可选 emoji 图标，首次绘制会多占约 30MB 内存。", self.island_icon_select),
                     SettingRow(
-                        "dynamic_island_custom_text", "自定义短文本", "信息槽选择“自定义短文本”时显示的内容。", self.island_custom_text_edit, stacked=True
+                        "dynamic_island_custom_text", "自定义短文本", "信息栏选择“自定义短文本”时显示的内容。", self.island_custom_text_edit, stacked=True
                     ),
                     SettingRow(
                         "dynamic_island_click_action",

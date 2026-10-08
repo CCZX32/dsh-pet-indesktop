@@ -117,11 +117,13 @@ SECTION_GUIDE: dict[str, str] = {
     # 常规
     "应用启动": "开机后要不要自动把桌宠叫起来。",
     "窗口与系统": "它压在别的窗口上面还是能被盖住，全屏玩游戏时让不让位。",
-    "启动项（高级）": "开机时顺手把 dsh 服务拉起来；不装它也能用。",
+    "启动项（高级）": "随桌宠启动（不是开机）时顺手把 dsh 服务拉起来；可以只起服务，也可以连界面一起打开。",
     # 桌宠
     "显示": "桌宠和它的气泡显示多大、多透明。",
     "音乐关联": "听到音乐就唱歌、显示歌词；按你在用的播放器挑对应开关。",
     "播放器路径与标题格式（高级）": "播放器装在哪儿、歌名从哪儿取。默认值对大多数人是好的。",
+    # 非 Windows 上不存在「标题格式」行，组名跟着退化（见 settings_music）。
+    "播放器路径（高级）": "播放器装在哪儿。默认值对大多数人是好的。",
     "动画与移动": "动作播放多快、待机时自己走动还是原地待着。",
     "拖拽与弹射": "拖它、甩它、把它弹出去时的手感。",
     "边缘探头": "拖到屏幕边上，它会探出身子看一眼再缩回去。",
@@ -141,22 +143,23 @@ SECTION_GUIDE: dict[str, str] = {
     "彩蛋入口": "菜单里那个小彩蛋，以及它弹出来的图和话。",
     # 桌面组件
     "桌面胶囊（灵动岛）": "屏幕边上那条小胶囊：显示什么、点它做什么、怎么收起来。",
-    "网络延迟检测（高级）": "胶囊里的网速数字多久刷新一次。",
+    "网络延迟检测（高级）": "胶囊多久测一次网络延迟（开了「网络」这条信息才有用）；速率监测不产生额外流量，和这一项无关。",
     # AI 与对话
     "API 列表": "你配过的服务商清单，在这里增删和切换。",
     "模型与连接": "当前用哪家、哪个模型、密钥填什么、人设提示词写什么。",
-    "系统通知": "桌宠不在桌面上的时候，把消息交给系统通知。",
+    "系统通知": "你没在看聊天窗时（切去干别的），回复和失败会弹到桌面右下角；点一下跳回聊天窗。",
     "视觉能力": "看图的活儿交给谁：跟聊天用同一家，还是单独配一个。",
     "生成参数（高级）": "等待上限、随机程度、回复长度这些底层旋钮。",
     "对话窗口": "聊天窗的配色、背景图和透明度。",
     "余额与服务状态": "余额多久刷一次，以及高峰、空闲时段各显示什么话。",
     # 自动化与联动
-    "待办提醒": "编程助手干完活时，提醒你还有哪些待办没做完。",
-    "免打扰": "什么情况下一律不出声，比如全屏看片、开会的时候。",
+    "待办提醒": "到点了提醒你该做什么；待办条目在右键菜单「待办提醒」面板里增删改。",
+    "免打扰": "开启后普通提醒先攒着，退出免打扰时统一汇报；审批、报错这类要你回应的提示照常冒出来。",
     "主动识屏 · 开关与节奏": "它偶尔看看你正在用的软件，说句话。截图不保存。",
-    "主动识屏 · 什么时候看": "什么时候才看：要你先闲置、鼠标穿过去时还算不算数。",
+    "主动识屏 · 什么时候看": "什么时候才看：要不要先闲置才看，以及桌宠处于鼠标穿透状态时算不算数。",
     "主动识屏 · 看哪些软件": "只看你点名的软件；看过留下的痕迹随时能清掉。",
-    "主动识屏 · 细调（高级）": "看得多勤、多久搭一次话、一天最多看几次，以及不花钱的试运行。",
+    "主动识屏 · 细调（高级）": "看得多勤、多久搭一次话、一天最多看几次，以及不花钱的试运行。"
+                        "预设选「自定义参数」时这些参数才生效；手动改参数保存后会自动落成自定义预设。",
     "消费统计": "每一轮结束时报一报这轮花了多少钱。",
     "Agent 联动": "编程助手开始干活、干完活、出错时的提示音。",
     "提示音效": "三种时机各用哪段声音、多大声、多久内不重复。",
@@ -176,7 +179,12 @@ SECTION_GUIDE: dict[str, str] = {
 
 
 def apply_descriptions(root) -> None:
-    """把 ``SECTION_GUIDE`` 注入每个分区 / 折叠框（标题做键，缺项留空）。"""
+    """把 ``SECTION_GUIDE`` 注入 ``root``（一个域页的滚动内容）里的分区 / 折叠框。
+
+    ``root`` 是域页 ``settingsScroll`` 的 widget，不是整个对话框：域装配末尾旧的散页
+    已被 ``deleteLater``，整框遍历会顺手碰这些待销毁的壳（无害，但没有一处需要它们）。
+    标题做键，缺项留空。
+    """
     for section in root.findChildren(SettingsSection):
         section.set_description(SECTION_GUIDE.get(section_title(section), ""))
     for box in root.findChildren(CollapsibleGroup):
@@ -313,9 +321,16 @@ class _SettingsAnchorBar(QWidget):
         else:
             return
         # 展开把下面所有块都推下去了：先把布局算一遍再取 y，否则量到的是旧位置。
-        layout = self._scroll.widget().layout()
+        content = self._scroll.widget()
+        layout = content.layout()
         if layout is not None:
             layout.activate()
+        # 只 activate 布局还不够：它按内容**旧的**高度重排，量出来的 y 落在半更新的
+        # 布局上（实测页尾目标少算 74px，滚过去仍差那么多）；滚动范围也要等内容真的
+        # resize 才更新，否则 setValue 会被旧 maximum 截住。adjustSize() 让内容按新
+        # sizeHint 真 resize，布局与滚动范围一次到位——同步、不需要定时器，
+        # 也就没有「延后一拍时目标已被销毁」的悬空问题。
+        content.adjustSize()
 
     # ---------------------------------------------------------------- 跟手
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
@@ -327,14 +342,16 @@ class _SettingsAnchorBar(QWidget):
 def install(dialog) -> None:
     """给每个设置域页装跳转条、给每个分区注入描述（域装配末尾调一次）。
 
-    没有 ``pageHeader`` / ``settingsScroll`` 的页（如「更新」的命令面板）自然跳过：
-    那不是设置表单，没有「区」可直达。
+    没有 ``settingsScroll`` 的页（如「更新」的命令面板）自然跳过：那不是设置表单，
+    没有「区」可直达，也没有分区要写描述。
     """
-    apply_descriptions(dialog)
     for index in range(dialog.pages.count()):
         page = dialog.pages.widget(index)
-        heading_host = getattr(page, "heading_host", None)
         scroll = page.findChild(QScrollArea, "settingsScroll")
-        if heading_host is None or scroll is None:
+        if scroll is None:
+            continue
+        apply_descriptions(scroll.widget())
+        heading_host = getattr(page, "heading_host", None)
+        if heading_host is None:
             continue
         _SettingsAnchorBar(heading_host, scroll)

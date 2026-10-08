@@ -163,9 +163,15 @@ recovery
 3. **布局与可访问性**：720×500 最小窗口下 chip 不越界（超宽自动换行，实测两行）、组描述不纵向裁切；
    chip 可 Tab 聚焦，accessibleName 为「跳到「X」分区」；主文件行数预算按实测从 2495 校准到 2497
    （只在装配处加了 import 与 `install(self)` 接线，主体全在新模块）。
-4. **跨平台**：无平台分支（分区遍历、跳转条、描述是同一条 Qt 代码路径）；真实 GUI 验收仅本机 Windows
+4. **跨平台**：产品代码无新平台分支（分区遍历、跳转条、描述是同一条 Qt 代码路径），但
+   **测试按平台条件分叉**：主动识屏整页与 foobar / 浏览器媒体两行只在 Windows 构造
+   （`settings_pet_controls` 的平台闸门），依赖它们的用例改为「按被测对话框实际构造结果
+   驱动」（有则验、无则跳过或换一个三平台都有的等效目标），组描述覆盖率与「无过期键」守卫
+   只对本平台实际存在的组校验。Ubuntu / macOS 会碰到的平台差异已在
+   `sys.platform = "linux"` 的模拟构造（`import pet` 前打补丁，跑真实
+   `ModernSettingsDialog`）与同一补丁下的聚焦 pytest 里逐条跑过；真实 GUI 验收仅本机 Windows
    ——`windows` 平台插件实测 sectionTitle 15px/600、sectionDescription 12px `#8a8d93`、任务标签高 34px、
-   chip 84×28 且实际渲染底色 `#f0f1f3`（证明 QSS 令牌生效）；macOS / Linux 未跑（不推断）。
+   chip 84×28 且实际渲染底色 `#f0f1f3`（证明 QSS 令牌生效）；macOS 真实机未跑（不推断）。
 5. **视觉与文档**：本记录即变更记录；代表性截图在 `.scratch/settings-ux-polish/`（本刀为呈现层改动，
    截图仅供人工复核，未做像素级比对）；未改 Shared UX Contract / Settings System / Menu Action Model，
    `CONTEXT.md` 无需更新。

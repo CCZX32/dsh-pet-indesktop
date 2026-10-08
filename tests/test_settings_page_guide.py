@@ -24,8 +24,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
+import pytest
+
 import pet.modern_settings_dialog as settings_mod
-from pet import settings_page_guide
+from pet import settings_music, settings_page_guide
 from pet.config import Config
 from pet.modern_settings_dialog import ModernSettingsDialog, SettingRow, SettingsSection
 from pet.settings_widgets import CollapsibleGroup, SettingsTabContainer
@@ -46,6 +48,17 @@ _AUTOMATION_ORDER = [
     "box:自定义台词（逐事件文案）",
 ]
 
+#: 同上，去掉主动识屏四组：这四组只在 Windows 构造（``settings_pet_controls`` 的
+#: 平台闸门），非 Windows 的装配表里根本没有它们。
+_AUTOMATION_ORDER_WITHOUT_PROACTIVE = [
+    "待办提醒",
+    "免打扰",
+    "消费统计",
+    "box:Agent 联动",
+    "文案风格与模板",
+    "box:自定义台词（逐事件文案）",
+]
+
 #: 「主动识屏」四组 → 行键（顺序即组内呈现顺序）。
 _PROACTIVE_GROUPS = (
     ("主动识屏 · 开关与节奏", ("proactive_enabled", "proactive_preset")),
@@ -57,6 +70,20 @@ _PROACTIVE_GROUPS = (
      ("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
       "proactive_min_interval", "proactive_daily_cap", "proactive_free")),
 )
+_PROACTIVE_TITLES = frozenset(title for title, _keys in _PROACTIVE_GROUPS)
+
+
+def _has_proactive(dialog) -> bool:
+    """本对话框有没有构造出主动识屏控件。
+
+    平台差异不写死在测试里（不判 ``sys.platform``），由**被测对话框的实际构造结果**
+    回答：产品哪天改成别的平台也建，这些用例自动跟着跑。
+    """
+    return hasattr(dialog, "pro_enabled_check")
+
+
+def _expected_automation_order(dialog) -> list[str]:
+    return _AUTOMATION_ORDER if _has_proactive(dialog) else _AUTOMATION_ORDER_WITHOUT_PROACTIVE
 
 
 def _dialog(tmp_path, monkeypatch, *, include_ai: bool = True):
@@ -173,6 +200,8 @@ def test_proactive_rows_are_split_back_into_four_groups(tmp_path, monkeypatch):
     """15 行拆成 4 组（开关与节奏 / 什么时候看 / 看哪些软件 / 细调（高级）），一个不漏。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
+        if not _has_proactive(dialog):
+            pytest.skip("主动识屏控件只在 Windows 构造（settings_pet_controls 的平台闸门）")
         titles = [title for title, _rows in settings_page_guide.sections_in_layout_order(
             _content(dialog, "自动化与联动"))]
         for title, _keys in _PROACTIVE_GROUPS:
@@ -204,7 +233,7 @@ def test_automation_domain_top_level_order_is_the_assembly_table(tmp_path, monke
     """顶层顺序 = 装配表顺序；「消费统计」不再靠 insertWidget 倒插到最前面。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
-        assert _top_level_titles(_content(dialog, "自动化与联动")) == _AUTOMATION_ORDER
+        assert _top_level_titles(_content(dialog, "自动化与联动")) == _expected_automation_order(dialog)
         # 折叠框仍在表里、默认收起（口径未变）。
         assert dialog.agent_link_box.is_expanded() is False
         assert dialog.dialogue_phrases_box.is_expanded() is False
@@ -409,28 +438,72 @@ def test_clicking_a_chip_top_aligns_the_section(tmp_path, monkeypatch):
         dialog.close()
 
 
+def _advanced_group_targets(dialog) -> list[tuple[str, str | None, str]]:
+    """「默认收起的高级组」目标：``(域, 标签键, 组标题)``。
+
+    桌宠域的「碰撞参数（高级）」三平台都有，是本用例的常驻路径；主动识屏的细调组只在
+    Windows 构造（``settings_pet_controls`` 的平台闸门），有就一并验——展开后滚动
+    是同一条代码路径，覆盖不削弱。
+    """
+    targets = [("桌宠", "motion_collision", "碰撞参数（高级）")]
+    if _has_proactive(dialog):
+        targets.append(("自动化与联动", None, "主动识屏 · 细调（高级）"))
+    return targets
+
+
 def test_clicking_a_chip_expands_a_collapsed_group_first(tmp_path, monkeypatch):
     """目标是高级组 / 折叠框时先展开再滚（口径同搜索命中），否则滚过去是一片空白。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         dialog.resize(900, 700)
         dialog.show()
-        dialog.pro_enabled_check.setChecked(True)  # 主动识屏细项要总开关打开才可见
         app.processEvents()
         _page_widget, bar = _select(dialog, "自动化与联动")
 
-        detail = _section(dialog, "自动化与联动", "主动识屏 · 细调（高级）")
-        assert detail.card.isHidden() is True, "高级组默认收起"
-        next(chip for chip in _chips(bar) if chip.text() == "主动识屏 · 细调（高级）").click()
-        app.processEvents()
-        assert detail.toggle.isChecked() is True
-        assert detail.card.isHidden() is False, "跳过去之后参数必须真的看得见"
-
+        # 折叠框（三平台都有这条路径）。
         assert dialog.agent_link_box.is_expanded() is False
         next(chip for chip in _chips(bar) if chip.text() == "Agent 联动").click()
         app.processEvents()
         assert dialog.agent_link_box.is_expanded() is True
         assert dialog.agent_link_box.body.isHidden() is False
+
+        if _has_proactive(dialog):
+            dialog.pro_enabled_check.setChecked(True)  # 主动识屏细项要总开关打开才可见
+            app.processEvents()
+        for domain, tab_key, title in _advanced_group_targets(dialog):
+            _page_widget, bar = _select(dialog, domain)
+            detail = _section(dialog, domain, title, tab_key)
+            assert detail.card.isHidden() is True, "高级组默认收起"
+            next(chip for chip in _chips(bar) if chip.text() == title).click()
+            app.processEvents()
+            assert detail.toggle.isChecked() is True
+            assert detail.card.isHidden() is False, "跳过去之后参数必须真的看得见"
+    finally:
+        dialog.close()
+
+
+def test_clicking_a_chip_top_aligns_a_collapsed_group_in_one_click(tmp_path, monkeypatch):
+    """收起的高级组：**一次**点击就要顶对齐（展开后布局与滚动范围都得先落定）。
+
+    回归：展开只 ``activate()`` 布局时，量到的 y 落在半更新的布局上、滚动范围也还是
+    旧的——第一次点击滚不到位（实测页尾目标差 74px），要再点一次才对。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(720, 500)
+        dialog.show()
+        app.processEvents()
+        _page_widget, bar = _select(dialog, "AI 与对话")
+        scroll = _page(dialog, "AI 与对话").findChild(QScrollArea, "settingsScroll")
+        target = _section(dialog, "AI 与对话", "生成参数（高级）")
+        assert target.card.isHidden() is True, "高级组默认收起"
+        assert scroll.verticalScrollBar().maximum() > 0, "内容不够长，测不出滚动"
+
+        next(chip for chip in _chips(bar) if chip.text() == "生成参数（高级）").click()
+        app.processEvents()
+        expected = target.mapTo(scroll.widget(), QPoint(0, 0)).y() - 8
+        assert scroll.verticalScrollBar().value() == max(0, expected)
+        assert target.mapTo(scroll.viewport(), QPoint(0, 0)).y() == 8
     finally:
         dialog.close()
 
@@ -439,6 +512,8 @@ def test_chip_follows_its_group_being_hidden_by_a_dependency(tmp_path, monkeypat
     """整组被前置开关藏起来时，它的 chip 一起藏（不留在页头当死链）。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
+        if not _has_proactive(dialog):
+            pytest.skip("主动识屏控件只在 Windows 构造（settings_pet_controls 的平台闸门）")
         dialog.resize(900, 700)
         dialog.show()
         app.processEvents()
@@ -474,7 +549,7 @@ def test_anchor_bar_rebuilds_when_the_in_page_tab_changes(tmp_path, monkeypatch)
 
         assert tabs.currentKey() == "display_music"
         assert [chip.text() for chip in _chips(bar)] == [
-            "显示", "音乐关联", "播放器路径与标题格式（高级）"]
+            "显示", "音乐关联", settings_music.advanced_group_title(dialog)]
         assert bar.isHidden() is True, "「显示与音乐」只有 3 个区"
 
         tabs.setCurrentKey("motion_collision")
@@ -517,6 +592,23 @@ def test_anchor_bar_and_descriptions_fit_the_compact_window(tmp_path, monkeypatc
 
 
 # ------------------------------------------------------------------------- 组描述
+def _titles_absent_on_this_platform(dialog) -> set[str]:
+    """本平台**不可能出现**的组标题（``SECTION_GUIDE`` 里的这些键不算过期）。
+
+    两处平台闸门，都由实际构造结果回答：
+
+    - 主动识屏整页只在 Windows 构造 ⇒ 它的四组在本平台不存在；
+    - 播放器高级组在「标题格式」行不存在时退化成不提标题格式的组名
+      （``settings_music.advanced_group_title``），另一个组名才是本平台的。
+    """
+    absent = set()
+    if not _has_proactive(dialog):
+        absent |= _PROACTIVE_TITLES
+    player_titles = {settings_music.PLAYER_GROUP_TITLE, settings_music.PLAYER_GROUP_TITLE_NO_FOOBAR}
+    absent |= player_titles - {settings_music.advanced_group_title(dialog)}
+    return absent
+
+
 def test_every_group_has_a_description(tmp_path, monkeypatch):
     """覆盖率守卫：每个可见组都必须有一句描述（新增组漏写 = 红）。"""
     dialog = _dialog(tmp_path, monkeypatch)
@@ -530,11 +622,16 @@ def test_every_group_has_a_description(tmp_path, monkeypatch):
 
 
 def test_section_guide_has_no_stale_entries(tmp_path, monkeypatch):
-    """字典不许腐烂：每个键都得对上一个真实存在的组。"""
+    """字典不许腐烂：每个键都得对上一个真实存在的组。
+
+    本平台按产品闸门不可能存在的组（见 ``_titles_absent_on_this_platform``）不算过期，
+    但这些键本身仍受另一条 CI 腿盯着——Windows 上它们必须全都对得上。
+    """
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         titles = {title for title, _widget in _all_groups(dialog)}
-        stale = sorted(set(settings_page_guide.SECTION_GUIDE) - titles)
+        stale = sorted(
+            set(settings_page_guide.SECTION_GUIDE) - titles - _titles_absent_on_this_platform(dialog))
         assert not stale, f"这些描述的组已经不存在了（请同步删除）：{stale}"
     finally:
         dialog.close()
@@ -588,6 +685,11 @@ REWRITTEN_ROW_TITLES = {
     "agent_sound_enabled": "AI 编程助手提示音",
 }
 
+#: 只在 Windows 存在的改名行（主动识屏整页的平台闸门）：非 Windows 上它们不存在，
+#: 不算「行键丢了」，也不算别名失效。
+_WINDOWS_ONLY_ROW_KEYS = frozenset(
+    key for key in REWRITTEN_ROW_TITLES if key.startswith("proactive_"))
+
 #: 改标题前用户会照着找的旧说法 → 该落在哪一行（旧词进 ``ROW_ALIASES``）。
 OLD_WORDS = {
     "dry-run": "proactive_dry_run",
@@ -611,7 +713,10 @@ def test_rewritten_row_titles_match_the_agreed_wording(tmp_path, monkeypatch):
     try:
         for key, title in REWRITTEN_ROW_TITLES.items():
             row = dialog.findChild(SettingRow, f"settingRow_{key}")
-            assert row is not None, f"行键 {key} 不见了（本刀不许动行键）"
+            if row is None:
+                assert key in _WINDOWS_ONLY_ROW_KEYS and not _has_proactive(dialog), (
+                    f"行键 {key} 不见了（本刀不许动行键）")
+                continue
             assert row.label.text() == title, f"{key} 的标题与定稿不符"
     finally:
         dialog.close()
@@ -622,6 +727,8 @@ def test_old_words_still_find_the_rewritten_rows(tmp_path, monkeypatch):
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         for query, key in OLD_WORDS.items():
+            if key in _WINDOWS_ONLY_ROW_KEYS and not _has_proactive(dialog):
+                continue  # 本平台没有这一行（Windows 那条 CI 腿盯住它的旧词别名）
             dialog.search_edit.setText(query)
             app.processEvents()
             hits = [row.objectName() for row in dialog._search_matches]
