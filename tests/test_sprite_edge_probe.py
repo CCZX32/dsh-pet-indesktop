@@ -763,3 +763,97 @@ def test_unknown_sprite_queries_are_safe():
     assert world.angle_of(sprite) == 0.0
     assert world.exposure_of(sprite) == 1.0
     assert world.reentry_remaining_of(sprite) == 0.0
+
+
+# ---------------------------------------------------------------- overlay 壳接线
+def _shell_with_probe(tmp_path, clock):
+    """真实 OverlayShell + 真实 SpriteEdgeProbeWorld（只注入世界时钟）。
+
+    ``edge_probe_enabled`` 是默认关的（默认 False），overlay 却是默认拓扑，
+    故显式打开；时钟用 ``SpriteEdgeProbeWorld`` 明确支持的注入口，避免固定
+    sleep 赌时序（AGENTS.md 时序测试纪律）。
+    """
+    import tests.test_sprite_menu_facade as fac
+
+    shell, _lib = fac._make_shell(tmp_path, {"edge_probe_enabled": True})
+    shell._probe._clock = clock
+    return shell
+
+
+def _menu_action(container, label):
+    """递归找 label 对应的 QAction（现代模板把「回到右下角」收在子菜单里）。"""
+    for action in container.actions():
+        if action.isSeparator():
+            continue
+        if action.text() == label:
+            return action
+        submenu = action.menu()
+        if submenu is not None:
+            found = _menu_action(submenu, label)
+            if found is not None:
+                return found
+    return None
+
+
+def _probe_ticks(world, clock, sprite, seconds, *, step=1 / 60):
+    """只推进探头世界（不驱动 sprite.advance：本用例断言姿态与位置改写）。"""
+    remaining = float(seconds)
+    while remaining > 1e-9:
+        dt = min(step, remaining)
+        clock.advance(dt)
+        world.tick([sprite], dt)
+        remaining -= dt
+
+
+@pytest.mark.parametrize("entry", ["shell", "menu"])
+def test_overlay_return_corner_cancels_active_probe_session(tmp_path, entry):
+    """overlay「回右下角」必须先取消探头会话（legacy 窗侧 window.py 同语义）。
+
+    复现（修复前）：PEEKING 稳态角色（±45°、曝光 0.55）回角后会话仍在——角色
+    斜着停在右下角，且下一次点击触发的拉直过渡会把 x 写回**旧屏缘**（
+    ``_apply_pose`` 的 ``probe_target_x``），表现为「点一下瞬移回原来贴的那条边」。
+
+    两个入口都验：``shell`` = 托盘主宠/子宠与设置重置走的那条
+    （``OverlayShell._go_default_corner``）；``menu`` = 右键菜单「回到右下角」
+    （建造器经 facade 回调落回同一方法）。第二入口此前在 facade 里另写了一份
+    「set_pos 落角」，所以它单独构成一条回归面。
+    """
+    from pet import catalog
+    from pet.sprite_menu_facade import build_sprite_full_menu
+
+    clock = FakeClock()
+    shell = _shell_with_probe(tmp_path, clock)
+    sprite = shell.sprite
+    bounds = QRect(shell._bounds)
+    menu = None
+    try:
+        # 贴左缘静止 → 推进到 PEEKING 稳态（左侧会话，姿态 ±45°）
+        sprite.set_pos(QPointF(0.0, bounds.y() + 400.0))
+        _probe_ticks(shell._probe, clock, sprite,
+                     EDGE_REST_SECONDS + EDGE_ENTER_MS / 1000.0 + 0.2)
+        assert shell._probe.mode_of(sprite) == PEEKING, "前置：必须已进入探头稳态"
+        assert shell._probe.side_of(sprite) == "left"
+        assert abs(sprite.probe_angle) == pytest.approx(EDGE_PROBE_ANGLE)
+
+        if entry == "menu":
+            menu = build_sprite_full_menu(shell)
+            _menu_action(menu, "回到右下角").trigger()
+        else:
+            shell._go_default_corner(sprite)
+
+        corner = QPointF(bounds.x() + bounds.width() - 1 - sprite.rect().width()
+                         - catalog.CORNER_MARGIN,
+                         bounds.y() + bounds.height() - 1 - sprite.rect().height())
+        assert sprite.pos == corner, "回角落位"
+        assert shell._probe.mode_of(sprite) == OFF, "回角必须取消探头会话"
+        assert sprite.probe_angle == 0.0 and sprite.probe_exposure == 1.0, \
+            "姿态必须复位（否则角色斜着停在右下角）"
+
+        # 点击不再被探头消费（会话已退出），随后的 tick 也不再改写 x
+        assert shell._probe.on_sprite_clicked(sprite) is False
+        _probe_ticks(shell._probe, clock, sprite, 0.5)
+        assert sprite.pos == corner, "探头残留会把角色瞬移回旧屏缘"
+    finally:
+        if menu is not None:
+            menu.close()
+        shell._delete_runtime_marker()

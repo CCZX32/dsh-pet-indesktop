@@ -3071,7 +3071,16 @@ class OverlayShell(QObject):
         return entries
 
     def _go_default_corner(self, sprite) -> None:
-        """把指定 sprite 送回右下角（window.go_default_corner 等价）。"""
+        """把指定 sprite 送回右下角（window.go_default_corner 等价）。
+
+        落位前先取消该 sprite 的探头会话（legacy ``window._go_default_corner`` 同
+        语义）。会话残留时：角色保持 ±45° 探头姿态停在右下角，且下一次点击触发的
+        拉直过渡会把 x 写回**旧屏缘**（``_apply_pose`` 的 ``probe_target_x``）——
+        表现为「点一下瞬移回原来贴的那条边」。托盘主宠/子宠与设置重置三个入口都走
+        本方法，故一处收口即同惠。
+        """
+        if getattr(self._probe, "active", False):
+            self._probe.cancel(sprite, "return_corner")
         sprite.set_pos(self._default_corner_pos(self._bounds, sprite.rect()))
 
     def _hide_bubble_for_menu(self) -> None:

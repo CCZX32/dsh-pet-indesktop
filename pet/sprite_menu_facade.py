@@ -464,9 +464,9 @@ class SpriteMenuFacade:
         self._shell.set_on_top(bool(on))
 
     def go_default_corner(self) -> None:
-        shell = self._shell
-        sprite = self.sprite
-        sprite.set_pos(shell._default_corner_pos(shell._bounds, sprite.rect()))
+        # 收敛到壳的同名方法：那里在落位前取消探头会话（会话残留会让角色斜着
+        # 停在角落、下一次点击被拉直过渡瞬移回旧屏缘）。
+        self._shell._go_default_corner(self.sprite)
 
     def hide(self) -> None:
         """「隐藏桌宠」：只隐藏被点的那一只（旧版一窗一宠 = 隐藏本窗）。
