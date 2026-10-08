@@ -2470,28 +2470,28 @@ class ModernSettingsDialog(QDialog):
         self._saved_via_button = True
         self.accept()
 
+    def _save_before_close(self) -> bool:
+        """关闭前落盘（X / Esc / 关闭按钮共用）；False = 没写成功，调用方不关窗。
+
+        即时型偏好与右键菜单/托盘同一写入时机；失败提示由 ``_write_config`` 内部弹。
+        """
+        if getattr(self, "_saved_via_button", False):
+            return True
+        try:
+            if not self._write_config():
+                return False
+            self._apply_autostart()
+        except Exception:
+            logging.exception("关闭设置时保存配置失败")
+        return True
+
     def reject(self) -> None:  # noqa: N802 - Qt API
-        """Esc 路径与关闭按钮一致：保存设置并应用开机自启。"""
-        if not getattr(self, "_saved_via_button", False):
-            try:
-                self._write_config()
-                self._apply_autostart()
-            except Exception:
-                logging.exception("Esc 关闭设置时保存配置失败")
-        super().reject()
+        """Esc / 关闭按钮与 X 同契约：保存失败不关窗（草稿留在控件里）。"""
+        if self._save_before_close():
+            super().reject()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        """直接关闭（X / Esc）时同样落盘，避免修改丢失。
-
-        设置项都是即时型偏好，与右键菜单/托盘修改的写入时机保持一致；
-        已走「保存并退出」则跳过（防重复写入）。
-        """
-        if not getattr(self, "_saved_via_button", False):
-            try:
-                if not self._write_config():
-                    event.ignore()
-                    return
-                self._apply_autostart()
-            except Exception:
-                logging.exception("关闭设置时保存配置失败")
+        if not self._save_before_close():
+            event.ignore()
+            return
         super().closeEvent(event)

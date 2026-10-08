@@ -1162,6 +1162,76 @@ def test_modern_settings_close_autosaves(tmp_path, monkeypatch):
     assert reloaded.get("self_talk_bubble_style") == "breath_bubble"
 
 
+def test_modern_settings_escape_keeps_the_dialog_open_when_save_fails(tmp_path, monkeypatch):
+    """保存失败时 Esc 与 X 同契约：不关窗，草稿留在控件里。
+
+    回归背景：``closeEvent``（X）一直有 ``if not self._write_config():
+    event.ignore()``，而 ``reject()``（Esc / 关闭按钮）忽略返回值照常
+    ``super().reject()``——磁盘写不进时按 Esc 会**静默丢草稿**：窗口关了、改动
+    从没落盘，用户以为保存成功了。
+    """
+    import shiboken6
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    warnings: list = []
+    monkeypatch.setattr(settings_mod.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+    config = Config(tmp_path)
+    config.path.mkdir(parents=True, exist_ok=True)   # 目标为目录 → os.replace 必失败
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
+    dialog.bubble_style_select.setCurrentData("breath_bubble")
+    finished: list = []
+    dialog.finished.connect(lambda code: finished.append(int(code)))
+    dialog.show()
+    app.processEvents()
+    try:
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)    # 真实 Esc 键事件
+        app.processEvents()
+
+        # 设置窗带 WA_DeleteOnClose：真被关掉时 C++ 对象当场销毁，isValid 立即可判
+        assert finished == [], "保存失败时 Esc 不得关窗（草稿会丢）"
+        assert shiboken6.isValid(dialog) and dialog.isVisible(), "窗口必须还在"
+        assert dialog.bubble_style_select.currentData() == "breath_bubble", "草稿必须还在"
+        assert any("保存失败" in str(x[1]) for x in warnings), "必须走既有的失败提示路径"
+    finally:
+        config.path.rmdir()                          # 恢复可写，收尾关窗
+        if shiboken6.isValid(dialog):
+            dialog.close()
+        app.processEvents()
+
+
+def test_modern_settings_escape_closes_when_save_succeeds(tmp_path, monkeypatch):
+    """非回归：保存正常时 Esc 照旧关窗，并落盘。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
+    dialog.bubble_style_select.setCurrentData("breath_bubble")
+    finished: list = []
+    dialog.finished.connect(lambda code: finished.append(int(code)))
+    dialog.show()
+    app.processEvents()
+
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+
+    assert finished == [int(QDialog.DialogCode.Rejected)], "保存成功时 Esc 必须关窗"
+    assert config.get("self_talk_bubble_style") == "breath_bubble", "关窗前必须落盘"
+
+
 def test_settings_stylesheet_has_dark_overrides(monkeypatch):
     """深色系统下新版设置必须追加深色覆盖段（白底白字不可读问题）。"""
     from pet.modern_settings_dialog import _settings_stylesheet
