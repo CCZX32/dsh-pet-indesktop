@@ -2855,3 +2855,19 @@ def test_upgrade_round_reprovisions_when_only_legacy_tier_generation_exists(
             fp.clip_out_dir(webm, videos, frameseq)
     finally:
         lib.shutdown()
+
+
+def test_creation_flags_hide_ffmpeg_console_on_windows(monkeypatch):
+    """ffmpeg 转换子进程必须隐藏控制台窗口（CREATE_NO_WINDOW）：缺了它每次
+    转换都闪出一个终端窗口（默认终端承载子进程控制台），开机自启的集中供给
+    时段最刺眼。POSIX 无控制台概念，返回 0。"""
+    CREATE_NO_WINDOW = 0x08000000
+    BELOW_NORMAL = 0x00004000
+
+    monkeypatch.setattr(os, "name", "nt")
+    flags = fp._creation_flags()
+    assert flags & CREATE_NO_WINDOW, "转换子进程不能闪终端窗口"
+    assert flags & BELOW_NORMAL, "低优先级档位不能丢"
+
+    monkeypatch.setattr(os, "name", "posix")
+    assert fp._creation_flags() == 0
