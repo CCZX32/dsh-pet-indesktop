@@ -2556,6 +2556,10 @@ class AgentLinkManager(QObject):
         self._unknown_bridge_reminded_at: dict[str, float] = {}  # agent → 上次未知桥接事件提醒时刻
         self._saw_alert: set[str] = set()            # busy 周期内出现过 attention/error 的 Agent
         self._saw_error: set[str] = set()            # busy 周期内真正出现过 error 的 Agent
+        # 收尾后爆雷（success/idle 已声明回合结束后，确认窗内才到的 error）：
+        # 这些 agent 的 _saw_error 不得跨下一个忙入口存活——那个忙入口是新回合，
+        # 不是「error→working 的同周期重试」（见 _abort_done_check_on_error）。
+        self._error_after_done: set[str] = set()
         self._sound_last_at: dict[str, float] = {}
         self._sound_last_event: dict[str, tuple[str, float]] = {}
         self._link_seq = 0                           # 联动动作轮换计数
@@ -3068,8 +3072,13 @@ class AgentLinkManager(QObject):
         if state in self._BUSY_STATES:
             self._cancel_done_check(agent_key)
             self._saw_alert.discard(agent_key)
-            if prev_raw != "error":
+            # _saw_error 跨 error→working 存活是为「error 后同周期重试」留的
+            # （重试后收尾仍按失败口径）；但收尾后爆雷的 error 之后不是重试而是
+            # **新回合**，标记必须随新回合清除，否则下一回合的成功收尾被整个
+            # 吃掉（既无成功气泡也无失败口径）。见 _abort_done_check_on_error。
+            if prev_raw != "error" or agent_key in self._error_after_done:
                 self._saw_error.discard(agent_key)
+            self._error_after_done.discard(agent_key)
         elif state in ("attention", "error") and prev_raw in self._BUSY_STATES:
             self._saw_alert.add(agent_key)
             if state == "error":
@@ -3078,6 +3087,12 @@ class AgentLinkManager(QObject):
             # attention/error 同样进入完成确认（800ms 内回忙则取消——例如
             # SubagentStop 后主 Agent 继续干活、工具报错后重试）。
             self._schedule_done_check(agent_key)
+        elif state == "error":
+            # 收尾后爆雷：prev_raw 已不是 busy——收尾边沿（success/idle/attention）
+            # 已经声明本轮结束，确认窗内到达的 error 必须取消 pending 的完成确认
+            # 并按失败口径打标。上一条 elif 已经吃掉「来向是 busy」的 error
+            # （那里的确认由 error 自己排定），所以到这里的一定是收尾之后才爆的雷。
+            self._abort_done_check_on_error(agent_key)
         elif state in ("idle", "sleeping") and prev_raw in self._BUSY_STATES:
             # working/thinking → idle：疑似任务完成，800ms 稳定确认
             # （过滤 working→idle→working 抖动；确认期间回忙则取消）
@@ -3761,6 +3776,30 @@ class AgentLinkManager(QObject):
             timer.stop()
             timer.deleteLater()
 
+    def _abort_done_check_on_error(self, agent_key: str) -> None:
+        """收尾后爆雷：error 落在完成确认窗内 → 取消确认并按失败口径打标。
+
+        能走到这里的前提是该 agent 已有 pending 的完成确认——收尾边沿（busy→success /
+        busy→idle / busy→attention）已经声明本轮结束，随后的 error 属于「收尾后爆雷」：
+        成功口径的收尾（「已完成本轮任务」+ done 音效）此时已经不成立，而这条 error
+        又走不进 busy→error 那条既有分支（那里要求 prev_raw 是 busy），只能在这里
+        收口。打两个既有标记——``_saw_error`` 掐 done 音效、挡后续 success 边沿的重复
+        排定，``_saw_alert`` 把收尾文案切离「已完成」；``_error_after_done`` 记录「这个
+        标记来向不是 busy」，让下一个忙入口把标记当**新回合**清掉（同周期重试与此相反，
+        ``_saw_error`` 要跨 error→working 存活）。
+
+        两个调用点：``_on_agent_state`` 的收尾边沿来向 error 分支，与 ``_on_llm_error``
+        （API 级错误同样语义，且收敛器的 ERROR 不注入呈现管线——那条路径上这是唯一
+        的闸）。没有 pending 确认时是 no-op：确认窗外的 error 由既有分支处理，
+        本方法不改那条路径的行为。
+        """
+        if agent_key not in self._done_pending:
+            return
+        self._saw_error.add(agent_key)
+        self._saw_alert.add(agent_key)
+        self._error_after_done.add(agent_key)
+        self._cancel_done_check(agent_key)
+
     def _fire_done(self, agent_key: str) -> None:
         """800ms 稳定确认到期：期间回忙则不算完成；配置/冷却在弹出前再查。"""
         self._done_pending.pop(agent_key, None)
@@ -3770,7 +3809,12 @@ class AgentLinkManager(QObject):
         hidden = not hasattr(self.win, "isVisible") or not self.win.isVisible()
         if self._last_raw.get(agent_key) in self._BUSY_STATES:
             return
-        if not hidden and agent_key not in self._saw_error:
+        # 防线：到期时该 agent 的**当前**原始状态已是 error（收尾后爆雷时打标路径
+        # 万一漏了，或者将来新增的 error 落点忘了打标）→ 一律不许成功口径。
+        # 这不会打断 Claude 的 error 周期收尾：那条路径上 _saw_error/_saw_alert 已
+        # 经打上（busy→error 分支），走的就是下面的非成功分支。
+        dirty = agent_key in self._saw_error or self._last_raw.get(agent_key) == "error"
+        if not hidden and not dirty:
             self._emit_sound("done", agent_key)
         now = self._clock()
         if now - self._done_cooldown.get(agent_key, 0.0) < self._DONE_COOLDOWN_S:
@@ -3778,7 +3822,7 @@ class AgentLinkManager(QObject):
             return
         self._done_cooldown[agent_key] = now
         name = self.agent_names.get(agent_key, agent_key)
-        if agent_key in self._saw_alert:
+        if agent_key in self._saw_alert or self._last_raw.get(agent_key) == "error":
             # busy 期间出现过 attention/error：不暗示"成功完成"
             text = self._dialogue("done.attention", f"{name} 那边停了，结果怎么样要主人自己看一眼哦", agent_key=agent_key, name=name)
         else:
@@ -4204,7 +4248,15 @@ class AgentLinkManager(QObject):
 
         errorCode 是上游真实错误码（如 bad_response_status_code），不再替换成
         分类别名；errorKind 承载分类语义（api=AI 服务错误，非模型访问失败）。
+
+        llm_error 同时是本回合「收尾后爆雷」在呈现侧的打标点之一：这条记录没有
+        state 字段（不进 legacy 状态流），收敛器产出的 ERROR 也不注入呈现管线
+        （``_on_dsh_converged_state`` 只注入 thinking/success），所以成功收尾之后
+        到来的 llm_error 只有这里能取消 pending 的完成确认。放在可见性/冷却早退
+        之前：错误是本回合的客观事实，与提醒是否呈现无关（隐藏期改道灵动岛、
+        冷却期都不能因此误报成功）。
         """
+        self._abort_done_check_on_error(agent_key)
         if not hasattr(self.win, "isVisible") or not self.win.isVisible():
             return
         if not isinstance(record, dict):

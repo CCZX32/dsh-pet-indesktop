@@ -4301,6 +4301,196 @@ class TestDshTurnEndSuccessCompletion:
         assert not any("已完成本轮任务" in b or "执行完成" in b or "已顺利完成" in b
                        for b in bubbles), bubbles
 
+    # ------------------------------------------------------------------
+    # 收尾后爆雷：success 之后 800ms 确认窗内到达的 error
+    # ------------------------------------------------------------------
+    #
+    # ``turn/end`` 让收敛器产出 success 并排定完成确认；``AgentStatus(error)`` /
+    # ``llm_error`` 在确认窗内到达时 ``prev_raw`` 已是终态（不在 ``_BUSY_STATES``）：
+    # ① ``_on_agent_state`` 的既有 error 分支要求 ``prev_raw in _BUSY_STATES``，
+    #    于是既不取消 pending 的确认、也不打 ``_saw_error``/``_saw_alert``；
+    # ② ``llm_error`` 专属出口（``_on_llm_error``）同样不取消不打标；
+    # 800ms 到期 ``_fire_done`` 照弹「已完成本轮任务」+ done 音效——错误提醒之后
+    # 紧跟一条成功口径，用户看到的收尾是错的。
+    #
+    # 契约：error 落在完成确认窗内 = 「本回合已知不干净（收尾后爆雷）」——取消
+    # 确认 + 按失败口径打标；``_fire_done`` 再加一道「到期时复读当前原始状态」的
+    # 兜底。注意与 Claude 的 ``busy→attention→done`` 正常收尾路径无关：那条路径
+    # 上 error 的来向是 busy（既有分支照旧打标并排定确认），attention 的排定逻辑
+    # 一行不动。
+
+    @staticmethod
+    def _success_wording(bubbles: list) -> list:
+        """气泡里属于「成功口径」的那些（done.success 预设的三句）。"""
+        return [b for b in bubbles
+                if any(k in b for k in ("已完成本轮任务", "执行完成", "已顺利完成"))]
+
+    @staticmethod
+    def _success_turn_records(session: str = "s-1") -> list[dict]:
+        """正常回合的三条真实记录（turn/end 收敛 success）。"""
+        return [
+            {"event": "turn/start", "sessionId": session},
+            {"event": "tool/call", "sessionId": session, "tool": "bash"},
+            {"event": "turn/end", "sessionId": session},
+        ]
+
+    def test_error_inside_confirm_window_never_claims_success(self, tmp_path, monkeypatch):
+        """⑪ AgentStatus(error) 落在确认窗内：取消确认，不弹成功口径、不播 done。"""
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._success_turn_records(),
+                        {"event": "AgentStatus", "state": "error"})
+            mon._poll()
+            assert mon._converger.current_state is DshState.ERROR, mon._converger.current_state
+            assert "dsh" not in mgr._done_pending, \
+                "确认窗内到达的 error 必须取消 pending 的完成确认"
+            assert "dsh" in mgr._saw_error and "dsh" in mgr._saw_alert, \
+                "收尾后爆雷必须按失败口径打标（音效闸 + 文案口径）"
+            assert bubbles, "错误提醒本身照常呈现（不得把提醒一起掐掉）"
+            bubbles.clear()
+            sounds.clear()
+            self._pump(app, 1.2)                    # 超过 800ms 确认窗
+        finally:
+            mgr.shutdown()
+        assert self._success_wording(bubbles) == [], bubbles
+        assert "done.wav" not in sounds, sounds
+
+    def test_llm_error_inside_confirm_window_never_claims_success(self, tmp_path, monkeypatch):
+        """⑫ llm_error 落在确认窗内：取消确认，不弹成功口径、不播 done。
+
+        llm_error 记录既不进 legacy 状态流（``normalize_event_state`` 不认这个名字、
+        记录也没有 state 字段），收敛器产出的 ERROR 又不注入呈现管线
+        （``_on_dsh_converged_state`` 只注入 thinking/success）——这条路径上唯一能
+        拦住完成确认的就是 ``_on_llm_error`` 自己，⑪ 的状态闸在这里够不着。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._success_turn_records(),
+                        {"event": "llm_error", "sessionId": "s-1",
+                         "errorCode": "bad_response_status_code",
+                         "errorMessage": "500 Internal Server Error",
+                         "errorKind": "api"})       # 桥接 llm_error 的真实形状
+            mon._poll()
+            assert "dsh" not in mgr._done_pending, "llm_error 必须取消 pending 的完成确认"
+            assert any("AI 服务" in b for b in bubbles), bubbles
+            bubbles.clear()
+            sounds.clear()
+            self._pump(app, 1.2)
+        finally:
+            mgr.shutdown()
+        assert self._success_wording(bubbles) == [], bubbles
+        assert "done.wav" not in sounds, sounds
+
+    def test_next_turn_after_post_completion_error_plays_done_again(self, tmp_path, monkeypatch):
+        """⑬ 收尾后爆雷的下一个回合：标记随新回合清除，完成提醒恢复。
+
+        既有清标规则是「``prev_raw != "error"`` 才清 ``_saw_error``」——那条规则
+        为「error→working 的同周期重试」留标记（见 ⑨ 与音效族的 error 重试用例），
+        而收尾后爆雷的 error 之前已是终态、后面的 busy 就是**新回合**：标记不清
+        就会把下一回合的成功收尾整个吃掉（既没有成功气泡也没有失败口径）。
+
+        时钟全程冻结（``clock=[1000.0]``），所以下一回合的完成气泡只有在
+        「被取消的确认没占掉完成冷却（``_DONE_COOLDOWN_S``）」时才可能出现。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._success_turn_records(),
+                        {"event": "AgentStatus", "state": "error"})
+            mon._poll()
+            assert "dsh" not in mgr._done_pending
+            assert "dsh" in mgr._saw_error
+            bubbles.clear()
+            sounds.clear()
+            self._pump(app, 1.2)                    # 上一回合的确认窗彻底走完
+            assert self._success_wording(bubbles) == [], bubbles
+            self._write(mon.events_dir, *self._success_turn_records())   # 下一个正常回合
+            mon._poll()
+            assert "dsh" not in mgr._saw_error, "新回合的忙入口必须清掉收尾后爆雷的标记"
+            assert "dsh" not in mgr._saw_alert
+            assert "dsh" in mgr._done_pending, "正常回合必须重新排定完成确认"
+            assert self._wait_until(
+                app, lambda: self._success_wording(bubbles)), bubbles
+        finally:
+            mgr.shutdown()
+        assert sounds.count("done.wav") == 1, sounds
+
+    def test_cancelled_confirm_does_not_consume_done_cooldown(self, tmp_path, monkeypatch):
+        """⑭ 被取消的确认不占完成冷却（``_DONE_COOLDOWN_S`` 表不留痕）。
+
+        依据 ``_fire_done``：``self._done_cooldown[agent_key] = now`` 写在
+        「到期 → 回忙/隐藏/冷却三道闸全过 → 真的要弹泡」之后；被取消的确认根本
+        到不了那行。时钟冻结时 ``now - _done_cooldown.get(agent_key, 0.0) <
+        _DONE_COOLDOWN_S`` 恒真，所以「上一轮误写了冷却」的唯一表现就是下一轮的
+        完成气泡永不出现——本用例把这一点钉死。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        try:
+            mon._probe_online()
+            self._write(mon.events_dir, *self._success_turn_records(),
+                        {"event": "AgentStatus", "state": "error"})
+            mon._poll()
+            self._pump(app, 1.2)
+            assert "dsh" not in mgr._done_cooldown, \
+                "被取消的确认不得在冷却表里留下时刻（否则下一回合的完成气泡被吃掉）"
+            assert self._success_wording(bubbles) == [], bubbles
+
+            # 同一冻结时钟下的第一个干净回合：确认必须照常弹（冷却没被占）
+            self._write(mon.events_dir, *self._success_turn_records())
+            mon._poll()
+            assert self._wait_until(app, lambda: self._success_wording(bubbles)), bubbles
+            assert mgr._done_cooldown["dsh"] == clock[0], "真的弹过才写冷却时刻"
+
+            # 第二个干净回合（时钟仍冻结 = 距上次弹泡 0s < 5s）：既有冷却语义生效
+            n_success = len(self._success_wording(bubbles))
+            self._write(mon.events_dir, *self._success_turn_records())
+            mon._poll()
+            assert self._wait_until(app, lambda: "dsh" not in mgr._done_pending)
+            self._pump(app, 0.3)
+            assert len(self._success_wording(bubbles)) == n_success, \
+                "冷却窗内的第二次完成提醒必须被抑制（_DONE_COOLDOWN_S 既有语义）"
+        finally:
+            mgr.shutdown()
+        # 被取消的那一轮一声不响（只有 error.wav）；其后两轮各播一条 done.wav——
+        # 音效走 `_emit_sound` 自己的 sound_cooldown_seconds，`_DONE_COOLDOWN_S`
+        # 只管气泡（既有两套冷却，本条断言只钉「取消的确认不得留下任何成功痕迹」）。
+        assert sounds.count("done.wav") == 2, sounds
+
+    def test_fire_done_refuses_success_wording_for_current_error_state(
+            self, tmp_path, monkeypatch):
+        """⑮ 防线：确认到期时该 agent 当前原始状态是 error → 不许成功口径。
+
+        真实路径上 error 到达时确认已被 ⑪/⑫ 取消，所以这里**刻意构造**这道兜底
+        要防的那一种状态：确认还挂着、``_last_raw`` 已是 error、而打标路径漏了
+        （标记缺席）。到期出口必须自己再读一次当前状态——将来新增的 error 落点
+        忘打标也不至于播出「已完成本轮任务」。
+        """
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "working")
+            mgr._on_agent_state("dsh", "success")
+            assert "dsh" in mgr._done_pending
+            mgr._last_raw["dsh"] = "error"          # 漏标路径：状态已是 error
+            mgr._saw_error.discard("dsh")
+            mgr._saw_alert.discard("dsh")
+            bubbles.clear()
+            sounds.clear()
+            mgr._fire_done("dsh")                   # 真实到期出口
+        finally:
+            mgr.shutdown()
+        assert self._success_wording(bubbles) == [], bubbles
+        assert "done.wav" not in sounds, sounds
+
 
 # ============================================================================
 class TestUnifiedEventEnvelopeSchema:
