@@ -925,6 +925,64 @@ def test_pending_speech_is_rechecked_against_quiet_mode_on_dequeue(tmp_path, mon
     assert service._player.plays == 0, "出队时被 _fire 闸丢弃（缓存命中也不出声）"
 
 
+def test_discarded_synthesis_drains_pending_speech_with_exemption(tmp_path, monkeypatch):
+    """合成结果因免打扰被丢弃时，待播队列必须在同一次结算里出队。
+
+    实测缺陷（2026-10-08）：不起播就没有 EndOfMedia 媒体终止事件，而待播队列
+    唯一的出队入口是 ``_on_media_status``（该事件的回调）——免打扰期间在飞的合成
+    一完成，排在后面的豁免语音（交互应答，respect_quiet=False）就无声滞留，直到
+    被后续偶然事件覆盖为止。
+
+    链路全部走真实入口，不手工清 ``_busy``、不人工发终止事件。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    first = "今天是中秋节。"
+    second = "今天也要认真工作呀。"
+    cached_second = _cache_mp3(service, second)
+
+    assert service.speak(first, log_tag="节日提醒") is True
+    assert len(_WorkerSpy.instances) == 1, "第一条进入合成，通道被占"
+    _quiet().start(15)                       # 合成期间才进入免打扰
+    assert service.speak(second, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == second, "豁免的那条照旧进队列（入队时不该被闸掉）"
+
+    _WorkerSpy.instances[0].finish()         # 第一条合成回来：被免打扰闸丢弃、不起播
+    _qapp().processEvents()
+
+    assert _quiet().suppression_active() is True, "本用例前提：出队那一拍仍在免打扰"
+    assert service._player.plays == 1, "通道空出后豁免语音必须当场出队出声"
+    assert [Path(s).name for s in service._player.sources] == [cached_second.name]
+    assert service._pending_speech is None, "队列字段随这次出队被消费清空"
+    assert service._pending_respect_quiet is True, "出队消费后复位为默认值"
+
+
+def test_discarded_synthesis_drains_quiet_pending_without_playing(tmp_path, monkeypatch):
+    """对照片：待播那条尊重免打扰时，出队被 ``_fire`` 的闸现读丢弃、零播放。
+
+    出队的意义不是"一定要出声"，而是队列字段必须被消费清空——不消费就会滞留，
+    等后续偶然事件才吐出来（甚至永远不出声）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    first = "今天是中秋节。"
+    second = "现在是上午九点整。"
+    _cache_mp3(service, second)
+
+    assert service.speak(first, log_tag="节日提醒") is True
+    assert service.speak(second, log_tag="节日提醒") is True, "入队时未开免打扰 → 照旧进队列"
+    assert service._pending_speech == second
+    _quiet().start(15)                       # 第一条合成回来之前才进入免打扰
+
+    _WorkerSpy.instances[0].finish()
+    _qapp().processEvents()
+
+    assert service._player.plays == 0, "尊重免打扰的那条出队时被 _fire 闸丢弃"
+    assert service._pending_speech is None, "出队消费清空（不滞留到后续偶然事件）"
+    assert service._pending_respect_quiet is True
+    assert len(_WorkerSpy.instances) == 1, "被闸丢弃的那条不得再起一路合成"
+
+
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):
     """报时让位：本分钟不发声，且槽位被消费，同分钟后续 tick 不再询问。"""
     service, app, cfg = _service(tmp_path, monkeypatch)

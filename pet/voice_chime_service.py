@@ -25,6 +25,9 @@
   （``_quiet_muted``，判据仍是 ``quiet_mode``），预合成一并跳过（省一次
   TTS 网络请求），被丢弃的只有声音——气泡语义不变（照旧进暂存队列）；
   点击自言自语属交互应答（issue #208），在调用侧显式豁免（豁免随队携带）。
+  免打扰丢弃的那次合成不起播、也就没有 EndOfMedia 媒体终止事件，待播队列
+  随这次丢弃一并出队（``_drain_pending_speech``）：豁免的那条照常出声，
+  尊重免打扰的那条被 ``_fire`` 的闸再丢一次。
 """
 
 from __future__ import annotations
@@ -723,6 +726,12 @@ class VoiceChimeService:
             logger.debug("免打扰期间静音，丢弃合成结果（气泡照旧）：%s", Path(path).name)
             if role != "speak":
                 self._bubble(self._pending_bubble if self._pending_bubble is not None else text)
+            # 这次完成不起播 = 音频通道空出，待播队列在此出队：不起播就没有
+            # EndOfMedia 媒体终止事件，_on_media_status 不会来（详见
+            # _drain_pending_speech）。豁免的那条被 _fire 照常播放；尊重免打扰的
+            # 那条由 _fire 的闸现读再丢一次——两种结局都正确，且队列字段被消费
+            # 清空，不留到后续偶然事件才吐出来。
+            self._drain_pending_speech()
             return
         if role == "speak":
             # 外部播报（节日提醒）：只出声，气泡由调用方自己展示。
@@ -783,7 +792,7 @@ class VoiceChimeService:
             return False
 
     def _on_media_status(self, status) -> None:
-        """一条音频播完后，播放待播队列里的那一条（若有）。
+        """媒体状态变化：终止态（播完/坏媒体）即"通道空出"，排空待播队列。
 
         **刻意不在本方法里 import QtMultimedia**：终止态枚举在 ``_ensure_player``
         成功创建播放器时缓存到 ``self._terminal_statuses``。这样本方法没有 Qt
@@ -793,6 +802,17 @@ class VoiceChimeService:
         """
         if status not in getattr(self, "_terminal_statuses", ()):
             return
+        self._drain_pending_speech()
+
+    def _drain_pending_speech(self) -> None:
+        """待播队列出队：补播那一条（若有）并消费掉队列字段。
+
+        **与媒体终止回调 :meth:`_on_media_status` 共用**——终止态是"通道空出"的
+        本征信号，但"合成完成却不起播"的路径同样让通道空出：合成结果因免打扰被
+        丢弃时不起播，于是没有 EndOfMedia 终止事件，待播队列不能指望那个事件来
+        出队（否则免打扰期间在飞的那次合成一完成，排在后面的豁免语音就无声滞留，
+        直到被后续偶然事件覆盖）。调用方负责判定"这一次结算确实不起播"。
+        """
         pending = self._pending_speech
         self._pending_speech = None
         # 随队携带的免打扰口径一并取出、并复位为默认值（与 _pending_speech 同生命周期）。
