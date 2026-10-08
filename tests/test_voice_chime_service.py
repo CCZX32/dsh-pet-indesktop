@@ -277,6 +277,190 @@ def test_is_running_tracks_timer_state(tmp_path, monkeypatch):
     assert service.is_running() is False
 
 
+# ------------------------------------------------------------ 免打扰：语音静音
+
+
+def _quiet():
+    """进程级免打扰状态（唯一判据在 quiet_mode，本文件只驱动它）。"""
+    from pet import quiet_mode
+
+    return quiet_mode.shared_quiet_state()
+
+
+def _cache_file_for(service, cfg, sentence: str) -> Path:
+    """按产品约定预置一份假缓存音频，返回其路径（用来走「缓存命中」那条出声路径）。"""
+    key = cache_key(sentence, {
+        "voice": cfg.get("voice_chime_voice"),
+        "rate": cfg.get("voice_chime_rate"),
+        "pitch": cfg.get("voice_chime_pitch"),
+    })
+    service._cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = service._cache_dir / f"{key}.mp3"
+    cached.write_bytes(b"fake-mp3")
+    return cached
+
+
+def test_quiet_mode_silences_chime_voice_and_still_defers_bubble(tmp_path, monkeypatch):
+    """免打扰期间报时不出声：播放器零调用，连合成都不发起（省一次 TTS 网络请求）。
+
+    口径（2026-10-08 拍板）：气泡照旧进暂存队列（退出免打扰统一汇报），语音按
+    「时间敏感」**丢弃**——14:00 的报时在 15:00 补播没有意义。
+    """
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    _quiet().start(15)
+
+    service.say_now("现在是上午九点整。台词")
+
+    assert _WorkerSpy.instances == [], "免打扰期间不该发起合成（网络请求）"
+    assert service._player.sources == []
+    assert service._player.plays == 0
+    assert app.win.bubbles == [], "免打扰期间气泡不上屏"
+    assert _quiet().pending_count() == 1, "但气泡照旧进暂存队列（语义不变）"
+
+
+def test_quiet_mode_silences_cached_replay(tmp_path, monkeypatch):
+    """缓存命中（预合成已完成）那条出声路径同样过闸：拦的是「出声」不是「合成」。"""
+    service, app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    sentence = "现在是上午九点整。测试台词"
+    cached = _cache_file_for(service, cfg, sentence)
+    _quiet().start(15)
+
+    service.say_now(sentence)
+
+    assert service._player.sources == [], f"不得把 {cached.name} 交给播放器"
+    assert service._player.plays == 0
+    assert _quiet().pending_count() == 1
+
+
+def test_quiet_mode_skips_precache_synthesis(tmp_path, monkeypatch):
+    """免打扰期间不预合成：合成出来也只会在到点被丢弃（同样是省一次网络请求）。"""
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    _quiet().start(15)
+
+    # 09:59:30 距下一报时点 10:00 只有 30s（在 60s 预合成窗口内）→ 平时会起合成线程
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+
+    assert _WorkerSpy.instances == [], "免打扰期间不该起合成线程"
+    assert service._precache_slot is None
+
+
+def test_quiet_mode_drops_inflight_synthesis_result(tmp_path, monkeypatch):
+    """合成期间才进入免打扰：迟到的结果同样不出声，气泡语义不变。"""
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service.say_now("现在是上午九点整。台词")
+    assert len(_WorkerSpy.instances) == 1
+
+    _quiet().start(15)
+    _WorkerSpy.instances[0].finish()
+
+    assert service._player.plays == 0, "免打扰生效后回来的音频不得出声"
+    assert app.win.bubbles == []
+    assert _quiet().pending_count() == 1
+
+
+def test_quiet_mode_off_plays_chime_as_before(tmp_path, monkeypatch):
+    """非回归：未进入免打扰时逐字回到改动前的行为（合成 → 播放 → 上屏）。"""
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+
+    service.say_now("现在是上午九点整。台词")
+    assert len(_WorkerSpy.instances) == 1
+    _WorkerSpy.instances[0].finish()
+
+    assert service._player.plays == 1
+    assert [text for text, _ms in app.win.bubbles] == ["现在是上午九点整。台词"]
+    assert _quiet().pending_count() == 0
+
+
+def test_voice_comes_back_after_quiet_mode_ends(tmp_path, monkeypatch):
+    """退出免打扰后语音恢复：静音闸不许粘住（判据每次现读）。"""
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    state = _quiet()
+    state.start(15)
+    service.say_now("现在是上午九点整。")
+    assert _WorkerSpy.instances == []
+
+    state.reset()
+    service.say_now("现在是上午九点整。")
+
+    assert len(_WorkerSpy.instances) == 1, "免打扰结束后必须照常出声"
+
+
+def test_fullscreen_equivalent_quiet_silences_voice(tmp_path, monkeypatch):
+    """全屏等效免打扰走同一道闸（不是手动免打扰专属）。"""
+    from pet import quiet_mode
+
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    quiet_mode.note_fullscreen(True)
+
+    service.say_now("现在是上午九点整。")
+
+    assert _WorkerSpy.instances == []
+    assert service._player.plays == 0
+    assert app.win.bubbles == []
+    assert _quiet().pending_count() == 1
+
+
+def test_fullscreen_quiet_switched_off_by_config_plays(tmp_path, monkeypatch):
+    """`quiet_also_on_fullscreen` 关掉时全屏不是免打扰 → 照常出声（判据同源，不各自读标志）。"""
+    from pet import quiet_mode
+
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    app.win.cfg = {"quiet_also_on_fullscreen": False}
+    quiet_mode.note_fullscreen(True)
+
+    service.say_now("现在是上午九点整。")
+
+    assert len(_WorkerSpy.instances) == 1
+
+
+def test_festival_speech_is_silenced_under_quiet_mode(tmp_path, monkeypatch):
+    """节日语音（外部播报）同样过这道闸：speak() 默认尊重免打扰。"""
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    _quiet().start(15)
+
+    assert service.speak("今天是中秋节。", log_tag="节日提醒") is True
+
+    assert _WorkerSpy.instances == []
+    assert service._player.plays == 0
+    assert app.win.bubbles == [], "节日气泡由调用方自己管，通道不该插一条"
+
+
+def test_click_self_talk_speech_is_exempt_from_quiet_mode(tmp_path, monkeypatch):
+    """点击自言自语是交互应答（issue #208 口径）：显式豁免免打扰，照常出声。"""
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    _quiet().start(15)
+
+    assert service.speak("今天也要认真工作呀。", log_tag="点击自言自语",
+                         respect_quiet=False) is True
+
+    assert len(_WorkerSpy.instances) == 1
+    _WorkerSpy.instances[0].finish()
+    assert service._player.plays == 1
+
+
+def test_chime_settings_hint_mentions_quiet_mode(tmp_path):
+    """设置页说明同步：启用行必须写明免打扰期间不出声（否则用户以为功能坏了）。"""
+    from pet.voice_chime_settings import VoiceChimeSettingsPage
+
+    _qapp()
+    page = VoiceChimeSettingsPage(Config(base=tmp_path))
+
+    hint = page.enabled_check.accessibleDescription()
+    assert "免打扰" in hint, f"启用语音报时的说明没提免打扰：{hint!r}"
+
+
 # ------------------------------------------------------------ 设置页
 
 
@@ -1018,7 +1202,7 @@ def _recording_channel(played: list, spoken: list, *, play_ok: bool = True):
             played.append(path)
             return play_ok
 
-        def speak(self, text, *, log_tag=""):
+        def speak(self, text, *, log_tag="", respect_quiet=True):
             spoken.append(text)
             return True
 

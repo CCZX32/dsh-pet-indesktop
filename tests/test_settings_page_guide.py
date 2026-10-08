@@ -735,6 +735,11 @@ def test_section_descriptions_pass_the_copy_lint():
     assert not offenders, "组描述里出现黑话（改文案）：\n" + "\n".join(offenders)
 
 
+def test_quiet_guide_mentions_voice_muting():
+    """免打扰的组描述必须写明「语音也静音」（2026-10-08 口径，防文案回退）。"""
+    assert "语音" in settings_page_guide.SECTION_GUIDE["免打扰"]
+
+
 def test_advanced_group_shows_its_description_while_collapsed(tmp_path, monkeypatch):
     """高级组收起时也看得见「这里是什么」，否则要先展开才知道里面有没有要找的。"""
     dialog = _dialog(tmp_path, monkeypatch)

@@ -1469,7 +1469,9 @@ class AppShell:
             # 运行中的通道配置由 _sync_chime_service 在保存时刷新；未运行才需补读。
             if not channel.is_running():
                 channel.apply_config()
-            channel.speak(stripped, log_tag="点击自言自语")
+            # 交互应答显式豁免免打扰（issue #208：点了就要有回应，与点击台词气泡
+            # 同口径）；提醒类播报用 speak() 的默认值，免打扰期间静音。
+            channel.speak(stripped, log_tag="点击自言自语", respect_quiet=False)
         except Exception:
             logging.exception("点击自言自语语音播报失败")
             return False

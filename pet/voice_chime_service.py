@@ -19,6 +19,11 @@
   去重，同句不重复合成；
 - 预合成降延迟：距下一报时点 ≤ 60s 时提前在后台线程合成该次报时音频并
   写缓存，到点直接播缓存实现近零延迟；预合成未及时完成则回退即时合成。
+- 免打扰（含全屏等效）期间不出声：报时语音与节日语音在**合成入口**
+  （``_fire``）与**回放出口**（``_handle_synthesized``）过同一道闸
+  （``_quiet_muted``，判据仍是 ``quiet_mode``），预合成一并跳过（省一次
+  TTS 网络请求），被丢弃的只有声音——气泡语义不变（照旧进暂存队列）；
+  点击自言自语属交互应答（issue #208），在调用侧显式豁免。
 """
 
 from __future__ import annotations
@@ -294,6 +299,9 @@ class VoiceChimeService:
         self._busy_since = 0.0
         self._last_prune_at = 0.0
         self._synthesis_role = "play"  # play | precache：区分合成完成回调的用途
+        # 本次合成是否尊重免打扰（True = 免打扰期间丢弃结果）。与 _synthesis_role
+        # 同生命周期：合成开始时置位、回调里消费后复位为默认值。
+        self._synthesis_respect_quiet = True
         # 预合成状态：目标槽位 / 语音文本 / 气泡文本 / 缓存文件（到点命中即零延迟播放）
         self._precache_slot: str | None = None
         self._precache_text: str | None = None
@@ -380,7 +388,7 @@ class VoiceChimeService:
             return
         self._fire(build_chime_sentence(now, self._cfg), now, build_bubble_sentence(now, self._cfg))
 
-    def speak(self, text: str, *, log_tag: str = "外部播报") -> bool:
+    def speak(self, text: str, *, log_tag: str = "外部播报", respect_quiet: bool = True) -> bool:
         """向本服务（进程内唯一的音频通道）提交一段**纯语音**播报，不含气泡。
 
         供节日提醒等功能复用：合成、缓存、播放与报时**共用同一套**，因此结构上
@@ -392,6 +400,12 @@ class VoiceChimeService:
         的展示时长），若再走报时的 ``_bubble`` 会被 ``voice_chime_show_bubble``
         二次影响，也会出现"两个气泡"。
 
+        ``respect_quiet`` 默认 True = 免打扰（含全屏等效）期间丢弃这段语音（判据
+        见 ``_quiet_muted``）。提醒类播报（节日提醒）用默认值；**交互应答**（点击
+        自言自语）显式传 False——它回应用户刚做的动作，与 issue #208 里"点击台词
+        照常冒"同口径。默认取 True 是刻意的：新调用方漏传时是"免打扰期间不出声"，
+        而不是"免打扰期间突然响一声"。
+
         返回 False 仅表示文本为空；edge-tts 不可用时只记日志、不出声（调用方的
         气泡照常）。
         """
@@ -402,7 +416,8 @@ class VoiceChimeService:
             self._pending_speech = stripped
             logger.info("%s：音频通道忙，已排队待播", log_tag)
             return True
-        self._fire(stripped, datetime.now(), None, show_bubble=False, role="speak")
+        self._fire(stripped, datetime.now(), None, show_bubble=False, role="speak",
+                   respect_quiet=respect_quiet)
         return True
 
     def play_file(self, path: str, *, log_tag: str = "本地语音") -> bool:
@@ -412,6 +427,9 @@ class VoiceChimeService:
         报时叠音。区别是刻意**不排队**：预缓存的是点击台词，点击那一刻已经过去
         了，晚几秒才冒出来反而突兀——通道忙就直接放弃这次出声（返回 False），
         由调用方决定是否回退到在线合成。
+
+        **不走免打扰静音闸**：本入口只有点击自言自语在用（交互应答，同
+        ``speak(respect_quiet=False)``），见 :meth:`speak` 的说明。
         """
         target = Path(path)
         if not target.is_file():
@@ -465,6 +483,10 @@ class VoiceChimeService:
                 self._precache_text = None
                 self._precache_bubble = None
                 self._precache_path = None
+        # 免打扰期间不预合成：这次报时到点会被静音闸丢掉，合成等于白跑一趟
+        # 网络请求（退出免打扰后又回到即时合成的既有回退路径）。
+        if self._quiet_muted():
+            return
         next_secs = next_chime_in_seconds(now, self._cfg)
         if next_secs > self.PRECACHE_WINDOW_S:
             return
@@ -539,7 +561,8 @@ class VoiceChimeService:
         return None
 
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
-              *, show_bubble: bool = True, role: str = "play") -> None:
+              *, show_bubble: bool = True, role: str = "play",
+              respect_quiet: bool = True) -> None:
         """播报一次。
 
         语音用口播文本 ``sentence``（同时作为合成输入与缓存键）；气泡用
@@ -547,11 +570,24 @@ class VoiceChimeService:
 
         ``show_bubble=False`` / ``role="speak"`` 是给外部播报（节日提醒）用的：
         只出声、不出气泡（气泡由调用方自己管），合成完成回调据此走 ``_play_only``。
+
+        ``respect_quiet`` 见 :meth:`speak`：免打扰（含全屏等效）期间这里直接丢弃
+        本次播报——**在合成之前返回**，连缓存都不查（用户听不到的声音没必要合成）。
+        气泡照旧走 ``_bubble``（它自己会进暂存队列），语义与改动前逐字相同；出声的
+        各条路径（缓存命中 / 即时合成 / 排队补播）都要经过本方法，所以这道闸只有
+        一处。合成在飞时被静音的那一半在 ``_handle_synthesized``。
         """
         if not _EDGE_TTS_AVAILABLE:
             self._notify_missing_tts()
             return
         bubble = bubble_text if bubble_text is not None else build_bubble_sentence(now, self._cfg)
+        if respect_quiet and self._quiet_muted():
+            # 丢弃而不是补播：报时/节日语音是时间敏感的（14:00 的报时 15:00 再响没有
+            # 意义），与气泡「攒着退出后统一汇报」的语义刻意不同。
+            logger.debug("免打扰期间静音，丢弃本次语音（气泡照旧）：%s", sentence[:20])
+            if show_bubble:
+                self._bubble(bubble)
+            return
         voice, note = resolve_voice(self._cfg["voice"])
         if note:
             self._announce_voice_substitution(note)
@@ -578,12 +614,13 @@ class VoiceChimeService:
             # 合成在飞（多为本次报时的预合成）：排队待补，不得直接丢弃——
             # 到点回退即时合成正经此路径（_on_tick 在预合成未完成时调 _fire，
             # 被 busy 门挡死曾导致到点静默丢报时且 _last_slot 已盖戳不再重试）。
-            self._queued_fire = (sentence, now, bubble_text, show_bubble, role)
+            self._queued_fire = (sentence, now, bubble_text, show_bubble, role, respect_quiet)
             logger.info("语音报时合成在飞，排队待补：%s", sentence[:20])
             return
         self._busy = True
         self._busy_since = time.monotonic()
         self._synthesis_role = role
+        self._synthesis_respect_quiet = respect_quiet
         self._pending_bubble = bubble if show_bubble else None
         # 本次合成有效：清掉上一次 stop() 留下的作废标记，
         # 否则新起的合成结果会被当成"迟到结果"丢弃。
@@ -605,9 +642,11 @@ class VoiceChimeService:
     def _on_synthesized(self, path: str, text: str, error: str) -> None:
         role = self._synthesis_role
         self._synthesis_role = "play"
+        respect_quiet = self._synthesis_respect_quiet
+        self._synthesis_respect_quiet = True
         self._busy = False
         try:
-            self._handle_synthesized(role, path, text, error)
+            self._handle_synthesized(role, path, text, error, respect_quiet)
         finally:
             # 任何结局（完成/失败/已停止）都必须结算排队项：_stopped 时
             # _drain 内部丢弃，其余情况补播——不能让到点报时静默消失。
@@ -620,10 +659,12 @@ class VoiceChimeService:
         self._queued_fire = None
         if queued is None or self._stopped:
             return
-        sentence, now, bubble_text, show_bubble, role = queued
-        self._fire(sentence, now, bubble_text, show_bubble=show_bubble, role=role)
+        sentence, now, bubble_text, show_bubble, role, respect_quiet = queued
+        self._fire(sentence, now, bubble_text, show_bubble=show_bubble, role=role,
+                   respect_quiet=respect_quiet)
 
-    def _handle_synthesized(self, role: str, path: str, text: str, error: str) -> None:
+    def _handle_synthesized(self, role: str, path: str, text: str, error: str,
+                            respect_quiet: bool = True) -> None:
         if self._stopped:
             # stop()（关闭开关 / 应用退出）之后才回来的结果：不再回放/气泡——
             # 否则「关掉语音报时之后又响一声」，退出路径上还可能触碰正在析构的窗口。
@@ -655,6 +696,13 @@ class VoiceChimeService:
             # 预合成完成：仅记录缓存路径，不播放（到点由 _fire 直接播缓存）。
             self._precache_path = str(path)
             logger.info("预合成完成：%s", Path(path).name)
+            return
+        if respect_quiet and self._quiet_muted():
+            # 合成期间才进入免打扰（合成要 3-8s，全屏/手动免打扰都可能在中间发生）：
+            # 结果既不出声也不回放，气泡仍按既有语义走（_bubble 自己会进暂存队列）。
+            logger.debug("免打扰期间静音，丢弃合成结果（气泡照旧）：%s", Path(path).name)
+            if role != "speak":
+                self._bubble(self._pending_bubble if self._pending_bubble is not None else text)
             return
         if role == "speak":
             # 外部播报（节日提醒）：只出声，气泡由调用方自己展示。
@@ -753,6 +801,22 @@ class VoiceChimeService:
             return False
 
     # ------------------------------------------------------------ 提示
+    def _quiet_muted(self) -> bool:
+        """当前是否因免打扰（含全屏等效）静音语音报时 / 节日语音。
+
+        判据与气泡**同源**：``window_alerts.quiet_blocked`` 转发 ``quiet_mode`` 的
+        唯一判据（手动或全屏等效，以及 ``quiet_also_on_fullscreen`` 配置），本方法
+        只负责取宿主窗口，不另读标志——两处判据各自读标志就会出现"气泡压住了、
+        声音还在响"这类不一致。
+
+        宿主没有窗口（无 GUI 的测试替身 / 纯逻辑调用）时返回 False：没有窗口就
+        没有全屏避让，免打扰也无从谈起。
+        """
+        from . import window_alerts
+
+        win = getattr(self._app, "win", None)
+        return win is not None and window_alerts.quiet_blocked(win)
+
     def _bubble(self, text: str) -> None:
         """桌宠气泡展示报时文字（受 voice_chime_show_bubble 开关控制）。
 
@@ -772,7 +836,8 @@ class VoiceChimeService:
         win = getattr(app, "win", None)
         # 免打扰（含全屏等效）判定在**可见性判断之前**（同 festival_service）：
         # 宿主隐藏时若先看 isVisible，报时提醒会走系统通知，免打扰压不住也不进
-        # 暂存队列。语音照常播，只是不留字、不入通知。
+        # 暂存队列。这里的暂存只针对**气泡**：语音由 _fire / _handle_synthesized
+        # 的静音闸丢弃（不补播，理由见 _fire 的说明）。
         if win is not None and window_alerts.quiet_blocked(win):
             window_alerts.defer_quiet(text)
             return
