@@ -183,7 +183,7 @@ modern_settings_dialog.py
 
 ## 三、架构红线与开发约束
 
-> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（213 行，7 个用例）。
+> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（577 行，13 个用例）。
 
 ### 3.1 行数预算（绊线，不是红线）
 
@@ -390,7 +390,7 @@ _on_tick(now)
 |---|---|---|
 | `tests/test_voice_chime.py`（952 行） | 61 个 def / 参数化后 153 用例 | 11 键默认值与清洗、六种调度数学、`chime_slot` 幂等、`build_chime_text`/`build_chime_bubble_text` 解耦、台词每日排列轮换（`quote_day_order`/`chime_index_in_day`/`pick_quote`）、库长不重复护栏、自定义台词清洗、预合成状态机、缓存裁剪、edge 参数格式化与 `cache_key` |
 | `tests/test_config_schema.py` | 5 | 三处登记护栏：`DEFAULTS_SNAPSHOT`、`RELOAD_WHITELIST_SNAPSHOT`、`SPECIAL_CASED_KEYS`，代表用例 `test_every_defaults_key_is_whitelisted_or_special_cased` |
-| `tests/test_architecture.py`（213 行） | 7 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫 |
+| `tests/test_architecture.py`（577 行） | 13 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫、多进程层与旧版菜单退役层的防复活守卫 |
 | `tests/test_menu_layout.py`（2108 行） | 65 | 菜单模板节点顺序、动作 resolve、populate 标签（含语音报时两项） |
 | `tests/test_desktop_pet_features.py`（3118 行） | 94 | 桌宠能力集成（含菜单标签断言） |
 | `tests/test_bundle_slim.py` | 10 | `plan_removals` / `verify_no_live_reference` / `verify_required` / dry-run / 实际应用 / 拒绝越界 |
