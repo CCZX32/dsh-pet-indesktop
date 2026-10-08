@@ -939,7 +939,8 @@ class Config:
             # 版本与主题变化，没有稳定契约，所以做成可配置而不是硬编码一份。
             "foobar_title_format": "",
             # 手动指定播放器路径 {netease|qqmusic: exe 路径}：自动搜索找不到时的
-            # 逃生口，只能手改 config.json（暂无设置页控件），空 = 走自动搜索。
+            # 逃生口，也能在「设置 → 桌宠 → 播放器路径（高级）」里改（
+            # settings_music.build_music_player_rows），空 = 走自动搜索。
             "music_player_paths": {},
             "agent_cost_enabled": False,  # Agent 本轮结束时显示消费金额（用余额差值估算）
             "golden_spin_on_click": False,  # 点击回应动画结束后自动接一段黄金回旋

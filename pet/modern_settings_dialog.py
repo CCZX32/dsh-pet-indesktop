@@ -1974,8 +1974,8 @@ class ModernSettingsDialog(QDialog):
             phrases_box.add_group("事件气泡文案", phrase_rows)
         phrases_box.set_expanded(False)
         self.dialogue_phrases_box = phrases_box
-        # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
-        # 用现成的 CollapsibleGroup.add_group，不需要新造控件。
+        # 「Agent 联动」折叠框只装「提示音效」子组（默认折叠）；「消费统计」已独立成
+        # 一级分组留在框外（见本域 sections 表）。用现成的 CollapsibleGroup.add_group。
         agent_box = CollapsibleGroup("Agent 联动", self)
         agent_cost_rows = [
             SettingRow("agent_cost", "显示本轮消费",

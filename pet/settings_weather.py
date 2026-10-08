@@ -70,7 +70,8 @@ def build_weather_rows(dialog) -> list[SettingRow]:
             "weather_enabled",
             "启用天气",
             "右键菜单显示「查看天气」与「天气城市」。只在点「查看天气」或切换城市时"
-            "联网取一次数（中国天气网优先，open-meteo 兜底），平时不请求、不打扰。",
+            "联网取一次数（中国天气网优先，open-meteo 兜底），平时不请求、不打扰；"
+            "关掉后菜单里保留这两个入口并置灰，悬停能看到关闭原因。",
             dialog.weather_enabled_check,
         ),
         SettingRow(

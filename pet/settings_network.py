@@ -214,7 +214,7 @@ def build_menu_rows(dialog) -> list[SettingRow]:
             "「网络信息」菜单入口",
             "右键菜单里显示「网络信息」：公网 IP、IP 属地（及是否在中国大陆）、"
             "Google / GitHub 可达性。只在打开弹窗时取一次（约 1 KB），不轮询；"
-            "关掉后菜单里不再出现该入口。",
+            "关掉后菜单里保留该入口并置灰，悬停能看到关闭原因。",
             dialog.network_info_menu_check,
         ),
     ]
