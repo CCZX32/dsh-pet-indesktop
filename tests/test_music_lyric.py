@@ -1615,3 +1615,107 @@ class TestPendingPlaybackIsBoundPerRequest:
             "A 的歌词被 B 的真实进度污染（reported=True 会置灰对齐一整首）")
 
 
+# ------------------------------------------------- 关闭歌词后迟到采样的代次守卫
+#
+# 全产品审查 C4（2026-10-08）：``sync_enabled(False)`` 停表 + 置停止标 + ``_reset()``，
+# 但采样线程可能正卡在 WinRT 的 ``get_now_playing()`` 里（OS 边界，实测会长时间不
+# 返回）。它返回后照常 ``_playback_ready.emit``，主线程回调只查窗口可见性、不查启用
+# 态与代次：``_reset()`` 已把 ``_current_key`` 清空，迟到结果于是被当成"新歌"——重新
+# 取词并把歌词顶上屏，用户明明关了歌词，屏幕却冒出歌词、后台还白跑一次网络。
+
+
+class _GatedSampler:
+    """可控 SMTC 采样替身（只替换 OS 边界）：首次调用卡在事件上，之后立即返回。"""
+
+    def __init__(self, playback) -> None:
+        import threading
+
+        self.playback = playback
+        self.calls = 0
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def __call__(self, tracked_app_id=None, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            self.release_first.wait(timeout=10)
+        return self.playback
+
+
+def _pump_until(predicate, *, timeout=10.0) -> bool:
+    """宽预算轮询 + 事件泵：采样线程到主线程的 ``_playback_ready`` 是队列投递。"""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    app.processEvents()
+    return predicate()
+
+
+def _gated_controller(monkeypatch, *, title="夜曲", artist="周杰伦"):
+    """真实控制器 + 真实采样线程，只把 SMTC 采样换成卡在事件上的替身。"""
+    from pet import now_playing
+    from pet.music_lyric_controller import MusicLyricController
+
+    sampler = _GatedSampler(_playback(None, title=title, artist=artist))
+    monkeypatch.setattr(now_playing, "get_now_playing", sampler)
+    win = _FakeWinVisible()
+    ctrl = MusicLyricController(win)
+    fetched: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: fetched.append(a))
+    return win, ctrl, sampler, fetched
+
+
+def test_late_sample_after_disable_is_dropped(qapp, monkeypatch):
+    """关闭歌词后迟到的采样：不取词、不上屏（代次守卫）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10), "前提：采样已进入 SMTC 调用"
+        ctrl.sync_enabled(False)      # 用户关掉歌词：停表 + 置停止标 + _reset()
+        sampler.release_first.set()   # 放行卡住的采样 → 迟到结果回到主线程
+
+        assert _pump_until(lambda: ctrl._sampling is False), "迟到采样未回到主线程"
+        assert fetched == [], "关闭后迟到的采样不得重新派发取词"
+        assert win.shown == [], "关闭后迟到的采样不得把歌名/歌词顶上屏"
+    finally:
+        ctrl.shutdown()
+
+
+def test_sample_callback_still_processed_when_enabled(qapp, monkeypatch):
+    """非回归：开启状态下采样回调照常推进（代次守卫不得误杀正常一拍）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10)
+        sampler.release_first.set()
+
+        assert _pump_until(lambda: fetched), "开启状态下采样结果必须照常处理"
+        assert win.shown, "开启状态下歌名必须照常亮出"
+    finally:
+        ctrl.shutdown()
+
+
+def test_resample_after_disable_enable_is_processed(qapp, monkeypatch):
+    """关闭再开启：新一代采样照常处理（代次不串，不把新结果当陈旧的丢）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10)
+        ctrl.sync_enabled(False)
+        sampler.release_first.set()
+        assert _pump_until(lambda: ctrl._sampling is False)
+        assert fetched == []
+
+        ctrl.sync_enabled(True)       # 重新开启：新采样（第 2 次调用）立即返回
+        assert _pump_until(lambda: fetched), "关闭再开启后新采样不得被误丢"
+    finally:
+        ctrl.shutdown()
+
+

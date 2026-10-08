@@ -309,6 +309,14 @@ class MusicLyricController(QObject):
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
     _pending_by_key: dict = None
 
+    # 采样**代次**：每次 _reset() 递增（=关闭歌词 / 退出音乐模式 / shutdown）。
+    # 在途采样带着派发时的代次回来，代次不符即为上一代的迟到结果，一律丢弃。
+    # 类级默认 0 供单测直接驱动 _on_playback_ready（没有派发过，两值相等=放行）。
+    _generation: int = 0
+    # 最近一次派发的采样所属代次（主线程写、主线程读；同一时刻只允许一拍在途，
+    # 由 _sampling 标志保证，所以单个槽位就够）。
+    _dispatch_generation: int = 0
+
     def __init__(self, window: Any) -> None:
         super().__init__(window)
         self.win = window
@@ -464,6 +472,10 @@ class MusicLyricController(QObject):
 
     def _reset(self) -> None:
         self._tracker.reset()
+        # 代次递增放在**最前**：复位之后到达的在途采样必须被识别成上一代。
+        # 所有关闭路径（sync_enabled(False) / set_music_mode_enabled(False) /
+        # shutdown）都经这里，代次变化即等价于"当前不再启用"。
+        self._generation += 1
         self._current_key = None
         self._no_lyric_until.clear()
         self._loading.clear()
@@ -592,6 +604,8 @@ class MusicLyricController(QObject):
         if self._sampling or self._sample_thread is None:
             return  # 上一拍还没回来 / 线程未起：跳过，避免堆积
         self._sampling = True
+        # 记下本拍所属代次（回调侧据此判"是不是关闭/复位之后才回来的"）。
+        self._dispatch_generation = self._generation
         self._sample_wake.set()
 
     def _browser_media_enabled(self) -> bool:
@@ -696,6 +710,12 @@ class MusicLyricController(QObject):
     def _on_playback_ready(self, playback) -> None:
         """采样回到主线程：在这里做原有的状态推进。"""
         self._sampling = False
+        # 代次守卫：关闭歌词（_reset 递增代次）之后才回来的采样不得再推进任何
+        # 状态。此时 _current_key 已被清空，放行等于把"关掉歌词前那一拍"当成
+        # 新歌——重新取词 + 歌词上屏，用户明明关了歌词。shutdown 同理（同一个
+        # _reset）。flag 照常在上一行清掉，否则采样永久停摆。
+        if self._dispatch_generation != self._generation:
+            return
         if not getattr(self.win, "isVisible", lambda: False)():
             return
         if playback is None:
