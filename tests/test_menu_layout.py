@@ -1446,7 +1446,10 @@ def test_settings_visual_hierarchy_uses_shared_product_tokens(tmp_path, monkeypa
     section_title = dialog.pages.currentWidget().findChild(settings_mod.QLabel, "sectionTitle")
     row = dialog.findChild(SettingRow, "settingRow_autostart")
     assert page_title.font().pixelSize() == 22
-    assert section_title.font().pixelSize() == 13
+    # 2026-10-08 视觉层级调整：组标题 13px → 15px（描述小字 12px 另立一行，见下）。
+    assert section_title.font().pixelSize() == 15
+    description = dialog.pages.currentWidget().findChild(settings_mod.QLabel, "sectionDescription")
+    assert description is not None and description.font().pixelSize() == 12
     assert row.label.font().pixelSize() == 13
     assert row.label.font().weight() == 500
     assert row.hint_label.font().pixelSize() == 12

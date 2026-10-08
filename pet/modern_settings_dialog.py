@@ -554,7 +554,7 @@ class ModernSettingsDialog(QDialog):
                     "后台服务",
                     [
                         SettingRow("balance_refresh", "余额自动刷新", "设置后台刷新间隔；0 分钟表示关闭。", self.balance_refresh_spin),
-                        SettingRow("balance_tier_mode", "峰谷提示文案", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
+                        SettingRow("balance_tier_mode", "高峰 / 空闲时段提示", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
                         SettingRow(
                             "balance_tier_peak", "高峰自定义文本", "仅“自定义”模式生效；留空回退默认“高峰”。", self.balance_tier_peak_edit, stacked=True
                         ),
@@ -585,9 +585,9 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_enabled", "启用灵动岛", "显示独立胶囊小窗；桌宠隐藏后仍可常驻。", self.island_enabled_check),
                     SettingRow("dynamic_island_icon", "显示图标", "在胶囊左侧显示角色图标。", self.island_icon_check),
                     SettingRow("dynamic_island_name", "显示名称", "显示当前角色名称。", self.island_name_check),
-                    SettingRow("dynamic_island_info", "显示信息槽", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
+                    SettingRow("dynamic_island_info", "显示中间信息栏", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
                     SettingRow("dynamic_island_status", "显示状态灯", "显示右侧状态圆点。", self.island_status_check),
-                    SettingRow("dynamic_island_info_mode", "信息槽内容", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
+                    SettingRow("dynamic_island_info_mode", "信息栏显示什么", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
                     SettingRow(
                         "dynamic_island_style",
                         "背景风格",
@@ -734,10 +734,10 @@ class ModernSettingsDialog(QDialog):
                         "多开桌宠之间发生碰撞物理互动。开启鼠标穿透的桌宠仍会参与碰撞，锁定位置的桌宠作为固定障碍。",
                         self.collision_enabled_check,
                     ),
-                    SettingRow("collision_restitution", "弹性系数", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
+                    SettingRow("collision_restitution", "撞后弹力", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
                     SettingRow("collision_friction", "摩擦系数", "擦边碰撞时的切向摩擦阻力（0~0.30，默认 0.08）。", self.collision_friction_spin),
-                    SettingRow("collision_mass_scale", "质量倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
-                    SettingRow("collision_impulse_cap", "冲量上限", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
+                    SettingRow("collision_mass_scale", "体重倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
+                    SettingRow("collision_impulse_cap", "最大撞击力度", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
                     SettingRow("collision_sound_enabled", "碰撞音效", "碰撞时播放音效反馈。", self.collision_sound_check),
                     SettingRow("collision_sound_volume", "碰撞音量", "调整碰撞音效播放音量。", self.collision_sound_volume_spin),
                 ],
@@ -753,7 +753,7 @@ class ModernSettingsDialog(QDialog):
         # 行数预算原因；组名与顺序的既有契约见 tests/test_menu_layout.py）。
         # Agent 联动：音效设置
         agent_sound_rows = [
-            SettingRow("agent_sound_enabled", "Agent 音效联动", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
+            SettingRow("agent_sound_enabled", "AI 编程助手提示音", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
             SettingRow("agent_sound_start", "开始工作提示音", "Agent 进入工作状态时播放。", self.agent_sound_start_widget, stacked=True),
             SettingRow("agent_sound_done", "任务完成提示音", "Agent 完成任务时播放。", self.agent_sound_done_widget, stacked=True),
             SettingRow("agent_sound_error", "发生错误提示音", "Agent 出现错误异常时播放。", self.agent_sound_error_widget, stacked=True),
@@ -935,7 +935,7 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "内容与布局",
                 [
-                    SettingRow("menu_template", "菜单模式", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
+                    SettingRow("menu_template", "菜单版本（新版 / 旧版）", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
                     SettingRow("context_menu_layout", "菜单编排", "调整显示、顺序和层级；左侧编辑，右侧同步预览。", self.menu_layout_editor, stacked=True),
                 ],
                 menu_content,
@@ -1249,7 +1249,7 @@ class ModernSettingsDialog(QDialog):
                         "她会偶尔看一眼你在用的软件并说句话。截图只在内存处理、不落盘、不写入会话。",
                         self.pro_enabled_check,
                     ),
-                    SettingRow("proactive_dry_run", "dry-run 验证模式", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
+                    SettingRow("proactive_dry_run", "试运行（只记日志、不花钱）", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
                     SettingRow(
                         "proactive_preset",
                         "陪伴节奏预设",
@@ -1264,9 +1264,9 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "频率参数（自定义预设时生效）",
                 [
-                    SettingRow("proactive_dwell", "窗口停留门限（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
-                    SettingRow("proactive_cooldown", "关怀冷却间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
-                    SettingRow("proactive_min_interval", "最小请求间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
+                    SettingRow("proactive_dwell", "在同一窗口停多久才看（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
+                    SettingRow("proactive_cooldown", "两次搭话至少间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
+                    SettingRow("proactive_min_interval", "两次识屏最短间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
                     SettingRow("proactive_daily_cap", "每日请求上限", "DeepSeek 视觉单次约 ¥0.003；上限 9999 约等于不限。", self.pro_cap_spin),
                 ],
                 content,
@@ -1282,7 +1282,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("proactive_pre_cue", "触发前先兆提示", "触发前先冒一句「让我看看……」。", self.pro_precue_check),
                     SettingRow(
                         "proactive_free",
-                        "识屏优先用独立视觉配置",
+                        "识屏用单独的看图模型",
                         "开：服务商配了独立视觉端点（如免费的智谱 GLM-4.6V-Flash）时识屏走它；关：始终跟随聊天模型。",
                         self.pro_free_check,
                     ),
@@ -1302,7 +1302,7 @@ class ModernSettingsDialog(QDialog):
                         stacked=True,
                     ),
                     SettingRow("proactive_whitelist_add", "快捷添加", "点击后 3 秒内切换到目标窗口，自动采样进程名/标题。", self.pro_add_btn),
-                    SettingRow("proactive_memory_clear", "陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
+                    SettingRow("proactive_memory_clear", "清空陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
                 ],
                 content,
             )

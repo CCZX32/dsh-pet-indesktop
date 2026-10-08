@@ -73,6 +73,31 @@ ROW_ALIASES: dict[str, tuple[str, ...]] = {
     # 设置页统一写「API Key」（行 label 就是「API Key」），用户说「密钥」；
     # 「密钥」只出现在「恢复默认」确认框的说明文字里，不在任何设置的文案里。
     "密钥": ("api_key",),
+    # 2026-10-08 行标题重写（14 行）后，老用户记忆里的旧说法在新文案里已经一个字都
+    # 不剩，关键词命中覆盖不到——逐条补回来，免得改完标题老用户搜不着。
+    # 「dry-run 验证模式」→「试运行（只记日志、不花钱）」
+    "dry-run": ("proactive_dry_run",),
+    "验证模式": ("proactive_dry_run",),
+    # 「窗口停留门限（秒）」→「在同一窗口停多久才看（秒）」（「停留」还在 hint 里）
+    "门限": ("proactive_dwell",),
+    # 「关怀冷却间隔」→「两次搭话至少间隔」（「关怀」还在 hint 里）
+    "冷却": ("proactive_cooldown",),
+    # 「最小请求间隔（秒）」→「两次识屏最短间隔（秒）」
+    "最小请求": ("proactive_min_interval",),
+    # 「识屏优先用独立视觉配置」→「识屏用单独的看图模型」（「独立视觉」还在 hint 里）
+    "视觉配置": ("proactive_free",),
+    # 「菜单模式」→「菜单版本（新版 / 旧版）」
+    "菜单模式": ("menu_template",),
+    # 「质量倍率」→「体重倍率」（hint 写的是「质量加权倍率」，连不成词）
+    "质量倍率": ("collision_mass_scale",),
+    # 「弹性系数」→「撞后弹力」
+    "弹性": ("collision_restitution",),
+    # 「显示信息槽」→「显示中间信息栏」
+    "信息槽": ("dynamic_island_info",),
+    # 「峰谷提示文案」→「高峰 / 空闲时段提示」
+    "峰谷": ("balance_tier_mode",),
+    # 「Agent 音效联动」→「AI 编程助手提示音」
+    "音效联动": ("agent_sound_enabled",),
 }
 
 _ROW_PREFIX = "settingRow_"
