@@ -8,8 +8,9 @@
    keyline 里侧再 1px），随 squish 形变，**不进内容缓存**（paintEvent 里两笔固定
    成本，内容位图命中不失效）。像素断言取真渲染位图，反解上层笔的 alpha
    （SourceOver premultiplied）：暗色档要量到白 α≈10% / 黑 α≈18%，亮底/玻璃按
-   各自档位取值。已知底色两处取法不同——顶部两行底下只有底板（阴影带下偏 2px
-   从行 8 才盖到），底部那一行的底层取同栈的上一行（底板压在阴影上，RGB 不变）。
+   各自档位取值。已知底色两处取法不同——顶部两行底下是底板本身（投影是纯黑，
+   只加 alpha、不动预乘颜色），底部那一行的底层取同栈的上一行（底板压在投影上，
+   RGB 不变）。
 2. **结构变化淡化**：只在**结构变化**时淡化，120-150ms，单侧口径（主代理裁决
    2026-10-07）：**旧位图按 (1−t) 渐出、新位图始终直绘就位**——未变化的内容
    全程零稀释零闪烁，新增/重排的内容即时到位，旧结构残影渐隐。
@@ -121,8 +122,9 @@ def _premul(image: QImage, x: int, y: int) -> int:
 def _premul_ref(color: QColor) -> int:
     """主题色在渲染器里实际存下的预乘 R（含 8bit 取整：28·235/255 → 26）。
 
-    顶部那两行的底层就是底板本身（阴影带下偏 2px，从行 8 才盖到），所以底板色的
-    预乘值就是底色参考；底部那几行走 :func:`_bottom_base_premul`（同栈实测外推）。
+    顶部那两行的底层就是底板本身（三层投影是纯黑，只加 alpha、不动预乘 R），
+    所以底板色的预乘值就是底色参考；底部那几行走 :func:`_bottom_base_premul`
+    （同栈实测外推）。
     """
     return round(color.red() * color.alpha() / 255.0)
 
@@ -192,9 +194,9 @@ def _shell_distance(island: DynamicIsland, x: float, y: float) -> float:
 def test_top_highlight_and_bottom_shadow_pixels_on_dark(tmp_path):
     """暗色档：内缘上 1px 是白 α≈10% 的高光，下 1px 是黑 α≈18% 的暗边。
 
-    顶部底色取 ``_style_palette()[0]``（行 6/7 底下只有底板——阴影带下偏 2px，从行 8
-    才盖到）；底部底色取同栈上一行并按逐行斜率外推一格（见 :func:`_bottom_base_premul`：
-    阴影纯黑只加 alpha，笔又占住了这一整行，只能外推）。
+    顶部底色取 ``_style_palette()[0]``（行 6/7 的底层是底板本身——三层投影是纯黑，
+    只加 alpha、不动预乘 R）；底部底色取同栈上一行并按逐行斜率外推一格（见
+    :func:`_bottom_base_premul`：投影纯黑只加 alpha，笔又占住了这一整行，只能外推）。
     外描边（keyline）必须原样保留：笔在它**里侧**再 1px（k3 §7.4）。
     """
     _qapp()

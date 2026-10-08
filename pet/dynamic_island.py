@@ -53,6 +53,12 @@ _EDGE_MARGIN = 16
 _DOCK_THRESHOLD = 40
 _STRIP_THICKNESS = 16
 _STRIP_SIDE = 64  # 左右停靠时竖条的长度
+#: 胶囊投影三层：(两侧内收 px, 底边下伸 px, 纯黑 alpha)。
+#: 单层"整块下移 2px"既做不出近实远虚的落影，底缘也只剩一条硬边。三层一律
+#: **两侧内收、只向下长**——窗口高只有 44（胶囊 y=6..38），左右余量已被
+#: scale 1.03 / squish 鼓出吃掉，向外扩会被窗口硬切。最低层底边 38+4=42，
+#: 放大到 1.03 后 ≈42.6 < 44，安全。
+_CAPSULE_SHADOW_LAYERS = ((1.0, 1.0, 28), (2.0, 2.5, 16), (3.0, 4.0, 8))
 _CARD_WIDTH = 340      # 卡片宽下限（沿用现状视觉记忆）
 _CARD_WIDTH_MAX = 420  # 卡片宽上限（k3 §5.1：防长来源说明把卡片拉成横幅）
 _CARD_AUTO_COLLAPSE_MS = 15_000
@@ -164,10 +170,10 @@ _CONTENT_FADE_TICK_MS = 16   # ~60fps，与 _ANIM_TICK_MS 同口径
 # / 操作。高度**全部按字体度量实测**（k3 §5.2，不再有固定的 148）；每一区自带横分隔线
 # 与上下间距，所以"没有指标段"时整区连分隔线一起消失，不会留下一条悬空的线。
 _CARD_MARGIN_X = 16       # 内容左右边距（沿用现状 _build_card 的阅读边距）
-_CARD_MARGIN_TOP = 6
+_CARD_MARGIN_TOP = 10
 _CARD_MARGIN_BOTTOM = 12
-_CARD_LINE_GAP = 2        # 同一区内相邻行的行距
-_CARD_SECTION_GAP = 8     # 分区到横分隔线的距离（线上下各一档，k3 §5.1）
+_CARD_LINE_GAP = 3        # 同一区内相邻行的行距
+_CARD_SECTION_GAP = 10    # 分区到横分隔线的距离（线上下各一档，k3 §5.1）
 _CARD_SEP_PX = 1          # 横分隔线厚度（色 = 段间竖线色，见 _divider_color）
 _CARD_COL_GAP = 8         # 指标详情三列之间的间距
 _CARD_NAME_COL_MAX = 44   # 段名列宽上限（超宽右省略，值列左缘因此对齐）
@@ -1308,7 +1314,6 @@ class DynamicIsland(QWidget):
             return
         _bg, primary, secondary = self._style_palette()
         primary_color, secondary_color = QColor(primary), QColor(secondary)
-        accent_hex = self._accent_color().name()
         # 字体走字号层（与胶囊同一份源）、颜色走主题函数：卡片不自己发明一套
         self._card_balance_label.setFont(self._font_for("primary"))
         for label in (self._card_tier_label, self._card_status_label,
@@ -1322,13 +1327,19 @@ class DynamicIsland(QWidget):
                                f"color: {self._status_dot_color().name()};")
         self._apply_card_style(self._card_message_label,
                                f"color: {secondary_color.name()};")
-        # 按钮：圆角 8px、描边跟随主题色、悬停加亮；不用系统默认灰按钮
+        # 按钮：圆角 14px（= 按钮高 28 的一半）、accent 以 rgba 三档穿透做
+        # 常态/悬停/按下——常态就是"淡底 + 描边"的次级按钮，不再是隐形按钮；
+        # 按下（0.30）比悬停（0.20）更深，反馈不会落回次色灰而断档
+        accent = self._accent_color()
+        accent_rgb = f"{accent.red()}, {accent.green()}, {accent.blue()}"
         button_style = (
-            f"QPushButton {{ color: {primary_color.name()}; background: transparent;"
-            f" border: 1px solid {accent_hex}; border-radius: 8px;"
-            f" padding: 4px 10px; }}"
-            f"QPushButton:hover {{ background: {accent_hex}; color: #ffffff; }}"
-            f"QPushButton:pressed {{ background: {secondary_color.name()}; }}"
+            f"QPushButton {{ color: {primary_color.name()};"
+            f" background: rgba({accent_rgb}, 0.10);"
+            f" border: 1px solid rgba({accent_rgb}, 0.45);"
+            f" border-radius: 14px; padding: 4px 12px; }}"
+            f"QPushButton:hover {{ background: rgba({accent_rgb}, 0.20);"
+            f" border-color: rgba({accent_rgb}, 0.70); }}"
+            f"QPushButton:pressed {{ background: rgba({accent_rgb}, 0.30); }}"
         )
         for btn in (self._card_toggle_btn, self._card_chat_btn,
                     self._card_settings_btn):
@@ -3221,12 +3232,14 @@ class DynamicIsland(QWidget):
         # 胶囊外形：内缩 _CAPSULE_INSET + 果冻形变（只有外形参与 squish）
         rect, radius = self._squished_capsule_rect()
 
-        # 柔和阴影：底层半透明圆角矩形（跟随形变）
+        # 柔和阴影：三层半透明圆角矩形（跟随形变）——自外向内收窄、只向下长，
+        # 越往外越淡越大（见 _CAPSULE_SHADOW_LAYERS）
         if self._mode != "expanded":
-            shadow = rect.translated(0, 2)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 46))
-            painter.drawRoundedRect(shadow, radius, radius)
+            for inset, drop, alpha in _CAPSULE_SHADOW_LAYERS:
+                painter.setBrush(QColor(0, 0, 0, alpha))
+                painter.drawRoundedRect(
+                    rect.adjusted(inset, 1.0, -inset, drop), radius, radius)
 
         # 胶囊主体（白色 / 黑色 / 玻璃质感）；内容层已下沉到 _content_cache，
         # 主/次文字色在这里不再使用

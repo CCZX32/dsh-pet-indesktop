@@ -403,7 +403,7 @@ def test_squish_keeps_content_inside_capsule(monkeypatch, tmp_path):
             for y in range(img.height()):
                 if y < rect.top() - 1 or y > rect.bottom() + 1:
                     if qAlpha(img.pixel(x, y)) > 60:
-                        # 阴影带（rect 下移 2、α46）是设计内图元，排除
+                        # 投影带（三层内收/下伸、纯黑 α≤28）是设计内图元，排除
                         if not (rect.bottom() + 1 < y <= rect.bottom() + 3
                                 and qAlpha(img.pixel(x, y)) <= 80):
                             offenders.append((x, y))
