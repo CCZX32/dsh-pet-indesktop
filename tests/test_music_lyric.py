@@ -1321,6 +1321,59 @@ def test_resync_ignored_when_no_lyrics(monkeypatch):
     assert ctrl.nudge(5.0) is False
 
 
+# ------------------------------------------------- 取词失败后的同曲自动重试（B5）
+
+def test_same_track_retries_lyric_fetch_after_cooldown(monkeypatch):
+    """冷却到期后同一首歌不切歌也要自动重试（修复前：同曲轮询永不重试）。
+
+    冷却到期的判断原先只在 ``_start_track``（切歌路径）里，而同曲轮询的曲目 key
+    不变、压根走不到那条判断——一次网络故障就把这首歌在本次会话里永久拉黑，
+    十次同曲采样 ``fetch_attempts`` 恒为 0，网络恢复也不会自愈。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    ctrl = mod.MusicLyricController(_FakeWin())
+    attempts: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: attempts.append(a))
+
+    key = ("song-a", "artist")
+    sampled = _playback(None, title="Song-A", artist="Artist")
+    ctrl._start_track(key, "Song-A", "Artist", sampled, 100.0)
+    assert len(attempts) == 1, "切歌路径照常取词"
+
+    ctrl._on_lyrics_ready(key, None)              # 取词失败：记冷却
+    cooldown_until = ctrl._no_lyric_until[key]
+    assert cooldown_until > clock.now
+
+    clock.now = cooldown_until - 1.0              # 冷却内：同曲采样不重复取
+    ctrl._on_playback_ready(sampled)
+    assert len(attempts) == 1, f"冷却期内不得重复取词：{attempts}"
+
+    clock.now = cooldown_until + 1.0              # 冷却到期：同曲采样自动重试
+    ctrl._on_playback_ready(sampled)
+    assert len(attempts) == 2, f"冷却到期后同曲必须自动重试：{attempts}"
+    assert key in ctrl._loading, "重试同样走「取词中」去重位"
+
+
+def test_same_track_does_not_refetch_while_already_loading(monkeypatch):
+    """非回归：取词在途时同曲采样不得叠加第二路请求。"""
+    import pet.music_lyric_controller as mod
+
+    _patch_clock(monkeypatch, 100.0)
+    ctrl = mod.MusicLyricController(_FakeWin())
+    attempts: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: attempts.append(a))
+
+    key = ("song-a", "artist")
+    sampled = _playback(None, title="Song-A", artist="Artist")
+    ctrl._start_track(key, "Song-A", "Artist", sampled, 100.0)
+    ctrl._on_playback_ready(sampled)
+    ctrl._on_playback_ready(sampled)
+
+    assert len(attempts) == 1, f"在途取词只允许一路：{attempts}"
+
+
 # ------------------------------------------------- 网络边界（系统代理必须被绕过）
 
 

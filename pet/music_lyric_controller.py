@@ -325,8 +325,10 @@ class MusicLyricController(QObject):
         self._sample_stop = threading.Event()
         self._current_key: tuple[str, str] | None = None
         # 取词失败曲目的重试冷却（key → 可再次尝试的时刻）。一次网络故障
-        # 不该把这首歌在本次会话里永久拉黑（歌词族终审应修 3）——冷却 5 分钟
-        # 后允许自动重试一次，网络恢复即可自愈；冷却内不反复请求。
+        # 不该把这首歌在本次会话里永久拉黑（歌词族终审应修 3）——冷却到期后
+        # **同曲轮询**（_on_playback_ready 的无歌词分支 → _request_lyrics）会再试
+        # 一次，网络恢复即可自愈；每次失败都刷新冷却，所以最密也是每 5 分钟一次，
+        # 冷却内不反复请求。
         self._no_lyric_until: dict[tuple[str, str], float] = {}
         self._loading: set[tuple[str, str]] = set()
         # 是否已经历过一次切歌边界。用于跳过"开启功能时正在播、且播放器不报
@@ -734,6 +736,11 @@ class MusicLyricController(QObject):
 
         # 同一首歌：跟着进度走。标题常驻，歌词换行。
         if not self._tracker.has_lyrics:
+            # 取词失败后的同曲重试：冷却到期的判断原先只在 _start_track（切歌路径）
+            # 里，而同曲轮询的曲目 key 不变、永远走不到那条判断——一次网络故障就
+            # 把这首歌在本次会话里永久拉黑，网络恢复也不会自愈。这里按同一个
+            # `_no_lyric_until` 冷却补一次（在途去重与冷却判定都在 _request_lyrics）。
+            self._request_lyrics(key, track.title, track.artist, playback, now)
             # 还在取词：只显示常驻标题，别留空白。
             if self._title_line and not self._bubble_blocked():
                 self._show("", title=self._title_line, force=True)
@@ -781,11 +788,20 @@ class MusicLyricController(QObject):
         # 注意这里用**原始** title/artist 显示；取词用的是清洗后的查询词
         # （见 _lyric_query），两者刻意分开：显示不该被清洗规则改写。
         self._announce(title, artist)
+        self._request_lyrics(key, title, artist, playback, time.monotonic())
 
-        if key in self._loading or time.monotonic() < self._no_lyric_until.get(key, 0.0):
-            return
+    def _request_lyrics(self, key, title, artist, playback, now: float) -> bool:
+        """按需派发一次后台取词（在途去重 + 失败冷却）。返回是否真的派发了。
 
-        # 取词走后台线程：轮询里绝不发网络请求。
+        两条调用点共用这一份判定：切歌（``_start_track``）与同曲轮询
+        （``_on_playback_ready`` 的无歌词分支）。**同曲轮询这条点不可省**——只留
+        切歌那一条的话，取词失败后曲目 key 不变就永远不再判定冷却，这首歌在本次
+        会话里被永久拉黑（B5）。
+
+        取词走后台线程：轮询里绝不发网络请求。
+        """
+        if key in self._loading or now < self._no_lyric_until.get(key, 0.0):
+            return False
         query_title, query_artist = self._lyric_query(title, artist, playback)
         self._loading.add(key)
         # 采样上下文按**请求键**绑定，不写实例级单一槽（歌词族终审阻塞 1）：
@@ -799,6 +815,7 @@ class MusicLyricController(QObject):
             name="music-lyric-fetch",
             daemon=True,
         ).start()
+        return True
 
     # ------------------------------------------------ 手动对齐（快进 / 中途开始）
 
@@ -972,8 +989,11 @@ class MusicLyricController(QObject):
         if key != self._current_key:
             return  # 期间已经切歌，丢弃过期结果
         if lyrics is None or (not lyrics.lines and not lyrics.instrumental):
-            # 查不到曲目：不再重试，但**标题继续常驻**——
-            # 用户要的是"歌名长期显示"，查不到也不该让气泡空掉或消失。
+            # 查不到曲目：记 5 分钟冷却（`_no_lyric_until`），冷却到期后由**同曲
+            # 轮询**自动重试一次（`_on_playback_ready` → `_request_lyrics`），
+            # 冷却内不复请求——一次网络故障不会把这首歌在本次会话里永久拉黑。
+            # 无论查不到与否，**标题继续常驻**：用户要的是"歌名长期显示"，查不到
+            # 也不该让气泡空掉或消失。
             self._no_lyric_until[key] = time.monotonic() + 300.0
             if self._title_line and not self._bubble_blocked():
                 self._show("", title=self._title_line, force=True)
