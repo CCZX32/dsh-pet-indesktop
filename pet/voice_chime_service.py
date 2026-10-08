@@ -20,10 +20,11 @@
 - 预合成降延迟：距下一报时点 ≤ 60s 时提前在后台线程合成该次报时音频并
   写缓存，到点直接播缓存实现近零延迟；预合成未及时完成则回退即时合成。
 - 免打扰（含全屏等效）期间不出声：报时语音与节日语音在**合成入口**
-  （``_fire``）与**回放出口**（``_handle_synthesized``）过同一道闸
+  （``_fire``）、**回放出口**（``_handle_synthesized``）与 **``speak()`` 的
+  排队入口**（免打扰期间不入队，不留到免打扰结束后补播）过同一道闸
   （``_quiet_muted``，判据仍是 ``quiet_mode``），预合成一并跳过（省一次
   TTS 网络请求），被丢弃的只有声音——气泡语义不变（照旧进暂存队列）；
-  点击自言自语属交互应答（issue #208），在调用侧显式豁免。
+  点击自言自语属交互应答（issue #208），在调用侧显式豁免（豁免随队携带）。
 """
 
 from __future__ import annotations
@@ -314,6 +315,10 @@ class VoiceChimeService:
         # 外部播报（节日提醒）经 speak() 复用本服务的音频通道：通道忙时进深度 1
         # 待播队列，当前一段播完再播——不打断、不叠音。None 表示无待播。
         self._pending_speech: str | None = None
+        # 排队的那一条是否尊重免打扰（False = 交互应答，出队时即便在免打扰也照常
+        # 出声）。与 _pending_speech 同生命周期：入队时随文本一起置位，出队消费后
+        # 复位为默认值 True。
+        self._pending_respect_quiet = True
         # 媒体终止态枚举；_ensure_player 成功时填充，未创建播放器时为空元组。
         self._terminal_statuses: tuple = ()
         # 让位钩子：由 AppShell 注入 Callable[[str], bool]，入参是本分钟的报时槽位，
@@ -392,9 +397,16 @@ class VoiceChimeService:
         """向本服务（进程内唯一的音频通道）提交一段**纯语音**播报，不含气泡。
 
         供节日提醒等功能复用：合成、缓存、播放与报时**共用同一套**，因此结构上
-        不可能与报时叠音。通道忙（合成中或正在出声）时不打断也不丢弃，进深度 1
-        的待播队列，当前一段播完后自动播；队列已有待播时后来的覆盖前面的
-        （只留最新一条，避免堆积出已过期的内容）。
+        不可能与报时叠音。通道忙（合成中或正在出声）时不打断，进深度 1 的待播队列，
+        当前一段播完后自动播；队列已有待播时后来的覆盖前面的（只留最新一条，避免
+        堆积出已过期的内容）。
+
+        排队同样受免打扰契约约束，且契约**随队携带**：尊重免打扰的那条（默认）
+        在入队时就过闸——免打扰期间**丢弃、不入队**（与 ``_fire`` 同语义，不留到
+        免打扰结束后补播一条过期提醒）；显式豁免的那条（交互应答）把
+        ``respect_quiet`` 一起存进队列，出队时用它去过 ``_fire`` 的闸——入队时没开
+        免打扰、出队前才开的，出队那一拍仍会被闸丢弃（免打扰状态是现读的，不是
+        入队快照）。
 
         气泡刻意不在这里做：节日提醒有自己的一套气泡（含 show_quote 开关与更长
         的展示时长），若再走报时的 ``_bubble`` 会被 ``voice_chime_show_bubble``
@@ -413,7 +425,13 @@ class VoiceChimeService:
         if not stripped:
             return False
         if self._busy or self._player_busy():
+            if respect_quiet and self._quiet_muted():
+                # 入队即丢弃（与 _fire 的「丢弃不补播」同语义）：排队的节日语音在
+                # 免打扰结束后出队补播，等于把一条过期提醒翻出来。
+                logger.debug("免打扰期间静音，丢弃本次排队语音：%s", stripped[:20])
+                return True
             self._pending_speech = stripped
+            self._pending_respect_quiet = respect_quiet
             logger.info("%s：音频通道忙，已排队待播", log_tag)
             return True
         self._fire(stripped, datetime.now(), None, show_bubble=False, role="speak",
@@ -575,7 +593,9 @@ class VoiceChimeService:
         本次播报——**在合成之前返回**，连缓存都不查（用户听不到的声音没必要合成）。
         气泡照旧走 ``_bubble``（它自己会进暂存队列），语义与改动前逐字相同；出声的
         各条路径（缓存命中 / 即时合成 / 排队补播）都要经过本方法，所以这道闸只有
-        一处。合成在飞时被静音的那一半在 ``_handle_synthesized``。
+        一处。合成在飞时被静音的那一半在 ``_handle_synthesized``。``speak()`` 的
+        排队入口另有一道**同语义**的闸（免打扰期间不入队，免得免打扰结束后补播一条
+        过期提醒），出队时仍走本方法再判一次——免打扰状态是现读的，不是入队快照。
         """
         if not _EDGE_TTS_AVAILABLE:
             self._notify_missing_tts()
@@ -775,9 +795,13 @@ class VoiceChimeService:
             return
         pending = self._pending_speech
         self._pending_speech = None
+        # 随队携带的免打扰口径一并取出、并复位为默认值（与 _pending_speech 同生命周期）。
+        respect_quiet = self._pending_respect_quiet
+        self._pending_respect_quiet = True
         if not pending or self._stopped:
             return
-        self._fire(pending, datetime.now(), None, show_bubble=False, role="speak")
+        self._fire(pending, datetime.now(), None, show_bubble=False, role="speak",
+                   respect_quiet=respect_quiet)
 
     def _ensure_player(self) -> bool:
         if self._player is not None:

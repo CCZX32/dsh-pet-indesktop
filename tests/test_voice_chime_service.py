@@ -736,11 +736,13 @@ def test_about_to_quit_stops_voice_chime_service(tmp_path, monkeypatch):
 
 
 # ============================================================ 共享音频通道（节日语音）
-# 节日提醒的语音复用本报时服务作为进程内唯一音频通道。下列用例锁住三件事：
+# 节日提醒的语音复用本报时服务作为进程内唯一音频通道。下列用例锁住四件事：
 #   1) speak() 只出声、不出气泡（气泡归调用方，避免与节日自己的气泡重复/被
 #      voice_chime_show_bubble 二次影响）；
 #   2) 通道忙时不打断也不丢弃，进深度 1 待播队列，播完自动接上；
-#   3) yield_slot 钩子让报时在"节日要说话的那一分钟"整分钟让位，且让位同样
+#   3) 排队同样受免打扰契约约束：入队即过闸（尊重免打扰的那条直接丢弃、不补播），
+#      豁免随队携带（交互应答出队时照常出声）；
+#   4) yield_slot 钩子让报时在"节日要说话的那一分钟"整分钟让位，且让位同样
 #      消费槽位（否则 20s 一次的 tick 会在本分钟内反复询问）。
 
 
@@ -841,6 +843,86 @@ def test_stop_clears_pending_speech(tmp_path, monkeypatch):
     service.stop()
 
     assert service._pending_speech is None
+
+
+def test_pending_speech_carries_quiet_exemption_through_the_queue(tmp_path, monkeypatch):
+    """交互应答（点击自言，respect_quiet=False）排队时，豁免必须随队携带。
+
+    实测缺陷（2026-10-08，9eedd70 的忙通道分支）：这段分支只存文本、不存
+    ``respect_quiet``，出队时回落默认 True → 通道忙时排队的那次点击自言自语在
+    免打扰中出队被误静音（契约：交互应答免打扰照常播）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    text = "今天也要认真工作呀。"
+    _cache_mp3(service, text)
+    service._busy = True
+    _quiet().start(15)
+
+    assert service.speak(text, log_tag="点击自言自语", respect_quiet=False) is True
+
+    assert service._pending_speech == text, "忙通道照旧进队列（深度 1，不打断当前音频）"
+    assert service._pending_respect_quiet is False, "豁免必须随文本一起入队"
+
+    service._busy = False          # 当前一段的合成/播放结算完毕
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert _quiet().suppression_active() is True, "出队时仍在免打扰（本用例前提）"
+    assert service._player.plays == 1, "豁免随队携带：交互应答照常出声"
+    assert service._pending_respect_quiet is True, "出队消费后复位为默认值"
+
+
+def test_quiet_mode_drops_queued_speech_instead_of_replaying_later(tmp_path, monkeypatch, caplog):
+    """免打扰中通道忙时的节日语音：入队即丢弃，不得留到免打扰结束后补播。
+
+    实测缺陷（2026-10-08，9eedd70 的忙通道分支）：这段分支不过静音闸，节日语音
+    被排队 → 免打扰结束后出队补播一条已经过期的提醒（契约：免打扰期间丢弃、
+    不补播，与 ``_fire`` 同语义）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service._busy = True
+    _quiet().start(15)
+
+    with caplog.at_level("DEBUG"):
+        assert service.speak("今天是中秋节。", log_tag="节日提醒") is True
+
+    assert service._pending_speech is None, "入队即闸：队列里不得留下这条节日语音"
+    assert _WorkerSpy.instances == [], "丢弃发生在合成之前（连缓存都不查）"
+    assert any("免打扰" in r.getMessage() for r in caplog.records), "丢弃须留下可发现的日志"
+
+    _quiet().reset()               # 免打扰结束后的那些拍
+    service._busy = False
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._pending_speech is None
+    assert service._player.plays == 0, "出队后无任何播放（过期提醒不补播）"
+
+
+def test_pending_speech_is_rechecked_against_quiet_mode_on_dequeue(tmp_path, monkeypatch):
+    """入队时不在免打扰、出队前才进入：出队这一拍仍要被闸丢掉（既有语义回归）。
+
+    随队携带的是**入队时**的豁免值，不是当时的免打扰状态快照——真闸仍在
+    ``_fire`` 里，所以出队必须再判一次（本用例锁住这一点不被"随队携带"改坏）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    text = "今天是重阳节。"
+    _cache_mp3(service, text)
+    service._busy = True
+
+    assert service.speak(text, log_tag="节日提醒") is True
+    assert service._pending_speech == text, "入队时未开免打扰 → 照旧进队列"
+
+    _quiet().start(15)             # 这一条播完之前用户开了免打扰
+    service._busy = False
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._pending_speech is None
+    assert service._player.plays == 0, "出队时被 _fire 闸丢弃（缓存命中也不出声）"
 
 
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):
