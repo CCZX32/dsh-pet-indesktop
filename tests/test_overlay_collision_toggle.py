@@ -78,6 +78,11 @@ def _teardown(shell):
     overlay = getattr(shell, "overlay", None)
     if overlay is not None:
         overlay.close()
+    # 排空延迟音效回调：sprite_sound._submit 用 QTimer.singleShot(0, ...) 把播放
+    # 推迟到下一轮事件循环，不排空会漏进下一条用例的 play_sound 打桩里（音量 0.7
+    # 的碰撞音被记成别人的点击音）。调两次：回调执行本身也可能再投递事件。
+    QApplication.processEvents()
+    QApplication.processEvents()
 
 
 def test_refresh_settings_applies_main_collision_switch(tmp_path):
