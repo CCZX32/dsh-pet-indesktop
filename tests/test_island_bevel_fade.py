@@ -8,8 +8,9 @@
    keyline 里侧再 1px），随 squish 形变，**不进内容缓存**（paintEvent 里两笔固定
    成本，内容位图命中不失效）。像素断言取真渲染位图，反解上层笔的 alpha
    （SourceOver premultiplied）：暗色档要量到白 α≈10% / 黑 α≈18%，亮底/玻璃按
-   各自档位取值。已知底色两处取法不同——顶部两行底下只有底板（阴影带下偏 2px
-   从行 8 才盖到），底部那一行的底层取同栈的上一行（底板压在阴影上，RGB 不变）。
+   各自档位取值。已知底色两处取法不同——顶部两行底下是底板本身（投影是纯黑，
+   只加 alpha、不动预乘颜色），底部那一行的底层取同栈的上一行（底板压在投影上，
+   RGB 不变）。
 2. **结构变化淡化**：只在**结构变化**时淡化，120-150ms，单侧口径（主代理裁决
    2026-10-07）：**旧位图按 (1−t) 渐出、新位图始终直绘就位**——未变化的内容
    全程零稀释零闪烁，新增/重排的内容即时到位，旧结构残影渐隐。
@@ -39,7 +40,9 @@ from pet.dynamic_island import DynamicIsland
 #: 墨阈值：滤掉抗锯齿外溢与阴影的弱覆盖（0-255 的 alpha）。
 _INK = 40
 #: "亮行"判据（R 通道比底板高多少才算一笔高光/描边）。
-_BRIGHT_DELTA = 12
+#: 取 16：软陶笔（白 α26 ≈ +24）与外描边（白 α52 ≈ +50）都在它之上，而顶部
+#: 光泽 sheen（暗风白 α14 ≈ +12）在它之下——不然扫亮带的用例会把光泽带读成笔。
+_BRIGHT_DELTA = 16
 
 
 def _qapp() -> QApplication:
@@ -121,8 +124,9 @@ def _premul(image: QImage, x: int, y: int) -> int:
 def _premul_ref(color: QColor) -> int:
     """主题色在渲染器里实际存下的预乘 R（含 8bit 取整：28·235/255 → 26）。
 
-    顶部那两行的底层就是底板本身（阴影带下偏 2px，从行 8 才盖到），所以底板色的
-    预乘值就是底色参考；底部那几行走 :func:`_bottom_base_premul`（同栈实测外推）。
+    顶部那两行的底层就是底板本身（三层投影是纯黑，只加 alpha、不动预乘 R），
+    所以底板色的预乘值就是底色参考；底部那几行走 :func:`_bottom_base_premul`
+    （同栈实测外推）。
     """
     return round(color.red() * color.alpha() / 255.0)
 
@@ -192,9 +196,9 @@ def _shell_distance(island: DynamicIsland, x: float, y: float) -> float:
 def test_top_highlight_and_bottom_shadow_pixels_on_dark(tmp_path):
     """暗色档：内缘上 1px 是白 α≈10% 的高光，下 1px 是黑 α≈18% 的暗边。
 
-    顶部底色取 ``_style_palette()[0]``（行 6/7 底下只有底板——阴影带下偏 2px，从行 8
-    才盖到）；底部底色取同栈上一行并按逐行斜率外推一格（见 :func:`_bottom_base_premul`：
-    阴影纯黑只加 alpha，笔又占住了这一整行，只能外推）。
+    顶部底色取 ``_style_palette()[0]``（行 6/7 的底层是底板本身——三层投影是纯黑，
+    只加 alpha、不动预乘 R）；底部底色取同栈上一行并按逐行斜率外推一格（见
+    :func:`_bottom_base_premul`：投影纯黑只加 alpha，笔又占住了这一整行，只能外推）。
     外描边（keyline）必须原样保留：笔在它**里侧**再 1px（k3 §7.4）。
     """
     _qapp()
@@ -369,6 +373,155 @@ def test_docked_strip_has_no_bevel(tmp_path):
         assert (normal.pixelColor(island.width() // 2, highlight_row).red()
                 - island._style_palette()[0].red()) >= _BRIGHT_DELTA, (
             "对照：自由胶囊态必须有软陶笔")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+# ------------------------------------------------- 顶部光泽 / 玻璃 / 字号 / 细节批
+def test_top_sheen_covers_only_the_upper_band_and_never_enters_content(tmp_path):
+    """暗风顶部光泽：从 rect.top()+3 起、比软陶笔弱、到中线前归零，且不进内容缓存。
+
+    起点避开上面两行（外描边 + 软陶笔）——那两行是既有像素契约的采样行。
+    """
+    _qapp()
+    island = _island(tmp_path)
+    island.show()
+    try:
+        top, highlight_row, _shadow, _bottom = _edge_rows(island)
+        rect, _radius = island._squished_capsule_rect()
+        base = island._style_palette()[0]
+        frame = _render(island)
+        cx = island.width() // 2
+
+        assert frame.pixelColor(cx, top + 2).red() == base.red(), (
+            "光泽不得爬上软陶笔所在的行")
+        sheen = frame.pixelColor(cx, top + 3).red() - base.red()
+        bevel = frame.pixelColor(cx, highlight_row).red() - base.red()
+        assert 0 < sheen < bevel, (
+            f"光泽必须弱于软陶笔、亮于底板（量到 {sheen} vs 笔 {bevel}）")
+        mid = int(round(rect.center().y()))
+        assert frame.pixelColor(cx, mid).red() == base.red(), "光泽不该铺到胶囊中线"
+
+        content = _content(island)
+        assert content.pixelColor(cx, top + 3).alpha() == 0, (
+            "光泽是外壳图元，不得进内容缓存")
+        cached = island._content_cache()
+        for _ in range(3):
+            _render(island)
+        assert island._content_cache() is cached, (
+            "每帧一笔光泽不得让内容缓存失效（同 _paint_bevel 口径）")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_top_sheen_skips_light_style(tmp_path, monkeypatch):
+    """亮风不画光泽：白底上的白光泽等于没有，只会把顶部两道白笔糊宽。
+
+    取证口径是等价性：亮风帧必须与"把整个 sheen 表清零后重画"的帧逐像素相同
+    （白底上光泽本就不可见，只有等价性才证得动"真的没画"）。
+    """
+    _qapp()
+    assert island_mod._SHEEN_ALPHA["light"] == 0
+    island = _island(tmp_path, style="light")
+    island.show()
+    try:
+        frame = _render(island)
+        monkeypatch.setattr(island_mod, "_SHEEN_ALPHA",
+                            {"dark": 0, "light": 0, "glass": 0})
+        without = _render(island)
+        assert frame.size() == without.size()
+        diff = [(x, y) for y in range(frame.height()) for x in range(frame.width())
+                if frame.pixelColor(x, y).rgba() != without.pixelColor(x, y).rgba()]
+        assert not diff, f"亮风帧与「关掉光泽」帧必须一模一样（差异 {diff[:4]}）"
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_glass_gradient_has_four_stops_and_a_refraction_fold(tmp_path):
+    """玻璃底四停点：0/1 是上下表面，0.48→0.52 掉一档 = 玻璃折射线。"""
+    _qapp()
+    island = _island(tmp_path, style="glass")
+    try:
+        stops = island._style_palette()[0].stops()
+        assert [round(pos, 2) for pos, _color in stops] == [0.0, 0.48, 0.52, 1.0]
+        alphas = [color.alpha() for _pos, color in stops]
+        assert alphas == [214, 168, 146, 196], f"四停点 alpha 走样：{alphas}"
+        assert alphas[1] > alphas[2], "0.48→0.52 必须掉一档（折不出来的玻璃没有折射）"
+    finally:
+        island.deleteLater()
+
+
+def test_value_layer_is_demibold_and_keeps_the_unit_alpha(tmp_path):
+    """读数层加粗到 DemiBold：字号仍是 13（盒宽按实测走），单位降色系数不动。"""
+    from PySide6.QtGui import QFont
+    _qapp()
+    island = _island(tmp_path)
+    try:
+        font = island._font_for("value")
+        assert font.pixelSize() == 13
+        assert font.weight() == QFont.Weight.DemiBold
+        assert island_mod._FONT_LAYERS["label"] == (10, QFont.Weight.Normal), (
+            "label 层字重不动（单位盒的弱化靠 10px + α70 双管）")
+        assert island_mod._UNIT_ALPHA == 0.7
+    finally:
+        island.deleteLater()
+
+
+def test_icon_ring_follows_style_and_style_is_in_the_content_key(tmp_path):
+    """头像底圈细光圈按 style 分档，且 style 显式进内容键（跨风格不得命中旧位图）。"""
+    _qapp()
+    # 只留图标：主/次文字色项全空，键里只有 style 这一项能识别风格
+    island = _island(tmp_path, show_icon=True, show_info=False,
+                     icon="img:missing.png")
+    island.show()
+    try:
+        dark = island._content_cache()
+        assert island._icon_ring_color().name() == "#ffffff"
+        assert island._icon_ring_color().alpha() == 46
+        _update_config(island, style="light")
+        light = island._content_cache()
+        assert light is not dark, "跨风格必须重建内容位图（头像光圈随 style 变色）"
+        assert island._icon_ring_color().name() == "#000000"
+        assert island._icon_ring_color().alpha() == 20
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_status_dot_highlight_is_bead_only_for_solid_and_glyph(tmp_path):
+    """状态点珠感高光：实心点有上半高光，空心环不画（环内必须仍是空的）。"""
+    _qapp()
+    neutral = QColor("#a0aabe")  # dark 主题的中性点色（见 _status_dot_style）
+    island = _island(tmp_path, show_status=True, show_info=False)
+    island.show()
+    try:
+        def dot_image():
+            image = _content(island)
+            xs, ys = [], []
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    if image.pixelColor(x, y).alpha() >= 40:
+                        xs.append(x)
+                        ys.append(y)
+            assert xs, "状态点没画出来"
+            return image, (min(xs), min(ys))
+
+        island.set_dsh_state("idle")
+        image, (x0, y0) = dot_image()
+        # 采样点 = 珠感高光的椭圆中心（点内局部 (4, 2.5)）：实心点上这里被提亮，
+        # 空心环上这里必须是空的（环内是洞，高光会把洞填回实心）
+        assert image.pixelColor(x0 + 4, y0 + 2).red() > neutral.red(), (
+            "实心点的上缘要被珠感高光提亮（量到 "
+            f"{image.pixelColor(x0 + 4, y0 + 2).red()} ≤ 中性色 {neutral.red()}）")
+
+        island.set_pet_visible(False)  # 空心环
+        image, (x0, y0) = dot_image()
+        assert image.pixelColor(x0 + 4, y0 + 2).alpha() == 0, (
+            "空心环不画珠感（高光中心点必须仍是洞，否则形状通道就废了）")
+        assert image.pixelColor(x0 + 3, y0 + 3).alpha() == 0, "环内整片必须是空的"
     finally:
         island.hide()
         island.deleteLater()

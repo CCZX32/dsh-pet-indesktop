@@ -53,6 +53,20 @@ _EDGE_MARGIN = 16
 _DOCK_THRESHOLD = 40
 _STRIP_THICKNESS = 16
 _STRIP_SIDE = 64  # 左右停靠时竖条的长度
+#: 胶囊投影三层：(两侧内收 px, 底边下伸 px, 纯黑 alpha)。
+#: 单层"整块下移 2px"既做不出近实远虚的落影，底缘也只剩一条硬边。三层一律
+#: **两侧内收、只向下长**——窗口高只有 44（胶囊 y=6..38），左右余量已被
+#: scale 1.03 / squish 鼓出吃掉，向外扩会被窗口硬切。最低层底边 38+4=42，
+#: 放大到 1.03 后 ≈42.6 < 44，安全。
+_CAPSULE_SHADOW_LAYERS = ((1.0, 1.0, 28), (2.0, 2.5, 16), (3.0, 4.0, 8))
+#: 胶囊顶部光泽（sheen）：受光的一道淡白带，画在内容之下、外壳之上。
+#: 起点从 ``rect.top()+_SHEEN_TOP_PX`` 起——上面两行已被外描边（keyline）与软陶笔
+#: 占住（那两行是既有像素契约的采样行，光泽不得改它们的值）。亮风跳过：白底上
+#: 白光泽等于没有，只会把顶部那两道白笔糊宽。
+_SHEEN_TOP_PX = 3.0      # 从 rect.top()+3 起，避开 keyline 行和 bevel 取样行
+_SHEEN_SPAN = 0.42
+#: 按 style 分档的峰值 alpha（不乘 _opacity：外壳质感不随内容透明度走，同 keyline）
+_SHEEN_ALPHA = {"dark": 14, "light": 0, "glass": 34}
 _CARD_WIDTH = 340      # 卡片宽下限（沿用现状视觉记忆）
 _CARD_WIDTH_MAX = 420  # 卡片宽上限（k3 §5.1：防长来源说明把卡片拉成横幅）
 _CARD_AUTO_COLLAPSE_MS = 15_000
@@ -94,7 +108,7 @@ _DOCK_EDGES = ("none", "top", "bottom", "left", "right")
 # 主题色预设（设置页可换）：图标底圈 / 事件闪光 / 停靠描边共用
 _ACCENT_PRESETS = {
     "blue": "#40b8ff",
-    "green": "#30a46c",
+    "green": "#34c77b",
     "purple": "#9b7bff",
     "pink": "#ff7ab8",
     "orange": "#ffa94d",
@@ -127,6 +141,29 @@ _DOT_DONE_COLOR = "#50dc78"    # 完成绿（沿用旧「可见绿灯」色值�
 _DOT_ERROR_COLOR = "#f2777a"   # 错误红（与告警色体系的 crit 同色）
 _DOT_GLYPH_COLOR = "#ffffff"   # 感叹笔画色（红底上两种主题都清晰）
 _DOT_GLYPH_W_RATIO = 0.17      # 感叹笔画宽 / 点径（8px 点 → 1.36px）
+#: 珠感高光：实心/感叹点画完后叠一道上半椭圆高光（空心环不画——环内本来是空的，
+#: 高光会把环画回实心）。左内收 1.5px 与点径同款留边，高 0.38×点径。
+_DOT_HIGHLIGHT_INSET_X = 1.5
+_DOT_HIGHLIGHT_TOP = 1.0
+_DOT_HIGHLIGHT_H_RATIO = 0.38
+_DOT_HIGHLIGHT_ALPHA = 70
+#: 头像底圈的内侧细光圈（把底圈从"一块色斑"勾成"一枚圆章"）：暗/玻璃底白、
+#: 亮底黑（白圈在白底上不可见）。色随 style 分档，所以 style 必须进内容缓存键。
+_ICON_RING_DARK = (255, 255, 255, 46)
+_ICON_RING_LIGHT = (0, 0, 0, 20)
+
+# ---- 工作态声纳环（P3 视觉打磨）----
+# "在用"这件事从静态色点升级成有节拍的信号：状态点外扩一圈 accent 环，半径
+# 线性扩散、alpha 按 (1-t)³ 收敛（= 1 - ease_out_cubic(t)，先亮后急收）。**只在
+# 工作态播**——待确认是"等你"，完成是"刚做完"，错误要的是注意力，都不该有个
+# 持续的节拍。驱动是独立 30fps 单表，起表条件收敛在 ``_sonar_eligible``，离开
+# 工作态/隐藏/展开卡片/收进细条一律停表销毁（同 _dot_done_timer 的停表纪律）。
+_SONAR_PERIOD_MS = 1600
+_SONAR_TICK_MS = 33        # ~30fps：环是慢速呼吸，不需要 60fps
+_SONAR_R0_PX = 5.0         # 起点半径：贴在 8px 点（半径 4）外 1px，从点位外起
+_SONAR_R1_PX = 13.0
+_SONAR_ALPHA = 90
+_SONAR_PEN_PX = 1.5
 
 # ---- 段数值告警色体系（P2 Slice E2，裁决稿 §三 ops5.5）----
 # 两级告警色只染**数值**（含 E4 单位盒跟随值色）：阈值与滞回在 island_segments
@@ -164,10 +201,10 @@ _CONTENT_FADE_TICK_MS = 16   # ~60fps，与 _ANIM_TICK_MS 同口径
 # / 操作。高度**全部按字体度量实测**（k3 §5.2，不再有固定的 148）；每一区自带横分隔线
 # 与上下间距，所以"没有指标段"时整区连分隔线一起消失，不会留下一条悬空的线。
 _CARD_MARGIN_X = 16       # 内容左右边距（沿用现状 _build_card 的阅读边距）
-_CARD_MARGIN_TOP = 6
+_CARD_MARGIN_TOP = 10
 _CARD_MARGIN_BOTTOM = 12
-_CARD_LINE_GAP = 2        # 同一区内相邻行的行距
-_CARD_SECTION_GAP = 8     # 分区到横分隔线的距离（线上下各一档，k3 §5.1）
+_CARD_LINE_GAP = 3        # 同一区内相邻行的行距
+_CARD_SECTION_GAP = 10    # 分区到横分隔线的距离（线上下各一档，k3 §5.1）
 _CARD_SEP_PX = 1          # 横分隔线厚度（色 = 段间竖线色，见 _divider_color）
 _CARD_COL_GAP = 8         # 指标详情三列之间的间距
 _CARD_NAME_COL_MAX = 44   # 段名列宽上限（超宽右省略，值列左缘因此对齐）
@@ -255,6 +292,20 @@ def spring_step(
 def ease_out_cubic(t: float) -> float:
     t = max(0.0, min(1.0, float(t)))
     return 1.0 - (1.0 - t) ** 3
+
+
+def sonar_ring_params(t: float) -> tuple[float, int]:
+    """工作态声纳环在归一化时刻 ``t``（0..1，一个周期内的相位）的 (半径 px, alpha)。
+
+    半径线性扩散（``_SONAR_R0_PX`` → ``_SONAR_R1_PX``）；alpha 走 (1−t)³
+    ——即 ``1 − ease_out_cubic(t)``：起手最亮，越扩越淡，末段几乎瞬间收干净，
+    不留"最后一帧还看得见一圈"的尾巴。纯函数：绘制只消费它的返回值，曲线口径
+    在测试里直接钉端点与单调性。
+    """
+    phase = max(0.0, min(1.0, float(t)))
+    radius = _SONAR_R0_PX + (_SONAR_R1_PX - _SONAR_R0_PX) * phase
+    alpha = round(_SONAR_ALPHA * (1.0 - ease_out_cubic(phase)))
+    return radius, alpha
 
 
 def dock_edge_for(
@@ -419,7 +470,7 @@ class _CardStatusDot(QWidget):
 #: L5 卡片辅助文字（单位全称·来源·更新时间·最近消息·状态文字，k3 §5.1 的 11px 档）。
 _FONT_LAYERS = {
     "primary": (14, QFont.Weight.DemiBold),
-    "value": (13, QFont.Weight.Medium),
+    "value": (13, QFont.Weight.DemiBold),
     "name": (12, QFont.Weight.Normal),
     "label": (10, QFont.Weight.Normal),
     "aux": (11, QFont.Weight.Normal),
@@ -477,6 +528,12 @@ class DynamicIsland(QWidget):
         self._dsh_state = ""
         self._dot_done = False
         self._dot_done_timer: QTimer | None = None
+        # 工作态声纳环：_status_dot_rect = 内容层画点时顺手记下的点位矩形
+        # （绘制层不自己算几何，见 _paint_sonar_ring）；_sonar_timer/_sonar_started
+        # = 30fps 单表与本周期的起始时刻（相位按真实时间算，tick 抖动不吃曲线）。
+        self._status_dot_rect: QRectF | None = None
+        self._sonar_timer: QTimer | None = None
+        self._sonar_started = 0.0
         self._last_message = ""
         # 几何变化回调（果冻墙碰撞体挂这里跟踪拖拽/停靠滑动）：AppShell 注入。
         self.on_geometry_changed = None
@@ -784,6 +841,9 @@ class DynamicIsland(QWidget):
                 callback(bool(visible))
             except Exception:
                 pass
+        # 隐藏桌宠会把**非工作态**的点变成空心环（工作态压过隐藏，见
+        # _status_dot_state）——凡点到空心环的路径都该把环一起收掉，这里搭同一趟车
+        self._sync_sonar_ring()
         self._sync_card_labels()
         self.update()
 
@@ -813,6 +873,7 @@ class DynamicIsland(QWidget):
             self._bounce(impulse=3.0)
         if falling:
             self._arm_dot_done()
+        self._sync_sonar_ring()   # 旧通道同样进工作态：环与状态点同源同判据
         self.update()
 
     def set_dsh_state(self, state: str) -> None:
@@ -845,6 +906,9 @@ class DynamicIsland(QWidget):
             # notify_event 多一道，是该裁决对本路径的单独要求；状态点本身不受
             # 闸门影响。免打扰判据复用全应用唯一的 suppression_active）
             self._bounce(impulse=3.0)
+        # 声纳环跟状态点同源起停（工作态才有）：状态点是"在用"的静态通道，
+        # 环是它的节拍通道，两者共用 _status_dot_state 这一个判据
+        self._sync_sonar_ring()
         self.update()
 
     def _arm_dot_done(self) -> None:
@@ -872,6 +936,56 @@ class DynamicIsland(QWidget):
         """停表并销毁完成瞬态定时器（幂等）：回落后不留空转表。"""
         timer, self._dot_done_timer = self._dot_done_timer, None
         self._dot_done = False
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    # ------------------------------------------------------ 工作态声纳环
+    def _sonar_eligible(self) -> bool:
+        """声纳环的唯一判据（起停都问它，所以不可能出现"两处口径打架"）。
+
+        四条缺一不可：窗口可见、自由胶囊态（展开卡片/停靠细条都不播——卡片态
+        读者在别处，细条是另一种图元语言）、状态点开着、当刻状态点就是工作中。
+        """
+        if not self.isVisible() or self._mode != "normal":
+            return False
+        if not self._visible_parts()[3]:
+            return False
+        return self._status_dot_state() == _DOT_WORKING
+
+    def _sync_sonar_ring(self) -> None:
+        """按当刻判据起停声纳环（幂等）：状态变了、显隐变了、模式变了都喊它。
+
+        与"只在 working 上升沿起表"相比，幂等口径多兜住一种情形——隐藏时进入
+        工作态、显示回来时工作态还在（上升沿早过去了），此时该接着播。
+        """
+        if self._sonar_eligible():
+            self._start_sonar_ring()
+        else:
+            self._stop_sonar_ring()
+
+    def _start_sonar_ring(self) -> None:
+        """起表（幂等）：已在跑就不重开——重开会把相位重置成 0，节拍被踩碎。"""
+        timer = self._sonar_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(_SONAR_TICK_MS)
+            timer.timeout.connect(self._on_sonar_tick)
+            self._sonar_timer = timer
+            self._sonar_started = time.monotonic()
+        if not timer.isActive():
+            timer.start()
+
+    def _on_sonar_tick(self) -> None:
+        """每 tick 重判一次判据：不成立就自己停表收口（不指望每个改动点都记得喊停）。"""
+        if not self._sonar_eligible():
+            self._stop_sonar_ring()
+            return
+        self.update()
+
+    def _stop_sonar_ring(self) -> None:
+        """停表并销毁声纳环定时器（幂等）：离开工作态就不留空转表。"""
+        timer, self._sonar_timer = self._sonar_timer, None
         if timer is not None:
             timer.stop()
             timer.deleteLater()
@@ -942,6 +1056,7 @@ class DynamicIsland(QWidget):
         # 采样闸门放在最后：上面两段都可能改 _mode（停靠边切换 / 关掉靠边半隐藏），
         # 早于它们同步就会拿着过期的细条态去收口或恢复（P2 Slice E6）
         self._sync_content_sampling()
+        self._sync_sonar_ring()          # 同上：判据含模式与 show_status，都要最后判
         self._refresh()
 
     # ------------------------------------------------------------ 余额峰谷
@@ -1308,7 +1423,6 @@ class DynamicIsland(QWidget):
             return
         _bg, primary, secondary = self._style_palette()
         primary_color, secondary_color = QColor(primary), QColor(secondary)
-        accent_hex = self._accent_color().name()
         # 字体走字号层（与胶囊同一份源）、颜色走主题函数：卡片不自己发明一套
         self._card_balance_label.setFont(self._font_for("primary"))
         for label in (self._card_tier_label, self._card_status_label,
@@ -1322,13 +1436,19 @@ class DynamicIsland(QWidget):
                                f"color: {self._status_dot_color().name()};")
         self._apply_card_style(self._card_message_label,
                                f"color: {secondary_color.name()};")
-        # 按钮：圆角 8px、描边跟随主题色、悬停加亮；不用系统默认灰按钮
+        # 按钮：圆角 14px（= 按钮高 28 的一半）、accent 以 rgba 三档穿透做
+        # 常态/悬停/按下——常态就是"淡底 + 描边"的次级按钮，不再是隐形按钮；
+        # 按下（0.30）比悬停（0.20）更深，反馈不会落回次色灰而断档
+        accent = self._accent_color()
+        accent_rgb = f"{accent.red()}, {accent.green()}, {accent.blue()}"
         button_style = (
-            f"QPushButton {{ color: {primary_color.name()}; background: transparent;"
-            f" border: 1px solid {accent_hex}; border-radius: 8px;"
-            f" padding: 4px 10px; }}"
-            f"QPushButton:hover {{ background: {accent_hex}; color: #ffffff; }}"
-            f"QPushButton:pressed {{ background: {secondary_color.name()}; }}"
+            f"QPushButton {{ color: {primary_color.name()};"
+            f" background: rgba({accent_rgb}, 0.10);"
+            f" border: 1px solid rgba({accent_rgb}, 0.45);"
+            f" border-radius: 14px; padding: 4px 12px; }}"
+            f"QPushButton:hover {{ background: rgba({accent_rgb}, 0.20);"
+            f" border-color: rgba({accent_rgb}, 0.70); }}"
+            f"QPushButton:pressed {{ background: rgba({accent_rgb}, 0.30); }}"
         )
         for btn in (self._card_toggle_btn, self._card_chat_btn,
                     self._card_settings_btn):
@@ -1777,6 +1897,8 @@ class DynamicIsland(QWidget):
         # 卡片开着时每秒刷一次"更新时间"与状态文字（收起/隐藏即停表，同完成瞬态）
         self._card_tick_timer.start()
         self._sync_content_sampling()
+        # 展开卡片即停声纳环（卡片态是"读者在别处"的形态，见 _sonar_eligible）
+        self._sync_sonar_ring()
         self.card_expanded.emit()
 
     def collapse_card(self, *, animate: bool = True) -> None:
@@ -1797,6 +1919,7 @@ class DynamicIsland(QWidget):
             self._set_free_geometry(self._target_rect())
             self._apply_fixed_size()
         self._sync_content_sampling()    # 收进细条 = 内容全不画 → 全停采样
+        self._sync_sonar_ring()          # 收到 normal 才可能重新播（见 _sonar_eligible）
 
     # ------------------------------------------------------------ 动效核心
     def _bounce(self, impulse: float = 4.0) -> None:
@@ -2624,10 +2747,13 @@ class DynamicIsland(QWidget):
             return (QColor(255, 255, 255, round(242 * opacity)),
                     QColor(31, 35, 40), QColor(107, 114, 128))
         if style == "glass":
+            # 四停点：0/1 是玻璃的上下表面，0.48/0.52 的折线是"玻璃折射线"
+            # ——中间那道亮暗交替让渐变压出一道折射边，三段插值各管一段。
             gradient = QLinearGradient(0, 0, 0, self.height())
-            gradient.setColorAt(0.0, QColor(255, 255, 255, round(196 * opacity)))
-            gradient.setColorAt(0.5, QColor(230, 242, 255, round(150 * opacity)))
-            gradient.setColorAt(1.0, QColor(255, 255, 255, round(210 * opacity)))
+            gradient.setColorAt(0.00, QColor(255, 255, 255, round(214 * opacity)))
+            gradient.setColorAt(0.48, QColor(234, 244, 255, round(168 * opacity)))
+            gradient.setColorAt(0.52, QColor(220, 235, 255, round(146 * opacity)))
+            gradient.setColorAt(1.00, QColor(244, 249, 255, round(196 * opacity)))
             return gradient, QColor(35, 45, 60), QColor(90, 105, 125)
         return (QColor(28, 30, 38, round(235 * opacity)),
                 QColor(235, 238, 245), QColor(160, 170, 190))
@@ -2651,6 +2777,16 @@ class DynamicIsland(QWidget):
         if style == "glass":
             return QColor(35, 45, 60, 36)
         return QColor(255, 255, 255, 36)
+
+    def _icon_ring_color(self) -> QColor:
+        """头像底圈的内侧细光圈色：暗/玻璃底白 α46、亮底黑 α20。
+
+        亮底给白圈等于没画（白圈落在亮色底圈上分不出来），所以按 style 分支给
+        常量——与 ``_keyline_color``/``_bevel_colors`` 同款口径。它随 style 变化，
+        所以 ``style`` 必须进内容缓存键（见 :meth:`_content_cache`）。
+        """
+        style = str(self._cfg.get("style") or "dark")
+        return QColor(*(_ICON_RING_LIGHT if style == "light" else _ICON_RING_DARK))
 
     def _alert_color(self, severity: str) -> QColor | None:
         """告警级的**数值**色（``""``/未识别 → None，表示不染色）。
@@ -2788,6 +2924,15 @@ class DynamicIsland(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(pen)
             painter.drawPath(_status_error_glyph_path(rect))
+        if shape != _DOT_HOLLOW:
+            # 珠感高光：实心/感叹点画完后在**上半约 1/3** 叠一道半椭圆白高光，
+            # 点从"一块纯色圆盘"变成"一颗珠子"。空心环不画——环内本来是空的，
+            # 高光会把环画回实心（形状通道就废了）。尺寸仍是 8px：高光全在点内。
+            painter.setBrush(QColor(255, 255, 255, _DOT_HIGHLIGHT_ALPHA))
+            painter.drawEllipse(QRectF(
+                rect.x() + _DOT_HIGHLIGHT_INSET_X, rect.y() + _DOT_HIGHLIGHT_TOP,
+                rect.width() - 2 * _DOT_HIGHLIGHT_INSET_X,
+                rect.height() * _DOT_HIGHLIGHT_H_RATIO))
         # 复位画笔/画刷：调用点后面还可能画别的东西
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -3060,6 +3205,9 @@ class DynamicIsland(QWidget):
                    seg.box_text, seg.elide_px)
                   for seg in segments),
             self._accent_color().name() if icon else "",
+            # 风格显式进键：头像底圈的内侧细光圈按 style 分档（暗/玻璃白、亮底黑），
+            # 而"只有图标"时上面那些颜色项全是空串——不显式进键就会跨风格命中旧位图
+            str(self._cfg.get("style") or "dark"),
             primary_color.name() if name else "",
             primary_text_color.name() if segments else "",
             secondary_color.name() if segments else "",
@@ -3087,8 +3235,15 @@ class DynamicIsland(QWidget):
         baseline = _CAPSULE_HEIGHT / 2.0 + _BASELINE_DY
         painter.setPen(Qt.PenStyle.NoPen)
         if icon:
+            circle = QRectF(x, (_CAPSULE_HEIGHT - _ICON_PX) / 2, _ICON_PX, _ICON_PX)
             painter.setBrush(self._accent_color())
-            painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - _ICON_PX) / 2, _ICON_PX, _ICON_PX))
+            painter.drawEllipse(circle)
+            # 内侧 1px 细光圈：把底圈从"一块色斑"勾成"一枚圆章"（暗/玻璃白、
+            # 亮底黑）。画在头像之下——头像照旧盖住圈心
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(self._icon_ring_color(), 1))
+            painter.drawEllipse(circle.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.setPen(Qt.PenStyle.NoPen)
             if icon_pm is not None:
                 # 头像居中画进底圈：drawPixmap 不碰文字/emoji 字体栈
                 painter.drawPixmap(
@@ -3124,13 +3279,27 @@ class DynamicIsland(QWidget):
         for placement in placements:
             seg = placement.seg
             if placement.divider_x is not None:
-                # 段间竖线：1×14px、槽位正中；首段前、chip 前与状态点前都不画
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(self._divider_color())
-                painter.drawRect(QRectF(
+                # 段间竖线：1×14px、槽位正中；首段前、chip 前与状态点前都不画。
+                # 竖直渐变：两端 alpha=0、30%/70% 处才是本色——线头收进段间空隙，
+                # 竖线不再是一根两端硬切的 1px 柱子（尺寸与落位一个字节没变）
+                divider_color = self._divider_color()
+                divider_rect = QRectF(
                     placement.divider_x,
                     (_CAPSULE_HEIGHT - _DIVIDER_H_PX) / 2.0,
-                    _DIVIDER_W_PX, _DIVIDER_H_PX))
+                    _DIVIDER_W_PX, _DIVIDER_H_PX)
+                divider = QLinearGradient(
+                    0, divider_rect.top(), 0, divider_rect.bottom())
+                divider.setColorAt(0.0, QColor(
+                    divider_color.red(), divider_color.green(),
+                    divider_color.blue(), 0))
+                divider.setColorAt(0.3, divider_color)
+                divider.setColorAt(0.7, divider_color)
+                divider.setColorAt(1.0, QColor(
+                    divider_color.red(), divider_color.green(),
+                    divider_color.blue(), 0))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(divider)
+                painter.drawRect(divider_rect)
             if seg.kind == island_layout.KIND_CHIP:
                 # +N chip：描边无填充、圆角 9、高 18，文字居中且无竖线（K3 §3.3）
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -3194,9 +3363,13 @@ class DynamicIsland(QWidget):
             x = placement.right
         if status:
             painter.setPen(Qt.PenStyle.NoPen)
-            self._paint_status_dot(painter, QRectF(
+            self._status_dot_rect = QRectF(
                 x + _STATUS_GAP_PX, (_CAPSULE_HEIGHT - _STATUS_DOT_PX) / 2,
-                _STATUS_DOT_PX, _STATUS_DOT_PX))
+                _STATUS_DOT_PX, _STATUS_DOT_PX)
+            self._paint_status_dot(painter, self._status_dot_rect)
+        else:
+            # 不画点就没有点位：声纳环以它为圆心，留着上一次的矩形就会绕空转
+            self._status_dot_rect = None
         painter.end()
         self._content_pixmap = pm
         self._content_cache_key = key
@@ -3221,12 +3394,14 @@ class DynamicIsland(QWidget):
         # 胶囊外形：内缩 _CAPSULE_INSET + 果冻形变（只有外形参与 squish）
         rect, radius = self._squished_capsule_rect()
 
-        # 柔和阴影：底层半透明圆角矩形（跟随形变）
+        # 柔和阴影：三层半透明圆角矩形（跟随形变）——自外向内收窄、只向下长，
+        # 越往外越淡越大（见 _CAPSULE_SHADOW_LAYERS）
         if self._mode != "expanded":
-            shadow = rect.translated(0, 2)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 46))
-            painter.drawRoundedRect(shadow, radius, radius)
+            for inset, drop, alpha in _CAPSULE_SHADOW_LAYERS:
+                painter.setBrush(QColor(0, 0, 0, alpha))
+                painter.drawRoundedRect(
+                    rect.adjusted(inset, 1.0, -inset, drop), radius, radius)
 
         # 胶囊主体（白色 / 黑色 / 玻璃质感）；内容层已下沉到 _content_cache，
         # 主/次文字色在这里不再使用
@@ -3245,6 +3420,26 @@ class DynamicIsland(QWidget):
             painter.setPen(QPen(self._keyline_color(), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5)
+
+        # 顶部光泽（sheen）：受光的一道淡白带，画在外壳之上、内容之下——每帧一笔、
+        # 不进内容缓存（与 _paint_bevel 同口径）。裁剪到胶囊外形：光泽是"表面受光"，
+        # 不能溢出轮廓（squish 鼓出时 rect 已变宽，裁剪切跟着变）。亮风 alpha=0 跳过。
+        sheen_alpha = _SHEEN_ALPHA.get(style, 0)
+        if sheen_alpha:
+            sheen_rect = QRectF(
+                rect.left(), rect.top() + _SHEEN_TOP_PX, rect.width(),
+                rect.height() * _SHEEN_SPAN - _SHEEN_TOP_PX)
+            sheen = QLinearGradient(0, sheen_rect.top(), 0, sheen_rect.bottom())
+            sheen.setColorAt(0.0, QColor(255, 255, 255, sheen_alpha))
+            sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, radius, radius)
+            painter.setClipPath(clip)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(sheen)
+            painter.drawRect(sheen_rect)
+            painter.restore()
 
         # 内容层（图标/名称/信息/状态灯）：缓存位图 blit——文字逐帧重画是
         # 实测大头（见 _content_cache）；内容绝不参与形变，口径与原"按未
@@ -3294,10 +3489,37 @@ class DynamicIsland(QWidget):
         # 不进内容缓存（每帧两笔固定成本，见 _paint_bevel）
         self._paint_bevel(painter, rect, radius)
 
+        # 工作态声纳环（P3）：状态点外扩的 accent 圈，画在最上层——它是"当刻
+        # 相位"的函数，逐帧重画是本质；内容缓存里没有它，缓存键自然不含它
+        self._paint_sonar_ring(painter)
+
+    def _paint_sonar_ring(self, painter: QPainter) -> None:
+        """画工作态声纳环（非工作态/表未跑时一笔不画）。
+
+        圆心取内容层画点时顺手记下的点位矩形（``_status_dot_rect``）——绘制层
+        不自己重算落位，两处口径不可能分叉。相位按**真实时间**取（周期取模），
+        tick 抖动只影响帧的疏密，不影响曲线位置。
+        """
+        dot = self._status_dot_rect
+        if dot is None or self._sonar_timer is None:
+            return
+        phase = ((time.monotonic() - self._sonar_started) * 1000.0
+                 % _SONAR_PERIOD_MS) / _SONAR_PERIOD_MS
+        radius, alpha = sonar_ring_params(phase)
+        if alpha <= 0:
+            return
+        color = self._accent_color()
+        color.setAlpha(alpha)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, _SONAR_PEN_PX))
+        painter.drawEllipse(dot.center(), radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
     # ------------------------------------------------------------ 显隐休眠
     def hideEvent(self, event) -> None:  # noqa: N802
-        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起/完成瞬态全部停表，
-        隐藏态零定时器空转。"""
+        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起/完成瞬态/声纳环
+        全部停表，隐藏态零定时器空转。"""
         super().hideEvent(event)
         self._info_timer.stop()
         self._tier_tick_timer.stop()
@@ -3306,6 +3528,7 @@ class DynamicIsland(QWidget):
         self._card_collapse_timer.stop()
         self._card_tick_timer.stop()
         self._stop_dot_done_timer()
+        self._stop_sonar_ring()
         self._stop_content_fade()
         # 光标旗帜随隐藏复位（A1 第二票 R3）：隐藏期间光标真实位置不可知，
         # 不复位的话显示后 expand_card 会拿陈旧 True 误判「鼠标在岛内」不起 15s 表
@@ -3378,6 +3601,9 @@ class DynamicIsland(QWidget):
         self._schedule_next_balance_tier_refresh()
         self._sync_network_slot()
         self._sync_sys_slot()
+        # 隐藏期间可能已经进入工作态（hideEvent 停了环）：显示回来按当刻判据重判
+        # ——"工作中"就该有声纳，上升沿早过去了不构成不播的理由（见 _sync_sonar_ring）
+        self._sync_sonar_ring()
         self._refresh()
         # 原生窗口此刻已就绪；再延迟一拍重申一次 topmost——show 期间 Qt 还在
         # 收尾窗口排序，它可能覆盖同步那次（口径同 legacy window.py showEvent）
@@ -3525,6 +3751,7 @@ class DynamicIsland(QWidget):
         self._dragging = False
         # 分支决定完模式再同步采样：细条单击 → 滑出（恢复）、拖拽落定 → 停靠（全停）
         self._sync_content_sampling()
+        self._sync_sonar_ring()          # 拖拽落定可能停靠（细条不播环）
         self._emit_geometry_changed()
         event.accept()
 

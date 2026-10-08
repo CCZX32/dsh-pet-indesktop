@@ -248,6 +248,38 @@ def test_divider_vertically_centered(monkeypatch, tmp_path):
         island.close()
 
 
+def test_divider_fades_at_both_ends(monkeypatch, tmp_path):
+    """竖线竖直渐变：两端 alpha=0、中段本色——线头收进段间空隙，不是硬切柱子。
+
+    落位与尺寸一个字节没动（仍是 1×14、槽位正中、中心 22，见上一条），变的只是
+    上下两端的 alpha 走法。两端的 alpha 必须**真的**归零，否则"收头"是空话。
+    """
+    island, _screen = _make_island(monkeypatch, metrics=["cpu", "mem"])
+    try:
+        img = _fresh_content(island)
+        segs = island._compose_info_segments()
+        pl = layout.place_info_segments(
+            segs, start_x=_segments_start_x(island),
+            primary_fm=island._metrics_for("primary"),
+            value_fm=island._metrics_for("value"),
+            label_fm=island._metrics_for("label"))
+        dividers = [p.divider_x for p in pl if p.divider_x is not None]
+        assert dividers, "cpu+mem 两段之间应有竖线"
+        column = int(round(dividers[0]))
+        band = int(round(_CENTER - 7)), int(round(_CENTER + 6))  # 15..28：14px 竖线
+        alphas = [qAlpha(img.pixel(column, y)) for y in range(band[0], band[1] + 1)]
+        assert alphas and max(alphas) >= 30, f"竖线中段必须是本色（实测 {alphas}）"
+        # 渐变端点是像素边界（15.0 / 29.0），首末两行取的是各自行中心的值
+        # （t≈0.036 → α≈4），所以"两端归零"落到像素上就是"≤ 本色的一成"。
+        ends = (alphas[0], alphas[-1])
+        assert max(ends) <= max(alphas) // 4, (
+            f"竖线两端必须收到近零（实测两端 {ends}，本色 {max(alphas)}）")
+        assert alphas.count(max(alphas)) >= 5, (
+            f"本色区应覆盖中段（实测 {alphas}）")
+    finally:
+        island.close()
+
+
 # ---------------------------------------------------------- 6. chip 光学居中
 def test_chip_text_optically_centered_in_box(monkeypatch, tmp_path):
     """chip 文字在 18px chip 盒内**按字体度量光学居中**（D2 遗留项转正）。
@@ -403,7 +435,7 @@ def test_squish_keeps_content_inside_capsule(monkeypatch, tmp_path):
             for y in range(img.height()):
                 if y < rect.top() - 1 or y > rect.bottom() + 1:
                     if qAlpha(img.pixel(x, y)) > 60:
-                        # 阴影带（rect 下移 2、α46）是设计内图元，排除
+                        # 投影带（三层内收/下伸、纯黑 α≤28）是设计内图元，排除
                         if not (rect.bottom() + 1 < y <= rect.bottom() + 3
                                 and qAlpha(img.pixel(x, y)) <= 80):
                             offenders.append((x, y))
