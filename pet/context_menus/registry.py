@@ -11,10 +11,15 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QWidgetAction
 
 from ..config import DEFAULT_MENU_EASTER_EGG
+from ..weather_menu import (
+    WEATHER_DISABLED_REASON,
+    add_show_weather,
+    add_weather_cities,
+    weather_menu_enabled,
+)
 from .fun_entry import add_ojingjing_entry
 from .icons import custom_file_menu_icon, vector_menu_icon
 from .quick_launch import add_quick_launch_menu, configured_quick_apps
-from ..weather_menu import add_show_weather, add_weather_cities
 from .shared import (
     NETWORK_INFO_DISABLED_REASON,
     QUARK_PAN_URL,
@@ -155,17 +160,12 @@ def _memory_trim_available(_pet) -> bool:
 
     return memory_trim.is_supported()
 
-_WEATHER_DISABLED_REASON = "天气功能已在设置中关闭"
 
-
-def _weather_enabled(pet) -> bool:
-    """「查看天气 / 天气城市」是否可用：只看设置里的天气总开关。
-
-    与歌词同口径：开关关掉**不**改动菜单结构，只把条目置灰并给出原因
-    （CONTEXT.md「Runtime Disabled」：位置保留、切换开关不重写菜单树）。
-    """
-    cfg = getattr(pet, "cfg", None)
-    return bool(cfg.get("weather_enabled", True)) if cfg is not None else True
+# 「查看天气 / 天气城市」的判据与原因文案收在共享建造器模块（`weather_menu`），
+# 因为停用门必须同时落在注册表（新版树）和建造器（legacy 直调）两处——两个
+# 真值就是"新版菜单里关掉了、旧版菜单还在"（B7）。这里只做转发。
+_WEATHER_DISABLED_REASON = WEATHER_DISABLED_REASON
+_weather_enabled = weather_menu_enabled
 
 
 def _music_align_ready(pet) -> bool:

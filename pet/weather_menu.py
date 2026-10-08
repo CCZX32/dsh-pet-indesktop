@@ -431,6 +431,34 @@ def add_city_flow(pet, *, dialog_factory=None, search=None, run_async=None,
 
 
 # ---------------------------------------------------------------- 菜单建造器
+#
+# **停用门落在建造器里，不只在新版注册表上（B7）**：注册表的 enabled/
+# disabled_reason 只管新版树，legacy 扁平菜单直接调这两个建造器——门只写在注册表
+# 上就是"关掉天气开关后旧版菜单仍然进得去城市搜索、把城市写进配置"（两套菜单两个
+# 真值）。语义沿用 CONTEXT.md 的 Runtime Disabled：**入口保留、置灰、写明原因**，
+# 不是整条消失（消失会让用户以为功能被删了；置灰 + tooltip 才说明"是开关关的"）。
+# 两个拓扑都读 ``pet.cfg``（overlay 是 ``_SpriteConfig`` 视图，get 转发主配置）。
+
+WEATHER_DISABLED_REASON = "天气功能已在设置中关闭"
+
+
+def weather_menu_enabled(pet) -> bool:
+    """「查看天气 / 天气城市」是否可用：只看设置里的天气总开关（默认开）。
+
+    两套建造器（新版注册表的 ``enabled`` 与 legacy 直调的建造器）共用同一判定，
+    避免"新版菜单里关掉了、旧版菜单还在"这种两套真值。
+    """
+    cfg = _config_of(pet)
+    return bool(cfg.get("weather_enabled", True)) if cfg is not None else True
+
+
+def _mark_disabled(action) -> None:
+    """Runtime Disabled 置灰：保留位置 + 写明原因（恒等幂等，重复调用无害）。"""
+    if action is not None:
+        action.setEnabled(False)
+        action.setToolTip(WEATHER_DISABLED_REASON)
+
+
 # 为什么这两个建造器在函数内导入 shared：``pet.weather_menu`` 被
 # ``context_menus.legacy`` / ``registry`` 反向引用，而 shared 经包 ``__init__``
 # 会带着 legacy 一起跑——模块级导入就成了循环。建造器只在真正建菜单时才需要
@@ -442,8 +470,11 @@ def add_show_weather(menu: QMenu, pet, *, icons: bool = True):
     callback = getattr(pet, "on_show_weather", None)
     if callback is None:
         return None
-    return add_action(menu, "查看天气", "weather" if icons else None,
-                      lambda: callback(pet), close_on_trigger=True)
+    action = add_action(menu, "查看天气", "weather" if icons else None,
+                        lambda: callback(pet), close_on_trigger=True)
+    if not weather_menu_enabled(pet):
+        _mark_disabled(action)
+    return action
 
 
 def add_weather_cities(menu: QMenu, pet, *, icons: bool = True):
@@ -454,6 +485,10 @@ def add_weather_cities(menu: QMenu, pet, *, icons: bool = True):
     if cfg is None:
         return None
     submenu = add_submenu(menu, "天气城市", "weather" if icons else None)
+    if not weather_menu_enabled(pet):
+        # 关掉总开关 = 整条入口不可用：置灰子菜单的 menuAction（展不开 ⇒ 添加城市
+        # 不可达），与新版 ``populate`` 对子菜单条目的处置逐点一致。
+        _mark_disabled(submenu.menuAction())
     cities = normalize_city_list(cfg.get("weather_city_list"))
     current = current_city(cfg)
     if not cities:

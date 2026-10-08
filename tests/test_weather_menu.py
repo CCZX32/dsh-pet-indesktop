@@ -131,6 +131,45 @@ def test_show_weather_action_absent_without_callback():
     assert _labels(menu) == []
 
 
+# ------------------------------------------ 总开关关掉 = Runtime Disabled（置灰）
+#
+# 门必须落在**共享建造器**里：新版注册表的 enabled/disabled_reason 只管新版树，
+# legacy 扁平菜单直调建造器，门只写在注册表上就是"旧版菜单仍然点得进城市搜索并
+# 写配置"（两套菜单两个真值）。语义沿用 CONTEXT.md 的 Runtime Disabled：
+# 位置保留、置灰、写明原因，**不让入口整条消失**。
+
+def test_weather_entries_are_greyed_when_the_switch_is_off():
+    """关闭天气总开关：共享建造器把两个入口都置灰并写明原因。"""
+    pet = _Pet({"weather_enabled": False})
+    menu = QMenu()
+
+    action = M.add_show_weather(menu, pet)
+    assert action is not None and "查看天气" in _labels(menu), "关掉开关不得让入口消失"
+    assert action.isEnabled() is False
+    assert action.toolTip() == M.WEATHER_DISABLED_REASON
+
+    cities = M.add_weather_cities(menu, pet)
+    assert cities is not None and "天气城市" in _labels(menu)
+    assert cities.menuAction().isEnabled() is False, "子菜单入口同样置灰"
+    assert cities.menuAction().toolTip() == M.WEATHER_DISABLED_REASON
+    # 关闭态下「添加城市…」不可达（子菜单入口置灰后根本展不开）
+    assert M.weather_menu_enabled(pet) is False
+
+
+def test_weather_entries_stay_enabled_when_the_switch_is_on():
+    """非回归：开关开着时两个入口照常可用（默认值也是开）。"""
+    pet = _Pet({"weather_enabled": True})
+    menu = QMenu()
+    action = M.add_show_weather(menu, pet)
+    assert action.isEnabled() is True
+    assert action.toolTip() != M.WEATHER_DISABLED_REASON
+    cities = M.add_weather_cities(menu, pet)
+    assert cities.menuAction().isEnabled() is True
+
+    default_pet = _Pet({})                      # 键缺失 = 默认开
+    assert M.weather_menu_enabled(default_pet) is True
+
+
 # ---------------------------------------------------------------- 城市子菜单
 def _city_actions(submenu):
     return [action.text() for action in submenu.actions() if action.isCheckable()]
@@ -484,5 +523,31 @@ def test_real_petwindow_legacy_menu_contains_weather_entries(tmp_path):
         build_legacy_menu(menu, win, load_menu_template("legacy"))
         labels = _labels(menu)
         assert "查看天气" in labels and "天气城市" in labels
+    finally:
+        win.close()
+
+
+def test_real_petwindow_legacy_menu_greys_weather_when_switched_off(tmp_path):
+    """真窗口 + 真 legacy 建造器：总开关关掉后两个天气入口都置灰、不可点。
+
+    修复前：置灰门只在新版注册表里，legacy 直调共享建造器 → 关闭态下用户仍能
+    从旧版菜单进入城市搜索、把城市写进配置（与实际停用状态自相矛盾）。
+    """
+    import tests.test_sprite_menu_parity as parity
+    from pet.config import Config
+    from pet.context_menu import load_menu_template
+    from pet.context_menus import build_legacy_menu
+
+    config = Config(base=tmp_path)
+    config.set("weather_enabled", False)
+    win = parity._reference_window(config)
+    try:
+        menu = QMenu()
+        build_legacy_menu(menu, win, load_menu_template("legacy"))
+        show = _find(menu, "查看天气")
+        cities = _find(menu, "天气城市")
+        assert show.isEnabled() is False, "旧版菜单的「查看天气」必须置灰"
+        assert cities.isEnabled() is False, "旧版菜单的「天气城市」必须置灰（添加城市不可达）"
+        assert show.toolTip() == M.WEATHER_DISABLED_REASON
     finally:
         win.close()
