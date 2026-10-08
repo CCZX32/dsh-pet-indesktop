@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import catalog, island_layout, island_segments, net_monitor, quiet_mode, sys_monitor
+from .config import _clean_island_coordinate
 from .dsh_state import DshState
 from .island_layout import (
     _BASELINE_DY, _CHIP_ALERT_DOT_PX, _CHIP_H_PX, _CHIP_RADIUS_PX, _CONTENT_PAD_PX,
@@ -2683,9 +2684,15 @@ class DynamicIsland(QWidget):
         self._update_size()
         screen = self._current_screen()
         available = screen.availableGeometry() if screen is not None else None
-        x = self._cfg.get("x")
-        y = self._cfg.get("y")
-        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        # 坐标的合法性判据与 config 的清洗层共用一处（`config._clean_island_coordinate`：
+        # 有限 + ±100000 内）。这里不是多余的第二遍清洗——配置对象可能**没走清洗**
+        # （手改配置、跨版本回滚、外部工具写盘），而 ``QPoint(int(x), int(y))`` 对
+        # 10**100 抛 OverflowError、对 nan/inf 抛 ValueError/OverflowError，会在
+        # 应用创建路径上直接崩掉。非法值走默认定位分支，与字符串/列表坐标的既有
+        # 回退同一条路（注意：只查 ``math.isfinite`` 挡不住 10**100）。
+        x = _clean_island_coordinate(self._cfg.get("x"))
+        y = _clean_island_coordinate(self._cfg.get("y"))
+        if x is not None and y is not None:
             pos = QPoint(int(x), int(y))
         else:
             pos = (

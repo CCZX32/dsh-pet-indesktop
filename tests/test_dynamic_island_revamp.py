@@ -14,6 +14,7 @@ from pet.dynamic_island import (
     DynamicIsland,
     _CAPSULE_HEIGHT,
     _CAPSULE_INSET,
+    _EDGE_MARGIN,
     _STRIP_SIDE,
     _STRIP_THICKNESS,
     dock_edge_for,
@@ -410,6 +411,71 @@ def test_config_cleans_new_island_keys(tmp_path):
     assert cleaned["style"] == "dark"     # 已下线的风格回默认
     assert cleaned["opacity"] == 1.0      # 超界钳到 1.0
     assert cleaned["accent"] == "blue"    # 非法色回默认
+
+
+# ------------------------------------------------------------ 位置（脏坐标）
+def test_config_cleans_dirty_island_coordinates(tmp_path):
+    """x/y 必须是**有限**且在 ±100000 内的数：脏值一律回 None（= 自动定位）。
+
+    合法性判据来自消费方式（``_apply_position`` 的 ``QPoint(int(x), int(y))``）：
+    JSON 允许的 ``10**100`` 让 int() 抛 OverflowError、``NaN`` 抛 ValueError、
+    ``±Infinity`` 抛 OverflowError——非法值必须在配置层就归一为 None，而不是把
+    应用创建路径打断（手改配置 / 跨版本回滚 / 外部工具写盘都可能绕过界面）。
+    """
+    cfg = Config(base=tmp_path)
+    dirty = [10 ** 100, float("nan"), float("inf"), -float("inf"),
+             100001, -100001, "400", [1, 2], True, None]
+    for value in dirty:
+        cfg.set("dynamic_island", {"enabled": True, "x": value, "y": value})
+        cleaned = cfg.get("dynamic_island")
+        assert cleaned["x"] is None, f"x={value!r} 必须被清洗成 None"
+        assert cleaned["y"] is None, f"y={value!r} 必须被清洗成 None"
+    # 合法值（含 0 与两个边界）原样保留，落盘重载后仍是合法值
+    for value in (0, 400, -400, 100000, -100000, 12.5):
+        cfg.set("dynamic_island", {"enabled": True, "x": value, "y": value})
+        cleaned = cfg.get("dynamic_island")
+        assert cleaned["x"] == value, f"x={value!r} 被误清洗"
+        assert cleaned["y"] == value, f"y={value!r} 被误清洗"
+    cfg.save()
+    assert Config(base=tmp_path).get("dynamic_island")["x"] == 12.5
+
+
+def test_island_survives_dirty_stored_coordinates(tmp_path):
+    """存储里的脏坐标（10**100 / NaN / ±Infinity）：构造不炸，落默认位置。
+
+    配置清洗是第一道闸，消费侧不能只依赖它——这里直接改内存里的岛配置，
+    模拟「没走清洗」的值（手改配置、外部工具写盘、回滚到旧数据）。
+    修复前 ``_apply_position`` 只查 isinstance(int/float) 就 ``QPoint(int(x),
+    int(y))``：10**100 抛 OverflowError、NaN 抛 ValueError、±inf 抛 OverflowError，
+    整条应用创建路径中断；合法字符串/列表坐标的既有回退分支也走不到。
+    """
+    _qapp()
+    avail = _avail()
+    for dirty in (10 ** 100, float("nan"), float("inf"), -float("inf"), 10 ** 6):
+        cfg = Config(base=tmp_path)
+        cfg.set("dynamic_island", {"enabled": True, "x": 400, "y": 300})
+        cfg.data["dynamic_island"]["x"] = dirty     # 绕过清洗层
+        cfg.data["dynamic_island"]["y"] = dirty
+        island = DynamicIsland(cfg)
+        try:
+            expected = QPoint(avail.right() - island.width() - _EDGE_MARGIN,
+                              avail.top() + _EDGE_MARGIN)
+            assert island.pos() == expected, \
+                f"x=y={dirty!r} 未落默认位置：{island.pos()} != {expected}"
+        finally:
+            island.hide()
+            island.deleteLater()
+
+
+def test_island_restores_legal_stored_coordinates(tmp_path):
+    """合法坐标照常恢复（非回归：清洗与消费两道闸都不改正常语义）。"""
+    _qapp()
+    island = _island(tmp_path, x=400, y=300)
+    try:
+        assert island.pos() == QPoint(400, 300)
+    finally:
+        island.hide()
+        island.deleteLater()
 
 
 def test_expanded_mode_disables_window_transform(tmp_path):

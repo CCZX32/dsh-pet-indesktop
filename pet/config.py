@@ -7,6 +7,7 @@ import copy
 import errno
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -615,6 +616,28 @@ def _default_dynamic_island_data() -> dict:
     }
 
 
+#: 灵动岛坐标（x/y）的合法绝对值上限：真实屏幕坐标远小于此，超界即为脏数据
+#: （手改配置 / 跨版本回滚 / 外部工具写盘）。消费方 ``QPoint(int(x), int(y))``
+#: 对 10**100 这类合法 JSON 大整数抛 OverflowError、对 nan/inf 抛
+#: ValueError/OverflowError——上限与有限性一起在清洗层收口。
+_ISLAND_POS_LIMIT = 100000
+
+
+def _clean_island_coordinate(value):
+    """灵动岛 x/y 归一化：有限 int/float 且在 ±``_ISLAND_POS_LIMIT`` 内则原样返回，否则 None。
+
+    None = 未定位（``dynamic_island._apply_position`` 走自动定位分支）。bool 是
+    int 的子类，不算坐标。消费方复用本函数做第二道闸（同一个「合法坐标」判据，
+    不再抄一份），因为 ``math.isfinite(10**100)`` 为真但 ``int()`` 仍会溢出——
+    只看有限性挡不住大整数。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or abs(value) > _ISLAND_POS_LIMIT:
+        return None
+    return value
+
+
 def _clean_dynamic_island_data(value) -> dict:
     defaults = _default_dynamic_island_data()
     if not isinstance(value, dict):
@@ -658,6 +681,8 @@ def _clean_dynamic_island_data(value) -> dict:
         result[_key] = _bool_or_default(_v, defaults[_key])
     edge = str(result.get("dock_edge") or "none").strip()
     result["dock_edge"] = edge if edge in {"none", "top", "bottom", "left", "right"} else "none"
+    for _axis in ("x", "y"):
+        result[_axis] = _clean_island_coordinate(result.get(_axis))
     # 至少保留一个组件：全部关闭时强制显示信息槽，避免空胶囊。
     if not (result["show_icon"] or result["show_name"] or result["show_info"] or result["show_status"]):
         result["show_info"] = True
