@@ -754,3 +754,149 @@ def test_music_sing_enabled_string_false_is_not_truthy(tmp_path):
 
     _write_config(tmp_path, {"version": 4, "music_sing_enabled": "yes"})
     assert Config(base=tmp_path).data["music_sing_enabled"] is True
+
+
+# ------------------------------------------------- 脏值家族：合法 JSON 不得阻断启动
+#
+# 全产品审查 C3（2026-10-08）：三族脏值都能让 ``Config()`` 构造直接抛异常，
+# 而启动路径（``pet/app.py`` 的 Config()）与自救入口（``pet/__main__.py`` 的
+# 独立设置页同样先构造 Config()）都没有 try —— 一个手改出来的 config.json
+# 就能让程序连设置恢复都进不去：
+#
+# - list / dict 撞 ``x not in {"..."}`` 成员判断 → TypeError: unhashable；
+# - ``10**400``（json 合法数字字面量 → Python 大整数）撞 ``float()`` /
+#   ``math.isfinite()`` → OverflowError；
+# - ``Infinity`` / ``NaN``（Python json.loads 默认接受）撞 ``int()`` → OverflowError。
+#
+# 下面把这一族**逐键**钉住：构造成功 + 回默认值。探针口径见本文件末尾的
+# ``test_dirty_value_scan_covers_every_config_key``（穷举全键 × 全脏值）。
+
+_HUGE = int("9" * 400)
+
+
+def _load_with(tmp_path, **payload):
+    """按真实加载路径读一份脏配置（reload + _normalize_pet_settings）。"""
+    payload.setdefault("version", 4)
+    _write_config(tmp_path, payload)
+    return Config(base=tmp_path)
+
+
+def _island_coordinate_config(tmp_path, axis: str, value):
+    return _load_with(tmp_path, dynamic_island={"enabled": True, axis: value})
+
+
+def test_unhashable_enum_keys_fall_back_to_default(tmp_path):
+    """枚举键撞 list/dict：成员判断不得抛 TypeError: unhashable type。"""
+    for i, (key, expected) in enumerate(
+        (("context_menu_template", "modern"), ("chat_ui_style", "modern"))
+    ):
+        for j, dirty in enumerate(([1, 2], {"a": 1})):
+            cfg = _load_with(tmp_path / f"{i}-{j}", **{key: dirty})
+            assert cfg.data[key] == expected, f"{key}={dirty!r} 必须回落 {expected}"
+
+
+def test_unhashable_enum_keys_keep_legal_values(tmp_path):
+    """非回归：合法枚举值原样保留（保护不能顺手吃掉合法值）。"""
+    assert _load_with(
+        tmp_path / "legacy", context_menu_template="legacy").get("context_menu_template") == "legacy"
+    assert _load_with(
+        tmp_path / "classic", chat_ui_style="classic").get("chat_ui_style") == "classic"
+
+
+def test_huge_island_coordinates_fall_back_to_auto_position(tmp_path):
+    """灵动岛坐标超大整数：回 None（自动定位），不得 OverflowError。"""
+    for axis in ("x", "y"):
+        for i, dirty in enumerate((_HUGE, -_HUGE)):
+            cfg = _island_coordinate_config(tmp_path / f"{axis}{i}", axis, dirty)
+            assert cfg.data["dynamic_island"][axis] is None
+
+
+def test_nonfinite_and_huge_island_opacity_fall_back(tmp_path):
+    """灵动岛不透明度：超大整数/NaN/Infinity 落在 [0.4, 1.0]，不得抛异常。
+
+    超范围数值按区间夹取（与全文件数值键同规），非数值/溢出/NaN 回默认 1.0。
+    """
+    cases = (
+        (_HUGE, 1.0),            # float() 溢出 → 默认
+        (float("nan"), 1.0),     # 不可比较 → 默认
+        (float("inf"), 1.0),     # 超上限 → 夹到 1.0
+        (float("-inf"), 0.4),    # 超下限 → 夹到 0.4
+    )
+    for i, (dirty, expected) in enumerate(cases):
+        cfg = _load_with(
+            tmp_path / f"opacity{i}", dynamic_island={"enabled": True, "opacity": dirty}
+        )
+        assert cfg.data["dynamic_island"]["opacity"] == expected, f"opacity={dirty!r}"
+
+
+def test_huge_quiet_minutes_falls_back_to_default(tmp_path):
+    """免打扰默认时长：超大整数回默认档（float() 溢出不得冒泡）。"""
+    cfg = _load_with(tmp_path, quiet_minutes_default=_HUGE)
+    assert cfg.data["quiet_minutes_default"] == config_mod.DEFAULT_QUIET_MINUTES
+
+
+def test_nonfinite_int_keys_fall_back_to_default(tmp_path):
+    """int() 型数值键遇 Infinity/NaN：不得 OverflowError，落在可用区间内。"""
+    cases = ((float("inf"), 100, 100), (float("-inf"), 10, 10), (float("nan"), 100, 84))
+    for i, (dirty, background, card) in enumerate(cases):
+        cfg = _load_with(
+            tmp_path / f"opacity{i}",
+            chat_background_opacity=dirty,
+            modern_chat_background_opacity=dirty,
+            modern_chat_card_opacity=dirty,
+        )
+        assert cfg.data["chat_background_opacity"] == background, f"{dirty!r}"
+        assert cfg.data["modern_chat_background_opacity"] == background, f"{dirty!r}"
+        assert cfg.data["modern_chat_card_opacity"] == card, f"{dirty!r}"
+
+
+def test_nonfinite_menu_appearance_int_keys_fall_back(tmp_path):
+    """菜单外观的圆角/字号：Infinity/NaN 回可用值（不抛），合法值照常夹取。"""
+    cases = (
+        (float("inf"), 18, 18),
+        (float("-inf"), 6, 10),
+        (float("nan"), 12, 13),      # NaN → 默认
+        (999, 18, 18),               # 越界数值 → 夹取
+    )
+    for i, (dirty, radius, font_size) in enumerate(cases):
+        cfg = _load_with(
+            tmp_path / f"appearance{i}",
+            context_menu_appearance={"corner_radius": dirty, "ui_font_size": dirty},
+        )
+        assert cfg.data["context_menu_appearance"]["corner_radius"] == radius, f"{dirty!r}"
+        assert cfg.data["context_menu_appearance"]["ui_font_size"] == font_size, f"{dirty!r}"
+
+
+def test_nonfinite_version_does_not_break_reload(tmp_path):
+    """顶层 version 非有限：reload 的迁移判定不得抛（回 1 = 老配置路径）。"""
+    for i, dirty in enumerate((float("inf"), float("-inf"), float("nan"))):
+        cfg = _load_with(tmp_path / f"version{i}", version=dirty)
+        assert cfg.data["version"] == 4, "归一化后 version 仍必须回写当前版本"
+
+
+def test_dirty_value_scan_covers_every_config_key(tmp_path):
+    """穷举探针：每个配置键 × 每种脏值都必须能构造出 Config（家族护栏）。
+
+    这是"同族残留"的机器判据——新增键只要又走裸 ``x in {...}`` / ``int()`` /
+    ``float()`` / ``math.isfinite()``，这里立刻红，并指出是哪个键哪种脏值。
+    """
+    dirty_values = {
+        "list": [1, 2],
+        "dict": {"a": 1},
+        "huge": _HUGE,
+        "nan": float("nan"),
+        "inf": float("inf"),
+        "neginf": float("-inf"),
+        "str": "abc",
+        "none": None,
+    }
+    keys = sorted(Config(base=tmp_path / "seed").data)
+    failures: list[str] = []
+    for key in keys:
+        for label, dirty in dirty_values.items():
+            case = tmp_path / f"{key[:40]}-{label}"
+            try:
+                _load_with(case, **{key: dirty})
+            except Exception as exc:  # noqa: BLE001 - 探针要把任何异常都记下来
+                failures.append(f"{key}={label}: {type(exc).__name__}: {exc}")
+    assert failures == [], "脏值不得阻断 Config() 构造：\n" + "\n".join(failures)

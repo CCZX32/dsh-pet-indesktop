@@ -49,10 +49,12 @@ def normalize_quiet_minutes(value) -> int:
 
     非法值回落默认档；合法整数取**最近的档**（60 → 60，45 → 30/60 取近者），
     保证消费方（菜单/设置页/倒计时）永远拿到 ``QUIET_MINUTE_CHOICES`` 里的值。
+    OverflowError 与 ``_float_or_default`` 同规：json 里 400 位数字串会解析成
+    Python 大整数，``float()`` 直接抛——不接住就是 Config() 构造失败、启动崩。
     """
     try:
         minutes = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return DEFAULT_QUIET_MINUTES
     if minutes != minutes or minutes <= 0:  # NaN / 非正数
         return DEFAULT_QUIET_MINUTES
@@ -152,20 +154,16 @@ def _clean_menu_appearance(value):
     defaults = DEFAULT_CONTEXT_MENU_APPEARANCE
     theme = str(value.get("theme", "system"))
     density = str(value.get("density", "standard"))
-    try:
-        radius = int(value.get("corner_radius", 12))
-    except (TypeError, ValueError):
-        radius = 12
-    try:
-        font_size = int(value.get("ui_font_size", 13))
-    except (TypeError, ValueError):
-        font_size = 13
+    # 整数键统一走 _float_or_default 再取整：手写 int() 只接 TypeError/ValueError，
+    # 而 Infinity/NaN 撞 int() 抛 OverflowError（一整个启动路径就此断掉）。
+    radius = int(_float_or_default(value.get("corner_radius"), 12.0, 6.0, 18.0))
+    font_size = int(_float_or_default(value.get("ui_font_size"), 13.0, 10.0, 18.0))
     result = {
         "theme": theme if theme in {"system", "light", "dark"} else "system",
         "density": density if density in {"compact", "standard", "spacious"} else "standard",
-        "corner_radius": max(6, min(18, radius)),
+        "corner_radius": radius,
         "ui_font": str(value.get("ui_font") or "system")[:80],
-        "ui_font_size": max(10, min(18, font_size)),
+        "ui_font_size": font_size,
         "translucent": bool(value.get("translucent", True)),
         "opacity": _float_or_default(value.get("opacity"), 0.94, 0.72, 1.0),
     }
@@ -543,6 +541,11 @@ def _float_or_default(value, default, minimum, maximum):
         # OverflowError：json.loads 会把超长整数字面量解析成 Python int，
         # float(10**400) 直接抛——不接住就是 Config() 构造失败、启动崩。
         return default
+    if number != number:  # NaN
+        # NaN 与任何数比较都为假，max/min 的结果取决于参数顺序（实测回落到区间
+        # **上限**），是夹取夹不出来的脏值——与 net_monitor.clamp_interval /
+        # speech_bubble_text.clamp_bubble_text_scale 同规：回默认。
+        return default
     return max(minimum, min(maximum, number))
 
 
@@ -630,10 +633,16 @@ def _clean_island_coordinate(value):
     int 的子类，不算坐标。消费方复用本函数做第二道闸（同一个「合法坐标」判据，
     不再抄一份），因为 ``math.isfinite(10**100)`` 为真但 ``int()`` 仍会溢出——
     只看有限性挡不住大整数。
+
+    两次判定顺序是有意的：**先在整数域比上限**，再对浮点判有限性。反过来写
+    （``math.isfinite(10**400)``）会在大整数上先抛 OverflowError——那正是
+    "合法 JSON 脏值阻断启动"的一族（10**400 是 json 接受的数字字面量）。
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or abs(value) > _ISLAND_POS_LIMIT:
+    if abs(value) > _ISLAND_POS_LIMIT:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
 
@@ -654,10 +663,10 @@ def _clean_dynamic_island_data(value) -> dict:
     result["custom_text"] = str(result.get("custom_text") or "")[:80]
     style = str(result.get("style") or "dark").strip()
     result["style"] = style if style in {"dark", "light", "glass"} else "dark"
-    try:
-        result["opacity"] = max(0.4, min(1.0, float(result.get("opacity", 1.0))))
-    except (TypeError, ValueError):
-        result["opacity"] = 1.0
+    # 同族脏值统一走 _float_or_default：手写 float() 只接 TypeError/ValueError，
+    # 而 10**400 抛 OverflowError（json 接受的数字字面量），NaN/±inf 也会被
+    # max/min 静默留下（两个方向的比较都假，结果取决于参数顺序）。
+    result["opacity"] = _float_or_default(result.get("opacity"), 1.0, 0.4, 1.0)
     accent = str(result.get("accent") or "blue").strip()
     result["accent"] = accent if accent in {"blue", "green", "purple", "pink", "orange"} else "blue"
     # 图标归一化：auto 原样；img:<路径> 按路径保留（限长 260）；其余当文字/emoji
@@ -1128,8 +1137,10 @@ class Config:
             return
         try:
             old_version = int(raw.get("version", 1) or 1)
-        except (TypeError, ValueError):
-            old_version = 1  # 脏数据（手改/损坏）不得导致启动崩溃
+        except (TypeError, ValueError, OverflowError):
+            # 脏数据（手改/损坏）不得导致启动崩溃；OverflowError 是 Infinity/NaN
+            # 撞 int() 的那一支（Python json.loads 默认接受这两个字面量）。
+            old_version = 1
         if old_version < 2:
             raw.pop("scale", None)
         chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
@@ -1573,8 +1584,11 @@ class Config:
         self.data["self_talk_texts"] = _clean_self_talk_texts(self.data.get("self_talk_texts"))
         bubble_style = str(self.data.get("self_talk_bubble_style") or "")
         self.data["self_talk_bubble_style"] = bubble_style if bubble_style in SELF_TALK_BUBBLE_STYLES else DEFAULT_SELF_TALK_BUBBLE_STYLE
-        if self.data.get("context_menu_template") not in {"legacy", "modern"}:
-            self.data["context_menu_template"] = "modern"
+        # 枚举键必须先 str() 再判成员：直接 `x not in {"legacy","modern"}` 遇到
+        # list/dict 抛 TypeError: unhashable type（json 合法脏值），Config() 构造
+        # 失败 → 启动崩、连独立设置页都进不去。同族写法一律抄这一行。
+        template = str(self.data.get("context_menu_template") or "")
+        self.data["context_menu_template"] = template if template in {"legacy", "modern"} else "modern"
         self.data["context_menu_layout"] = _clean_menu_layout_override(self.data.get("context_menu_layout"))
         self.data["context_menu_appearance"] = _clean_menu_appearance(self.data.get("context_menu_appearance"))
         self.data["menu_easter_egg"] = _clean_menu_easter_egg(self.data.get("menu_easter_egg"))
@@ -1582,8 +1596,8 @@ class Config:
         self.data["anim_menu_stay_open"] = _bool_or_default(
             self.data.get("anim_menu_stay_open"), False)
         self.data["quick_launch_apps"] = _clean_quick_launch_apps(self.data.get("quick_launch_apps"))
-        if self.data.get("chat_ui_style") not in {"modern", "classic"}:
-            self.data["chat_ui_style"] = "modern"
+        ui_style = str(self.data.get("chat_ui_style") or "")
+        self.data["chat_ui_style"] = ui_style if ui_style in {"modern", "classic"} else "modern"
         self.data["character_profiles"] = _clean_character_profiles(self.data.get("character_profiles"))
         self.data["chat_always_on_top"] = bool(self.data.get("chat_always_on_top", False))
         self.data["dynamic_island"] = _clean_dynamic_island_data(self.data.get("dynamic_island"))
@@ -1611,18 +1625,14 @@ class Config:
         for prefix in ("chat_background", "modern_chat_background"):
             opacity_key = f"{prefix}_opacity"
             fill_key = f"{prefix}_fill"
-            try:
-                opacity = int(self.data.get(opacity_key, 100))
-            except (TypeError, ValueError):
-                opacity = 100
-            self.data[opacity_key] = max(10, min(100, opacity))
+            # 不透明度 [10,100]：整数键统一走 _float_or_default 再取整——手写
+            # int() 只接 TypeError/ValueError，Infinity/NaN 抛 OverflowError（启动崩）。
+            self.data[opacity_key] = int(_float_or_default(
+                self.data.get(opacity_key), 100.0, 10.0, 100.0))
             fill = str(self.data.get(fill_key, "cover") or "cover")
             self.data[fill_key] = fill if fill in {"cover", "contain", "stretch"} else "cover"
-        try:
-            card_opacity = int(self.data.get("modern_chat_card_opacity", 84))
-        except (TypeError, ValueError):
-            card_opacity = 84
-        self.data["modern_chat_card_opacity"] = max(10, min(100, card_opacity))
+        self.data["modern_chat_card_opacity"] = int(_float_or_default(
+            self.data.get("modern_chat_card_opacity"), 84.0, 10.0, 100.0))
 
         # 点击音效 & 弹弓 & 物理力度归一化
         self.data["click_sound_enabled"] = bool(self.data.get("click_sound_enabled", True))
