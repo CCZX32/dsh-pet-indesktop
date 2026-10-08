@@ -852,7 +852,7 @@ class ShellOverlayWindow(OverlayWindow):
         QTimer.singleShot(0, self, dispatch)
 
     def reopen_context_menu(self, menu) -> None:
-        """按原位置重开右键菜单（模板切换立即生效；window.py 同名方法等价物）。
+        """按原位置重开右键菜单（菜单树重建后立即生效；window.py 同名方法等价物）。
 
         QMenu 会把请求点挪到不出屏的位置，沿用用户实际看到的坐标（同
         window.py ``reopen_context_menu`` 的 ``_context_menu_anchor`` 口径）。

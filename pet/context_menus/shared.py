@@ -740,8 +740,8 @@ def add_look_screen(menu: QMenu, pet, *, icons: bool = True):
 def network_info_menu_enabled(pet) -> bool:
     """「网络信息」入口的开关（``network_info_menu_enabled``，默认开）。
 
-    两套建造器（modern 注册表的 enabled、legacy 建造器）共用同一判定，避免
-    "新版菜单里关掉了、旧版菜单还在"这种两套真值。
+    开关真值只有一份：注册表的 ``enabled`` 与本模块建造器写的 tooltip 共用它，
+    避免"设置里关掉了、菜单里还在"这种两套真值。
     """
     cfg = getattr(pet, "cfg", None)
     if cfg is None:
@@ -759,8 +759,8 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
 
     - 回调不存在（纯桌宠变体）＝ 能力不可用 → 整条不出现；
     - 开关关掉 ＝ 运行时停用 → 保留位置、置灰并写上说明（不消失、也不点了没反应）。
-      legacy 建造器直接调本函数，故置灰在这里落地；modern 路径的 ``populate`` 会按
-      ``enabled_ids`` 再置一次灰（同一份 reason，幂等）。
+      置灰在建造器里落地（任何调用方——布局渲染或直调——拿到的都是同一份 reason），
+      ``populate`` 之后还会按 ``enabled_ids`` 再置一次灰（幂等）。
     """
     callback = getattr(pet, "on_network_info", None)
     if callback is None:
@@ -1142,8 +1142,9 @@ def music_align_ready(pet) -> bool:
     可能用 ``__getattr__`` 兜底返回任意对象（测试替身就这么干），只判 None 会
     把无关对象当成控制器（同 ``_music_controller`` 的教训）。
 
-    放在共享模块而不是注册表里：停用门必须同时落在注册表（新版树）与建造器
-    （legacy 直调）两处，否则旧版菜单会给出"点了没反应"的死项（B8）。
+    放在共享模块而不是注册表里：判定与置灰必须同源，否则会出现
+    "入口在、点了没反应"的死项（B8 的历史形态是旧版菜单直调建造器绕过注册表；
+    旧版菜单 2026-10-08 已退役，口径不变）。
     """
     controller = _music_controller(pet)
     return bool(controller.align_available()) if controller is not None else False
@@ -1153,7 +1154,7 @@ def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
     """「歌词对齐」子菜单：纠正快进 / 中途开始播放造成的歌词错位。
 
     为什么是"一个 id 挂子菜单"而不是五个平级项：与 ``add_harness`` 同一个理由——
-    菜单模板与用户自己编排过的布局里只会出现 ``music_lyric_align`` 这一个 id。
+    默认布局与用户自己编排过的布局里只会出现 ``music_lyric_align`` 这一个 id。
 
     为什么用「上一句 / 下一句」做主手柄：用户听到的是"现在唱这句"，而不是
     "现在第几秒"，按行步进比按秒微调快得多；±5 秒留给最后一点偏差。
@@ -1162,9 +1163,9 @@ def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
     估算，快进或中途开始播放后必然错位，且没有任何自动信号可利用——所以给用户
     一个一次点击就能对准的入口，是这个功能唯一诚实的做法。
 
-    **置灰也在本建造器里落地**：legacy 建造器直接调本函数，门只写在注册表上就是
-    "旧版菜单里留着一条点了没反应的死项"。新版 ``populate`` 之后会按
-    ``enabled_ids`` 再置一次灰（同一份 reason，幂等）。
+    **置灰也在本建造器里落地**：门只写在注册表上，任何绕过注册表的调用方都会
+    拿到一条点了没反应的入口。``populate`` 之后会按 ``enabled_ids`` 再置一次灰
+    （同一份 reason，幂等）。
     """
     icon = "play" if icons else None
     submenu = add_submenu(menu, "歌词对齐", icon)

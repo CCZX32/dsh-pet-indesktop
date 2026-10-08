@@ -432,10 +432,10 @@ def add_city_flow(pet, *, dialog_factory=None, search=None, run_async=None,
 
 # ---------------------------------------------------------------- 菜单建造器
 #
-# **停用门落在建造器里，不只在新版注册表上（B7）**：注册表的 enabled/
-# disabled_reason 只管新版树，legacy 扁平菜单直接调这两个建造器——门只写在注册表
-# 上就是"关掉天气开关后旧版菜单仍然进得去城市搜索、把城市写进配置"（两套菜单两个
-# 真值）。语义沿用 CONTEXT.md 的 Runtime Disabled：**入口保留、置灰、写明原因**，
+# **停用门落在建造器里，不只写在注册表上（B7 的形态）**：注册表的 enabled/
+# disabled_reason 只管布局渲染侧，绕过注册表的直接调用（历史形态是旧版扁平菜单，
+# 2026-10-08 已退役）就会拿到一个还能进的入口。语义沿用 CONTEXT.md 的
+# Runtime Disabled：**入口保留、置灰、写明原因**，
 # 不是整条消失（消失会让用户以为功能被删了；置灰 + tooltip 才说明"是开关关的"）。
 # 两个拓扑都读 ``pet.cfg``（overlay 是 ``_SpriteConfig`` 视图，get 转发主配置）。
 
@@ -445,8 +445,8 @@ WEATHER_DISABLED_REASON = "天气功能已在设置中关闭"
 def weather_menu_enabled(pet) -> bool:
     """「查看天气 / 天气城市」是否可用：只看设置里的天气总开关（默认开）。
 
-    两套建造器（新版注册表的 ``enabled`` 与 legacy 直调的建造器）共用同一判定，
-    避免"新版菜单里关掉了、旧版菜单还在"这种两套真值。
+    注册表的 ``enabled`` 与建造器写的 tooltip 共用这一份判定，避免"设置里关掉了、
+    菜单里还在"这种两套真值。
     """
     cfg = _config_of(pet)
     return bool(cfg.get("weather_enabled", True)) if cfg is not None else True

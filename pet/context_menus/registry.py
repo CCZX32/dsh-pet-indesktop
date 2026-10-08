@@ -163,8 +163,9 @@ def _memory_trim_available(_pet) -> bool:
 
 
 # 「查看天气 / 天气城市」的判据与原因文案收在共享建造器模块（`weather_menu`），
-# 因为停用门必须同时落在注册表（新版树）和建造器（legacy 直调）两处——两个
-# 真值就是"新版菜单里关掉了、旧版菜单还在"（B7）。这里只做转发。
+# 这里只做转发：开关真值只有一份，注册表的 enabled 与建造器写的 tooltip 同源。
+# （历史背景：旧版扁平菜单曾直调建造器绕过注册表，门只写在注册表上就会漏；
+# 旧版菜单已于 2026-10-08 退役，但"判定收在建造器里"的口径保持不动。）
 _WEATHER_DISABLED_REASON = WEATHER_DISABLED_REASON
 _weather_enabled = weather_menu_enabled
 
@@ -172,8 +173,8 @@ _weather_enabled = weather_menu_enabled
 def _music_align_ready(pet) -> bool:
     """「歌词对齐」判据的转发（实现与原因文案在 ``shared.music_align_ready``）。
 
-    门同样要落在共享建造器里：legacy 建造器直调 ``add_music_lyric_align``，
-    注册表独占判定就会让旧版菜单留下一条点了没反应的死项（B8）。
+    门收在共享建造器里（本函数转发的 ``shared.music_align_ready``）：
+    "能对齐"的判定与置灰必须同源，否则会出现"入口在、点了没反应"的死项。
     """
     from .shared import music_align_ready
 
