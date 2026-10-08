@@ -1115,6 +1115,51 @@ def test_modern_settings_save_writes_autostart_wanted(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_legacy_menu_autostart_persists_wanted_flag(tmp_path, monkeypatch):
+    """旧版菜单的「开机自启」必须记录 autostart_wanted（启动自检提醒依赖它）。
+
+    新版注册表（registry 的 autostart 项）、设置页与托盘都写这个键，旧版建造器
+    调用共享建造器时漏传 pet——勾旧版菜单的自启只写系统登录项、不写配置，
+    ``pet/app.py`` 的自检（``autostart_wanted`` 为真但系统项被安全软件清掉 →
+    提醒用户重新启用）因此永远看不到用户勾过。
+
+    真 QMenu + 真 Config + 真 PetWindow 建菜单，只把系统登录项边界（autostart
+    模块）打桩；断言配置落盘，而不只是内存里的 Config 对象。
+    """
+    import json
+
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    import pet.context_menus.shared as shared_mod
+    import tests.test_context_menu_lifecycle as lc
+    from pet.config import Config
+    from pet.context_menu import populate_context_menu
+
+    app = QApplication.instance() or QApplication([])
+    applied: list[bool] = []
+    monkeypatch.setattr(shared_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(shared_mod.autostart_mod, "set_enabled",
+                        lambda enabled: applied.append(bool(enabled)) or True)
+    config = Config(base=tmp_path)
+    config.set("context_menu_template", "legacy")
+    config.save()
+    assert config.get("autostart_wanted") is False
+    win = lc.PetWindow(lc.FakeLibrary(), config)
+    menu = QMenu()
+    try:
+        populate_context_menu(menu, win)
+        action = next(a for a in menu.actions() if a.text() == "开机自启")
+        action.setChecked(True)
+        assert applied == [True], "系统登录项照常写入"
+        assert config.get("autostart_wanted") is True
+        persisted = json.loads((config.dir / "config.json").read_text(encoding="utf-8"))
+        assert persisted["autostart_wanted"] is True, "必须落盘（自检读的是盘上的值）"
+    finally:
+        menu.close()
+        win.close()
+        app.processEvents()
+
+
 def test_modern_provisional_config_falls_back_to_keyring(tmp_path, monkeypatch):
     """测试连接未填 Key 时必须回退系统钥匙串，否则默认场景误报 401。"""
     from PySide6.QtWidgets import QApplication
