@@ -21,6 +21,7 @@ from .fun_entry import add_ojingjing_entry
 from .icons import custom_file_menu_icon, vector_menu_icon
 from .quick_launch import add_quick_launch_menu, configured_quick_apps
 from .shared import (
+    MUSIC_ALIGN_DISABLED_REASON,
     NETWORK_INFO_DISABLED_REASON,
     QUARK_PAN_URL,
     REPO_URL,
@@ -169,19 +170,14 @@ _weather_enabled = weather_menu_enabled
 
 
 def _music_align_ready(pet) -> bool:
-    """「歌词对齐」是否可用：只有位置靠本地时钟估算时才有意义。
+    """「歌词对齐」判据的转发（实现与原因文案在 ``shared.music_align_ready``）。
 
-    播放器报了真实进度（Chrome / QQ 音乐）时位置本来就跟着快进走，手动对齐
-    只会跟真值打架；还没有歌词可对齐时同理。**必须 isinstance 校验**——宿主
-    可能用 ``__getattr__`` 兜底返回任意对象（测试替身就这么干），只判 None 会
-    把无关对象当成控制器（同 ``shared._music_controller`` 的教训）。
+    门同样要落在共享建造器里：legacy 建造器直调 ``add_music_lyric_align``，
+    注册表独占判定就会让旧版菜单留下一条点了没反应的死项（B8）。
     """
-    from ..music_lyric_controller import MusicLyricController
+    from .shared import music_align_ready
 
-    controller = getattr(pet, "_music_lyric", None)
-    if not isinstance(controller, MusicLyricController):
-        return False
-    return bool(controller.align_available())
+    return music_align_ready(pet)
 
 
 def _build_chat(menu, pet):
@@ -316,7 +312,7 @@ class MenuActionRegistry:
                 add_music_lyric_align,
                 _music_lyric_configured,
                 enabled=_music_align_ready,
-                disabled_reason="当前不需要手动对齐（播放器会上报进度，或还没有歌词）",
+                disabled_reason=MUSIC_ALIGN_DISABLED_REASON,
             ),
             "music_open_netease": MenuActionSpec(add_music_open_netease),
             "music_open_qqmusic": MenuActionSpec(add_music_open_qqmusic),

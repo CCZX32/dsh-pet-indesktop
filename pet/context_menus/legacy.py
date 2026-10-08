@@ -24,6 +24,7 @@ from .shared import (
     add_music_next,
     add_music_open_netease,
     add_music_open_qqmusic,
+    add_music_lyric_align,
     add_music_pause,
     add_music_prev,
     add_music_quit,
@@ -79,6 +80,11 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     add_music_next(music_menu, pet, icons=False)
     add_music_prev(music_menu, pet, icons=False)
     add_music_quit(music_menu, pet, icons=False)
+    # 「歌词对齐」必须在这里也装上：首首无进度歌曲的引导气泡与设置页「显示歌词」
+    # 行都指向「音乐 → 歌词对齐」，漏装则切到旧版菜单后按提示找不到入口（B8）。
+    # 位置与新版默认布局一致（退出音乐模式之后、播放器启动项之前），置灰语义由
+    # 共享建造器按 music_align_ready 落地。
+    add_music_lyric_align(music_menu, pet, icons=False)
     music_menu.addSeparator()
     add_music_open_netease(music_menu, pet, icons=False)
     add_music_open_qqmusic(music_menu, pet, icons=False)

@@ -81,6 +81,7 @@ MUSIC_LABELS = (
     "给主人换一首（切歌）",
     "人家想再听刚才那首（上一首）",
     "人家今天不唱了（退出音乐模式）",
+    "歌词对齐",
     "打开网易云音乐给主人放歌",
     "打开QQ音乐给主人放歌",
 )
@@ -354,6 +355,56 @@ def test_legacy_template_missing_entries_all_present(tmp_path):
             assert label in music_labels, f"音乐子菜单缺项：{label}"
     finally:
         shell._delete_runtime_marker()
+
+
+def test_legacy_music_menu_lyric_align_matches_the_modern_registry(tmp_path):
+    """legacy 音乐子菜单装有「歌词对齐」，且可用性语义与新版注册表逐点一致。
+
+    引导文案（首首无进度歌曲的一次性提示、设置页「显示歌词」行）都写着「用右键
+    菜单『音乐 → 歌词对齐』校正」；新版注册表里有 ``music_lyric_align``，legacy
+    建造器漏了它——切到旧版菜单后用户按提示去找，菜单里根本没有这一项。
+    """
+    from PySide6.QtWidgets import QMenu
+
+    from pet.context_menus.registry import MENU_ACTIONS
+    from pet.context_menus.shared import MUSIC_ALIGN_DISABLED_REASON, add_music_lyric_align
+    from pet.music_lyric import LyricLine
+    from pet.music_lyric_controller import MusicLyricController
+
+    config = Config(base=tmp_path)
+    config.set("music_lyric_enabled", True)
+    win = _reference_window(config)
+    try:
+        def _align_action():
+            menu = QMenu()
+            build_legacy_menu(menu, win, load_menu_template("legacy"))
+            music = next(a.menu() for a in menu.actions() if a.text() == "音乐")
+            return next(a for a in music.actions() if a.text() == "歌词对齐")
+
+        action = _align_action()
+        entries = [a.text() for a in action.menu().actions() if not a.isSeparator()]
+        assert entries == [
+            "回到开头（现在这句算开头）", "上一句", "下一句", "后退 5 秒", "前进 5 秒",
+        ], entries
+        # 没有控制器：置灰 + 写明原因（点了没反应是反模式），与注册表判定一致
+        assert action.isEnabled() is ("music_lyric_align" in MENU_ACTIONS.enabled_ids(win))
+        assert action.isEnabled() is False
+        assert action.toolTip() == MUSIC_ALIGN_DISABLED_REASON
+
+        # 位置靠本地时钟估算（网易云这类）→ 菜单可用；与注册表同判据
+        ctrl = MusicLyricController(win)
+        ctrl._title_line = "我在唱《t》"
+        ctrl._tracker.load([LyricLine(0.0, "第一句")], now=time.monotonic(),
+                           position=None)
+        win._music_lyric = ctrl
+        assert ctrl.align_available() is True
+
+        action = _align_action()
+        assert action.isEnabled() is True
+        assert action.isEnabled() is ("music_lyric_align" in MENU_ACTIONS.enabled_ids(win))
+        assert add_music_lyric_align is not None   # 共享建造器仍是唯一实现
+    finally:
+        win.close()
 
 
 def test_modern_template_exposes_same_capabilities(tmp_path):

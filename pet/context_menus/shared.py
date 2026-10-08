@@ -1127,6 +1127,27 @@ def _align_lyric(pet, kind: str) -> bool:
     return False
 
 
+#: 「歌词对齐」不可用时的说明（``add_music_lyric_align`` 写的 tooltip 与注册表的
+#: ``disabled_reason`` 共用这一份；口径见 CONTEXT.md 的 Runtime Disabled：保留
+#: 位置、置灰、并解释原因）。
+MUSIC_ALIGN_DISABLED_REASON = "当前不需要手动对齐（播放器会上报进度，或还没有歌词）"
+
+
+def music_align_ready(pet) -> bool:
+    """「歌词对齐」是否可用：只有位置靠本地时钟估算时才有意义。
+
+    播放器报了真实进度（Chrome / QQ 音乐）时位置本来就跟着快进走，手动对齐
+    只会跟真值打架；还没有歌词可对齐时同理。**必须 isinstance 校验**——宿主
+    可能用 ``__getattr__`` 兜底返回任意对象（测试替身就这么干），只判 None 会
+    把无关对象当成控制器（同 ``_music_controller`` 的教训）。
+
+    放在共享模块而不是注册表里：停用门必须同时落在注册表（新版树）与建造器
+    （legacy 直调）两处，否则旧版菜单会给出"点了没反应"的死项（B8）。
+    """
+    controller = _music_controller(pet)
+    return bool(controller.align_available()) if controller is not None else False
+
+
 def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
     """「歌词对齐」子菜单：纠正快进 / 中途开始播放造成的歌词错位。
 
@@ -1139,6 +1160,10 @@ def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
     实测依据（2026-09-21）：网易云音乐完全不上报播放进度，歌词只能按本地时钟
     估算，快进或中途开始播放后必然错位，且没有任何自动信号可利用——所以给用户
     一个一次点击就能对准的入口，是这个功能唯一诚实的做法。
+
+    **置灰也在本建造器里落地**：legacy 建造器直接调本函数，门只写在注册表上就是
+    "旧版菜单里留着一条点了没反应的死项"。新版 ``populate`` 之后会按
+    ``enabled_ids`` 再置一次灰（同一份 reason，幂等）。
     """
     icon = "play" if icons else None
     submenu = add_submenu(menu, "歌词对齐", icon)
@@ -1152,6 +1177,10 @@ def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
                lambda: _align_lyric(pet, "back5"), close_on_trigger=True)
     add_action(submenu, "前进 5 秒", icon,
                lambda: _align_lyric(pet, "fwd5"), close_on_trigger=True)
+    if not music_align_ready(pet):
+        action = submenu.menuAction()
+        action.setEnabled(False)
+        action.setToolTip(MUSIC_ALIGN_DISABLED_REASON)
     return submenu
 
 
