@@ -1851,6 +1851,15 @@ class AppShell:
         win = getattr(inst, "win", None)
         corner = getattr(win, "go_default_corner", None)
         if callable(corner):
+            # B1：``go_default_corner`` 一次做完"落默认角落 + 落盘"，而那份落盘是
+            # **整表**写（``cfg.save()``）。D12 指令与主进程 300ms 去抖的 reload 是
+            # 两条时序，指令先到时 ``win.cfg`` 还是重置前的旧值——不先按磁盘拉齐，
+            # 这一次落盘就把刚写下的默认值整表覆盖回去（见
+            # ``settings_reset_defaults.reload_runtime_config``）。
+            from . import settings_reset_defaults
+
+            settings_reset_defaults.reload_runtime_config(
+                getattr(win, "cfg", None), self.config)
             corner()
 
     def _install_config_watcher(self) -> None:

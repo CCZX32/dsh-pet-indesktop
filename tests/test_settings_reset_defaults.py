@@ -673,3 +673,72 @@ def test_settings_reset_command_aligns_overlay_sprite(tmp_path: Path):
         shell._delete_runtime_marker()
         if getattr(shell, "tray", None) is not None:
             shell.tray.hide()
+
+
+# ------------------------------------- 4. 指令先到、reload 后到：不得整表回写旧值
+#
+# 真实时序（B1）：独立设置进程是"先写默认值、再写对齐指令"两步目录事件，而主进程
+# 的目录事件处理顺序是「先消费指令（立刻对齐并落盘）、后按 300ms 去抖排 reload」。
+# 于是对齐那一刻运行期那份 Config 还停在重置前的旧值，而它的落盘是**整表**写——
+# 刚落盘的默认值被整表覆盖回旧值，重置被静默抵消。
+
+def test_reset_command_keeps_defaults_on_disk_while_runtime_config_is_stale(tmp_path: Path):
+    """legacy：指令消费 → 真实 go_default_corner + 真实写盘，磁盘必须仍是默认值。"""
+    base = tmp_path / "appdata"
+    runtime = _dirty_config(base)
+    runtime.data.update({"no_move": True, "stream_capture_mode": True})
+    assert runtime.save() is True, "前置条件：运行期旧值必须落盘"
+
+    settings = Config(base=base)                    # 设置进程：同一目录、独立实例
+    assert settings.reset_to_defaults() is True
+    assert cmd_mod.write_command(
+        settings.dir, cmd_mod.CMD_APPLY_SETTINGS_RESET) is True
+
+    instance = _stub_instance(
+        runtime, _StubScreen("primary", QRect(0, 0, 1920, 1040)), (400, 400))
+    shell = _stub_shell(instance)
+
+    shell._consume_settings_command()               # ← 指令先到（reload 还没跑）
+    window_placement.save_position(instance.win)    # ← 退出收口：真实整表写盘
+
+    on_disk = Config(base=base)
+    assert on_disk.get("pet_opacity") == 100, "重置后的默认值被运行期旧值整表覆盖回去"
+    assert on_disk.get("no_move") is False
+    assert on_disk.get("stream_capture_mode") is False
+    assert on_disk.get("self_talk_enabled") is False
+    assert on_disk.get("mouse_through") is False
+    assert on_disk.get("rx") is not None and on_disk.get("rx") > 0.9, "对齐落位仍要落盘"
+
+
+def test_overlay_reset_command_reloads_runtime_config_before_alignment(tmp_path: Path):
+    """overlay 同一条指令：对齐前同样把运行期配置拉齐（否则退出写盘覆盖回旧值）。"""
+    from tests.test_overlay_spawn import _make_persistent_shell
+
+    base = tmp_path / "appdata"
+    shell, _ = _make_persistent_shell(base, {
+        "no_move": True, "pet_opacity": 40,
+        "mouse_through": True, "self_talk_enabled": True,
+    })
+    try:
+        stale = shell._config.data["pet_opacity"]
+        assert stale == 40, "前置条件：运行期那份 Config 必须还停在旧值"
+
+        settings = Config(str(base))                # 设置进程：独立实例
+        assert settings.reset_to_defaults() is True
+        assert cmd_mod.write_command(
+            settings.dir, cmd_mod.CMD_APPLY_SETTINGS_RESET) is True
+
+        shell._consume_settings_command()           # ← 指令先到（reload 还没跑）
+        shell.save_position()                       # ← 退出收口：真实整表写盘
+
+        on_disk = Config(str(base))
+        assert on_disk.get("pet_opacity") == 100, "overlay 退出写盘把默认值覆盖回旧值"
+        assert on_disk.get("no_move") is False
+        assert on_disk.get("mouse_through") is False
+        assert on_disk.get("self_talk_enabled") is False
+        assert on_disk.get("rx") is not None, "对齐落位仍要落盘"
+    finally:
+        shell._teardown_settings_command_watch()
+        shell._delete_runtime_marker()
+        if getattr(shell, "tray", None) is not None:
+            shell.tray.hide()

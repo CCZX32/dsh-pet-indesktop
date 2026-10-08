@@ -4110,6 +4110,11 @@ class OverlayShell(QObject):
         主宠与子宠都可用）：`slot` 为空 = 主身份，否则是那一只子身份；目标已不活跃
         = 没有运行态要对齐，直接跳过。刻意不读配置里的 rx/ry 决定落点——本方法可能
         由 D12 指令驱动，而指令与主进程去抖中的外部 reload 是两条时序。
+
+        **对齐前先把运行期配置拉齐（B1）**：这一只的几何最终由退出收口的
+        ``save_position()`` 落盘，而那是 ``self._config.save()`` 的**整表**写。指令
+        先到、去抖 reload 后到的话，整表写会把刚恢复的默认值覆盖回旧值（主宠那份
+        主配置尤甚）。口径与 legacy ``AppShell.apply_settings_reset`` 同一份实现。
         """
         if slot is None:
             target = self.sprite
@@ -4119,6 +4124,9 @@ class OverlayShell(QObject):
         if target is None:
             logging.info("overlay: 重置对齐目标（slot=%s）不在场，跳过", slot)
             return
+        from . import settings_reset_defaults
+
+        settings_reset_defaults.reload_runtime_config(self._config)
         self._go_default_corner(target)
 
     def _teardown_settings_command_watch(self) -> None:

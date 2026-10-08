@@ -23,7 +23,9 @@ config watcher → ``reload()`` + ``_apply_external_config_change()`` 链应用�
 - **运行态对齐**（:func:`_request_runtime_alignment`）：位置类键已回 null，运行中的
   窗口不会自己动，而正常退出会把运行态几何写回磁盘——旧位置因此被"合法地"写回去，
   重置被静默抵消。两条路径与「一键退出子肥鱼」同规：进程内直接调窗回调，独立设置
-  进程走 D12 指令通道。
+  进程走 D12 指令通道。消费端（``AppShell`` / ``OverlayShell.apply_settings_reset``）
+  在动运行态之前必须先 :func:`reload_runtime_config`：对齐会经 ``cfg.save()`` 整表
+  落盘，而指令总是先于 300ms 去抖的 reload 到达（见该函数 docstring）。
 
 实现拆出 ``modern_settings_dialog.py`` 的原因与 settings_music / settings_file_interpret
 同规：主对话框只留一行接线（该文件有行数预算）。
@@ -44,6 +46,7 @@ __all__ = [
     "build_reset_confirm_box",
     "confirm_reset",
     "sync_system_autostart",
+    "reload_runtime_config",
 ]
 
 RESET_BUTTON_TEXT = "恢复默认设置…"
@@ -125,6 +128,41 @@ def sync_system_autostart(host) -> None:
             "写入开机自启失败：可能被安全软件拦截。\n"
             "可在设置页的「开机自启」开关里重试，或检查安全软件/系统优化工具的拦截记录。",
         )
+
+
+def reload_runtime_config(*configs) -> bool:
+    """重置级运行态对齐**之前**，把运行期配置从磁盘拉齐。返回是否真的重载过。
+
+    为什么必须在对齐前做（B1）：对齐的落点要经 ``cfg.save()`` **整表**落盘（legacy
+    是 ``win.go_default_corner`` → ``save_position``，overlay 是退出时的
+    ``save_position``）。而设置进程是"先写默认值、再写对齐指令"两步目录事件，主
+    进程的事件处理顺序是「先消费指令（立刻对齐并落盘）、后按 300ms 去抖排 reload」
+    ——对齐那一刻运行期那份 Config 还停在重置前的旧值，一次整表落盘就把刚落盘的
+    默认值全部覆盖回去（``no_move`` / ``pet_opacity`` / ``stream_capture_mode`` …），
+    重置被静默抵消。
+
+    ``reload()`` 本身是既有的"外部变更合并"口（键清单见 ``Config.reload``），与
+    watcher 随后那一拍同源，重复调用幂等。多个候选里同一份配置只重载一次（生产
+    路径 ``win.cfg`` 与 ``shell.config`` 常常就是同一个对象）。
+
+    无 ``reload`` 接口的假配置/测试替身跳过（对齐照跑，行为不比修复前更差）。
+    """
+    reloaded = False
+    seen: set[int] = set()
+    for config in configs:
+        if config is None or id(config) in seen:
+            continue
+        seen.add(id(config))
+        reload_fn = getattr(config, "reload", None)
+        if not callable(reload_fn):
+            continue
+        try:
+            reload_fn()
+        except Exception:
+            logging.exception("恢复默认设置：运行态配置重载失败，对齐可能被旧值覆盖")
+            continue
+        reloaded = True
+    return reloaded
 
 
 def _request_runtime_alignment(host) -> None:
