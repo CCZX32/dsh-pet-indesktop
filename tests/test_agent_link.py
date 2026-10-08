@@ -4798,6 +4798,74 @@ class TestDshLateQueuedSignalsAreIsolated:
             mgr.shutdown()
 
 
+class _BridgeWin:
+    """真实桥装配用的假窗口：记录气泡/提醒文案，并统计交互关闭次数。"""
+
+    def __init__(self) -> None:
+        self.bubbles: list[str] = []
+        self.alerts: list[str] = []
+        self.resolved: list[str] = []
+        self.hidden = 0
+        self._bubble_busy_until = 0.0
+        self._sticky_bubble_active = False
+        self._alert_current = None
+        self._alert_queue: list = []
+
+    def isVisible(self):
+        return True
+
+    def show_bubble(self, text, duration_ms=3000, sticky=False, buttons=None):
+        self.bubbles.append(str(text))
+
+    def show_alert(self, text, **kwargs):
+        self.alerts.append(str(text))
+
+    def resolve_alert(self, alert_id):
+        self.resolved.append(str(alert_id))
+
+    def hide_bubble(self):
+        self.hidden += 1
+
+
+class _BridgeHarness:
+    """真实装配：真实 Config + 真实 AgentLinkManager + 真实桥记录通道。
+
+    ``DshMonitor`` 的目录尾读换成 ``ByteOffsetTailer``（读写一个受控文件），
+    ``_poll`` 与信号分发保持产品原样——用例断言的是真链路，不是手工接线。
+
+    中性化的只有两条不能确定性运行的边界，且都与被断言的行为无关：
+    ``_probe_online``（socket 探活 + 进程枚举）置为 no-op；``_online = False``
+    让状态收敛器不消费事件（状态收敛另有专测 tests/test_dsh_state.py）。
+    """
+
+    def __init__(self, tmp_path, *, phrases: dict | None = None) -> None:
+        QApplication.instance() or QApplication([])
+        self.win = _BridgeWin()
+        cfg = Config(base=tmp_path)
+        if phrases is not None:
+            cfg.data["dialogue_mode"] = "custom"
+            cfg.data["dialogue_phrases"] = phrases
+            cfg.save()
+        self.mgr = AgentLinkManager(self.win, cfg)
+        self.bridge = tmp_path / "dsh.jsonl"
+        self.bridge.touch()
+        self.mon = self.mgr.monitors["dsh"]
+        self.mon._tailer = ByteOffsetTailer(self.bridge)
+        self.mon._probe_online = lambda: None
+        self.mon._online = False
+        self.mon._poll()  # 尾读初始化（backfill：不重放历史）
+
+    def feed(self, *records: dict) -> None:
+        """按产品写盘形状追加桥接记录，并跑一拍 ``_poll``（解析 + 信号分发）。"""
+        with open(self.bridge, "a", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        self.mon._poll()
+
+    def close(self) -> None:
+        self.mgr.shutdown()
+
+
 class TestAgentScopedPhraseRouting:
     """Agent 专属文案必须贯穿全部事件路径。
 
@@ -4807,78 +4875,27 @@ class TestAgentScopedPhraseRouting:
     运行时仍出全局文案（start / thinking / 活动 / 完成四条路径已有显式路由，
     是非回归基线）。
 
-    真实装配：真实 Config + 真实 AgentLinkManager + 真实桥方向（``DshMonitor``
-    的目录尾读换成 ``ByteOffsetTailer``，真写盘 → ``_poll`` 解析并分发）。
     文案双层都填满且**逐事件不同**：global 层全为 ``GLOBAL-X:<事件>``，
     ``agents.dsh`` 全为 ``DSH-X:<事件>``——于是每个气泡文案本身就是「这条路径
     路由到了哪一层」的证据（既验层级，又能逐条归因）。
-
-    中性化的只有两条不能确定性运行的边界：``_probe_online``（socket 探活 +
-    进程枚举）与 ``_online=False``（收敛器不消费事件；状态收敛另有专测
-    tests/test_dsh_state.py），它们与文案路由无关。
     """
 
-    def _make_mgr(self, tmp_path):
-        app = QApplication.instance() or QApplication([])
+    @staticmethod
+    def _phrases() -> dict:
         keys = phrase_keys()
-        bubbles: list[str] = []
-        alerts: list[str] = []
-
-        class DummyWin:
-            _bubble_busy_until = 0.0
-            _sticky_bubble_active = False
-            _alert_current = None
-            _alert_queue: list = []
-
-            def isVisible(self):
-                return True
-
-            def show_bubble(self, text, duration_ms=3000, sticky=False, buttons=None):
-                bubbles.append(str(text))
-
-            def show_alert(self, text, **kwargs):
-                alerts.append(str(text))
-
-            def resolve_alert(self, alert_id):
-                pass
-
-            def hide_bubble(self):
-                pass
-
-        win = DummyWin()
-        cfg = Config(base=tmp_path)
-        cfg.data["dialogue_mode"] = "custom"
-        cfg.data["dialogue_phrases"] = {
+        return {
             "global": {key: [f"GLOBAL-X:{key}"] for key in keys},
             "agents": {
                 "dsh": {key: [f"DSH-X:{key}"] for key in keys},
                 "opencode": {key: [f"OPENCODE-X:{key}"] for key in keys},
             },
         }
-        cfg.save()
-        mgr = AgentLinkManager(win, cfg)
-        bridge = tmp_path / "dsh.jsonl"
-        bridge.touch()
-        mon = mgr.monitors["dsh"]
-        mon._tailer = ByteOffsetTailer(bridge)
-        mon._probe_online = lambda: None
-        mon._online = False
-        mon._poll()  # 尾读初始化（backfill：不重放历史）
-        return mgr, bubbles, alerts, bridge, mon
-
-    @staticmethod
-    def _feed(bridge, mon, *records) -> None:
-        with open(bridge, "a", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record) + "\n")
-        mon._poll()
 
     def test_review_question_model_access_and_failure_paths_use_agent_phrases(self, tmp_path):
         """审批 / 问题 / 模型访问失败 / API 错误 / 硬失败五条桥接路径走专属文案。"""
-        mgr, _bubbles, alerts, bridge, mon = self._make_mgr(tmp_path)
+        harness = _BridgeHarness(tmp_path, phrases=self._phrases())
         try:
-            self._feed(
-                bridge, mon,
+            harness.feed(
                 {"event": "approval/request", "ts": 1, "toolName": "bash",
                  "rpcId": "r-approval", "sessionId": "s-1"},
                 # 审批的另两个分支：词表外的工具名（label 回退原文）与无工具名
@@ -4902,8 +4919,9 @@ class TestAgentScopedPhraseRouting:
                 {"event": "execution/failed", "ts": 11},
             )
         finally:
-            mgr.shutdown()
+            harness.close()
 
+        alerts = harness.win.alerts
         for key in ("approval.tool", "approval.generic", "question.one",
                     "question.many", "question.empty",
                     "model_access.one", "llm_error.api",
@@ -4915,12 +4933,13 @@ class TestAgentScopedPhraseRouting:
 
     def test_start_path_still_uses_agent_phrases(self, tmp_path):
         """非回归基线：已显式路由的 start 路径继续出专属文案。"""
-        mgr, bubbles, _alerts, bridge, mon = self._make_mgr(tmp_path)
+        harness = _BridgeHarness(tmp_path, phrases=self._phrases())
         try:
-            self._feed(bridge, mon, {"event": "agent/status", "state": "working", "ts": 1})
-            assert any(text.startswith("DSH-X:start") for text in bubbles), bubbles
+            harness.feed({"event": "agent/status", "state": "working", "ts": 1})
         finally:
-            mgr.shutdown()
+            harness.close()
+        assert any(text.startswith("DSH-X:start") for text in harness.win.bubbles), \
+            harness.win.bubbles
 
     def test_agent_missing_warning_uses_agent_phrases(self, tmp_path, monkeypatch):
         """「没检测到本机安装」提醒同走该 Agent 的专属文案。
@@ -4932,22 +4951,71 @@ class TestAgentScopedPhraseRouting:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-        mgr, bubbles, _alerts, _bridge, _mon = self._make_mgr(tmp_path)
+        harness = _BridgeHarness(tmp_path, phrases=self._phrases())
         try:
-            mgr._warn_if_agent_absent("opencode")
+            harness.mgr._warn_if_agent_absent("opencode")
         finally:
-            mgr.shutdown()
-        assert any(text.startswith("OPENCODE-X:agent.missing") for text in bubbles), bubbles
+            harness.close()
+        assert any(text.startswith("OPENCODE-X:agent.missing")
+                   for text in harness.win.bubbles), harness.win.bubbles
 
     def test_public_events_stay_on_the_global_layer(self, tmp_path):
         """非回归：公共事件（桥接安装等）不随 Agent 归属，保持空路由读 global。"""
-        mgr, bubbles, _alerts, _bridge, _mon = self._make_mgr(tmp_path)
+        harness = _BridgeHarness(tmp_path, phrases=self._phrases())
         try:
             # 真实公共事件路径：安装失败提醒（成功分支会真起监视器，不在此触发）
-            mgr._on_install_finished("dsh", False, "boom", None)
+            harness.mgr._on_install_finished("dsh", False, "boom", None)
             for key in sorted(PUBLIC_DIALOGUE_EVENTS):
-                assert mgr._dialogue(key, "fb") == f"GLOBAL-X:{key}", \
+                assert harness.mgr._dialogue(key, "fb") == f"GLOBAL-X:{key}", \
                     f"公共事件 {key} 被 Agent 路由污染"
         finally:
-            mgr.shutdown()
-        assert any(text.startswith("GLOBAL-X:bridge.install.failed") for text in bubbles), bubbles
+            harness.close()
+        assert any(text.startswith("GLOBAL-X:bridge.install.failed")
+                   for text in harness.win.bubbles), harness.win.bubbles
+
+
+class TestBridgeResolutionFrames:
+    """收尾帧的两条路分工：raw 旁路按事件名、语义层按身份——都不许失效、不许重复收尾。
+
+    旁路（``BaseAgentMonitor._poll`` 的直通名单）拿的是**原始**记录，身份字段不过
+    预算修剪；语义层（``normalize_event`` → ``_on_normalized_event``）拿的是
+    bounded 后的 ``AgentEvent``，顶层 callId 被搬进信封字段。两条路并存：
+
+    - ``approval/decided`` / ``approval/resolved`` / ``question/resolved`` 由旁路
+      按身份（或旧路径无身份兜底）收尾；
+    - ``interaction/resolved`` 没有旁路，只有语义层能收——它的 callId 只写在顶层，
+      身份回退失效就等于这条收尾帧永远配不上（气泡永久挂着）。
+    """
+
+    def test_interaction_resolved_call_id_frame_closes_pending_approval(self, tmp_path):
+        """桥接真实形状的 interaction/resolved（身份只在顶层）必须关掉对应审批。"""
+        harness = _BridgeHarness(tmp_path)
+        try:
+            harness.feed({"event": "approval/request", "ts": 1, "toolName": "bash",
+                          "rpcId": "rpc-a", "callId": "call-a", "sessionId": "s-1"})
+            assert harness.mgr.pending_interactions_for("dsh"), "前置：审批必须已登记"
+
+            harness.feed({"event": "interaction/resolved", "ts": 2, "source": "dsh",
+                          "kind": "approval", "callId": "call-a", "sessionId": "s-1",
+                          "outcome": "approved"})
+        finally:
+            harness.close()
+
+        assert harness.mgr.pending_interactions_for("dsh") == {}, \
+            "顶层 callId 未回退 → 语义层配不上身份，审批气泡永久挂着"
+
+    def test_raw_bypass_still_closes_identityless_decided(self, tmp_path):
+        """旁路收尾不变：无身份的旧路径 approval/decided 仍关闭纯提示审批。"""
+        harness = _BridgeHarness(tmp_path)
+        try:
+            # 无 rpcId 的纯提示审批（旁路只能靠「无 id 兜底」关闭）
+            harness.feed({"event": "approval/request", "ts": 1, "toolName": "bash",
+                          "approvalId": "ap-hint", "sessionId": "s-1"})
+            assert harness.mgr.pending_interactions_for("dsh")
+            harness.feed({"event": "approval/decided", "ts": 2, "sessionId": "s-1"})
+        finally:
+            harness.close()
+
+        assert harness.mgr.pending_interactions_for("dsh") == {}, \
+            "approval/decided 的旁路兜底收尾被破坏"
+        assert harness.win.resolved, "关闭必须经 resolve_alert 精确关闭那一条气泡"
