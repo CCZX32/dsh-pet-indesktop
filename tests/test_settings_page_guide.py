@@ -753,7 +753,9 @@ def test_advanced_group_shows_its_description_while_collapsed(tmp_path, monkeypa
 
 
 # --------------------------------------------------------- 行标题重写（2026-10-08）
-#: 14 行改写后的定稿标题（行键一个都没动，只改措辞）。
+#: 13 行改写后的定稿标题（行键一个都没动，只改措辞）。
+#: 2026-10-08：「菜单版本（新版 / 旧版）」随旧版菜单退役整行删除（不是改名），
+#: 故从本表移除——它的旧词别名也一并删除，见 OLD_WORDS 的注释。
 REWRITTEN_ROW_TITLES = {
     "proactive_dry_run": "试运行（只记日志、不花钱）",
     "proactive_dwell": "在同一窗口停多久才看（秒）",
@@ -761,7 +763,6 @@ REWRITTEN_ROW_TITLES = {
     "proactive_min_interval": "两次识屏最短间隔（秒）",
     "proactive_free": "识屏用单独的看图模型",
     "proactive_memory_clear": "清空陪伴记忆",
-    "menu_template": "菜单版本（新版 / 旧版）",
     "collision_mass_scale": "体重倍率",
     "collision_impulse_cap": "最大撞击力度",
     "collision_restitution": "撞后弹力",
@@ -777,6 +778,8 @@ _WINDOWS_ONLY_ROW_KEYS = frozenset(
     key for key in REWRITTEN_ROW_TITLES if key.startswith("proactive_"))
 
 #: 改标题前用户会照着找的旧说法 → 该落在哪一行（旧词进 ``ROW_ALIASES``）。
+#: 「菜单模式 → menu_template」不在本表：那一行已被删除，旧词没有去向，
+#: 别名同时从 settings_search.ROW_ALIASES 移除（搜「菜单模式」0 候选是正确行为）。
 OLD_WORDS = {
     "dry-run": "proactive_dry_run",
     "验证模式": "proactive_dry_run",
@@ -784,7 +787,6 @@ OLD_WORDS = {
     "冷却": "proactive_cooldown",
     "最小请求": "proactive_min_interval",
     "视觉配置": "proactive_free",
-    "菜单模式": "menu_template",
     "质量倍率": "collision_mass_scale",
     "弹性": "collision_restitution",
     "信息槽": "dynamic_island_info",
@@ -794,7 +796,7 @@ OLD_WORDS = {
 
 
 def test_rewritten_row_titles_match_the_agreed_wording(tmp_path, monkeypatch):
-    """14 行标题按定稿措辞呈现（只改措辞，行键一个不动）。"""
+    """13 行标题按定稿措辞呈现（只改措辞，行键一个不动）。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         for key, title in REWRITTEN_ROW_TITLES.items():

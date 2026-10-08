@@ -875,9 +875,10 @@ def _dialog_parent(pet):
 def add_harness(menu: QMenu, pet, *, icons: bool = True):
     """DeepSeek Harness 子菜单：启动 / 重启 / 停止。
 
-    为什么用子菜单而不是三个平级项：菜单模板（pet/menu_templates/*.json）与用户
-    自己编排过的布局里只有 ``harness`` 这一个 id，新增 id 对老布局不生效；子菜单
-    挂在既有 id 上，老用户的菜单立刻拿到完整生命周期入口。
+    为什么用子菜单而不是三个平级项：菜单默认布局（pet/menu_templates/
+    modern-default-v1.json）与用户自己编排过的布局里只有 ``harness`` 这一个 id，
+    新增 id 对老布局不生效；子菜单挂在既有 id 上，老用户的菜单立刻拿到完整生命周期
+    入口。
 
     重启/停止是破坏性动作（可能结束你自己在终端里跑着的 dsh），带确认框；启动
     保持原语义（复用本机实例并打开页面）。

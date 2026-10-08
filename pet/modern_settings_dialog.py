@@ -1830,7 +1830,7 @@ class ModernSettingsDialog(QDialog):
             "菜单编排",
             page_content(
                 [
-                    ("内容与布局", claim("menu_template", "context_menu_layout") + settings_network.build_menu_rows(self)),
+                    ("内容与布局", claim("context_menu_layout") + settings_network.build_menu_rows(self)),
                 ]
             ),
         )

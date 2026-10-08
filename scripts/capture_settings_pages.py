@@ -205,16 +205,6 @@ def capture(args: argparse.Namespace) -> None:
                 raise RuntimeError(f"failed to save screenshot: {target}")
             dialog.menu_layout_editor.icon_display_menu.close()
             app.processEvents()
-            dialog.menu_template_select.showPopup()
-            app.processEvents()
-            popup = dialog.menu_template_select._popup
-            if popup is None:
-                raise RuntimeError("menu mode popup was not created")
-            target = destination / "04-菜单-菜单模式下拉.png"
-            if not popup.grab().save(str(target)):
-                raise RuntimeError(f"failed to save screenshot: {target}")
-            popup.close()
-            app.processEvents()
         if args.interaction_details:
             interaction_index = next(
                 index
