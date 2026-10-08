@@ -1515,6 +1515,102 @@ def test_chime_outlet_requeues_with_the_original_tuple(tmp_path, monkeypatch):
     assert [Path(s).name for s in service._player.sources] == [Path(worker.out_path).name]
 
 
+def test_speak_outlet_requeue_does_not_overwrite_a_newer_request(tmp_path, monkeypatch, caplog):
+    """回队不盖新：槽里已有更新的待播语音时，这次旧完成结果直接丢弃。
+
+    断链：``speak("older-A", respect_quiet=False)`` 起 A 合成 → A 在飞时
+    ``speak("newer-B")`` 入队（深度 1，按契约留最新一条）→ C 经缓存命中起播 →
+    A 完成发现被接管，回队时用 A 覆盖 B 及其旗 → C 结束后出队的是**过期的 A**，
+    B 永久丢失。入口方向是新覆盖旧（``speak`` 的"只留最新一条"），回队方向不能
+    倒灌成旧覆盖新。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    engaged = _self_starting_engagement(service, monkeypatch)
+    older = "今天是中秋节。"
+    newer = "今天也要认真工作呀。"
+    chime_text = "现在是上午九点整。"
+    cached_newer = _cache_mp3(service, newer)
+    cached_chime = _cache_mp3(service, chime_text)
+
+    assert service.speak(older, log_tag="点击自言自语", respect_quiet=False) is True
+    assert len(_WorkerSpy.instances) == 1, "A 当时通道空闲 → 直发合成"
+    worker_a = _WorkerSpy.instances[0]
+
+    assert service.speak(newer, log_tag="节日提醒") is True      # 通道忙 → B 入队
+    assert service._pending_speech == newer, "入口方向：队列里是后来的 B"
+    assert service._pending_respect_quiet is True
+
+    service._fire(chime_text, datetime.now(), chime_text)       # C 经缓存例外起播
+    assert engaged["engaged"] is True, "C 的 play() 接管了通道"
+    assert [Path(s).name for s in service._player.sources] == [cached_chime.name]
+
+    with caplog.at_level("DEBUG"):
+        worker_a.finish()                                       # A 完成：发现通道被接管
+    _qapp().processEvents()
+
+    assert service._pending_speech == newer, "槽里必须仍是更新的 B——A 不得覆盖它"
+    assert service._pending_respect_quiet is True, "B 的旗原样保留"
+    assert service._player.plays == 1, "过期的 A 不出声"
+    assert any("已有更新" in r.getMessage() for r in caplog.records), \
+        "丢弃旧结果必须留下可发现的日志"
+
+    engaged["engaged"] = False                                  # C 播完 → 出队的是 B
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._pending_speech is None
+    assert [Path(s).name for s in service._player.sources][-1] == cached_newer.name, \
+        "出队的是 B（不是过期的 A）"
+    assert service._player.plays == 2
+
+
+def test_chime_outlet_requeue_does_not_overwrite_a_newer_queued_fire(tmp_path, monkeypatch, caplog):
+    """回队不盖新（role=play 同型）：_queued_fire 已有更新的报时项时丢弃旧完成结果。"""
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    engaged = _self_starting_engagement(service, monkeypatch)
+    older = "今天是中秋节。"
+    chime_text = "现在是上午九点整。"
+    cached_chime = _cache_mp3(service, chime_text)
+
+    service._fire(older, datetime(2026, 9, 15, 10, 0, 0), older)   # 旧报时 A 在飞
+    assert len(_WorkerSpy.instances) == 1
+    worker_a = _WorkerSpy.instances[0]
+    assert service._synthesis_role == "play"
+
+    service._on_tick(datetime(2026, 9, 15, 11, 0, 0))              # 新报时 B 被 busy 门拦下
+    queued = service._queued_fire
+    assert queued is not None, "新报时 B 进入排队槽"
+    assert queued[0] != older, "槽里是更晚的那一条报时"
+
+    service._fire(chime_text, datetime.now(), chime_text)          # C 经缓存例外起播
+    assert engaged["engaged"] is True
+    assert [Path(s).name for s in service._player.sources] == [cached_chime.name]
+
+    with caplog.at_level("DEBUG"):
+        worker_a.finish()                                          # A 完成：通道被接管
+    _qapp().processEvents()
+
+    assert service._queued_fire == queued, "槽里必须仍是 B 的原 tuple——A 不得覆盖它"
+    assert service._player.plays == 1, "过期的 A 不出声"
+    assert any("已有更新" in r.getMessage() for r in caplog.records), \
+        "丢弃旧结果必须留下可发现的日志"
+
+    engaged["engaged"] = False                                     # C 播完 → 出队 B
+    service._terminal_statuses = ("END",)
+    service._on_media_status("END")
+
+    assert service._queued_fire is None, "B 出队"
+    assert len(_WorkerSpy.instances) == 2, "B 走即时合成（缓存未命中）"
+    _WorkerSpy.instances[1].finish()
+    _qapp().processEvents()
+
+    assert service._player.plays == 2, "B 补播出声"
+
+
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):
     """报时让位：本分钟不发声，且槽位被消费，同分钟后续 tick 不再询问。"""
     service, app, cfg = _service(tmp_path, monkeypatch)

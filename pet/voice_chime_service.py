@@ -41,6 +41,10 @@
   所以 ``_handle_synthesized`` 的两个播放出口在**动手播放那一刻**再判一次
   ``_player_engaged()``：被接管就不 ``setSource``，改为回队（报时回 ``_queued_fire``、
   外部播报回 ``_pending_speech``），等下一拍按上面的不变量出队。
+- **回队不盖新**：两个回队点都是"槽非空即弃旧"——槽里已有更新的请求时，这次**较旧**
+  的完成结果直接丢弃（debug 日志），槽内那条及其旗原样保留。排队契约的入口方向是
+  "后来的覆盖前面的"（只留最新一条），回队方向不能倒灌成"旧的盖新的"，否则更新的
+  请求会被一条过期语音永久顶掉。
 """
 
 from __future__ import annotations
@@ -432,7 +436,9 @@ class VoiceChimeService:
         供节日提醒等功能复用：合成、缓存、播放与报时**共用同一套**，因此结构上
         不可能与报时叠音。通道不空闲（合成中、正在出声，或刚起播而媒体仍在加载）
         时不打断，进深度 1 的待播队列，当前一段播完后自动播；队列已有待播时后来的
-        覆盖前面的（只留最新一条，避免堆积出已过期的内容）。
+        覆盖前面的（只留最新一条，避免堆积出已过期的内容）。这条**新覆盖旧**只对
+        入口方向成立：较早那条合成完成时若发现通道被接管，回队时若槽里已有更新
+        请求则直接丢弃它自己（见 ``_handle_synthesized`` 的回队点），不会旧盖新。
 
         排队同样受免打扰契约约束，且契约**随队携带**：尊重免打扰的那条（默认）
         在入队时就过闸——免打扰期间**丢弃、不入队**（与 ``_fire`` 同语义，不留到
@@ -816,6 +822,13 @@ class VoiceChimeService:
         if role == "speak":
             # 外部播报（节日提醒）：只出声，气泡由调用方自己展示。
             if self._player_engaged():
+                # 回队不盖新：槽里已有更新的请求（本次合成的结果比它旧）就丢弃本次，
+                # 槽内那条及其旗原样不动——排队契约的入口方向是"新覆盖旧"，回队方向
+                # 倒灌成"旧盖新"会让更新的请求永久丢失。
+                if self._pending_speech is not None:
+                    logger.debug("播放时刻通道已被占用，槽里已有更新的待播语音，"
+                                 "丢弃这次旧结果：%s", text[:20])
+                    return
                 logger.debug("播放时刻通道已被占用，外部播报回队待播：%s", text[:20])
                 self._pending_speech = text
                 self._pending_respect_quiet = respect_quiet
@@ -823,6 +836,12 @@ class VoiceChimeService:
             self._play_only(path)
             return
         if self._player_engaged():
+            # 回队不盖新（同 speak 出口）：_queued_fire 里已有更新的报时排队项时，
+            # 丢弃这次较旧的完成结果，原 tuple 原样保留。
+            if self._queued_fire is not None:
+                logger.debug("播放时刻通道已被占用，槽里已有更新的报时排队项，"
+                             "丢弃这次旧结果：%s", text[:20])
+                return
             logger.debug("播放时刻通道已被占用，报时回队待播：%s", text[:20])
             # 原 tuple 各字段原样带回（now 见 _synthesis_now 的说明）。
             self._queued_fire = (text, self._synthesis_now, self._pending_bubble,
