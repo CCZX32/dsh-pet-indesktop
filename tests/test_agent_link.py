@@ -22,6 +22,8 @@ import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import pet.agent_link as agent_link
+from pet import click_sound, harness_launcher
+from pet.dsh_state import DshState
 from pet.agent_link import (
     AgentLinkManager,
     AgentEvent,
@@ -3902,6 +3904,254 @@ class TestNotifyDshState:
             mgr.shutdown()
         assert bubbles == []
         assert win.switched == []
+
+
+# ============================================================================
+# 14. DSH 回合成功结束（turn/end → success）必须触发完成提醒（issue #234）
+# ============================================================================
+class TestDshTurnEndSuccessCompletion:
+    """DSH 跑完一个回合（``turn/end`` → 收敛状态 ``success``）出完成气泡 + done 音效。
+
+    修复前的三道断链（本类逐条钉住）：
+    1. ``dsh_state`` 收敛器对 ``turn/end`` 正确产出 ``success``，但
+       ``_on_dsh_converged_state`` 没有 success 分支——状态进不了呈现管线；
+    2. ``_on_agent_state`` 的完成边沿只认 ``busy→attention/error`` 与
+       ``busy→idle/sleeping``，缺 ``busy→success``：``_schedule_done_check``
+       从不被调度，800ms 确认/冷却/done 音效全部落空；
+    3. 灵动岛侧不受影响——``dsh_state_changed`` 在分支之前无条件 emit，
+       该顺序是既有契约（本类用例一并钉住）。
+
+    ``success`` 只走 ``_last_raw`` 这条**原始状态流**（所有消费方按
+    ``in _BUSY_STATES`` 判定，无等值白名单）；**不得**加进 ``VALID_STATES``
+    ——那是所有监视器共用的归一入口，加值会改 Claude/Cursor 的判决口径。
+    """
+
+    _SOUND_PATHS = {
+        "builtin:agent-start": "start.wav",
+        "builtin:agent-done": "done.wav",
+        "builtin:agent-error": "error.wav",
+    }
+
+    @staticmethod
+    def _pump(app, seconds: float) -> None:
+        """跑满一段事件循环（负向断言专用：给被取消/不该存在的定时器犯错的机会）。"""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+    @classmethod
+    def _wait_until(cls, app, predicate, timeout: float = 5.0) -> bool:
+        """宽预算轮询等待（禁止固定 sleep 猜时序：800ms 确认窗在慢 runner 上会漂）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        app.processEvents()
+        return bool(predicate())
+
+    def _make_mgr(self, tmp_path, monkeypatch):
+        """真 manager（含真 DshMonitor，worker 不启动，手动驱动 _poll）+ 假窗口。
+
+        事件目录按 ``Config(base=tmp_path/"cfg")`` 的不变量落在
+        ``tmp_path/dsh-pet-bridge``（与减法测试的 live manager 同构）。
+        """
+        app = QApplication.instance() or QApplication([])
+        bubbles, sounds = [], []
+        files = {}
+        for value, name in self._SOUND_PATHS.items():
+            path = tmp_path / name
+            path.write_bytes(b"RIFF")
+            files[value] = path
+        # 音效钉在播放漏斗层（winmm 直放 / Qt 后端都逃不掉）
+        monkeypatch.setattr(agent_link, "resolve_builtin_sound", lambda p: files.get(str(p)))
+        for fn in ("play_sound", "play_with_winmm", "play_with_qt"):
+            monkeypatch.setattr(click_sound._pool, fn,
+                                lambda path, volume=1.0: sounds.append(Path(path).name) or True)
+
+        class DummyWin:
+            cats = {"acts": ["写代码", "吃Token"]}
+            idles = ["待机呼吸"]
+            _bubble_busy_until = 0.0
+            _alert_current = None
+            _alert_queue: list = []
+            _sticky_bubble_active = False
+
+            def isVisible(self):
+                return True
+
+            def _switch(self, name):
+                pass
+
+            def request_link_anim(self, name):
+                pass
+
+            def request_link_idle(self):
+                pass
+
+            def show_bubble(self, text, duration_ms=3000, **_kw):
+                bubbles.append(str(text))
+
+            def _pick(self, lst):
+                return lst[0]
+
+        cfg = Config(base=tmp_path / "cfg")
+        cfg.data["agent_link"].update({
+            "sound_enabled": True,
+            "sound_cooldown_seconds": 0.0,
+            "sound_start_path": "builtin:agent-start",
+            "sound_done_path": "builtin:agent-done",
+            "sound_error_path": "builtin:agent-error",
+        })
+        cfg.save()
+        clock = [1000.0]
+        mgr = AgentLinkManager(DummyWin(), cfg, min_interval=0.0, clock=lambda: clock[0])
+        mon = mgr.monitors["dsh"]
+        # 白盒：等效 agent_link.dsh 已启用——收敛管线的迟到信号隔离闸只放行
+        # 「监视器在跑」的信号，手动驱动 _poll 的测试必须置真。
+        mon._running = True
+        mon.events_dir.mkdir(parents=True, exist_ok=True)
+        mon._tailer._initial_backfill_done = True
+        return mgr, bubbles, sounds, clock, app
+
+    @staticmethod
+    def _write(bridge_dir, *records):
+        with (bridge_dir / "dsh.jsonl").open("a", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def test_working_to_success_plays_done_bubble_and_sound(self, tmp_path, monkeypatch):
+        """① working→success：调度 800ms 完成确认，到期后出完成气泡 + done 音效。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "working")
+            bubbles.clear()
+            sounds.clear()
+            mgr._on_agent_state("dsh", "success")
+            assert "dsh" in mgr._done_pending, "busy→success 必须调度完成确认"
+        except BaseException:
+            mgr.shutdown()
+            raise
+        try:
+            assert self._wait_until(app, lambda: bool(bubbles)), \
+                "800ms 确认到期后必须弹完成气泡"
+        finally:
+            mgr.shutdown()
+        assert any("已完成本轮任务" in b for b in bubbles), bubbles
+        assert sounds.count("done.wav") == 1, sounds
+
+    def test_returning_to_busy_inside_confirm_window_cancels_done(self, tmp_path, monkeypatch):
+        """② 确认窗口内回忙：取消确认，且不得留下迟到的气泡/音效。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "working")
+            mgr._on_agent_state("dsh", "success")
+            assert "dsh" in mgr._done_pending
+            mgr._on_agent_state("dsh", "working")   # 800ms 内回忙（工具重试/继续干活）
+            assert "dsh" not in mgr._done_pending, "回忙必须取消完成确认"
+            bubbles.clear()
+            sounds.clear()
+            self._pump(app, 1.2)                    # 超过确认窗：被取消的定时器不得再弹
+            mgr._fire_done("dsh")                   # 兜底：即便定时器仍到点也不得播
+            assert bubbles == [], bubbles
+            assert sounds == [], sounds
+        finally:
+            mgr.shutdown()
+
+    def test_success_then_idle_does_not_repeat_done(self, tmp_path, monkeypatch):
+        """③ success→idle 不重复播：完成提醒只在 busy→success 边沿调度一次。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "working")
+            mgr._on_agent_state("dsh", "success")
+            assert self._wait_until(app, lambda: any("已完成本轮任务" in b for b in bubbles)), bubbles
+            n_bubbles = len(bubbles)
+            # 收敛器在 turn/end 之后可能补一条 idle 基线：不得二次调度完成确认
+            mgr._on_agent_state("dsh", "idle")
+            assert "dsh" not in mgr._done_pending, "success→idle 不得再调度完成确认"
+            self._pump(app, 0.3)                    # 确认窗余量：不得重复弹/重复响
+            assert len(bubbles) == n_bubbles, bubbles
+            assert sounds.count("done.wav") == 1, sounds
+        finally:
+            mgr.shutdown()
+
+    def test_error_cycle_plays_no_done_sound(self, tmp_path, monkeypatch):
+        """④ error 周期（llm/retry 等）出 error 音效与停止口径气泡，绝不播 done。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "working")
+            bubbles.clear()
+            sounds.clear()
+            mgr._on_agent_state("dsh", "error")
+            assert "dsh" in mgr._done_pending, "busy→error 仍走完成确认（既有契约）"
+            mgr._fire_done("dsh")
+            assert "error.wav" in sounds, sounds
+            assert "done.wav" not in sounds, "error 周期不得播 done 音效"
+            assert bubbles and all("已完成本轮任务" not in b for b in bubbles), bubbles
+        finally:
+            mgr.shutdown()
+
+    def test_converged_success_enters_presentation_pipeline(self, tmp_path, monkeypatch):
+        """⑤ 消融守门：收敛器产出 success 时必须被送进呈现管线。
+
+        删掉 ``_on_dsh_converged_state`` 的 success 分支（修复前原状）本用例必须红
+        ——它就是这个断链的回归闸；同时钉住岛侧 emit 仍在分支之前无条件执行。
+        """
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        converged = []
+        mgr.dsh_state_changed.connect(lambda f, t: converged.append((f, t)))
+        try:
+            mgr._on_agent_state("dsh", "working")   # 真实回合里由 turn/start 落下 busy
+            mgr._on_dsh_converged_state("working", "success", "turn/end")
+            assert converged == [("working", "success")], "岛侧转发（绿点）不得被新分支吃掉"
+            assert mgr._last_raw.get("dsh") == "success", "success 必须到达呈现管线"
+            assert "dsh" in mgr._done_pending, "success 必须调度完成确认"
+        finally:
+            mgr.shutdown()
+
+    def test_success_is_not_a_global_valid_state(self):
+        """``success`` 不得进入 ``VALID_STATES``：那是所有监视器共用的归一入口。
+
+        它只在 DSH 收敛器→呈现管线的这条原始状态流里存在。把 success 加进
+        归一白名单会扩大 Claude/Cursor 的判决口径（transcript 里出现 success
+        字样的行会被判成合法状态），是这条修复最容易走错的「顺手改法」。
+        """
+        assert "success" not in agent_link.VALID_STATES
+        assert normalize_event_state("", "success") == ""
+
+    def test_real_bridge_turn_records_reach_done_bubble(self, tmp_path, monkeypatch):
+        """⑥ 端到端：真实记录形状 → 真收敛器 → 真出口。
+
+        ``turn/start → tool/call → turn/end`` 三条桥接记录经真 ``DshMonitor._poll``
+        （含真 ``DshStateConverger``）流到 ``AgentLinkManager``，最终出完成气泡。
+        本机无 DSH+桥接真实环境，验到「真实记录形状 → 真实收敛器 → 真实出口」一层。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        bridge_dir = mon.events_dir
+        converged = []
+        mon.dsh_state_changed.connect(lambda f, t, src: converged.append(t))
+        try:
+            mon._probe_online()                     # 在线基线 → idle
+            self._write(bridge_dir,
+                        {"event": "turn/start", "sessionId": "s-1"},
+                        {"event": "tool/call", "sessionId": "s-1", "tool": "bash"})
+            mon._poll()
+            assert converged == ["idle", "thinking", "working"], converged
+            assert mgr._last_raw.get("dsh") == "thinking", mgr._last_raw
+            bubbles.clear()
+            sounds.clear()
+            self._write(bridge_dir, {"event": "turn/end", "sessionId": "s-1"})
+            mon._poll()
+            assert mon._converger.current_state is DshState.SUCCESS
+            assert "dsh" in mgr._done_pending, "turn/end 的 success 必须走到完成确认"
+            assert self._wait_until(app, lambda: any("已完成本轮任务" in b for b in bubbles)), bubbles
+        finally:
+            mgr.shutdown()
+        assert sounds.count("done.wav") == 1, sounds
 
 
 # ============================================================================

@@ -2976,6 +2976,9 @@ class AgentLinkManager(QObject):
         - thinking：legacy AgentStatus 基线只有 working/idle，thinking 由收敛器
           补进联动管线（思考气泡/动画——对话开始的稳定触发点之一，与真人消息
           双保险，呈现管线自带同态去重）；
+        - success：回合成功结束（桥接 turn/end）同样对 legacy 基线不可见，由本
+          分支注入管线；完成气泡/done 音效由 ``_on_agent_state`` 的
+          busy→success 边沿调度（800ms 确认 + 冷却），本方法不直接弹；
         - waiting_approval：审批把 Agent 卡在等用户输入——计入「需要看一眼」
           （完成后不误报成功），并弹通用 attention 纯提示气泡（busy 中也必须
           提示，不走 ``_on_agent_state`` 的「busy 后不弹 attention」分支）。
@@ -2995,6 +2998,12 @@ class AgentLinkManager(QObject):
             return
         if to_state == "thinking":
             self.notify_dsh_state("thinking")
+            return
+        if to_state == "success":
+            # 回合成功结束（桥接 turn/end → 收敛 success）：注入呈现管线，
+            # 由 busy→success 边沿的完成确认（800ms + 冷却）出气泡/音效。
+            # 此前没有这条分支，success 进不了管线——完成提醒永不触发（issue #234）。
+            self.notify_dsh_state("success")
             return
         if to_state == "waiting_approval":
             self._saw_alert.add("dsh")
@@ -3072,6 +3081,12 @@ class AgentLinkManager(QObject):
         elif state in ("idle", "sleeping") and prev_raw in self._BUSY_STATES:
             # working/thinking → idle：疑似任务完成，800ms 稳定确认
             # （过滤 working→idle→working 抖动；确认期间回忙则取消）
+            self._schedule_done_check(agent_key)
+        elif state == "success" and prev_raw in self._BUSY_STATES:
+            # DSH 回合成功结束（收敛器 success，见 _on_dsh_converged_state）：
+            # 与 busy→idle 同一条完成确认（800ms + 冷却 + _fire_done），
+            # 零新增定时器。success 只存在于这条原始状态流（_last_raw），
+            # 不进 VALID_STATES——那是所有监视器共用的归一入口。
             self._schedule_done_check(agent_key)
 
         # 去抖：同一 Agent 连续相同状态只生效第一次
