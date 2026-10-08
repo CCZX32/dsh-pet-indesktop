@@ -2,7 +2,7 @@
 
 > **基线**：`6021fc4`（分支 `release/2026-10-08-candidate`）
 > **分支**：`release/2026-10-08-candidate`　**日期**：2026-10-08
-> **范围**：26 个文件（实现 11、测试 15；净 `+1006 / −1144`，含删除 4 个文件）
+> **范围**：45 个文件（实现 20、脚本 1、测试 16、文档 8；净 `+1048 / −1042`，含删除 4 个文件、新增 1 个文档）
 > **关联**：[`SETTINGS-REDESIGN-Q6-Q7-DOMAIN-LAYOUT-DECISION.md`](SETTINGS-REDESIGN-Q6-Q7-DOMAIN-LAYOUT-DECISION.md)（菜单迁移决定）、
 > [`PR-REPORT-OVERLAY-MENU-PARITY-2026-09-24.md`](PR-REPORT-OVERLAY-MENU-PARITY-2026-09-24.md)（模板分发与 facade parity 的上游报告）、
 > [`CONTEXT-MENU-RESEARCH-AND-REFACTOR-2026-08-25.md`](CONTEXT-MENU-RESEARCH-AND-REFACTOR-2026-08-25.md)（双模板的来源）
@@ -66,6 +66,9 @@
 | `pet/window.py` | +1 / −9 | 删 `set_context_menu_template`（模板切换第三个入口）与 `context_menu` 的 `normalize_template_id` 导入；`__init__` 删 `on_open_legacy_settings`、`on_open_modern_chat` 两个槽位 |
 | `pet/app.py` | +0 / −4 | `_wire_window` 删"旧版设置槽位恒 None"的赋值与解释注释（旧版建造器是它唯一读方） |
 | `pet/weather_menu.py` | +3 / −3 | 函数内 import 的解释注释仍指向已删的 `context_menus.legacy`，按现状改正（循环导入的理由不变） |
+| `pet/context_menus/registry.py` | +6 / −6 | 仅注释：停用门"为什么落在建造器里"的理由原写成"legacy 建造器直调"，改按现状表述（理由成立、参照物已删） |
+| `pet/overlay_shell.py` | +1 / −1 | 仅注释：`reopen_context_menu` 的"模板切换立即生效"改为"菜单树重建后立即生效" |
+| `scripts/capture_settings_pages.py` | +0 / −12 | 截图脚本的「菜单模式下拉」截图块删除（控件已不存在，跑起来必抛 `AttributeError`） |
 
 ### 测试
 
@@ -87,6 +90,19 @@
 | `tests/test_sprite_menu_facade.py` | +9 / −11 | 能力条目用例收成单树 |
 | `tests/test_sprite_menu_target.py` | +3 / −7 | `_make_shell` 去掉 `template` 参数与配置写入 |
 | `tests/test_menu_tree_release.py` | +1 / −2 | 壳装配去掉退役键写入 |
+| `tests/test_settings_page_guide.py` | +2 / −2 | 「定稿措辞」表与「旧词可搜」表去掉菜单版本行（行被删除而非改名，旧词别名同步从 `settings_search` 移除） |
+
+### 文档
+
+| 文件 | 改动意图 |
+|---|---|
+| `README.md` | 三处「一键回到旧版 / 可切换新旧模板」表述失实（现代树本就没有切换项，是 Q6/Q7 有意设计）改为如实描述；目录树注释与「旧版菜单也同步提供」旧句更正 |
+| `docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md` | 本报告（新增） |
+| `docs/INDEX.md` | 登记本报告；给菜单调研文档与 overlay parity 报告行加后继变更指针 |
+| `docs/SETTINGS-CHANGE-GATES.md` | 按门禁要求补本条**设置删除**的变更记录（准入复核/键去向/旧入口/搜索别名/恢复路径，准出逐项对应） |
+| `docs/SETTINGS-REDESIGN-Q6-Q7-DOMAIN-LAYOUT-DECISION.md` | 两条 legacy 迁移条目标记为**已执行（2026-10-08）**；补一段说明「搜旧称 0 候选是正确行为」 |
+| `docs/CONTEXT-MENU-RESEARCH-AND-REFACTOR-2026-08-25.md` | 文首加「双模板已是历史」警示（正文保持 2026-08-25 快照不改写） |
+| `docs/DEV-HANDOVER.md` | 目录树注释同步；`test_architecture.py` 行数/用例数按实测校准（213/7 → 577/13，原数字本就滞后） |
 
 ### 未改动（故意）
 
@@ -276,7 +292,7 @@
 | 静态检查 | `python -m ruff check pet/ tests/ scripts/` | **All checks passed!** |
 | 聚焦（菜单族 15 文件） | `pytest -q tests/test_sprite_menu_parity.py tests/test_menu_layout.py tests/test_desktop_pet_features.py tests/test_quiet_mode.py tests/test_weather_menu.py tests/test_memory_trim.py tests/test_effects_integration.py tests/test_requested_regressions.py tests/test_config_schema.py tests/test_harness_lifecycle.py tests/test_chat_subsystem.py tests/test_animation_menu_close_and_group.py tests/test_sprite_menu_facade.py tests/test_sprite_menu_target.py tests/test_architecture.py` | 基线 **672 passed / 2 skipped**；退役后同 15 文件 **674 passed / 2 skipped**（92.9s） |
 | 全量（第一次，含尚未修的措辞表） | `QT_QPA_PLATFORM=offscreen python -m pytest -q tests` | **2 failed, 5506 passed, 11 skipped**（1032s）——两条失败恰是本轮后修的 `test_settings_page_guide.py` 措辞/旧词表（菜单版本行删除后表未同步），修复后该文件 118 passed |
-| 全量（冻结树复跑） | 同上 | **PENDING** |
+| 全量（冻结树复跑，`1f1d66a`） | 同上 | **5510 passed / 11 skipped / 0 failed**（1028.89s，17:08） |
 | 架构红线 | `pytest -q tests/test_architecture.py` | 见全量 |
 | 迁移实测 | `python .scratch/legacy-menu-retirement/migration_check.py` | **通过**（第五节 2） |
 | 超集核对 | `python .scratch/legacy-menu-retirement/compare.py` | **通过**（第五节 1） |
@@ -297,8 +313,13 @@
 | 1 | `339292e` | `refactor(menu): 旧版右键菜单全量退役` |
 | 2 | `e23f6e6` | `refactor(config): 右键菜单模板键退役 + 旧存档静默迁移` |
 | 3 | `aad317d` | `refactor(menu): 清理随旧版菜单退役的死槽` |
+| 4 | `5480cd7` | `chore(menu): 同步随菜单版本行失效的残留引用`（措辞表 / 截图脚本 / 域归属声明 / 注释） |
+| 5 | `02e84dd` | `docs(menu): 旧版菜单退役的用户可见说明与文档同步` |
+| 6 | `8ddb901` | `docs(menu): 修正仍按"两套建造器"写的历史注释（无行为改动）` |
+| 7 | `1f1d66a` | `docs(handover): test_architecture 的行数与用例数按实测校准` |
 
-（本次未 push；第 4 个提交为本文档与文档同步。）
+**本次未 push**（用户明令）。第 7 个提交之后工作区只有本报告的实测数字回填（纯文档）。
+全量套件是在 `1f1d66a` 这棵树上跑的（0 failed）；此后仅本报告与纯注释/文档有改动。
 
 ## 七、已知限制与后续
 
