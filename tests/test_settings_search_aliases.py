@@ -218,6 +218,36 @@ def test_alias_matches_inside_a_sentence_and_up_down_stream_terms(tmp_path, monk
         dialog.close()
 
 
+def test_old_title_information_slot_content_reaches_the_content_selector(tmp_path, monkeypatch):
+    """旧标题「信息槽内容」必须命中**内容选择器**那一行，不能只落在显示开关上。
+
+    回归（终审问题 2）：改名后「信息槽」三个字整页只剩「显示中间信息栏」这一行的旧说法
+    被别名兜住，而它原本的标题「信息槽内容」对应的 ``dynamic_island_info_mode`` 反倒
+    不在别名目标里——老用户搜旧标题拿到的是另一个开关，「旧说法仍搜得到」的承诺没兑现。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        keys = _keys(_matches(dialog, "信息槽内容"))
+        assert "settingRow_dynamic_island_info_mode" in keys, (
+            f"搜旧标题「信息槽内容」必须能到内容选择器那一行，实得 {keys}"
+        )
+
+        # 旧词是查询的**子串**即命中（「信息槽内容怎么改」也算），与别名口径一致。
+        assert "settingRow_dynamic_island_info_mode" in _keys(_matches(dialog, "信息槽内容怎么改"))
+
+        # 回车遍历要真能走到那一行，并且落在「桌面组件」域（不是只出现在候选集里）。
+        row = _search(dialog, "信息槽内容", presses=keys.index("settingRow_dynamic_island_info_mode"))
+        assert row.objectName() == "settingRow_dynamic_island_info_mode"
+        assert dialog.sidebar.currentItem().text() == "桌面组件"
+
+        # 「信息槽」这条别名**有意不收**自定义短文本那一行（它从没叫过「信息槽…」，
+        # 自己那句「自定义短文本」本来就能关键词命中）。
+        assert "settingRow_dynamic_island_custom_text" not in keys
+        assert "settingRow_dynamic_island_custom_text" in _keys(_matches(dialog, "自定义短文本"))
+    finally:
+        dialog.close()
+
+
 def test_alias_reset_defaults_and_excluded_terms_are_documented(tmp_path, monkeypatch):
     """别名表里每条都能命中真实行；「重置」这类没有行落点的词不假装有命中。"""
     from pet.settings_search import ROW_ALIASES
