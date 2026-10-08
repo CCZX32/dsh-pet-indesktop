@@ -178,3 +178,34 @@
 
 - 挂账：设置窗启动闪小窗（用户指示算了）；`test_dynamic_island_revamp` 墙钟速率断言在自定义重排顺序下负载敏感（默认顺序全绿，未动）；macOS 原生菜单行为为静态推断（建议真 mac 手点托盘/子菜单一次）。
 - 回滚：`.bak-r2`（二轮包）/`.bak-r1`（一轮包）/`.bak-20261008`（10-06 旧包）整对换回。
+
+---
+
+## 六、第四轮增量：UX/视觉打磨批 + issue #234 族（2026-10-08 午后，HEAD `47b2ea5`）
+
+### 修改文件说明（`95bca21..47b2ea5`，10 commits）
+
+- **`136990f` fix(agent-link)**：DSH turn/end→success 完成提醒断链（issue #234 口径）。`pet/agent_link.py` +15：`_on_dsh_converged_state` 加 success 分支注入呈现管线；`_on_agent_state` elif 链补 busy→success 边沿（复用既有 800ms/5s 确认链，零新增定时器；VALID_STATES/岛 emit 顺序未动）。测试 +250。
+- **岛视觉三批**（merge `69b299d`）：`pet/dynamic_island.py` +256/-29。胶囊阴影单层→三层（`_CAPSULE_SHADOW_LAYERS`，两侧内收只向下长）；卡片按钮 QSS 胶囊形 rgba 三档（修 pressed 落灰）；卡片节奏常量（10/10/3）；dark/glass 顶部 sheen（top+3 起 42% 高，白 α14/34→0）；glass 渐变 3→4 停点（0.48/0.52 折射线）；读数字重 Medium→DemiBold；竖线渐变收头/状态点珠感/头像光圈/style 进内容缓存 key；accent green #30a46c→#34c77b；**工作态声纳环**（`_sonar_eligible` 唯一判据 + 幂等起停 + 33ms 单表 + 停表 deleteLater + 每 tick 自检 + 缓存外绘制 + 真实时间相位）。测试 +437/-12（新增 13 条像素/生命周期用例）。
+- **设置页三批+修复批**（merge `e2d4b85`/`b3cdc2e`/`47b2ea5`）：主动识屏 15 行大卡拆 4 组、语音页拆 6 组、自动化页重排删倒插；**页内分区跳转条**（≥4 区才显示、点击顶对齐、折叠先展再滚、chip 跟随依赖显隐）+ 50 组人话描述（新模块 `pet/settings_page_guide.py`）；QSS 层级（sectionTitle 15px/600、描述 12px）；14 行标题人话化（行键零改动）+ 旧词 12 条入搜索别名；修复批：跳转收起组一次到位（adjustSize）→ 页尾留白顶对齐（`_PastEndPadding` 按差额算、短页补 0）；测试三平台按构造结果分叉（修 CI ubuntu/macOS 红）；描述勘误 7 条；「信息槽」别名补 `dynamic_island_info_mode`。
+- **`a20a255` fix(agent-link)**：硬失败回合（execution/failed）不再误报 DSH 完成（astra 终审抓出：桥接失败后仍无条件写 turn/end→收敛 success）。`_on_execution_failed` 打 `_saw_error`+`_saw_alert` 双标 + busy→success 边沿据 `_saw_error` 跳过调度。+23/-1，测试 +148（含次生灾害：误触发写冷却窗吃掉下一回合真完成提醒）。
+
+### 性能分析（实测）
+
+- 岛 paintEvent：静止/动画态中位 +0.07~0.10ms/帧（三层阴影 +0.08 为大头，声纳环 ≤0.01），远低于 0.3ms 降级阈值；base/after 交替 3 轮中位数。
+- 设置跳转条：点 chip 端到端 4.4ms 中位（一次性同步布局）；留白重算 23µs 中位，仅 resize/换标签/点 chip 时触发。
+- 全量测试：**5441 passed / 11 skipped**（16m51s）；岛族 552、设置族 384+152+125、联动族 228 各段全绿。
+- 部署版实机：启动 12s 后 173MB；设置窗交互高峰期 221MB（与上轮 +36MB 岛段化成本同量级，无泄漏迹象）；tick p50=6.0ms p99=12.1ms。
+
+### 实机运行记录（第六轮部署，PID 54324）
+
+- 构建冒烟：exe 2.1s 起、--settings 1.1s 起、DLL 链 OK，zip 163.6MB。
+- 灵动岛：实机渲染正常（玻璃质感、底部柔影、五段全出、状态点收在胶囊内）。
+- 设置页（computer use 实测）：常规页组描述+第三刀标记在位（3 组<4 无跳转条，门槛正确）；自动化与联动页 7 chip 跳转条（主动识屏关→3 chip 同步隐藏，跟随正确）；**点页尾「自定义台词」chip → 折叠框展开并一次点击顶对齐**；搜旧词「信息槽内容」→ 2 候选，回车遍历第 2 命中正是「信息栏显示什么」行。
+- 验不到的两条（如实登记）：声纳环（需真实 DSH 工作态，本机无；生命周期 6 条单测钉着）；DSH 完成/失败提醒端到端（验到「真实桥接记录形状→真收敛器→真出口」一层）。
+- 审查链：A1（岛，2 条上报核为幻觉驳回）→ ops5.5（设置，1P1 CI 平台分叉+2P2 全销项）→ astra 终审（2P2+1P3 全销项）——每条上报均先核真再修。
+
+### 挂账与回滚
+
+- 挂账新增：跳转条不显示的页（<4 区）在部分窗口档有幽灵空白（BASE 既有，`_CurrentPageStack` 反馈环，本批口径外）；macOS/Linux 实机未跑。
+- 回滚：`.bak-r3`（五轮包）/`.bak-r2`/`.bak-r1`/`.bak-20261008` 整对换回。
