@@ -1405,9 +1405,12 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
         # 2026-10-08「按区直找」后两页各自拆回同类小分组（组名带页名前缀）。
         "语音报时 · 何时报", "语音报时 · 用什么声音", "语音报时 · 说什么",
         "节日提醒 · 开关", "节日提醒 · 时间", "节日提醒 · 文案",
-        # 「自动化与联动」的「主动识屏」不再是一张压平的大卡（同上）。
-        "主动识屏 · 开关与节奏", "主动识屏 · 什么时候看", "主动识屏 · 看哪些软件",
     }.issubset(set(section_titles))
+    if hasattr(dialog, "pro_enabled_check"):
+        # 「自动化与联动」的「主动识屏」不再是一张压平的大卡（同上）。
+        # 这几组只在 Windows 构造（settings_pet_controls 的平台闸门）。
+        assert {"主动识屏 · 开关与节奏", "主动识屏 · 什么时候看", "主动识屏 · 看哪些软件",
+                }.issubset(set(section_titles))
     advanced_titles = [
         button.text()
         for button in dialog.findChildren(

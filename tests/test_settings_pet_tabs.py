@@ -38,7 +38,7 @@ TAB2_SECTIONS = ("动画与移动", "拖拽与弹射", "边缘探头", "生小�
 
 TAB1_ROWS = (
     "scale", "bubble_text_scale", "pet_opacity",
-    "music_sing", "music_lyric", "music_lyric_lead", "music_browser_media",
+    "music_sing", "music_lyric", "music_lyric_lead",
 )
 TAB1_ADVANCED_ROWS = ("music_player_netease", "music_player_qqmusic", "music_player_detect")
 TAB2_ROWS = (
@@ -52,9 +52,10 @@ TAB2_ADVANCED_ROWS = (
     "collision_restitution", "collision_friction", "collision_mass_scale",
     "collision_impulse_cap", "collision_sound_volume",
 )
-#: foobar 两行只在 Windows 建（平台闸门，不是被整理掉了）。
+#: 浏览器媒体会话开关与 foobar 两行同样只在 Windows 建（SMTC / 窗口标题源是
+#: Windows 专属能力，非 Windows 建行也没效果）——平台闸门，不是被整理掉了。
 if sys.platform == "win32":
-    TAB1_ROWS = TAB1_ROWS + ("foobar_lyrics",)
+    TAB1_ROWS = TAB1_ROWS + ("music_browser_media", "foobar_lyrics")
     TAB1_ADVANCED_ROWS = ("foobar_title_format",) + TAB1_ADVANCED_ROWS
 
 

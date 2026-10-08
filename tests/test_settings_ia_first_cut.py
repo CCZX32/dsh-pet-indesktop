@@ -173,16 +173,19 @@ def test_v1_rewritten_rows_carry_the_final_wording(tmp_path, monkeypatch):
     """七处定稿的逐处落点（行级，含动态日流量与平台分支）。"""
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
-        lyrics = _row(dialog, "foobar_lyrics").hint_label.text()
-        assert "媒体控制插件" in lyrics and "可搜索 foo_mediacontrol 插件" in lyrics
-        assert "装好后不需要打开本开关" in lyrics
-        assert "停止播放后可能仍显示上一首" in lyrics
-        assert "SMTC" not in lyrics
+        # foobar2000 两行只在 Windows 建（窗口标题源走 Win32 枚举）——平台闸门，
+        # 不是被整理掉了；非 Windows 上不建行，就没这条文案可查。
+        if settings_music.foobar_lyrics_supported():
+            lyrics = _row(dialog, "foobar_lyrics").hint_label.text()
+            assert "媒体控制插件" in lyrics and "可搜索 foo_mediacontrol 插件" in lyrics
+            assert "装好后不需要打开本开关" in lyrics
+            assert "停止播放后可能仍显示上一首" in lyrics
+            assert "SMTC" not in lyrics
 
-        fmt = _row(dialog, "foobar_title_format")
-        assert fmt.label.text() == "播放器标题格式（高级）"
-        assert fmt.hint_label.text().startswith("通常留空即可。")
-        assert "类似 %artist% - %title% 这样的格式" in fmt.hint_label.text()
+            fmt = _row(dialog, "foobar_title_format")
+            assert fmt.label.text() == "播放器标题格式（高级）"
+            assert fmt.hint_label.text().startswith("通常留空即可。")
+            assert "类似 %artist% - %title% 这样的格式" in fmt.hint_label.text()
 
         interval = _row(dialog, "network_probe_interval").hint_label.text()
         assert interval.startswith("延迟检测间隔（0.5–60 秒）。间隔越短反应越快、流量越多：")
@@ -191,9 +194,9 @@ def test_v1_rewritten_rows_carry_the_final_wording(tmp_path, monkeypatch):
 
         slot = _row(dialog, "island_network").hint_label.text()
         assert "速率监测不产生额外流量，延迟检测每次约 0.16 KB。" in slot
-        # 合并岛段化后：网络是独立指标段，不再与信息槽内容互相挤占（旧架构那句
+        # 合并岛段化后：网络是独立指标段，不再与信息栏内容互相挤占（旧架构那句
         # 「关闭后信息槽恢复显示…」随旧耦合一起作废）。
-        assert "信息槽内容另有其行，不受本开关影响" in slot
+        assert "信息栏内容另有其行，不受本开关影响" in slot
         assert "网卡字节计数器" not in slot and "UDP" not in slot
 
         drop = _row(dialog, "drop_gravity").hint_label.text()
@@ -272,12 +275,16 @@ def test_v2_new_advanced_groups_are_advanced_and_collapsed(tmp_path, monkeypatch
                 parent = parent.parentWidget()
             assert len(ancestors) == 1, f"{key} 的 SettingsSection 祖先必须唯一"
 
-        # 常用开关一律留在主视线（未被误藏）。
-        for key in ("autostart", "music_sing", "music_lyric", "music_browser_media",
-                    "drag_physics", "collision_enabled", "island_network",
-                    "agent_sound_enabled"):
+        # 常用开关一律留在主视线（未被误藏）。浏览器媒体会话开关只在 Windows 建行
+        # （SMTC 是 Windows 专属能力），非 Windows 上没这一行可查。
+        common = ["autostart", "music_sing", "music_lyric",
+                  "drag_physics", "collision_enabled", "island_network",
+                  "agent_sound_enabled"]
+        if settings_music.browser_media_supported():
+            common.append("music_browser_media")
+        for key in common:
             assert _section_of(dialog, key).advanced is False, f"{key} 是常用开关，不得收进高级组"
-        if sys.platform == "win32":
+        if settings_music.foobar_lyrics_supported():
             assert _section_of(dialog, "foobar_lyrics").advanced is False
             assert _section_of(dialog, "foobar_title_format").advanced is True
     finally:
