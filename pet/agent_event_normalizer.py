@@ -63,13 +63,6 @@ class InteractionResolvedEvent(SemanticEvent):
     call_id: str = ""
     outcome: str = ""
 
-@dataclass(frozen=True)
-class ControlResultEvent(SemanticEvent):
-    request_id: str = ""
-    operation: str = ""
-    ok: bool = False
-    phase: str = ""
-
 _LIFECYCLE = {"agent/status", "AgentStatus", "session/created", "session/disposed", "turn/start", "turn/end", "step/start", "step/end", "task_started", "task_complete", "thread_rolled_back"}
 _EXPLORATION = {"read", "grep", "glob", "search", "web_search", "web_search_begin", "exec_command_begin"}
 _ACTION = {"edit", "write", "patch", "shell", "pwsh", "bash", "pytest", "npm test", "playwright", "run"}
@@ -142,6 +135,4 @@ def normalize_event(record: AgentEvent | dict, *, source_hint: str = "", agent_n
             kind = "question" if "question" in action else "approval"
             return InteractionResolvedEvent(**common, kind=kind, **_resolved_ids(ev, data), outcome=str(data.get("outcome") or data.get("decision") or ""))
         return UserActionEvent(**common, action=action)
-    if lower in {"control-result", "bridge/control-result", "watchdog/control-result"}:
-        return ControlResultEvent(**common, request_id=ev.request_id or str(data.get("requestId") or ""), operation=str(data.get("operation") or ""), ok=bool(data.get("ok", False)), phase=str(data.get("phase") or ""))
     return None

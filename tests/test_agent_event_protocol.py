@@ -591,3 +591,35 @@ def test_interaction_resolved_reads_top_level_call_id():
     assert resolved.call_id == "call-3", "只读 data['callId'] 会恒得空串（配对失效）"
     assert (resolved.request_id, resolved.rpc_id, resolved.approval_id) == \
         ("req-1", "rpc-3", "appr-3")
+
+
+# --------------------------------------------------------------------------
+# 退役事件：control-result（mux 中继与控制队列已删）
+#
+# 语义层曾接受 control-result / bridge/control-result / watchdog/control-result
+# 三形态并产出 ControlResultEvent，但仓库里（*.py 与 *.js）从无生产者，消费端
+# 也只看 RetryEvent / InteractionResolvedEvent 两类，属于零生产者零消费者的
+# 摆设分支。删除后旧桥若仍写这些事件，会落 agent_link 的「未知桥接事件」
+# 提醒路径——这是退役事件的预期口径（提醒用户更新 bridge）。
+# --------------------------------------------------------------------------
+
+RETIRED_CONTROL_EVENTS = ("control-result", "bridge/control-result", "watchdog/control-result")
+
+
+def test_retired_control_result_events_no_longer_produce_semantic_events():
+    """三种 control-result 形态都不再产出语义事件。"""
+    from pet.agent_event_normalizer import normalize_event
+
+    for name in RETIRED_CONTROL_EVENTS:
+        event = normalize_event(parse_agent_event(
+            {"ts": 1.0, "source": "dsh", "event": name, "requestId": "req-1",
+             "operation": "restart", "ok": True, "phase": "done"}))
+        assert event is None, \
+            f"{name} 已退役，不该再有语义事件，实得 {type(event).__name__}"
+
+
+def test_control_result_event_class_stays_removed():
+    """退役的事件类不得回流（无生产者即无契约，留着只会误导消费端）。"""
+    from pet import agent_event_normalizer
+
+    assert not hasattr(agent_event_normalizer, "ControlResultEvent")

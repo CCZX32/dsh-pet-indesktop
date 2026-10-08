@@ -275,7 +275,7 @@ unknown_bridge_event = Signal(str, object)
 ```text
 LifecycleEvent, ToolCallEvent, ToolResultEvent, ReasoningEvent,
 EvidenceEvent, ActionEvent, RetryEvent, ErrorEvent, ApprovalEvent,
-QuestionEvent, UserActionEvent, InteractionResolvedEvent, ControlResultEvent
+QuestionEvent, UserActionEvent, InteractionResolvedEvent
 ```
 
 公共字段为 `source`、`agent_name`、`session_id`、`step`、`data`。
@@ -286,12 +286,16 @@ QuestionEvent, UserActionEvent, InteractionResolvedEvent, ControlResultEvent
 kind, request_id, rpc_id, approval_id, call_id, outcome
 ```
 
-`ControlResultEvent` 还包含：`request_id`、`operation`、`ok`、`phase`。
-
 语义事件当前只有 `AgentLinkManager._on_normalized_event` 一个消费方（`normalized_event`
 信号直连）：它只用 `RetryEvent` 维护模型访问失败连续计数、用
 `InteractionResolvedEvent` 做交互 resolved 兜底清理，其余 dataclass 属于分类契约，
 暂无消费者。原先预留的 `AgentEventRuntime` 分发层自引入起零消费方，已在 PR57 移除。
+
+`ControlResultEvent` 已随 mux 中继与控制队列的删除一并退役（仓库内 `*.py` / `*.js`
+都没有生产者，消费者也不识别它）。旧桥若仍写 `control-result`、
+`bridge/control-result` 或 `watchdog/control-result`，会落 `agent_link` 的
+`unknown_bridge_event` 提醒路径——这是退役事件的预期口径（提醒更新 bridge），
+不再单独为它保留语义分支。
 
 ## AgentLinkManager 交互接口
 
