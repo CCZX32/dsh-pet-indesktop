@@ -20,10 +20,11 @@
 """
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRectF
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF, QTimer
 from PySide6.QtGui import QColor, QImage, QPainterPath, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -416,6 +417,243 @@ def test_hide_stops_flash_timer(tmp_path):
         assert island._dot_done is False
     finally:
         island.deleteLater()
+
+
+# ---------------------------------------------------------- 工作态声纳环
+def _frame(island: DynamicIsland) -> QImage:
+    """真渲染一帧（走完整 paintEvent）：透明底 + 显式 render（同软陶笔用例口径）。"""
+    image = QImage(island.size(), QImage.Format.Format_ARGB32)
+    image.fill(QColor(0, 0, 0, 0))
+    island.render(image)
+    return image
+
+
+def _dot_rect(island: DynamicIsland) -> QRectF:
+    rect = island._status_dot_rect
+    assert rect is not None, "内容层没记下状态点矩形（画点路径没走到？）"
+    return QRectF(rect)
+
+
+def _outside_dot_diff(one: QImage, two: QImage, dot: QRectF) -> list[tuple[int, int]]:
+    """两帧在**状态点之外**逐像素不同的位置——只有环带会出现在这里。"""
+    hits = []
+    for y in range(one.height()):
+        for x in range(one.width()):
+            if dot.contains(QPointF(x + 0.5, y + 0.5)):
+                continue
+            if one.pixelColor(x, y) != two.pixelColor(x, y):
+                hits.append((x, y))
+    return hits
+
+
+def _radius(dot: QRectF, x: int, y: int) -> float:
+    return math.hypot(x + 0.5 - dot.center().x(), y + 0.5 - dot.center().y())
+
+
+def test_sonar_ring_curve_endpoints_and_shape():
+    """曲线口径：半径线性 5→13，alpha 90→0 按 (1−t)³（端点 + 单调 + 钳位）。"""
+    _qapp()
+    assert island_mod._SONAR_R0_PX == 5.0 and island_mod._SONAR_R1_PX == 13.0
+    assert island_mod._SONAR_ALPHA == 90
+    assert island_mod._SONAR_PERIOD_MS == 1600
+    assert island_mod._SONAR_TICK_MS == 33
+
+    r0, a0 = island_mod.sonar_ring_params(0.0)
+    assert (r0, a0) == (5.0, 90), f"起点必须是 (5, 90)，实测 {(r0, a0)}"
+    r1, a1 = island_mod.sonar_ring_params(1.0)
+    assert (r1, a1) == (13.0, 0), f"终点必须是 (13, 0)，实测 {(r1, a1)}"
+    # 中点是 (1−0.5)³ = 0.125 的 alpha——不是线性衰减（否则 (1-t) 就够了）
+    assert island_mod.sonar_ring_params(0.5) == (9.0, round(90 * 0.125))
+    # 越界钳位（相位取模后的浮点尾巴不许把半径甩出区间）
+    assert island_mod.sonar_ring_params(-3.0) == (5.0, 90)
+    assert island_mod.sonar_ring_params(7.0) == (13.0, 0)
+
+    previous = (0.0, 255)
+    for step in range(1, 101):
+        radius, alpha = island_mod.sonar_ring_params(step / 100.0)
+        assert radius >= previous[0], "半径必须单调外扩"
+        assert alpha <= previous[1], "alpha 必须单调收敛"
+        previous = (radius, alpha)
+
+
+def test_sonar_ring_runs_only_while_working(tmp_path):
+    """起停判据：只有工作态起表；待确认/完成/错误/空闲/离线一律停表销毁。"""
+    _qapp()
+    island = _island(tmp_path)
+    island.show()
+    try:
+        island.set_dsh_state("idle")
+        assert island._sonar_timer is None, "空闲态不该有环（静止零定时器）"
+
+        island.set_dsh_state("working")
+        timer = island._sonar_timer
+        assert timer is not None and timer.isActive()
+        assert timer.isSingleShot() is False
+        assert timer.interval() == island_mod._SONAR_TICK_MS
+
+        # 工作态内部换字/重复喂值不重开表：重开就把相位踩回 0，节拍被踩碎
+        island.set_dsh_state("thinking")
+        assert island._sonar_timer is timer
+        island.set_dsh_state("working")
+        assert island._sonar_timer is timer
+
+        for state in ("idle", "success", "waiting_approval", "error", "offline"):
+            island.set_dsh_state("working")
+            assert island._sonar_timer is not None, f"{state} 之前应还在播"
+            island.set_dsh_state(state)
+            assert island._sonar_timer is None, f"{state}：非工作态必须停表"
+            assert timer.isActive() is False
+
+        # 旧粗粒度通道同样进工作态：环与状态点同源同判据
+        island.set_agent_active(True)
+        assert island._sonar_timer is not None
+        island.set_agent_active(False)
+        assert island._sonar_timer is None
+
+        # 桌宠隐藏**不**停环：工作态在五态优先级里压过「隐藏」（见 _status_dot_state），
+        # 点本身还是 accent 实心点，环与点同判据所以照播
+        island.set_dsh_state("working")
+        island.set_pet_visible(False)
+        assert _dot_style(island)[0] == "solid" and island._sonar_timer is not None
+        # 但"空闲 + 隐藏"是空心环：环跟着收（工作信号不出现在隐藏态）
+        island.set_dsh_state("idle")
+        assert _dot_style(island)[0] == "hollow"
+        assert island._sonar_timer is None
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_sonar_ring_stops_on_hide_expand_and_dock(tmp_path):
+    """隐藏 / 展开卡片 / 收进细条三条停表路径，以及回到自由态后的重判。"""
+    _qapp()
+    island = _island(tmp_path)
+    island.show()
+    try:
+        island.set_dsh_state("working")
+        assert island._sonar_timer is not None
+
+        island.hide()
+        assert island._sonar_timer is None, "hideEvent 必须停表（隐藏态零空转）"
+        island.show()
+        assert island._sonar_timer is not None, "显示回来工作态还在 → 环接着播"
+
+        island.expand_card()
+        assert island._mode == "expanded"
+        assert island._sonar_timer is None, "展开卡片必须停表（读者在别处）"
+        island.collapse_card(animate=False)
+        assert island._mode == "normal"
+        assert island._sonar_timer is not None, "收回自由胶囊才可能重新播"
+
+        # 停靠细条：另一种图元语言，不播环（走真配置路径：改 dock_edge + 重应用位置）
+        island.config.set("dynamic_island", dict(island._cfg, dock_edge="left"))
+        island.refresh_from_config()
+        assert island._mode == "docked"
+        assert island._sonar_timer is None, "停靠细条态不许播环"
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_sonar_ring_timer_is_destroyed_and_never_leaks(tmp_path):
+    """停表纪律：不是"停下"而是对象真的从 Qt 对象树上消失；反复起停不留常驻表。"""
+    _qapp()
+    island = _island(tmp_path)
+    island.show()
+    try:
+        island.set_dsh_state("working")
+        timer = island._sonar_timer
+        assert timer is not None
+        island.set_dsh_state("idle")
+        assert island._sonar_timer is None and timer.isActive() is False
+        _process_deferred_delete()
+        import shiboken6
+        assert not shiboken6.isValid(timer), "停表必须 deleteLater 销毁定时器"
+
+        baseline = len(island.findChildren(QTimer))
+        for _ in range(20):
+            island.set_dsh_state("working")
+            island.set_dsh_state("idle")
+        _process_deferred_delete()
+        assert len(island.findChildren(QTimer)) == baseline, (
+            "反复起停必须不留常驻定时器（对象树上的数量不变）")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_sonar_ring_is_painted_outside_the_content_cache(tmp_path):
+    """环画在缓存之外、只在环带落墨：内容层位图里没有它，缓存也不因它失效。"""
+    _qapp()
+    island = _island(tmp_path)
+    island.show()
+    try:
+        island.set_dsh_state("working")
+        island._finish_animations()   # 起态时的弹跳位移会整帧挪位，先归零再取像
+        cached = island._content_cache()
+        working = _frame(island)
+        dot = _dot_rect(island)
+        # 环每帧重画，但内容层位图必须原封不动（环不进缓存、也不进缓存键）
+        for _ in range(3):
+            _frame(island)
+        assert island._content_cache() is cached, "每帧一笔环不得让内容层位图失效"
+
+        island.set_dsh_state("idle")   # 离开工作态 → 停表，同一颗岛不再画环
+        idle = _frame(island)
+
+        diff = _outside_dot_diff(working, idle, dot)
+        assert len(diff) >= 8, "工作态必须真的画出环（与空闲帧的这些差异就是环）"
+        far = [p for p in diff if _radius(dot, *p) > island_mod._SONAR_R1_PX + 1.5]
+        assert not far, f"环墨跑到半径 {island_mod._SONAR_R1_PX} 之外：{far[:4]}"
+        assert min(_radius(dot, *p) for p in diff) > 3.5, "环不许盖在 8px 点上"
+        assert _outside_dot_diff(working, idle, dot) == diff, "前提：帧渲染是确定的"
+
+        # 内容层：环带在缓存位图里一个像素都没有（环是帧级图元）
+        content = _content_image(island)
+        for x, y in diff:
+            assert content.pixelColor(x, y).alpha() == 0, (
+                f"({x},{y}) 内容层里不该有环（环不进缓存，也不进缓存键）")
+
+        # 空闲帧与"从没进过工作态的同配置岛"逐像素一致：离开工作态后环零残留
+        fresh = _island(tmp_path)
+        fresh.show()
+        try:
+            fresh._finish_animations()
+            reference = _frame(fresh)
+            assert _outside_dot_diff(idle, reference, dot) == [], (
+                "离开工作态后帧里必须零环残留")
+        finally:
+            fresh.hide()
+            fresh.deleteLater()
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_sonar_ring_never_touches_width_or_plan_inputs(tmp_path):
+    """环是纯时间绘制态：起停与相位变化一个字节都不许进宽度白名单/行计划键。"""
+    _qapp()
+    island = _island(tmp_path, show_info=True, info_mode="custom", custom_text="测试")
+    island.show()
+    try:
+        island.set_dsh_state("idle")
+        width = island.width()
+        plan_inputs = island._plan_inputs()
+
+        island.set_dsh_state("working")
+        island._sonar_started -= 0.7   # 相位推到"动画中"（半径/alpha 都变了）
+        _frame(island)
+        assert island.width() == width, "环改了胶囊宽度（它不该进宽度白名单）"
+        assert island._plan_inputs() == plan_inputs, "环进了行计划输入键"
+        assert island.dock_edge == "none" and island._mode == "normal"
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def _process_deferred_delete() -> None:
+    _qapp().processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 # -------------------------------------------------------------- 宽度白名单

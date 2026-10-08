@@ -152,6 +152,19 @@ _DOT_HIGHLIGHT_ALPHA = 70
 _ICON_RING_DARK = (255, 255, 255, 46)
 _ICON_RING_LIGHT = (0, 0, 0, 20)
 
+# ---- 工作态声纳环（P3 视觉打磨）----
+# "在用"这件事从静态色点升级成有节拍的信号：状态点外扩一圈 accent 环，半径
+# 线性扩散、alpha 按 (1-t)³ 收敛（= 1 - ease_out_cubic(t)，先亮后急收）。**只在
+# 工作态播**——待确认是"等你"，完成是"刚做完"，错误要的是注意力，都不该有个
+# 持续的节拍。驱动是独立 30fps 单表，起表条件收敛在 ``_sonar_eligible``，离开
+# 工作态/隐藏/展开卡片/收进细条一律停表销毁（同 _dot_done_timer 的停表纪律）。
+_SONAR_PERIOD_MS = 1600
+_SONAR_TICK_MS = 33        # ~30fps：环是慢速呼吸，不需要 60fps
+_SONAR_R0_PX = 5.0         # 起点半径：贴在 8px 点（半径 4）外 1px，从点位外起
+_SONAR_R1_PX = 13.0
+_SONAR_ALPHA = 90
+_SONAR_PEN_PX = 1.5
+
 # ---- 段数值告警色体系（P2 Slice E2，裁决稿 §三 ops5.5）----
 # 两级告警色只染**数值**（含 E4 单位盒跟随值色）：阈值与滞回在 island_segments
 # （纯判定），这里只管"哪一级用什么色"。亮底主题按同一色相加深档而不是新增主题
@@ -279,6 +292,20 @@ def spring_step(
 def ease_out_cubic(t: float) -> float:
     t = max(0.0, min(1.0, float(t)))
     return 1.0 - (1.0 - t) ** 3
+
+
+def sonar_ring_params(t: float) -> tuple[float, int]:
+    """工作态声纳环在归一化时刻 ``t``（0..1，一个周期内的相位）的 (半径 px, alpha)。
+
+    半径线性扩散（``_SONAR_R0_PX`` → ``_SONAR_R1_PX``）；alpha 走 (1−t)³
+    ——即 ``1 − ease_out_cubic(t)``：起手最亮，越扩越淡，末段几乎瞬间收干净，
+    不留"最后一帧还看得见一圈"的尾巴。纯函数：绘制只消费它的返回值，曲线口径
+    在测试里直接钉端点与单调性。
+    """
+    phase = max(0.0, min(1.0, float(t)))
+    radius = _SONAR_R0_PX + (_SONAR_R1_PX - _SONAR_R0_PX) * phase
+    alpha = round(_SONAR_ALPHA * (1.0 - ease_out_cubic(phase)))
+    return radius, alpha
 
 
 def dock_edge_for(
@@ -501,6 +528,12 @@ class DynamicIsland(QWidget):
         self._dsh_state = ""
         self._dot_done = False
         self._dot_done_timer: QTimer | None = None
+        # 工作态声纳环：_status_dot_rect = 内容层画点时顺手记下的点位矩形
+        # （绘制层不自己算几何，见 _paint_sonar_ring）；_sonar_timer/_sonar_started
+        # = 30fps 单表与本周期的起始时刻（相位按真实时间算，tick 抖动不吃曲线）。
+        self._status_dot_rect: QRectF | None = None
+        self._sonar_timer: QTimer | None = None
+        self._sonar_started = 0.0
         self._last_message = ""
         # 几何变化回调（果冻墙碰撞体挂这里跟踪拖拽/停靠滑动）：AppShell 注入。
         self.on_geometry_changed = None
@@ -808,6 +841,9 @@ class DynamicIsland(QWidget):
                 callback(bool(visible))
             except Exception:
                 pass
+        # 隐藏桌宠会把**非工作态**的点变成空心环（工作态压过隐藏，见
+        # _status_dot_state）——凡点到空心环的路径都该把环一起收掉，这里搭同一趟车
+        self._sync_sonar_ring()
         self._sync_card_labels()
         self.update()
 
@@ -837,6 +873,7 @@ class DynamicIsland(QWidget):
             self._bounce(impulse=3.0)
         if falling:
             self._arm_dot_done()
+        self._sync_sonar_ring()   # 旧通道同样进工作态：环与状态点同源同判据
         self.update()
 
     def set_dsh_state(self, state: str) -> None:
@@ -869,6 +906,9 @@ class DynamicIsland(QWidget):
             # notify_event 多一道，是该裁决对本路径的单独要求；状态点本身不受
             # 闸门影响。免打扰判据复用全应用唯一的 suppression_active）
             self._bounce(impulse=3.0)
+        # 声纳环跟状态点同源起停（工作态才有）：状态点是"在用"的静态通道，
+        # 环是它的节拍通道，两者共用 _status_dot_state 这一个判据
+        self._sync_sonar_ring()
         self.update()
 
     def _arm_dot_done(self) -> None:
@@ -896,6 +936,56 @@ class DynamicIsland(QWidget):
         """停表并销毁完成瞬态定时器（幂等）：回落后不留空转表。"""
         timer, self._dot_done_timer = self._dot_done_timer, None
         self._dot_done = False
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    # ------------------------------------------------------ 工作态声纳环
+    def _sonar_eligible(self) -> bool:
+        """声纳环的唯一判据（起停都问它，所以不可能出现"两处口径打架"）。
+
+        四条缺一不可：窗口可见、自由胶囊态（展开卡片/停靠细条都不播——卡片态
+        读者在别处，细条是另一种图元语言）、状态点开着、当刻状态点就是工作中。
+        """
+        if not self.isVisible() or self._mode != "normal":
+            return False
+        if not self._visible_parts()[3]:
+            return False
+        return self._status_dot_state() == _DOT_WORKING
+
+    def _sync_sonar_ring(self) -> None:
+        """按当刻判据起停声纳环（幂等）：状态变了、显隐变了、模式变了都喊它。
+
+        与"只在 working 上升沿起表"相比，幂等口径多兜住一种情形——隐藏时进入
+        工作态、显示回来时工作态还在（上升沿早过去了），此时该接着播。
+        """
+        if self._sonar_eligible():
+            self._start_sonar_ring()
+        else:
+            self._stop_sonar_ring()
+
+    def _start_sonar_ring(self) -> None:
+        """起表（幂等）：已在跑就不重开——重开会把相位重置成 0，节拍被踩碎。"""
+        timer = self._sonar_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(_SONAR_TICK_MS)
+            timer.timeout.connect(self._on_sonar_tick)
+            self._sonar_timer = timer
+            self._sonar_started = time.monotonic()
+        if not timer.isActive():
+            timer.start()
+
+    def _on_sonar_tick(self) -> None:
+        """每 tick 重判一次判据：不成立就自己停表收口（不指望每个改动点都记得喊停）。"""
+        if not self._sonar_eligible():
+            self._stop_sonar_ring()
+            return
+        self.update()
+
+    def _stop_sonar_ring(self) -> None:
+        """停表并销毁声纳环定时器（幂等）：离开工作态就不留空转表。"""
+        timer, self._sonar_timer = self._sonar_timer, None
         if timer is not None:
             timer.stop()
             timer.deleteLater()
@@ -966,6 +1056,7 @@ class DynamicIsland(QWidget):
         # 采样闸门放在最后：上面两段都可能改 _mode（停靠边切换 / 关掉靠边半隐藏），
         # 早于它们同步就会拿着过期的细条态去收口或恢复（P2 Slice E6）
         self._sync_content_sampling()
+        self._sync_sonar_ring()          # 同上：判据含模式与 show_status，都要最后判
         self._refresh()
 
     # ------------------------------------------------------------ 余额峰谷
@@ -1806,6 +1897,8 @@ class DynamicIsland(QWidget):
         # 卡片开着时每秒刷一次"更新时间"与状态文字（收起/隐藏即停表，同完成瞬态）
         self._card_tick_timer.start()
         self._sync_content_sampling()
+        # 展开卡片即停声纳环（卡片态是"读者在别处"的形态，见 _sonar_eligible）
+        self._sync_sonar_ring()
         self.card_expanded.emit()
 
     def collapse_card(self, *, animate: bool = True) -> None:
@@ -1826,6 +1919,7 @@ class DynamicIsland(QWidget):
             self._set_free_geometry(self._target_rect())
             self._apply_fixed_size()
         self._sync_content_sampling()    # 收进细条 = 内容全不画 → 全停采样
+        self._sync_sonar_ring()          # 收到 normal 才可能重新播（见 _sonar_eligible）
 
     # ------------------------------------------------------------ 动效核心
     def _bounce(self, impulse: float = 4.0) -> None:
@@ -3269,9 +3363,13 @@ class DynamicIsland(QWidget):
             x = placement.right
         if status:
             painter.setPen(Qt.PenStyle.NoPen)
-            self._paint_status_dot(painter, QRectF(
+            self._status_dot_rect = QRectF(
                 x + _STATUS_GAP_PX, (_CAPSULE_HEIGHT - _STATUS_DOT_PX) / 2,
-                _STATUS_DOT_PX, _STATUS_DOT_PX))
+                _STATUS_DOT_PX, _STATUS_DOT_PX)
+            self._paint_status_dot(painter, self._status_dot_rect)
+        else:
+            # 不画点就没有点位：声纳环以它为圆心，留着上一次的矩形就会绕空转
+            self._status_dot_rect = None
         painter.end()
         self._content_pixmap = pm
         self._content_cache_key = key
@@ -3391,10 +3489,37 @@ class DynamicIsland(QWidget):
         # 不进内容缓存（每帧两笔固定成本，见 _paint_bevel）
         self._paint_bevel(painter, rect, radius)
 
+        # 工作态声纳环（P3）：状态点外扩的 accent 圈，画在最上层——它是"当刻
+        # 相位"的函数，逐帧重画是本质；内容缓存里没有它，缓存键自然不含它
+        self._paint_sonar_ring(painter)
+
+    def _paint_sonar_ring(self, painter: QPainter) -> None:
+        """画工作态声纳环（非工作态/表未跑时一笔不画）。
+
+        圆心取内容层画点时顺手记下的点位矩形（``_status_dot_rect``）——绘制层
+        不自己重算落位，两处口径不可能分叉。相位按**真实时间**取（周期取模），
+        tick 抖动只影响帧的疏密，不影响曲线位置。
+        """
+        dot = self._status_dot_rect
+        if dot is None or self._sonar_timer is None:
+            return
+        phase = ((time.monotonic() - self._sonar_started) * 1000.0
+                 % _SONAR_PERIOD_MS) / _SONAR_PERIOD_MS
+        radius, alpha = sonar_ring_params(phase)
+        if alpha <= 0:
+            return
+        color = self._accent_color()
+        color.setAlpha(alpha)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, _SONAR_PEN_PX))
+        painter.drawEllipse(dot.center(), radius, radius)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
     # ------------------------------------------------------------ 显隐休眠
     def hideEvent(self, event) -> None:  # noqa: N802
-        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起/完成瞬态全部停表，
-        隐藏态零定时器空转。"""
+        """隐藏即休眠：信息轮询/动效/停靠收回/卡片自动收起/完成瞬态/声纳环
+        全部停表，隐藏态零定时器空转。"""
         super().hideEvent(event)
         self._info_timer.stop()
         self._tier_tick_timer.stop()
@@ -3403,6 +3528,7 @@ class DynamicIsland(QWidget):
         self._card_collapse_timer.stop()
         self._card_tick_timer.stop()
         self._stop_dot_done_timer()
+        self._stop_sonar_ring()
         self._stop_content_fade()
         # 光标旗帜随隐藏复位（A1 第二票 R3）：隐藏期间光标真实位置不可知，
         # 不复位的话显示后 expand_card 会拿陈旧 True 误判「鼠标在岛内」不起 15s 表
@@ -3475,6 +3601,9 @@ class DynamicIsland(QWidget):
         self._schedule_next_balance_tier_refresh()
         self._sync_network_slot()
         self._sync_sys_slot()
+        # 隐藏期间可能已经进入工作态（hideEvent 停了环）：显示回来按当刻判据重判
+        # ——"工作中"就该有声纳，上升沿早过去了不构成不播的理由（见 _sync_sonar_ring）
+        self._sync_sonar_ring()
         self._refresh()
         # 原生窗口此刻已就绪；再延迟一拍重申一次 topmost——show 期间 Qt 还在
         # 收尾窗口排序，它可能覆盖同步那次（口径同 legacy window.py showEvent）
@@ -3622,6 +3751,7 @@ class DynamicIsland(QWidget):
         self._dragging = False
         # 分支决定完模式再同步采样：细条单击 → 滑出（恢复）、拖拽落定 → 停靠（全停）
         self._sync_content_sampling()
+        self._sync_sonar_ring()          # 拖拽落定可能停靠（细条不播环）
         self._emit_geometry_changed()
         event.accept()
 
