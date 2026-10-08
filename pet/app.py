@@ -2776,7 +2776,14 @@ class AppShell:
         DSH 联动状态/提醒等非交互气泡在桌宠隐藏期间改弹到岛对话气泡
         （预览式，不抢焦点，超时自动收回，后到覆盖）。岛对话不可用
         （无聊天模块 / 岛未启用 / hidden_chat 关 / 桌宠其实可见）时返回
-        False，调用方维持原丢弃行为。"""
+        False，调用方维持原丢弃行为。
+
+        岛聊天**有在途请求**时同样返回 False（丢弃本轮反馈）：气泡是同一个，
+        预览式改写会把在途请求的 request_id 清掉，真实回答随后被完成回调按
+        request_id 静默丢掉（既不显示也不落库）——聊天明显比一条状态气泡重要。
+        不排队：这类反馈是"正在想办法/开始干活"的瞬时状态，压到回答之后才送
+        等于送达一条过期消息（与 :meth:`_on_global_chat_finished` 的"气泡在场
+        则跳过"同一取舍）。"""
         if self._aggregate_pet_visible() or not self._island_chat_available():
             return False
         island = getattr(self, "island", None)
@@ -2788,6 +2795,9 @@ class AppShell:
             self.island_chat = IslandChatBubble(self.config)
             self.island_chat.show_pet_requested.connect(self._show_pets_from_island_chat)
         bubble = self.island_chat
+        asker = getattr(bubble, "request_in_flight", None)
+        if callable(asker) and asker():
+            return False
         bubble.open_chat_callback = self._open_full_chat_from_island_chat
         bubble.show_feedback(island, text, subtitle=subtitle, duration_ms=duration_ms)
         return True

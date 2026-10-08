@@ -400,6 +400,15 @@ class QuickChatBubble(QFrame):
         self._active_request_id = None
         self.hint_label.setText("已停止")
 
+    def request_in_flight(self) -> bool:
+        """是否有自己发出的、尚未到终态的请求在途。
+
+        预览式改写（``show_reply``/``show_feedback``）会把 ``_active_request_id``
+        清成 None，此后真实完成回调按 request_id 匹配全部**静默返回**（回答既不
+        上屏也不落库）。所以任何"接管气泡显示"的外部入口都必须先问这一句。
+        """
+        return self._active_request_id is not None or self.service.busy
+
     # ------------------------------------------------------------ 显示
     def _set_reply_text(self, full_text: str) -> None:
         """记录 AI 回答全文，并算出气泡内展示文本（超限截断 + 提示全文位置）。

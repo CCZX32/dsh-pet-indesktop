@@ -7,6 +7,9 @@ IslandChatBubble 锚定定位与预览态、AppShell 接线（可用性判定、
 """
 from __future__ import annotations
 
+import json
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -571,6 +574,109 @@ def test_island_feedback_disabled_when_hidden_chat_off(tmp_path):
 
         assert shell._island_feedback_bubble("DSH 开始干活啦～") is False
         assert shell.island_chat is None
+    finally:
+        _teardown_shell(shell)
+
+
+class _BlockingProvider:
+    """可控网络替身（只替换网络边界）：请求进来卡住，测试放行后才产出一条回答。"""
+
+    def __init__(self, reply: str = "在的呀，我一直在听") -> None:
+        self.reply = reply
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def stream(self, messages, config, cancel):
+        self.started.set()
+        while not self.release.wait(timeout=0.02):
+            if cancel.is_set():
+                return
+        if cancel.is_set():
+            return
+        yield self.reply
+
+
+def _pump_until(predicate, *, timeout: float = 10.0) -> bool:
+    """宽预算轮询 + 事件泵（worker→主线程的信号是队列投递，必须跑事件循环）。"""
+    app = _qapp()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    app.processEvents()
+    return predicate()
+
+
+def _disk_messages(bubble) -> list[dict]:
+    """会话**磁盘文件**里的消息（落库真值，不走 pending 快照）。"""
+    path = (Path(bubble.config.dir) / "sessions" / bubble.session.character_id
+            / f"{bubble.session.session_id}.json")
+    return json.loads(path.read_text(encoding="utf-8"))["messages"]
+
+
+def _send_blocking_question(shell, tmp_path, question: str = "你在吗"):
+    """真气泡 + 真 ChatService/QThread + 真会话存储：发一条问题并卡在请求中。"""
+    shell._show_island_chat(activate=True)
+    bubble = shell.island_chat
+    provider = _BlockingProvider()
+    bubble.service.provider = provider
+    bubble.input.setText(question)
+    bubble._send()
+    assert provider.started.wait(timeout=10), "前提：请求已进入 provider"
+    assert bubble._active_request_id is not None, "前提：请求在途"
+    return bubble, provider
+
+
+def test_island_feedback_yields_to_inflight_request(tmp_path):
+    """联动反馈不得打断岛聊天在途请求：AI 回答照常上屏并落库。
+
+    旧行为：``_island_feedback_bubble`` 复用现存气泡直接 ``show_feedback`` →
+    ``show_reply`` 把 ``_active_request_id`` 清成 None → 真实 AI 完成回调
+    request_id 对不上直接返回，回答既不显示也不落库（用户看到的是被反馈文案
+    顶掉的气泡，聊到一半的回答凭空消失）。反馈面必须给在途请求让路：本轮
+    反馈丢弃（反馈本身有时效性，排队到回答之后只会送出一条过期状态），
+    调用方维持"改道失败即放弃"的原语义。
+    """
+    _qapp()
+    shell = _make_shell(tmp_path, hidden_chat=True)
+    try:
+        shell.island = _island(tmp_path)
+        shell.enable_chat = True
+        bubble, provider = _send_blocking_question(shell, tmp_path)
+
+        assert shell._island_feedback_bubble(
+            "DSH 正在认真想办法……", subtitle="DSH", duration_ms=4500) is False, \
+            "在途请求期间联动反馈必须让路（返回 False 让调用方维持原丢弃行为）"
+        assert bubble._active_request_id is not None, "在途请求不得被反馈清掉"
+
+        provider.release.set()
+        assert _pump_until(lambda: bubble._active_request_id is None), "回答未回到气泡"
+
+        assert bubble.output.text() == provider.reply, "AI 回答必须显示（不是反馈文案）"
+        bubble.store.flush()
+        roles = [m["role"] for m in _disk_messages(bubble)]
+        assert roles == ["user", "assistant"], f"AI 回答必须落库，实际 {roles}"
+    finally:
+        _teardown_shell(shell)
+
+
+def test_island_feedback_previews_when_request_finished(tmp_path):
+    """非回归：请求不在途时反馈照常预览（让路只针对在途请求）。"""
+    _qapp()
+    shell = _make_shell(tmp_path, hidden_chat=True)
+    try:
+        shell.island = _island(tmp_path)
+        shell.enable_chat = True
+        bubble, provider = _send_blocking_question(shell, tmp_path)
+        provider.release.set()
+        assert _pump_until(lambda: bubble._active_request_id is None)
+
+        assert shell._island_feedback_bubble(
+            "DSH 开始干活啦～", subtitle="DSH", duration_ms=4500) is True
+        assert "开始干活啦" in bubble.output.text()
+        assert bubble.hint_label.text() == "DSH"
     finally:
         _teardown_shell(shell)
 
