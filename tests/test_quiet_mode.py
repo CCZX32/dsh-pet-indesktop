@@ -299,7 +299,7 @@ def _shown_texts(window) -> list[str]:
 @pytest.mark.parametrize(
     "alert_type,shown_during_quiet",
     [
-        ("watchdog", False),        # 普通提醒：卡住 / 硬失败
+        ("watchdog", False),        # 默认分类 = 普通提醒（非穿透类）
         ("approval", True),         # 交互应答：压了会出事故
         ("question", True),
         ("interaction", True),
@@ -333,6 +333,31 @@ def test_interactive_alert_passes_through_with_buttons(win):
 
     assert win._alert_current is not None
     assert win._speech_bubble.shown[-1]["buttons"] is not None
+
+
+def test_agent_link_hard_failure_alert_passes_through_quiet(win):
+    """硬失败提醒必须穿透免打扰：真实 manager → 真实 ``window_alerts.show_alert``。
+
+    ``_on_execution_failed`` 此前没带 ``alert_type``，落进 ``show_alert`` 的默认值
+    ``watchdog`` / priority=3 → 被免打扰门禁（``alert_survives_suppression``）当
+    普通提醒压进暂存队列，用户在最需要看到报错的时刻什么都看不到，与「审批、报错
+    照常提醒」的规格相矛盾。
+    """
+    from pet.agent_link import AgentLinkManager
+
+    quiet_mode.shared_quiet_state().start(15)
+    mgr = AgentLinkManager(win, win.cfg, min_interval=0.0)
+    try:
+        mgr._on_execution_failed(
+            "dsh", {"failureType": "tool_failed", "errorCode": "E_BASH",
+                    "errorMessage": "exit status 1"})
+    finally:
+        mgr.shutdown()
+
+    assert win._alert_current is not None, "硬失败提醒必须穿透免打扰"
+    assert quiet_mode.shared_quiet_state().pending_count() == 0, "不得进免打扰暂存队列"
+    assert win._alert_current["alertType"] == "execution/failed"
+    assert "失败" in _shown_texts(win)[-1], _shown_texts(win)
 
 
 def test_fullscreen_equivalent_queues_ordinary_alert(win):

@@ -3188,10 +3188,15 @@ class TestExecutionFailed:
             def show_bubble(self, text, duration_ms=3200, sticky=False, buttons=None):
                 self.shown.append(str(text))
 
-            def show_alert(self, text, *, subtitle="", duration_ms=0, buttons=None, sticky=True):
+            def show_alert(self, text, *, subtitle="", duration_ms=0, buttons=None,
+                           sticky=True, alert_id="", priority=3,
+                           alert_type="watchdog", metadata=None):
+                # 签名与真实 PetWindow/OverlayShell.show_alert 对齐：硬失败提醒
+                # 必须带上 alert_type/priority 才能穿透免打扰（见 test_quiet_mode）。
                 self.alerts.append({
                     "text": str(text), "sticky": bool(sticky),
                     "duration_ms": int(duration_ms),
+                    "priority": int(priority), "alert_type": str(alert_type),
                 })
 
             def request_link_anim(self, anim):
@@ -3213,6 +3218,9 @@ class TestExecutionFailed:
         mgr._on_execution_failed("dsh", {"failureType": "tool_failed", "retryExhausted": False})
         assert mgr.win.alerts
         assert "工具执行失败" in mgr.win.alerts[-1]["text"]  # failure.tool 预设首句
+        # 分类必须显式给：默认的 watchdog 会被免打扰当普通提醒压进暂存队列。
+        assert mgr.win.alerts[-1]["alert_type"] == "execution/failed"
+        assert mgr.win.alerts[-1]["priority"] == 1
 
     def test_generic_failure(self, tmp_path):
         mgr = self._make_mgr(tmp_path)

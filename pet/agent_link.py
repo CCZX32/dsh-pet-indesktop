@@ -4478,6 +4478,14 @@ class AgentLinkManager(QObject):
     # ------------------------------------------------------------------
     _FAIL_ANIM_KEYWORDS = ("失败", "冒烟", "晕", "倒下", "昏", "扑街", "求救", "哭了", "委屈")
     _FAIL_REMINDER_MS = 6000
+    #: 硬失败提醒的提醒分类。**必须显式给**，不能吃 ``show_alert`` 的默认值
+    #: ``watchdog``：那是普通提醒档，会被免打扰门禁
+    #: （``window_alerts.alert_survives_suppression``）压进暂存队列——「审批、报错
+    #: 照常提醒」是规格，用户在最需要看到报错的时刻反而什么都看不到。
+    _FAIL_ALERT_TYPE = "execution/failed"
+    #: 与既有错误类提醒（``model_access`` / ``llm_error``）同档优先级：高于普通
+    #: 状态气泡与看门狗档，正在展示的低优先提醒被它顶掉；审批/提问（0）仍可抢占。
+    _FAIL_ALERT_PRIORITY = 1
 
     def _pick_fail_anim(self) -> str | None:
         """从当前角色动作池里按语义挑选「失败/冒烟」动画；缺素材静默跳过。"""
@@ -4511,6 +4519,11 @@ class AgentLinkManager(QObject):
         busy→idle 会先排定确认；那条路径没有 success 边沿可拦，只能靠文案标记）。
         打标放在最前，先于可见性/模型访问抑制的早退：失败是本回合的客观事实，
         与提醒是否呈现无关（隐藏期改道灵动岛、抑制期都不能因此误报成功）。
+
+        提醒分类走 ``_FAIL_ALERT_TYPE`` / ``_FAIL_ALERT_PRIORITY``（不得吃
+        ``show_alert`` 的默认 ``watchdog``）：报错属免打扰的穿透类，压成普通提醒
+        就违背「审批、报错照常提醒」的规格。隐藏态走灵动岛改道，那条改道要求
+        ``not buttons and not bubble_blocked``，本提醒本就无按钮、非 sticky，不受影响。
         """
         self._saw_error.add(agent_key)
         self._saw_alert.add(agent_key)
@@ -4561,6 +4574,12 @@ class AgentLinkManager(QObject):
         else:
             text = self._dialogue("failure.generic", f"{name} 本轮运行失败，需要检查或重新运行", name=name, **conditional)
         if hasattr(self.win, "show_alert"):
-            self.win.show_alert(text, duration_ms=self._FAIL_REMINDER_MS, sticky=False)
+            self._show_alert_compat(
+                text,
+                duration_ms=self._FAIL_REMINDER_MS,
+                sticky=False,
+                priority=self._FAIL_ALERT_PRIORITY,
+                alert_type=self._FAIL_ALERT_TYPE,
+            )
         elif hasattr(self.win, "show_bubble"):
             self.win.show_bubble(text, duration_ms=self._FAIL_REMINDER_MS)
