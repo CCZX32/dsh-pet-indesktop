@@ -2747,7 +2747,7 @@ class AgentLinkManager(QObject):
         name, marker = item
         if not marker.exists() and hasattr(self.win, "show_bubble"):
             self.win.show_bubble(
-                self._dialogue("agent.missing", f"已开启 {name} 联动监听，但没检测到本机安装 {name}——装了它我才能感知到哦", name=name),
+                self._dialogue("agent.missing", f"已开启 {name} 联动监听，但没检测到本机安装 {name}——装了它我才能感知到哦", agent_key=agent_key, name=name),
                 duration_ms=6000,
             )
 
@@ -3461,14 +3461,14 @@ class AgentLinkManager(QObject):
         if label:
             text = self._dialogue(
                 "approval.tool", f"{prefix}{name} 在请求审批：{label}，请到 DSH 界面处理～",
-                label=label, name=name, **conditional,
+                agent_key=agent_key, label=label, name=name, **conditional,
             )
         elif tool:
             text = self._dialogue("approval.tool", f"{prefix}{name} 有审批等你决定（{tool}），请到 DSH 界面处理～",
-                                  label=tool, name=name, **conditional)
+                                  agent_key=agent_key, label=tool, name=name, **conditional)
         else:
             text = self._dialogue("approval.generic", f"{prefix}{name} 有审批等你决定，请到 DSH 界面处理～",
-                                  name=name, **conditional)
+                                  agent_key=agent_key, name=name, **conditional)
         self._register_interaction(
             agent_key, kind="approval", text=text, tool=tool,
             rpc_id=payload.get("rpcId"),
@@ -3526,7 +3526,8 @@ class AgentLinkManager(QObject):
         prefix = f"{session_display} · " if session_display and session_display != f"DSH · {session_id[:8]}" else ""
         conditional = self._session_conditional(payload)
         self._register_interaction(
-            agent_key, kind="question", text=self._question_text(name, questions, prefix=prefix,
+            agent_key, kind="question", text=self._question_text(agent_key, name, questions,
+                                                                 prefix=prefix,
                                                                  conditional=conditional),
             questions=questions,
             rpc_id=payload.get("rpcId"),
@@ -3534,27 +3535,31 @@ class AgentLinkManager(QObject):
             session_id=session_id,
         )
 
-    def _question_text(self, name: str, questions: list, *, prefix: str = "",
+    def _question_text(self, agent_key: str, name: str, questions: list, *, prefix: str = "",
                        conditional: dict | None = None) -> str:
         """把 questions 载荷排版成气泡文案（单行紧凑）。
 
         泡泡是图片气泡：normalize_bubble_text 会把换行折叠成空格，且 sticky 只
         显示第一页——所以选项用「 / 」内联拼接而非强行多行，保证「常驻问题弹窗」
-        在小气泡里完整可见。"""
+        在小气泡里完整可见。
+
+        ``agent_key`` 是预设路由身份（问题气泡文案同样支持 Agent 专属覆盖），
+        与展示名 ``name`` 分开传：名字可被自定义 Agent 覆盖，路由键不能。
+        """
         conditional = conditional or {}
         if not questions:
             return self._dialogue("question.empty", f"{prefix}{name} 在等你回答一个问题，快去看一下～",
-                                  name=name, **conditional)
+                                  agent_key=agent_key, name=name, **conditional)
         if len(questions) > 1:
             if self._questions_all_have_options(questions):
                 return self._dialogue("question.many", f"{prefix}{name} 有 {len(questions)} 个问题等你回答，快去看一下～",
-                                      count=len(questions), name=name, **conditional)
+                                      agent_key=agent_key, count=len(questions), name=name, **conditional)
             # 含自由文本分支：整批必须回 DSH 界面输入，引导不随台词被覆盖
             return self._with_dsh_input_hint(self._dialogue(
                 "question.many",
                 f"{prefix}{name} 有 {len(questions)} 个问题等你回答"
                 "（含文本输入，请到 DSH 界面输入文本回答）～",
-                count=len(questions), name=name, **conditional,
+                agent_key=agent_key, count=len(questions), name=name, **conditional,
             ))
         q = questions[0]
         if not isinstance(q, dict):
@@ -3579,7 +3584,7 @@ class AgentLinkManager(QObject):
         text = self._dialogue(
             "question.one",
             f"{name} 在问你：{body}，需要你输入，请到 DSH 界面输入文本回答～",
-            body=body, name=name, **conditional,
+            agent_key=agent_key, body=body, name=name, **conditional,
         )
         return self._with_dsh_input_hint(text)
 
@@ -4151,7 +4156,7 @@ class AgentLinkManager(QObject):
             existing["_ts"] = now
             existing["_dismissed"] = False
             self._remember_model_access_record_fields(existing, record)
-            self._show_model_access_alert(session_key, existing["count"])
+            self._show_model_access_alert(agent_key, session_key, existing["count"])
             return
         entry = {
             "count": max(1, supplied_count),
@@ -4161,7 +4166,7 @@ class AgentLinkManager(QObject):
         }
         self._remember_model_access_record_fields(entry, record)
         cache[session_key] = entry
-        self._show_model_access_alert(session_key, entry["count"])
+        self._show_model_access_alert(agent_key, session_key, entry["count"])
 
     def _remember_model_access_record_fields(self, entry: dict, record: dict) -> None:
         """把限流记录的条件字段缓存进条目，供弹窗模板条件注入（缺失自动隐藏）。"""
@@ -4171,7 +4176,7 @@ class AgentLinkManager(QObject):
             if value not in (None, ""):
                 entry[field] = value
 
-    def _show_model_access_alert(self, session_key: str, count: int) -> None:
+    def _show_model_access_alert(self, agent_key: str, session_key: str, count: int) -> None:
         """展示模型访问失败提醒弹窗，高优先级，带「知道了」按钮，15 秒自动收起。"""
         fallback = (
             "DSH 模型访问失败，本次请求未完成；请稍后重试。"
@@ -4188,7 +4193,7 @@ class AgentLinkManager(QObject):
         session_name = self._session_name_or_empty(session_key)
         if session_name and session_name.strip():
             conditional["sessionName"] = session_name.strip()
-        text = self._dialogue(key, fallback, count=count, **conditional)
+        text = self._dialogue(key, fallback, agent_key=agent_key, count=count, **conditional)
         # PhrasePicker's built-in persona text is intentionally allowed to use
         # different wording; only an unavailable/empty renderer falls back.
         if not str(text or '').strip():
@@ -4307,7 +4312,7 @@ class AgentLinkManager(QObject):
         error_kind = str(record.get("errorKind") or "api")
         fallback = f"AI 服务错误（{error_code}）：{error_message}"
         key = "llm_error.api"
-        text = self._dialogue(key, fallback)
+        text = self._dialogue(key, fallback, agent_key=agent_key)
         buttons = [("知道了", lambda sk=session_key: self._dismiss_llm_error_alert(sk))]
         if hasattr(self.win, "show_alert"):
             self.win.show_alert(
@@ -4568,11 +4573,11 @@ class AgentLinkManager(QObject):
                 conditional[field] = value
         conditional.update(self._session_conditional(payload))
         if retry_exhausted or failure_type == "model_retry_exhausted":
-            text = self._dialogue("failure.retry", f"{name} 本轮运行失败——模型请求多次重试后仍未成功，需要检查或重新运行", name=name, **conditional)
+            text = self._dialogue("failure.retry", f"{name} 本轮运行失败——模型请求多次重试后仍未成功，需要检查或重新运行", agent_key=agent_key, name=name, **conditional)
         elif failure_type == "tool_failed":
-            text = self._dialogue("failure.tool", f"{name} 本轮运行失败——工具执行最终失败，需要检查或重新运行", name=name, **conditional)
+            text = self._dialogue("failure.tool", f"{name} 本轮运行失败——工具执行最终失败，需要检查或重新运行", agent_key=agent_key, name=name, **conditional)
         else:
-            text = self._dialogue("failure.generic", f"{name} 本轮运行失败，需要检查或重新运行", name=name, **conditional)
+            text = self._dialogue("failure.generic", f"{name} 本轮运行失败，需要检查或重新运行", agent_key=agent_key, name=name, **conditional)
         if hasattr(self.win, "show_alert"):
             self._show_alert_compat(
                 text,
