@@ -743,8 +743,8 @@ def test_single_modern_menu_routes_to_selected_chat_dispatcher():
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="legacy", character="shenshen", on_top=False)
-        on_open_chat_settings = on_open_legacy_settings = on_open_modern_settings = None
+        cfg = Config(character="shenshen", on_top=False)
+        on_open_chat_settings = on_open_modern_settings = None
         idles = turns = moves = clicks = acts = []
         playback_speed = scale = 1.0
         drag_physics = no_move = False

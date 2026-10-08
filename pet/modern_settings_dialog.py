@@ -910,10 +910,6 @@ class ModernSettingsDialog(QDialog):
         menu_page_layout = QVBoxLayout(menu_content)
         menu_page_layout.setContentsMargins(0, 0, 0, 0)
         menu_page_layout.setSpacing(18)
-        self.menu_template_select = ModernSelect(menu_content, width=156)
-        self.menu_template_select.addItem("新版菜单", "modern")
-        self.menu_template_select.addItem("旧版兼容菜单", "legacy")
-        self.menu_template_select.setCurrentData(str(self.config.get("context_menu_template", "modern") or "modern"))
         menu_available_actions = set(MENU_ACTIONS.ids)
         if sys.platform != "win32":
             menu_available_actions.discard("proactive_screen")
@@ -935,7 +931,6 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "内容与布局",
                 [
-                    SettingRow("menu_template", "菜单版本（新版 / 旧版）", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
                     SettingRow("context_menu_layout", "菜单编排", "调整显示、顺序和层级；左侧编辑，右侧同步预览。", self.menu_layout_editor, stacked=True),
                 ],
                 menu_content,
@@ -2364,7 +2359,6 @@ class ModernSettingsDialog(QDialog):
                 "dark_hover": self.dark_hover_picker.text(),
             },
         )
-        self.config.set("context_menu_template", self.menu_template_select.currentData())
         default_menu_nodes = load_default_menu_layout().get("nodes", [])
         self.config.set(
             "context_menu_layout",

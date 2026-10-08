@@ -811,7 +811,6 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
             self.values = {
                 "character": "shenshen",
                 "on_top": True,
-                "context_menu_template": "modern",
             }
 
         def get(self, key, default=None):
@@ -923,7 +922,6 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
     class FakeConfig:
         def get(self, key, default=None):
             return {
-                "context_menu_template": "modern",
                 "character": "shenshen",
                 "context_menu_appearance": {"theme": "light"},
             }.get(key, default)
@@ -1124,7 +1122,7 @@ def test_modern_menu_starts_with_ojingjing_entry_and_uses_pet_avatar(monkeypatch
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="modern", character="shenshen", on_top=False)
+        cfg = Config(character="shenshen", on_top=False)
         on_open_chat = on_open_modern_settings = None
         idles = turns = moves = clicks = acts = []
         playback_speed = scale = 1.0
@@ -1868,7 +1866,6 @@ def test_modern_menu_adds_quick_launch_submenu_and_uses_saved_appearance(monkeyp
 
     class Config:
         values = {
-            "context_menu_template": "modern",
             "character": "shenshen",
             "on_top": True,
             "context_menu_appearance": {"theme": "dark", "density": "spacious", "corner_radius": 16},
@@ -2050,7 +2047,7 @@ def test_modern_animation_leaf_icons_are_loaded_only_when_category_opens(monkeyp
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="modern", character="shenshen", on_top=False)
+        cfg = Config(character="shenshen", on_top=False)
         on_open_chat = on_open_modern_settings = on_spawn_pet = None
         idles = ["idle-a"]
         turns = ["turn-a"]

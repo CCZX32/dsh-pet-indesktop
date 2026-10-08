@@ -67,7 +67,6 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "collision_sound_volume",
         "context_menu_appearance",
         "context_menu_layout",
-        "context_menu_template",
         "cursor_hidden_passthrough",
         "dialogue_last_scope",
         "dialogue_mode",
@@ -756,6 +755,43 @@ def test_music_sing_enabled_string_false_is_not_truthy(tmp_path):
     assert Config(base=tmp_path).data["music_sing_enabled"] is True
 
 
+# ------------------------------------------- 退役键的静默迁移（2026-10-08）
+def test_retired_menu_template_key_is_discarded_silently(tmp_path):
+    """旧版菜单退役后，配置里的菜单模板键必须静默丢弃：读入即弃 + 不再写回。
+
+    旧存档（含用户手改的 `"legacy"`）只能表现为"什么都没发生"：不抛异常、
+    不回退旧布局、不影响启动；下一次落盘时键从文件里消失。
+    """
+    cfg = _load_with(tmp_path, context_menu_template="legacy")
+    assert "context_menu_template" not in cfg.data
+    assert cfg.get("context_menu_template") is None
+    assert cfg.get("context_menu_template", "modern") == "modern"
+
+
+def test_retired_menu_template_key_is_not_written_back(tmp_path):
+    """丢弃必须落到盘上：save() 之后 config.json 里不再有这个键。"""
+    import json
+
+    cfg = _load_with(tmp_path, context_menu_template="modern")
+    assert cfg.save() is True
+    payload = json.loads((cfg.dir / "config.json").read_text(encoding="utf-8"))
+    assert "context_menu_template" not in payload
+
+
+def test_retired_menu_template_key_is_dropped_in_slot_config(tmp_path):
+    """每个 slot 配置同样丢弃（子肥鱼各有自己那份 config-slot-N.json）。"""
+    import json
+
+    slot_dir = tmp_path / "slot"
+    (slot_dir / config_mod.APP_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    _write_config(slot_dir, {"version": 4, "context_menu_template": "legacy"})
+    slot_path = slot_dir / config_mod.APP_DIR_NAME / "config.json"
+    slot_path.rename(slot_path.with_name("config-slot-3.json"))
+    cfg = Config(base=slot_dir, instance_id="slot-3")
+    assert "context_menu_template" not in cfg.data
+    assert cfg.get("context_menu_template") is None
+
+
 # ------------------------------------------------- 脏值家族：合法 JSON 不得阻断启动
 #
 # 全产品审查 C3（2026-10-08）：三族脏值都能让 ``Config()`` 构造直接抛异常，
@@ -787,9 +823,7 @@ def _island_coordinate_config(tmp_path, axis: str, value):
 
 def test_unhashable_enum_keys_fall_back_to_default(tmp_path):
     """枚举键撞 list/dict：成员判断不得抛 TypeError: unhashable type。"""
-    for i, (key, expected) in enumerate(
-        (("context_menu_template", "modern"), ("chat_ui_style", "modern"))
-    ):
+    for i, (key, expected) in enumerate((("chat_ui_style", "modern"),)):
         for j, dirty in enumerate(([1, 2], {"a": 1})):
             cfg = _load_with(tmp_path / f"{i}-{j}", **{key: dirty})
             assert cfg.data[key] == expected, f"{key}={dirty!r} 必须回落 {expected}"
@@ -797,8 +831,6 @@ def test_unhashable_enum_keys_fall_back_to_default(tmp_path):
 
 def test_unhashable_enum_keys_keep_legal_values(tmp_path):
     """非回归：合法枚举值原样保留（保护不能顺手吃掉合法值）。"""
-    assert _load_with(
-        tmp_path / "legacy", context_menu_template="legacy").get("context_menu_template") == "legacy"
     assert _load_with(
         tmp_path / "classic", chat_ui_style="classic").get("chat_ui_style") == "classic"
 

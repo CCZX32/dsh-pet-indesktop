@@ -86,7 +86,6 @@ _ROW_DEFAULT_PATHS: dict[str, str | tuple[str, float]] = {
     "menu_font": "context_menu_appearance.ui_font",
     "menu_font_size": "context_menu_appearance.ui_font_size",
     "menu_translucent": "context_menu_appearance.translucent",
-    "menu_template": "context_menu_template",
     "egg_enabled": "menu_easter_egg.enabled",
     "egg_title": "menu_easter_egg.title",
     "egg_hint": "menu_easter_egg.hint",

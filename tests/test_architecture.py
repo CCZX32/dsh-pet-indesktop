@@ -351,9 +351,11 @@ def test_pet_tree_has_zero_retired_layer_imports():
 # 守卫分三层，同多进程层先例：
 #   ① 退役文件必须**不存在**（删除刀不许被静默回退）；
 #   ② 整个 pet/ 树不得再 import 退役模块；
-#   ③ 退役符号（旧版建造器 / 旧模板装载 / 模板切换 / 模板键）不得在任何一行
-#      重新出现——包括函数体、字符串与注释：这些符号一旦回潮，就意味着
-#      "配置里那个键又有人读了"或"又有一棵菜单树按它分流"，正是本次删掉的东西。
+#   ③ 退役符号（旧版建造器 / 旧模板装载 / 模板切换）不得在任何一行重新出现——
+#      包括函数体、字符串与注释：这些符号一旦回潮，就意味着"又有一棵菜单树按
+#      模板分流"，正是本次删掉的东西。
+# 退役配置键另有一条更精确的守卫（test_retired_menu_template_key_confined_to_migration）：
+# 它必须还能被**迁移**引用一次（丢旧值），但不许再被任何消费方读/写。
 RETIRED_LEGACY_MENU_PATHS = (
     "context_menus/legacy.py",
     "context_menus/menu_styles/legacy.py",
@@ -371,6 +373,9 @@ RETIRED_LEGACY_MENU_SYMBOLS = (
     "normalize_template_id",
     "add_template_switch",
 )
+#: 已退役的右键菜单模板键：只允许出现在 config.py 的迁移函数里。
+RETIRED_MENU_TEMPLATE_KEY = "context_menu_template"
+RETIRED_MENU_TEMPLATE_MIGRATION = "pet/config.py::_migrate_menu_template_config"
 
 
 def test_retired_legacy_menu_files_are_gone():
@@ -379,6 +384,49 @@ def test_retired_legacy_menu_files_are_gone():
                if (PET_DIR / rel).exists()]
     assert not present, (
         "旧版右键菜单退役层文件回潮（已全量删除）：\n" + "\n".join(present)
+    )
+
+
+def _function_block(source: str, name: str) -> tuple[int, int, str]:
+    """按缩进切出一个方法体（返回 (起始行号, 结束行号, 文本)）。"""
+    lines = source.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"    def {name}"))
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("    def ") or lines[i].startswith("    @"):
+            end = i
+            break
+    return start, end, "\n".join(lines[start:end])
+
+
+def test_retired_menu_template_key_confined_to_migration():
+    """退役的模板键在 pet/ 里只许存活于迁移函数内（丢旧值的那一处）。
+
+    这是"读入即弃"的机器判据：别处再出现这个键，就等于又有一个消费方读它
+    （配置重新分叉）；迁移函数里出现则是必须的——旧存档得有个地方丢掉它。
+    """
+    config_src = (PET_DIR / "config.py").read_text(encoding="utf-8")
+    _, _, block = _function_block(config_src, "_migrate_menu_template_config")
+    assert RETIRED_MENU_TEMPLATE_KEY in block, (
+        f"{RETIRED_MENU_TEMPLATE_MIGRATION} 必须仍丢弃这个键（旧存档的去向）")
+    outside = [(no, line) for no, line in enumerate(config_src.splitlines(), 1)
+               if RETIRED_MENU_TEMPLATE_KEY in line]
+    block_start, block_end, _ = _function_block(config_src, "_migrate_menu_template_config")
+    offenders = [
+        f"pet/config.py:{no}: 退役键出现在迁移函数之外"
+        for no, _line in outside
+        if not (block_start + 1 <= no <= block_end)
+    ]
+    for path in sorted(PET_DIR.rglob("*.py")):
+        if path.name == "config.py":
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(rf"\b{RETIRED_MENU_TEMPLATE_KEY}\b", line):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "退役的右键菜单模板键回潮（只许在迁移函数里丢旧值）：\n"
+        + "\n".join(offenders)
     )
 
 

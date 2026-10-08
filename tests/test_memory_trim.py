@@ -842,8 +842,7 @@ def test_registry_registers_memory_trim_with_a_windows_gate(monkeypatch):
 def test_modern_menu_offers_memory_trim_on_windows_only(app, monkeypatch):
     from pet.context_menu import populate_context_menu
 
-    pet = _Pet({"context_menu_template": "modern", "context_menu_layout": None,
-                "context_menu_appearance": {}})
+    pet = _Pet({"context_menu_layout": None, "context_menu_appearance": {}})
     monkeypatch.setattr(shared_mod.autostart_mod, "is_enabled", lambda: False)
 
     monkeypatch.setattr(sys, "platform", "win32")

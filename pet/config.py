@@ -899,7 +899,6 @@ class Config:
             "lock_position": False,  # 锁定位置：桌宠不可拖动（点击仍有效）
             "shift_drag": False,  # 按住 SHIFT+左键才能拖动
             "pet_opacity": 100,  # 桌宠窗口不透明度 10-100
-            "context_menu_template": "modern",
             "context_menu_layout": None,
             "context_menu_appearance": dict(DEFAULT_CONTEXT_MENU_APPEARANCE),
             "menu_easter_egg": dict(DEFAULT_MENU_EASTER_EGG),
@@ -1218,7 +1217,6 @@ class Config:
             "cursor_hidden_passthrough",
             "drag_physics",
             "drop_gravity",
-            "context_menu_template",
             "dialogue_mode",
             "dialogue_phrases",
             "dialogue_last_scope",
@@ -1346,6 +1344,7 @@ class Config:
             self.data["file_interpret"] = _merge_file_interpret_data(raw["file_interpret"])
         self._migrate_click_sound_config(raw)
         self._migrate_decode_broker_config(raw)
+        self._migrate_menu_template_config(raw)
         self.data["version"] = 4
         self._migrate_plaintext_keys_to_keyring()
 
@@ -1454,6 +1453,26 @@ class Config:
             logging.getLogger(__name__).info("配置键 decode_broker_enabled 已退役（批5.3 共享解码改为进程内 fan-out），忽略旧值 %r", old)
             raw.pop("decode_broker_enabled", None)
         self._decode_broker_migrated = True
+
+    def _migrate_menu_template_config(self, raw: dict) -> None:
+        """2026-10-08：右键菜单模板键退役（旧版扁平菜单全量删除，只剩现代树）。
+
+        迁移语义（SETTINGS-CHANGE-GATES「旧 key 有明确去向」）：读旧值 → 记一次
+        info → 丢弃。**不报错、不回退、不写回**——旧存档里不论写着 ``legacy``、
+        ``modern`` 还是脏值，表现都是"什么都没发生"：菜单永远是现代树，键在下一次
+        save()（落盘的是 ``self.data``，键已不在其中）时从文件里消失。
+
+        主配置与每个 slot 配置各走一次本方法（所有实例都是同一条构造路径），因此
+        子肥鱼那份 ``config-slot-N.json`` 同样被清。
+        """
+        if getattr(self, "_menu_template_migrated", False):
+            return
+        if "context_menu_template" in raw:
+            logging.getLogger(__name__).info(
+                "配置键 context_menu_template 已退役（旧版右键菜单全量删除，"
+                "菜单恒为现代树），忽略旧值 %r", raw.get("context_menu_template"))
+            raw.pop("context_menu_template", None)
+        self._menu_template_migrated = True
 
     @staticmethod
     def _clean_phrase_events(events) -> dict:
@@ -1584,11 +1603,6 @@ class Config:
         self.data["self_talk_texts"] = _clean_self_talk_texts(self.data.get("self_talk_texts"))
         bubble_style = str(self.data.get("self_talk_bubble_style") or "")
         self.data["self_talk_bubble_style"] = bubble_style if bubble_style in SELF_TALK_BUBBLE_STYLES else DEFAULT_SELF_TALK_BUBBLE_STYLE
-        # 枚举键必须先 str() 再判成员：直接 `x not in {"legacy","modern"}` 遇到
-        # list/dict 抛 TypeError: unhashable type（json 合法脏值），Config() 构造
-        # 失败 → 启动崩、连独立设置页都进不去。同族写法一律抄这一行。
-        template = str(self.data.get("context_menu_template") or "")
-        self.data["context_menu_template"] = template if template in {"legacy", "modern"} else "modern"
         self.data["context_menu_layout"] = _clean_menu_layout_override(self.data.get("context_menu_layout"))
         self.data["context_menu_appearance"] = _clean_menu_appearance(self.data.get("context_menu_appearance"))
         self.data["menu_easter_egg"] = _clean_menu_easter_egg(self.data.get("menu_easter_egg"))
@@ -1596,6 +1610,9 @@ class Config:
         self.data["anim_menu_stay_open"] = _bool_or_default(
             self.data.get("anim_menu_stay_open"), False)
         self.data["quick_launch_apps"] = _clean_quick_launch_apps(self.data.get("quick_launch_apps"))
+        # 枚举键必须先 str() 再判成员：直接 `x not in {...}` 遇到 list/dict 抛
+        # TypeError: unhashable type（json 合法脏值），Config() 构造失败 → 启动崩、
+        # 连独立设置页都进不去。同族写法一律抄这一行。
         ui_style = str(self.data.get("chat_ui_style") or "")
         self.data["chat_ui_style"] = ui_style if ui_style in {"modern", "classic"} else "modern"
         self.data["character_profiles"] = _clean_character_profiles(self.data.get("character_profiles"))

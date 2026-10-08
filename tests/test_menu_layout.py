@@ -481,7 +481,6 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
 
     class FakeConfig:
         values = {
-            "context_menu_template": "modern",
             "context_menu_layout": None,
             "context_menu_appearance": {"theme": "light"},
             "character": "shenshen",
@@ -1704,7 +1703,13 @@ def test_settings_domains_use_semantic_sidebar_icons():
     )
 
 
-def test_settings_menu_page_persists_legacy_compatibility_mode(tmp_path, monkeypatch):
+def test_settings_menu_page_has_no_menu_version_selector(tmp_path, monkeypatch):
+    """「菜单版本（新版 / 旧版）」下拉已随旧版菜单退役：设置页不再有它，
+    保存也不再把已退役的模板键写回配置。
+
+    （旧用例 `test_settings_menu_page_persists_legacy_compatibility_mode` 断言
+    的正是"切到旧版并落盘"，随旧版菜单一起删除。）
+    """
     from PySide6.QtWidgets import QApplication
 
     from pet import modern_settings_dialog as settings_mod
@@ -1713,12 +1718,14 @@ def test_settings_menu_page_persists_legacy_compatibility_mode(tmp_path, monkeyp
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    config = Config(tmp_path)
+    dialog = ModernSettingsDialog(config, include_ai=False)
 
-    dialog.menu_template_select.setCurrentData("legacy")
+    assert not hasattr(dialog, "menu_template_select"), (
+        "菜单版本下拉必须随旧版菜单一起删除（切不回旧版了，留着就是死开关）")
     dialog.save_exit_button.click()
-
-    assert Config(tmp_path).get("context_menu_template") == "legacy"
+    assert "context_menu_template" not in config.data
+    assert "context_menu_template" not in Config(tmp_path).data
     app.processEvents()
 
 
