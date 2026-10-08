@@ -2059,44 +2059,76 @@ def test_legacy_config_value_dispatches_legacy_layout(monkeypatch):
     app.processEvents()
 
 
-def test_legacy_config_value_uses_legacy_settings_callback(monkeypatch):
-    from PySide6.QtGui import QPixmap
+def test_wired_petwindow_offers_settings_entry_in_both_menu_templates(tmp_path):
+    """正式装配 × 两种菜单模板：都有可触发的「桌宠设置」入口，且各只有一条。
+
+    真实装配：真实 ``PetWindow``（素材库用既有测试替身）+ **真实**
+    ``pet.app.PetInstance._wire_window``（宿主只补该方法读到的面）；两种模板各建一次菜单，
+    逐模板触发设置项，断言落到 ``_wire_window`` 注入的那条现代设置回调。
+
+    回归背景：``PetInstance._wire_window`` 把 ``on_open_legacy_settings`` 恒注入 None（旧版
+    设置对话框已退役），而 legacy 建造器只读这个槽位、不回退现代回调——切到旧版
+    菜单后窗口侧无处可开设置。overlay 拓扑靠 ``sprite_menu_facade`` 单独补了一条
+    设置项，于是同一个「旧版菜单」在两种正式拓扑能力不一致。
+
+    旧用例（``test_legacy_config_value_uses_legacy_settings_callback``）在测试内
+    手工往替身塞了一个生产从不存在的 legacy 回调，所以它断言的不是产品行为。
+    """
     from PySide6.QtWidgets import QApplication, QMenu
 
+    import pet.app as app_mod
     from pet.context_menu import populate_context_menu
+    from pet.config import Config
 
-    class Config:
-        def get(self, key, default=None):
-            return {"context_menu_template": "legacy", "character": "shenshen"}.get(key, default)
+    import tests.test_context_menu_lifecycle as lc
 
-    class Pet:
-        cfg = Config()
-        on_open_chat = None
-        on_open_chat_settings = None
-        on_open_legacy_settings = None
-        on_open_modern_settings = None
-        on_spawn_pet = None
-        idles = turns = moves = clicks = acts = []
-        playback_speed = scale = 1.0
-        drag_physics = no_move = False
+    class _Shell:  # AppShell 经 self.shell 路由的进程级方法（本用例不触发）
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
 
-        def __init__(self):
-            self.opened = []
-            self.on_open_legacy_settings = lambda: self.opened.append("legacy")
-            self.on_open_modern_settings = lambda: self.opened.append("modern")
+    class _Host:  # _wire_window 的最小宿主：只补它读到的属性
+        enable_chat = True
+
+        def __init__(self, config):
+            self.config = config
+            self.shell = _Shell()
+            self.opened: list[str] = []
+
+        def _slot_wrap(self, fn):
+            return fn
+
+        def open_modern_settings(self):
+            self.opened.append("modern")
 
         def __getattr__(self, name):
             return lambda *args, **kwargs: None
 
     app = QApplication.instance() or QApplication([])
-    pet = Pet()
-    menu = QMenu()
-    populate_context_menu(menu, pet)
-    # legacy 模板的「桌宠设置」走旧版设置回调（不再是现代设置）
-    next(action for action in menu.actions() if action.text() == "桌宠设置").trigger()
-    assert pet.opened == ["legacy"]
-    menu.close()
-    app.processEvents()
+    config = Config(base=tmp_path)
+    config.set("context_menu_template", "legacy")
+    config.save()
+    win = lc.PetWindow(lc.FakeLibrary(), config)
+    host = _Host(config)
+    app_mod.PetInstance._wire_window(host, win)
+    assert win.on_open_legacy_settings is None, "前置：正式接线不注入旧版设置回调"
+    try:
+        for template in ("legacy", "modern"):
+            config.set("context_menu_template", template)
+            menu = QMenu()
+            populate_context_menu(menu, win)
+            entries = [a for a in menu.actions() if a.text() == "桌宠设置"]
+            assert len(entries) == 1, (
+                f"{template} 模板的「桌宠设置」入口应恰有一条，实际 {len(entries)} 条")
+            assert entries[0].isEnabled()
+            before = len(host.opened)
+            entries[0].trigger()
+            assert host.opened[before:] == ["modern"], \
+                f"{template} 模板的设置入口未落到窗口的现代设置回调"
+            menu.close()
+            app.processEvents()
+    finally:
+        win.close()
+        app.processEvents()
 
 
 def test_runtime_pet_icon_crops_transparent_canvas_before_scaling():

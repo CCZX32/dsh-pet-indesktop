@@ -303,10 +303,11 @@ class SpriteMenuFacade:
 
     @property
     def on_open_legacy_settings(self):
-        """legacy 布局的旧设置槽：app.py 自 ae6838a 起恒注入 ``None``。
+        """legacy 布局的旧设置槽：``PetInstance._wire_window`` 恒注入 ``None``。
 
-        逐点对齐（否则 overlay 会凭空多出/少掉一个设置入口）；legacy 模板真正
-        可用的设置入口由 ``build_sprite_full_menu`` 追加的「桌宠设置」承担。
+        逐点对齐（否则 overlay 会凭空多出/少掉一个设置入口）；槽位为空时
+        ``build_legacy_menu`` 回退到 ``on_open_modern_settings``，legacy 模板的
+        「桌宠设置」因此仍落在下面那条逐 sprite 的开设置入口上。
         """
         return None
 
@@ -756,15 +757,12 @@ def build_sprite_full_menu(shell, sprite=None) -> QMenu:
         build_legacy_menu(menu, facade, template)
         install_responsive_menu_style(menu)
         install_stay_open_interaction(menu)
-        # 旧布局缺的两个入口由这里补（legacy.py 自身没有；删掉就是实机可见的
-        # 功能回退——用户当前菜单里这两项本来就在）：
-        # 1) 桌宠设置：app 把 on_open_legacy_settings 恒注入 None，旧布局没有
-        #    设置入口，不补则切到旧版后无处可开设置；
-        # 2) 隐藏桌宠：overlay 的隐藏语义（set_pet_visible）没有别的菜单入口。
-        settings_action = _add_action(
-            menu, "桌宠设置", None, facade.on_open_modern_settings,
-            close_on_trigger=True)
-        _move_before_quit(menu, settings_action)
+        # 旧布局缺的这个入口由这里补（legacy.py 自身没有；删掉就是实机可见的
+        # 功能回退——用户当前菜单里这项本来就在）：隐藏桌宠的 overlay 语义
+        # （set_pet_visible）没有别的菜单入口。
+        # 「桌宠设置」不在这里补：legacy 建造器已在旧版设置槽位为空时回退到
+        # on_open_modern_settings（见 pet/context_menus/legacy.py），再补一条
+        # 就是旧版菜单里两个同名入口。
         hide_action = _add_action(
             menu, "隐藏桌宠", None, facade.hide, close_on_trigger=True)
         if not _move_after_label(menu, "退出子肥鱼", hide_action):

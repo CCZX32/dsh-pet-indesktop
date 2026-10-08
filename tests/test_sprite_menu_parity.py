@@ -202,7 +202,7 @@ def _reference_window(config, *, chat=True):
     win.on_show_weather = lambda parent=None: None
     win.on_look_screen = win.look_at_screen if chat else None
     win.on_open_modern_settings = lambda: None
-    win.on_open_legacy_settings = None          # app.py:457 恒注入 None
+    win.on_open_legacy_settings = None          # PetInstance._wire_window 恒注入 None
     win.on_spawn_pet = lambda: None
     win.on_clear_spawned_pets = lambda: None
     win.on_check_update = lambda parent=None: None
@@ -545,6 +545,36 @@ def test_music_service_host_is_the_overlay_shell(tmp_path):
     finally:
         shell.shutdown_music_lyric()
         shell._delete_runtime_marker()
+
+
+# ------------------------------------------------- 桌宠设置入口（两种模板各一条）
+def test_settings_entry_present_once_in_both_templates(tmp_path):
+    """overlay 侧「桌宠设置」：两种模板都恰有一条，且点它按被点 sprite 打开设置。
+
+    回归背景：旧版菜单的设置入口此前由 ``sprite_menu_facade`` 在 ``build_legacy_menu``
+    之外单独追加（因为 app 把 ``on_open_legacy_settings`` 恒注入 None），而 legacy
+    建造器自身不回退现代回调——同一个「旧版菜单」在两种正式拓扑下能力不一致。修法
+    是让建造器回退到 ``on_open_modern_settings``，facade 的补丁随之删除；若补丁回流，
+    这里会看到两条入口。
+    """
+    for template in ("modern", "legacy"):
+        shell, instance, config = _make_overlay(tmp_path / template, template=template)
+        try:
+            menu = build_sprite_full_menu(shell)
+            entries = [action for action in menu.actions() if action.text() == "桌宠设置"]
+            assert len(entries) == 1, (
+                f"{template} 模板的「桌宠设置」入口应恰有一条，实际 {len(entries)} 条")
+            assert entries[0].isEnabled()
+            entries[0].trigger()
+            opened = [call for call in instance.shell.calls
+                      if call[0] == "open_settings_process"]
+            assert len(opened) == 1, f"{template}：入口未落到设置进程（实际 {opened}）"
+            identity = opened[0][1][0]
+            assert identity.config.instance_id == str(config.instance_id or ""), \
+                f"{template}：设置入口必须带上被点 sprite 的配置身份"
+            menu.close()
+        finally:
+            shell._delete_runtime_marker()
 
 
 # ---------------------------------------------------------------- 6. 点击路由

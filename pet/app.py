@@ -521,6 +521,9 @@ class PetInstance:
         win.on_check_update = self._slot_wrap(self.shell.check_update)
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
+        # 旧版设置对话框已退役：这个槽位保持 None，legacy 模板建造器据此回退到
+        # 下面那条现代设置回调（见 pet/context_menus/legacy.py），旧版菜单因此
+        # 仍有可开的设置入口。
         win.on_open_legacy_settings = None
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
         # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见

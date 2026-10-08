@@ -49,7 +49,12 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     """Build only the classic flat menu and its original settings entry."""
     chat = getattr(pet, "on_open_chat", None)
     chat_settings = getattr(pet, "on_open_chat_settings", None)
-    legacy_settings = getattr(pet, "on_open_legacy_settings", None)
+    # 设置入口：旧版设置对话框已退役（``PetInstance._wire_window`` 的
+    # ``on_open_legacy_settings`` 恒为 None），槽位为空时回退到现代设置回调——
+    # 否则切到旧版菜单后这个正式拓扑里根本没有可开的设置入口（overlay 侧此前
+    # 靠 sprite_menu_facade 单独补一条，两套拓扑的能力因此不一致）。
+    legacy_settings = (getattr(pet, "on_open_legacy_settings", None)
+                       or getattr(pet, "on_open_modern_settings", None))
     if chat is not None:
         add_action(menu, "AI 对话", None, chat, close_on_trigger=True)
     if chat_settings is not None:
