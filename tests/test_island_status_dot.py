@@ -253,8 +253,10 @@ def test_rendered_pixels_cover_all_five_states(tmp_path):
         image, bbox = _dot_box(island)
         x0, y0, x1, y1 = bbox
         cx = _center(bbox)[0]
-        # 盘内离开笔画中轴的像素必须是纯红（底色不是红就是没画红实心）
-        assert _near(image.pixelColor(x0 + 2, y0 + 3), _ERROR_RED, tol=30), \
+        # 盘内离开笔画中轴的像素必须是纯红（底色不是红就是没画红实心）。
+        # 取样点取 y0+5 而不是 y0+3：珠感高光盖住了上半约 1/3（y0+1..y0+4），
+        # 那里的红已被白 α70 提亮，不再是"盘内底色"这个待测成分。
+        assert _near(image.pixelColor(x0 + 2, y0 + 5), _ERROR_RED, tol=30), \
             "错误点底色必须是红 #F2777A"
         inks = [image.pixelColor(cx, y).blue() for y in range(y0, y1 + 1)]
         assert max(inks) > 170, "感叹矢量没画出来（中轴上没有近白笔画）"

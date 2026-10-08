@@ -59,6 +59,14 @@ _STRIP_SIDE = 64  # 左右停靠时竖条的长度
 #: scale 1.03 / squish 鼓出吃掉，向外扩会被窗口硬切。最低层底边 38+4=42，
 #: 放大到 1.03 后 ≈42.6 < 44，安全。
 _CAPSULE_SHADOW_LAYERS = ((1.0, 1.0, 28), (2.0, 2.5, 16), (3.0, 4.0, 8))
+#: 胶囊顶部光泽（sheen）：受光的一道淡白带，画在内容之下、外壳之上。
+#: 起点从 ``rect.top()+_SHEEN_TOP_PX`` 起——上面两行已被外描边（keyline）与软陶笔
+#: 占住（那两行是既有像素契约的采样行，光泽不得改它们的值）。亮风跳过：白底上
+#: 白光泽等于没有，只会把顶部那两道白笔糊宽。
+_SHEEN_TOP_PX = 3.0      # 从 rect.top()+3 起，避开 keyline 行和 bevel 取样行
+_SHEEN_SPAN = 0.42
+#: 按 style 分档的峰值 alpha（不乘 _opacity：外壳质感不随内容透明度走，同 keyline）
+_SHEEN_ALPHA = {"dark": 14, "light": 0, "glass": 34}
 _CARD_WIDTH = 340      # 卡片宽下限（沿用现状视觉记忆）
 _CARD_WIDTH_MAX = 420  # 卡片宽上限（k3 §5.1：防长来源说明把卡片拉成横幅）
 _CARD_AUTO_COLLAPSE_MS = 15_000
@@ -100,7 +108,7 @@ _DOCK_EDGES = ("none", "top", "bottom", "left", "right")
 # 主题色预设（设置页可换）：图标底圈 / 事件闪光 / 停靠描边共用
 _ACCENT_PRESETS = {
     "blue": "#40b8ff",
-    "green": "#30a46c",
+    "green": "#34c77b",
     "purple": "#9b7bff",
     "pink": "#ff7ab8",
     "orange": "#ffa94d",
@@ -133,6 +141,16 @@ _DOT_DONE_COLOR = "#50dc78"    # 完成绿（沿用旧「可见绿灯」色值�
 _DOT_ERROR_COLOR = "#f2777a"   # 错误红（与告警色体系的 crit 同色）
 _DOT_GLYPH_COLOR = "#ffffff"   # 感叹笔画色（红底上两种主题都清晰）
 _DOT_GLYPH_W_RATIO = 0.17      # 感叹笔画宽 / 点径（8px 点 → 1.36px）
+#: 珠感高光：实心/感叹点画完后叠一道上半椭圆高光（空心环不画——环内本来是空的，
+#: 高光会把环画回实心）。左内收 1.5px 与点径同款留边，高 0.38×点径。
+_DOT_HIGHLIGHT_INSET_X = 1.5
+_DOT_HIGHLIGHT_TOP = 1.0
+_DOT_HIGHLIGHT_H_RATIO = 0.38
+_DOT_HIGHLIGHT_ALPHA = 70
+#: 头像底圈的内侧细光圈（把底圈从"一块色斑"勾成"一枚圆章"）：暗/玻璃底白、
+#: 亮底黑（白圈在白底上不可见）。色随 style 分档，所以 style 必须进内容缓存键。
+_ICON_RING_DARK = (255, 255, 255, 46)
+_ICON_RING_LIGHT = (0, 0, 0, 20)
 
 # ---- 段数值告警色体系（P2 Slice E2，裁决稿 §三 ops5.5）----
 # 两级告警色只染**数值**（含 E4 单位盒跟随值色）：阈值与滞回在 island_segments
@@ -425,7 +443,7 @@ class _CardStatusDot(QWidget):
 #: L5 卡片辅助文字（单位全称·来源·更新时间·最近消息·状态文字，k3 §5.1 的 11px 档）。
 _FONT_LAYERS = {
     "primary": (14, QFont.Weight.DemiBold),
-    "value": (13, QFont.Weight.Medium),
+    "value": (13, QFont.Weight.DemiBold),
     "name": (12, QFont.Weight.Normal),
     "label": (10, QFont.Weight.Normal),
     "aux": (11, QFont.Weight.Normal),
@@ -2635,10 +2653,13 @@ class DynamicIsland(QWidget):
             return (QColor(255, 255, 255, round(242 * opacity)),
                     QColor(31, 35, 40), QColor(107, 114, 128))
         if style == "glass":
+            # 四停点：0/1 是玻璃的上下表面，0.48/0.52 的折线是"玻璃折射线"
+            # ——中间那道亮暗交替让渐变压出一道折射边，三段插值各管一段。
             gradient = QLinearGradient(0, 0, 0, self.height())
-            gradient.setColorAt(0.0, QColor(255, 255, 255, round(196 * opacity)))
-            gradient.setColorAt(0.5, QColor(230, 242, 255, round(150 * opacity)))
-            gradient.setColorAt(1.0, QColor(255, 255, 255, round(210 * opacity)))
+            gradient.setColorAt(0.00, QColor(255, 255, 255, round(214 * opacity)))
+            gradient.setColorAt(0.48, QColor(234, 244, 255, round(168 * opacity)))
+            gradient.setColorAt(0.52, QColor(220, 235, 255, round(146 * opacity)))
+            gradient.setColorAt(1.00, QColor(244, 249, 255, round(196 * opacity)))
             return gradient, QColor(35, 45, 60), QColor(90, 105, 125)
         return (QColor(28, 30, 38, round(235 * opacity)),
                 QColor(235, 238, 245), QColor(160, 170, 190))
@@ -2662,6 +2683,16 @@ class DynamicIsland(QWidget):
         if style == "glass":
             return QColor(35, 45, 60, 36)
         return QColor(255, 255, 255, 36)
+
+    def _icon_ring_color(self) -> QColor:
+        """头像底圈的内侧细光圈色：暗/玻璃底白 α46、亮底黑 α20。
+
+        亮底给白圈等于没画（白圈落在亮色底圈上分不出来），所以按 style 分支给
+        常量——与 ``_keyline_color``/``_bevel_colors`` 同款口径。它随 style 变化，
+        所以 ``style`` 必须进内容缓存键（见 :meth:`_content_cache`）。
+        """
+        style = str(self._cfg.get("style") or "dark")
+        return QColor(*(_ICON_RING_LIGHT if style == "light" else _ICON_RING_DARK))
 
     def _alert_color(self, severity: str) -> QColor | None:
         """告警级的**数值**色（``""``/未识别 → None，表示不染色）。
@@ -2799,6 +2830,15 @@ class DynamicIsland(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(pen)
             painter.drawPath(_status_error_glyph_path(rect))
+        if shape != _DOT_HOLLOW:
+            # 珠感高光：实心/感叹点画完后在**上半约 1/3** 叠一道半椭圆白高光，
+            # 点从"一块纯色圆盘"变成"一颗珠子"。空心环不画——环内本来是空的，
+            # 高光会把环画回实心（形状通道就废了）。尺寸仍是 8px：高光全在点内。
+            painter.setBrush(QColor(255, 255, 255, _DOT_HIGHLIGHT_ALPHA))
+            painter.drawEllipse(QRectF(
+                rect.x() + _DOT_HIGHLIGHT_INSET_X, rect.y() + _DOT_HIGHLIGHT_TOP,
+                rect.width() - 2 * _DOT_HIGHLIGHT_INSET_X,
+                rect.height() * _DOT_HIGHLIGHT_H_RATIO))
         # 复位画笔/画刷：调用点后面还可能画别的东西
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -3071,6 +3111,9 @@ class DynamicIsland(QWidget):
                    seg.box_text, seg.elide_px)
                   for seg in segments),
             self._accent_color().name() if icon else "",
+            # 风格显式进键：头像底圈的内侧细光圈按 style 分档（暗/玻璃白、亮底黑），
+            # 而"只有图标"时上面那些颜色项全是空串——不显式进键就会跨风格命中旧位图
+            str(self._cfg.get("style") or "dark"),
             primary_color.name() if name else "",
             primary_text_color.name() if segments else "",
             secondary_color.name() if segments else "",
@@ -3098,8 +3141,15 @@ class DynamicIsland(QWidget):
         baseline = _CAPSULE_HEIGHT / 2.0 + _BASELINE_DY
         painter.setPen(Qt.PenStyle.NoPen)
         if icon:
+            circle = QRectF(x, (_CAPSULE_HEIGHT - _ICON_PX) / 2, _ICON_PX, _ICON_PX)
             painter.setBrush(self._accent_color())
-            painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - _ICON_PX) / 2, _ICON_PX, _ICON_PX))
+            painter.drawEllipse(circle)
+            # 内侧 1px 细光圈：把底圈从"一块色斑"勾成"一枚圆章"（暗/玻璃白、
+            # 亮底黑）。画在头像之下——头像照旧盖住圈心
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(self._icon_ring_color(), 1))
+            painter.drawEllipse(circle.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.setPen(Qt.PenStyle.NoPen)
             if icon_pm is not None:
                 # 头像居中画进底圈：drawPixmap 不碰文字/emoji 字体栈
                 painter.drawPixmap(
@@ -3135,13 +3185,27 @@ class DynamicIsland(QWidget):
         for placement in placements:
             seg = placement.seg
             if placement.divider_x is not None:
-                # 段间竖线：1×14px、槽位正中；首段前、chip 前与状态点前都不画
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(self._divider_color())
-                painter.drawRect(QRectF(
+                # 段间竖线：1×14px、槽位正中；首段前、chip 前与状态点前都不画。
+                # 竖直渐变：两端 alpha=0、30%/70% 处才是本色——线头收进段间空隙，
+                # 竖线不再是一根两端硬切的 1px 柱子（尺寸与落位一个字节没变）
+                divider_color = self._divider_color()
+                divider_rect = QRectF(
                     placement.divider_x,
                     (_CAPSULE_HEIGHT - _DIVIDER_H_PX) / 2.0,
-                    _DIVIDER_W_PX, _DIVIDER_H_PX))
+                    _DIVIDER_W_PX, _DIVIDER_H_PX)
+                divider = QLinearGradient(
+                    0, divider_rect.top(), 0, divider_rect.bottom())
+                divider.setColorAt(0.0, QColor(
+                    divider_color.red(), divider_color.green(),
+                    divider_color.blue(), 0))
+                divider.setColorAt(0.3, divider_color)
+                divider.setColorAt(0.7, divider_color)
+                divider.setColorAt(1.0, QColor(
+                    divider_color.red(), divider_color.green(),
+                    divider_color.blue(), 0))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(divider)
+                painter.drawRect(divider_rect)
             if seg.kind == island_layout.KIND_CHIP:
                 # +N chip：描边无填充、圆角 9、高 18，文字居中且无竖线（K3 §3.3）
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -3258,6 +3322,26 @@ class DynamicIsland(QWidget):
             painter.setPen(QPen(self._keyline_color(), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5)
+
+        # 顶部光泽（sheen）：受光的一道淡白带，画在外壳之上、内容之下——每帧一笔、
+        # 不进内容缓存（与 _paint_bevel 同口径）。裁剪到胶囊外形：光泽是"表面受光"，
+        # 不能溢出轮廓（squish 鼓出时 rect 已变宽，裁剪切跟着变）。亮风 alpha=0 跳过。
+        sheen_alpha = _SHEEN_ALPHA.get(style, 0)
+        if sheen_alpha:
+            sheen_rect = QRectF(
+                rect.left(), rect.top() + _SHEEN_TOP_PX, rect.width(),
+                rect.height() * _SHEEN_SPAN - _SHEEN_TOP_PX)
+            sheen = QLinearGradient(0, sheen_rect.top(), 0, sheen_rect.bottom())
+            sheen.setColorAt(0.0, QColor(255, 255, 255, sheen_alpha))
+            sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, radius, radius)
+            painter.setClipPath(clip)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(sheen)
+            painter.drawRect(sheen_rect)
+            painter.restore()
 
         # 内容层（图标/名称/信息/状态灯）：缓存位图 blit——文字逐帧重画是
         # 实测大头（见 _content_cache）；内容绝不参与形变，口径与原"按未
