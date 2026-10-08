@@ -10,9 +10,19 @@ import logging
 import time
 import urllib.request
 
+import pytest
+
 from pet import music_lyric
 from pet.music_lyric import Lyrics, LyricLine, parse_lrc
 from pet.music_lyric_controller import LyricTracker
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """真窗口用例需要 QApplication（其余用例只用 QObject 替身）。"""
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
 
 
 # ---------------------------------------------------------------- parse_lrc
@@ -1175,7 +1185,15 @@ def test_estimated_progress_hint_shown_once_per_session(monkeypatch):
             self.alerts: list = []
 
         def show_alert(self, text, **kw):
+            # 替身必须建立**真实的占用态**：控制器的 `_bubble_blocked()` 读的就是
+            # ``_alert_current``，只记一笔文本会让"提醒正挂着 → 歌词让路"的整条
+            # 路径永远走不到（B4 的回归就藏在这个缺口后面）。
             self.alerts.append(text)
+            self._alert_current = {"id": kw.get("alert_id", ""), "text": str(text)}
+
+        def resolve_alert(self, alert_id):
+            if (self._alert_current or {}).get("id") == alert_id:
+                self._alert_current = None
 
     _patch_clock(monkeypatch, 100.0)
     win = _HintWin()
@@ -1210,6 +1228,88 @@ def test_no_hint_when_player_reports_progress(monkeypatch):
 
     ctrl._start_track(("夜曲", "周杰伦"), "夜曲", "周杰伦", _playback(30.0), 100.0)
     assert win.alerts == [], win.alerts
+
+
+# --------------------------------------------- 引导让位（真窗口 + 真提醒队列）
+#
+# B4：「首首歌词到位即收起进度引导」曾经**不可达**——`_on_lyrics_ready` 先跑
+# `_bubble_blocked()`（`_alert_current` 非空即真）并 return，resolve 排在它后面。
+# 引导气泡自身就占着 `_alert_current`，于是这条 resolve 永远走不到，用户第一首歌
+# 12 秒内零帧歌词。故本组用例用**真 PetWindow + 真 window_alerts 队列**，而不是
+# 只记一笔调用的替身。
+
+def _real_window_controller(qapp, tmp_path, monkeypatch):
+    """真 PetWindow（含真提醒队列 + 真气泡）+ 真控制器（取词线程打桩，保持离线）。
+
+    返回 ``(win, ctrl, pushes)``：``pushes`` 记录 ``win.show_bubble`` 的每一次
+    真实调用（探针，不是打桩——原方法照跑），用来断言"歌词确实上屏了"。
+    刻意**不**替换气泡替身：`resolve_alert` 靠真 `dismiss()` 把气泡隐藏，控制器
+    的 `_bubble_taken_by_other` 又据此判定占用位是否还在——换成 isVisible 恒真的
+    假气泡就测不到"引导收起后歌词立即上屏"。
+    """
+    import pet.music_lyric_controller as mod
+    from tests.pet_window_fakes import make_pet_window
+
+    _patch_clock(monkeypatch, 100.0)
+    win = make_pet_window(tmp_path)
+    ctrl = mod.MusicLyricController(win)
+    ctrl._tracker.lead = 0.0
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+
+    pushes: list[dict] = []
+    real_show = win.show_bubble
+
+    def _spy(text, duration_ms=3200, subtitle=None, **kwargs):
+        pushes.append({"text": str(text), "subtitle": subtitle})
+        return real_show(text, duration_ms, subtitle, **kwargs)
+
+    monkeypatch.setattr(win, "show_bubble", _spy)
+    return win, ctrl, pushes
+
+
+def test_first_song_lyrics_resolve_the_progress_estimate_hint(qapp, tmp_path, monkeypatch):
+    """首首歌词到位 → 引导被精确收起 + 歌词立即刷新（修复前：引导仍占位、零气泡）。"""
+    win, ctrl, pushes = _real_window_controller(qapp, tmp_path, monkeypatch)
+    key = ("夜曲", "周杰伦")
+    try:
+        ctrl._start_track(key, "夜曲", "周杰伦", _playback(None), 100.0)
+        assert win._alert_current is not None
+        assert win._alert_current["id"] == "music-lyric-estimated", win._alert_current
+
+        pushes.clear()
+        ctrl._on_lyrics_ready(key, Lyrics(
+            lines=(LyricLine(0.0, "第一句"), LyricLine(5.0, "第二句"))))
+
+        assert win._alert_current is None, "进度引导必须被收起（否则歌词 12s 内上不了屏）"
+        assert pushes, "歌词必须立即刷新（修复前 _bubble_blocked 早退，一次都没送）"
+        assert pushes[-1]["text"] == "第一句", pushes
+        assert pushes[-1]["subtitle"] == "我在唱《夜曲》"
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_other_alerts_are_not_resolved_by_lyrics_arriving(qapp, tmp_path, monkeypatch):
+    """非回归：收起只认 music-lyric-estimated 这一条 id，队列里的其它提醒不动。"""
+    win, ctrl, pushes = _real_window_controller(qapp, tmp_path, monkeypatch)
+    key = ("夜曲", "周杰伦")
+    try:
+        ctrl._start_track(key, "夜曲", "周杰伦", _playback(None), 100.0)
+        win.resolve_alert("music-lyric-estimated")   # 先清掉引导，换成别人的提醒
+        win.show_alert("审批：需要你点一下", sticky=True, buttons=[("同意", lambda: None)],
+                       alert_id="approval-1", priority=0, alert_type="approval")
+        current = win._alert_current
+        assert current is not None and current["id"] == "approval-1"
+
+        pushes.clear()
+        ctrl._on_lyrics_ready(key, Lyrics(
+            lines=(LyricLine(0.0, "第一句"), LyricLine(5.0, "第二句"))))
+
+        assert win._alert_current is current, "别人的提醒不得被歌词到位顺手收掉"
+        assert pushes == [], "审批占着气球时歌词必须让路"
+    finally:
+        win.close()
+        qapp.processEvents()
 
 
 def test_resync_ignored_when_no_lyrics(monkeypatch):

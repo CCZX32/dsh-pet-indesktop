@@ -999,13 +999,18 @@ class MusicLyricController(QObject):
         # 不能让它冒充真值，否则「歌词对齐」会被误判为没必要而整组置灰。
         self._tracker.load(list(lyrics.lines), now=now, position=position,
                            reported=reported is not None)
+        # 歌词到位时若「进度估算提示」还占着气泡（首首那 12s），歌词优先——提示是
+        # 一次性引导，歌词是功能本体。用既有 resolve_alert 精确收起那一条，不误伤
+        # 队列里的其它提醒。
+        #
+        # **必须排在 `_bubble_blocked()` 早退之前**：那条提示自己就占着
+        # `_alert_current`，而 `_bubble_blocked()` 把"正挂着提醒"判为让路——早退先
+        # 跑的话这段 resolve 永远不可达（死代码），用户第一首歌 12 秒零帧歌词。
+        current = getattr(self.win, "_alert_current", None)
+        if current is not None and current.get("id") == "music-lyric-estimated":
+            window_alerts.resolve_alert(self.win, "music-lyric-estimated")
         if self._bubble_blocked():
             return
-        # 歌词到位时若「进度估算提示」还占着气泡（首首那 12s），歌词优先——
-        # 提示是一次性引导，歌词是功能本体：用既有 resolve_alert 精确收起
-        # 那一条（不误伤队列里的其它提醒），否则用户第一首歌 12 秒零帧歌词。
-        if getattr(self.win, "_alert_current", None) is not None and                 self.win._alert_current.get("id") == "music-lyric-estimated":
-            window_alerts.resolve_alert(self.win, "music-lyric-estimated")
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。
         index = self._tracker.advance(now)
         self._last_lyric = self._tracker.text_at(index) if index >= 0 else ""
