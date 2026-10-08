@@ -25,9 +25,10 @@
   （``_quiet_muted``，判据仍是 ``quiet_mode``），预合成一并跳过（省一次
   TTS 网络请求），被丢弃的只有声音——气泡语义不变（照旧进暂存队列）；
   点击自言自语属交互应答（issue #208），在调用侧显式豁免（豁免随队携带）。
-  免打扰丢弃的那次合成不起播、也就没有 EndOfMedia 媒体终止事件，待播队列
-  随这次丢弃一并出队（``_drain_pending_speech``）：豁免的那条照常出声，
-  尊重免打扰的那条被 ``_fire`` 的闸再丢一次。
+  凡是**合成完成却没起播**的结局（预合成、免打扰丢弃、合成失败、已停止）都没有
+  EndOfMedia 媒体终止事件，待播语音在 ``_on_synthesized`` 的 finally 收口里统一
+  出队（``_drain_pending_speech``，唯一出队口）：豁免的那条照常出声，尊重免打扰的
+  那条被 ``_fire`` 的闸现读再丢一次。
 """
 
 from __future__ import annotations
@@ -673,7 +674,19 @@ class VoiceChimeService:
         finally:
             # 任何结局（完成/失败/已停止）都必须结算排队项：_stopped 时
             # _drain 内部丢弃，其余情况补播——不能让到点报时静默消失。
+            # 顺序刻意为「先 _drain_queued_fire」：待补播的报时若在此起了合成，
+            # 待播 speech 会被 _fire 的 busy 门重新入队（豁免随队携带），等下一轮
+            # 出队——报时优先，且条目不丢。
             self._drain_queued_fire()
+            # 统一出队口：_handle_synthesized 起了播（_play_only/_play_and_bubble）
+            # → 通道已被接管 → 跳过（EndOfMedia 会照常出队）；凡是**没起播**的完成
+            # 结局（预合成、免打扰丢弃、合成失败、已停止）→ 通道空出却没有
+            # EndOfMedia → 在此就地出队（豁免的被 _fire 照常播，尊重免打扰的被
+            # _fire 现读再丢一次，_stopped 由 _drain_pending_speech 内部丢弃）。
+            # 判据用 _player_engaged 而非 _player_busy：本行正是"刚 play() 完"那一刻，
+            # playbackState 还没转成 PlayingState，后者会误判为通道空出（见该方法）。
+            if not self._player_engaged():
+                self._drain_pending_speech()
 
     def _drain_queued_fire(self) -> None:
         """补播被 busy 门拦下的排队播报（若有）；stop() 后一律丢弃。"""
@@ -726,12 +739,8 @@ class VoiceChimeService:
             logger.debug("免打扰期间静音，丢弃合成结果（气泡照旧）：%s", Path(path).name)
             if role != "speak":
                 self._bubble(self._pending_bubble if self._pending_bubble is not None else text)
-            # 这次完成不起播 = 音频通道空出，待播队列在此出队：不起播就没有
-            # EndOfMedia 媒体终止事件，_on_media_status 不会来（详见
-            # _drain_pending_speech）。豁免的那条被 _fire 照常播放；尊重免打扰的
-            # 那条由 _fire 的闸现读再丢一次——两种结局都正确，且队列字段被消费
-            # 清空，不留到后续偶然事件才吐出来。
-            self._drain_pending_speech()
+            # 这次完成不起播 = 通道空出，待播 speech 由 _on_synthesized 的 finally
+            # 统一出队（本次是其中之一，见那里）。此处不得再调一次：双出队路径。
             return
         if role == "speak":
             # 外部播报（节日提醒）：只出声，气泡由调用方自己展示。
@@ -791,6 +800,33 @@ class VoiceChimeService:
         except Exception:
             return False
 
+    def _player_engaged(self) -> bool:
+        """音频通道是否已被某一源**接管**（正在出声，或刚起播、媒体仍在加载）。
+
+        比 :meth:`_player_busy` 多认一个 ``LoadingMedia``：``playbackState`` 判不了
+        "刚起播"。实机实测（QMediaPlayer + QAudioOutput，offscreen）——``setSource``
+        后立刻 ``play()``，那一刻 ``playbackState`` 仍是 ``StoppedState``、
+        ``mediaStatus`` 为 ``LoadingMedia``，约 300ms 后才转成
+        ``PlayingState``/``BufferingMedia``。而 ``_on_synthesized`` 的 finally 正是在
+        "刚 play() 完"这一刻跑的：按 ``_player_busy`` 判会把刚接管的通道误判成空出，
+        于是待播语音当场抢播、把刚起播的那一段掐掉。
+
+        只给那个收口用：``speak``/``play_file`` 的"通道忙"判据语义不同，未改。
+        """
+        if self._player is None:
+            return False
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+
+            return (
+                self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                or self._player.mediaStatus() == QMediaPlayer.MediaStatus.LoadingMedia
+            )
+        except Exception:
+            # 拿不到判据（QtMultimedia 缺失 / 测试替身没有这些方法）时按"未接管"
+            # 处理：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
+            return False
+
     def _on_media_status(self, status) -> None:
         """媒体状态变化：终止态（播完/坏媒体）即"通道空出"，排空待播队列。
 
@@ -807,11 +843,15 @@ class VoiceChimeService:
     def _drain_pending_speech(self) -> None:
         """待播队列出队：补播那一条（若有）并消费掉队列字段。
 
-        **与媒体终止回调 :meth:`_on_media_status` 共用**——终止态是"通道空出"的
-        本征信号，但"合成完成却不起播"的路径同样让通道空出：合成结果因免打扰被
-        丢弃时不起播，于是没有 EndOfMedia 终止事件，待播队列不能指望那个事件来
-        出队（否则免打扰期间在飞的那次合成一完成，排在后面的豁免语音就无声滞留，
-        直到被后续偶然事件覆盖）。调用方负责判定"这一次结算确实不起播"。
+        两个调用点，对应**通道已空出**的两种来源：
+
+        - :meth:`_on_media_status` 的终止态（播完/坏媒体）——本征信号；
+        - :meth:`_on_synthesized` 的 finally 收口——凡是**合成完成却没起播**的
+          结局（预合成、免打扰丢弃、合成失败、已停止）都不会有 EndOfMedia，
+          待播语音不能指望那个事件来出队，否则会无声滞留到被后续偶然事件覆盖
+          （豁免的那条被 ``_fire`` 照常播，尊重免打扰的那条被 ``_fire`` 的闸
+          现读再丢一次，``_stopped`` 在这里直接丢弃）。收口处已用
+          ``_player_engaged()`` 排除"确实起了播"的那些——它们由 EndOfMedia 出队。
         """
         pending = self._pending_speech
         self._pending_speech = None

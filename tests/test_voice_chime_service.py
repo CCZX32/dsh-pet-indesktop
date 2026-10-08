@@ -928,10 +928,11 @@ def test_pending_speech_is_rechecked_against_quiet_mode_on_dequeue(tmp_path, mon
 def test_discarded_synthesis_drains_pending_speech_with_exemption(tmp_path, monkeypatch):
     """合成结果因免打扰被丢弃时，待播队列必须在同一次结算里出队。
 
-    实测缺陷（2026-10-08）：不起播就没有 EndOfMedia 媒体终止事件，而待播队列
-    唯一的出队入口是 ``_on_media_status``（该事件的回调）——免打扰期间在飞的合成
-    一完成，排在后面的豁免语音（交互应答，respect_quiet=False）就无声滞留，直到
-    被后续偶然事件覆盖为止。
+    实测缺陷（2026-10-08）：不起播就没有 EndOfMedia 媒体终止事件，而待播队列的
+    出队口只有 ``_on_media_status``（该事件的回调）——免打扰期间在飞的合成一完成，
+    排在后面的豁免语音（交互应答，respect_quiet=False）就无声滞留，直到被后续偶然
+    事件覆盖为止。出队口随后收敛到 ``_on_synthesized`` 的 finally 收口（凡是不起播
+    的完成结局都在那里结算），本用例锁的是行为，不锁调用点。
 
     链路全部走真实入口，不手工清 ``_busy``、不人工发终止事件。
     """
@@ -981,6 +982,174 @@ def test_discarded_synthesis_drains_quiet_pending_without_playing(tmp_path, monk
     assert service._pending_speech is None, "出队消费清空（不滞留到后续偶然事件）"
     assert service._pending_respect_quiet is True
     assert len(_WorkerSpy.instances) == 1, "被闸丢弃的那条不得再起一路合成"
+
+
+def test_precache_completion_drains_pending_speech_with_exemption(tmp_path, monkeypatch):
+    """预合成完成同样"不起播"：待播队列必须在这一次结算里出队。
+
+    实测缺陷（2026-10-08，同族最后一条）：预合成分支只记录 ``_precache_path``
+    就 return，既不起播也不产生 EndOfMedia。复现链：报时点前 60s 预合成在飞
+    （``_busy=True``）→ 用户开启免打扰 → 点击自言（无本地缓存）以
+    ``respect_quiet=False`` 入队 → 预合成完成不起播 ⇒ 豁免语音滞留；报时点到时
+    若仍免打扰，报时也被丢弃不起播，依然无人出队。
+
+    链路全部走真实入口，不手工清 ``_busy``、不人工发终止事件。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    text = "今天也要认真工作呀。"
+    cached = _cache_mp3(service, text)
+
+    # 09:59:30 距 10:00 只 30s（在 60s 预合成窗口内）→ 预合成在飞
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+    assert len(_WorkerSpy.instances) == 1, "预合成在飞（通道被占）"
+    precache_worker = _WorkerSpy.instances[0]
+
+    _quiet().start(15)                       # 报时点之前用户开了免打扰
+    assert service.speak(text, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == text, "豁免的那条照旧进队列（入队时不该被闸掉）"
+
+    precache_worker.finish()                 # 预合成完成：只记路径、不起播
+    _qapp().processEvents()
+
+    assert _quiet().suppression_active() is True, "本用例前提：出队那一拍仍在免打扰"
+    assert service._player.plays == 1, "不起播的完成结局必须让豁免语音当场出队出声"
+    assert [Path(s).name for s in service._player.sources] == [cached.name]
+    assert service._pending_speech is None, "队列字段随这次出队被消费清空"
+    assert service._pending_respect_quiet is True, "出队消费后复位为默认值"
+
+
+def test_precache_completion_records_path_without_playing(tmp_path, monkeypatch):
+    """预合成本身的语义不变：完成只记录缓存路径，不播放报时音频、不碰待播队列。"""
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+    worker = _WorkerSpy.instances[0]
+
+    worker.finish()
+    _qapp().processEvents()
+
+    assert service._precache_path == str(worker.out_path), "预合成完成只记录缓存路径"
+    assert service._player.sources == [], "预合成不得出声（到点由 _fire 播缓存）"
+    assert service._player.plays == 0
+    assert service._pending_speech is None
+
+
+def test_failed_synthesis_drains_pending_speech(tmp_path, monkeypatch):
+    """合成失败同样不起播：待播队列在 error 结算里出队，不滞留。
+
+    error 分支自己的日志与气泡行为不在本用例范围内（那里一行未动），本用例锁的
+    是"失败结算也必须让通道上排队的那一条落地"。
+    """
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    first = "今天是中秋节。"
+    second = "今天也要认真工作呀。"
+    cached = _cache_mp3(service, second)
+
+    assert service.speak(first, log_tag="节日提醒") is True
+    assert service.speak(second, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == second, "通道忙 → 豁免的那条进队列"
+
+    _WorkerSpy.instances[0].finish(error="synthesis boom")
+    _qapp().processEvents()
+
+    assert service._pending_speech is None, "失败结算同样要消费队列字段（不滞留）"
+    assert service._player.plays == 1, "豁免的那条被出队并播放"
+    assert [Path(s).name for s in service._player.sources] == [cached.name]
+    assert any("合成失败" in msg for msg, _ms in app.win.bubbles), "error 气泡语义不变"
+
+
+def test_completion_that_started_playback_leaves_queue_to_end_of_media(tmp_path, monkeypatch):
+    """收口的另一半：这一次完成**确实起了播**时，队列必须留给 EndOfMedia。
+
+    行为契约是 ``speak()`` 的「通道忙时不打断、不叠音，当前一段播完再接上」。
+    实机实测（QMediaPlayer + QAudioOutput，offscreen）：``setSource`` 后立刻
+    ``play()`` 那一刻 ``playbackState`` 仍是 ``StoppedState``、``mediaStatus`` 才是
+    ``LoadingMedia``（约 300ms 后才转 PlayingState）——而收口就在那一刻跑，若按
+    ``playbackState`` 判会把刚接管的通道误判成空出，待播语音当场抢播、把刚起播的
+    那一段掐掉。故收口用 ``_player_engaged()``（PlayingState 或 LoadingMedia）。
+
+    这里不导入 QtMultimedia（Linux CI 上它拖 libpulse 等系统库）：直接按收口读的
+    判据打桩，锁住"判据为真 ⇒ 不出队"这一侧。判据本身的真值表由
+    ``test_player_engaged_covers_just_started_playback`` 用最小替身逐个锁住。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    first = "今天是中秋节。"
+    second = "今天也要认真工作呀。"
+    cached_second = _cache_mp3(service, second)
+
+    assert service.speak(first, log_tag="节日提醒") is True     # 合成在飞（通道被占）
+    assert service.speak(second, log_tag="点击自言自语", respect_quiet=False) is True
+    assert service._pending_speech == second
+    monkeypatch.setattr(service, "_player_engaged", lambda: True)  # 这次完成起了播
+
+    _WorkerSpy.instances[0].finish()                            # 第一条合成回来 → 起播
+    _qapp().processEvents()
+
+    assert service._player.plays == 1, "只该起播第一条"
+    assert [Path(s).name for s in service._player.sources] == [Path(
+        _WorkerSpy.instances[0].out_path).name], "第一条不得被待播语音顶掉"
+    assert service._pending_speech == second, "起了播 → 留给 EndOfMedia，不在此出队"
+
+    service._terminal_statuses = ("END",)      # 第一条播完 → EndOfMedia 照常接上
+    service._on_media_status("END")
+
+    assert service._pending_speech is None
+    assert [Path(s).name for s in service._player.sources][-1] == cached_second.name
+    assert service._player.plays == 2, "播完第一条后，待播的第二条接上"
+
+
+def test_player_engaged_covers_just_started_playback(tmp_path, monkeypatch):
+    """判据本身的真值表，含实机实测到的"刚起播"那一刻（StoppedState+LoadingMedia）。
+
+    实机探针（QMediaPlayer + QAudioOutput，offscreen，assets/sounds/click.wav）：
+      ``setSource`` 后立刻 ``play()``  → state=StoppedState, status=LoadingMedia
+      约 300ms 后                     → state=PlayingState, status=BufferingMedia
+    所以单看 ``playbackState`` 会把刚接管的通道判成空出。这里用最小替身锁住真值表，
+    不依赖真实解码/音频设备、不依赖 conftest 的 play() 静音桩。
+    """
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer
+    except ImportError:  # pragma: no cover - 缺系统库的 Linux CI 上跳过而非红
+        pytest.skip("QtMultimedia 不可用（缺 libpulse 等系统库）")
+
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    Playing = QMediaPlayer.PlaybackState.PlayingState
+    Stopped = QMediaPlayer.PlaybackState.StoppedState
+    Loading = QMediaPlayer.MediaStatus.LoadingMedia
+    Buffering = QMediaPlayer.MediaStatus.BufferingMedia
+    NoMedia = QMediaPlayer.MediaStatus.NoMedia
+
+    class _StubPlayer:
+        """只回答收口要问的两个问题（playbackState / mediaStatus）。"""
+
+        def __init__(self, state, status) -> None:
+            self._state, self._status = state, status
+
+        def playbackState(self):  # noqa: N802 - 对齐 Qt API
+            return self._state
+
+        def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
+            return self._status
+
+    assert service._player_engaged() is False, "拿不到判据（_FakePlayer）→ 按未接管"
+    service._player = _StubPlayer(Stopped, NoMedia)
+    assert service._player_engaged() is False, "全新播放器：无媒体 → 未接管"
+    service._player = _StubPlayer(Stopped, Loading)
+    assert service._player_engaged() is True, "刚起播（实机那一刻）必须判为已接管"
+    service._player = _StubPlayer(Playing, Buffering)
+    assert service._player_engaged() is True, "正在出声 → 已接管"
+    service._player = _StubPlayer(Stopped, QMediaPlayer.MediaStatus.EndOfMedia)
+    assert service._player_engaged() is False, "一段播完（通道空出）→ 未接管"
+    service._player = None
+    assert service._player_engaged() is False, "无播放器 → 未接管"
 
 
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):
