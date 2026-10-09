@@ -51,14 +51,21 @@
   ``StoppedState`` 的窗口（约 200ms），两个枚举子判据都不成立——只看枚举会把这段时间
   的通道误判成空闲，新语音当场 ``setSource`` 顶掉刚起播的那一段且永远等不到
   EndOfMedia。
-- **自记标志的滞留窗口与两道兜底（如实登记）**：这个标志没有 Qt 事件保证一定有结局——
+- **自记标志的滞留窗口与三道兜底（如实登记）**：这个标志没有 Qt 事件保证一定有结局——
   设备被拔 / 音频输出异常时，``play()`` 之后可能**既不给终止态也不进 PlayingState**，
   标志卡 True 就是通道**永久判忙**（``speak`` 永远排队、``play_file`` 永远让路、合成
   完成永远回队出不来）。所以复位有四条路径：终止态（EndOfMedia / InvalidMedia）、
-  ``errorOccurred``（按终止态同一套结算排队项）、``stop()`` / 免打扰切断、以及
-  ``_play_pending_since + _PLAY_PENDING_MAX_S``（120s，取值理由见该常量）的看门狗
-  上限兜底——最后那条覆盖"连错误信号都不给"的静默滞留，并与合成超时共用同一条
-  单次表（``_reararm_watchdog`` 取最早到点的那个期限）。
+  ``errorOccurred``、``stop()`` / 免打扰切断、以及 ``_play_pending_since +
+  _PLAY_PENDING_MAX_S``（120s，取值理由见该常量）的看门狗上限兜底（最后那条覆盖"连
+  错误信号都不给"的静默滞留，并与合成超时共用同一条单次表 —— ``_reararm_watchdog``
+  取最早到点的那个期限）。兜底本身有三道：① ``errorOccurred`` 接到
+  ``_on_player_error``，按终止态同一套结算；② 上限到点清标志并按既有同序结算两个队列；
+  ③ **同一拍还要连播放器一起治**（``_release_stale_play_pending``）——对**非
+  PlayingState** 的播放器主动 ``stop()``，把它拽出 ``LoadingMedia``（实测 stop() 之后
+  停在 LoadedMedia，不算接管）。第 ③ 道不可省：只清标志治不彻底，``LoadingMedia`` 仍让
+  ``_player_engaged()`` 恒真、drain 判忙留队，而两个期限都空后表也真撤了（手动通道
+  没有 20s tick）→ 永久判忙。**真在 PlayingState 的段一个字段都不动**（上限只管"卡住"，
+  掐合法在播就是"报时被截断"），只把期限顺延一个窗口再查。
 - **缓存原子落盘**：worker 先写同目录临时文件（``*.part``），完成后经
   ``config.atomic_replace_with_retry`` 原子换名到最终缓存路径——``edge_tts.save`` 是
   边收边写，直接写最终路径时进程被斩（daemon worker 随退出死掉）会留下永久截断的
@@ -1261,10 +1268,12 @@ class VoiceChimeService:
         一定能结（设备被拔 / 音频输出异常时，``play()`` 之后可能既不给终止态也不进
         ``PlayingState``），卡住就是通道**永久判忙**——从"偶发误判空闲"退化成"再也
         不出声"（``speak`` 永远排队、``play_file`` 永远让路、合成完成永远回队出不来）。
-        两道兜底：① ``errorOccurred`` 接到 :meth:`_on_player_error`，按终止态同一套
+        三道兜底：① ``errorOccurred`` 接到 :meth:`_on_player_error`，按终止态同一套
         结算；② 同一条看门狗表在 ``_play_pending_since + _PLAY_PENDING_MAX_S`` 到点
-        （见 :meth:`_release_stale_play_pending`），覆盖"连错误信号都没有"的那种静默
-        滞留。上限提前响不危险：真在出声时本方法的枚举子判据照旧为真。
+        （见 :meth:`_release_stale_play_pending`）清标志并结算队列，覆盖"连错误信号都
+        没有"的那种静默滞留；③ 同一拍还把**非 PlayingState** 的播放器 ``stop()`` 出
+        ``LoadingMedia``——只清标志治不彻底，本方法的第二个子判据仍为真；真在
+        PlayingState 的段则一个字段都不动。
 
         拿不到枚举判据（QtMultimedia 缺失 / ``object.__new__`` 测试替身没有这些方法）
         时回落到自记标志：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
@@ -1280,6 +1289,26 @@ class VoiceChimeService:
                 self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
                 or self._player.mediaStatus() == QMediaPlayer.MediaStatus.LoadingMedia
             )
+        except Exception:
+            return False
+
+    def _player_playing(self) -> bool:
+        """播放器是否**真的在出声**（只认 ``playbackState == PlayingState`` 一个判据）。
+
+        与 :meth:`_player_engaged` 刻意不同：这里不认 ``LoadingMedia``、也不认自记标志
+        ——上限兜底只允许掐"卡住"的那一段，真在 PlayingState 的音频是合法播放，绝不能
+        停（停了用户听到的就是"报时被截断"）。
+
+        拿不到枚举（QtMultimedia 缺失 / ``object.__new__`` 替身没有这些方法）时返回
+        False：那种对象没有枚举可判，按"没在播"处理才能让治愈路径把播放器拽出可能的
+        滞留态（真播放器一定实现了这个方法）。
+        """
+        if self._player is None:
+            return False
+        try:
+            from PySide6.QtMultimedia import QMediaPlayer
+
+            return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         except Exception:
             return False
 
@@ -1590,13 +1619,21 @@ class VoiceChimeService:
     def _release_stale_play_pending(self) -> None:
         """播放接管标志的上限兜底：超过 ``_PLAY_PENDING_MAX_S`` 仍未结就按"通道空出"收。
 
-        覆盖 ``errorOccurred`` 也覆盖不到的静默滞留（"既无终止态、也不进 PlayingState、
-        连错误都不报"）。结算动作与终止态/播放错误**完全同一套**（复位标志 + 同序
-        drain），不开第二套语义。
+        覆盖 ``errorOccurred`` 也覆盖不到的静默滞留。**治到底**：只清自记标志治不彻底
+        ——播放器死在 ``StoppedState + LoadingMedia`` 时枚举判据 ``LoadingMedia`` 仍让
+        ``_player_engaged()`` 恒真，drain 判忙留队，而两个期限都空后表也真撤了（手动
+        通道没有 20s tick）→ 此后再无挂钟可布、通道**永久判忙**。所以这一拍对**非
+        PlayingState** 的播放器主动 ``stop()``（把 mediaStatus 拽出 LoadingMedia：
+        实测 stop() 之后停在 LoadedMedia，不算接管），再按既有同序结算两个队列。
 
-        未到上限时按剩余时间重布看门狗表（同合成那一支的理由：单次表被提前叫醒后
-        不重布就没了）。没有起点（``_play_pending_since`` 为 None，例如测试替身直接
-        置位标志）时无从判定，保持原样——那种对象也没有真实播放器会被卡住。
+        **真在 PlayingState 的那一段一个字段都不动**（标志/队列/播放器都不碰）：上限的
+        语义只管"卡住"，合法在播的长音频被掐就是"报时被截断"。只把期限**顺延一个窗口**
+        再查——不是原地重布（期限已过，原地重布会算出 ≤0 的剩余时间 → 1ms 忙转表），
+        这样它若之后才卡住，下一个窗口照样收得住。
+
+        未到上限时同样只是重布（单次表被提前叫醒后不重布就没了）。没有起点
+        （``_play_pending_since`` 为 None，例如测试替身直接置位标志）时无从判定，
+        保持原样——那种对象也没有真实播放器会被卡住。
         """
         if not getattr(self, "_play_pending_end", False):
             return
@@ -1607,10 +1644,15 @@ class VoiceChimeService:
         if elapsed < _PLAY_PENDING_MAX_S:
             self._reararm_watchdog()
             return
-        logger.warning("播放接管状态超时未结（%.0fs），复位并结算排队项",
+        if self._player_playing():
+            self._play_pending_since = time.monotonic()
+            self._reararm_watchdog()
+            logger.debug("播放接管状态已超过 %.0fs 但仍在 PlayingState：顺延期限再查",
+                         _PLAY_PENDING_MAX_S)
+            return
+        logger.warning("播放接管状态超时未结（%.0fs），按通道空出收并停掉卡住的播放器",
                        _PLAY_PENDING_MAX_S)
-        self._clear_play_pending()
-        self._current_respect_quiet = None
+        self._stop_current_segment()
         self._drain_queued_fire()
         self._drain_pending_speech()
 

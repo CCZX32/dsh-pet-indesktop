@@ -2782,10 +2782,12 @@ def test_terminal_status_still_clears_flag_and_settles_without_leftover_watchdog
 
 
 def test_play_pending_cap_does_not_release_a_playing_segment(tmp_path, monkeypatch):
-    """上限只兜「卡住」、不掐「在播」：标志被放掉时枚举判据照样说接管。
+    """上限只兜「卡住」、不掐「在播」：标志不在时枚举判据照样说接管。
 
-    这条是上限取值的**安全论证**：上限提前响（时钟脏 / 阈值取小了）只会让自记标志
-    失效，枚举子判据仍在——正在出声的那一段不会被误判成空闲，也就不会被新语音顶掉。
+    这条钉的是 ``_player_engaged`` 的**判据本身**：自记标志缺失（被任何一条复位路径
+    放掉、或服务侧字段本就为空）时，真在 PlayingState 的那一段仍必须判接管——否则
+    新语音会当场 ``setSource`` 顶掉它。上限那一拍"不停在播段、连标志都不清"的行为
+    由 ``test_play_pending_cap_does_not_touch_a_genuinely_playing_segment`` 单独钉。
     """
     try:
         from PySide6.QtMultimedia import QMediaPlayer
@@ -2998,3 +3000,110 @@ def test_play_watch_still_heals_after_a_synthesis_outcome(tmp_path, monkeypatch)
     assert service._pending_speech is None, "通道空出后排队项必须结算"
     assert [w.text for w in _WorkerSpy.instances] == [
         "现在是上午九点整。A 又起合成", "卡住期间排队的播报"]
+
+
+# ==================================== 上限治愈：卡住的播放器要一起治
+
+
+def test_play_pending_cap_heals_a_player_stuck_in_loading(tmp_path, monkeypatch):
+    """停在 ``StoppedState + LoadingMedia`` 的死局：上限那一拍连播放器一起治（astra 终审）。
+
+    只清自记标志治不彻底：``_player_engaged`` 的第二个子判据 ``mediaStatus == LoadingMedia``
+    仍为真 → ``_player_engaged()`` 恒真 → drain 判忙留队；而此时两个期限都空，表也随
+    ``_clear_play_pending`` 真撤了（手动通道没有 20s tick）→ 此后再无挂钟可布，通道
+    **永久判忙**。修法：超时那一拍对**非 PlayingState** 的播放器主动 ``stop()``，把
+    mediaStatus 拽出 LoadingMedia（实测 stop() 之后停在 LoadedMedia，不算接管），再按
+    既有同序结算两个队列。
+    """
+    import time as _time
+
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer
+    except ImportError:  # pragma: no cover - 缺系统库的 Linux CI 上跳过而非红
+        pytest.skip("QtMultimedia 不可用")
+
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    sentence = "现在是上午九点整。卡在加载"
+    _cache_file_for(service, cfg, sentence)
+
+    class _StuckLoadingPlayer(_FakePlayer):
+        """既不给终止态、也进不了 PlayingState 的卡死播放器（枚举判据可查、可控）。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.status = QMediaPlayer.MediaStatus.LoadingMedia
+
+        def playbackState(self):  # noqa: N802 - 对齐 Qt API
+            return QMediaPlayer.PlaybackState.StoppedState
+
+        def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
+            return self.status
+
+        def stop(self) -> None:
+            super().stop()
+            # 实机：``stop()`` 之后 mediaStatus 停在 LoadedMedia（而 LoadedMedia 不算接管）
+            self.status = QMediaPlayer.MediaStatus.LoadedMedia
+
+    service._player = _StuckLoadingPlayer()
+    service.say_now(sentence)                     # 缓存命中起播 → 置位标志与起点
+    assert service._play_pending_end is True
+    assert service._player_engaged() is True, "前提：枚举判据也判接管（LoadingMedia）"
+    assert service._player.stops == 0
+
+    service._pending_speech = "卡死期间排队的播报"
+    service._play_pending_since = _time.monotonic() - (svc_mod._PLAY_PENDING_MAX_S + 1.0)
+    service._release_stale_busy()                 # 上限到点那一拍（表/tick 的同一个入口）
+
+    assert service._player.stops == 1, "非 PlayingState 的播放器必须被 stop 出 LoadingMedia"
+    assert service._player_engaged() is False, "治愈之后通道必须真的空出来"
+    assert service._play_pending_end is False
+    assert service._pending_speech is None, "治愈即通道空出：排队项同序结算"
+    assert [w.text for w in _WorkerSpy.instances] == ["卡死期间排队的播报"]
+
+
+def test_play_pending_cap_does_not_touch_a_genuinely_playing_segment(tmp_path, monkeypatch):
+    """真在 PlayingState 的段：上限只把期限顺延，不停播放器、不清标志、不出队。
+
+    "上限只管卡住"：长音频（合法在播）到点被掐，用户听到的就是报时被截断。
+    """
+    import time as _time
+
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer
+    except ImportError:  # pragma: no cover - 缺系统库的 Linux CI 上跳过而非红
+        pytest.skip("QtMultimedia 不可用")
+
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    sentence = "现在是上午九点整。长音频在播"
+    _cache_file_for(service, cfg, sentence)
+
+    class _LongPlayingPlayer(_FakePlayer):
+        def playbackState(self):  # noqa: N802 - 对齐 Qt API
+            return QMediaPlayer.PlaybackState.PlayingState
+
+        def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
+            return QMediaPlayer.MediaStatus.BufferingMedia
+
+    service._player = _LongPlayingPlayer()
+    service.say_now(sentence)
+    assert service._play_pending_end is True and service._player.stops == 0
+
+    service._pending_speech = "在播期间排队的播报"
+    service._play_pending_since = _time.monotonic() - (svc_mod._PLAY_PENDING_MAX_S + 1.0)
+    service._release_stale_busy()
+
+    assert service._player.stops == 0, "合法在播的段绝不能被停"
+    assert service._play_pending_end is True, "上限不杀合法播放：标志一个字段都不动"
+    assert service._pending_speech == "在播期间排队的播报", "在播期间不许出队补播（会叠音）"
+    assert service._channel_idle() is False, "通道仍被这一段占着"
+    # 期限顺延一个窗口再查，而不是原地重布（期限已过，原地重布会算出 ≤0 → 1ms 忙转表）
+    interval = service._unlock_timer.interval()
+    assert service._unlock_timer.isActive() and \
+        int(svc_mod._PLAY_PENDING_MAX_S * 1000) - 2_000 <= interval \
+        <= int(svc_mod._PLAY_PENDING_MAX_S * 1000), interval
