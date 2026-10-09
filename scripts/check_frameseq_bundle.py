@@ -13,7 +13,11 @@
 ``frameseq/<相对路径去扩展名>.g<源 sha256 前 12 位>/``，且其 ``meta.json`` 可读、
 ``frames`` 与磁盘 ``f_*.webp`` 帧数相符（半成品目录运行时同样拒收）、
 ``encoder`` / ``unblend`` 等于当前档（改档即让全部旧世代失效——这是设计好的迁移
-路径，旧档产物不许冒充当前档出包）。
+路径，旧档产物不许冒充当前档出包）、**源身份**（``meta.source_sha256``）三件事
+同时成立：64 位十六进制 ∧ 以该世代目录的戳（目录名前 12 位）开头 ∧ 等于当前源 webm
+的完整 sha256。源身份是运行时的身份凭证（``provision:636-646`` / ``:674-680``）：
+摘要缺失（旧版无戳产物）/ 非 hex / 与目录戳不符 / 指向另一份源，运行时都拒收那份
+产物并回退 WebM 播放——目录名对而摘要不对的产物同样必须挡在构建期。
 
 **约束**：零 Qt 零第三方依赖（构建机环境最小假设），只读文件系统（一个字节都不
 写），不 import ``pet`` 包（那会连带 PySide6）。GIF 变体不在本门范围：它的素材是
@@ -48,6 +52,9 @@ UNBLEND_MARK = "white-v3"
 # frameseq_provision.py:235 / :236 —— 世代目录名 = <stem><GEN_INFIX><sha 前 N 位>。
 GEN_INFIX = ".g"
 GEN_STAMP_HEX = 12
+# frameseq_provision.py:637 —— meta.source_sha256 必须是 64 位十六进制
+# （``_complete_meta`` 的 ``_is_hex(stamp, 64)``：源身份凭证的长度口径）。
+SOURCE_SHA_HEX = 64
 
 # 每类失败清单最多列这么多条（构建日志可读性；总数照实报）。
 MAX_LISTED = 20
@@ -57,6 +64,7 @@ PROBLEM_TITLES: dict[str, str] = {
     "missing_generation": "clip 缺当前世代产物",
     "stale_generation": "世代档不符（产物不是当前档）",
     "broken_meta": "meta.json 缺失或损坏",
+    "bad_source_identity": "源身份不符（meta.source_sha256 缺失/非法/与目录戳或当前源不一致）",
     "incomplete_frames": "帧序列不全（帧数与 meta.json 不符）",
     "unreadable_source": "源 webm 不可读（无法定位世代目录）",
 }
@@ -105,6 +113,23 @@ def source_sha256(webm: Path) -> str | None:
     except OSError:
         return None
     return digest.hexdigest()
+
+
+def is_hex(text: object, length: int) -> bool:
+    """定长十六进制判定（与 ``frameseq_provision._is_hex`` 同口径：大小写不敏感）。"""
+    text = str(text)
+    return len(text) == length and all(c in "0123456789abcdef" for c in text.lower())
+
+
+def stamp_from_name(name: str) -> str | None:
+    """从世代目录名解析源戳；不是世代目录名返回 None（与 provision 同口径）。"""
+    text = str(name)
+    if GEN_INFIX not in text:
+        return None
+    stem, _, tail = text.rpartition(GEN_INFIX)
+    if not stem or not is_hex(tail, GEN_STAMP_HEX):
+        return None
+    return tail.lower()
 
 
 def iter_character_dirs(characters_dir: Path) -> list[Path]:
@@ -159,15 +184,53 @@ def frames_on_disk(gen_dir: Path) -> int:
     return count
 
 
+def check_source_identity(gen_dir: Path, meta: dict, digest: str) -> Problem | None:
+    """校验 ``meta.source_sha256`` 这份身份凭证（三件事，与运行时同口径）。
+
+    ``digest`` 是**当前源 webm 的完整 sha256**，由调用方（``check_bundle``）算好传入：
+    门本来就要为列清单算源哈希，这里复用，不双份读盘（一次 106 段 ≈ 53MB）。
+
+    与 ``frameseq_provision._complete_meta`` 逐条对齐：长度/字符集 → 目录戳前缀 →
+    完整值等于当前源。任一不成立，运行时就不采纳这份产物（回退 WebM 播放）。
+    """
+    stamp = stamp_from_name(gen_dir.name)
+    if stamp is None:
+        return Problem(
+            "bad_source_identity", gen_dir,
+            f"世代目录名解析不出源戳（应形如 <stem>{GEN_INFIX}<sha 前 "
+            f"{GEN_STAMP_HEX} 位>）——运行时按名字取戳，取不到即拒收")
+    identity = meta.get("source_sha256")
+    if not is_hex(identity, SOURCE_SHA_HEX):
+        return Problem(
+            "bad_source_identity", gen_dir,
+            f"meta.source_sha256={identity!r} 不是 {SOURCE_SHA_HEX} 位十六进制"
+            "（旧版无戳产物没有身份凭证，运行时拒收）")
+    identity = str(identity).lower()
+    if not identity.startswith(stamp):
+        return Problem(
+            "bad_source_identity", gen_dir,
+            f"meta.source_sha256={identity} 与目录戳 {stamp} 不符"
+            f"（前 {GEN_STAMP_HEX} 位必须一致）")
+    if identity != digest.lower():
+        return Problem(
+            "bad_source_identity", gen_dir,
+            f"meta.source_sha256={identity} 指向另一份源"
+            f"（当前源 webm 的 sha256 = {digest.lower()}）")
+    return None
+
+
 def check_clip(clip: Path, videos_dir: Path, frameseq_root: Path,
                digest: str) -> Problem | None:
-    """单段 clip 体检：世代目录在不在、meta 能不能读、帧全不全、档位对不对。"""
+    """单段 clip 体检：世代目录在不在、meta 能不能读、源身份对不对、帧全不全、档位对不对。"""
     gen_dir = clip_generation_dir(clip, videos_dir, frameseq_root, digest)
     if not gen_dir.is_dir():
         return Problem("missing_generation", gen_dir, "缺该 clip 的当前世代帧序列目录")
     meta = read_meta(gen_dir)
     if meta is None:
         return Problem("broken_meta", gen_dir, "meta.json 缺失、非 JSON 或不是对象")
+    identity_problem = check_source_identity(gen_dir, meta, digest)
+    if identity_problem is not None:
+        return identity_problem
     # 帧数自洽（与运行时采纳闸门 ``_complete_meta`` 同口径）：半成品世代目录会被
     # 运行时拒收 ⇒ 用户看到的还是未转换素材，必须挡在构建期。
     frames = meta.get("frames")

@@ -309,6 +309,10 @@ class MusicLyricController(QObject):
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
     _pending_by_key: dict = None
 
+    # 每次取词派发那一拍的暂停累计快照（key → 秒，见 _request_lyrics）。同样是回调
+    # 路径要用的字段，故有类级默认；读侧用 `or {}` 兜住 None（测试替身）。
+    _paused_base_by_key: dict = None
+
     # 取词在飞期间的暂停记账（见 _note_paused）：同样的道理，回调路径要有默认值。
     _paused_total: float = 0.0
     _paused_since: float | None = None
@@ -383,6 +387,9 @@ class MusicLyricController(QObject):
         # 取词对应的那次采样。取词是异步的，结果回来时要靠它换算进度，
         # 所以必须留在实例上（也要有类级默认，便于单测直接驱动回调）。
         self._pending_by_key: dict = {}
+        # 每次派发那一拍的暂停累计快照（key → 秒）。与 _pending_by_key 同生命周期、
+        # 同样按 key 绑定：有进度分支完成时只扣"派发之后新增"的暂停（见 _on_lyrics_ready）。
+        self._paused_base_by_key: dict = {}
         self._lyrics_ready.connect(self._on_lyrics_ready)
         self._playback_ready.connect(self._on_playback_ready)
 
@@ -888,6 +895,10 @@ class MusicLyricController(QObject):
         # position/reported 装载——A 是估算进度、B 是真值时，A 的手动对齐会被
         # 误判置灰一整首。按 key 绑定后，A 的结果永远只读 A 自己的上下文。
         self._pending_by_key[key] = playback
+        # 派发这一拍的暂停累计快照：有进度分支的位置窗口从**这次采样**起算，完成时
+        # 只扣这之后新增的暂停。每次派发都刷新——同曲失败重试是一次新派发，窗口也
+        # 跟着挪到新的采样上（旧值留着会把冷却期的暂停扣进新窗口，见 _on_lyrics_ready）。
+        self._paused_base_by_key[key] = self._paused_seconds(now)
         threading.Thread(
             target=self._fetch_worker,
             args=(key, query_title, query_artist),
@@ -1083,27 +1094,38 @@ class MusicLyricController(QObject):
 
         now = time.monotonic()
         playback = self._pending_by_key.pop(key, None)
+        # 本次派发那一拍快照的累计暂停（见 _request_lyrics）。`or {}` 兜住类级默认
+        # None（测试替身直接驱动本回调），拿不到快照时按 0 处理。
+        paused_base = (getattr(self, "_paused_base_by_key", None) or {}).pop(key, None)
         reported = getattr(playback, "position", None) if playback is not None else None
         if reported is not None:
             # 有真实进度（如 QQ 音乐）：从"读到该值的时刻"回推到此刻，
-            # 抵消取词耗时造成的滞后，因此不存在延迟。再扣掉取词在飞期间已经
-            # 发生的暂停：窗口 `[updated_at, now]` 里的时间不全是播放时间，不扣
-            # 的话这段暂停会被算成进度、歌词当场跳到未来（与无进度分支同一条口径）。
+            # 抵消取词耗时造成的滞后，因此不存在延迟。再扣掉**本次窗口内**已经
+            # 发生的暂停：窗口里面不全是播放时间，不扣的话暂停会被算成进度、歌词
+            # 当场跳到未来（与无进度分支同一条口径：只扣锚点之后的暂停）。
             #
-            # 暂停时长按**窗口长度封顶**（保守不多扣）：`_paused_seconds` 记的是
-            # "取词在飞期间"的累计暂停，正常路径上整段都落在窗口内（派发取词那一拍
-            # 是播放拍，窗口起点就是它），但同曲失败重试那条路径上窗口起点可能晚于
-            # 已封口的暂停段——多扣会把位置压到 `reported` 以下（歌词相对播放器倒退，
-            # 而播放器自己报的值才是真值）。封顶后 `position >= reported` 恒成立：
-            # 宁可少扣，绝不多扣。
+            # **必须减去派发基线的增量，而不是整首累计**：`_paused_seconds` 记的是
+            # 整首歌的暂停（只在切歌时复位），而同曲失败重试换了新的采样上下文——
+            # 窗口起点（这次采样）晚于首试与冷却期那些已封口的暂停段。按整首累计
+            # 扣（哪怕按窗口长度封顶）会把这些窗口外的暂停也算进来：30s 冷却暂停撞
+            # 上 5s 窗口会把位置算成 100 而不是 105（歌词退回一整句）。
+            #
+            # 不再需要"按窗口长度封顶"：窗口起点就是基线快照那一刻，之后的暂停段
+            # 必然落在 `[updated_at, now]` 内（派发是播放拍，且派发时刻晚于采样时刻），
+            # 所以 `paused <= elapsed` 本就恒成立；上限只留 `max(0, ...)` 兜脏值。
             elapsed = max(0.0, now - playback.updated_at)
-            paused = min(self._paused_seconds(now), elapsed)
+            paused = max(0.0, self._paused_seconds(now) - (paused_base or 0.0))
             position = max(0.0, reported + elapsed - paused)
         else:
             # 无真实进度（如网易云）：基准必须是**检测到切歌的时刻**，而不是
-            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。再扣掉取词
-            # 在飞期间已经发生的暂停（含"此刻仍在暂停"的未完结段）：暂停不是播放
+            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。再扣掉这一个
+            # 窗口内已经发生的暂停（含"此刻仍在暂停"的未完结段）：暂停不是播放
             # 时间，算进去歌词会当场跳到未来（B05）。
+            #
+            # 这里**不**减派发基线：本分支的锚点是检测到切歌的时刻（暂停记账在那里
+            # 归零），窗口就是 `[检测, now]`；减去基线会把重试前（首试 + 冷却期）的
+            # 暂停漏扣，位置反而偏大。两个分支共用的口径是"只扣锚点之后的暂停"，
+            # 锚点本身按各自的位置来源取——这是刻意的不同，不是漏改。
             detected = self._detected_at if self._detected_at is not None else now
             paused = self._paused_seconds(now)
             position = max(0.0, now - detected - paused)

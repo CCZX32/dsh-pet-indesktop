@@ -259,31 +259,89 @@ def test_eat_paths_stops_at_file_budget(tmp_path, monkeypatch):
     assert stats["total_bytes"] == 30
 
 
-def test_eat_paths_stops_at_time_budget(tmp_path, monkeypatch):
-    """B03：耗时预算（mock monotonic）——每 N 项（文件 + 目录）查一次钟，越预算即停扫。
+def test_eat_paths_checks_clock_for_every_item(tmp_path, monkeypatch):
+    """astra F2：查钟粒度 = **逐项**（不再是「每 256 项查一次」）。
 
-    单层几万文件的目录只有一层目录、进目录那一次检查不够，靠这道"每 N 项"封顶。
+    单层目录只进一次目录，若查钟还带"每 N 项"的粒度，单层少量慢文件就整段不受控；
+    这里用假钟记调用次数：30 个文件必须查到 ≥ 32 次（建预算 1 + 进目录 1 + 每文件 1）。
     """
     import pet.file_eater as file_eater
 
-    folder = _big_dir(tmp_path, "slow-dir", 520)
-    ticks = {"t": 0.0}
+    folder = _big_dir(tmp_path, "item-clock-dir", 30)
+    calls = {"n": 0}
 
-    def slow_clock():
-        ticks["t"] += 1.0  # 每次查钟推进 1 秒（预算 2 秒）：第二次查钟即越预算
-        return ticks["t"]
+    def counting_clock():
+        calls["n"] += 1
+        return 0.0  # 时间永远不动：只数查了几次，不触发截断
 
-    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", slow_clock)
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", counting_clock)
     pet = _make_pet(tmp_path)
 
     result = FileEaterDropHandler(pet).eat_paths([str(folder)])
 
-    # 记账项 = 进目录 1 项 + 已统计的文件；第 N 项那次查钟越预算，该项自身不计入
-    expected = file_eater.SCAN_TIME_CHECK_EVERY - 2
-    assert result["truncated"] is True
-    assert result["scanned"] == expected, "查钟即停，计数停在预算内"
-    assert result["bytes"] == expected * 10
-    assert f"只统计了前 {expected} 项" in pet.bubbles[0][0]
+    assert result["truncated"] is False
+    assert result["scanned"] == 30
+    assert calls["n"] >= 32, f"每记一项都要查钟，实际只查了 {calls['n']} 次"
+
+
+def test_eat_paths_stops_at_time_budget_in_one_slow_directory(tmp_path, monkeypatch):
+    """astra F2：单层**少量**慢文件也必须封顶（逐项查钟的反例场景）。
+
+    旧实现每 256 项才查一次钟：一个目录 30 个文件、每个 ``stat()`` 0.3s（合计 9s）
+    既不到 256 项、也不会再进新目录 → 全程一次钟都不查 → 9 秒不截断，GUI 线程就
+    这么冻着。逐项查钟之后，第 7 次 stat 之后（2.1s）进第 8 个文件即越 2s 预算。
+    """
+    import pet.file_eater as file_eater
+
+    folder = _big_dir(tmp_path, "slow-single-layer", 30)
+    ticks = {"t": 0.0}
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", lambda: ticks["t"])
+
+    real_stat = Path.stat
+
+    def slow_stat(self, *args, **kwargs):
+        # 只让**被统计的文件**慢（``is_file``/``is_dir`` 内部同样走 ``Path.stat``，
+        # 一并计耗会把"还没开始统计就超预算"变成被测行为之外的事）。
+        if self.name.endswith(".bin"):
+            ticks["t"] += 0.3  # 每个文件 stat 花 0.3 秒（预算 2 秒）
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", slow_stat)
+    pet = _make_pet(tmp_path)
+
+    result = FileEaterDropHandler(pet).eat_paths([str(folder)])
+
+    assert result["truncated"] is True, "单层 30 个慢文件不到任何'每 N 项'阈值也必须封顶"
+    assert result["scanned"] == 7, "7 次 stat 累计 2.1s，第 8 个文件记账前即越预算"
+    assert result["bytes"] == 7 * 10
+    assert "只统计了前 7 项" in pet.bubbles[0][0]
+
+
+def test_eat_paths_stops_at_time_budget_for_slow_loose_files(tmp_path, monkeypatch):
+    """astra F2：批量散文件同缺口——没有目录层、每项都慢的批同样按墙钟截断。"""
+    import pet.file_eater as file_eater
+
+    pet = _make_pet(tmp_path)
+    paths = []
+    for i in range(30):
+        path = tmp_path / f"loose{i:02d}.bin"
+        path.write_text("x" * 10, encoding="utf-8")
+        paths.append(str(path))
+
+    ticks = {"t": 0.0}
+
+    def slow_clock():
+        ticks["t"] += 0.3  # 每次查钟推进 0.3 秒（预算 2 秒）
+        return ticks["t"]
+
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", slow_clock)
+
+    result = FileEaterDropHandler(pet).eat_paths(paths)
+
+    assert result["truncated"] is True, "散文件批也必须有墙钟封顶"
+    assert (result["files"], result["scanned"]) == (6, 6), "第 7 个文件记账时已越预算"
+    assert result["bytes"] == 60
+    assert "只统计了前 6 项" in pet.bubbles[0][0]
 
 
 def test_eat_paths_stops_in_empty_directory_tree(tmp_path, monkeypatch):

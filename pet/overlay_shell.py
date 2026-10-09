@@ -88,7 +88,11 @@ from . import overlay_settings_command
 from . import overlay_spawn_state
 from . import slot_manager
 from . import window_alerts
-from .context_menus.shared import add_tray_action, release_menu_tree
+from .context_menus.shared import (
+    add_tray_action,
+    animation_icon_cache_drop_library,
+    release_menu_tree,
+)
 from .physics import throw_speed_cap
 from .config import (
     DEFAULT_SELF_TALK_BUBBLE_STYLE,
@@ -3779,6 +3783,9 @@ class OverlayShell(QObject):
         if config_dir and slot and geometry:
             overlay_spawn_state.write_slot_geometry(config_dir, slot, geometry)
         lib = self._spawned_libs.pop(sprite, None)
+        # 菜单缩略图缓存挂壳上、按库身份分键：这只宠退出即定向摘掉它自己的条目
+        # （只摘它的，不动同壳其他宠的图；死条目留着只占 128 条上限）。
+        self._drop_menu_icon_cache_for(lib)
         if sprite in self._spawned:
             self._spawned.remove(sprite)
         self.overlay.remove_sprite(sprite)
@@ -4567,6 +4574,17 @@ class OverlayShell(QObject):
                 shutdown()
             except Exception:
                 logging.exception("overlay: 旧素材库收尾失败")
+
+    def _drop_menu_icon_cache_for(self, library) -> None:
+        """定向摘掉某个素材库的菜单缩略图条目（退出子肥鱼用）。
+
+        缓存挂壳上、键 =（库身份, 动画名）：一份缓存服务同壳所有宠，所以这里按库身份
+        只摘这只宠的条目——整份清掉（``_clear_menu_icon_cache`` 的换角色语义）会把别的
+        宠的图一起丢掉，下次开菜单全部重解码。没开过菜单（缓存尚未创建）时不动作。
+        """
+        cache = getattr(self, "_menu_icon_cache", None)
+        if isinstance(cache, dict):
+            animation_icon_cache_drop_library(cache, library)
 
     def _clear_menu_icon_cache(self) -> None:
         """换角色后清菜单动画缩略图缓存（B08；复审#5 后是**内存卫生**）。

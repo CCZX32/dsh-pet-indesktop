@@ -8,6 +8,7 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from pet.config import Config
@@ -132,18 +133,141 @@ def test_switch_character_drops_inflight_answer(tmp_path):
     bubble = QuickChatBubble(Config(base=tmp_path))
     try:
         provider = _send_blocking_question(bubble)
+        # 打点「停止信号」：它是第四类按 request-ID 认领的信号，这条用例造的就是它的
+        # 迟到投递（替身收到 cancel 收场 → worker emit stopped_by_user → 队列投递）
+        stopped = []
+        bubble.service.stopped.connect(lambda rid: stopped.append(rid))
 
         bubble.switch_character("nova")
         assert bubble._active_request_id is None, "切角色即作废在途请求（ID 闸归零）"
         assert bubble.hint_label.text() == "", "旧请求不会再回来，思考中提示必须撤掉"
 
         provider.release.set()
-        assert _pump_until(lambda: not bubble.service.busy), "旧 worker 未收尾"
-        # 迟到信号（完成/增量/错误）全部被 ID 闸丢弃：既不落库也不上屏
+        assert _pump_until(lambda: len(stopped) == 1), \
+            "前提：停止信号确实被投递到了气泡（否则下面几条断言会空过）"
+        assert not bubble.service.busy, "旧 worker 未收尾"
+        # 迟到信号（完成/增量/错误/停止）全部被 ID 闸丢弃：既不落库也不上屏
+        assert bubble.hint_label.text() == "", "迟到的停止信号不许把气泡改成「已停止」"
         assert bubble.output.text() == "", "旧角色的回答不许显示在新角色的气泡里"
         assert not [m for m in bubble.session.messages if m.role == "assistant"], \
             "旧角色的回答不许写进新角色的会话"
         assert bubble.session.character_id == "nova"
+    finally:
+        bubble.close()
+        app.processEvents()
+
+
+# ---------------------------------------------------------------- 迟到信号（astra #1）
+class _LateProvider:
+    """可控网络替身：请求卡住，放行后产出**终态**。
+
+    与 ``_BlockingProvider`` 的分工：那个收到 cancel 就直接返回（信号根本没被造出来），
+    只验到"没有信号时不出错"；本替身放行后一定会 emit 出信号——``"completed"`` 先产出
+    一条增量再正常收尾（worker 依次 emit 增量 + 完成），``"error"`` 直接抛异常
+    （worker emit 错误）。emit 在 worker 线程发生、投递到 GUI 线程要等事件循环，
+    两者之间正好是"先切角色、再投递"的窗口。
+    """
+
+    def __init__(self, outcome: str = "completed") -> None:
+        self.outcome = outcome
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def stream(self, messages, config, cancel):
+        self.started.set()
+        self.release.wait(timeout=10)
+        if self.outcome == "error":
+            raise RuntimeError("旧角色的网络错误")
+        yield "迟到的增量"
+
+
+def _release_and_wait_worker_exit(bubble, provider) -> bool:
+    """放行替身，并等到 worker 线程的 ``run()`` 真的退出。
+
+    ``QThread.finished`` 走直连（在 worker 线程执行）——它一响就说明增量/完成/错误
+    这些信号全部 emit 完毕、队列投递已挂在 GUI 线程事件队列里且尚未被处理。
+    """
+    done = threading.Event()
+    bubble.service._worker.finished.connect(lambda: done.set(), Qt.DirectConnection)
+    provider.release.set()
+    return done.wait(timeout=10)
+
+
+def _send_late_question(bubble, outcome: str = "completed"):
+    """发一条问题，返回 ``(provider, phase, forwarded)``。
+
+    ``forwarded`` 记下 service 那几类信号**到达气泡时**的测试阶段（``in_flight`` /
+    ``after_switch``）：既证明信号真的到过气泡（否则"没上屏"的断言可以空过），也证明
+    它是在切角色**之后**才被投递的。``phase`` 由用例在切换前翻成 ``after_switch``。
+    """
+    provider = _LateProvider(outcome)
+    bubble.service.provider = provider
+    phase = {"now": "in_flight"}
+    forwarded: list[tuple[str, str]] = []
+    for name in ("delta", "finished", "error"):
+        getattr(bubble.service, name).connect(
+            lambda *args, _name=name: forwarded.append((_name, phase["now"])))
+    bubble.input.setText("你在吗")
+    bubble._send()
+    assert provider.started.wait(timeout=10), "前提：请求已进入 provider"
+    assert bubble._active_request_id is not None, "前提：请求在途"
+    return provider, phase, forwarded
+
+
+def _assert_late_signals_dropped(bubble, forwarded, expected: set[str]) -> None:
+    """断言 ``expected`` 那几类信号在切换后被投递到气泡、且一个副作用都没留下。"""
+    delivered = {name for name, _ in forwarded}
+    assert _pump_until(lambda: expected <= {name for name, _ in forwarded}), \
+        f"前提：{expected} 必须真的被投递过（实际 {delivered}）"
+    assert all(where == "after_switch" for _, where in forwarded), \
+        f"前提：投递必须发生在切角色之后（实际 {forwarded}）"
+    assert bubble.output.text() == "", "迟到信号不许上屏"
+    assert bubble._reply_full == ""
+    assert bubble.hint_label.text() == ""
+    assert not [m for m in bubble.session.messages if m.role == "assistant"], \
+        "迟到的完成信号不许落进新角色的会话"
+    assert bubble.session.character_id == "nova"
+
+
+def test_switch_character_drops_queued_late_delta_and_completion(tmp_path):
+    """astra #1：增量 + 完成信号**先 emit、后切角色、再投递**，必须被 ID 闸丢弃。
+
+    换会话会换掉 ``session``，迟到完成信号若还认领成功，回答就落进**新**角色的会话
+    并显示在新角色的气泡里——既有用例没造出这条信号，等于这条路径没被动态验过。
+    """
+    app = QApplication.instance() or QApplication([])
+    from pet.quick_chat import QuickChatBubble
+
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        provider, phase, forwarded = _send_late_question(bubble)
+        assert _release_and_wait_worker_exit(bubble, provider), \
+            "前提：worker 已把增量 + 完成 emit 进队列"
+
+        phase["now"] = "after_switch"
+        bubble.switch_character("nova")
+
+        _assert_late_signals_dropped(bubble, forwarded, {"delta", "finished"})
+    finally:
+        bubble.close()
+        app.processEvents()
+
+
+def test_switch_character_drops_queued_late_error(tmp_path):
+    """astra #1：错误信号同样先 emit 再切角色 → 不许把「请求失败：…」写上新角色气泡。"""
+    app = QApplication.instance() or QApplication([])
+    from pet.quick_chat import QuickChatBubble
+
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        provider, phase, forwarded = _send_late_question(bubble, "error")
+        assert _release_and_wait_worker_exit(bubble, provider), \
+            "前提：worker 已把错误 emit 进队列"
+
+        phase["now"] = "after_switch"
+        bubble.switch_character("nova")
+
+        _assert_late_signals_dropped(bubble, forwarded, {"error"})
     finally:
         bubble.close()
         app.processEvents()

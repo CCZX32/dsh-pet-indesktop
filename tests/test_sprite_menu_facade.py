@@ -269,18 +269,28 @@ class _StubLibrary:
 
 
 def _stub_sprite(library):
-    return type("Sprite", (), {"library": library})()
+    """只带 ``library`` 的 sprite 替身。
+
+    库挂在**实例**上（不是类属性）：动态 ``type(...)`` 的类属性会一直吊着库不放，
+    "库被回收后弱引用失效"这类断言就永远不成立（P3 的 id 复用用例正是靠它才可能真回收）。
+    """
+    sprite = type("Sprite", (), {})()
+    sprite.library = library
+    return sprite
 
 
 def _seed_menu_icon_cache(shell, library, name, image) -> None:
     """按产品键（库身份 + 动画名）预置一条缓存：单一来源，不在测试里复刻键格式。"""
-    from pet.context_menus.shared import animation_icon_cache_key
+    from pet.context_menus.shared import (
+        animation_icon_cache_entry,
+        animation_icon_cache_key,
+    )
 
     cache = getattr(shell, "_menu_icon_cache", None)
     if cache is None:
         cache = {}
         shell._menu_icon_cache = cache
-    cache[animation_icon_cache_key(library, name)] = QImage(image)
+    cache[animation_icon_cache_key(library, name)] = animation_icon_cache_entry(library, image)
 
 
 def test_character_switch_clears_menu_icon_cache(tmp_path, monkeypatch):
@@ -403,5 +413,188 @@ def test_late_worker_write_is_keyed_to_the_old_library(tmp_path, monkeypatch):
 
         assert not facade.animation_icon_image("act1").isNull()
         assert decoded == ["/lib-a/act1.webm", "/lib-b/act1.webm"], "新库按新键重新解码"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_cache_hit_requires_a_live_identity():
+    """值里的库弱引用是唯一身份凭证：凭不出来的条目一律不命中。
+
+    失败方向必须是"未命中"（重解码），不能是"命中旧图"——所以空条目、没有身份凭证的
+    条目（库对象不支持弱引用）、指向别的库的条目都要判未命中。
+    """
+    from pet.context_menus.shared import (
+        animation_icon_cache_entry,
+        animation_icon_cache_hit,
+    )
+
+    lib_a = _StubLibrary("lib-a")
+    image = _argb32(0xFF010203)
+    entry = animation_icon_cache_entry(lib_a, image)
+
+    assert animation_icon_cache_hit(entry, lib_a) is image, "同一个库命中"
+    assert animation_icon_cache_hit(entry, _StubLibrary("lib-b")) is None, "别的库不命中"
+    assert animation_icon_cache_hit(None, lib_a) is None, "空条目不命中"
+    assert animation_icon_cache_hit(image, lib_a) is None, "裸 QImage（非条目）不命中"
+    opaque = animation_icon_cache_entry({}, image)   # dict 不支持弱引用 → 无身份凭证
+    assert animation_icon_cache_hit(opaque, {}) is None, "无凭证的条目永不命中"
+
+
+def test_cache_prune_drops_target_library_and_dead_entries():
+    """定向摘的契约：摘目标库的条目 + 顺手清掉对谁都永不命中的条目，活库条目留着。
+
+    "永不命中"的两类：库已回收（弱引用已死）、没有身份凭证（库对象不支持弱引用）。
+    它们留着只占 128 条上限与内存，与"退出子肥鱼"这轮清理同源。
+    """
+    import gc
+
+    from pet.context_menus.shared import (
+        animation_icon_cache_drop_library,
+        animation_icon_cache_entry,
+        animation_icon_cache_key,
+    )
+
+    image = _argb32(0xFF010203)
+    target = _StubLibrary("lib-target")
+    keeper = _StubLibrary("lib-keeper")
+    dead = _StubLibrary("lib-dead")
+    cache = {
+        animation_icon_cache_key(target, "act1"): animation_icon_cache_entry(target, image),
+        animation_icon_cache_key(keeper, "act1"): animation_icon_cache_entry(keeper, image),
+        animation_icon_cache_key(dead, "act1"): animation_icon_cache_entry(dead, image),
+        animation_icon_cache_key({}, "act1"): animation_icon_cache_entry({}, image),
+    }
+    del dead
+    gc.collect()
+
+    assert animation_icon_cache_drop_library(cache, target) == 3, \
+        "目标库 + 已回收的 + 无凭证的"
+    assert set(cache) == {animation_icon_cache_key(keeper, "act1")}, "别的活库条目不动"
+
+
+def test_cache_entry_does_not_keep_the_library_alive(tmp_path, monkeypatch):
+    """缓存值不许吊住库：条目留下、库照样能被回收（存的是弱引用，不是强引用）。
+
+    这条是"不许把库强引用塞进缓存"的直接守卫：缓存挂壳上、活到进程退出，塞强引用就等于
+    把退役的库连同素材一起吊在内存里（换角色/退出子宠都放不掉）。
+    """
+    import gc
+    import weakref
+
+    import pet.animation_thumbnail as thumb_mod
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        lib = _StubLibrary("lib-weak")
+        sprite = _stub_sprite(lib)
+        facade = SpriteMenuFacade(shell, sprite)
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame",
+                            lambda path: _argb32(0xFF010203))
+        facade.animation_icon_image("act1")
+
+        ref = weakref.ref(lib)
+        sprite.library = None
+        del lib
+        gc.collect()
+
+        assert ref() is None, "缓存条目不得持有库的强引用"
+        assert len(shell._menu_icon_cache) == 1, "条目本身还在（死条目，靠身份校验不命中）"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_stale_entry_is_not_served_when_library_id_is_reused(tmp_path, monkeypatch):
+    """P3：旧库回收后 ``id()`` 被复用，不得把它的图当成本库的命中。
+
+    键是 ``(id(library), 动画名)``，而 ``id()`` 只保证"同刻存活对象互不相同"——
+    旧库回收后新库完全可能拿到同一个 id，于是键逐字相同、缓存里那份旧图被当成本库的
+    命中，新角色的菜单显示上一只宠的缩略图。
+
+    复现方式：旧库解码进缓存后整个被回收（弱引用失效），随后**同一个键**被新库查询。
+    id 复用由 CPython 分配器决定、测试里无法确定性复现（赌分配器会 flaky），所以这里
+    直接把键钉成旧键——复现的是 id 复用之后的那个后果。修复前这次查询命中旧图（上面
+    两条断言即红），修复后必须视为未命中、重解码新库素材并按同键覆盖。
+    """
+    import gc
+
+    import pet.animation_thumbnail as thumb_mod
+    import pet.sprite_menu_facade as facade_mod
+    from pet.context_menus.shared import animation_icon_cache_key
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        lib_old = _StubLibrary("lib-old")
+        sprite = _stub_sprite(lib_old)
+        facade = SpriteMenuFacade(shell, sprite)
+        # 把键钉成旧库的键：id 复用后新库算出来的键与它逐字相同
+        pinned = animation_icon_cache_key(lib_old, "act1")
+        monkeypatch.setattr(facade_mod, "animation_icon_cache_key",
+                            lambda _library, name: pinned)
+
+        decoded: list = []
+
+        def decode_old(path):
+            decoded.append(path)
+            return _argb32(0xFF445566, size=8)
+
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame", decode_old)
+
+        stale = facade.animation_icon_image("act1")
+        assert decoded == ["/lib-old/act1.webm"], "前提：旧库的图已经进缓存"
+        assert stale.pixel(0, 0) == _argb32(0xFF445566).pixel(0, 0)
+
+        sprite.library = None            # 旧库失去最后一个强引用（sprite 换库）
+        del lib_old
+        gc.collect()
+
+        fresh = _argb32(0xFF99AA33, size=8)
+
+        def decode_new(path):
+            decoded.append(path)
+            return fresh
+
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame", decode_new)
+        lib_new = _StubLibrary("lib-new")
+        sprite.library = lib_new
+
+        assert facade.animation_icon_cached_image("act1").isNull(), \
+            "旧库已回收：同键的这条缓存不得再被当成命中（id 复用也是同样后果）"
+        image = facade.animation_icon_image("act1")
+        assert decoded == ["/lib-old/act1.webm", "/lib-new/act1.webm"], \
+            "id 复用后必须重解码新库的素材，不得返回旧库的图"
+        assert image.pixel(0, 0) == fresh.pixel(0, 0)
+        # 覆盖判定用的是新加的条目校验器：放在行为断言之后，修复前先在行为上红
+        from pet.context_menus.shared import animation_icon_cache_hit
+
+        assert animation_icon_cache_hit(shell._menu_icon_cache[pinned], lib_new) is not None, \
+            "重解码的结果必须覆盖同键上的旧条目"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_exiting_spawned_pet_drops_its_menu_icon_cache(tmp_path):
+    """P3：退出子肥鱼即定向摘掉它自己的缩略图条目。
+
+    旧行为：退出子肥鱼只 ``shutdown`` 库，缓存条目留到换角色清缓存或撞 128 条上限——
+    死图占着上限，且旧库在缓存里的那份身份凭证也一起留着。缓存按库身份分键，这里应当
+    摘得准：只摘这只宠的库，别动别的宠（整份清掉会把同壳其他宠的图一起丢掉）。
+    """
+    shell, main_lib = _make_shell(tmp_path)
+    try:
+        shell._create_main_library = lambda: RichLibrary()
+        shell.spawn_pet()
+        child_lib = shell._spawned[0].library
+        assert child_lib is not main_lib
+
+        _seed_menu_icon_cache(shell, child_lib, "idle1", _argb32(0xFF0A0B0C))
+        _seed_menu_icon_cache(shell, main_lib, "idle1", _argb32(0xFF0D0E0F))
+        assert len(shell._menu_icon_cache) == 2
+
+        shell.clear_spawned_pets()
+
+        assert len(shell._menu_icon_cache) == 1, "退出子宠必须摘掉它自己的条目"
+        facade = SpriteMenuFacade(shell)
+        assert not facade.animation_icon_cached_image("idle1").isNull(), \
+            "主宠的同名动画缓存不受影响"
     finally:
         shell._delete_runtime_marker()

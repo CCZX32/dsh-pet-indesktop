@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 
 import shiboken6
 
@@ -37,9 +38,64 @@ def animation_icon_cache_key(library, name: str) -> tuple[int, str]:
     - 换库后旧 worker 才解码完：它把**旧库**的图写回裸名称键，新库随后命中它。
 
     库身份用 ``id(library)``（进程内唯一）：库对象一旦回收，旧键自然成为死项，由缓存
-    的 128 条上限兜底清掉。
+    的 128 条上限兜底清掉。但 ``id()`` 只保证**同刻存活**的对象互不相同——对象回收后
+    新对象可以复用同一个 id，所以"键相同"不等于"是同一个库"：命中判定必须再看缓存值里
+    带的库弱引用（``animation_icon_cache_entry`` / ``animation_icon_cache_hit``）。
+    本函数只算键，不负责身份校验。
     """
     return (id(library), str(name))
+
+
+def animation_icon_cache_entry(library, image) -> tuple:
+    """把缩略图包成缓存**值**：``(库弱引用, QImage)``——键只带 id，值带身份。
+
+    为什么值不能只是 QImage：``id(library)`` 会被回收对象复用 ⇒ 光看键会把**另一个**
+    库的图当成本库的命中（新角色菜单显示上一只宠的缩略图）。值里带一份库的弱引用做
+    身份校验（见 ``animation_icon_cache_hit``）：弱引用不持有库、不给库延寿（把库强引用
+    塞进缓存会把退役的库吊在内存里），旧库回收后校验必然失配、该条目退化成"永不命中"，
+    下次查询重解码并按同一个键覆盖。
+
+    不支持弱引用的库对象（``weakref.ref`` 抛 ``TypeError``）拿不到身份凭证 ⇒ 命中判定
+    一律判未命中（宁可重解码，不冒把错图画上屏的风险）。
+    """
+    try:
+        return (weakref.ref(library), image)
+    except TypeError:
+        return (None, image)
+
+
+def animation_icon_cache_hit(entry, library):
+    """缓存值命中判定：命中返回那份 QImage，未命中返回 ``None``。
+
+    命中 = 值形如 ``animation_icon_cache_entry`` ∧ 库弱引用仍存活 ∧ 指向的**正是**本次
+    查询的这个库对象。三条缺一即未命中（调用方重解码并覆盖）：id 复用、库已回收、
+    条目被别处写坏，都不会把旧库的图画上屏。
+    """
+    if not isinstance(entry, tuple) or len(entry) != 2:
+        return None
+    ref, image = entry
+    if ref is None or ref() is not library:
+        return None
+    return image
+
+
+def animation_icon_cache_drop_library(cache: dict, library) -> int:
+    """按库身份定向摘掉缓存条目（退出子肥鱼）；返回摘掉的条数。
+
+    键只带 ``id()``，没有"库 → 键"的反查表，所以逐个条目比身份。除该库自己的条目外，
+    引用已死（库已回收）与没有身份凭证（不支持弱引用的库）的条目一并摘掉——这两类对
+    任何库都是永不命中，留着只占 128 条上限与内存。
+    """
+    if not isinstance(cache, dict) or library is None:
+        return 0
+    removed = 0
+    for key, entry in list(cache.items()):
+        ref = entry[0] if isinstance(entry, tuple) and len(entry) == 2 else None
+        owner = ref() if ref is not None else None
+        if ref is None or owner is None or owner is library:
+            cache.pop(key, None)
+            removed += 1
+    return removed
 
 
 class _AnimationIconSignals(QObject):

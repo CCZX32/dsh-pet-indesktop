@@ -2512,29 +2512,6 @@ def _isolated_quiet(monkeypatch):
     return state
 
 
-def _drop_chime_quiet_listeners() -> None:
-    """收口：摘掉共享状态表里残留的服务回调（用既有 remove_listener，不改状态机）。"""
-    from pet import quiet_mode
-
-    state = quiet_mode.shared_quiet_state()
-    for callback in list(state._listeners):
-        if getattr(callback, "__func__", None) is VoiceChimeService._on_quiet_state_changed:
-            state.remove_listener(callback)
-
-
-@pytest.fixture(autouse=True)
-def _no_stale_chime_quiet_listeners():
-    """用例边界上清掉"构造即挂"留下的回调。
-
-    本文件 70+ 个用例各自 ``_service(...)`` 构造服务而从不 ``stop()``（它们只测一拍
-    内的行为）：回调对空闲服务是无害 no-op，但共享订阅表会随用例数线性增长、并持有
-    服务与它的播放器不放。这里按身份摘掉（摘的是本模块的回调，不碰别人的订阅）。
-    """
-    _drop_chime_quiet_listeners()
-    yield
-    _drop_chime_quiet_listeners()
-
-
 def test_unstarted_manual_channel_is_cut_when_quiet_mode_starts(tmp_path, monkeypatch):
     """未 start() 的手动通道在免打扰开启时也必须被切（复审 #6）。
 
@@ -2616,13 +2593,20 @@ def test_quiet_state_change_is_harmless_for_idle_service(tmp_path, monkeypatch):
 
 
 def test_shared_quiet_listeners_are_pruned_between_cases(tmp_path, monkeypatch):
-    """收口体检：构造即挂的回调在用例边界被摘掉，共享订阅表不随用例数增长。"""
+    """收口体检：构造即挂的回调在用例边界被摘掉，共享订阅表不随用例数增长。
+
+    收口手段的**唯一实现**在 ``tests/conftest.py``（全局 autouse fixture 用的就是
+    它，``test_overlay_app_hosts`` 一类"构造完就不管"的域同样受它保护）：这里直接
+    调那条实现，锁定它的效果。
+    """
+    from tests.conftest import drop_stale_chime_quiet_listeners
+
     shared = _quiet()
     service, _app, _cfg = _service(tmp_path, monkeypatch)
 
     assert service._on_quiet_state_changed in shared._listeners, "构造挂在进程级单例上"
 
-    _drop_chime_quiet_listeners()
+    drop_stale_chime_quiet_listeners()
 
     assert service._on_quiet_state_changed not in shared._listeners
 
@@ -2922,3 +2906,95 @@ def test_publish_gives_up_after_retry_budget_and_keeps_failure_path(tmp_path, mo
     assert results[-1][0] == str(out_path)
     assert list(tmp_path.glob(f"*{svc_mod.TEMP_SUFFIX}")) == [], "临时文件必须被清"
     assert not out_path.exists()
+
+
+# ============================================ 挂钟结算：合成结局不得撤掉播放挂钟
+
+
+@pytest.mark.parametrize("outcome", ["完成", "失败", "超时"])
+@pytest.mark.parametrize("play_watch", [True, False])
+def test_synthesis_outcome_settles_watchdog_and_keeps_play_watch(
+        tmp_path, monkeypatch, outcome, play_watch):
+    """合成结局（完成 / 失败 / 超时）只结算**自己那一支**的挂钟（astra F1）。
+
+    可达序列（手动通道从不 start()，这条单次表是它唯一的自愈入口）：起合成 A →
+    A 在飞期间另一请求命中缓存起播 B（``_fire`` 的缓存旁路不看合成锁）→ B 卡在
+    没有终止信号的接管态 → A 完成 / 失败 / 超时。**裸撤表**会让 B 的
+    ``_PLAY_PENDING_MAX_S`` 兜底永远不到点（手动通道没有 20s tick），通道永久判忙
+    （speak 永远排队、play_file 永远让路、合成完成永远回队出不来）；drain 在通道
+    不空闲时直接 return，不会替它补布。
+
+    不变量：合成结局之后，**还有未结挂钟就必须还在表上**（且指向它的剩余期限），
+    两个挂钟都结了才允许真撤。``play_watch`` 的行就是这两半。
+    """
+    import time as _time
+
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    b_sentence = "现在是上午九点整。B 命中缓存"
+    _cache_file_for(service, cfg, b_sentence)
+
+    service.say_now("现在是上午九点整。A 起合成")        # A 起合成（_WorkerSpy 不回调）
+    assert service._busy is True
+    service.say_now(b_sentence)                          # 缓存旁路：A 在飞时 B 起播
+    assert service._busy is True, "前提：A 的合成仍在飞"
+    assert service._play_pending_end is True, "前提：B 处于播放接管态"
+
+    if not play_watch:
+        # 对照组：B 的挂钟已经正常结掉（终止态），表上只剩合成那一支
+        service._terminal_statuses = ("END",)
+        service._on_media_status("END")
+        assert service._play_pending_end is False
+
+    if outcome == "完成":
+        _WorkerSpy.instances[-1].finish()
+    elif outcome == "失败":
+        _WorkerSpy.instances[-1].finish(error="edge-tts 合成失败")
+    else:
+        service._busy_since = _time.monotonic() - (svc_mod._SYNTH_TIMEOUT_S + 1.0)
+        service._release_stale_busy()
+
+    assert service._busy is False, "前提：合成那一支已经结了"
+    timer = service._unlock_timer
+    if service._play_pending_end:
+        assert timer.isActive(), "播放挂钟还在，表不许被合成结局撤掉"
+        assert int(svc_mod._SYNTH_TIMEOUT_S * 1000) < timer.interval() \
+            <= int(svc_mod._PLAY_PENDING_MAX_S * 1000), timer.interval()
+    else:
+        assert not timer.isActive(), "两个挂钟都结了才允许真撤表"
+
+
+def test_play_watch_still_heals_after_a_synthesis_outcome(tmp_path, monkeypatch):
+    """交错之后的兜底仍然到得了点：表还活着 → 到点把卡住的 B 收掉并结算排队项。
+
+    上一条钉的是"表还在"，这条钉它的**后果**：表到点那一拍（手动通道里唯一会来的
+    那一拍）必须真的解开 B 并结算排队项，而不是留一条永远不会响的死表。
+    """
+    import time as _time
+
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    b_sentence = "现在是上午九点整。B 又命中缓存"
+    _cache_file_for(service, cfg, b_sentence)
+
+    service.say_now("现在是上午九点整。A 又起合成")
+    service.say_now(b_sentence)
+    assert service._busy is True and service._play_pending_end is True
+
+    _WorkerSpy.instances[-1].finish(error="edge-tts 合成失败")   # A 失败（最省事的结局）
+    assert service._play_pending_end is True, "前提：B 的挂钟仍在"
+    assert service._unlock_timer.isActive(), "表必须还活着，否则 B 的兜底永远不到点"
+
+    service._pending_speech = "卡住期间排队的播报"
+    service._play_pending_since = _time.monotonic() - (svc_mod._PLAY_PENDING_MAX_S + 1.0)
+    service._unlock_timer.timeout.emit()          # 等价于"表到点"
+
+    assert service._play_pending_end is False, "到点必须解开卡住的接管态"
+    assert service._player_engaged() is False
+    assert service._pending_speech is None, "通道空出后排队项必须结算"
+    assert [w.text for w in _WorkerSpy.instances] == [
+        "现在是上午九点整。A 又起合成", "卡住期间排队的播报"]

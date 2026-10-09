@@ -22,16 +22,23 @@ STATS_HISTORY_LIMIT = 50
 # 投喂气泡的副标题（两条投喂链共用；拖文件只是做样子）。
 FEEDING_BUBBLE_SUBTITLE = "放心，只是做个样子，文件没有删除或移动哦"
 
-# 投喂扫描预算（B03 + 复审#4）：拖入大目录（几万文件/网络盘）时同步递归 + 逐项
-# ``stat()`` 会把整个桌宠 UI 冻在 GUI 线程上。两条预算：**文件数**上限 + **墙钟**上限。
+# 投喂扫描预算（B03 + 复审#4 + astra F2）：拖入大目录（几万文件/网络盘）时同步递归 +
+# 逐项 ``stat()`` 会把整个桌宠 UI 冻在 GUI 线程上。两条预算：**文件数**上限 + **墙钟**上限。
 #
-# 记账粒度是「项」= 文件 + 目录（``_ScanBudget.visited``）：只数文件的话，空目录树
-# 一个文件都不统计（既不耗文件预算、也走不到耗时检查），慢盘上"文件少但每层目录都卡"
-# 的树在两次检查之间也不受控——进一个新目录就查一次钟，任何形态的树都有墙钟封顶。
+# 记账粒度是「项」= 文件 + 目录：只数文件的话，空目录树一个文件都不统计（既不耗文件
+# 预算、也走不到耗时检查），慢盘上"文件少但每层目录都卡"的树在两次检查之间也不受控——
+# 进一个新目录就查一次钟，任何形态的树都有墙钟封顶。
+# 查钟粒度是**逐项**（文件 + 目录各一次）：一次 ``time.monotonic()`` 本机实测约 60ns
+# （200 万次 / 0.119s），在 ``account()`` 循环里的边际开销实测约 23ns/call，相对任何
+# 真实 ``stat()``（微秒~百毫秒级）可忽略；满预算（20000 个文件）比"每 256 项抽样"
+# 多约 2 万次调用 ≈ 0.5~1.2ms。换来的是"每两次 stat 之间必有一次查钟"的最细封顶——
+# 单层 30 个文件、每个 ``stat()`` 0.3s 的慢盘目录，或用例里一次拖进来的大批散文件
+# （没有目录层），都在预算处截断，不依赖任何"每 N 项"阈值。如实说明边界：这是
+# **同步阻塞**的逐项 syscall，单次 syscall 自身没有墙钟上界（一次卡 10s 的 stat 无法
+# 被预算中断）；逐项查钟给的是两次调用之间的最细粒度，不是严格墙钟上界。
 # 触预算即停扫，统计与气泡如实标记截断（截断提示报的是**文件**口径，未变）。
 SCAN_FILE_LIMIT = 20000       # 已统计文件数上限（目录不计入，由墙钟兜底）
 SCAN_TIME_BUDGET_S = 2.0
-SCAN_TIME_CHECK_EVERY = 256   # 每 N 项（文件 + 目录）查一次钟
 # 预算时钟（测试注入假钟；生产 = 单调钟）
 _SCAN_CLOCK = time.monotonic
 
@@ -143,12 +150,13 @@ def _measure_path(path: Path, budget=None) -> tuple[int, int, int]:
 class _ScanBudget:
     """一次投喂的扫描预算：文件数上限 + 墙钟上限。
 
-    记账粒度是「项」= 文件 + 目录（``visited`` 计口径）：
+    记账粒度是「项」= 文件 + 目录：
 
     - ``account_dir()`` 每进入一个新目录查一次钟——纯空目录树与"文件少但每层目录都
       卡"的慢盘树靠它封顶；
-    - ``account()`` 每 ``SCAN_TIME_CHECK_EVERY`` 项查一次钟（逐项查钟本身也是开销）——
-      单层几万文件的目录只有一层目录，靠它封顶。
+    - ``account()`` 每统计一个文件查一次钟（逐项，不做"每 N 项"抽样）——单层目录
+      只有一层，几万文件、或"文件不多但每个 stat 都慢"都靠它封顶。抽样查钟会漏掉
+      整段慢扫描：30 个文件 × 0.3s 不到任何阈值，一次钟都查不到就是不截断。
 
     越预算即停扫并 ``truncated = True``；``scanned`` = 真正统计到的**文件**数，
     截断提示与统计按它报真实口径（目录数另有 ``folders`` 口径，两者互不相混）。
@@ -162,27 +170,28 @@ class _ScanBudget:
             SCAN_TIME_BUDGET_S if time_budget is None else time_budget))
         self._deadline = self._clock() + budget_s
         self.scanned = 0   # 已统计的文件数（气泡/统计口径）
-        self.visited = 0   # 已记账的项数（文件 + 目录，查钟口径）
         self.truncated = False
 
     def account_dir(self) -> bool:
         """记一个即将进入的目录；返回 False = 预算用尽，调用方必须停止递归。"""
         if self.truncated:
             return False
-        self.visited += 1
         if self._clock() >= self._deadline:
             self.truncated = True
             return False
         return True
 
     def account(self) -> bool:
-        """记一个即将统计的文件；返回 False = 预算用尽，调用方必须立即停扫。"""
+        """记一个即将统计的文件；返回 False = 预算用尽，调用方必须立即停扫。
+
+        每次记账都查一次钟（逐项）：``monotonic`` 一次约 60ns（本机实测，200 万次
+        / 0.119s），被记账的那次 ``stat()`` 才是耗时主体，查钟本身不构成开销——
+        换来"两次 stat 之间必有一次查钟"。
+        """
         if self.scanned >= self._file_limit:
             self.truncated = True
             return False
-        self.visited += 1
-        if (self.visited % SCAN_TIME_CHECK_EVERY == 0
-                and self._clock() >= self._deadline):
+        if self._clock() >= self._deadline:
             self.truncated = True
             return False
         self.scanned += 1

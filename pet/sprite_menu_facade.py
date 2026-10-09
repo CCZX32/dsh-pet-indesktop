@@ -53,7 +53,11 @@ from .context_menus.menu_styles.common import (
     install_stay_open_interaction,
 )
 from .context_menus.shared import add_action as _add_action
-from .context_menus.shared import animation_icon_cache_key
+from .context_menus.shared import (
+    animation_icon_cache_entry,
+    animation_icon_cache_hit,
+    animation_icon_cache_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -211,8 +215,11 @@ class SpriteMenuFacade:
     def _icon_cache(self) -> dict:
         """动画缩略图缓存挂**壳**上（facade 每次右键重建，缓存必须长寿命）。
 
-        缓存键 =（库身份, 动画名）（``shared.animation_icon_cache_key``）：同壳多宠
+        键 =（库身份, 动画名）（``shared.animation_icon_cache_key``）：同壳多宠
         异角色的同名动画各存各的，换库后旧 worker 的迟到写入也落在旧库的键上。
+        值 =（库弱引用, QImage）（``shared.animation_icon_cache_entry``）：键里的
+        ``id()`` 会被回收对象复用，命中时还要按值里的弱引用核对身份
+        （``shared.animation_icon_cache_hit``）。
         """
         cache = getattr(self._shell, "_menu_icon_cache", None)
         if cache is None:
@@ -230,8 +237,15 @@ class SpriteMenuFacade:
         return animation_icon_cache_key(library, name)
 
     def animation_icon_cached_image(self, name: str):
-        """只读缓存查询（shared 侧用它决定是否先放占位图标）。"""
-        cached = self._icon_cache().get(self._icon_key(name))
+        """只读缓存查询（shared 侧用它决定是否先放占位图标）。
+
+        命中判定走 ``shared.animation_icon_cache_hit``：库身份在键里只是 ``id()``，
+        真正的身份校验在值里的库弱引用上——旧库回收后 id 被新库复用时，这条查询
+        必须报未命中，否则菜单会把上一只宠的缩略图显示在新角色上。
+        """
+        library = getattr(self.sprite, "library", None)
+        cached = animation_icon_cache_hit(
+            self._icon_cache().get(self._icon_key(name, library)), library)
         return QImage(cached) if cached is not None else QImage()
 
     def animation_icon_image(self, name: str):
@@ -242,12 +256,14 @@ class SpriteMenuFacade:
 
         库身份在**解码前**取一次并贯穿查询/解码/写入：worker 可能在解码期间被换库
         （换角色），此时它手里的图仍是旧库的，写入必须落回旧库的键——否则迟到写入会
-        成为新库的缓存命中，菜单显示上一个角色的图。
+        成为新库的缓存命中，菜单显示上一个角色的图。写入连库的**弱引用**一起存
+        （``shared.animation_icon_cache_entry``）：键只是 ``id()``，命中还要核对值里的
+        弱引用仍指向本次查询的这个库，所以 id 复用同样不会误命中。
         """
         library = getattr(self.sprite, "library", None)
         key = self._icon_key(name, library)
         cache = self._icon_cache()
-        cached = cache.get(key)
+        cached = animation_icon_cache_hit(cache.get(key), library)
         if cached is not None:
             return QImage(cached)
         clip_path = getattr(library, "clip_path", None)
@@ -260,7 +276,7 @@ class SpriteMenuFacade:
         if image is not None and not image.isNull():
             if len(cache) >= 128:
                 cache.clear()
-            cache[key] = QImage(image)
+            cache[key] = animation_icon_cache_entry(library, image)
         return image
 
     # ---------------------------------------------------------------- 素材清单（动画分类建造器）

@@ -1892,3 +1892,87 @@ def test_pause_during_fetch_is_deducted_from_reported_progress(monkeypatch):
     assert ctrl._tracker.position(105.0) == pytest.approx(32.0)
     assert ctrl._tracker.uses_reported_position is True, "真值口径不变，仍不提供手动对齐"
     assert win.shown[-1] == ("我在唱《t》", "B"), win.shown[-1]
+
+
+def test_pause_before_a_retry_dispatch_is_not_deducted_from_reported_progress(monkeypatch):
+    """同曲失败重试：只扣**本次派发之后**新增的暂停（astra F3）。
+
+    `_paused_seconds` 是**整首歌**累计（只在切歌时复位），而同曲失败重试会换一份新的
+    采样上下文——位置窗口 `[updated_at, now]` 从这次派发起算，早于它的暂停段（首试与
+    冷却期）根本不在窗口里。旧实现按窗口长度封顶（`min(暂停, 窗口)`）只保证"位置不低于
+    采样值"，保证不了"扣的暂停属于窗口"：30s 冷却期暂停撞上 5s 窗口，会把 105 算成 100
+    （歌词退回一整句）。修法是派发那一拍快照累计暂停，完成时只扣增量。
+    """
+    import pet.music_lyric_controller as mod
+    from pet.now_playing import Playback, Track
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    def sample(position):
+        return Playback(track=Track(title="t", artist="a", playing=True),
+                        position=position, updated_at=clock.now)
+
+    def paused_at(moment):
+        clock.now = moment
+        ctrl._on_playback_ready(Playback(
+            track=Track(title="t", artist="a", playing=False),
+            position=100.0, updated_at=clock.now))
+
+    ctrl._on_playback_ready(sample(100.0))        # t=100 首试派发（真值 100s）
+    paused_at(101.0)
+    clock.now = 131.0
+    ctrl._on_playback_ready(sample(100.0))        # t=131 恢复 → 冷却期暂停累计 30s
+
+    clock.now = 135.0
+    ctrl._on_lyrics_ready(key, None)              # 首试失败：记 5 分钟冷却
+    assert ctrl._no_lyric_until[key] > clock.now
+
+    clock.now = 436.0
+    ctrl._on_playback_ready(sample(100.0))        # 冷却到期：同曲重试 = 新派发
+    assert key in ctrl._loading, "前提：重试真的派发了"
+
+    clock.now = 441.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=(
+        LyricLine(0.0, "A"), LyricLine(100.0, "B"), LyricLine(104.0, "C"))))
+
+    # 窗口只有 5s（436→441，其间零暂停）：100 + 5 - 0 = 105。
+    # 按整首累计扣（旧的封顶写法）会算成 100 + 5 - min(30, 5) = 100。
+    assert ctrl._tracker.position(441.0) == pytest.approx(105.0)
+    assert win.shown[-1] == ("我在唱《t》", "C"), win.shown[-1]   # 错的 100 → B（退回一句）
+
+
+def test_cooldown_pause_is_still_deducted_without_reported_progress(monkeypatch):
+    """无进度分支的窗口起点是**切歌时刻**，所以重试前的暂停照样要扣（刻意的不同）。
+
+    两个分支只共用"同一份暂停记账 + 只扣锚点之后的暂停"这一条口径，锚点不同：
+    有进度 → 本次派发那次采样；无进度 → 检测到切歌的时刻（`_detected_at`，那里的
+    暂停记账本就归零）。把"派发基线"照搬到无进度分支会**漏扣**冷却期暂停，位置偏大。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))            # t=100 检测到歌（无进度源）
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    clock.now = 131.0
+    ctrl._on_playback_ready(_playback(None))            # 恢复：暂停累计 30s
+
+    clock.now = 135.0
+    ctrl._on_lyrics_ready(key, None)                    # 首试失败 → 冷却
+    clock.now = 436.0
+    ctrl._on_playback_ready(_playback(None))            # 冷却到期：重试派发
+
+    clock.now = 441.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    # 441 - 100 - 30 = 311（冷却期的 300s 算作播放——无进度源只能这么估，本修复没改）
+    assert ctrl._tracker.position(441.0) == pytest.approx(311.0)

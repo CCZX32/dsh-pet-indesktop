@@ -977,7 +977,11 @@ class VoiceChimeService:
         if deadlines:
             self._arm_unlock_timer(min(deadlines) - now)
         else:
-            self._disarm_unlock_timer()
+            # 两个挂钟都结了：**这才是真正的撤表**（单次表到点也会自然停表，这里显式
+            # 撤一下，让"由谁布、由谁撤"成对，也不留一条只会空响的表）。
+            timer = getattr(self, "_unlock_timer", None)
+            if timer is not None:
+                timer.stop()
 
     def _arm_unlock_timer(self, remaining_s: float) -> None:
         """布一道**只为自愈**的超时（见 ``_unlock_timer`` 与 ``_reararm_watchdog``）。
@@ -992,14 +996,19 @@ class VoiceChimeService:
         timer.start()
 
     def _disarm_unlock_timer(self) -> None:
-        """两个挂钟都结了（回调回来 / 超时自愈 / 终止态 / stop）就撤掉看门狗表。
+        """合成锁有结局之后的挂钟**结算**：还有未结挂钟就按剩余期限重布，否则才真撤表。
 
-        不撤的话它会一直挂着到期限到点才响一声空炮（那一响的语义已经作废）；运行期
-        这条表与 20s tick 的 watchdog 互为冗余，撤掉不影响任何既有语义。
+        这里刻意**不是**裸 ``timer.stop()``：两个挂钟共用一条单次表，而"合成有结局"
+        只说明**合成那一支**结了——播放接管那一支可能还挂着。可达序列：手动通道起
+        合成 A → A 在飞期间另一请求命中缓存起播 B（``_fire`` 缓存旁路不看合成锁）→
+        B 卡在没有终止信号的接管态 → A 完成 / 失败 / 超时。裸撤会让 B 的
+        ``_PLAY_PENDING_MAX_S`` 兜底永远不到点（手动通道没有 20s tick，drain 在通道
+        不空闲时又直接 return），通道永久判忙。
+
+        实现只有一条（``_reararm_watchdog`` 按当前状态重算表），三个结局
+        （完成 / 失败 / 合成超时）都调本方法，不在各点各写一份。
         """
-        timer = getattr(self, "_unlock_timer", None)
-        if timer is not None:
-            timer.stop()
+        self._reararm_watchdog()
 
     def _worker_callback(self, generation: int):
         """取本次合成的 worker 回调（顺带保证信号桥已建好并接到本服务）。"""
@@ -1037,7 +1046,9 @@ class VoiceChimeService:
         respect_quiet = self._synthesis_respect_quiet
         self._synthesis_respect_quiet = True
         self._busy = False
-        # 本次合成已有结局：撤掉解锁表（若 drain 又起了新合成，_fire 会重新布一道）。
+        # 本次合成已有结局：**结算**看门狗表（不是裸撤）——播放接管那一支可能还挂着
+        # （手动通道没有 tick，撤了就再也没人续命），由 _disarm_unlock_timer 按剩余
+        # 期限重算。若 drain 又起了新合成，_fire 会重新布一道。
         self._disarm_unlock_timer()
         try:
             self._handle_synthesized(role, path, text, error, respect_quiet)
@@ -1563,7 +1574,8 @@ class VoiceChimeService:
         logger.warning("语音合成超时未回调，复位合成锁（%.0fs）", _SYNTH_TIMEOUT_S)
         self._busy = False
         self._synthesis_role = "play"
-        # 解锁表已响过一次（单次表自然停表）；显式撤一下，让"由谁布、由谁撤"成对。
+        # 合成那一支结了：**结算**看门狗表（同 _on_synthesized 的口径）——播放接管
+        # 那一支若还挂着，必须按它的剩余期限重布，否则它的上限兜底永远不到点。
         self._disarm_unlock_timer()
         # 代次递增 = 这次挂死的合成从此作废：它若日后才回调（网络超时后返回），
         # 回调带的旧代次会被 _on_synthesized 认出来并整条丢弃，不会串到随后起的

@@ -59,6 +59,18 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _other_stamp_sha(digest: str) -> str:
+    """另一份源的 sha，**前缀就与目录戳不符**（首字符换掉即错开前 12 位）。"""
+    head = "f" if not digest.startswith("f") else "0"
+    return head * GATE.GEN_STAMP_HEX + digest[GATE.GEN_STAMP_HEX:]
+
+
+def _other_source_sha(digest: str) -> str:
+    """另一份源的 sha，**前缀与目录戳一致**、尾部不同（冒充戳但指向别的源）。"""
+    last = "0" if digest[-1] != "0" else "1"
+    return digest[:-1] + last
+
+
 def _make_clip(
     characters_dir: Path,
     character: str,
@@ -105,6 +117,17 @@ def _make_clip(
     }
     (gen / "meta.json").write_text(json.dumps(payload), encoding="utf-8")
     return webm, gen
+
+
+def _patch_source_sha(gen: Path, value: str | None) -> None:
+    """改写世代目录 meta.json 的 ``source_sha256``（``None`` = 删掉该键）。"""
+    path = gen / "meta.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if value is None:
+        payload.pop("source_sha256", None)
+    else:
+        payload["source_sha256"] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _run(characters_dir: Path) -> subprocess.CompletedProcess:
@@ -259,6 +282,72 @@ class TestGateVerdicts:
             assert character in result.stderr
 
 
+# --------------------------------------------------------------------------- 源身份（astra F4）
+
+
+class TestSourceIdentity:
+    """``meta.source_sha256`` 是运行时采纳条件，构建门必须同样验。
+
+    运行时（``pet/frameseq_provision.py::_complete_meta`` / ``current_generation``）
+    要求三件事同时成立：摘要是 64 位小写十六进制 ∧ 以世代目录戳（目录名前 12 位）开头
+    ∧ 等于**当前源 webm 的完整 sha256**。目录名对了而摘要缺失 / 非 hex / 与戳不符 /
+    指向另一份源时运行时拒收那份产物并回退 WebM 播放——用户看到的就是未转换素材，
+    正是这道门要拦的静默缺口。
+    """
+
+    @staticmethod
+    def _clip_with_identity(tmp_path, mutate) -> Path:
+        """造一段 clip，再按 ``mutate(digest) -> str | None`` 改写 meta 的源摘要。"""
+        characters = tmp_path / "characters"
+        webm, gen = _make_clip(characters, "shenshen", "写代码")
+        _patch_source_sha(gen, mutate(_sha256(webm)))
+        return characters
+
+    def test_valid_identity_passes(self, tmp_path):
+        # 正例守卫：真实摘要（默认写法）必须放行，新校验不许误伤
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "写代码")
+        report = GATE.check_bundle(characters)
+        assert report.ok, report.problems
+        assert _run(characters).returncode == 0
+
+    def test_missing_source_sha_fails(self, tmp_path):
+        """旧版无戳产物（meta 没有 source_sha256）：运行时不给身份凭证即拒收。"""
+        characters = self._clip_with_identity(tmp_path, lambda _digest: None)
+        report = GATE.check_bundle(characters)
+        assert [p.kind for p in report.problems] == ["bad_source_identity"], report.problems
+        assert "64 位十六进制" in report.problems[0].detail
+        result = _run(characters)
+        assert result.returncode == 1
+        assert "源身份" in result.stderr
+        assert "source_sha256" in result.stderr
+
+    def test_non_hex_source_sha_fails(self, tmp_path):
+        """非 hex（也含长度不对）的摘要：不是合法的源身份。"""
+        characters = self._clip_with_identity(tmp_path, lambda _digest: "z" * 64)
+        report = GATE.check_bundle(characters)
+        assert [p.kind for p in report.problems] == ["bad_source_identity"], report.problems
+        assert "64 位十六进制" in report.problems[0].detail
+        assert _run(characters).returncode == 1
+
+    def test_source_sha_stamp_mismatch_fails(self, tmp_path):
+        """摘要与目录戳前缀不符：目录名换过、或 meta 与目录不是一套产物。"""
+        characters = self._clip_with_identity(tmp_path, _other_stamp_sha)
+        report = GATE.check_bundle(characters)
+        assert [p.kind for p in report.problems] == ["bad_source_identity"], report.problems
+        detail = report.problems[0].detail
+        assert "目录戳" in detail
+        assert _run(characters).returncode == 1
+
+    def test_source_sha_pointing_to_another_source_fails(self, tmp_path):
+        """摘要戳对得上、但指向**另一份源**：源换版后产物没跟上，运行时同样拒收。"""
+        characters = self._clip_with_identity(tmp_path, _other_source_sha)
+        report = GATE.check_bundle(characters)
+        assert [p.kind for p in report.problems] == ["bad_source_identity"], report.problems
+        assert "当前源" in report.problems[0].detail
+        assert _run(characters).returncode == 1
+
+
 # --------------------------------------------------------------------------- 硬约束
 
 
@@ -317,6 +406,12 @@ class TestGenerationHomology:
         characters = tmp_path / "characters"
         webm, gen = _make_clip(characters, "shenshen", "待机呼吸休闲")
         assert gen.name.endswith(_sha256(webm)[:GATE.GEN_STAMP_HEX])
+
+    def test_source_sha_length_matches_provision(self):
+        # 身份凭证的长度口径写死在 provision ``_complete_meta`` 的 ``_is_hex(stamp, 64)``
+        # 里（没有模块级常量可提取）：按源码文本比对，运行时改长度即红。
+        text = PROVISION_SOURCE.read_text(encoding="utf-8")
+        assert f"_is_hex(stamp, {GATE.SOURCE_SHA_HEX})" in text
 
     def test_provision_constants_are_not_legacy(self):
         # 防线自证：门认的档串必须不在 provision 的 LEGACY_ENCODER_DESCS 里

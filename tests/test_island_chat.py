@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from pet.app import AppShell
@@ -596,6 +597,25 @@ class _BlockingProvider:
         yield self.reply
 
 
+class _LateProvider:
+    """可控网络替身：请求卡住，放行后**一定**产出一条回答（收到 cancel 也不提前收场）。
+
+    与 ``_BlockingProvider`` 的分工：那个收到 cancel 就直接返回，迟到信号根本没被造
+    出来；本替身让 worker 在切角色**之前**就 emit 出「增量 + 完成」，投递到 GUI 线程
+    留到切换之后，正好验 ID 闸。
+    """
+
+    def __init__(self, reply: str = "旧角色的迟到回答") -> None:
+        self.reply = reply
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def stream(self, messages, config, cancel):
+        self.started.set()
+        self.release.wait(timeout=10)
+        yield self.reply
+
+
 def _pump_until(predicate, *, timeout: float = 10.0) -> bool:
     """宽预算轮询 + 事件泵（worker→主线程的信号是队列投递，必须跑事件循环）。"""
     app = _qapp()
@@ -685,6 +705,49 @@ def test_island_switch_character_drops_inflight_answer(tmp_path):
         assert _pump_until(lambda: not bubble.service.busy), "旧 worker 未收尾"
         assert bubble.output.text() == "", "旧角色的回答不许显示在岛上"
         assert not [m for m in bubble.session.messages if m.role == "assistant"]
+        assert bubble.session.character_id == "nova"
+    finally:
+        bubble.close()
+        bubble.deleteLater()
+
+
+def test_island_switch_character_drops_queued_late_delta_and_completion(tmp_path):
+    """astra #1：岛气泡同一条——排好队的增量 + 完成信号在切角色后投递必须被丢弃。
+
+    基类那条用例的替身收到 cancel 就直接返回（迟到信号根本没被造出来）；本用例放行后
+    先产出一条增量再正常收尾，worker 线程直连打点确认两类信号**已 emit**（此时队列投递
+    还挂在 GUI 线程事件队列里），随后才切角色：增量不许上岛、完成不许落进新角色会话。
+    """
+    _qapp()
+    bubble = IslandChatBubble(Config(base=tmp_path))
+    try:
+        provider = _LateProvider()
+        bubble.service.provider = provider
+        phase = {"now": "in_flight"}
+        forwarded: list[tuple[str, str]] = []
+        for name in ("delta", "finished"):
+            getattr(bubble.service, name).connect(
+                lambda *args, _name=name: forwarded.append((_name, phase["now"])))
+        bubble.input.setText("你在吗")
+        bubble._send()
+        assert provider.started.wait(timeout=10), "前提：请求已进入 provider"
+
+        done = threading.Event()
+        bubble.service._worker.finished.connect(lambda: done.set(), Qt.DirectConnection)
+        provider.release.set()
+        assert done.wait(timeout=10), "前提：worker 已把增量 + 完成 emit 进队列"
+
+        phase["now"] = "after_switch"
+        bubble.switch_character("nova")
+
+        delivered = {name for name, _ in forwarded}
+        assert _pump_until(lambda: {"delta", "finished"} <= {name for name, _ in forwarded}), \
+            f"前提：两类信号必须真的被投递过（实际 {delivered}）"
+        assert all(where == "after_switch" for _, where in forwarded), \
+            f"前提：投递必须发生在切角色之后（实际 {forwarded}）"
+        assert bubble.output.text() == "", "迟到的增量不许上岛"
+        assert not [m for m in bubble.session.messages if m.role == "assistant"], \
+            "迟到的完成信号不许落进新角色的会话"
         assert bubble.session.character_id == "nova"
     finally:
         bubble.close()
