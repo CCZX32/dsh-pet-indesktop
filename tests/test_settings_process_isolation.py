@@ -381,11 +381,10 @@ def test_launch_settings_process_uses_source_command(tmp_path, monkeypatch):
     shell = _bare_shell(Config(base=tmp_path))
     calls = []
     monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
-    from PySide6.QtCore import QProcess
-
     monkeypatch.setattr(
-        QProcess, "startDetached",
-        staticmethod(lambda program, arguments, workdir: calls.append((program, arguments, workdir)) or (True, 4242)),
+        AppShell, "_spawn_settings_process",
+        staticmethod(lambda program, arguments, workdir, environment:
+                     calls.append((program, arguments, workdir)) or True),
     )
     assert shell._launch_settings_process() is True
     program, arguments, workdir = calls[0]
@@ -395,17 +394,86 @@ def test_launch_settings_process_uses_source_command(tmp_path, monkeypatch):
 
 
 def test_launch_settings_process_failure_is_reported(tmp_path, monkeypatch):
-    """startDetached 返回失败 → _launch_settings_process 返回 False（触发回退）。"""
+    """detach 启动失败 → _launch_settings_process 返回 False（触发回退）。"""
     import pet.app as app_mod
-    from PySide6.QtCore import QProcess
 
     shell = _bare_shell(Config(base=tmp_path))
     monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
     monkeypatch.setattr(
-        QProcess, "startDetached",
-        staticmethod(lambda program, arguments, workdir: (False, 0)),
+        AppShell, "_spawn_settings_process",
+        staticmethod(lambda program, arguments, workdir, environment: False),
     )
     assert shell._launch_settings_process() is False
+
+
+def test_launch_settings_process_tells_child_the_running_topology(tmp_path, monkeypatch):
+    """R01：子进程拿到的是**拉起它的主进程运行中拓扑**，不是磁盘上下一次启动的配置。
+
+    主进程启动时读一次拓扑并快照定死（app.start()）；此后用户在设置页勾上「直播
+    捕获兼容」只改磁盘，正在跑的这个进程仍是 overlay。设置子进程若只按磁盘判就是
+    legacy，子宠页会把全部设置写进 ``config-slot-N.json``，而运行中的 overlay 主进程
+    对非 per-slot 键只读主配置——"保存成功、实际无效"。
+    """
+    import pet.app as app_mod
+    from pet import overlay_settings_command as cmd_mod
+
+    config = Config(base=tmp_path)
+    assert config.save() is True
+    cmd_mod.reset_topology_snapshot()
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    monkeypatch.delenv(cmd_mod.ENV_PARENT_TOPOLOGY, raising=False)
+    assert cmd_mod.is_overlay_topology() is True, "用例前置：启动时判成 overlay 并快照"
+
+    # 用户勾选「直播捕获兼容」并保存（重启后生效，本进程没重启）
+    external = Config(base=tmp_path)
+    external.set("stream_capture_mode", True)
+    assert external.save() is True
+    on_disk = json.loads(config.path.read_text(encoding="utf-8"))
+    assert on_disk["stream_capture_mode"] is True, "用例前置：磁盘已开启捕获模式"
+
+    shell = _bare_shell(config)
+    calls = []
+    monkeypatch.setattr(app_mod.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        AppShell, "_spawn_settings_process",
+        staticmethod(lambda program, arguments, workdir, environment:
+                     calls.append(environment) or True),
+    )
+    assert shell._launch_settings_process() is True
+
+    environment = calls[0]
+    assert environment.value(cmd_mod.ENV_PARENT_TOPOLOGY) == "overlay", \
+        "磁盘捕获开关不得改写父进程运行中拓扑的陈述"
+
+
+def test_spawn_settings_process_hands_environment_to_the_detached_child(
+        tmp_path, monkeypatch):
+    """真起一个 detach 子进程：注入的 env 必须到得了子进程（不是只写进对象）。
+
+    这条是真机机制验证（不 mock Qt）：``QProcess`` 实例 + ``startDetached()`` +
+    ``setProcessEnvironment``。设置子进程侧读到的就是这条 env（见
+    ``overlay_settings_command.is_overlay_topology`` 的判定链）。
+    """
+    from PySide6.QtCore import QProcessEnvironment
+
+    out = tmp_path / "child-env.txt"
+    environment = QProcessEnvironment.systemEnvironment()
+    environment.insert("DSH_PET_PARENT_TOPOLOGY", "overlay")
+
+    script = (
+        "import os, pathlib, sys;"
+        "pathlib.Path(sys.argv[1]).write_text("
+        "os.environ.get('DSH_PET_PARENT_TOPOLOGY', 'MISSING'), encoding='utf-8')"
+    )
+    started = AppShell._spawn_settings_process(
+        sys.executable, ["-c", script, str(out)], str(tmp_path), environment)
+
+    assert started is True
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not out.exists():
+        time.sleep(0.05)
+    assert out.exists(), "子进程没跑起来（detach 机制坏了）"
+    assert out.read_text(encoding="utf-8") == "overlay"
 
 
 # ------------------------------------------------------------- 5. 气泡抑制

@@ -36,7 +36,11 @@ def _island(tmp_path: Path, **overrides) -> DynamicIsland:
     }
     data.update(overrides)
     cfg.set("dynamic_island", data)
-    return DynamicIsland(cfg)
+    island = DynamicIsland(cfg)
+    # 岛的常规形态是**可见**的交互面：隐藏的岛不弹气泡（AppShell 的可用性判定
+    # 看宿主侧运行态，见 test_running_island_disable_retires_chat_availability）。
+    island.show()
+    return island
 
 
 def _click(widget) -> None:
@@ -828,5 +832,83 @@ def test_appshell_island_feedback_available(tmp_path):
         assert shell._island_feedback_available() is True
         shell.enable_chat = False
         assert shell._island_feedback_available() is False
+    finally:
+        _teardown_shell(shell)
+
+# ------------------------------------------------------ 关岛后的运行中行为（R07）
+def _disable_island_at_runtime(shell) -> None:
+    """运行中关岛：设置页/托盘落盘后由 ``_sync_dynamic_island`` 收口（只 hide）。"""
+    cfg = dict(shell.config.get("dynamic_island"))
+    cfg["enabled"] = False
+    shell.config.set("dynamic_island", cfg)
+    shell._sync_dynamic_island()
+
+
+def test_running_island_disable_retires_chat_availability(tmp_path):
+    """运行中关岛：岛对象还在（只 ``hide()``），但它不再是可用的交互面。
+
+    ``_sync_dynamic_island`` 关岛走 ``hide()`` + 摘桥，**不销毁对象**；可用性判定
+    若只看"对象有效 + hidden_chat 开"，隐藏桌宠时反馈改道与后台回复仍会锚着岛旧
+    位置弹气泡——用户明明关了岛，屏幕上却冒出岛对话孤窗（2026-10-09 审查 R07）。
+    """
+    _qapp()
+    shell = _make_shell(tmp_path, hidden_chat=True)
+    try:
+        shell._sync_dynamic_island()
+        assert shell.island is not None and shell.island.isVisible() is True
+        assert shell._island_chat_available() is True
+
+        _disable_island_at_runtime(shell)
+
+        assert shell.island is not None, "关岛只 hide()：对象保留 ≠ 交互面可用"
+        assert shell.island.isVisible() is False
+        assert shell._island_chat_available() is False
+        assert shell._island_feedback_available() is False
+
+        cfg = dict(shell.config.get("dynamic_island"))
+        cfg["enabled"] = True
+        shell.config.set("dynamic_island", cfg)
+        shell._sync_dynamic_island()
+        assert shell.island.isVisible() is True
+        assert shell._island_chat_available() is True, "再开岛必须恢复可用"
+    finally:
+        _teardown_shell(shell)
+
+
+def test_disabled_island_drops_hidden_feedback_and_reply_bubbles(tmp_path):
+    """关岛 + 桌宠隐藏：反馈改道与后台回复都不再弹岛气泡（回退各原非岛路径）。"""
+    _qapp()
+    shell = _make_shell(tmp_path, hidden_chat=True)
+    try:
+        shell._sync_dynamic_island()
+        shell.island.set_pet_visible(False)
+        _disable_island_at_runtime(shell)
+
+        assert shell._island_feedback_bubble("DSH 开始干活啦～") is False
+        assert shell.island_chat is None, "关岛后不许再建岛对话气泡（旧位置孤窗）"
+
+        shell._on_global_chat_finished("在的呀")
+        assert shell.island_chat is None, "后台回复同样不许弹在隐藏的岛上"
+    finally:
+        _teardown_shell(shell)
+
+
+def test_disabled_island_hidden_chat_click_falls_back_to_non_island_route(tmp_path):
+    """关岛 + 桌宠隐藏：hidden_chat 的单击路由回退到既有非岛路径（叫回桌宠）。
+
+    岛关着就不该有岛气泡这条路：``chat_requested`` 落到这里时按**既有的 else
+    分支语义**处理（与无聊天能力的构建同一条回退链）。
+    """
+    _qapp()
+    shell = _make_shell(tmp_path, hidden_chat=True)
+    try:
+        shell._sync_dynamic_island()
+        shell.island.set_pet_visible(False)
+        _disable_island_at_runtime(shell)
+
+        shell._chat_from_island()
+
+        assert shell.island_chat is None, "岛不可用时不弹气泡"
+        assert shell.island._pet_visible is True, "回退到既有的「显示桌宠」分支"
     finally:
         _teardown_shell(shell)

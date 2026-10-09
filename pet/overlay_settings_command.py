@@ -35,14 +35,25 @@ settings.lock 单实例）里点「一键退出子肥鱼」无法跨进程删 sp
 会连带素材库/ffmpeg/托盘），所以拓扑读取的唯一实现放在这个零 Qt 模块，
 ``overlay_shell.is_overlay_topology`` 只做转发（对外入口名不变）。
 
-拓扑输入有两个（T4 落地，Phase A）：
+拓扑输入有三个：
 
-1. ``PET_RENDER_TOPOLOGY`` 显式 env = dev 逃生门，**显式值优先**（测试与开发
+1. ``DSH_PET_PARENT_TOPOLOGY``：**拉起本设置进程的那个主进程的运行中拓扑**
+   （值 ``overlay`` / ``legacy``，父进程在 ``AppShell._launch_settings_process``
+   注入；见 :data:`ENV_PARENT_TOPOLOGY`）。它回答的是"我现在正在被谁编辑、那个
+   进程在跑哪套渲染路径"，**优先于下面两条**——设置子进程必须按运行中的那个主进程
+   分流，不能按磁盘上"下一次启动的配置"（用户勾了捕获模式但没重启时，盘上是
+   legacy、运行中的主进程仍是 overlay；按盘分流会把子宠页的设置写进
+   ``config-slot-N.json``，而 overlay 主进程对非 per-slot 键只读主配置）；
+2. ``PET_RENDER_TOPOLOGY`` 显式 env = dev 逃生门，**显式值优先**（测试与开发
    都要能压过用户配置）；
-2. 主配置 ``config.json`` 的 ``stream_capture_mode``：勾选「直播捕获兼容」即
+3. 主配置 ``config.json`` 的 ``stream_capture_mode``：勾选「直播捕获兼容」即
    **重启级切换**到 legacy 单窗 PetWindow 路径（overlay 单合成窗不给 OBS
    枚举的窗口）。**进程内快照一次**（T5：启动时定死，不做运行时切换）——
    否则用户在设置页勾上以后，正在跑的这一进程会中途翻拓扑。
+
+父进程那条是**记录事实**不是做选择：它的值就是父进程自己（含上面第 2、3 条输入）
+定下来的运行中判定，正常路径上三条不可能互相矛盾；父进程没发话（旧主进程 /
+手工单开设置页）时判定链原样回退到第 2、3 条。
 """
 from __future__ import annotations
 
@@ -67,6 +78,14 @@ logger = logging.getLogger(__name__)
 # T5：开发期一次性分流 flag（不进 Config/设置页/schema）。显式值优先于配置。
 ENV_TOPOLOGY = "PET_RENDER_TOPOLOGY"
 TOPOLOGY_OVERLAY = "overlay"
+TOPOLOGY_LEGACY = "legacy"
+
+#: 父进程（拉起本设置子进程的那个主进程）**运行中**拓扑的陈述：``overlay`` /
+#: ``legacy``。与 ``PET_RENDER_TOPOLOGY`` 严格分开——后者是 dev 逃生门（开发者
+#: 声明"本进程要跑哪套渲染路径"），本条是主进程告诉子进程"我现在正跑着哪一套"，
+#: 记录事实而非选择，故在判定链里排在最前（见 :func:`is_overlay_topology`）。
+#: 写入点唯一：``AppShell._launch_settings_process`` 拉起设置子进程时注入。
+ENV_PARENT_TOPOLOGY = "DSH_PET_PARENT_TOPOLOGY"
 
 #: T4：持久键 ``stream_capture_mode`` 也是拓扑输入（勾选 = 重启级切到 legacy
 #: 单窗路径，OBS 才能枚举到窗口）。键名与 ``config.py`` 的 schema 同字面量。
@@ -96,23 +115,35 @@ DEFAULT_MAX_AGE_S = 120.0
 _SLOT_INSTANCE_RE = re.compile(r"^slot-(\d+)$")
 
 
-def _explicit_env_verdict() -> bool | None:
-    """显式 env 逃生门的判定：``legacy`` → 非 overlay；其它非空值 → overlay。
+def _topology_env_verdict(name: str) -> bool | None:
+    """拓扑 env 的判定：``legacy`` → 非 overlay；其它非空值 → overlay。
 
-    未设置 / 空白 → None（不是判定，只表示"env 没有发话"，交给配置判定）。大小写
-    与首尾空白不敏感（历史契约）。
+    未设置 / 空白 → None（不是判定，只表示"这条 env 没有发话"）。大小写与首尾空白
+    不敏感。父进程陈述与 dev 逃生门**共用这一份解析**：两条通道的取值口径必须一致，
+    否则"同一个值在两个进程里判出相反结果"。
     """
-    raw = os.environ.get(ENV_TOPOLOGY, "").strip().lower()
+    raw = os.environ.get(name, "").strip().lower()
     if not raw:
         return None
-    return raw != "legacy"
+    return raw != TOPOLOGY_LEGACY
+
+
+def _explicit_env_verdict() -> bool | None:
+    """显式 env 逃生门的判定（``PET_RENDER_TOPOLOGY``）。"""
+    return _topology_env_verdict(ENV_TOPOLOGY)
+
+
+def _parent_env_verdict() -> bool | None:
+    """父进程运行中拓扑的陈述（``DSH_PET_PARENT_TOPOLOGY``）；没发话 → None。"""
+    return _topology_env_verdict(ENV_PARENT_TOPOLOGY)
 
 
 def env_forces_legacy() -> bool:
     """显式 ``PET_RENDER_TOPOLOGY=legacy``？（dev 逃生门，运行期即时切换）。
 
     设置页文案要用它区分「本进程就是 legacy，开关即时生效」与「默认路径：开关
-    是重启级拓扑输入」（见 ``settings_pet_controls.stream_capture_hint``）。
+    是重启级拓扑输入」（见 ``settings_pet_controls.stream_capture_hint``）。父进程
+    陈述不参与这条——它说的是"运行中拓扑是什么"，不是"捕获开关是否即时生效"。
     """
     return _explicit_env_verdict() is False
 
@@ -172,17 +203,34 @@ def is_overlay_topology() -> bool:
 
     判定顺序：
 
-    1. ``PET_RENDER_TOPOLOGY`` 显式值（dev 逃生门，优先）；
-    2. 否则读主配置的 ``stream_capture_mode``：开启 → legacy（捕获模式重启级
+    1. ``DSH_PET_PARENT_TOPOLOGY``（父进程运行中拓扑的陈述；只有设置子进程会收到）：
+       优先于其余输入——这个设置页编辑的就是那个正在跑的进程，按它分流才不会出现
+       "保存成功、运行期无效"；
+    2. ``PET_RENDER_TOPOLOGY`` 显式值（dev 逃生门）；
+    3. 否则读主配置的 ``stream_capture_mode``：开启 → legacy（捕获模式重启级
        切换，T4），关闭/读不到 → overlay（默认拓扑）。
 
     不做运行时切换：配置判定在首次读取时快照（``stream_capture_mode_enabled``），
-    设置页勾选只影响**下一次启动**。
+    设置页勾选只影响**下一次启动**。父进程那条陈述同样由它的启动快照给出
+    （:func:`runtime_topology_env_value`），故也不需要运行时重判。
     """
+    parent = _parent_env_verdict()
+    if parent is not None:
+        return parent
     explicit = _explicit_env_verdict()
     if explicit is not None:
         return explicit
     return not stream_capture_mode_enabled()
+
+
+def runtime_topology_env_value() -> str:
+    """本进程作为**父进程**拉起设置子进程时要注入的 :data:`ENV_PARENT_TOPOLOGY` 值。
+
+    = 本进程运行中的拓扑（同一个 :func:`is_overlay_topology`，不是第二份判据）：
+    主进程启动路径已读过一次并快照定死，之后用户在设置页动捕获开关只改磁盘，这条
+    陈述不变——正是"子进程按运行中的父进程分流"所需要的事实。
+    """
+    return TOPOLOGY_OVERLAY if is_overlay_topology() else TOPOLOGY_LEGACY
 
 
 def capture_switch_is_restart_level() -> bool:

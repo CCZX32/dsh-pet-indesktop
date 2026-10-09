@@ -442,3 +442,85 @@ def test_routed_keys_cover_the_runtime_per_slot_read_surface(tmp_path):
     for main_only in ("pet_opacity", "voice_chime_enabled", "edge_probe_enabled",
                       "dynamic_island", "context_menu_appearance"):
         assert main_only not in settings_slot_config.SLOT_ROUTED_KEYS
+
+
+# ------------------------------------------------------------ 10. 分流按父进程运行中拓扑（R01）
+def test_parent_overlay_topology_routes_child_page_despite_disk_capture_mode(
+        tmp_path, monkeypatch):
+    """磁盘 ``stream_capture_mode=True``（勾了没重启）+ 父进程正跑 overlay → 照旧分流。
+
+    R01：默认 overlay 运行中，用户在主宠设置勾选「直播捕获兼容」并保存（文案明说
+    重启后生效，用户没重启）→ 磁盘上捕获开关为 True。此后打开子宠设置：设置子进程
+    按磁盘快照判成 legacy，``route_settings_config`` 原样返回不分流，子宠页把全部
+    设置写进 ``config-slot-N.json``——而仍在运行的 overlay 主进程对这些键只读主配置，
+    于是"保存成功、实际无效"，还会污染下一次重启的配置身份。
+
+    正解：设置进程按**拉起它的那个主进程的运行中拓扑**分流。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    main = Config(base=tmp_path)
+    main.set("stream_capture_mode", True)
+    assert main.save() is True
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    monkeypatch.delenv(cmd_mod.ENV_PARENT_TOPOLOGY, raising=False)
+    cmd_mod.reset_topology_snapshot()
+
+    # 主进程拉起设置子进程时把**运行中拓扑**显式传下去（子进程快照是冷的：只按
+    # 磁盘读就是 legacy，正是 R01 的错判）。
+    monkeypatch.setenv(cmd_mod.ENV_PARENT_TOPOLOGY, "overlay")
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+
+    routed = settings_slot_config.route_settings_config(cfg)
+    assert routed is not cfg, "父进程还在 overlay 跑：子宠页必须分流"
+
+    routed.set("pet_opacity", 33)
+    assert routed.save() is True
+    assert _read_json(main.path)["pet_opacity"] == 33, "非 per-slot 键落主配置（真生效）"
+    assert _read_json(_slot_path(main.dir)).get("pet_opacity") != 33, \
+        "一个字节都不许落 slot 文件"
+
+
+def test_parent_legacy_topology_does_not_route_even_when_disk_says_overlay(
+        tmp_path, monkeypatch):
+    """父进程正跑 legacy（捕获模式/dev 逃生门）→ 即使磁盘捕获开关关着也不分流。
+
+    那只宠读的就是自己那份 ``config-slot-N.json`` 的全部键，分流会让它的设置失效。
+    父进程的陈述与磁盘互相矛盾时以**父进程运行中拓扑**为准：那才是这个设置页正在
+    编辑的那个进程。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    cmd_mod.reset_topology_snapshot()
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    monkeypatch.setenv(cmd_mod.ENV_PARENT_TOPOLOGY, "legacy")
+
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+    assert settings_slot_config.route_settings_config(cfg) is cfg
+
+    # 父进程陈述与 dev 逃生门同时在场且互相矛盾：父进程运行中拓扑优先
+    monkeypatch.setenv(cmd_mod.ENV_TOPOLOGY, "overlay")
+    assert settings_slot_config.route_settings_config(cfg) is cfg
+
+
+def test_missing_parent_topology_env_falls_back_to_existing_verdict(
+        tmp_path, monkeypatch):
+    """父进程没发话（手工单开设置页/旧主进程）→ 判定逐位回到原有链路。"""
+    from pet import overlay_settings_command as cmd_mod
+
+    main = Config(base=tmp_path)
+    main.set("stream_capture_mode", True)
+    assert main.save() is True
+    cmd_mod.reset_topology_snapshot()
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    monkeypatch.delenv(cmd_mod.ENV_PARENT_TOPOLOGY, raising=False)
+
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+    assert settings_slot_config.route_settings_config(cfg) is cfg, \
+        "缺父进程陈述时照旧按磁盘快照判（勾了没重启 = 那个进程就是 legacy）"
+
+    monkeypatch.setenv(cmd_mod.ENV_PARENT_TOPOLOGY, "overlay")
+    assert settings_slot_config.route_settings_config(cfg) is not cfg, \
+        "同一份磁盘配置，父进程陈述 overlay 就分流"

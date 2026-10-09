@@ -26,6 +26,14 @@
 - ``collision_enabled`` 虽不在 ``PER_SLOT_SETTING_KEYS`` 里，却也有专属的逐宠读点
   （见 :data:`SLOT_ROUTED_KEYS`）。
 
+这里的"本进程拓扑"对设置子进程而言 = **拉起它的那个主进程的运行中拓扑**
+（``overlay_settings_command.ENV_PARENT_TOPOLOGY``，主进程拉起设置子进程时注入）：
+磁盘上的 ``stream_capture_mode`` 是重启级输入，用户勾了「直播捕获兼容」还没重启时
+盘上是 legacy、而运行中的主进程仍是 overlay——按盘分流会把子宠页的全部设置写进
+``config-slot-N.json``，而那个主进程对非 per-slot 键只读主配置，于是"保存成功、
+实际无效"（2026-10-09 审查 R01）。父进程没发话（旧主进程 / 手工单开设置页）时判定
+原样回退到磁盘快照，legacy 运行中的行为逐位不变。
+
 主配置身份（F2 定论，2026-10-09）：:func:`route_settings_config` 构造主配置时不传
 ``instance_id``，于是 ``Config`` 会读 ``DSH_PET_INSTANCE``（``config.py:846``）——
 这不是漏改，两种启动形态下它都恰好指向"该进程真正会读的那份文件"：
@@ -324,7 +332,8 @@ def route_settings_config(config):
 
     1. 配置身份是 ``slot-N``（子宠的独立设置进程；主身份 / 非 slot 实例不分流）；
     2. 本进程拓扑是 overlay（legacy 单窗那只宠读的就是自己那份 slot 文件的全部键，
-       分流会让它的设置失效）。
+       分流会让它的设置失效）。设置子进程的这条判定 = **拉起它的主进程运行中拓扑**
+       （``DSH_PET_PARENT_TOPOLOGY``），不是磁盘上下一次启动的配置，见模块 docstring。
 
     幂等：已套过路由的配置原样返回。
     """

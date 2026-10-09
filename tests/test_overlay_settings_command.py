@@ -150,6 +150,75 @@ def test_topology_config_path_reuses_app_config_location(monkeypatch):
         "/tmp/base") / "dsh-pet-test" / "config.json"
 
 
+# ---------------------------------------------------------------- 父进程运行中拓扑（R01）
+def test_parent_running_topology_env_wins_over_disk_capture_config(tmp_path, monkeypatch):
+    """父进程的运行中拓扑压过磁盘上的捕获开关（子进程按它分流）。
+
+    R01 场景：用户勾上「直播捕获兼容」并保存但**没重启**（文案就是这么说的），盘上
+    ``stream_capture_mode=True``；拉起这个设置子进程的主进程仍在 overlay 上跑。子进程
+    若按盘判就是 legacy → 子宠页把全部设置写进 ``config-slot-N.json``，而运行中的
+    overlay 主进程对非 per-slot 键只读主配置 ⇒"保存成功、实际无效"，还会污染下一次
+    重启的配置身份。
+    """
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+
+    monkeypatch.setenv(cmd.ENV_PARENT_TOPOLOGY, "overlay")
+    assert cmd.is_overlay_topology() is True
+
+    monkeypatch.setenv(cmd.ENV_PARENT_TOPOLOGY, " LEGACY ")
+    assert cmd.is_overlay_topology() is False
+
+
+def test_parent_topology_env_outranks_dev_escape_hatch(tmp_path, monkeypatch):
+    """两条 env 同时在场且互相矛盾：**父进程运行中拓扑优先**（记录事实，不是选择）。
+
+    父进程的这条陈述本来就是它按自己那套输入（含 dev 逃生门）定下来的结果，正常
+    路径上两者不可能矛盾；这里钉的是矛盾时的取舍，免得判定链悄悄长出第二份判据。
+    """
+    _pin_config(tmp_path, monkeypatch)
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, "overlay")
+    monkeypatch.setenv(cmd.ENV_PARENT_TOPOLOGY, "legacy")
+    assert cmd.is_overlay_topology() is False
+
+
+def test_missing_parent_topology_env_falls_back_to_existing_inputs(tmp_path, monkeypatch):
+    """父进程没发话（手工单开设置页/旧主进程）→ 判定逐位回到原有链路。"""
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_PARENT_TOPOLOGY, raising=False)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+
+    assert cmd.is_overlay_topology() is False, "磁盘快照（原行为）"
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, "overlay")
+    assert cmd.is_overlay_topology() is True, "dev 逃生门（原行为）"
+    monkeypatch.setenv(cmd.ENV_PARENT_TOPOLOGY, "")
+    assert cmd.is_overlay_topology() is True, "空白 = 没发话，不参与判定"
+
+
+def test_runtime_topology_env_value_reports_the_running_verdict(tmp_path, monkeypatch):
+    """父进程侧：报给子进程的就是本进程运行中的拓扑（同一个判定，不是第二份判据）。
+
+    "运行中"的含义由 T5 的快照保证：启动时读一次定死，之后用户改设置页只动磁盘，
+    这条 env 陈述不变。
+    """
+    path = _pin_config(tmp_path, monkeypatch)
+    monkeypatch.delenv(cmd.ENV_PARENT_TOPOLOGY, raising=False)
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+
+    assert cmd.runtime_topology_env_value() == cmd.TOPOLOGY_OVERLAY, "空目录 = 默认 overlay"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+    assert cmd.runtime_topology_env_value() == "overlay", "启动时定死的拓扑不随磁盘改"
+
+    cmd.reset_topology_snapshot()  # 等价于"主进程重启"
+    assert cmd.runtime_topology_env_value() == "legacy"
+
+
 def test_slot_from_instance_id():
     assert cmd.slot_from_instance_id("slot-3") == 3
     assert cmd.slot_from_instance_id("slot-0") == 0
