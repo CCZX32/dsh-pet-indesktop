@@ -774,10 +774,30 @@ def test_sample_thread_is_reused_across_disable_enable():
         ctrl.sync_enabled(False)
 
 
-def test_sampling_resumes_after_disable_enable(monkeypatch):
-    """关掉歌词再打开，采样必须恢复——不是永久停摆。
+class _ParkedSampleThread:
+    """「派发已记账、worker 尚未起跑」那一刻的采样线程替身。
 
-    这是用户可见的后果：一旦发生过一次开关，歌词再也不随播放更新。
+    真线程停不进这个窗口（要么还没起跑、要么已进 ``_sample_loop``），而它正是 R02
+    的充要条件：``_on_tick`` 已把 ``_sampling`` 记成 True，却没有任何 worker 会去
+    消费这一拍。``alive`` 可切；切成 False = 线程在 ``_sample_loop`` 的停止检查处
+    break 退出（生产里的结局：退出前不会发任何结果回调）。
+    """
+
+    def __init__(self) -> None:
+        self.alive = True
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+def test_sampling_resumes_after_disable_enable(monkeypatch):
+    """关掉歌词再打开，采样必须恢复——不是永久停摆（R02）。
+
+    真实时序：``_on_tick`` 先记 ``_sampling=True`` 再唤醒 worker；worker 若在起跑
+    前撞上关闭，就会消费掉唤醒口、在 ``_sample_loop`` 的停止检查处直接 break 退出
+    ——**不发任何结果回调**，唯一的常规复位点 ``_on_playback_ready`` 因此永不执行：
+    ``_sampling`` 卡在 True，重开后每一拍都在 ``_on_tick`` 第一道闸门返回，唤醒口也
+    再没人置位——采样线程永远停在 ``wake.wait()`` 上，歌词再也不更新，直到重启应用。
     """
     from pet import now_playing
     from pet.music_lyric_controller import MusicLyricController
@@ -796,22 +816,32 @@ def test_sampling_resumes_after_disable_enable(monkeypatch):
     win = _FakeWinVisible()
     ctrl = MusicLyricController(win)
     try:
-        ctrl.sync_enabled(True)
-        assert _wait_until(lambda: calls["n"] >= 1), "首次开启后应采样"
-        # 采样必须带上"当前跟踪的播放器"，否则会话选取会在两个播放器之间乱跳
-        assert seen and seen[0] == "", seen
+        # 摆出「派发已记账、worker 尚未起跑」：替身顶掉线程且从不跑循环。
+        # 此后**不许再手动碰 _sampling**——它卡不卡 True 正是被测行为。
+        parked = _ParkedSampleThread()
+        ctrl._sample_thread = parked
+        ctrl._on_tick()
+        assert ctrl._sampling is True, "前提：派发已记账"
+
+        ctrl.sync_enabled(False)
+        # worker 此刻才醒：消费掉关闭时置位的唤醒口，看到 stop 就退出（不发回调）。
+        ctrl._sample_wake.clear()
+        parked.alive = False
+        assert ctrl._sampling is False, (
+            "关闭必须结清未消费的派发；卡 True 会让重开后的 _on_tick 永远在第一道"
+            "闸门返回，唤醒口也再没人置位"
+        )
 
         before = calls["n"]
-        ctrl.sync_enabled(False)
         ctrl.sync_enabled(True)
-        # 再派发一拍；线程若因 _sample_stop 未复位而退出，这里就永远等不到。
-        ctrl._sampling = False
-        ctrl._on_tick()
 
         assert _wait_until(lambda: calls["n"] > before), (
-            "关闭再开启后采样必须恢复；"
-            "卡住说明 _sample_stop 仍是 set 状态，采样线程一进循环就退出了"
+            "关闭再开启后采样必须恢复；卡住说明 _sampling 仍卡在 True，"
+            "采样线程停在 wake.wait() 上等一个永远不来的唤醒"
         )
+        # 采样必须带上"当前跟踪的播放器"，否则会话选取会在两个播放器之间乱跳
+        assert seen and seen[0] == "", seen
+        assert ctrl._sample_thread is not parked, "替身已死，重开必须重建真线程"
     finally:
         ctrl.sync_enabled(False)
 

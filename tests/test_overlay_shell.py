@@ -764,3 +764,74 @@ def test_switch_child_character_does_not_touch_chat_surfaces():
     assert shell._spawned_libs[child] is not None
     assert bubble.switched == []
     assert instance.chat_syncs == []
+
+
+# ---------------------------------------------------------------- 主宠提升：聊天面跟提升者（R03）
+class _PromotionInstance(FakeInstance):
+    """真 Config 的假实例 + 聊天面同步记录（提升路径要读真 slot 文件）。"""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.chat_syncs: list[str] = []
+
+    def sync_chat_character(self, character_id):
+        self.chat_syncs.append(character_id)
+
+
+def _make_promotion_shell(tmp_path, main_character, child_character):
+    """真落盘 Config + 主宠 + 一只**异角色**子宠（子宠角色写在它自己的 slot 里）。
+
+    子宠的角色经 ``switch_character(cid, child)`` 真写进 ``config-slot-1.json``
+    （产品路径，不是测试手搓文件）：主宠退出时提升者正是按这份文件接管主身份。
+    """
+    config = Config(base=tmp_path)
+    config.set("character", main_character)
+    config.save()
+    instance = _PromotionInstance(config)
+    shell = OverlayShell(
+        app, instance,
+        screen=FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040)),
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
+    shell.spawn_pet()
+    child = shell._spawned[0]
+    shell.switch_character(child_character, child)
+    assert shell._config.get("character") == main_character, "前提：子宠换角色不动主配置"
+    return shell, instance, child
+
+
+def test_promotion_syncs_chat_surfaces_to_promoted_character(tmp_path):
+    """R03-A：子宠提升为主宠后，聊天面必须跟**提升者**的角色。
+
+    提升路径把提升者的角色（它自己那份 slot 配置）接管进主配置，但已有聊天面
+    （快速气泡 + 完整聊天窗/岛气泡）的角色仍是构造期快照——B07 的
+    ``_sync_chat_surfaces`` 只接在主动切角色上，提升这条没调它，于是提升完
+    再开口还是旧主的会话与系统提示。
+    """
+    shell, instance, child = _make_promotion_shell(tmp_path, "shenshen", "nova")
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+
+    assert shell.exit_pet(shell.sprite) is True
+
+    assert shell.sprite is child
+    assert shell._config.get("character") == "nova"     # 提升者身份已接管主配置
+    assert bubble.switched == ["nova"], "快速对话气泡必须跟提升者的角色"
+    assert instance.chat_syncs == ["nova"], "完整聊天窗/岛气泡必须跟提升者的角色"
+
+
+def test_promotion_same_character_syncs_through_the_same_entry(tmp_path):
+    """新旧主同角色：提升仍走同一入口（"角色没变"由聊天面自己早退，不是跳过同步）。
+
+    锁住提升路径的角色值取自**接管后的主配置**：这里它等于旧主的角色，入口照调、
+    主配置不变（真气泡/聊天窗在同角色时早退，不会重建正在续聊的那条会话）。
+    """
+    shell, instance, child = _make_promotion_shell(tmp_path, "shenshen", "shenshen")
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+
+    assert shell.exit_pet(shell.sprite) is True
+
+    assert shell.sprite is child
+    assert shell._config.get("character") == "shenshen"
+    assert bubble.switched == ["shenshen"]
+    assert instance.chat_syncs == ["shenshen"]

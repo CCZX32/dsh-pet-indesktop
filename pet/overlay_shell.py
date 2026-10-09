@@ -235,6 +235,11 @@ class _GoldenSpinSpriteHost:
     ``PetSprite.set_throw_rotation``，故控制器每次 ``win.update()`` 都等价地
     写一次角度（0 = 回正）。目标 sprite 由 ``shell._golden_spin_target`` 指定
     ——多宠时点击哪只转哪只（旧架构一窗一宠，天然只有一只）。
+
+    **控制器全壳共享、目标独占**（R06）：角度只写给 ``_golden_spin_target``
+    指向的那一只，换目标由 ``shell._ensure_golden_spin`` 先把旧目标回正并脱离
+    （见 ``_settle_golden_spin_target``）——``_golden_spin_target`` 为 None 时
+    本方法整拍空转，这正是结清过程中"不再往旧目标写角"的闸门。
     """
 
     __slots__ = ("_shell",)
@@ -2290,7 +2295,14 @@ class OverlayShell(QObject):
         return callable(getattr(sprite, "set_throw_rotation", None))
 
     def _ensure_golden_spin(self, sprite):
-        """懒建控制器（幂等）：角度写入目标切到本次的 sprite。"""
+        """懒建控制器（幂等）+ 选定角度目标；**换目标即结清旧的**。
+
+        模型：控制器**全壳共享**（一条角度状态机服务所有宠，与旧架构"一窗一宠"
+        下每窗一台等价），目标**独占**（同一时刻只有一只宠在转）。角度存在各
+        sprite 自己身上，每拍只写给当前目标，故换目标不结清旧的，那只就会永远
+        停在切换那一刻的倾斜角上（归零只发生在控制器对**当前**目标走完最后一圈）。
+        菜单直连与点击直连都经本方法换目标，结清只有这一处。
+        """
         if not self._golden_spin_capable(sprite):
             return None
         spin = self._golden_spin
@@ -2299,8 +2311,30 @@ class OverlayShell(QObject):
 
             spin = GoldenSpinController(self._golden_spin_host)
             self._golden_spin = spin
+        if self._golden_spin_target is not sprite:
+            self._settle_golden_spin_target(spin)
         self._golden_spin_target = sprite
         return spin
+
+    def _settle_golden_spin_target(self, spin) -> None:
+        """结清当前角度目标：回正旧目标 + 让共享会话回到空闲（换目标前调用）。
+
+        「回正」与控制器走完最后一圈的归零**同一口径**——都经 sprite 的
+        ``set_throw_rotation`` 写 0（0 = 自然角），不走别的通道。顺序固定：先摘
+        目标（此后宿主 ``update`` 找不到目标、不再写角），再 ``cancel`` 收掉共享
+        会话（停表 + 控制器归零 + 清 pending），最后直接回正旧 sprite——"谁写 0"
+        只有一个落点，不依赖 update 的时机。会话结清后 ``start()``/``spin_direct()``
+        对新目标从自然角重新起转（active 拒绝只对**同一目标**的重复触发生效）。
+        """
+        old = self._golden_spin_target
+        self._golden_spin_target = None
+        if old is None:
+            return
+        if spin is not None:
+            spin.cancel()
+        reset = getattr(old, "set_throw_rotation", None)
+        if callable(reset):
+            reset(0.0)
 
     def _spin_direct(self, sprite) -> bool:
         """立即开转（空闲开一圈；旋转中累计一圈并让当前圈快速收尾）。
@@ -3821,6 +3855,22 @@ class OverlayShell(QObject):
                 overlay_spawn_state.write_slot_geometry(config_dir, slot, geometry)
 
     # ---------------------------------------------------------------- 4.2b 主实例提升
+    def promote_target_name(self) -> str:
+        """主宠退出时将被提升的那一只（活跃清单列表头）的展示名；无子宠 → ``""``。
+
+        只读 seam，供「退出这只」确认框点名"谁会被提升"：菜单层据此知道"有子宠 =
+        提升，无子宠 = 退整个应用"，不必自己摸活跃清单。展示名走与识屏自我识别同一条
+        既有口径（``_config.character_display_name`` + 该 sprite 自己的 ``character``）：
+        用户起的别名优先，没有则回退角色显示名；配置对象没有该面（测试替身/精简装配）
+        时回退角色 id，反正不新造一套命名。
+        """
+        if not self._spawned:
+            return ""
+        cid = str(self._sprite_config(self._spawned[0]).get(
+            "character", catalog.DEFAULT_CHARACTER))
+        namer = getattr(self._config, "character_display_name", None)
+        return str((namer(cid) if callable(namer) else "") or cid)
+
     def exit_pet(self, sprite=None) -> bool:
         """退出单只（菜单「退出这只」的 overlay 落点）。
 
@@ -3899,6 +3949,12 @@ class OverlayShell(QObject):
         self._invalidate_sprite_configs()  # 身份换位：子视角快照全部作废
         self._rebind_main_sprite()
         self._sync_sprite_settings()  # 新主 + 其余子宠的资格位按最新身份重算
+        # R03：提升者的角色已随上面的 per-slot 接管写进主配置，但**已有**聊天面
+        # （快速气泡 + 完整聊天窗/岛气泡）的角色仍是构造期快照——B07 的
+        # ``_sync_chat_surfaces`` 只接在主动切角色上，提升这条漏了它。聊天面本来
+        # 就只有主身份，提升后按**提升者**同步是正确语义；同一入口，不开第二套。
+        self._sync_chat_surfaces(str(self._config.get(
+            "character", catalog.DEFAULT_CHARACTER)))
         # 提升者的自言自语计时改由壳自身的机接管（它已不是子宠）
         self._close_self_talk_host(promoted)
         self._load_self_talk_settings()

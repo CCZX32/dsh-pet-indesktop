@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from .catalog import DEFAULT_CHARACTER
 from .config import _bool_or_default, _float_or_default
+from .file_eater import _ScanBudget
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ _INTERPRET_INSTRUCTION = (
 
 _PROGRESS_BUBBLE_MS = 3500
 
+# 收集触预算却一个候选都没收到时的提示：如实说明"没看完"，不许谎称读不了（R05）。
+_BUDGET_EXHAUSTED_HINT = "拖进来的文件太多，一次看不过来，少拖几个再试～"
+
 
 def _progress_interval_seconds(cfg: Any) -> float:
     data = cfg.get("file_interpret") if cfg is not None else None
@@ -74,8 +78,19 @@ def is_interpretable_file(path: Any) -> bool:
         return False
 
 
-def collect_interpretable(paths: Any) -> list[Path]:
-    """过滤出可解读的本地文件：去重、剔目录与不存在的路径。"""
+def collect_interpretable(paths: Any, budget: _ScanBudget | None = None) -> list[Path]:
+    """过滤出可解读的本地文件：去重、剔目录与不存在的路径，**且在扫描预算内**。
+
+    ``budget`` 复用投喂扫描那份 ``_ScanBudget``（不另抄一份口径）：它在每个真正
+    要探盘的候选上记一次账（逐项查钟 + 文件数上限）。这里的 ``is_file()`` 与投喂
+    侧一样是 GUI 线程上的同步 syscall——投喂侧一直有预算（B03），解读询问链原先
+    没有，拖进一大批散装文本/慢盘路径时测量停下来了、这条链照样卡死界面（R05）。
+    后缀不符或重复的候选**不记账**：它们不产生 syscall，记进去只会让一堆 .bin 把
+    文本文件的额度吃光。触预算即停并置 ``budget.truncated``，调用方必须据此如实
+    告诉用户"只收了前 N 个"；``budget`` 缺省自建，生产路径永远带预算。
+    """
+    if budget is None:
+        budget = _ScanBudget()
     result: list[Path] = []
     seen: set[str] = set()
     for raw in paths or []:
@@ -87,7 +102,11 @@ def collect_interpretable(paths: Any) -> list[Path]:
         if key in seen:
             continue
         seen.add(key)
-        if is_interpretable_file(path) and path.is_file():
+        if not is_interpretable_file(path):
+            continue
+        if not budget.account():
+            break
+        if path.is_file():
             result.append(path)
     return result
 
@@ -167,24 +186,34 @@ class FileInterpretController(QObject):
 
     # ---------------------------------------------------------- offer 接缝
     def offer(self, paths: Any) -> None:
-        """file_eater 吃完后的解读询问入口（由 install_file_interpreter 注入接线）。"""
+        """file_eater 吃完后的解读询问入口（由 install_file_interpreter 注入接线）。
+
+        收集走扫描预算（见 ``collect_interpretable``）：两条投喂链
+        （``sprite_feeding`` / legacy ``file_eater``）都从这个入口进来，所以预算对
+        两条链一起生效。
+        """
         if not _interpret_enabled(self._win.cfg):
             return
         if self._state == "running":
             self._bubble("正在解读上一个文件，先等等它～")
             return
-        eligible = collect_interpretable(paths)
+        budget = _ScanBudget()
+        eligible = collect_interpretable(paths, budget)
         if not eligible:
-            self._bubble("这些文件我读不了：目前只认文本类文件哦")
+            self._bubble(_BUDGET_EXHAUSTED_HINT if budget.truncated
+                         else "这些文件我读不了：目前只认文本类文件哦")
             return
         self._pending = eligible
         self._state = "awaiting"
+        subtitle = "内容将发送给当前配置的 AI 模型进行解读；文件本身不会被修改或上传"
+        if budget.truncated:
+            subtitle += f"（文件太多，只收了前 {len(eligible)} 个）"
         names = "、".join(p.name for p in eligible[:3])
         if len(eligible) > 3:
             names += "…"
         self._win.show_alert(
             f"要解读刚吃掉的 {names} 吗？",
-            subtitle="内容将发送给当前配置的 AI 模型进行解读；文件本身不会被修改或上传",
+            subtitle=subtitle,
             sticky=True,
             buttons=[("解读", self._on_confirm), ("不用了", self._on_decline)],
             alert_id=CONFIRM_ALERT_ID,

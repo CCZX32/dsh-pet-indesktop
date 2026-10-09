@@ -212,6 +212,63 @@ def test_eat_paths_forwards_interpret_offer(tmp_path):
     assert offers == [[str(note)]]
 
 
+class _InterpretPet(_FakePet):
+    """投喂链 + **真实**解读控制器接线所需的窗口面（cfg 既要 ``.dir`` 也要 ``.get``）。"""
+
+    def __init__(self, config_dir):
+        super().__init__(config_dir)
+        self.alerts: list[tuple[str, dict]] = []
+
+    @property
+    def cfg(self):
+        class _Cfg:
+            dir = None
+
+            @staticmethod
+            def get(key, default=None):
+                return {"enabled": True} if key == "file_interpret" else default
+
+        obj = _Cfg()
+        obj.dir = self.cfg_dir
+        return obj
+
+    def show_alert(self, text, **kwargs):
+        self.alerts.append((text, kwargs))
+
+
+def test_eat_paths_offer_chain_enforces_scan_budget(tmp_path, monkeypatch):
+    """R05 端到端：legacy 投喂链 → 真实解读控制器，询问气泡带截断标记。
+
+    拖入大量散装文本时，投喂侧的测量（B03）与解读侧的收集共用同一份
+    ``_ScanBudget`` 口径（``collect_interpretable``），所以同一次投喂两边报同一个
+    截断点；两条投喂链都汇进同一个 ``FileInterpretController.offer``，overlay 链
+    因此同样受这份预算保护。
+    """
+    import pet.file_eater as file_eater
+    from pet.file_interpret import FileInterpretController
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 3)
+    _qapp()  # 真窗口替身（QWidget）必须先有 QApplication，否则 Qt 直接 abort
+    pet = _InterpretPet(tmp_path)
+    paths = []
+    for i in range(6):
+        p = tmp_path / f"note{i}.txt"
+        p.write_text("内容", encoding="utf-8")
+        paths.append(str(p))
+
+    controller = FileInterpretController(pet)
+    handler = FileEaterDropHandler(pet)
+    handler.interpret_offer = controller.offer
+
+    result = handler.eat_paths(paths)
+
+    assert result["truncated"] is True
+    assert result["scanned"] == 3, "投喂侧停在预算处"
+    assert len(pet.alerts) == 1
+    _, kwargs = pet.alerts[0]
+    assert "只收了前 3 个" in kwargs["subtitle"], "解读询问气泡如实标记截断"
+
+
 # ---------------------------------------------------------------- B03：扫描预算
 def _big_dir(tmp_path, name, count):
     folder = tmp_path / name

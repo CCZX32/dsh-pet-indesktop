@@ -665,7 +665,16 @@ class PetInstance:
             for chat_window in (self.legacy_chat_window, self.modern_chat_window):
                 if chat_window is not None:
                     chat_window.set_pet_window(self.win)
-                    chat_window.switch_character(character_id)
+            # R03：完整聊天窗 + 岛对话气泡走 B07 收敛出的同一条公开 seam（角色
+            # 上下文是各自的构造期快照，换角色后不重指就还是旧角色）；快速对话
+            # 气泡是本实例自己持有的那一只（overlay 拓扑下挂在 sprite 壳上），
+            # 另有自己的公开 seam，一并同步——否则切完角色在这两处开口仍是旧
+            # 角色的会话与系统提示。
+            self.sync_chat_character(character_id)
+            quick_bubble = getattr(self, "quick_chat", None)
+            quick_sync = getattr(quick_bubble, "switch_character", None)
+            if callable(quick_sync):
+                quick_sync(character_id)
         if getattr(self.shell, "island", None) is not None:
             self.shell.island.refresh_from_config()
         # P1-4：任一窗切换后刷新托盘菜单（per-window 区闭包指向新窗，防陈旧窗）
@@ -1718,13 +1727,40 @@ class AppShell:
         started = float(getattr(self, "_settings_launch_at", 0.0) or 0.0)
         return bool(started) and (time.monotonic() - started) <= 5.0
 
+    @staticmethod
+    def _spawn_settings_process(program, arguments, working_dir, environment) -> bool:
+        """startDetached 独立设置进程，带着**只给子进程**的那份环境。
+
+        单独一层是为了让"注入的环境到底有没有交给子进程"能被点到（Qt 的实例方法
+        在测试侧替换不掉，真起一个设置窗又不合适），实现本身是 Qt 的标准 detach
+        路径：实例 ``QProcess`` + ``startDetached()``，与静态重载同语义（子进程与
+        父进程生命周期解耦；父进程的环境一个字节都不改）。
+        """
+        from PySide6.QtCore import QProcess
+
+        process = QProcess()
+        process.setProgram(program)
+        process.setArguments(list(arguments))
+        process.setWorkingDirectory(working_dir)
+        process.setProcessEnvironment(environment)
+        return bool(process.startDetached())
+
     def _launch_settings_process(self, instance=None, *, page: str | None = None) -> bool:
         """startDetached 独立设置进程；冻结包与源码运行分流。
 
         源码运行要走 `-m pet`（工作目录取仓库根），冻结包直接复用 exe 的参数
         分流入口（--settings）——与 --uninstall-cleanup 同一范式。
+
+        子进程还带着一条 ``DSH_PET_PARENT_TOPOLOGY``：**本进程运行中的拓扑**
+        （``overlay`` / ``legacy``）。设置页要按拓扑分流（子宠页的非 per-slot 键该
+        写主配置还是 slot 文件），而它自己只能看到磁盘——磁盘上的捕获开关是**重启级**
+        输入，用户勾了没重启时那个值描述的是"下一次启动"，不是那个正在跑的主进程。
+        传运行中拓扑 = 让"保存成功、实际无效"重新变回"保存即生效"（见
+        ``overlay_settings_command`` 的 ``ENV_PARENT_TOPOLOGY``）。
         """
-        from PySide6.QtCore import QProcess
+        from PySide6.QtCore import QProcessEnvironment
+
+        from . import overlay_settings_command as settings_command_mod
 
         if getattr(sys, "frozen", False):
             program = sys.executable
@@ -1745,8 +1781,12 @@ class AppShell:
             # 不等于进程级 env：显式传参，否则独立设置进程会打开主窗的配置。
             # 主窗/独立槽位进程 env 已一致，命令保持 ["--settings"] 原样。
             arguments += ["--instance", instance_id]
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert(settings_command_mod.ENV_PARENT_TOPOLOGY,
+                           settings_command_mod.runtime_topology_env_value())
         try:
-            started, _pid = QProcess.startDetached(program, arguments, workdir)
+            started = self._spawn_settings_process(program, arguments, workdir,
+                                                  environment)
         except Exception:
             logging.exception("拉起独立设置进程异常")
             return False
@@ -2736,12 +2776,36 @@ class AppShell:
             return False
         return bool(island_cfg.get("hidden_chat", True))
 
-    def _island_chat_available(self) -> bool:
-        """岛对话气泡可用：聊天功能在 + 岛存在 + hidden_chat 开。"""
-        if not getattr(self, "enable_chat", True):
-            return False
+    def _island_interactive(self) -> bool:
+        """岛当前是不是**启用且可见**的交互面。
+
+        ``_sync_dynamic_island`` 关岛走的是 ``hide()`` + 摘桥，**不销毁对象**——
+        「对象保留 ≠ 交互面可用」。判据读宿主这一侧的运行态（本进程内存里的岛
+        启用真值 + 岛窗自己的显隐），不读磁盘：岛开关可能是运行中改的（托盘菜单 /
+        设置子进程落盘后由 config watcher 收口），磁盘上那份随时可能滞后一拍。
+        """
         island = getattr(self, "island", None)
         if island is None or not shiboken6.isValid(island):
+            return False
+        island_cfg = self.config.get("dynamic_island", {})
+        if isinstance(island_cfg, dict) and not bool(island_cfg.get("enabled", True)):
+            return False
+        try:
+            return bool(island.isVisible())
+        except (AttributeError, RuntimeError):
+            # 测试替身/已销毁的原生窗口：宁可判成不可用（不弹孤窗），也不赌
+            return False
+
+    def _island_chat_available(self) -> bool:
+        """岛对话气泡可用：聊天功能在 + 岛是启用可见的交互面 + hidden_chat 开。
+
+        关岛之后（运行中改的也算）这里的三个"岛还在"的门都必须同时成立，否则隐藏
+        桌宠时的反馈改道/后台回复会锚着岛旧位置弹气泡——一个用户关掉的岛还在屏幕
+        上冒泡（2026-10-09 审查 R07）。
+        """
+        if not getattr(self, "enable_chat", True):
+            return False
+        if not self._island_interactive():
             return False
         return self._island_hidden_chat_enabled()
 

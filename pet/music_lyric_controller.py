@@ -414,15 +414,28 @@ class MusicLyricController(QObject):
             self._reset()
 
     def _stop_sample_thread(self) -> None:
-        """停掉采样线程（幂等）。卡在 WinRT 调用时不强杀——daemon 线程
-        随进程退出即可，主线程不受它影响。
+        """停掉采样线程（幂等），并结清那一拍"可能永远不回来"的派发（R02）。
+
+        卡在 WinRT 调用时不强杀——daemon 线程随进程退出即可，主线程不受它影响。
 
         **仍存活的线程保留引用**，不置 None：它可能正卡在 WinRT 里，丢掉引用
         就变成孤儿，之后醒来仍会 emit，与新线程抢 ``_sampling``（同类教训见
         pet/music_detect.py）。已退出的线程才清引用，供下次重建。
+
+        时序（R02）：``_on_tick`` 是**先记** ``_sampling=True`` 再唤醒 worker 的。
+        worker 若在起跑前撞上关闭，就会消费掉唤醒口、在 ``_sample_loop`` 的停止检查
+        处直接 break——**不发任何结果回调**，于是唯一的常规复位点
+        ``_on_playback_ready`` 永不执行，``_sampling`` 卡在 True：重开后每一拍都在
+        ``_on_tick`` 第一道闸门返回，唤醒口也再没人置位，采样线程永远停在
+        ``wake.wait()`` 上（歌词再也不更新，直到重启应用）。所以关闭必须在这里把
+        这拍未消费的派发按**结果回调的同一口径**（只复位 ``_sampling``）结清。
+
+        在途那一拍若稍后真的回来了，不必在这里额外作废：``_reset()`` 紧随其后递增
+        代次，``_on_playback_ready`` 的代次守卫会把它当上一代丢弃。
         """
         self._sample_stop.set()
         self._sample_wake.set()
+        self._sampling = False
         thread = self._sample_thread
         if thread is not None and not thread.is_alive():
             self._sample_thread = None

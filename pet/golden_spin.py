@@ -67,7 +67,16 @@ class GoldenSpinController(QObject):
 
     # ------------------------------------------------------------ 启动/取消
     def start(self) -> None:
-        """立即开始一段基准时长的 360° 逆时针旋转；已运行/待触发时忽略重复启动。"""
+        """立即开始一段基准时长的 360° 逆时针旋转。
+
+        「已运行/待触发时忽略重复启动」只对**同一目标**的重复触发生效（连点不自
+        打断）；目标是**独占**的：overlay 壳的控制器全壳共享，换目标（另一只宠）
+        由调用方先把旧目标结清——``OverlayShell._ensure_golden_spin`` →
+        ``_settle_golden_spin_target``（旧 sprite 回正 + 本控制器 ``cancel()``），
+        结清后本方法即从自然角为**新目标**重新起转。不结清就换目标，旧对象会永远
+        停在切换那一刻的倾斜角上（角度存在 sprite 自己身上，没有人再给它写 0）。
+        本控制器不持有 sprite 身份，故"换目标"这件事只能在持有目标的一侧判定。
+        """
         if self._active:
             return
         self._begin_session(1, GOLDEN_SPIN_DURATION_MS)
