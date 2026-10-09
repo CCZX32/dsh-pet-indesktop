@@ -3186,3 +3186,109 @@ def test_quiet_cut_heals_a_player_stuck_in_loading(tmp_path, monkeypatch):
         assert service._channel_idle() is True
     finally:
         service.stop()
+
+
+# ============================================ 卫生级：懒创建通道的释放与半挂监听
+
+
+def test_disabled_lazy_created_channel_is_released_on_sync(tmp_path, monkeypatch):
+    """「不想要」收口必须**无条件**：懒创建过（从不 start()）的通道也要 stop + 置 None。
+
+    ``_ensure_chime_service`` 的懒创建路径（菜单「立即报时」/ 设置页试听）从不
+    ``start()``，所以释放不能依赖"曾经运行过"。这条把该性质钉住：如果哪天有人给
+    else 分支加上 ``is_running()`` 之类的条件，未启动的懒创建服务就会只被丢引用、
+    不被 stop（QTimer / QMediaPlayer / quiet 监听白挂着）。
+    """
+    from pet.app import AppShell
+    from pet import quiet_mode
+    import pet.voice_chime_service as svc_mod
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", False)
+    cfg.set("festival_reminder_speak", False)
+    cfg.set("self_talk_speak_enabled", False)
+    cfg.set("click_show_self_talk", False)
+    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", False)   # 不打网络
+    shell = AppShell(_qapp(), cfg, enable_chat=False)
+    assert shell.voice_chime_service is None, "前提：三处开关都关，启动期不建通道"
+
+    shell.trigger_voice_chime_now("现在是上午九点整。懒创建")
+    service = shell.voice_chime_service
+    assert service is not None, "手动通道必须懒创建出服务"
+    assert service.is_running() is False, "前提：手动通道从不 start()"
+    state = quiet_mode.shared_quiet_state()
+    assert service._on_quiet_state_changed in state._listeners, "前提：构造即挂"
+
+    shell._sync_chime_service()
+
+    assert service.is_running() is False
+    assert service._stopped is True, "必须是真的 stop()（不是只丢引用）"
+    assert service._on_quiet_state_changed not in state._listeners, "免打扰监听一并摘除"
+    assert shell.voice_chime_service is None, "不想要时引用必须置 None"
+
+
+def test_constructor_detaches_quiet_listener_when_attach_fails(tmp_path, monkeypatch):
+    """构造期 attach 失败：先摘掉半挂监听再抛出，不留指向半成品服务的悬挂回调（R1）。
+
+    ``__init__`` 末尾挂免打扰监听。若 ``add_listener`` 中途抛异常（依赖半死 / 容器
+    实现异常），已经把回调放进表里的实现会让订阅表留着一条指向**构造失败**对象的
+    回调——那个对象不会被任何人 ``stop()``，回调永远悬着。防护：attach 抛异常时
+    best-effort detach 再原样上抛（异常照旧上报，不吞）。
+    """
+    from pet import quiet_mode
+    from pet.voice_chime_service import VoiceChimeService
+
+    _qapp()
+    state = quiet_mode.QuietState()
+    monkeypatch.setattr(quiet_mode, "shared_quiet_state", lambda: state)
+    real_add = quiet_mode.QuietState.add_listener
+
+    def poisoned_add(self, callback):
+        real_add(self, callback)                 # 先真的挂进表里……
+        raise RuntimeError("listener table poisoned")
+
+    monkeypatch.setattr(quiet_mode.QuietState, "add_listener", poisoned_add)
+
+    app = type("_App", (), {"config": None, "win": None})()
+
+    with pytest.raises(RuntimeError):
+        VoiceChimeService(app)
+
+    assert state._listeners == [], "构造失败之后不许留下半挂的监听"
+
+
+# ============================================ 卫生级：play_file 失败残留口径
+
+
+def test_play_file_failure_does_not_leave_respect_quiet(tmp_path, monkeypatch):
+    """起播失败时 ``_current_respect_quiet`` 必须复位为 None（R3 卫生）。
+
+    ``play_file`` 先按交互应答口径置 ``False`` 再交给 ``_play_only``；后者在播放器
+    建不起来时返回 False，标志却留着——下一条判定读到的会是上一段的残留口径（实际
+    无害，因为没有在播段时免打扰切断是 no-op，但状态不干净）。修法是在 ``play_file``
+    里复位（``_play_only`` 的契约不动）。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    target = tmp_path / "click.wav"
+    target.write_bytes(b"\x00fake-wav")
+    service._current_respect_quiet = None
+    service._ensure_player = lambda: False       # 播放器建不起来
+
+    assert service.play_file(str(target), log_tag="点击自言自语") is False
+
+    assert service._current_respect_quiet is None, "起播失败必须把在播口径复位"
+
+
+def test_play_file_success_keeps_exempt_respect_quiet(tmp_path, monkeypatch):
+    """非回归：起播成功的交互应答仍带豁免口径（免打扰期间不许被切断）。"""
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    target = tmp_path / "click.wav"
+    target.write_bytes(b"\x00fake-wav")
+
+    assert service.play_file(str(target), log_tag="点击自言自语") is True
+
+    assert service._current_respect_quiet is False, "交互应答照旧豁免"
+    assert service._player.plays == 1

@@ -609,7 +609,18 @@ class VoiceChimeService:
         # 与点击自言的本地播报（play_file）都只懒创建服务、**从不 start()**，而
         # 免打扰开关那一拍要切掉正在出声的那一段——监听不能只在 start() 里注册
         # （理由与取舍见 _attach_quiet_listener）。放在构造末尾：此刻全部字段已就绪。
-        self._attach_quiet_listener()
+        #
+        # 构造期防护：挂监听失败（依赖半死 / 订阅容器实现异常）时先把**可能已经挂上去**
+        # 的回调摘掉再原样上抛——否则订阅表会留着一条指向**构造失败**对象的回调，而那个
+        # 对象不会被任何人 stop()，回调永远悬着（半挂状态）。异常照旧上报给调用方，不吞。
+        try:
+            self._attach_quiet_listener()
+        except Exception:
+            try:
+                self._detach_quiet_listener()
+            except Exception:
+                logger.debug("构造失败后摘除免打扰监听也失败", exc_info=True)
+            raise
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -751,7 +762,13 @@ class VoiceChimeService:
         # 这一段的免打扰口径是**豁免**：免打扰在它播放期间才生效时也不掐断（它就是
         # 交互应答，同 speak(respect_quiet=False)），见 _on_quiet_state_changed。
         self._current_respect_quiet = False
-        return self._play_only(str(target))
+        if not self._play_only(str(target)):
+            # 起播失败（播放器建不起来 / 设备异常）：这一段根本没在播，口径必须复位——
+            # 留着 False 会让下一条判定读到上一段的残留状态（实际无害，没有在播段时
+            # 免打扰切断是 no-op，但状态不干净）。_play_only 的契约不动，复位在这里做。
+            self._current_respect_quiet = None
+            return False
+        return True
 
     # ------------------------------------------------------------ 调度
     def _on_tick(self, now: datetime | None = None) -> None:
