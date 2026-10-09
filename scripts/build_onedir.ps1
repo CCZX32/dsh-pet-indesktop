@@ -188,6 +188,21 @@ if (-not $SkipBuild) {
     python scripts\make_icon.py
     if ($LASTEXITCODE -ne 0) { throw "make_icon failed: $LASTEXITCODE" }
 
+    # 素材硬门（2026-10-08）：帧序列产物 assets\characters\<角色>\frameseq\ 是刻意
+    # 不入库的派生产物（.gitignore），只在构建机的素材源里存在。worktree / 新克隆
+    # 天然没有它，而上面 $datas 对非 GIF 变体**整树拷贝** assets\characters——素材
+    # 在就进包、缺了也不报错，于是缺帧序列的包会被静默打出来，用户长期看到未转换
+    # 素材（白边）。这里在 PyInstaller 起跑前验证每个 clip 都有当前世代的帧序列
+    # 产物，非零即中止（脚本自己的中文报错已打到 stderr，含怎么补）。
+    # GIF 变体跳过本门：它打包的是 assets\characters_gif（由 convert_to_gif.py
+    # 从 webm 直出 GIF），素材树里没有也没有 frameseq 这一层，本门不适用。
+    if (-not $isGif) {
+        Write-Host "[frameseq] verifying frame-sequence material completeness..." -ForegroundColor Cyan
+        python scripts\check_frameseq_bundle.py
+        if ($LASTEXITCODE -ne 0) { throw "check_frameseq_bundle failed: $LASTEXITCODE" }
+        Write-Host "[frameseq] frame-sequence material OK" -ForegroundColor Green
+    }
+
     # DLL 冲突隔离（issue: Qt6Core "procedure not found" / 找不到指定的程序）：
     # conda 的 Library\bin 与 MiKTeX 的 bin\x64 各自携带一套 Qt6/ICU DLL（版本与
     # PySide6 6.11 不匹配）。PyInstaller 的 bindepend 会按 PATH 解析 Qt6Core.dll 的
