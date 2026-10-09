@@ -25,8 +25,10 @@
     set_edge_probe_enabled                                    → config（探头世界每 tick 热读）
 
 4.2c D13：菜单作用对象 = 右键命中的那一只（``sprite`` 参数）。设置入口按它
-自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」直接接
+自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」接
 ``OverlayShell.exit_pet(sprite)``——主宠退出时由壳负责提升列表首只子宠。
+UX 防护：「退出这只」作用主宠时先弹确认框（不可逆：旧主宠没有 slot 存档，
+提升会覆盖它的位置与设置；无子宠则退整个应用），子宠保持一键直退。
 
 批 B2：作用对象口径对齐旧版一窗一宠（菜单以 ``pet=self`` 建造，每条都作用
 本窗那一只）——读（勾选态/素材清单）与写（动画/速率/大小/拖动物理/回角落/
@@ -57,6 +59,7 @@ from .context_menus.shared import (
     animation_icon_cache_entry,
     animation_icon_cache_hit,
     animation_icon_cache_key,
+    confirm_destructive_action,
 )
 
 log = logging.getLogger(__name__)
@@ -558,8 +561,41 @@ class SpriteMenuFacade:
             opener(self.sprite)
 
     def on_exit_pet(self) -> None:
-        """「退出这只」：退掉菜单作用对象（主宠退出则提升列表首只子宠为主）。"""
-        self._shell.exit_pet(self.sprite)
+        """「退出这只」：退掉菜单作用对象（主宠退出则提升列表首只子宠为主）。
+
+        作用对象是**主宠**时必须先确认——主宠退出不可逆：有子宠时旧主宠没有自己的
+        slot 存档，提升者的几何/设置直接覆盖它的（取不回来）；无子宠时等同退出整个
+        应用。这正是仓库惯例里"破坏性动作带确认框"的一类（dsh 重启/停止同款），
+        且默认按钮 = 取消（菜单里它与「设置」「退出」相邻，回车/连点不该不可逆）。
+
+        子宠退出**不**弹框：它有 ``config-slot-N.json`` 存档，且是用户逐只点选的明
+        确操作，一键直退（保留原有语义）。
+
+        macOS：菜单项已 ``close_on_trigger``（回调延迟到菜单关闭后执行），模态框不
+        会撞上 AppKit 原生菜单跟踪会话——见 ``shared.confirm_destructive_action``。
+        """
+        sprite = self.sprite
+        if self._is_main_sprite and not self._confirm_exit_main_pet():
+            return
+        self._shell.exit_pet(sprite)
+
+    def _confirm_exit_main_pet(self) -> bool:
+        """主宠退出的确认框（返回是否确认）：文案按"有没有会被提升的子宠"分两支。
+
+        子宠名取壳的只读 seam ``promote_target_name``（有子宠必非空，命名口径见
+        那边）——本层不新造命名系统，也不自己摸活跃清单。
+        """
+        promoted = ""
+        namer = getattr(self._shell, "promote_target_name", None)
+        if callable(namer):
+            promoted = str(namer() or "")
+        if promoted:
+            body = f"退出主宠将把「{promoted}」提升为主宠，原主宠的位置与设置不保留。"
+        else:
+            body = "退出主宠将退出整个应用。"
+        return confirm_destructive_action(
+            self, title="退出主宠", text="确认退出主宠？", informative=body,
+            confirm_label="确认退出主宠")
 
     def close(self) -> None:
         self._shell.app.quit()

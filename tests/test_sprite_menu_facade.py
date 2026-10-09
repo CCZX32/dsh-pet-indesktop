@@ -4,7 +4,7 @@
 覆盖：菜单建造器产出全量菜单（旧 context_menus 建造器原样复用）、
 facade 各窗口能力项落点、play_once/play_move_once、no_move 移动桶并入
 动作池、playback_speed bind 应用、drag_physics 松手不抛掷、switch_character
-换库收口。
+换库收口、「退出这只」的确认闸（主宠破坏性动作）。
 """
 from __future__ import annotations
 
@@ -111,6 +111,19 @@ def _recursive_labels(container) -> set:
         if action.menu() is not None:
             labels |= _recursive_labels(action.menu())
     return labels
+
+
+def _find_action(container, text: str):
+    """按文本递归找 QAction（条目可能落在分组子菜单里）。"""
+    for action in container.actions():
+        if action.text() == text:
+            return action
+        submenu = action.menu()
+        if submenu is not None:
+            found = _find_action(submenu, text)
+            if found is not None:
+                return found
+    return None
 
 
 def test_full_menu_builds_with_capability_items(tmp_path):
@@ -598,3 +611,225 @@ def test_exiting_spawned_pet_drops_its_menu_icon_cache(tmp_path):
             "主宠的同名动画缓存不受影响"
     finally:
         shell._delete_runtime_marker()
+
+
+# ---------------------------------------------------------------- 「退出这只」确认闸
+#
+# 主宠退出是**不可逆**破坏性动作：有子宠时旧主宠没有自己的 slot 存档，提升者会覆盖
+# 它的位置与设置（无法恢复）；无子宠时直接退出整个应用。子宠退出有 config-slot-N.json
+# 存档、且是用户明确点选，保持一键直退。
+def _spawn_child(shell):
+    """给壳生一只子肥鱼（per-pet 库走假库工厂，不碰真实素材）。"""
+    shell._create_main_library = lambda: RichLibrary()
+    shell.spawn_pet()
+    assert len(shell._spawned) == 1
+    return shell._spawned[0]
+
+
+def _teardown(shell) -> None:
+    """收掉本用例生的子肥鱼（各带自言自语计时器 + 气泡宿主）再删 runtime 标记。
+
+    本节的用例都生真实子宠；留着它们，计时器会在后续用例的同一进程里继续跑——
+    长跑套件里这是纯粹的噪声源（解码/事件循环被无谓占用）。
+    """
+    shell.clear_spawned_pets()
+    shell._delete_runtime_marker()
+
+
+class _DialogRecorder:
+    """确认框替身：**构造是产品代码真实走的**（文案/按钮/默认钮全按实现取），只替掉
+    ``exec`` 的模态事件循环（offscreen 下也真阻塞）。
+
+    真实路径里 ``clickedButton()`` 由 exec 期间的点击写入，替身必须同口径给出答案。
+    """
+
+    def __init__(self, answer: str | None) -> None:
+        self.answer = answer
+        self.opened = 0
+        self.text = ""
+        self.informative = ""
+        self.buttons: list[str] = []
+        self.default: str | None = None
+        self._clicked = None
+
+    def install(self, monkeypatch):
+        from PySide6.QtWidgets import QMessageBox
+
+        recorder = self
+
+        def fake_exec(box):
+            recorder.opened += 1
+            recorder.text = box.text()
+            recorder.informative = box.informativeText()
+            recorder.buttons = [button.text() for button in box.buttons()]
+            default = box.defaultButton()
+            recorder.default = default.text() if default is not None else None
+            recorder._clicked = next(
+                (button for button in box.buttons()
+                 if button.text() == recorder.answer), None)
+            return 0
+
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+        monkeypatch.setattr(QMessageBox, "clickedButton",
+                            lambda box: recorder._clicked)
+        return recorder
+
+
+def _spy_exit_pet(shell, monkeypatch) -> list:
+    """记录 ``OverlayShell.exit_pet`` 的调用（"取消则什么都不发生"的观测点）。"""
+    calls: list = []
+    monkeypatch.setattr(shell, "exit_pet",
+                        lambda sprite=None: calls.append(sprite))
+    return calls
+
+
+def test_exit_main_pet_cancel_keeps_main_and_children(tmp_path, monkeypatch):
+    """主宠 + 有子宠 → 点取消：不提升、不退出、活跃清单原样。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        child = _spawn_child(shell)
+        dialog = _DialogRecorder("取消").install(monkeypatch)
+        exits = _spy_exit_pet(shell, monkeypatch)
+
+        SpriteMenuFacade(shell).on_exit_pet()
+
+        assert dialog.opened == 1, "主宠退出必须先问一句"
+        assert exits == [], "取消不得调用 exit_pet（无提升、无退出）"
+        assert shell.sprite is not child, "取消不得提升子宠"
+        assert shell._spawned == [child], "取消不得动活跃清单"
+    finally:
+        _teardown(shell)
+
+
+def test_exit_main_pet_confirmed_promotes_first_child(tmp_path, monkeypatch):
+    """主宠 + 有子宠 → 点确认：走真实提升（列表首只子宠接管主身份）。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        child = _spawn_child(shell)
+        _DialogRecorder("确认退出主宠").install(monkeypatch)
+
+        SpriteMenuFacade(shell).on_exit_pet()
+
+        assert shell.sprite is child, "确认后子宠被提升为主宠"
+        assert shell._spawned == []
+    finally:
+        _teardown(shell)
+
+
+def test_exit_main_pet_without_children_cancel_does_not_quit(tmp_path, monkeypatch):
+    """主宠 + 无子宠 → 点取消：不退应用（这条也覆盖"菜单开着时最后一只子宠已退出"）。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        quits: list = []
+        monkeypatch.setattr(shell.app, "quit", lambda *a, **k: quits.append(1))
+        dialog = _DialogRecorder("取消").install(monkeypatch)
+        exits = _spy_exit_pet(shell, monkeypatch)
+
+        SpriteMenuFacade(shell).on_exit_pet()
+
+        assert dialog.opened == 1
+        assert "退出整个应用" in dialog.informative, "没子宠时必须说清是退整个应用"
+        assert exits == [], "取消不得调用 exit_pet"
+        assert quits == [], "取消不得退出应用"
+    finally:
+        _teardown(shell)
+
+
+def test_exit_main_pet_without_children_confirmed_quits_app(tmp_path, monkeypatch):
+    """主宠 + 无子宠 → 点确认：真的走退出整个应用。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        quits: list = []
+        monkeypatch.setattr(shell.app, "quit", lambda *a, **k: quits.append(1))
+        _DialogRecorder("确认退出主宠").install(monkeypatch)
+
+        SpriteMenuFacade(shell).on_exit_pet()
+
+        assert quits == [1], "确认后必须退出应用"
+    finally:
+        _teardown(shell)
+
+
+def test_exit_child_pet_has_no_confirm(tmp_path, monkeypatch):
+    """子宠退出不弹框：直接退掉它自己（有 slot 存档、用户明确点选），主宠不受影响。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        child = _spawn_child(shell)
+        dialog = _DialogRecorder("取消").install(monkeypatch)
+
+        SpriteMenuFacade(shell, child).on_exit_pet()
+
+        assert dialog.opened == 0, "子宠退出不该被确认框挡住"
+        assert shell._spawned == [], "子宠被退掉"
+        assert shell.sprite is not child, "主宠不退"
+    finally:
+        _teardown(shell)
+
+
+def test_exit_main_pet_confirm_box_defaults_to_cancel(tmp_path, monkeypatch):
+    """确认框的三个语义点：默认钮 = 取消（防连点/回车误触）、按钮文案、默认取消的返回值。"""
+    shell, _ = _make_shell(tmp_path)
+    try:
+        _spawn_child(shell)
+        monkeypatch.setattr(shell._config, "character_display_name",
+                            lambda cid: "小美", raising=False)
+        dialog = _DialogRecorder(None).install(monkeypatch)   # None = 没点任何按钮
+        exits = _spy_exit_pet(shell, monkeypatch)
+
+        SpriteMenuFacade(shell).on_exit_pet()
+
+        assert dialog.buttons == ["确认退出主宠", "取消"]
+        assert dialog.default == "取消", "默认钮必须是取消"
+        assert "确认退出主宠" in dialog.text
+        assert "小美" in dialog.informative, "有子宠时必须点名谁会被提升"
+        assert "原主宠的位置与设置不保留" in dialog.informative
+        assert exits == [], "没点确认（默认取消）不得退出"
+    finally:
+        _teardown(shell)
+
+
+def test_promote_target_name_uses_alias_and_empty_without_children(tmp_path, monkeypatch):
+    """壳的只读 seam：被提升者的展示名走既有角色名/别名口径，无子宠 → 空串。
+
+    退出确认框靠它点名"谁会被提升"，不新造命名系统：展示名与识屏自我识别同源
+    （``character_display_name`` + 该 sprite 自己的 ``character``）。
+    """
+    from pet import catalog
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        assert shell.promote_target_name() == "", "无子宠 → 没有会被提升的那一只"
+        child = _spawn_child(shell)
+        cid = str(shell._sprite_config(child).get("character", catalog.DEFAULT_CHARACTER))
+        assert shell.promote_target_name() == cid, "没有别名时回退角色显示名"
+
+        monkeypatch.setattr(shell._config, "character_display_name",
+                            lambda c: "小美" if c == cid else c, raising=False)
+        assert shell.promote_target_name() == "小美", "用户起的别名优先"
+    finally:
+        _teardown(shell)
+
+
+def test_menu_exit_this_for_main_pet_is_gated(tmp_path, monkeypatch):
+    """菜单入口本身也带闸：右击主宠 →「退出这只」→ 取消，什么都不发生。
+
+    上一条走 facade 方法，这条从**真实菜单项**触发——防的是"日后有人在菜单里直连
+    ``exit_pet`` 绕过 facade 的确认闸"（这个入口本来就只多宠时注入）。
+    """
+    shell, _ = _make_shell(tmp_path)
+    try:
+        child = _spawn_child(shell)
+        menu = build_sprite_full_menu(shell, shell.sprite)   # 右击主宠
+        action = _find_action(menu, "退出这只")
+        assert action is not None, "多宠时主宠菜单必须有「退出这只」"
+
+        dialog = _DialogRecorder("取消").install(monkeypatch)
+        exits = _spy_exit_pet(shell, monkeypatch)
+        action.trigger()
+
+        assert dialog.opened == 1
+        assert exits == [], "取消后不得退出"
+        assert shell.sprite is not child
+        assert shell._spawned == [child]
+    finally:
+        _teardown(shell)

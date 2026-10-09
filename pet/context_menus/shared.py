@@ -943,6 +943,35 @@ def _dialog_parent(pet):
     return getattr(pet, "dialog_parent", None) or pet
 
 
+def confirm_destructive_action(pet, *, title: str, text: str, informative: str = "",
+                               confirm_label: str, cancel_label: str = "取消") -> bool:
+    """破坏性动作的确认框：返回用户是否点了确认按钮。
+
+    与 dsh 重启/停止的确认框同款构造（``harness_launcher._confirm_harness_stop``）：
+    Warning 图标 + 明确的「确认 X / 取消」两个按钮 + ``exec()``。
+
+    **默认按钮 = 取消**（与那处相反，故收口在这里写明口径）：退出主宠这类动作在
+    右键菜单里离「设置」「退出」只有几像素，回车/连点落到确认上就不可逆了；默认落
+    在取消上，误触的代价是一次多余的点击。
+
+    调用方必须让菜单项 ``close_on_trigger``（回调延迟到菜单关闭后执行）：macOS
+    原生菜单跟踪会话里模态框会被 AppKit 抑制，与"设置对话框首次点击无反应"同源。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    box = QMessageBox(_dialog_parent(pet))
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(text)
+    if informative:
+        box.setInformativeText(informative)
+    confirm = box.addButton(confirm_label, QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton(cancel_label, QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() is confirm
+
+
 def add_harness(menu: QMenu, pet, *, icons: bool = True):
     """DeepSeek Harness 子菜单：启动 / 重启 / 停止。
 
