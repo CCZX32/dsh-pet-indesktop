@@ -22,12 +22,16 @@ STATS_HISTORY_LIMIT = 50
 # 投喂气泡的副标题（两条投喂链共用；拖文件只是做样子）。
 FEEDING_BUBBLE_SUBTITLE = "放心，只是做个样子，文件没有删除或移动哦"
 
-# 投喂扫描预算（B03）：拖入大目录（几万文件/网络盘）时同步递归 + 逐文件
-# ``stat()`` 会把整个桌宠 UI 冻在 GUI 线程上。文件数与耗时双预算，触预算即停扫，
-# 统计与气泡如实标记截断（Windows 与 overlay 两条投喂链共用本实现）。
-SCAN_FILE_LIMIT = 20000
+# 投喂扫描预算（B03 + 复审#4）：拖入大目录（几万文件/网络盘）时同步递归 + 逐项
+# ``stat()`` 会把整个桌宠 UI 冻在 GUI 线程上。两条预算：**文件数**上限 + **墙钟**上限。
+#
+# 记账粒度是「项」= 文件 + 目录（``_ScanBudget.visited``）：只数文件的话，空目录树
+# 一个文件都不统计（既不耗文件预算、也走不到耗时检查），慢盘上"文件少但每层目录都卡"
+# 的树在两次检查之间也不受控——进一个新目录就查一次钟，任何形态的树都有墙钟封顶。
+# 触预算即停扫，统计与气泡如实标记截断（截断提示报的是**文件**口径，未变）。
+SCAN_FILE_LIMIT = 20000       # 已统计文件数上限（目录不计入，由墙钟兜底）
 SCAN_TIME_BUDGET_S = 2.0
-SCAN_TIME_CHECK_EVERY = 512
+SCAN_TIME_CHECK_EVERY = 256   # 每 N 项（文件 + 目录）查一次钟
 # 预算时钟（测试注入假钟；生产 = 单调钟）
 _SCAN_CLOCK = time.monotonic
 
@@ -106,6 +110,10 @@ def _path_size(path: Path, budget=None) -> int:
             return path.stat().st_size
         total = 0
         for root, _dirs, files in os.walk(path):
+            # 进一个目录就记一次账（含 ``os.walk`` 的首个 root）：空目录/目录层数极深
+            # 的树靠这一次记账才能被墙钟预算截住。
+            if budget is not None and not budget.account_dir():
+                return total
             for name in files:
                 if budget is not None and not budget.account():
                     return total
@@ -133,11 +141,17 @@ def _measure_path(path: Path, budget=None) -> tuple[int, int, int]:
 
 
 class _ScanBudget:
-    """一次投喂的扫描预算：文件数上限 + 耗时上限。
+    """一次投喂的扫描预算：文件数上限 + 墙钟上限。
 
-    耗时每 ``SCAN_TIME_CHECK_EVERY`` 个文件查一次钟（逐文件查钟本身也是开销），
-    越预算即停扫并 ``truncated = True``；``scanned`` = 真正统计到的文件数，截断
-    提示按它报真实口径。
+    记账粒度是「项」= 文件 + 目录（``visited`` 计口径）：
+
+    - ``account_dir()`` 每进入一个新目录查一次钟——纯空目录树与"文件少但每层目录都
+      卡"的慢盘树靠它封顶；
+    - ``account()`` 每 ``SCAN_TIME_CHECK_EVERY`` 项查一次钟（逐项查钟本身也是开销）——
+      单层几万文件的目录只有一层目录，靠它封顶。
+
+    越预算即停扫并 ``truncated = True``；``scanned`` = 真正统计到的**文件**数，
+    截断提示与统计按它报真实口径（目录数另有 ``folders`` 口径，两者互不相混）。
     """
 
     def __init__(self, file_limit=None, time_budget=None, clock=None) -> None:
@@ -147,16 +161,27 @@ class _ScanBudget:
         budget_s = max(0.0, float(
             SCAN_TIME_BUDGET_S if time_budget is None else time_budget))
         self._deadline = self._clock() + budget_s
-        self.scanned = 0
+        self.scanned = 0   # 已统计的文件数（气泡/统计口径）
+        self.visited = 0   # 已记账的项数（文件 + 目录，查钟口径）
         self.truncated = False
+
+    def account_dir(self) -> bool:
+        """记一个即将进入的目录；返回 False = 预算用尽，调用方必须停止递归。"""
+        if self.truncated:
+            return False
+        self.visited += 1
+        if self._clock() >= self._deadline:
+            self.truncated = True
+            return False
+        return True
 
     def account(self) -> bool:
         """记一个即将统计的文件；返回 False = 预算用尽，调用方必须立即停扫。"""
         if self.scanned >= self._file_limit:
             self.truncated = True
             return False
-        if (self.scanned
-                and self.scanned % SCAN_TIME_CHECK_EVERY == 0
+        self.visited += 1
+        if (self.visited % SCAN_TIME_CHECK_EVERY == 0
                 and self._clock() >= self._deadline):
             self.truncated = True
             return False

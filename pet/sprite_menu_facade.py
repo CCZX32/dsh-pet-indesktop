@@ -53,6 +53,7 @@ from .context_menus.menu_styles.common import (
     install_stay_open_interaction,
 )
 from .context_menus.shared import add_action as _add_action
+from .context_menus.shared import animation_icon_cache_key
 
 log = logging.getLogger(__name__)
 
@@ -208,7 +209,11 @@ class SpriteMenuFacade:
         return QPixmap.fromImage(image)
 
     def _icon_cache(self) -> dict:
-        """动画缩略图缓存挂**壳**上（facade 每次右键重建，缓存必须长寿命）。"""
+        """动画缩略图缓存挂**壳**上（facade 每次右键重建，缓存必须长寿命）。
+
+        缓存键 =（库身份, 动画名）（``shared.animation_icon_cache_key``）：同壳多宠
+        异角色的同名动画各存各的，换库后旧 worker 的迟到写入也落在旧库的键上。
+        """
         cache = getattr(self._shell, "_menu_icon_cache", None)
         if cache is None:
             cache = {}
@@ -218,22 +223,33 @@ class SpriteMenuFacade:
                 log.debug("overlay: 挂载菜单图标缓存失败", exc_info=True)
         return cache
 
+    def _icon_key(self, name: str, library=None) -> tuple[int, str]:
+        """本 sprite 当前素材库下的缓存键（查询/写入必须同一函数，单一来源在 shared）。"""
+        if library is None:
+            library = getattr(self.sprite, "library", None)
+        return animation_icon_cache_key(library, name)
+
     def animation_icon_cached_image(self, name: str):
         """只读缓存查询（shared 侧用它决定是否先放占位图标）。"""
-        cached = self._icon_cache().get(name)
+        cached = self._icon_cache().get(self._icon_key(name))
         return QImage(cached) if cached is not None else QImage()
 
     def animation_icon_image(self, name: str):
         """解码一个代表性帧（worker 线程安全：只碰 clip_path + 解码器）。
 
-        窗口版在 PetWindow 上缓存（128 条上限）；sprite 世界的缓存落在壳上，
-        上限与失效口径逐点一致。
+        窗口版在 PetWindow 上缓存（128 条上限）；sprite 世界的缓存落在壳上，上限与
+        失效口径逐点一致。
+
+        库身份在**解码前**取一次并贯穿查询/解码/写入：worker 可能在解码期间被换库
+        （换角色），此时它手里的图仍是旧库的，写入必须落回旧库的键——否则迟到写入会
+        成为新库的缓存命中，菜单显示上一个角色的图。
         """
+        library = getattr(self.sprite, "library", None)
+        key = self._icon_key(name, library)
         cache = self._icon_cache()
-        cached = cache.get(name)
+        cached = cache.get(key)
         if cached is not None:
             return QImage(cached)
-        library = getattr(self.sprite, "library", None)
         clip_path = getattr(library, "clip_path", None)
         path = clip_path(name) if callable(clip_path) else None
         if path is None:
@@ -244,7 +260,7 @@ class SpriteMenuFacade:
         if image is not None and not image.isNull():
             if len(cache) >= 128:
                 cache.clear()
-            cache[name] = QImage(image)
+            cache[key] = QImage(image)
         return image
 
     # ---------------------------------------------------------------- 素材清单（动画分类建造器）

@@ -662,6 +662,35 @@ def test_island_feedback_yields_to_inflight_request(tmp_path):
         _teardown_shell(shell)
 
 
+def test_island_switch_character_drops_inflight_answer(tmp_path):
+    """岛气泡继承基类的切角色闸门：旧角色的回答不许落进新角色的会话。
+
+    岛气泡与快速对话气泡共用一套会话链路（``IslandChatBubble`` 继承
+    ``QuickChatBubble``），切角色走的就是基类那个 seam——主宠切角色后岛气泡跟在途
+    请求之间同样必须作废（否则岛上的旧回答写进新角色会话）。
+    """
+    _qapp()
+    bubble = IslandChatBubble(Config(base=tmp_path))
+    try:
+        provider = _BlockingProvider()
+        bubble.service.provider = provider
+        bubble.input.setText("你在吗")
+        bubble._send()
+        assert provider.started.wait(timeout=10), "前提：请求已进入 provider"
+
+        bubble.switch_character("nova")
+        assert bubble._active_request_id is None, "切角色即作废在途请求"
+
+        provider.release.set()
+        assert _pump_until(lambda: not bubble.service.busy), "旧 worker 未收尾"
+        assert bubble.output.text() == "", "旧角色的回答不许显示在岛上"
+        assert not [m for m in bubble.session.messages if m.role == "assistant"]
+        assert bubble.session.character_id == "nova"
+    finally:
+        bubble.close()
+        bubble.deleteLater()
+
+
 def test_island_feedback_previews_when_request_finished(tmp_path):
     """非回归：请求不在途时反馈照常预览（让路只针对在途请求）。"""
     _qapp()

@@ -251,18 +251,43 @@ def test_switch_character_swaps_library(tmp_path):
         shell._delete_runtime_marker()
 
 
-# ---------------------------------------------------------------- 菜单图标缓存（B08）
+# ---------------------------------------------------------------- 菜单图标缓存（B08 / 复审#5）
 def _argb32(color: int, size: int = 4) -> QImage:
     image = QImage(size, size, QImage.Format.Format_ARGB32)
     image.fill(color)
     return image
 
 
+class _StubLibrary:
+    """只够缩略图面用的素材库替身（``clip_path`` 带自己的身份标签）。"""
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+
+    def clip_path(self, name: str) -> str:
+        return f"/{self.tag}/{name}.webm"
+
+
+def _stub_sprite(library):
+    return type("Sprite", (), {"library": library})()
+
+
+def _seed_menu_icon_cache(shell, library, name, image) -> None:
+    """按产品键（库身份 + 动画名）预置一条缓存：单一来源，不在测试里复刻键格式。"""
+    from pet.context_menus.shared import animation_icon_cache_key
+
+    cache = getattr(shell, "_menu_icon_cache", None)
+    if cache is None:
+        cache = {}
+        shell._menu_icon_cache = cache
+    cache[animation_icon_cache_key(library, name)] = QImage(image)
+
+
 def test_character_switch_clears_menu_icon_cache(tmp_path, monkeypatch):
     """B08：换角色后菜单缩略图缓存必须清空，下次取图按新库重新解码。
 
-    缓存挂壳上、键只有动画名（``_icon_cache``）；主/子宠两角色同名动画会命中
-    上一角色的缩略图，菜单里显示别的角色的图。
+    缓存挂壳上、键 = （素材库身份, 动画名）（复审#5 起）；切角色清缓存是内存卫生：
+    旧库的死项不占着 128 条上限，也不给 id 复用留机会。
     """
     import pet.animation_thumbnail as thumb_mod
 
@@ -270,7 +295,7 @@ def test_character_switch_clears_menu_icon_cache(tmp_path, monkeypatch):
     try:
         facade = SpriteMenuFacade(shell)
         stale = _argb32(0xFF112233)
-        shell._menu_icon_cache = {"idle1": QImage(stale)}
+        _seed_menu_icon_cache(shell, shell.sprite.library, "idle1", stale)
         assert not facade.animation_icon_cached_image("idle1").isNull()
 
         decoded: list = []
@@ -300,7 +325,7 @@ def test_menu_icon_cache_hit_survives_without_character_switch(tmp_path, monkeyp
     try:
         facade = SpriteMenuFacade(shell)
         cached = _argb32(0xFF778899, size=6)
-        shell._menu_icon_cache = {"idle1": QImage(cached)}
+        _seed_menu_icon_cache(shell, shell.sprite.library, "idle1", cached)
 
         decoded: list = []
         monkeypatch.setattr(thumb_mod, "decode_representative_frame",
@@ -309,5 +334,74 @@ def test_menu_icon_cache_hit_survives_without_character_switch(tmp_path, monkeyp
 
         assert facade.animation_icon_image("idle1").size() == cached.size()
         assert decoded == []
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_same_animation_name_resolves_per_library(tmp_path, monkeypatch):
+    """复审#5：缓存键带库身份——同壳两只不同角色的宠，同名动画各取各的图。
+
+    缓存挂壳上（facade 每次右键重建，必须长寿命），键只有动画名时：两只宠本来就
+    不同角色、**没有任何切换发生**，开各自菜单时同名动画直接命中对方的缩略图。
+    """
+    import pet.animation_thumbnail as thumb_mod
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        decoded: list = []
+
+        def fake_decode(path):
+            decoded.append(path)
+            return _argb32(0xFF0000AA if "/lib-a/" in path else 0xFF0000BB)
+
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame", fake_decode)
+
+        facade_a = SpriteMenuFacade(shell, _stub_sprite(_StubLibrary("lib-a")))
+        facade_b = SpriteMenuFacade(shell, _stub_sprite(_StubLibrary("lib-b")))
+
+        facade_a.animation_icon_image("act1")
+        assert not facade_a.animation_icon_cached_image("act1").isNull()
+        assert facade_b.animation_icon_cached_image("act1").isNull(), \
+            "另一只宠的同名动画不得命中这只的缩略图"
+
+        image_a = facade_a.animation_icon_image("act1")
+        image_b = facade_b.animation_icon_image("act1")
+        assert decoded == ["/lib-a/act1.webm", "/lib-b/act1.webm"], "各自解码自己的素材"
+        assert image_a.pixel(0, 0) != image_b.pixel(0, 0)
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_late_worker_write_is_keyed_to_the_old_library(tmp_path, monkeypatch):
+    """复审#5：换库后旧 worker 的迟到写入必须落在**旧库**的键上。
+
+    worker 在解码**之前**就抓到了旧库（``clip_path`` 取自它），解码期间换库、清缓存
+    都已经发生；写入若只按动画名，就把旧角色的图写回新库的查询键上——B08 的"切角色
+    清缓存"管不到这一次迟到写入。
+    """
+    import pet.animation_thumbnail as thumb_mod
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        lib_a = _StubLibrary("lib-a")
+        lib_b = _StubLibrary("lib-b")
+        sprite = _stub_sprite(lib_a)
+        facade = SpriteMenuFacade(shell, sprite)
+
+        decoded: list = []
+
+        def decode_across_switch(path):
+            decoded.append(path)
+            sprite.library = lib_b        # 解码期间换库（旧 worker 的迟到时刻）
+            return _argb32(0xFF0000AA)
+
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame", decode_across_switch)
+
+        facade.animation_icon_image("act1")
+        assert facade.animation_icon_cached_image("act1").isNull(), \
+            "旧库解码出的图不得成为新库的缓存命中"
+
+        assert not facade.animation_icon_image("act1").isNull()
+        assert decoded == ["/lib-a/act1.webm", "/lib-b/act1.webm"], "新库按新键重新解码"
     finally:
         shell._delete_runtime_marker()

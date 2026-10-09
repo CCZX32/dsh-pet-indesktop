@@ -27,6 +27,21 @@ log = logging.getLogger(__name__)
 DEEPSEEK_WEB_URL = "https://chat.deepseek.com/"
 
 
+def animation_icon_cache_key(library, name: str) -> tuple[int, str]:
+    """菜单动画缩略图缓存键 =（素材库身份, 动画名），查询与写入共用这一处。
+
+    为什么必须带库身份：缓存挂壳上、facade 每次右键重建，只按动画名做键时——
+
+    - 同壳两只宠本来就不同角色（没有任何切换发生）：同名动画直接命中对方的缩略图，
+      菜单里显示的是另一只宠的图；
+    - 换库后旧 worker 才解码完：它把**旧库**的图写回裸名称键，新库随后命中它。
+
+    库身份用 ``id(library)``（进程内唯一）：库对象一旦回收，旧键自然成为死项，由缓存
+    的 128 条上限兜底清掉。
+    """
+    return (id(library), str(name))
+
+
 class _AnimationIconSignals(QObject):
     ready = Signal(object)
 

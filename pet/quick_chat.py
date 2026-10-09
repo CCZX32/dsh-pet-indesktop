@@ -231,18 +231,42 @@ class QuickChatBubble(QFrame):
         self.session = self._get_session()
 
     def switch_character(self, character_id: str) -> None:
-        """切角色同步 seam（B07）：换身份 + 按新角色重取会话。
+        """切角色同步 seam（B07）：先作废在途请求，再换身份 + 按新角色重取会话。
 
         气泡的角色是构造期一次性快照（``character_id`` 决定会话目录与系统提示，
         见 ``_get_session`` / ``_send`` 的 ``build_messages``）；主宠切角色后不同步
         这里，气泡会一直用旧角色的会话与人格提示。空身份/同角色不动作（避免无谓
         重建会话，丢掉正在续聊的那一条）。
+
+        作废在途请求是先决条件：``_finished`` / ``_delta`` / ``_error`` / ``_stopped``
+        一律按 ``_active_request_id`` 认领信号，换会话时不清它，旧角色那次请求的完成
+        信号到达时 ID 仍然匹配，回答就被 append 进**新**角色的 session（对照完整聊天窗
+        ``chat/widgets.py::switch_character`` 的同款闸门）。
         """
         new_id = str(character_id or "")
         if not new_id or new_id == self.character_id:
             return
+        self._invalidate_in_flight_request()
         self.character_id = new_id
         self.refresh_session()
+
+    def _invalidate_in_flight_request(self) -> None:
+        """作废在途请求：清 ID 闸 + 停掉 worker + 撤掉它的显示残留。
+
+        清 ID 后旧请求的完成/增量/错误/停止信号全部按 ID 失配静默丢弃（既不落库也不
+        上屏）；停 worker 只是别让它在后台白跑完再被丢弃。已上屏的半截回答属于**旧角色**
+        的回答，换身份后不该留在新角色的气泡里，故与完整聊天窗换角色一致地复位显示。
+        """
+        if self._active_request_id is None:
+            return
+        self._active_request_id = None
+        self.service.stop()
+        self._set_reply_text("")
+        self._page = 0
+        self._pages = []
+        self.page_widget.setVisible(False)
+        self._render_reply()
+        self.hint_label.setText("")
 
     def _new_session(self):
         session = self.store.create(

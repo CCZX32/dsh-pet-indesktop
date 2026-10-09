@@ -50,12 +50,23 @@
   之后约 30ms 起有一段 ``mediaStatus=LoadedMedia`` 而 ``playbackState`` 仍是
   ``StoppedState`` 的窗口（约 200ms），两个枚举子判据都不成立——只看枚举会把这段时间
   的通道误判成空闲，新语音当场 ``setSource`` 顶掉刚起播的那一段且永远等不到
-  EndOfMedia。终止态（EndOfMedia / InvalidMedia）与 ``stop()`` 复位该标志。
-- **缓存原子落盘**：worker 先写同目录临时文件（``*.part``），完成后 ``os.replace``
-  原子换名到最终缓存路径——``edge_tts.save`` 是边收边写，直接写最终路径时进程被斩
-  （daemon worker 随退出死掉）会留下永久截断的 mp3，而 ``_cache_hit`` 只看"存在且
-  非空"就会天天命中它、天天播静音。最终路径上只可能出现完整文件或什么都不出现；
-  缓存目录里的孤儿 ``*.part`` 在服务启动时清扫。
+  EndOfMedia。
+- **自记标志的滞留窗口与两道兜底（如实登记）**：这个标志没有 Qt 事件保证一定有结局——
+  设备被拔 / 音频输出异常时，``play()`` 之后可能**既不给终止态也不进 PlayingState**，
+  标志卡 True 就是通道**永久判忙**（``speak`` 永远排队、``play_file`` 永远让路、合成
+  完成永远回队出不来）。所以复位有四条路径：终止态（EndOfMedia / InvalidMedia）、
+  ``errorOccurred``（按终止态同一套结算排队项）、``stop()`` / 免打扰切断、以及
+  ``_play_pending_since + _PLAY_PENDING_MAX_S``（120s，取值理由见该常量）的看门狗
+  上限兜底——最后那条覆盖"连错误信号都不给"的静默滞留，并与合成超时共用同一条
+  单次表（``_reararm_watchdog`` 取最早到点的那个期限）。
+- **缓存原子落盘**：worker 先写同目录临时文件（``*.part``），完成后经
+  ``config.atomic_replace_with_retry`` 原子换名到最终缓存路径——``edge_tts.save`` 是
+  边收边写，直接写最终路径时进程被斩（daemon worker 随退出死掉）会留下永久截断的
+  mp3，而 ``_cache_hit`` 只看"存在且非空"就会天天命中它、天天播静音。最终路径上只
+  可能出现完整文件或什么都不出现；换名走重试版是因为 Windows 上目标 mp3 正被播放器
+  打开时裸 ``os.replace`` 直接 WinError 5（同 key 的预合成 / 独立进程试听会撞上）；
+  缓存目录里的孤儿 ``*.part`` 在服务启动时清扫（"在册"只保护本进程在飞的合成，
+  跨进程靠写入占用，见 ``_sweep_orphan_temp_files``）。
 - **免打扰切断在播段**：免打扰（含全屏等效）开启那一拍，当前正在播放且**尊重免打扰**
   的那一段立即停掉（用户的开关不能等到这段放完）；``respect_quiet=False`` 的交互应答
   （点击自言自语）照播——与入口闸的豁免口径同一条。免打扰退出**不补播**，与 ``_fire``
@@ -67,7 +78,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
-import os
 import threading
 import time
 import uuid
@@ -97,6 +107,40 @@ _PRUNE_MIN_INTERVAL_S = 300.0
 # 合成回调超时（秒）：worker 线程若异常未回调，_busy 会永久置位导致报时静默，
 # 超过该时限在调度 tick 中复位（正常合成 3-8s 完成，45s 余量充足）。
 _SYNTH_TIMEOUT_S = 45.0
+# 合成超时的**布表**间隔（秒/毫秒）：阈值 + 1s 余量（表到点那一拍再判一次是否真该解锁）。
+_UNLOCK_INTERVAL_S = _SYNTH_TIMEOUT_S + 1.0
+_UNLOCK_INTERVAL_MS = int(_UNLOCK_INTERVAL_S * 1000)
+# 「已发出 play、未见终止态」（``_play_pending_end``）的最长合理时长（秒）：超过它
+# 仍未见到终止态、也没进 PlayingState，就认定这一段**永远不会有结局**，复位标志并
+# 按终止态同一套结算排队项。
+#
+# 取值理由（不是拍脑袋）：
+# - 本机真实缓存目录 22 条报时音频实测 **1.42s ~ 7.73s**（均值 5.09s，ffmpeg 探针）；
+# - 合法文本上限 = 报时句（十余字）+ 单条台词 120 字（``voice_chime._MAX_CUSTOM_QUOTE_LEN``
+#   截断），约 130 字；语速可调到 -100%（edge-tts 下限，约半速），按 ~5 字/秒折算
+#   **理论最坏 ≈ 52s**；
+# - 取 120s = 理论最坏的两倍以上，正常长段不会被误伤；同时把"永久判忙"的持续
+#   时间封在 2 分钟以内。
+#
+# 提前响也不危险（所以不必跟着文本长度动态算）：标志只是 ``_player_engaged`` 的
+# **第三个**子判据，真在出声时 ``playbackState == PlayingState`` 照旧为真——上限
+# 放掉标志不会把正在播的那一段误判成空闲。
+_PLAY_PENDING_MAX_S = 120.0
+
+
+def _remaining_unlock_ms(seconds: float) -> int:
+    """把"剩余秒数"换算成布表的毫秒间隔。
+
+    夹到 ``(0, 最大布表间隔]``：脏值（``inf`` / ``nan`` / 负数，或时钟被回拨导致
+    "已经过去"的时间为负）不许变成 ``OverflowError`` 或 0 间隔的忙转表——这两种
+    都会让手动通道**唯一**的自愈入口失效。
+    """
+    try:
+        capped = min(max(0.001, float(seconds)), max(_UNLOCK_INTERVAL_S, _PLAY_PENDING_MAX_S))
+        return max(1, int(capped * 1000))
+    except (TypeError, ValueError, OverflowError):
+        return _UNLOCK_INTERVAL_MS
+
 
 # 合成线程里 edge_tts 导入失败时的回调错误码：GUI 侧据此走 _notify_missing_tts
 # 降级（"请 pip install edge-tts"），而不是笼统的"合成失败"。
@@ -253,7 +297,14 @@ def _sweep_orphan_temp_files(cache_dir: Path) -> None:
     ``*.part``，所以这里**按名字模式直接删**——不按修改时间猜（"多久没动过算孤儿"
     在新进程刚起来时必然全都不算旧，等于没清）。
 
-    在册的临时文件（同进程里仍在跑的合成）跳过，见 :data:`_live_temp_paths`。
+    "在册"的边界要说清：台账 :data:`_live_temp_paths` 是**进程内**的，跳过的只是
+    **本进程**在飞的合成（同进程里 stop() → start() 之间可能还有上一次的合成在跑，
+    删掉它的临时文件等于让那次合成白跑）。跨进程（独立设置进程的试听与主进程的
+    预合成写同一个缓存目录）**没有**这份保护，靠的是：Windows 上正在被写入的文件
+    ``unlink`` 会失败（PermissionError → 下面吞掉、留给对方继续写）；POSIX 上误删
+    一个在写的 ``*.part`` 也只会让对方这次合成找不到临时文件而算本次失败、下一轮
+    重试，**不会**产生坏缓存——最终路径只由原子换名产生，``_cache_hit`` 也只认
+    最终路径。
     """
     with _live_temp_lock:
         live = set(_live_temp_paths)
@@ -266,6 +317,8 @@ def _sweep_orphan_temp_files(cache_dir: Path) -> None:
             try:
                 stale.unlink(missing_ok=True)
             except OSError:
+                # 删不掉就留着：最可能是**别的进程**正在写它（Windows 共享冲突），
+                # 也可能只是本进程登记晚于这次清扫——两种都不该把清扫升级成启动失败。
                 logger.debug("清理孤儿合成临时文件失败：%s", stale)
     except OSError:
         logger.debug("合成临时文件清扫失败：%s", cache_dir)
@@ -351,13 +404,27 @@ class _TTSWorker(threading.Thread):
         )
 
     def _publish(self) -> bool:
-        """把临时文件原子换名到最终缓存路径（同目录内 ``os.replace``）。
+        """把临时文件原子换名到最终缓存路径（同目录内换名 + 瞬时共享冲突重试）。
 
         这是本模块"缓存永远不半截"的全部机制：最终路径上只可能出现完整文件或
         什么都不出现，读者（``_cache_hit``）没有中间态可撞见。
+
+        换名走 ``config.atomic_replace_with_retry``（口径与 config / slot_manager /
+        overlay_spawn_state 同一份实现）：Windows 上目标 mp3 **正被播放器打开**时裸
+        ``os.replace`` 会直接 WinError 5——同一段文本的两次合成（主进程预合成 vs
+        独立设置进程试听）落同一个缓存键就会踩到，杀软/索引服务扫描刚落盘的文件也
+        一样。这类共享冲突会自愈（同一份实现里仍是"只重试冲突、其它 OSError 立即
+        上抛"），重试比"这次合成白跑"划算。
+
+        重试预算耗尽仍失败（或非冲突错误，如 ENOENT/ENOSPC）→ 返回 False，走既有
+        "换名失败 = 本次合成失败"路径（调用方记错误、清临时文件、下一轮再试）。
+        惰性 import：保持本模块的导入图不变（这里已在后台线程、且刚跑完网络合成，
+        一次 import 的成本可以忽略）。
         """
+        from .config import atomic_replace_with_retry
+
         try:
-            os.replace(self._temp_path, self._out_path)
+            atomic_replace_with_retry(self._temp_path, self._out_path)
             return True
         except OSError:
             logger.warning("语音缓存换名失败：%s", self._out_path, exc_info=True)
@@ -437,7 +504,7 @@ class VoiceChimeService:
     PRECACHE_WINDOW_S = 60
 
     def __init__(self, app) -> None:
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import Qt, QTimer
 
         self._app = app
         config = getattr(app, "config", None)
@@ -484,18 +551,36 @@ class VoiceChimeService:
         # 实机实测 setSource+play 之后约 30ms 起有一段 mediaStatus=LoadedMedia 而
         # playbackState 仍是 StoppedState 的窗口（约 200ms），两个枚举子判据都不成立
         # → 通道被误判成空闲、新语音当场顶掉刚起播的那一段（见 _player_engaged）。
-        # 由两个播放出口置位，终止态 / stop() / 免打扰切断复位。
+        # 由两个播放出口（``_mark_play_pending``）置位；终止态、播放错误、stop() /
+        # 免打扰切断、以及 ``_PLAY_PENDING_MAX_S`` 上限兜底复位（``_clear_play_pending``）。
         self._play_pending_end = False
+        # 标志的置位时刻（monotonic）。这个标志的滞留窗口**没有** Qt 事件可挂——设备
+        # 被拔这类结局既不给终止态也不进 PlayingState——所以除了事件复位，还要有
+        # 一个时限兜底（见 _release_stale_play_pending 与 _PLAY_PENDING_MAX_S）。
+        self._play_pending_since: float | None = None
         # 当前在播段是否尊重免打扰（None = 当前没有在播段）。播放出口随起播一起写，
         # 免打扰开关那一拍据此决定切不切（见 _on_quiet_state_changed）。
         self._current_respect_quiet: bool | None = None
-        # 解锁表（单次）：手动通道（立即报时 / 设置页试听）整条生命周期都不 start()，
-        # 没有 20s tick 就没人跑 _release_stale_busy——worker 万一漏回调，_busy 永久
-        # 卡死、通道再也不出声（此后每次手动播报都只能进队列）。所以起合成就地布一道
-        # 超时，到点调同一个自愈入口；正常运行路径下它与 tick 互为冗余，语义不变。
+        # 看门狗表（单次）：手动通道（立即报时 / 设置页试听）整条生命周期都不 start()，
+        # 没有 20s tick 就没人跑 ``_release_stale_busy``——worker 万一漏回调，_busy 永久
+        # 卡死、通道再也不出声（此后每次手动播报都只能进队列）。所以起合成（以及起播，
+        # 见 _mark_play_pending）就地布一道超时，到点调同一个自愈入口；正常运行路径下
+        # 它与 tick 互为冗余，语义不变。
+        #
+        # **两个未结期限共用这一条表**（`_reararm_watchdog` 取最早的一个）：① 合成卡死
+        # （``_busy_since + _UNLOCK_INTERVAL_S``）；② 播放接管标志卡住
+        # （``_play_pending_since + _PLAY_PENDING_MAX_S``）。二者都会让通道永久判忙，
+        # 而手动通道没有别的周期性入口，共用一条表才能让两者都被兜住。
+        #
+        # **PreciseTimer 是这条表起码的要求**：Qt 的 CoarseTimer 允许比间隔提前最多
+        # 5% 触发（46s 的表 ≈ 43.7s 就可能响），而这一响正是"过没过 45s 阈值"的判定
+        # 时刻——提前响会把手动通道唯一的自愈入口白白烧掉。但 PreciseTimer 也**不是
+        # 契约保证**（它只是精度承诺，调度压力下仍可能偏离），所以重布逻辑照旧要有：
+        # 见 _release_stale_busy 的"经过不足阈值就按剩余时间重布"。
         self._unlock_timer = QTimer()
+        self._unlock_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._unlock_timer.setSingleShot(True)
-        self._unlock_timer.setInterval(int(_SYNTH_TIMEOUT_S * 1000) + 1000)
+        self._unlock_timer.setInterval(_UNLOCK_INTERVAL_MS)
         self._unlock_timer.timeout.connect(self._release_stale_busy)
         # 让位钩子：由 AppShell 注入 Callable[[str], bool]，入参是本分钟的报时槽位，
         # 返回 True 表示该槽位让位给节日提醒（报时本分钟不说）。None = 无人让位。
@@ -509,6 +594,11 @@ class VoiceChimeService:
         self._timer = QTimer()
         self._timer.setInterval(self.TICK_INTERVAL_MS)
         self._timer.timeout.connect(self._on_tick)
+        # **构造即挂**免打扰监听：手动通道（「立即报时」/ 设置页试听，见 say_now）
+        # 与点击自言的本地播报（play_file）都只懒创建服务、**从不 start()**，而
+        # 免打扰开关那一拍要切掉正在出声的那一段——监听不能只在 start() 里注册
+        # （理由与取舍见 _attach_quiet_listener）。放在构造末尾：此刻全部字段已就绪。
+        self._attach_quiet_listener()
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
@@ -516,6 +606,9 @@ class VoiceChimeService:
         # 在这里清掉——它们永远不会被换名，留着只是垃圾（且会让缓存目录看起来有
         # 一堆"半截缓存"）。只删在册之外的，见 _sweep_orphan_temp_files。
         _sweep_orphan_temp_files(self._cache_dir)
+        # 免打扰监听在构造时就挂好了（见 __init__ 与 _attach_quiet_listener），这里
+        # 再挂一次是兜底：stop() 摘除之后再 start 的**同一实例**要靠它挂回来；重复挂
+        # 由 add_listener 的身份去重保证幂等。
         self._attach_quiet_listener()
         self.apply_config()
         self._on_tick()
@@ -530,6 +623,13 @@ class VoiceChimeService:
         # 待播队列同样作废：关掉开关/退出后不该再补播一条排队的语音。
         self._pending_speech = None
         self._queued_fire = None
+        # 合成锁一并松开：当前产品路径 stop() 之后这个对象即被丢（``_sync_chime_service``
+        # 把引用置 None，下次懒创建的是新实例），所以这不是可达路径的修复，而是**防复用**：
+        # 复用 stop 过的实例走手动通道（立即报时 / 设置页试听）时，残留的 ``_busy`` 会让
+        # ``_fire`` 直接走"合成在飞，排队待补"，这个对象此后一次也发不出声音（ops-S1 重演）。
+        self._busy = False
+        self._busy_since = 0.0
+        self._synthesis_role = "play"
         self._disarm_unlock_timer()
         self._timer.stop()
         self._detach_quiet_listener()
@@ -730,7 +830,7 @@ class VoiceChimeService:
         self._busy = True
         self._busy_since = time.monotonic()
         self._synthesis_role = "precache"
-        self._arm_unlock_timer()
+        self._reararm_watchdog()
         generation = self._next_synthesis_generation()
         # 音色必须用 ``resolve_voice`` 的**结果**：缓存 key 与即时合成（_fire）用的
         # 都是替换后的音色，这里传配置原值会让预合成的产物落到另一个 key 上——音色
@@ -845,7 +945,7 @@ class VoiceChimeService:
         # 本次合成有效：清掉上一次 stop() 留下的作废标记，
         # 否则新起的合成结果会被当成"迟到结果"丢弃。
         self._stopped = False
-        self._arm_unlock_timer()
+        self._reararm_watchdog()
         generation = self._next_synthesis_generation()
         worker = _TTSWorker(
             sentence,
@@ -857,20 +957,44 @@ class VoiceChimeService:
         )
         worker.start()
 
-    def _arm_unlock_timer(self) -> None:
-        """起合成时布一道**只为解锁**的超时（见 ``_unlock_timer`` 的说明）。
+    def _reararm_watchdog(self) -> None:
+        """按**最近的一个未结期限**布看门狗表；两个期限都没有就撤表。
 
-        单次表，重复调用即从此刻重新计时（同一时刻只有一个 ``_busy``，各次合成
-        共用它能表达的全部语义）。
+        这条表是手动通道（从不 start()）唯一的自愈入口，而要兜的挂钟有两个：合成卡死
+        （``_busy_since + _UNLOCK_INTERVAL_S``）与播放接管卡死
+        （``_play_pending_since + _PLAY_PENDING_MAX_S``）。两者可能同时存在（预合成在飞
+        时上一段还在播），共用一条表就必须取最早的那个——先到的那个到点后由
+        ``_release_stale_busy`` 收掉，另一个会在那一拍之后重新布（见那里的重布分支）。
+        """
+        now = time.monotonic()
+        deadlines: list[float] = []
+        if getattr(self, "_busy", False):
+            deadlines.append(getattr(self, "_busy_since", now) + _UNLOCK_INTERVAL_S)
+        if getattr(self, "_play_pending_end", False):
+            since = getattr(self, "_play_pending_since", None)
+            if since is not None:
+                deadlines.append(since + _PLAY_PENDING_MAX_S)
+        if deadlines:
+            self._arm_unlock_timer(min(deadlines) - now)
+        else:
+            self._disarm_unlock_timer()
+
+    def _arm_unlock_timer(self, remaining_s: float) -> None:
+        """布一道**只为自愈**的超时（见 ``_unlock_timer`` 与 ``_reararm_watchdog``）。
+
+        单次表，重复调用即从此刻重新计时。``remaining_s`` 是距最近期限的剩余秒数；
+        每次布表都显式设间隔，否则会沿用上一次重布留下的短间隔（表越响越早）。
         """
         timer = getattr(self, "_unlock_timer", None)
-        if timer is not None:
-            timer.start()
+        if timer is None:
+            return
+        timer.setInterval(_remaining_unlock_ms(remaining_s))
+        timer.start()
 
     def _disarm_unlock_timer(self) -> None:
-        """合成有了结局（回调回来 / 超时自愈 / stop）就撤掉解锁表。
+        """两个挂钟都结了（回调回来 / 超时自愈 / 终止态 / stop）就撤掉看门狗表。
 
-        不撤的话它会一直挂着到 46s 后才响一声空炮（那一响的语义已经作废）；运行期
+        不撤的话它会一直挂着到期限到点才响一声空炮（那一响的语义已经作废）；运行期
         这条表与 20s tick 的 watchdog 互为冗余，撤掉不影响任何既有语义。
         """
         timer = getattr(self, "_unlock_timer", None)
@@ -1048,7 +1172,7 @@ class VoiceChimeService:
             self._player.play()
             # play 出口即置位"已发出 play、未见终止态"（见 _player_engaged）：
             # 从这一刻到终止态之间，枚举判据在 LoadedMedia 窗口里会漏判。
-            self._play_pending_end = True
+            self._mark_play_pending()
         except Exception:
             logger.exception("语音报时播放失败：%s", path)
             self._bubble("语音播放失败（设备/解码器异常）")
@@ -1073,11 +1197,31 @@ class VoiceChimeService:
             self._audio_out.setVolume(self._cfg["volume"] / 100.0)
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
-            self._play_pending_end = True
+            self._mark_play_pending()
             return True
         except Exception:
             logger.exception("外部播报播放失败：%s", path)
             return False
+
+    def _mark_play_pending(self) -> None:
+        """置位"已发出 play、未见终止态"（+ 记时刻 + 按期限布看门狗表）。
+
+        两个播放出口（``_play_and_bubble`` / ``_play_only``）共用的唯一置位点：时刻与
+        标志必须一起写，否则时限兜底拿不到起点（见 ``_PLAY_PENDING_MAX_S``）。置位即
+        布表：这一段若是"既不给终止态也不进 PlayingState"的死局，只有看门狗会来收。
+        """
+        self._play_pending_end = True
+        self._play_pending_since = time.monotonic()
+        self._reararm_watchdog()
+
+    def _clear_play_pending(self) -> None:
+        """放掉"已发出 play、未见终止态"标志（终止态 / 播放错误 / 超限 / 切段共用）。
+
+        标志与时刻必须一起清：只清标志会让下一次置位沿用旧起点（上限提前到点）。
+        """
+        self._play_pending_end = False
+        self._play_pending_since = None
+        self._reararm_watchdog()
 
     def _player_engaged(self) -> bool:
         """播放器是否已**接管**音频通道（正在出声，或刚起播、媒体仍在加载）。
@@ -1099,7 +1243,17 @@ class VoiceChimeService:
         **停留在 ``LoadedMedia``**（EndOfMedia → LoadedMedia），``player.stop()`` 之后
         也停在 ``LoadedMedia``——把 ``LoadedMedia`` 算作接管会让通道在每段播完后永久
         判忙（"这个组合不可达"的前提不成立，故不用那条更简的改法）。自记标志只在
-        ``play()`` 出口置位、由终止态与 ``stop()`` 复位，没有这个滞留问题。
+        ``play()`` 出口置位、由**四类**结局复位：终止态、播放错误（``errorOccurred``）、
+        ``stop()`` / 免打扰切断、以及 ``_PLAY_PENDING_MAX_S`` 时限兜底。
+
+        **这个标志有一个滞留窗口，如实登记**：它是服务侧的自记状态、没有 Qt 事件保证
+        一定能结（设备被拔 / 音频输出异常时，``play()`` 之后可能既不给终止态也不进
+        ``PlayingState``），卡住就是通道**永久判忙**——从"偶发误判空闲"退化成"再也
+        不出声"（``speak`` 永远排队、``play_file`` 永远让路、合成完成永远回队出不来）。
+        两道兜底：① ``errorOccurred`` 接到 :meth:`_on_player_error`，按终止态同一套
+        结算；② 同一条看门狗表在 ``_play_pending_since + _PLAY_PENDING_MAX_S`` 到点
+        （见 :meth:`_release_stale_play_pending`），覆盖"连错误信号都没有"的那种静默
+        滞留。上限提前响不危险：真在出声时本方法的枚举子判据照旧为真。
 
         拿不到枚举判据（QtMultimedia 缺失 / ``object.__new__`` 测试替身没有这些方法）
         时回落到自记标志：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
@@ -1145,7 +1299,25 @@ class VoiceChimeService:
         # 这一段真的结束了：复位"已发出 play、未见终止态"与"当前在播段"两个字段。
         # 不复位标志就会被永久判忙（终止态之后 mediaStatus 停在 LoadedMedia，枚举
         # 判据不成立，只剩这个标志撑着）。
-        self._play_pending_end = False
+        self._clear_play_pending()
+        self._current_respect_quiet = None
+        self._drain_queued_fire()
+        self._drain_pending_speech()
+
+    def _on_player_error(self, error, error_string: str = "") -> None:
+        """播放器报错即"通道空出"：按终止态**同一套**结算，不开第二套语义。
+
+        音频输出被拔 / 设备异常时 ``play()`` 之后可能既没有 EndOfMedia 也不进
+        ``PlayingState``——``_play_pending_end`` 会永久卡 True，通道永久判忙
+        （``speak`` 永远排队、``play_file`` 永远让路、合成完成永远回队出不来）。
+        ``errorOccurred`` 是这类结局唯一的信号，必须接上（见 ``_ensure_player``）。
+
+        即使错误属于别的段（或来得比标志还早，例如 ``setSource`` 期间就报错），这里做的
+        也只是"放掉标志 + 同序 drain"——比永久判忙安全；真正的兜底仍是
+        ``_PLAY_PENDING_MAX_S`` 时限（那条覆盖"连错误都不报"的静默滞留）。
+        """
+        logger.warning("音频播放错误，按通道空出结算：%s（%s）", error, error_string)
+        self._clear_play_pending()
         self._current_respect_quiet = None
         self._drain_queued_fire()
         self._drain_pending_speech()
@@ -1194,6 +1366,10 @@ class VoiceChimeService:
             )
             # 播完一条后排空待播队列（外部播报排队用）。
             self._player.mediaStatusChanged.connect(self._on_media_status)
+            # 播放错误（设备被拔 / 输出异常）同样按"通道空出"结算：这类结局既不给
+            # 终止态也进不了 PlayingState，只靠终止态复位会让通道**永久判忙**
+            # （见 _on_player_error 与 _player_engaged 的滞留窗口说明）。
+            self._player.errorOccurred.connect(self._on_player_error)
             return True
         except Exception:
             logger.exception("创建 QMediaPlayer 失败（检查 QtMultimedia ffmpegmediaplugin）")
@@ -1201,11 +1377,24 @@ class VoiceChimeService:
 
     # ------------------------------------------------------------ 免打扰切断
     def _attach_quiet_listener(self) -> None:
-        """订阅进程级免打扰状态边沿（幂等；随服务 start 走）。
+        """订阅进程级免打扰状态边沿（幂等；**构造即挂**，start 时再挂一次兜底）。
 
         用既有 ``QuietState.add_listener``，不改状态机：本服务只是它的第二个订阅方
-        （第一个是 ``QuietTicker``）。**必须与 stop() 成对**——订阅表持有的是绑定方法，
-        挂着不放就是一条指向半死服务的悬挂回调。
+        （第一个是 ``QuietTicker``）。
+
+        **为什么是构造即挂而不是只在 start() 里挂**：订阅的唯一职责是"免打扰开启那一
+        拍切掉正在出声的那一段"，而这条音频通道有三条起播路径——自动报时（走 start）与
+        **手动通道**（「立即报时」/ 设置页试听 → ``say_now``）、点击自言的本地播报
+        （``play_file``）。后两条只懒创建服务、**从不 start()**（``_fire`` 的 busy 门与
+        ``play_file`` 里都没有"必须先 start"的前置），只在 start() 注册等于让它们
+        在免打扰开启时一直把这一段放完。构造点是"服务存在的唯一时刻"，挂在这里则未来
+        新增起播路径也不会漏；挂在起播处（``_fire`` / ``play_file`` / 两个播放出口）
+        则是三四处要各自记得挂，漏一处就复发。
+
+        ``add_listener`` 按身份去重，所以构造 + start 重复挂不会叠。**必须与 stop()
+        成对**——订阅表持有的是绑定方法，挂着不放就是一条指向半死服务的悬挂回调；
+        AppShell 关闭这条通道时正是 ``stop()`` + 丢引用（见 ``_sync_chime_service``），
+        两个动作合起来才是完整的生命周期收口。
         """
         from . import quiet_mode
 
@@ -1258,7 +1447,7 @@ class VoiceChimeService:
         # ``player.stop()`` 不产生媒体终止态，且实测 stop 之后 ``mediaStatus`` 仍停在
         # ``LoadedMedia``——"已发出 play、未见终止"标志必须在这里显式复位，否则通道
         # 会被永久判忙（_player_engaged 的第三个子判据）。
-        self._play_pending_end = False
+        self._clear_play_pending()
         self._current_respect_quiet = None
 
     # ------------------------------------------------------------ 提示
@@ -1349,10 +1538,27 @@ class VoiceChimeService:
         self._bubble(note)
 
     def _release_stale_busy(self) -> None:
-        """合成线程异常未回调时复位 _busy；否则报时/预合成会被永久跳过。"""
+        """看门狗入口：把到点仍未结的**两个**挂钟都收掉（合成卡死 / 播放接管卡死）。
+
+        三个调用方：20s 的调度 tick（``_on_tick``）、看门狗表（``_unlock_timer`` 的
+        timeout）、以及测试直接驱动。**"经过不足阈值"这一拍不是空转**：表是单次表，
+        被提前叫醒（CoarseTimer 最多提前 5%，实测调度压力下 PreciseTimer 也不保证
+        分毫不差）之后，若不按剩余时间重布，单次表就此耗尽——手动通道没有 tick，
+        再漏一次回调就再也没有任何自愈入口，``_busy`` 永久卡死。
+
+        **播放接管那一项必须排在 ``_busy`` 早退之前**：两者是独立的挂钟，合成空闲时
+        标志照样可能卡住（设备被拔的静默滞留），被早退挡掉就等于没有兜底。
+        """
+        self._release_stale_play_pending()
         if not self._busy:
             return
-        if time.monotonic() - self._busy_since < _SYNTH_TIMEOUT_S:
+        elapsed = time.monotonic() - self._busy_since
+        if elapsed < _SYNTH_TIMEOUT_S:
+            # 还不到阈值：按剩余时间重新布表（不是裸 return）。tick 路径上这是冗余的
+            # 一次重布（下一次 tick 还会来），手动通道上是唯一的续命。走
+            # ``_reararm_watchdog`` 而不是直接按 45s 折算：另一个挂钟（播放接管上限）
+            # 若更早到点，它才是该唤醒的时刻。
+            self._reararm_watchdog()
             return
         logger.warning("语音合成超时未回调，复位合成锁（%.0fs）", _SYNTH_TIMEOUT_S)
         self._busy = False
@@ -1366,6 +1572,33 @@ class VoiceChimeService:
         # 合成锁复位后结算排队项：挂死的合成不会再来回调，到点报时靠这里补。
         # 两个队列同序结算（报时优先），判据在 drain 内部——这里是超时自愈这一拍，
         # 不结算待播语音就会让它永远没人出队（挂死的合成也不会再产生 END）。
+        self._drain_queued_fire()
+        self._drain_pending_speech()
+
+    def _release_stale_play_pending(self) -> None:
+        """播放接管标志的上限兜底：超过 ``_PLAY_PENDING_MAX_S`` 仍未结就按"通道空出"收。
+
+        覆盖 ``errorOccurred`` 也覆盖不到的静默滞留（"既无终止态、也不进 PlayingState、
+        连错误都不报"）。结算动作与终止态/播放错误**完全同一套**（复位标志 + 同序
+        drain），不开第二套语义。
+
+        未到上限时按剩余时间重布看门狗表（同合成那一支的理由：单次表被提前叫醒后
+        不重布就没了）。没有起点（``_play_pending_since`` 为 None，例如测试替身直接
+        置位标志）时无从判定，保持原样——那种对象也没有真实播放器会被卡住。
+        """
+        if not getattr(self, "_play_pending_end", False):
+            return
+        since = getattr(self, "_play_pending_since", None)
+        if since is None:
+            return
+        elapsed = time.monotonic() - since
+        if elapsed < _PLAY_PENDING_MAX_S:
+            self._reararm_watchdog()
+            return
+        logger.warning("播放接管状态超时未结（%.0fs），复位并结算排队项",
+                       _PLAY_PENDING_MAX_S)
+        self._clear_play_pending()
+        self._current_respect_quiet = None
         self._drain_queued_fire()
         self._drain_pending_speech()
 

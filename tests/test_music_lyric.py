@@ -1816,3 +1816,79 @@ def test_pause_bookkeeping_resets_on_track_change(monkeypatch):
 
     assert ctrl._paused_since is None
     assert ctrl._paused_total == pytest.approx(0.0)
+
+
+def test_pause_during_fetch_freezes_clock_even_when_bubble_is_taken(monkeypatch):
+    """取词期间暂停 + 完成时气泡被占：冻结时钟不许被"不显示"那条早退跳过。
+
+    ``load()`` 会清掉暂停态，所以"仍暂停就以暂停态装载"这一步不可省；它一旦排在
+    ``_bubble_blocked()`` 早退之后，完成时气泡被别的提醒占着就直接 return——tracker
+    按播放态从 load 那一刻起算，取词期间的暂停被算成播放时间，恢复播放后歌词停在
+    错的那一句。冻结时钟与"是否显示"是两件事，必须解耦。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))                 # 检测到歌 → 取词在飞
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))  # 取词在飞期间暂停
+    win._alert_current = {"id": "agent-approval"}            # 完成那一刻气泡被占
+    shown_before = list(win.shown)
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    assert win.shown == shown_before, "气泡被占时仍然不显示歌词"
+    assert ctrl._tracker.position(105.0) == pytest.approx(1.0), "105-100-4=1s"
+    assert ctrl._tracker.position(108.0) == pytest.approx(1.0), "暂停态：位置不许前进"
+
+    win._alert_current = None
+    clock.now = 110.0
+    ctrl._on_playback_ready(_playback(None))                 # 恢复播放
+
+    # 暂停段 101→110 全程 9s（含"歌词到位时仍暂停"的那段），恢复这一拍封口
+    assert ctrl._paused_since is None and ctrl._paused_total == pytest.approx(9.0)
+    assert ctrl._tracker.position(110.0) == pytest.approx(1.0), "从冻结处顺延，不跳"
+    assert win.shown[-1] == ("我在唱《t》", "A"), win.shown[-1]
+
+
+def test_pause_during_fetch_is_deducted_from_reported_progress(monkeypatch):
+    """有真实进度的播放器同样要扣取词期间的暂停（窗口里并非全是播放时间）。
+
+    ``reported + (now - updated_at)`` 把整段取词耗时都当成播放时间：取词期间按的
+    暂停会被算进位置，歌词当场跳到未来。暂停时长要扣，但**只能扣窗口里那部分**——
+    保守取 min(暂停, 窗口)，宁可少扣也绝不多扣（多扣会把位置压到采样值以下，
+    歌词相对播放器倒退）。
+    """
+    import pet.music_lyric_controller as mod
+    from pet.now_playing import Playback, Track
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    def sample(position, *, playing=True):
+        return Playback(track=Track(title="t", artist="a", playing=playing),
+                        position=position, updated_at=clock.now)
+
+    ctrl._on_playback_ready(sample(30.0))                    # 取词在飞：真值 30s @100s
+    clock.now = 101.0
+    ctrl._on_playback_ready(sample(30.0, playing=False))     # 暂停
+    clock.now = 104.0
+    ctrl._on_playback_ready(sample(30.0))                    # 恢复（暂停段 = 3s）
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=(
+        LyricLine(0.0, "A"), LyricLine(30.0, "B"), LyricLine(34.0, "C"))))
+
+    # 30 + (105-100) - 3 = 32s；不扣暂停是 35s（越过 34s 那句 → 歌词超前一整句）
+    assert ctrl._tracker.position(105.0) == pytest.approx(32.0)
+    assert ctrl._tracker.uses_reported_position is True, "真值口径不变，仍不提供手动对齐"
+    assert win.shown[-1] == ("我在唱《t》", "B"), win.shown[-1]

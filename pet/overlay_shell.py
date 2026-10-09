@@ -4569,11 +4569,12 @@ class OverlayShell(QObject):
                 logging.exception("overlay: 旧素材库收尾失败")
 
     def _clear_menu_icon_cache(self) -> None:
-        """换角色后清菜单动画缩略图缓存（B08）。
+        """换角色后清菜单动画缩略图缓存（B08；复审#5 后是**内存卫生**）。
 
-        缓存挂壳上、键只有动画名（``sprite_menu_facade._icon_cache``）：两个角色
-        同名动画会命中上一角色的缩略图，菜单里显示的是另一只宠的图。最小正道 =
-        整份清掉，下次取图按新库重新解码；没开过菜单（缓存尚未创建）时不动作。
+        缓存挂壳上、键 =（库身份, 动画名）（``shared.animation_icon_cache_key``）：
+        同名动画与迟到写入都已由库身份隔开，整份清掉的余下价值是不让旧库的死项占着
+        128 条上限、也不给 ``id()`` 复用留机会。下次取图按新库重新解码；没开过菜单
+        （缓存尚未创建）时不动作。
         """
         cache = getattr(self, "_menu_icon_cache", None)
         if isinstance(cache, dict):

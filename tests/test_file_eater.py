@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
@@ -259,10 +260,47 @@ def test_eat_paths_stops_at_file_budget(tmp_path, monkeypatch):
 
 
 def test_eat_paths_stops_at_time_budget(tmp_path, monkeypatch):
-    """B03：耗时预算（mock monotonic）——每 512 个文件查一次钟，越预算即停扫。"""
+    """B03：耗时预算（mock monotonic）——每 N 项（文件 + 目录）查一次钟，越预算即停扫。
+
+    单层几万文件的目录只有一层目录、进目录那一次检查不够，靠这道"每 N 项"封顶。
+    """
     import pet.file_eater as file_eater
 
     folder = _big_dir(tmp_path, "slow-dir", 520)
+    ticks = {"t": 0.0}
+
+    def slow_clock():
+        ticks["t"] += 1.0  # 每次查钟推进 1 秒（预算 2 秒）：第二次查钟即越预算
+        return ticks["t"]
+
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", slow_clock)
+    pet = _make_pet(tmp_path)
+
+    result = FileEaterDropHandler(pet).eat_paths([str(folder)])
+
+    # 记账项 = 进目录 1 项 + 已统计的文件；第 N 项那次查钟越预算，该项自身不计入
+    expected = file_eater.SCAN_TIME_CHECK_EVERY - 2
+    assert result["truncated"] is True
+    assert result["scanned"] == expected, "查钟即停，计数停在预算内"
+    assert result["bytes"] == expected * 10
+    assert f"只统计了前 {expected} 项" in pet.bubbles[0][0]
+
+
+def test_eat_paths_stops_in_empty_directory_tree(tmp_path, monkeypatch):
+    """复审#4：纯空目录树也必须被墙钟封顶。
+
+    旧实现只在 ``os.walk`` 的 files 循环里记账：一个文件都不统计的空目录树既不耗
+    文件预算、也永远走不到耗时检查——几万层空目录照样把 GUI 线程冻住，结果里连
+    "截断"都不标（用户看到"吃了空气"）。
+    """
+    import pet.file_eater as file_eater
+
+    root = tmp_path / "empty-tree"
+    cursor = root
+    for depth in range(3):
+        cursor = cursor / f"lvl{depth}"
+    cursor.mkdir(parents=True)  # 三层空目录，一个文件都没有
+
     calls = {"n": 0}
 
     def slow_clock():
@@ -272,12 +310,50 @@ def test_eat_paths_stops_at_time_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(file_eater, "_SCAN_CLOCK", slow_clock)
     pet = _make_pet(tmp_path)
 
-    result = FileEaterDropHandler(pet).eat_paths([str(folder)])
+    result = FileEaterDropHandler(pet).eat_paths([str(root)])
 
-    assert result["truncated"] is True
-    assert result["scanned"] == 512, "512 个文件一次耗时检查，检查即停"
-    assert result["bytes"] == 512 * 10
-    assert "只统计了前 512 项" in pet.bubbles[0][0]
+    assert result["truncated"] is True, "空目录树也必须有墙钟封顶"
+    assert (result["files"], result["scanned"]) == (0, 0)
+    assert result["folders"] == 1
+    assert "只统计了前 0 项" in pet.bubbles[0][0]
+
+
+def test_eat_paths_stops_when_each_stat_is_slow(tmp_path, monkeypatch):
+    """复审#4：文件少但 stat 巨慢的树同样封顶。
+
+    旧实现的耗时检查要求已处理 ≥512 个文件：慢盘/杀软扫描下"只有几十个文件、每个
+    ``stat()`` 都要几百毫秒"的目录在两次检查之间完全不受控。进目录就查一次钟以后，
+    任何形态的树都有墙钟封顶。
+    """
+    import pet.file_eater as file_eater
+
+    root = tmp_path / "slow-stat-tree"
+    for name in ("a", "b", "c"):
+        leaf = root / name
+        leaf.mkdir(parents=True)
+        (leaf / "f.bin").write_text("x" * 10, encoding="utf-8")
+
+    ticks = {"t": 0.0}
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", lambda: ticks["t"])
+
+    real_stat = Path.stat
+
+    def slow_stat(self, *args, **kwargs):
+        # 只让**被统计的文件**慢：``is_file``/``is_dir`` 内部同样走 ``Path.stat``，
+        # 一并计耗会把"还没开始统计就超预算"变成被测行为之外的事。
+        if self.name.endswith(".bin"):
+            ticks["t"] += 1.0  # 每个文件 stat 花 1 秒（预算 2 秒）
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", slow_stat)
+    pet = _make_pet(tmp_path)
+
+    result = FileEaterDropHandler(pet).eat_paths([str(root)])
+
+    assert result["truncated"] is True, "少于 N 个文件的慢目录也必须封顶"
+    assert result["scanned"] == 2, "前两个 stat 之后进第三个目录即越预算"
+    assert result["bytes"] == 20
+    assert "只统计了前 2 项" in pet.bubbles[0][0]
 
 
 def test_eat_paths_budget_covers_dropped_file_list(tmp_path, monkeypatch):

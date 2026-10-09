@@ -1086,8 +1086,19 @@ class MusicLyricController(QObject):
         reported = getattr(playback, "position", None) if playback is not None else None
         if reported is not None:
             # 有真实进度（如 QQ 音乐）：从"读到该值的时刻"回推到此刻，
-            # 抵消取词耗时造成的滞后，因此不存在延迟。
-            position = max(0.0, reported + (now - playback.updated_at))
+            # 抵消取词耗时造成的滞后，因此不存在延迟。再扣掉取词在飞期间已经
+            # 发生的暂停：窗口 `[updated_at, now]` 里的时间不全是播放时间，不扣
+            # 的话这段暂停会被算成进度、歌词当场跳到未来（与无进度分支同一条口径）。
+            #
+            # 暂停时长按**窗口长度封顶**（保守不多扣）：`_paused_seconds` 记的是
+            # "取词在飞期间"的累计暂停，正常路径上整段都落在窗口内（派发取词那一拍
+            # 是播放拍，窗口起点就是它），但同曲失败重试那条路径上窗口起点可能晚于
+            # 已封口的暂停段——多扣会把位置压到 `reported` 以下（歌词相对播放器倒退，
+            # 而播放器自己报的值才是真值）。封顶后 `position >= reported` 恒成立：
+            # 宁可少扣，绝不多扣。
+            elapsed = max(0.0, now - playback.updated_at)
+            paused = min(self._paused_seconds(now), elapsed)
+            position = max(0.0, reported + elapsed - paused)
         else:
             # 无真实进度（如网易云）：基准必须是**检测到切歌的时刻**，而不是
             # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。再扣掉取词
@@ -1112,15 +1123,20 @@ class MusicLyricController(QObject):
         current = getattr(self.win, "_alert_current", None)
         if current is not None and current.get("id") == "music-lyric-estimated":
             window_alerts.resolve_alert(self.win, "music-lyric-estimated")
-        if self._bubble_blocked():
-            return
         if self._paused_since is not None:
             # 取词期间用户按了暂停、到这一拍还没恢复：以**暂停态**装载，且**不立即
             # 显示**——恢复播放那一拍由 `_on_playback_ready` 的既有 set_paused(False)
             # 把基准顺延接上，那时按正确位置显示（歌词停在暂停那一刻的那句）。
             # 冻结这一步不可省：`load()` 会清掉暂停态，不冻的话恢复后基准仍从 load
             # 的时刻起算，暂停的这几秒又会被算成播放时间。
+            #
+            # **必须排在 `_bubble_blocked()` 早退之前**：冻结时钟记的是"这一段暂停
+            # 有多长"，与"这一刻能不能显示"是两件事——气泡被别的提醒占着时早退，
+            # 冻不上的话暂停时长直接算进播放时间（且恢复那一拍的 set_paused(False)
+            # 落在未暂停的 tracker 上是空操作，基准再也回不来）。
             self._tracker.set_paused(True, now=now)
+            return
+        if self._bubble_blocked():
             return
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。
         index = self._tracker.advance(now)

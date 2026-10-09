@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -68,6 +70,97 @@ def test_switch_character_ignores_empty_and_same_character(tmp_path):
         assert bubble.character_id == "shenshen" and bubble.session is session
         bubble.switch_character("shenshen")
         assert bubble.session is session
+    finally:
+        bubble.close()
+        app.processEvents()
+
+
+# ---------------------------------------------------------------- 切角色作废在途请求
+class _BlockingProvider:
+    """可控网络替身（只替换网络边界）：请求进来卡住，测试放行后才产出一条回答。"""
+
+    def __init__(self, reply: str = "旧角色的回答") -> None:
+        self.reply = reply
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def stream(self, messages, config, cancel):
+        self.started.set()
+        while not self.release.wait(timeout=0.02):
+            if cancel.is_set():
+                return
+        if cancel.is_set():
+            return
+        yield self.reply
+
+
+def _pump_until(predicate, *, timeout: float = 10.0) -> bool:
+    """宽预算轮询 + 事件泵（worker→主线程的信号是队列投递，必须跑事件循环）。"""
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    app.processEvents()
+    return predicate()
+
+
+def _send_blocking_question(bubble, question: str = "你在吗"):
+    """真 ChatService/QThread + 真会话存储：发一条问题并卡在请求中。"""
+    provider = _BlockingProvider()
+    bubble.service.provider = provider
+    bubble.input.setText(question)
+    bubble._send()
+    assert provider.started.wait(timeout=10), "前提：请求已进入 provider"
+    assert bubble._active_request_id is not None, "前提：请求在途"
+    return provider
+
+
+def test_switch_character_drops_inflight_answer(tmp_path):
+    """切角色必须作废在途请求：旧角色的回答不许落进新角色的会话也不许上屏。
+
+    旧行为：``switch_character`` 只换身份 + 重取会话，不清 ``_active_request_id``；
+    旧角色那次请求的完成信号在切换之后到达时 ID 仍然匹配，回答被 append 进**新**
+    角色的 session 并显示在新角色的气泡里。对照完整聊天窗
+    （``chat/widgets.py::switch_character`` 清 request ID + 停旧请求）同款闸门。
+    """
+    app = QApplication.instance() or QApplication([])
+    from pet.quick_chat import QuickChatBubble
+
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        provider = _send_blocking_question(bubble)
+
+        bubble.switch_character("nova")
+        assert bubble._active_request_id is None, "切角色即作废在途请求（ID 闸归零）"
+        assert bubble.hint_label.text() == "", "旧请求不会再回来，思考中提示必须撤掉"
+
+        provider.release.set()
+        assert _pump_until(lambda: not bubble.service.busy), "旧 worker 未收尾"
+        # 迟到信号（完成/增量/错误）全部被 ID 闸丢弃：既不落库也不上屏
+        assert bubble.output.text() == "", "旧角色的回答不许显示在新角色的气泡里"
+        assert not [m for m in bubble.session.messages if m.role == "assistant"], \
+            "旧角色的回答不许写进新角色的会话"
+        assert bubble.session.character_id == "nova"
+    finally:
+        bubble.close()
+        app.processEvents()
+
+
+def test_switch_character_without_inflight_request_only_swaps_session(tmp_path):
+    """非回归：空闲切角色行为不变（只换身份 + 重取会话，不触碰在途状态字段）。"""
+    app = QApplication.instance() or QApplication([])
+    from pet.quick_chat import QuickChatBubble
+
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        assert bubble._active_request_id is None
+        bubble.switch_character("nova")
+        assert bubble.character_id == "nova"
+        assert bubble.session.character_id == "nova"
+        assert bubble._active_request_id is None
     finally:
         bubble.close()
         app.processEvents()

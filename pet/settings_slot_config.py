@@ -26,6 +26,25 @@
 - ``collision_enabled`` 虽不在 ``PER_SLOT_SETTING_KEYS`` 里，却也有专属的逐宠读点
   （见 :data:`SLOT_ROUTED_KEYS`）。
 
+主配置身份（F2 定论，2026-10-09）：:func:`route_settings_config` 构造主配置时不传
+``instance_id``，于是 ``Config`` 会读 ``DSH_PET_INSTANCE``（``config.py:846``）——
+这不是漏改，两种启动形态下它都恰好指向"该进程真正会读的那份文件"：
+
+- **子宠的设置进程**：主进程按 ``_launch_settings_process`` 只在身份与进程级 env
+  不同才追加 ``--instance slot-N``（子宠），env 仍是主窗的 ⇒ ``_main`` = 主窗那份
+  ``config.json`` = 该进程运行期非 per-slot 键的读源（壳的 ``shell._config``，
+  ``overlay_shell._SpriteConfig.get`` 的兜底分支）；
+- **``--slot N`` 兼容启动**（``app.py`` 启动分流设 ``DSH_PET_INSTANCE=slot-N``，设置
+  子进程继承它）：``_main`` 解析成 ``config-slot-N.json``——**这正是该进程的主配置**。
+  该进程里壳的 ``shell._config`` 就是 ``Config(instance_id="slot-N")``，主 sprite 的
+  取值走 ``_sprite_config(主 sprite) -> shell._config``（``overlay_shell.py:1401-1413``），
+  legacy 单窗更是逐键读自己那份；换言之 ``_main`` 与运行期读源是同一份文件，
+  写进去立刻生效。此时若"按 env 判定"反而**会**写错文件（父进程可能是 slot-2 身份，
+  而它的子宠身份是 slot-5）。
+
+结论：保持"主配置 = ``Config(base=<slot 配置目录的上一级>)``（env 决定身份）"，
+不显式钉死路径；只有 ``slot_from_instance_id`` 那道门决定分不分流。
+
 ``PER_SLOT_SETTING_KEYS`` 的单一来源在 ``overlay_spawn_state``（零 Qt 轻模块）：
 独立设置进程禁止导入 ``overlay_shell``（会连带素材库/ffmpeg/托盘），而壳侧只有
 取源这一处读点，故键集本体放两侧都能 import 的轻模块。
@@ -81,6 +100,8 @@ class SlotRoutedConfig:
         # slot 文件内容按需读一次（配置同步边界才重读）；pending 是"用户这次改了什么"，
         # 与磁盘缓存是两件事——``reload()`` 只作废缓存，不丢 pending。
         self._slot_data: dict | None = None
+        # 分流键的清洗读源（绑定同一份 slot 文件的 Config，按需构造，与原始快照同代）
+        self._slot_reader: Config | None = None
         self._pending_slot: dict = {}
         self._pending_main: dict = {}
 
@@ -108,13 +129,19 @@ class SlotRoutedConfig:
 
         与运行期 ``_SpriteConfig.get`` 同口径：slot 文件里**缺键 / 值为 null** →
         回落到主配置（不是回落到出厂默认）——子宠的 per-slot 键本来就是这个继承语义。
+
+        但"键在 slot 文件里"只回答**取谁**，不回答**值长什么样**：slot 文件是手改/
+        半截 JSON 的一手数据，设置页各行却按"值已过 Config 清洗"的前提消费
+        （``float(playback_speed)`` / 遍历 ``self_talk_texts`` / ``int(bubble_text_scale)``）。
+        脏值原样交出去 = ValueError/TypeError → 整个设置窗构造失败（点「桌宠设置」
+        什么也打不开）。故值一律过一遍 :meth:`_cleaned_slot_value`。
         """
         if key in SLOT_ROUTED_KEYS:
             if key in self._pending_slot:
                 return self._pending_slot[key]
             value = self._slot_values().get(key)
             if value is not None:
-                return value
+                return self._cleaned_slot_value(key, value)
         return self._main.get(key, default)
 
     def set(self, key, value):
@@ -138,6 +165,33 @@ class SlotRoutedConfig:
         self._main.set_chat_settings(settings)
         self._pending_main["chat"] = self._main.data.get("chat")
 
+    def set_click_talk_bindings(self, character_id: str, bindings: dict) -> None:
+        """点击动画台词绑定：写主配置 + 按本视图的落盘纪律立即持久化。
+
+        必须显式实现，不能靠 ``__getattr__`` 转发：``Config.set_click_talk_bindings``
+        改完内存就自己 ``save()``，而那是**整表**写——设置进程的内存快照从启动起就
+        陈旧，设置窗开着期间主进程/托盘改过的键会被一起盖回去。
+
+        两件事都走本视图的既有口径：
+
+        - 写内存走 ``Config.set``：``character_profiles`` 在那个会触发
+          ``_normalize_pet_settings`` 的键集里，清洗实现与 ``Config`` 同一份；
+        - 落盘走 :meth:`_flush_main`（reload → 重放 pending → save）：既吸外部改动，
+          又保住 ``Config.set_click_talk_bindings`` 的"保存即落盘"契约（台词绑定对话框
+          点保存即生效，不必等设置页再点一次保存）。pending 里其余主配置键一并重放：
+          它们是用户当前的界面值，而设置页关窗必走 ``_write_config``（没有"取消不保存"
+          的出口），提前落盘不改变最终状态。
+        """
+        profiles = self._main.data.get("character_profiles")
+        profiles = dict(profiles) if isinstance(profiles, dict) else {}
+        profile = profiles.get(str(character_id))
+        profile = dict(profile) if isinstance(profile, dict) else {}
+        profile["click_talk_bindings"] = bindings
+        profiles[str(character_id)] = profile
+        self._main.set("character_profiles", profiles)
+        self._pending_main["character_profiles"] = self._main.data.get("character_profiles")
+        self._flush_main()
+
     def reload(self):
         """从磁盘重读两份配置（主配置 + slot 文件缓存）。
 
@@ -145,7 +199,7 @@ class SlotRoutedConfig:
         键由 :meth:`save` 在重读之后重放）。
         """
         self._main.reload()
-        self._slot_data = None
+        self._invalidate_slot_snapshot()
 
     def save(self) -> bool:
         """落盘：先写 slot 文件，再按 reload → set → save 写主配置。"""
@@ -166,19 +220,58 @@ class SlotRoutedConfig:
         """
         self._pending_slot.clear()
         self._pending_main.clear()
-        self._slot_data = None
+        self._invalidate_slot_snapshot()
         return bool(self._instance.reset_to_defaults())
 
     def __getattr__(self, name):
         """其余属性面一律转发主配置（chat / 角色别名 / 点击台词 / 密钥 / 域入口）。"""
         return getattr(self._main, name)
 
+    # ------------------------------------------------------------ 清洗读源
+    def _cleaned_slot_value(self, key, raw_value):
+        """slot 文件原值 → **Config 口径**的清洗值（读源不可用时原样返回）。
+
+        "清洗"= ``Config._normalize_pet_settings``（区间夹取、类型强转、枚举白名单），
+        由读源的 Config 在构造时对同一份 slot 文件跑一遍。关键在**同一份实现**：
+        在这里另写一张按键清洗表（``_float_or_default`` + 各键区间字面量）等于把
+        Config 的默认值与范围抄第二遍，两边迟早漂移。
+        """
+        data = self._cleaned_slot_data()
+        return data.get(key, raw_value) if isinstance(data, dict) else raw_value
+
+    def _cleaned_slot_data(self) -> dict | None:
+        """清洗读源的 data（按需构造一份绑定本 slot 文件的 Config）。
+
+        ``Config`` 构造即 ``reload`` + ``_normalize_pet_settings``，所以读源
+        **不能长期缓存**成"读过的那份内存"：``reload`` 自身不做归一化，读源随原始
+        快照一起换代（见 :meth:`_invalidate_slot_snapshot`），每次换代重新构造，
+        保证读到的清洗结果永远出自"构造时的 Config 口径"。
+
+        只读路径的副作用边界：``Config(instance_id=...)`` 对已存在的 slot 文件只读
+        （落种只在该身份还没有文件时发生，而那时 :meth:`get` 也走不到这里——原始
+        快照里没有这个键）。
+        """
+        reader = self._slot_reader
+        if reader is None:
+            # 与 ``route_settings_config`` 的目录口径同源：``Config.dir = base/APP_DIR_NAME``。
+            reader = Config(base=self._instance.dir.parent,
+                            instance_id=f"slot-{self._slot_id}")
+            self._slot_reader = reader
+        return getattr(reader, "data", None)
+
     # ------------------------------------------------------------ 落盘内部
+    def _invalidate_slot_snapshot(self) -> None:
+        """作废 slot 文件的原始快照与清洗读源（落盘/重读后按需重取，两者同代）。"""
+        self._slot_data = None
+        self._slot_reader = None
+
     def _slot_values(self) -> dict:
         """slot 文件内容（读一次缓存；缺失/损坏 → 空 dict = 逐键回退主配置）。"""
         if self._slot_data is None:
             data = overlay_spawn_state.read_slot_config(self._instance.dir, self._slot_id)
             self._slot_data = data if isinstance(data, dict) else {}
+            # 清洗读源与原始快照同代：换快照就必须换读源（否则读到上一代文件的清洗值）
+            self._slot_reader = None
         return self._slot_data
 
     def _flush_slot(self) -> bool:
@@ -191,7 +284,7 @@ class SlotRoutedConfig:
         """
         pending = dict(self._pending_slot)
         self._pending_slot.clear()
-        self._slot_data = None
+        self._invalidate_slot_snapshot()
         if not pending:
             return True
         flag = bool(pending["user_customized"]) if "user_customized" in pending else None

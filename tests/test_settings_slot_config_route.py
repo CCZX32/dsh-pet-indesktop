@@ -29,7 +29,7 @@ import pytest
 from pet import overlay_spawn_state as spawn_state
 from pet import settings_slot_config
 from pet.catalog import DEFAULT_SCALE
-from pet.config import Config
+from pet.config import DEFAULT_SELF_TALK_TEXTS, Config
 
 
 @pytest.fixture
@@ -230,7 +230,120 @@ def test_child_save_does_not_roll_back_external_main_change(tmp_path, app):
     assert on_disk["mem_min_size_mb"] == 123.0, "外部并发改动被陈旧内存快照盖回去了"
 
 
-# ------------------------------------------------------------ 5. 置灰摘除（路由接通后真生效）
+# ------------------------------------------------------------ 5. 分流键的清洗口径
+def test_child_page_survives_dirty_slot_values(tmp_path, app):
+    """slot JSON 里的脏值必须先过 Config 清洗：设置页构造不许炸。
+
+    分流键的读源是 slot 文件，而设置页各行按「值已过 Config 清洗」的前提消费
+    （``float(playback_speed)`` / 遍历 ``self_talk_texts`` / ``int(bubble_text_scale)``，
+    见 ``settings_pet_controls``）。手改或半截 JSON 里的 ``"playback_speed": "bad"``
+    原样返回就是 ValueError、``"self_talk_texts": 1`` 就是 TypeError——整个设置窗
+    构造失败（用户点「桌宠设置」什么也打不开）。
+
+    口径 = **Config 会给出的值**（同一份 ``_normalize_pet_settings``），不是另一套
+    兜底：脏值被清洗成该键的默认值，仍然是"slot 文件里有这个键"的那一支（不回退主配置）。
+    """
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    Config(base=tmp_path, instance_id="slot-1")  # 落种出 slot 文件
+    for key, dirty in (("playback_speed", "bad"),
+                       ("self_talk_texts", 1),
+                       ("bubble_text_scale", "xx")):
+        assert spawn_state.write_slot_setting(main.dir, 1, key, dirty) is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+
+    # 按独立设置进程的真实形态构造（``parent=None`` + ``standalone=True``）：
+    # 脏值原样返回时这一行就 ValueError / TypeError（点「桌宠设置」什么也打不开）。
+    dialog = _dialog(cfg, standalone=True)
+    try:
+        assert float(dialog.speed_select.currentData()) == pytest.approx(1.0)
+        assert dialog.texts_edit.toPlainText() == "\n".join(DEFAULT_SELF_TALK_TEXTS)
+        assert dialog.bubble_text_scale_spin.value() == 100
+    finally:
+        dialog.deleteLater()
+
+
+def test_child_page_keeps_clean_slot_values(tmp_path, app):
+    """非回归：slot 文件里的合法值照旧优先于主配置（清洗不得变成"回退主配置"）。"""
+    main = Config(base=tmp_path)
+    main.set("playback_speed", 0.5)
+    main.set("bubble_text_scale", 100)
+    assert main.save() is True
+    Config(base=tmp_path, instance_id="slot-1")
+    assert spawn_state.write_slot_setting(main.dir, 1, "playback_speed", 2.0) is True
+    assert spawn_state.write_slot_setting(main.dir, 1, "bubble_text_scale", 150) is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+
+    dialog = _dialog(cfg)
+    try:
+        assert float(dialog.speed_select.currentData()) == pytest.approx(2.0)
+        assert dialog.bubble_text_scale_spin.value() == 150
+    finally:
+        dialog.deleteLater()
+
+
+# ------------------------------------------------------------ 6. 点击台词绑定保存
+def _save_click_talk_binding(config, action_id: str, text: str) -> str:
+    """走真实对话框保存一条绑定（`编辑…` 按钮那条路），返回实际角色 id。"""
+    from pet.click_talk_dialog import ClickTalkBindingsDialog
+
+    dialog = ClickTalkBindingsDialog(config, click_names=[action_id])
+    try:
+        dialog.text_edit.setPlainText(text)
+        dialog._save()
+        return dialog.character_id
+    finally:
+        dialog.deleteLater()
+
+
+def test_child_click_talk_bindings_save_keeps_external_main_change(tmp_path, app):
+    """子宠页保存点击台词绑定：外部并发改动不得被回滚，绑定要真进主配置。
+
+    旧行为：``set_click_talk_bindings`` 经 ``__getattr__`` 转发到 ``Config``——那里
+    直接改内存 + ``self.save()``（**整表**写）。设置进程的内存快照从启动起就陈旧，
+    那次整表写会把设置窗开着期间主进程/托盘改过的键一起盖回去。
+    """
+    main = Config(base=tmp_path)
+    main.set("mem_min_size_mb", 50.0)
+    assert main.save() is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+
+    dialog = _dialog(cfg)
+    try:
+        external = Config(base=tmp_path)
+        external.set("mem_min_size_mb", 123.0)
+        assert external.save() is True
+
+        character_id = _save_click_talk_binding(dialog.config, "click1", "你好呀")
+        assert dialog.config.click_talk_bindings(character_id) == {"click1": ["你好呀"]}
+    finally:
+        dialog.deleteLater()
+
+    on_disk = _read_json(main.path)
+    assert on_disk["mem_min_size_mb"] == 123.0, "外部并发改动被陈旧内存快照盖回去了"
+    assert on_disk["character_profiles"][character_id]["click_talk_bindings"] == {
+        "click1": ["你好呀"]}, "绑定必须写进主配置（进程级数据）"
+
+
+def test_click_talk_binding_save_writes_main_config_even_without_page_save(tmp_path, app):
+    """绑定对话框自己的「保存」即落盘：设置页没再点保存（或直接关窗）也不丢。
+
+    路由把落盘收口在 ``save`` 的 reload → 重放 pending → save 上，但
+    ``Config.set_click_talk_bindings`` 的既契约是"保存即落盘"；两者都要满足。
+    """
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+    routed = settings_slot_config.route_settings_config(cfg)
+
+    character_id = _save_click_talk_binding(routed, "click2", "在的")
+
+    on_disk = _read_json(main.path)
+    assert on_disk["character_profiles"][character_id]["click_talk_bindings"] == {
+        "click2": ["在的"]}
+
+
+# ------------------------------------------------------------ 7. 置灰摘除（路由接通后真生效）
 def test_harness_controls_are_editable_on_the_child_page(tmp_path, app):
     """子宠页：「随桌宠启动 dsh 服务」与其目标下拉可编辑，保存落主配置。
 
@@ -260,7 +373,7 @@ def test_harness_controls_are_editable_on_the_child_page(tmp_path, app):
     assert on_disk["harness_launch_target"] == "service"
 
 
-# ------------------------------------------------------------ 6. 分流范围（只对 overlay 的 slot 身份）
+# ------------------------------------------------------------ 8. 分流范围（只对 overlay 的 slot 身份）
 def test_main_pet_config_is_not_routed(tmp_path):
     """主宠设置进程（无 --instance）：原样返回，行为逐位不变。"""
     main = Config(base=tmp_path)
@@ -280,6 +393,34 @@ def test_non_slot_instance_is_not_routed(tmp_path):
     """非 slot-N 的实例身份（测试/诊断用法）：没有可写的 slot 文件，不分流。"""
     cfg = Config(base=tmp_path, instance_id="probe-a")
     assert settings_slot_config.route_settings_config(cfg) is cfg
+
+
+# ------------------------------------------------------------ 9. 主配置身份（F2 定论）
+def test_slot_compat_launch_main_config_is_that_process_main(tmp_path, monkeypatch):
+    """F2 定论：``--slot N`` 兼容启动下，路由的"主配置"= 该进程的 config-slot-N.json。
+
+    ``--slot N`` 启动把 ``DSH_PET_INSTANCE=slot-N`` 写进进程环境，设置子进程继承它，
+    于是 ``route_settings_config`` 里的主配置构造（``Config(base=...)``，不传
+    ``instance_id``）解析出 ``config-slot-N.json``。那就是**该进程**的主配置：运行期
+    壳的非 per-slot 键读源是 ``shell._config``（``_SpriteConfig.get`` 的兜底分支），
+    而 ``shell._config`` 正是 ``Config(instance_id="slot-N")``。故这不是"读错了主配置"，
+    写进去立刻生效（详见模块 docstring 的「主配置身份」一节）。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    monkeypatch.setenv("DSH_PET_INSTANCE", "slot-2")
+    monkeypatch.setenv(cmd_mod.ENV_TOPOLOGY, "overlay")
+
+    cfg = Config(base=tmp_path, instance_id="slot-2")
+    assert cfg.path == spawn_state.slot_config_path(cfg.dir, 2)
+    assert Config(base=tmp_path).path == cfg.path, "env 身份让主配置构造落到同一份文件"
+
+    routed = settings_slot_config.route_settings_config(cfg)
+    assert routed is not cfg, "该进程仍是 overlay 拓扑下的 slot 身份，照常分流"
+    routed.set("pet_opacity", 42)
+    assert routed.save() is True
+    assert _read_json(cfg.path)["pet_opacity"] == 42, \
+        "窗口级键落进该进程自己的身份文件（= 运行期读源）"
 
 
 def test_routed_keys_cover_the_runtime_per_slot_read_surface(tmp_path):
