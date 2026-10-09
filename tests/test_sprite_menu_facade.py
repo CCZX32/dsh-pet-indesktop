@@ -249,3 +249,65 @@ def test_switch_character_swaps_library(tmp_path):
         assert shell.behavior.state_of(shell.sprite) is None  # forget 已重置
     finally:
         shell._delete_runtime_marker()
+
+
+# ---------------------------------------------------------------- 菜单图标缓存（B08）
+def _argb32(color: int, size: int = 4) -> QImage:
+    image = QImage(size, size, QImage.Format.Format_ARGB32)
+    image.fill(color)
+    return image
+
+
+def test_character_switch_clears_menu_icon_cache(tmp_path, monkeypatch):
+    """B08：换角色后菜单缩略图缓存必须清空，下次取图按新库重新解码。
+
+    缓存挂壳上、键只有动画名（``_icon_cache``）；主/子宠两角色同名动画会命中
+    上一角色的缩略图，菜单里显示别的角色的图。
+    """
+    import pet.animation_thumbnail as thumb_mod
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        facade = SpriteMenuFacade(shell)
+        stale = _argb32(0xFF112233)
+        shell._menu_icon_cache = {"idle1": QImage(stale)}
+        assert not facade.animation_icon_cached_image("idle1").isNull()
+
+        decoded: list = []
+
+        def fake_decode(path):
+            decoded.append(path)
+            return _argb32(0xFF445566)
+
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame", fake_decode)
+
+        shell.switch_character("nova")                    # 换角色成功即清缓存
+        shell.sprite.library.clip_path = lambda name: f"/x/{name}.webm"
+
+        assert facade.animation_icon_cached_image("idle1").isNull(), "旧角色的图不残留"
+        fresh = facade.animation_icon_image("idle1")
+        assert decoded == ["/x/idle1.webm"], "清缓存后必须按新库重新解码"
+        assert facade.animation_icon_cached_image("idle1").size() == fresh.size()
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_menu_icon_cache_hit_survives_without_character_switch(tmp_path, monkeypatch):
+    """不换角色时缓存行为不变：命中即返回，不重新解码。"""
+    import pet.animation_thumbnail as thumb_mod
+
+    shell, _ = _make_shell(tmp_path)
+    try:
+        facade = SpriteMenuFacade(shell)
+        cached = _argb32(0xFF778899, size=6)
+        shell._menu_icon_cache = {"idle1": QImage(cached)}
+
+        decoded: list = []
+        monkeypatch.setattr(thumb_mod, "decode_representative_frame",
+                            lambda path: decoded.append(path))
+        shell.sprite.library.clip_path = lambda name: f"/x/{name}.webm"
+
+        assert facade.animation_icon_image("idle1").size() == cached.size()
+        assert decoded == []
+    finally:
+        shell._delete_runtime_marker()

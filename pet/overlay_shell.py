@@ -345,27 +345,13 @@ class _LinkAnimChain:
 # - 主 sprite → 本进程主配置；
 # - 子 sprite → 它自己的 slot 文件，**缺文件/缺键回退主配置**（旧启动语义是
 #   "缺文件按主配置落种"）；
-# - 窗口级键不在此列（``on_top`` / ``mouse_through`` / ``pet_opacity`` /
-#   ``lock_position`` / ``shift_drag`` / ``cursor_hidden_passthrough`` /
-#   ``auto_hide_fullscreen`` / ``no_move`` / ``animation_gap_seconds`` /
-#   ``stream_capture_mode``）：一次只有一个合成窗，这些键物理上无法 per-pet
-#   （审计 C4），继续按主配置**全局**生效。
-PER_SLOT_SETTING_KEYS = frozenset({
-    # 几何 / 运动
-    "scale", "playback_speed", "drag_physics", "drop_gravity", "throw_strength",
-    "ffmpeg_recycle_minutes",
-    # 音效（点击与碰撞各一对门/音量；音源包 click_sound_pack 两者共用）
-    "click_sound_enabled", "click_sound_volume", "click_sound_pack",
-    "collision_sound_enabled", "collision_sound_volume",
-    # 气泡 / 自言自语族
-    "self_talk_enabled", "self_talk_texts", "self_talk_duration_seconds",
-    "self_talk_image_dir", "self_talk_image_scale", "self_talk_image_chance",
-    "self_talk_min_interval", "self_talk_max_interval",
-    "self_talk_speak_enabled", "self_talk_bubble_style", "bubble_text_scale",
-    "click_show_balance", "click_show_self_talk",
-    # 角色（per-pet 素材库）
-    "character",
-})
+# - 窗口级键（``on_top`` / ``mouse_through`` / ``pet_opacity`` / …）不在此列：
+#   一次只有一个合成窗，这些键物理上无法 per-pet（审计 C4），继续按主配置
+#   **全局**生效。
+#
+# 键集本体在 ``overlay_spawn_state.PER_SLOT_SETTING_KEYS``（零 Qt 轻模块，取舍与
+# 全量注释见该处）：独立设置进程也要按同一份键集分流，而它禁止导入本模块。
+PER_SLOT_SETTING_KEYS = overlay_spawn_state.PER_SLOT_SETTING_KEYS
 
 
 def _clamped_float(raw, default: float, low: float, high: float) -> float:
@@ -1205,8 +1191,11 @@ class OverlayShell(QObject):
 
     # ---------------------------------------------------------------- 主 sprite 接线
     def _bind_feeding(self) -> None:
-        """投喂控制器只认主 sprite；overlay/主 sprite 更换后必须重挂，
-        否则投喂命中判定仍打在旧 sprite 的几何上（4.2b 主实例提升同理）。"""
+        """投喂控制器挂在主 sprite 上，但**落点按 ``sprite_at`` 逐只判定**（B02）：
+        拖到哪只就吃哪只、气泡也落那只；
+
+        overlay/主 sprite 更换后必须重挂，否则投喂命中判定仍打在旧 sprite 的
+        几何上（4.2b 主实例提升同理）。"""
         from .sprite_feeding import SpriteFeedingController
         self._feeding = SpriteFeedingController(
             self.overlay, self.sprite, self._config, self.behavior)
@@ -3628,8 +3617,8 @@ class OverlayShell(QObject):
         """生小肥鱼（app.py spawn_pet 进程内路径语义 + D6 无锁身份分配）。
 
         分配 slot 身份 → 建 per-pet 库 + 新 sprite（自主宠向右逐级错开，重叠
-        规避由 body 钳制兜底）→ 进活跃清单并落盘。分配/建库失败只记录，
-        不留半只 sprite 在清单里。
+        规避由 body 钳制兜底）→ 进活跃清单并落盘。无可用身份时冒泡告知（B01，
+        分配器兜底后几乎不可达），建库失败只记录；两条失败都不留半只 sprite。
         """
         config_dir = self._spawn_config_dir()
         try:
@@ -3637,6 +3626,11 @@ class OverlayShell(QObject):
                 config_dir, active_slots=self._active_slots())
         except Exception:
             logging.exception("overlay: 生小肥鱼失败（无可用 slot 身份）")
+            # B01：分配兜底后这条路径只剩「128 个身份全活跃」一种可能，但绝不
+            # 能再只写日志——静默失败在用户眼里就是「点了没反应」。
+            self.show_bubble(
+                f"生小肥鱼失败：位置身份已耗尽（1-{overlay_spawn_state.MAX_SCAN_SLOTS}"
+                " 全部占用）", duration_ms=6000)
             return
         try:
             self._spawn_slot(slot)
@@ -4503,25 +4497,18 @@ class OverlayShell(QObject):
                     egg.on_probe_collision_throw(
                         sprite, probe_cancelled=cancelled)
 
-    def _say_feeding_bubble(self, files: int, folders: int,
-                            total_bytes: int, stats: dict) -> None:
-        """投喂气泡（file_eater._show_feedback 同文案格式）。"""
-        from .file_eater import format_bytes
-        if files and folders:
-            batch = f"{files} 个文件、{folders} 个文件夹"
-        elif files:
-            batch = f"{files} 个文件"
-        elif folders:
-            batch = f"{folders} 个文件夹"
-        else:
-            batch = "空气"
-        text = (
-            f"啊呜～吃掉 {batch}（{format_bytes(total_bytes)}），"
-            f"累计吃掉 {stats.get('file_count', 0)} 个文件、"
-            f"{stats.get('folder_count', 0)} 个文件夹，"
-            f"共 {format_bytes(stats.get('total_bytes', 0))}！"
-        )
-        self._bubble_follower.say(text, subtitle="放心，只是做个样子，文件没有删除或移动哦")
+    def _say_feeding_bubble(self, result: dict, sprite=None) -> None:
+        """投喂气泡（file_eater 同文案格式；B02：落命中那只自己的气泡通道）。
+
+        壳上子宠气泡既有分发靠 ``_bubble_for(sprite)``（每只一只跟随器，见
+        ``_ensure_sprite_bubble``），这里不再新造通道：落点是子宠就发子宠那只。
+        """
+        from .file_eater import FEEDING_BUBBLE_SUBTITLE, feeding_bubble_text
+        follower = self._bubble_for(sprite)
+        if follower is None:
+            return
+        follower.say(feeding_bubble_text(result),
+                     subtitle=FEEDING_BUBBLE_SUBTITLE)
 
     def switch_character(self, character_id: str, sprite=None) -> None:
         """切换角色（4.1c）：换 per-pet 库 + 行为状态重置 + 配置持久化。
@@ -4533,6 +4520,9 @@ class OverlayShell(QObject):
         本窗、只写本窗的 cfg。主宠照旧（换 ``self.lib`` + 写主配置）；子宠换**它
         自己的**库、写**它自己的** ``config-slot-N.json['character']``——此前一律
         打在主宠身上（审计 F1），子宠各自存的角色也无人读。
+
+        切完主宠还要收口两处跨角色的派生状态：菜单动画缩略图缓存（B08，同名动画
+        跨角色串图）与各聊天面的角色上下文（B07，切完再开口仍是旧角色）。
         """
         target = self.sprite if sprite is None else sprite
         if target is None:
@@ -4559,6 +4549,8 @@ class OverlayShell(QObject):
         self.lib = new_lib
         self.sprite.library = new_lib
         self.behavior.forget(self.sprite)
+        self._clear_menu_icon_cache()
+        self._sync_chat_surfaces(character_id)
         # 换库 = 换 body_box：锚点取材于 ``catalog.character_body_box``（体框变了
         # 但 rect 可能没变，位置扇出只在 old != new 时通知），必须显式刷新一次，
         # 否则同一位置下气泡挂在旧角色的锚点上直到下一次真实位移。
@@ -4576,8 +4568,48 @@ class OverlayShell(QObject):
             except Exception:
                 logging.exception("overlay: 旧素材库收尾失败")
 
+    def _clear_menu_icon_cache(self) -> None:
+        """换角色后清菜单动画缩略图缓存（B08）。
+
+        缓存挂壳上、键只有动画名（``sprite_menu_facade._icon_cache``）：两个角色
+        同名动画会命中上一角色的缩略图，菜单里显示的是另一只宠的图。最小正道 =
+        整份清掉，下次取图按新库重新解码；没开过菜单（缓存尚未创建）时不动作。
+        """
+        cache = getattr(self, "_menu_icon_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
+    def _sync_chat_surfaces(self, character_id: str) -> None:
+        """把新角色同步到各聊天面（B07）：快速对话气泡 + 完整聊天窗/岛对话气泡。
+
+        聊天面的角色（会话、头像、系统提示）是各自的构造期快照，换素材库不会
+        连带更新。持久气泡与聊天窗由持有点按各自 ``switch_character`` 重建角色
+        上下文；未创建的聊天面无需同步（新建时按新配置构造）。同步失败只记录，
+        绝不能让已经完成的素材切换白做。
+        """
+        bubble = self._quick_chat
+        sync = getattr(bubble, "switch_character", None)
+        if callable(sync):
+            try:
+                sync(character_id)
+            except Exception:
+                logging.exception("overlay: 快速对话气泡角色同步失败")
+        surface_sync = getattr(self._instance, "sync_chat_character", None)
+        if callable(surface_sync):
+            try:
+                surface_sync(character_id)
+            except Exception:
+                logging.exception("overlay: 完整聊天窗/岛对话气泡角色同步失败")
+
     def _switch_child_character(self, sprite, character_id: str) -> None:
-        """子宠换角色：换它自己的库 + 写它自己的 slot 配置（主宠一字不动）。"""
+        """子宠换角色：换它自己的库 + 写它自己的 slot 配置（主宠一字不动）。
+
+        聊天面不在此同步（B07 调查结论）：快速对话气泡、完整聊天窗、岛对话气泡
+        的角色身份一律取**主配置**（``QuickChatBubble(self._config)``、会话目录按
+        主身份），子宠没有自己的聊天身份通道可言——把主宠的聊天面改成子宠的角色
+        只会错得更远。菜单缩略图缓存是壳级的（同名动画跨角色串图，B08），换库后
+        照清。
+        """
         slot = self._spawned_slots.get(sprite)
         current = str(self._sprite_config(sprite).get(
             "character", catalog.DEFAULT_CHARACTER))
@@ -4607,6 +4639,7 @@ class OverlayShell(QObject):
         self.behavior.forget(sprite)
         self._invalidate_sprite_configs()
         self._slot_signature_cache = self._slot_config_signatures()
+        self._clear_menu_icon_cache()
         self._refresh_sprite_bubble_style(sprite)  # 换库换 body_box → 重锚一次
         shutdown = getattr(old_lib, "shutdown", None)
         if callable(shutdown):

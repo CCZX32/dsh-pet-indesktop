@@ -209,3 +209,91 @@ def test_eat_paths_forwards_interpret_offer(tmp_path):
     handler.eat_paths([str(note)])
 
     assert offers == [[str(note)]]
+
+
+# ---------------------------------------------------------------- B03：扫描预算
+def _big_dir(tmp_path, name, count):
+    folder = tmp_path / name
+    folder.mkdir()
+    for i in range(count):
+        (folder / f"f{i:05d}.bin").write_text("x" * 10, encoding="utf-8")
+    return folder
+
+
+def test_small_drop_reports_no_truncation(tmp_path):
+    """小目录/散文件不触预算：旧口径（文件数/文件夹数/字节数）一个不少。"""
+    pet = _make_pet(tmp_path)
+    folder = tmp_path / "small-dir"
+    folder.mkdir()
+    (folder / "inner.bin").write_text("x" * 7, encoding="utf-8")
+    loose = tmp_path / "loose.bin"
+    loose.write_text("y" * 3, encoding="utf-8")
+
+    result = FileEaterDropHandler(pet).eat_paths([str(folder), str(loose)])
+
+    assert result["files"] == 1
+    assert result["folders"] == 1
+    assert result["bytes"] == 10
+    assert result["truncated"] is False
+    assert result["scanned"] == 2
+    assert "只统计了前" not in pet.bubbles[0][0]
+
+
+def test_eat_paths_stops_at_file_budget(tmp_path, monkeypatch):
+    """B03：文件数预算——触上限即停扫，统计/气泡用真实口径（不是全量数）。"""
+    import pet.file_eater as file_eater
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 3)
+    pet = _make_pet(tmp_path)
+    folder = _big_dir(tmp_path, "big-dir", 6)
+
+    result = FileEaterDropHandler(pet).eat_paths([str(folder)])
+
+    assert result["truncated"] is True
+    assert result["scanned"] == 3, "计数停在预算内"
+    assert result["folders"] == 1
+    assert result["bytes"] == 30, "只累计已统计的 3 个文件（每个 10 字节）"
+    assert "只统计了前 3 项" in pet.bubbles[0][0], "气泡如实提示截断"
+    stats = json.loads((tmp_path / "file_eaten_stats.json").read_text(encoding="utf-8"))
+    assert stats["total_bytes"] == 30
+
+
+def test_eat_paths_stops_at_time_budget(tmp_path, monkeypatch):
+    """B03：耗时预算（mock monotonic）——每 512 个文件查一次钟，越预算即停扫。"""
+    import pet.file_eater as file_eater
+
+    folder = _big_dir(tmp_path, "slow-dir", 520)
+    calls = {"n": 0}
+
+    def slow_clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1e6  # 建预算时正常，之后时间已越过预算
+
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", slow_clock)
+    pet = _make_pet(tmp_path)
+
+    result = FileEaterDropHandler(pet).eat_paths([str(folder)])
+
+    assert result["truncated"] is True
+    assert result["scanned"] == 512, "512 个文件一次耗时检查，检查即停"
+    assert result["bytes"] == 512 * 10
+    assert "只统计了前 512 项" in pet.bubbles[0][0]
+
+
+def test_eat_paths_budget_covers_dropped_file_list(tmp_path, monkeypatch):
+    """预算按整批记账：拖进来的一串散文件同样在预算内截断。"""
+    import pet.file_eater as file_eater
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 2)
+    pet = _make_pet(tmp_path)
+    paths = []
+    for i in range(4):
+        p = tmp_path / f"loose{i}.bin"
+        p.write_text("x" * 5, encoding="utf-8")
+        paths.append(str(p))
+
+    result = FileEaterDropHandler(pet).eat_paths(paths)
+
+    assert (result["files"], result["bytes"]) == (2, 10)
+    assert result["truncated"] is True
+    assert result["scanned"] == 2

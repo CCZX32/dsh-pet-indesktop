@@ -128,6 +128,8 @@ class _WorkerSpy:
 
     def __init__(self, text, voice, rate, pitch, out_path, on_done) -> None:
         self.text = text
+        # 记下真实合成会用的音色：预合成与即时合成必须同源（ops-F3）。
+        self.voice = voice
         self.out_path = out_path
         self.on_done = on_done
         _WorkerSpy.instances.append(self)
@@ -138,6 +140,48 @@ class _WorkerSpy:
     def finish(self, path=None, text=None, error="") -> None:
         """模拟后台线程完成：把结果交回服务（真实实现走 queued 信号）。"""
         self.on_done(path or str(self.out_path), text or self.text, error)
+
+
+def _loaded_media_player_class():
+    """起播后停在实机 ``LoadedMedia`` 窗口里的播放器替身（缺 QtMultimedia 时返回 None）。
+
+    实机探针（QMediaPlayer + QAudioOutput，offscreen，``assets/sounds/click.wav``）：
+
+    =========================  ======================  =====================
+    时刻                        playbackState           mediaStatus
+    =========================  ======================  =====================
+    ``setSource`` + ``play()``  ``StoppedState``        ``LoadingMedia``
+    约 31ms                     ``StoppedState``        ``LoadedMedia``
+    约 237ms                    ``PlayingState``        ``BufferingMedia``
+    =========================  ======================  =====================
+
+    中间那约 200ms 里 ``_player_engaged`` 的两个枚举判据**都不成立**——本替身锁的
+    就是这一刻（``play()`` 之后停在 Stopped + LoadedMedia）。
+    """
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer
+    except ImportError:  # pragma: no cover - 缺系统库的 Linux CI 上跳过而非红
+        return None
+
+    class _LoadedWindowPlayer(_FakePlayer):
+        """只补上收口要问的两个问题（playbackState / mediaStatus）。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.status = QMediaPlayer.MediaStatus.NoMedia
+
+        def playbackState(self):  # noqa: N802 - 对齐 Qt API
+            return QMediaPlayer.PlaybackState.StoppedState
+
+        def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
+            return self.status
+
+        def play(self) -> None:
+            super().play()
+            # 实机：play() 之后约 31ms 进 LoadedMedia 窗口，约 237ms 才转 PlayingState
+            self.status = QMediaPlayer.MediaStatus.LoadedMedia
+
+    return _LoadedWindowPlayer
 
 
 def _service(tmp_path, monkeypatch, *, tts_available=True):
@@ -2077,3 +2121,294 @@ def test_stop_halts_currently_playing_audio(tmp_path, monkeypatch):
     # 从未播放过（播放器还没创建）：stop 仍须安全
     service._player = None
     service.stop()
+
+
+# ============================================================ 通道占用：LoadedMedia 窗口
+
+
+def test_loaded_media_window_keeps_channel_busy(tmp_path, monkeypatch):
+    """LoadedMedia 窗口（``playbackState`` 仍 Stopped）必须判忙（ops-F1）。
+
+    实机探针见 ``_loaded_media_player_class``：``setSource`` + ``play()`` 之后约 31ms
+    起有约 200ms 处于 ``StoppedState`` + ``LoadedMedia``，两个枚举判据都不成立。此前
+    ``_player_engaged()`` 只看枚举 → ``_channel_idle()`` 判空 → 这一窗口里点「立即
+    报时」/另一路合成完成都会 ``setSource`` 顶掉刚起播的那一段（音源被替换，那一段
+    永远等不到 EndOfMedia，后面的队列也跟着卡住）。
+
+    断言的是**判据来源**（唯一占用判据仍是 ``_channel_idle``）与后果（顶播/排队）。
+    """
+    player_class = _loaded_media_player_class()
+    if player_class is None:
+        pytest.skip("QtMultimedia 不可用（缺 libpulse 等系统库）")
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    End = QMediaPlayer.MediaStatus.EndOfMedia
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    first = "现在是上午九点整。"
+    second = "今天也要认真工作呀。"
+    cached_first = _cache_file_for(service, cfg, first)
+    cached_second = _cache_file_for(service, cfg, second)
+    service._player = player_class()
+    service._terminal_statuses = (End,)
+
+    assert service._channel_idle() is True, "起播前：通道真空闲"
+
+    assert service._play_only(str(cached_first)) is True, "起播第一条（进入 LoadedMedia 窗口）"
+
+    assert service._player_engaged() is True, "窗口内播放器已接管（已发出 play、未见终止）"
+    assert service._channel_idle() is False, "通道必须判忙，否则新语音会顶掉刚起播的这一段"
+
+    assert service.speak(second, log_tag="节日提醒") is True
+    assert service._player.plays == 1, "被占的通道不许顶播"
+    assert [Path(s).name for s in service._player.sources] == [cached_first.name]
+    assert service._pending_speech == second, "只能排队等这一段播完"
+
+    # 这一段播完（终止态 = 唯一"真的结束了"的信号）：标志复位，队列结算，第二条接上。
+    service._player.status = End
+    service._on_media_status(End)
+
+    assert service._pending_speech is None, "终止态这一拍必须结算队列（否则要等下个报时点）"
+    assert service._player.plays == 2, "排在后面的那条接上（判据确实在这一拍空出来了）"
+    assert [Path(s).name for s in service._player.sources][-1] == cached_second.name
+
+    # 第二条也播完：通道彻底空出——标志是真的被复位了，不是永久判忙。
+    service._player.status = End
+    service._on_media_status(End)
+    assert service._channel_idle() is True, "都播完后必须空闲，不许永久判忙"
+
+
+def test_stop_clears_pending_play_flag(tmp_path, monkeypatch):
+    """stop() 之后通道必须立刻回到空闲（ops-F1 的复位半边）。
+
+    实机探针：``player.stop()`` 之后 ``mediaStatus`` **仍停在 LoadedMedia**（该组合
+    可达，所以"把 LoadedMedia 也算接管"那条更简的改法会让通道永久判忙）。自记标志
+    因此必须在 ``stop()`` 里显式复位，否则关掉开关再打开时每一次播报都只能排队。
+    """
+    player_class = _loaded_media_player_class()
+    if player_class is None:
+        pytest.skip("QtMultimedia 不可用（缺 libpulse 等系统库）")
+
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service._player = player_class()
+
+    assert service._play_only(str(tmp_path / "chime.mp3")) is True
+    assert service._channel_idle() is False
+
+    service.stop()
+
+    assert service._player.stops == 1
+    assert service._channel_idle() is True, "stop() 后必须空闲（mediaStatus 仍滞留 LoadedMedia）"
+
+
+# ============================================================ 免打扰：切断在播段
+
+
+def test_quiet_entry_stops_respected_segment(tmp_path, monkeypatch):
+    """免打扰开启那一拍切断**正在播放**的尊重免打扰语音（B06）。
+
+    三处静音闸只拦"未起播"（``_fire`` / ``_handle_synthesized`` / 排队入口），所以
+    用户手动开免打扰或切全屏时，已经起播的那一段会一直放到完——用户的开关不能等到
+    这段放完。走真实订阅链：状态变化 → ``QuietState._notify`` → 服务回调。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service.start()
+    try:
+        sentence = "现在是上午九点整。"
+        _cache_mp3(service, sentence)
+
+        service.say_now(sentence)                       # 缓存命中 → 直接起播（报时口径）
+        assert service._player.plays == 1
+        assert service._current_respect_quiet is True, "报时语音尊重免打扰"
+
+        _quiet().start(15)                              # 用户手动开免打扰
+
+        assert service._player.stops == 1, "在播的报时语音必须立刻停住"
+        assert service._current_respect_quiet is None, "当前在播段的记账一并放掉"
+        assert service._player_engaged() is False
+        assert service._channel_idle() is True, "停住之后通道回到空闲"
+    finally:
+        service.stop()
+
+
+def test_quiet_entry_keeps_exempt_segment_playing(tmp_path, monkeypatch):
+    """交互应答（点击自言自语，``respect_quiet=False``）在免打扰开启那一拍**照播**。
+
+    入口闸的豁免口径（issue #208：点了就要有回应）同样覆盖"已经起播"这一段——
+    切断它等于把用户刚点出来的回应掐掉。
+    """
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service.start()
+    try:
+        line = "今天也要认真工作呀。"
+        cached = _cache_mp3(service, line)
+
+        assert service.play_file(str(cached), log_tag="点击自言自语") is True
+        assert service._player.plays == 1
+        assert service._current_respect_quiet is False, "本地预缓存台词是交互应答"
+
+        _quiet().start(15)
+
+        assert service._player.stops == 0, "交互应答是既有豁免，不许被切断"
+        assert service._current_respect_quiet is False
+    finally:
+        service.stop()
+
+
+def test_quiet_listener_follows_service_lifecycle(tmp_path, monkeypatch):
+    """免打扰订阅随服务生命周期走：start 注册（幂等）、stop 摘除（不留悬挂回调）。"""
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    state = _quiet()
+    callback = service._on_quiet_state_changed
+
+    assert callback not in state._listeners, "没启动的服务不该订阅进程级状态"
+
+    service.start()
+    assert list(state._listeners).count(callback) == 1
+    service.start()                                          # 幂等：不重复注册
+    assert list(state._listeners).count(callback) == 1
+
+    service.stop()
+    assert callback not in state._listeners, "stop() 必须摘掉订阅"
+
+
+def test_fullscreen_quiet_cut_follows_config(tmp_path, monkeypatch):
+    """全屏等效抑制同样切断在播段，且判据读**配置现值**（``quiet_also_on_fullscreen``）。
+
+    全屏这条边沿只有一个来源（既有全屏 watcher → ``quiet_mode.note_fullscreen``），
+    服务必须跟着它走；配置关掉时全屏不是免打扰，同样不许切。
+    """
+    from pet import quiet_mode
+
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service.start()
+    try:
+        sentence = "现在是上午九点整。"
+        _cache_mp3(service, sentence)
+
+        app.win.cfg = {"quiet_also_on_fullscreen": False}
+        service.say_now(sentence)
+        assert service._player.plays == 1
+        quiet_mode.note_fullscreen(True)
+        assert service._player.stops == 0, "配置关掉时全屏不触发切断"
+        quiet_mode.note_fullscreen(False)
+
+        app.win.cfg = {"quiet_also_on_fullscreen": True}
+        service.say_now(sentence)
+        assert service._player.plays == 2
+        quiet_mode.note_fullscreen(True)
+        assert service._player.stops == 1, "全屏等效抑制必须切断在播段"
+    finally:
+        service.stop()
+
+
+# ============================================================ 预合成：音色同源
+
+
+def test_precache_worker_uses_resolved_voice(tmp_path, monkeypatch):
+    """预合成 worker 用的是 ``resolve_voice`` 替换**之后**的音色（ops-F3）。
+
+    缓存 key 用的是替换后的音色、即时合成 ``_fire`` 传的也是替换后的，只有预合成
+    这一处曾经传配置原值：音色下架时预合成会拿一把在线表里不存在的嗓子白试两轮
+    （产物还落到另一个 key 上），并正好踩进 45s 超时自愈的竞态。
+    """
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    # 在线表里只剩默认音色 → 配置的这把嗓子被判"已被下架"
+    monkeypatch.setattr(svc_mod, "_live_voices", frozenset({DEFAULT_VOICE}))
+    dead = "zh-CN-XiaohanNeural"
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    cfg.set("voice_chime_voice", dead)
+    service.apply_config()
+    assert service._cfg["voice"] == dead, "配置里存的仍是那把已下架的音色"
+
+    # 09:59:30 距 10:00 只 30s（在 60s 预合成窗口内）→ 预合成在飞
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+
+    assert len(_WorkerSpy.instances) == 1
+    worker = _WorkerSpy.instances[0]
+    assert worker.voice == DEFAULT_VOICE, "worker 必须拿替换后的音色，不是配置原值"
+    # 与缓存 key 同源：产物文件名就是按替换后音色算出来的那个 key
+    expected = cache_key(worker.text, {
+        "voice": DEFAULT_VOICE,
+        "rate": service._cfg["rate"],
+        "pitch": service._cfg["pitch"],
+    })
+    assert worker.out_path.name == f"{expected}.mp3"
+
+
+# ============================================================ 手动通道：合成超时解锁
+
+
+def test_manual_channel_arms_unlock_watchdog(tmp_path, monkeypatch):
+    """手动通道（立即报时 / 设置页试听）不 start() 也能解锁卡死的合成（ops-S1）。
+
+    这两种路径创建的服务全程不 start() → 20s tick 不跑 → ``_release_stale_busy``
+    永远执行不到：worker 万一漏回调，``_busy`` 永久卡死，此后每次手动播报都只能
+    进队列、再也不出声。修法是起合成就地布一道**只为解锁**的单次超时。
+    """
+    import time as _time
+
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    assert service.is_running() is False, "手动通道：调度 tick 没在跑"
+
+    service.say_now("现在是上午九点整。")           # _WorkerSpy 永不回调 = worker 漏回调
+    assert service._busy is True, "合成在飞（通道被占）"
+    assert service._unlock_timer.isActive(), "起合成即布一道解锁超时"
+    assert service._unlock_timer.isSingleShot()
+    assert service._unlock_timer.interval() >= int(45_000)
+
+    # 表到点：把起合成时刻拨老，跑一次表回调（等价于 worker 再也不回调）
+    service._busy_since = _time.monotonic() - 100.0
+    service._unlock_timer.timeout.emit()
+
+    assert service._busy is False, "超时后 _busy 必须被解开，否则通道永久卡死"
+    assert service._channel_idle() is True
+    assert not service._unlock_timer.isActive(), "解锁之后撤表，不留无意义的待触发表"
+
+    # 合成有结局（回调回来）时同样撤表
+    service.say_now("现在是上午九点整。")
+    assert service._unlock_timer.isActive()
+    _WorkerSpy.instances[-1].finish()
+    assert not service._unlock_timer.isActive()
+
+
+# ============================================================ 缓存：孤儿临时文件
+
+
+def test_start_sweeps_orphan_temp_files(tmp_path, monkeypatch):
+    """服务启动时清掉缓存目录里的**孤儿**临时文件（ops-F2 的收尾）。
+
+    上一版 worker 直接写最终路径，进程被斩（daemon worker 随退出死掉）就在缓存目录
+    留下半截文件；改成临时文件 + 原子换名之后，半截产物只可能叫 ``*.part``，于是按
+    名字模式直接删——不按修改时间猜。在跑的合成（在册）不受影响。
+    """
+    import pet.voice_chime_service as svc_mod
+
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    sweep_dir = service._cache_dir / "sweep"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    orphan = sweep_dir / f"abc123.0f1e2d3c4b5a{svc_mod.TEMP_SUFFIX}"
+    orphan.write_bytes(b"\x00half-written")                 # 进程被斩留下的半截产物
+    inflight = sweep_dir / f"abc456.9a8b7c6d5e4f{svc_mod.TEMP_SUFFIX}"
+    inflight.write_bytes(b"\x00synthesizing")
+    final = sweep_dir / "abc123.mp3"
+    service._cache_dir = sweep_dir
+    svc_mod._register_live_temp(inflight)
+    try:
+        service.start()
+        try:
+            assert not orphan.exists(), "孤儿临时文件必须被清掉"
+            assert inflight.exists(), "在跑的合成登记的临时文件不许动"
+            assert svc_mod._cache_hit(final) is False, "半截产物没被换名 → 缓存不命中"
+        finally:
+            service.stop()
+    finally:
+        svc_mod._unregister_live_temp(inflight)

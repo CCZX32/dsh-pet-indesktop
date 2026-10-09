@@ -38,9 +38,45 @@ MAX_SCAN_SLOTS = 128
 _GEOMETRY_KEYS = ("rx", "ry", "facing", "scale")
 _SLOT_CONFIG_RE = re.compile(r"^config-slot-(\d+)\.json$")
 
+# ---------------------------------------------------------------- per-slot 设置键
+#
+# B7b：旧架构每只桌宠是**独立进程**，各读自己的 ``config-slot-N.json``
+# （``Config(instance_id="slot-N")`` + ``window.py`` 逐键读 ``self.cfg``），所有
+# sprite 级设置天然各存各的。单进程 overlay 壳只有一份 ``self._config``，这组常量
+# 与 ``overlay_shell._SpriteConfig`` 把那条身份→配置的对应关系复原：这组键逐 sprite
+# 取源（子 sprite 缺键回退主配置，与旧"缺文件按主配置落种"同口径），**其余键一律
+# 读主配置**。
+#
+# 窗口级键不在此列（``on_top`` / ``mouse_through`` / ``pet_opacity`` /
+# ``lock_position`` / ``shift_drag`` / ``cursor_hidden_passthrough`` /
+# ``auto_hide_fullscreen`` / ``no_move`` / ``animation_gap_seconds`` /
+# ``stream_capture_mode``）：一次只有一个合成窗，这些键物理上无法 per-pet
+# （审计 C4），继续按主配置**全局**生效。
+#
+# 键集本体放在本模块（零 Qt、只依赖 stdlib + config）而不是 ``overlay_shell``：
+# 独立设置进程（``pet/__main__.py --settings``）也要按同一份键集分流读写，而它
+# **禁止导入** overlay_shell（会连带素材库/ffmpeg/托盘）。``overlay_shell`` 侧只
+# 引用本常量，全仓单一来源（键集漂移 = 子宠页死开关复发）。
+PER_SLOT_SETTING_KEYS = frozenset({
+    # 几何 / 运动
+    "scale", "playback_speed", "drag_physics", "drop_gravity", "throw_strength",
+    "ffmpeg_recycle_minutes",
+    # 音效（点击与碰撞各一对门/音量；音源包 click_sound_pack 两者共用）
+    "click_sound_enabled", "click_sound_volume", "click_sound_pack",
+    "collision_sound_enabled", "collision_sound_volume",
+    # 气泡 / 自言自语族
+    "self_talk_enabled", "self_talk_texts", "self_talk_duration_seconds",
+    "self_talk_image_dir", "self_talk_image_scale", "self_talk_image_chance",
+    "self_talk_min_interval", "self_talk_max_interval",
+    "self_talk_speak_enabled", "self_talk_bubble_style", "bubble_text_scale",
+    "click_show_balance", "click_show_self_talk",
+    # 角色（per-pet 素材库）
+    "character",
+})
+
 
 class SpawnStateError(Exception):
-    """slot 身份分配失败（前 MAX_SCAN_SLOTS 个身份均被占用）。"""
+    """slot 身份分配失败：``MAX_SCAN_SLOTS`` 个身份**全部活跃**（无退役身份可复用）。"""
 
 
 # ------------------------------------------------------------------ 活跃宠清单
@@ -141,18 +177,28 @@ def scan_slot_configs(config_dir: Path | str | None) -> set[int]:
 
 def allocate_slot(config_dir: Path | str | None = None, *, active_slots=(),
                   max_slots: int = MAX_SCAN_SLOTS) -> int:
-    """无锁身份分配（D6）：取最小空闲 N。
+    """无锁身份分配（D6）：取最小空闲 N；名额用尽时复用最小退役身份。
 
     已占用 = 目录内已有 ``config-slot-N.json`` 的身份 ∪ 进程内活跃身份。
     slot 配置身份一经分配即保留（"退出子肥鱼配置保留"），因此分配单调增长、
     永不与既有身份相撞——复用一个保留身份会静默覆盖它的位置/设置记忆。
+
+    B01 兜底：普通用户反复生/退累计 ``max_slots`` 次后目录里全是历史身份，旧
+    实现直接抛 ``SpawnStateError``（UI 也只有日志），「生小肥鱼」从此永久失效。
+    这里改为复用**最小的非活跃退役身份**（位置/设置记忆被覆盖，warning 明示）；
+    只有 ``max_slots`` 个身份全部活跃（实际不可能）时才真失败。
     """
-    taken = scan_slot_configs(config_dir)
-    for slot in normalize_slots(active_slots):
-        taken.add(slot)
+    active = set(normalize_slots(active_slots))
+    taken = scan_slot_configs(config_dir) | active
     for candidate in range(1, int(max_slots) + 1):
         if candidate not in taken:
             return candidate
+    retired = [slot for slot in range(1, int(max_slots) + 1) if slot not in active]
+    if retired:
+        logging.warning(
+            "overlay: 前 %s 个 slot 身份均已占用，复用最小退役身份 slot=%s"
+            "（该身份的位置/设置记忆将被覆盖）", max_slots, retired[0])
+        return retired[0]
     raise SpawnStateError(f"overlay: 前 {max_slots} 个 slot 身份均已被占用")
 
 

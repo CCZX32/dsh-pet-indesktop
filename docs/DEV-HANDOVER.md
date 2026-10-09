@@ -70,7 +70,6 @@ D:\dsh-pet\
 │   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3258 行）
 │   ├── window.py                 # 桌宠主窗口（组合根，4599 行，预算 4632）
 │   ├── config.py                 # 配置读取/清洗/迁移/持久化（1555 行）
-│   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
 │   ├── modern_settings_dialog.py # 现代设置主对话框（2347 行，预算 2347）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
 │   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
@@ -213,8 +212,6 @@ modern_settings_dialog.py
 2. `pet/config.py` → `reload()` 白名单元组（语音报时在 913-923 行）；
 3. `tests/test_config_schema.py` → `DEFAULTS_SNAPSHOT` 与 `RELOAD_WHITELIST_SNAPSHOT` 快照集合（护栏用例：`test_every_defaults_key_is_whitelisted_or_special_cased` 等；特殊键走 `SPECIAL_CASED_KEYS`）。
 
-`pet/config_domains.py` 只做「取子键 / 聚合成域 dict」的编排，**不允许写第二份清洗逻辑**。
-
 ### 3.4 孤儿文件禁令
 
 `test_settings_widgets_orphan_cluster_guard`：`pet/settings_widgets.py`、`pet/settings_styles*.qss` 不允许「存在且零引用」—— 要么删除，要么被 `pet/` 内模块 import / read_text 读取。
@@ -251,8 +248,7 @@ modern_settings_dialog.py
 
 ### 4.1 配置对象与分组
 
-- `pet/config.py` 的 `Config` 负责读取、清洗、迁移、持久化；键以**顶层平铺**为主，复杂功能用嵌套 dict（chat / agent_link / proactive_screen / collision / menu）。
-- `pet/config_domains.py` 提供只读域 facade：`ChatConfig`、`AgentLinkConfig`、`ProactiveConfig`、`CollisionConfig`、`MenuConfig`，`normalize` 全部复用 `config.py` 既有清洗函数。
+- `pet/config.py` 的 `Config` 负责读取、清洗、迁移、持久化；键以**顶层平铺**为主，复杂功能用嵌套 dict（chat / agent_link / proactive_screen / collision / menu）。（曾有一层只读域 facade `config_domains`，因「只建不用」于 2026-10-09 整层退役，消费方直接读 `Config`。）
 - 配置落盘位置：运行期 `config.dir/config.json`（打包版为 `%APPDATA%\dsh-pet-standalone-<variant>\`）；仓库内 `pet/persona_presets/*.json` 属角色台词预设，不属运行期配置。
 
 ### 4.2 语音报时配置键（本项目的主要定制，11 个）

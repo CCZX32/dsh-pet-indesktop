@@ -9,6 +9,7 @@ QApplication。覆盖：清单原子读写/顺序保持、缺失=首次运行、
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import pytest
@@ -93,11 +94,34 @@ def test_scan_slot_configs_matches_frozen_naming(tmp_path):
     assert ovs.scan_slot_configs(None) == set()
 
 
-def test_allocate_slot_raises_when_exhausted(tmp_path):
+def test_allocate_slot_reuses_smallest_retired_when_history_is_full(tmp_path):
+    """B01：历史身份占满 1..MAX_SCAN_SLOTS 时复用**最小退役身份**，不抛错。
+
+    普通用户反复生/退累计 128 次后目录里全是历史 ``config-slot-N.json``；旧实现
+    直接抛 ``SpawnStateError`` → 「生小肥鱼」永久失效（UI 也只有日志）。
+    """
+    for slot in range(1, ovs.MAX_SCAN_SLOTS + 1):
+        _write(tmp_path / f"config-slot-{slot}.json", "{}")
+    assert ovs.allocate_slot(tmp_path) == 1
+    # 活跃身份仍优先跳过：复用只在没有空闲号时发生
+    assert ovs.allocate_slot(tmp_path, active_slots=[1, 2]) == 3
+
+
+def test_allocate_slot_reuse_is_logged(tmp_path, caplog):
+    """复用必须留 warning（明说覆盖该退役身份的位置/设置记忆）。"""
+    for slot in (1, 2, 3):
+        _write(tmp_path / f"config-slot-{slot}.json", "{}")
+    with caplog.at_level(logging.WARNING, logger="pet.overlay_spawn_state"):
+        assert ovs.allocate_slot(tmp_path, max_slots=3) == 1
+    assert any("退役身份" in record.getMessage() for record in caplog.records)
+
+
+def test_allocate_slot_raises_only_when_all_slots_active(tmp_path):
+    """真耗尽 = max_slots 个身份**全在活跃集合**（实际不可能）才抛错。"""
     for slot in (1, 2, 3):
         _write(tmp_path / f"config-slot-{slot}.json", "{}")
     with pytest.raises(ovs.SpawnStateError):
-        ovs.allocate_slot(tmp_path, max_slots=3)
+        ovs.allocate_slot(tmp_path, active_slots=[1, 2, 3], max_slots=3)
 
 
 # ---------------------------------------------------------------- 每身份几何

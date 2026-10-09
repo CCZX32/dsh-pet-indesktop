@@ -309,6 +309,10 @@ class MusicLyricController(QObject):
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
     _pending_by_key: dict = None
 
+    # 取词在飞期间的暂停记账（见 _note_paused）：同样的道理，回调路径要有默认值。
+    _paused_total: float = 0.0
+    _paused_since: float | None = None
+
     # 采样**代次**：每次 _reset() 递增（=关闭歌词 / 退出音乐模式 / shutdown）。
     # 在途采样带着派发时的代次回来，代次不符即为上一代的迟到结果，一律丢弃。
     # 类级默认 0 供单测直接驱动 _on_playback_ready（没有派发过，两值相等=放行）。
@@ -370,6 +374,12 @@ class MusicLyricController(QObject):
         self._width_locked: bool = False
         self._last_shown: tuple[str, str] | None = None
         self._last_playing: bool | None = None
+        # 取词在飞期间的暂停记账（累计秒 + 当前未完结段的起点）：无真实进度源时
+        # 位置按"检测到切歌的时刻"往下估算，而取词那几秒里 tracker 还没有歌词、
+        # set_paused 冻结不了任何东西——暂停时长必须在控制器这一层单独记，否则
+        # 取词回来时会把它算成播放进度（见 _note_paused）。
+        self._paused_total: float = 0.0
+        self._paused_since: float | None = None
         # 取词对应的那次采样。取词是异步的，结果回来时要靠它换算进度，
         # 所以必须留在实例上（也要有类级默认，便于单测直接驱动回调）。
         self._pending_by_key: dict = {}
@@ -486,6 +496,8 @@ class MusicLyricController(QObject):
         self._last_lyric = ""
         self._last_shown = None
         self._last_playing = None
+        self._paused_total = 0.0
+        self._paused_since = None
         self._lyric_yield_until = 0.0
         self._instrumental = False
         self._hint = ""
@@ -740,10 +752,20 @@ class MusicLyricController(QObject):
             # 暂停：只冻结进度，**不要** reset——否则恢复播放时同一首歌会被
             # 当成"新歌"重新走一遍跳过逻辑，后半首就再也接不上了。
             self._last_playing = False
-            if key == self._current_key and self._tracker.has_lyrics:
-                self._tracker.set_paused(True, now=now)
+            if key == self._current_key:
+                if self._tracker.has_lyrics:
+                    self._tracker.set_paused(True, now=now)
+                else:
+                    # 取词在飞（tracker 里还没有歌词）：`set_paused` 冻结不了任何东西
+                    # ——位置基准要等歌词到位由 load() 建立，所以这段暂停必须由控制器
+                    # 自己记账。不记的话，取词回来按「now - 检测时刻」估算的播放位置
+                    # 会把暂停的这几秒算进去，歌词当场跳到未来（B05）。
+                    self._note_paused(now)
             return
         self._last_playing = True
+        # 恢复播放这一拍给暂停段封口（与 tracker 自己的 set_paused(False) 同一拍）：
+        # 取词在飞期间的暂停时长到此为止，之后不再增长。
+        self._close_pause_segment(now)
 
         if key != self._current_key:
             self._start_track(key, track.title, track.artist, playback, now)
@@ -781,11 +803,46 @@ class MusicLyricController(QObject):
         # 每拍都重送：一是续期（防气泡先于句子超时消失），二是标题必须一直在。
         self._show(lyric, title=self._title_line, force=True)
 
+    # ------------------------------------------------ 取词在飞期间的暂停记账
+
+    def _note_paused(self, now: float) -> None:
+        """记下一次"采样说此刻暂停"：开一段暂停区间（幂等）。
+
+        只在**取词在飞**（tracker 还没有歌词）时调用——那时 ``LyricTracker.set_paused``
+        冻结不了任何东西（位置基准要等歌词到位才由 ``load()`` 建立）。暂停时长因此
+        由控制器自己记账，取词回来算估算位置时扣掉它。
+        """
+        if getattr(self, "_paused_since", None) is None:
+            self._paused_since = now
+
+    def _close_pause_segment(self, now: float) -> None:
+        """给暂停区间封口（恢复播放那一拍调用）；没有开着的区间时什么都不做。"""
+        since = getattr(self, "_paused_since", None)
+        if since is None:
+            return
+        self._paused_total = getattr(self, "_paused_total", 0.0) + max(0.0, now - since)
+        self._paused_since = None
+
+    def _paused_seconds(self, now: float) -> float:
+        """迄今累计的暂停时长，**含"此刻仍在暂停"的未完结段**。
+
+        未完结段必须算进来：取词回来时用户还按着暂停，那一刻到检测时刻之间的全部
+        时间都不该算进播放进度。
+        """
+        total = getattr(self, "_paused_total", 0.0)
+        since = getattr(self, "_paused_since", None)
+        if since is not None:
+            total += max(0.0, now - since)
+        return total
+
     def _start_track(self, key, title, artist, playback, now: float) -> None:
         """切歌：先亮歌名，再决定是否后台取词。"""
         self._current_key = key
         self._tracker.reset()
         self._last_shown = None
+        # 暂停记账跟着歌走：上一首的暂停时长绝不能算到这一首的进度上。
+        self._paused_total = 0.0
+        self._paused_since = None
         # 记下发现切歌的时刻——这是"这首歌从第 0 秒开始"的锚点。
         # 每首歌都重新记，避免用上一首的旧值把基准带到新歌上。
         self._detected_at = now
@@ -1033,10 +1090,14 @@ class MusicLyricController(QObject):
             position = max(0.0, reported + (now - playback.updated_at))
         else:
             # 无真实进度（如网易云）：基准必须是**检测到切歌的时刻**，而不是
-            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。
+            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。再扣掉取词
+            # 在飞期间已经发生的暂停（含"此刻仍在暂停"的未完结段）：暂停不是播放
+            # 时间，算进去歌词会当场跳到未来（B05）。
             detected = self._detected_at if self._detected_at is not None else now
-            position = max(0.0, now - detected)
-            log.info("歌词按检测时刻对齐: 已过去 %.2fs", position)
+            paused = self._paused_seconds(now)
+            position = max(0.0, now - detected - paused)
+            log.info("歌词按检测时刻对齐: 已过去 %.2fs（其中暂停 %.2fs）",
+                     now - detected, paused)
         # `reported` 必须一起带下去：这里的 position 在无进度时是**估算值**，
         # 不能让它冒充真值，否则「歌词对齐」会被误判为没必要而整组置灰。
         self._tracker.load(list(lyrics.lines), now=now, position=position,
@@ -1052,6 +1113,14 @@ class MusicLyricController(QObject):
         if current is not None and current.get("id") == "music-lyric-estimated":
             window_alerts.resolve_alert(self.win, "music-lyric-estimated")
         if self._bubble_blocked():
+            return
+        if self._paused_since is not None:
+            # 取词期间用户按了暂停、到这一拍还没恢复：以**暂停态**装载，且**不立即
+            # 显示**——恢复播放那一拍由 `_on_playback_ready` 的既有 set_paused(False)
+            # 把基准顺延接上，那时按正确位置显示（歌词停在暂停那一刻的那句）。
+            # 冻结这一步不可省：`load()` 会清掉暂停态，不冻的话恢复后基准仍从 load
+            # 的时刻起算，暂停的这几秒又会被算成播放时间。
+            self._tracker.set_paused(True, now=now)
             return
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。
         index = self._tracker.advance(now)

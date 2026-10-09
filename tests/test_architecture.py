@@ -249,8 +249,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-08 上调到 2497（同刀批 2）：页内分区跳转条与组描述的接线——import 1 行 +
 # 域装配末尾 `settings_page_guide.install(self)` 及其注释 2 行；主体（跳转条、流式
 # 布局、SECTION_GUIDE 描述表）全在 pet/settings_page_guide.py，本文件只做接线。
+# 2026-10-09 上调到 2501（bug 狩猎修复批，两批叠加）：即时音效开关的 reload 防陈旧
+# 快照守卫（+7，B04）+ 子宠页读写路由的配置入口一行与 harness 置灰摘除（+3，F2）。
 # 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2497
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2501
 
 
 def _read(name: str) -> str:
@@ -342,6 +344,40 @@ def test_pet_tree_has_zero_retired_layer_imports():
                     offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, (
         "pet/ 内仍有 import 多进程多宠退役层（架构倒退）：\n"
+        + "\n".join(offenders)
+    )
+
+
+# 死面 facade 退役（2026-10-09，bug 狩猎 F4 清理）：config_domains 是「只建不用」
+# 的配置域 facade——五个 ``Config.*_config`` 方法全仓零产品调用方（只有它自己的
+# 测试在用），留着只会让人按假象面改代码踩空。整层删除后按退役层先例守卫：
+# 文件必须不存在，且全 pet/ 树不得再 import——防「死面被静默合回」。
+RETIRED_DEAD_FACADE_MODULES = ("config_domains",)
+
+
+def test_retired_dead_facade_files_are_gone():
+    """死面 facade 机器化守卫：文件必须不存在（防"删了又被合回来"）。"""
+    present = [name for name in RETIRED_DEAD_FACADE_MODULES
+               if (PET_DIR / f"{name}.py").exists()]
+    assert not present, (
+        "死面 facade 文件回潮（2026-10-09 已整层删除）：\n" + "\n".join(present)
+    )
+
+
+def test_pet_tree_has_zero_dead_facade_imports():
+    """死面 facade 机器化守卫：整个 pet/ 树零 import（含函数级延迟 import）。"""
+    offenders = []
+    for path in sorted(PET_DIR.rglob("*.py")):
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue
+            for retired in RETIRED_DEAD_FACADE_MODULES:
+                if re.search(rf"\b{retired}\b", stripped):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "pet/ 内仍有 import 死面 facade（2026-10-09 已整层删除）：\n"
         + "\n".join(offenders)
     )
 

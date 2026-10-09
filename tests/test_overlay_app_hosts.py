@@ -131,6 +131,51 @@ def test_classic_chat_dispatcher_opens_with_overlay_host(tmp_path):
         _teardown(overlay)
 
 
+# ---------------------------------------------------------------- A1b 切角色同步聊天面（B07）
+def test_overlay_switch_character_syncs_open_chat_window(tmp_path):
+    """B07：overlay 主宠切角色后，已开着的完整聊天窗必须跟着换角色。
+
+    捕获模式的 ``PetInstance.switch_character`` 一直带这条同步（对齐
+    app.py:664-668），overlay 走的是 ``OverlayShell.switch_character``——缺的
+    正是它，切完角色再开口仍是旧角色的会话/头像/系统提示。
+    """
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        overlay.overlay.show()
+        overlay.open_full_chat()
+        window = inst.modern_chat_window
+        assert window is not None and window.character_id != "nova"
+
+        overlay.switch_character("nova")
+
+        assert shell.config.get("character") == "nova"
+        assert window.character_id == "nova", "完整聊天窗必须跟着切角色"
+        assert window.session.character_id == "nova", "会话也按新角色取"
+    finally:
+        _teardown(overlay)
+
+
+def test_overlay_switch_character_syncs_island_chat_bubble(tmp_path):
+    """B07：岛对话气泡（桌宠隐藏时的对话面）同样是聊天面，跟着切角色。"""
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        class _Bubble:
+            def __init__(self):
+                self.switched: list[str] = []
+
+            def switch_character(self, character_id):
+                self.switched.append(character_id)
+
+        bubble = _Bubble()
+        shell.island_chat = bubble
+
+        overlay.switch_character("nova")
+
+        assert bubble.switched == ["nova"]
+    finally:
+        _teardown(overlay)
+
+
 # ---------------------------------------------------------------- A2 提醒落气泡
 def _bubble_text(overlay) -> str:
     bubble = overlay._speech_bubble

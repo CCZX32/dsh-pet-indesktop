@@ -227,8 +227,22 @@ class QuickChatBubble(QFrame):
         return sessions[0] if sessions else self._new_session()
 
     def refresh_session(self) -> None:
-        """从磁盘重取最近会话（公开 seam；角色切换后外部刷新用，替代私访 _get_session）。"""
+        """从磁盘重取最近会话（公开 seam；外部刷新用，替代私访 _get_session）。"""
         self.session = self._get_session()
+
+    def switch_character(self, character_id: str) -> None:
+        """切角色同步 seam（B07）：换身份 + 按新角色重取会话。
+
+        气泡的角色是构造期一次性快照（``character_id`` 决定会话目录与系统提示，
+        见 ``_get_session`` / ``_send`` 的 ``build_messages``）；主宠切角色后不同步
+        这里，气泡会一直用旧角色的会话与人格提示。空身份/同角色不动作（避免无谓
+        重建会话，丢掉正在续聊的那一条）。
+        """
+        new_id = str(character_id or "")
+        if not new_id or new_id == self.character_id:
+            return
+        self.character_id = new_id
+        self.refresh_session()
 
     def _new_session(self):
         session = self.store.create(

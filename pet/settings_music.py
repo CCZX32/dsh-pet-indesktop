@@ -26,7 +26,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QMessageBox, QPushButton
 
 from . import music_players
-from .settings_widgets import ResourcePathPicker, SettingRow, mark_main_pet_only
+from .settings_widgets import ResourcePathPicker, SettingRow
 
 log = logging.getLogger("dsh-pet-standalone")
 
@@ -66,13 +66,9 @@ def create_music_player_controls(dialog) -> None:
     button.clicked.connect(lambda: start_detect(dialog))
     dialog.music_player_detect_btn = button
     # 两个路径键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，右键菜单读 host 配置面、
-    # 由 _SpriteConfig 转发到主配置）：子宠页改了不生效 ⇒ 置灰。「自动检测」按钮只
-    # 服务这两行（搜到的路径填进没人读的控件），一并置灰，免得留个点了没用的入口。
-    mark_main_pet_only(
-        dialog,
-        *(getattr(dialog, _PICKER_ATTR[key]) for key in PLAYER_KEYS),
-        button,
-    )
+    # 由 _SpriteConfig 转发到主配置）：子宠页保存由设置进程的配置路由直写主配置
+    # （pet/settings_slot_config.py），选了就生效——此前按死开关口径把两个选择器与
+    # 「自动检测」按钮一并置灰（搜到的路径填进没人读的控件），现摘除。
 
 
 def build_music_player_rows(dialog) -> list[SettingRow]:
@@ -123,8 +119,8 @@ def browser_media_rows(dialog) -> list[SettingRow]:
     if check is None or not browser_media_supported():
         return []
     # 与 foobar 两键同规（同一 _SOURCE_SWITCHES 组、同一读取形态）：进程级歌词源
-    # 开关，子宠页写了不生效 ⇒ 置灰。控件本体建在 settings_pet_controls。
-    mark_main_pet_only(dialog, check)
+    # 开关，子宠页保存由设置进程的配置路由直写主配置（pet/settings_slot_config.py），
+    # 改了真生效——此前按死开关口径置灰，现摘除。控件本体建在 settings_pet_controls。
     return [
         SettingRow(
             "music_browser_media",
@@ -157,9 +153,9 @@ def foobar_lyrics_rows(dialog) -> list[SettingRow]:
     edit = getattr(dialog, "foobar_title_format_edit", None)
     if check is None or edit is None or not foobar_lyrics_supported():
         return []
-    # 两个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，歌词源解析读主配置）：
-    # 子宠页改了不生效，如实置灰（控件本体建在 settings_pet_controls）。
-    mark_main_pet_only(dialog, check, edit)
+    # 两个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，歌词源解析读主配置）：子宠页
+    # 保存由设置进程的配置路由直写主配置（pet/settings_slot_config.py），改了真生效
+    # ——此前按死开关口径置灰，现摘除（控件本体建在 settings_pet_controls）。
     return [
         SettingRow(
             "foobar_lyrics",

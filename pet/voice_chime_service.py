@@ -45,6 +45,21 @@
   的完成结果直接丢弃（debug 日志），槽内那条及其旗原样保留。排队契约的入口方向是
   "后来的覆盖前面的"（只留最新一条），回队方向不能倒灌成"旧的盖新的"，否则更新的
   请求会被一条过期语音永久顶掉。
+- **播放接管自记标志**：``_player_engaged`` 除枚举判据外还认一个服务侧自记的
+  ``_play_pending_end``（"已发出 play、未见终止态"）。实机实测 ``setSource`` + ``play()``
+  之后约 30ms 起有一段 ``mediaStatus=LoadedMedia`` 而 ``playbackState`` 仍是
+  ``StoppedState`` 的窗口（约 200ms），两个枚举子判据都不成立——只看枚举会把这段时间
+  的通道误判成空闲，新语音当场 ``setSource`` 顶掉刚起播的那一段且永远等不到
+  EndOfMedia。终止态（EndOfMedia / InvalidMedia）与 ``stop()`` 复位该标志。
+- **缓存原子落盘**：worker 先写同目录临时文件（``*.part``），完成后 ``os.replace``
+  原子换名到最终缓存路径——``edge_tts.save`` 是边收边写，直接写最终路径时进程被斩
+  （daemon worker 随退出死掉）会留下永久截断的 mp3，而 ``_cache_hit`` 只看"存在且
+  非空"就会天天命中它、天天播静音。最终路径上只可能出现完整文件或什么都不出现；
+  缓存目录里的孤儿 ``*.part`` 在服务启动时清扫。
+- **免打扰切断在播段**：免打扰（含全屏等效）开启那一拍，当前正在播放且**尊重免打扰**
+  的那一段立即停掉（用户的开关不能等到这段放完）；``respect_quiet=False`` 的交互应答
+  （点击自言自语）照播——与入口闸的豁免口径同一条。免打扰退出**不补播**，与 ``_fire``
+  的丢弃语义一致。
 """
 
 from __future__ import annotations
@@ -52,8 +67,10 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import os
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -84,6 +101,16 @@ _SYNTH_TIMEOUT_S = 45.0
 # 合成线程里 edge_tts 导入失败时的回调错误码：GUI 侧据此走 _notify_missing_tts
 # 降级（"请 pip install edge-tts"），而不是笼统的"合成失败"。
 EDGE_TTS_MISSING = "edge-tts-missing"
+
+#: 合成中间产物的文件名后缀。最终缓存路径永远是 ``<key>.mp3``，半截产物只可能叫
+#: ``<key>.<唯一标识>.part``——清扫只需按这个模式匹配，不必按修改时间猜。
+TEMP_SUFFIX = ".part"
+
+#: 在跑的合成所登记的临时文件（进程内台账）。启动清扫只删**孤儿**：同进程里
+#: stop() → start() 之间可能还有上一次的合成在飞，删掉它的临时文件等于让那次合成
+#: 白跑（POSIX 上 os.replace 直接 FileNotFoundError）。
+_live_temp_paths: set[str] = set()
+_live_temp_lock = threading.Lock()
 
 
 def _edge_tts_available() -> bool:
@@ -176,17 +203,72 @@ def resolve_voice(configured) -> tuple[str, str]:
     return DEFAULT_VOICE, note
 
 
-def _cache_hit(path: Path) -> bool:
-    """缓存命中判定：文件存在**且非空**。
-
-    只判 ``exists()`` 不够——失败的合成会留下 0 字节/半截文件（``edge_tts.save``
-    先建文件再写），那会被当成「已有缓存」，于是播出一声静音且不再重新合成
-    （实机在缓存目录里抓到过一串 0 字节 mp3）。
-    """
+def _nonempty_file(path: Path) -> bool:
+    """文件存在**且非空**（0 字节 / 半截产物一律不算）。"""
     try:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _cache_hit(path: Path) -> bool:
+    """缓存命中判定：**最终缓存路径**上的文件存在且非空。
+
+    只判 ``exists()`` 不够——失败的合成会留下 0 字节文件（``edge_tts.save`` 先建文件
+    再写，服务端"成功"却没给音频时就留下它），那会被当成「已有缓存」，于是播出一声
+    静音且不再重新合成（实机在缓存目录里抓到过一串 0 字节 mp3）。
+
+    "只认最终名"由 worker 保证：它写的是 ``*.part`` 临时文件（见 :func:`_temp_cache_path`），
+    合成完成的产物经 ``os.replace`` 原子换名才出现在最终路径上，所以这里**不做**也
+    不该做"多大才算完整"那类猜测。
+    """
+    return _nonempty_file(path)
+
+
+def _temp_cache_path(out_path: Path) -> Path:
+    """本次合成用的临时文件路径：同目录 + 唯一标识。
+
+    必须同目录（``os.replace`` 只在同一文件系统内原子）且带唯一标识（同一段文本的
+    两次合工会 hash 到同一个最终路径，先后两次合成必须各写各的临时文件）。
+    """
+    return out_path.with_name(f"{out_path.stem}.{uuid.uuid4().hex[:12]}{TEMP_SUFFIX}")
+
+
+def _register_live_temp(path: Path) -> None:
+    with _live_temp_lock:
+        _live_temp_paths.add(str(path))
+
+
+def _unregister_live_temp(path: Path) -> None:
+    with _live_temp_lock:
+        _live_temp_paths.discard(str(path))
+
+
+def _sweep_orphan_temp_files(cache_dir: Path) -> None:
+    """清扫缓存目录里的**孤儿**临时文件（服务启动时一次）。
+
+    上一版 worker 直接把 ``edge_tts.save`` 写向最终路径，进程被斩（daemon worker
+    随退出死掉）就在缓存目录里留下半截文件，而 ``_cache_hit`` 只看"存在且非空"
+    → 天天命中、天天播静音。改成临时文件 + 原子换名后，半截产物只可能叫
+    ``*.part``，所以这里**按名字模式直接删**——不按修改时间猜（"多久没动过算孤儿"
+    在新进程刚起来时必然全都不算旧，等于没清）。
+
+    在册的临时文件（同进程里仍在跑的合成）跳过，见 :data:`_live_temp_paths`。
+    """
+    with _live_temp_lock:
+        live = set(_live_temp_paths)
+    try:
+        if not cache_dir.is_dir():
+            return
+        for stale in cache_dir.glob(f"*{TEMP_SUFFIX}"):
+            if str(stale) in live:
+                continue
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("清理孤儿合成临时文件失败：%s", stale)
+    except OSError:
+        logger.debug("合成临时文件清扫失败：%s", cache_dir)
 
 
 class _TTSWorker(threading.Thread):
@@ -194,6 +276,11 @@ class _TTSWorker(threading.Thread):
 
     线程不直接碰 Qt 对象；完成后把结果交给 owner 提供的回调（owner 在
     GUI 线程，回调触发 queued 信号桥接）。
+
+    **落盘是原子的**：``edge_tts.save`` 边收边写，所以合成写的是同目录临时文件
+    （``*.part``），成功后 ``os.replace`` 换名到最终缓存路径。直接写最终路径时，
+    进程在合成中途退出（本线程是 daemon，随进程被斩）会留下永久截断的 mp3，
+    而 ``_cache_hit`` 只看"存在且非空"→ 天天命中它、天天播静音，还永远不再重合成。
     """
 
     def __init__(self, text: str, voice: str, rate: str, pitch: str, out_path: Path, on_done) -> None:
@@ -203,9 +290,20 @@ class _TTSWorker(threading.Thread):
         self._rate = rate
         self._pitch = pitch
         self._out_path = out_path
+        self._temp_path = _temp_cache_path(out_path)
         self._on_done = on_done
 
     def run(self) -> None:  # noqa: D102
+        # 临时文件台账：登记在册的路径不受启动清扫影响（见 _sweep_orphan_temp_files）。
+        # 用 try/finally 而不是散在各条 return 前：任何异常路径都要注销，否则台账
+        # 会随着合成次数无界增长。
+        _register_live_temp(self._temp_path)
+        try:
+            self._synthesize_to_cache()
+        finally:
+            _unregister_live_temp(self._temp_path)
+
+    def _synthesize_to_cache(self) -> None:
         # 在线音色表顺手刷新（有网就更新缓存，失败无所谓）——只在这个后台线程里联网
         refresh_voice_list()
         # 主音色反复失败（下架 / 限流 / 参数被拒）时退到默认音色再试一轮
@@ -222,6 +320,7 @@ class _TTSWorker(threading.Thread):
                     # 探测通过但真导入失败（半装 / 被禁用）时也走这里，回 GUI 侧同一套
                     # "请 pip install edge-tts" 降级，而不是笼统的合成失败。
                     logger.warning("edge-tts 不可导入，降级为仅气泡提示")
+                    self._discard_partial()
                     self._on_done(str(self._out_path), self._text, EDGE_TTS_MISSING)
                     return
                 except Exception as exc:  # noqa: BLE001
@@ -231,7 +330,13 @@ class _TTSWorker(threading.Thread):
                     if attempt < EDGE_RETRY_TIMES and candidate != candidates[-1]:
                         time.sleep(EDGE_RETRY_DELAY_S)
                     continue
-                if self._out_path.exists() and self._out_path.stat().st_size > 0:
+                if _nonempty_file(self._temp_path):
+                    # 换名成功才回成功回调：换名失败等于这段音频没落进缓存，
+                    # 报成功会让到点的缓存命中路径播一个不存在的文件。
+                    if not self._publish():
+                        errors.append(f"{candidate} 第{attempt}次: 缓存换名失败")
+                        self._discard_partial()
+                        continue
                     if candidate != self._voice:
                         logger.warning(
                             "音色 %s 合成失败，已改用默认音色 %s", self._voice, candidate
@@ -245,12 +350,29 @@ class _TTSWorker(threading.Thread):
             str(self._out_path), self._text, "edge-tts 合成失败 → " + "；".join(errors[-4:])
         )
 
-    def _discard_partial(self) -> None:
-        """删掉失败留下的半截产物：留在缓存目录会被下一次当成「已有缓存」。"""
+    def _publish(self) -> bool:
+        """把临时文件原子换名到最终缓存路径（同目录内 ``os.replace``）。
+
+        这是本模块"缓存永远不半截"的全部机制：最终路径上只可能出现完整文件或
+        什么都不出现，读者（``_cache_hit``）没有中间态可撞见。
+        """
         try:
-            self._out_path.unlink(missing_ok=True)
+            os.replace(self._temp_path, self._out_path)
+            return True
         except OSError:
-            logger.debug("清理半截合成产物失败：%s", self._out_path)
+            logger.warning("语音缓存换名失败：%s", self._out_path, exc_info=True)
+            return False
+
+    def _discard_partial(self) -> None:
+        """删掉本次合成留下的临时文件。
+
+        只删临时文件、**不碰最终路径**：最终路径上的东西只可能是别的合成原子换名
+        出来的完整缓存，顺手删掉会毁掉一份本来能用的缓存。
+        """
+        try:
+            self._temp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("清理半截合成产物失败：%s", self._temp_path)
 
     async def _synthesize(self, voice: str) -> None:
         # 惰性导入：只在真的要合成的后台线程里付这笔 import 成本。
@@ -262,7 +384,7 @@ class _TTSWorker(threading.Thread):
             rate=self._rate,
             pitch=self._pitch,
         )
-        await communicate.save(str(self._out_path))
+        await communicate.save(str(self._temp_path))
 
 
 class _AudioBridge:
@@ -358,6 +480,23 @@ class VoiceChimeService:
         self._pending_respect_quiet = True
         # 媒体终止态枚举；_ensure_player 成功时填充，未创建播放器时为空元组。
         self._terminal_statuses: tuple = ()
+        # 「已发出 play、未见终止态」标志：``_player_engaged`` 的第三个子判据。
+        # 实机实测 setSource+play 之后约 30ms 起有一段 mediaStatus=LoadedMedia 而
+        # playbackState 仍是 StoppedState 的窗口（约 200ms），两个枚举子判据都不成立
+        # → 通道被误判成空闲、新语音当场顶掉刚起播的那一段（见 _player_engaged）。
+        # 由两个播放出口置位，终止态 / stop() / 免打扰切断复位。
+        self._play_pending_end = False
+        # 当前在播段是否尊重免打扰（None = 当前没有在播段）。播放出口随起播一起写，
+        # 免打扰开关那一拍据此决定切不切（见 _on_quiet_state_changed）。
+        self._current_respect_quiet: bool | None = None
+        # 解锁表（单次）：手动通道（立即报时 / 设置页试听）整条生命周期都不 start()，
+        # 没有 20s tick 就没人跑 _release_stale_busy——worker 万一漏回调，_busy 永久
+        # 卡死、通道再也不出声（此后每次手动播报都只能进队列）。所以起合成就地布一道
+        # 超时，到点调同一个自愈入口；正常运行路径下它与 tick 互为冗余，语义不变。
+        self._unlock_timer = QTimer()
+        self._unlock_timer.setSingleShot(True)
+        self._unlock_timer.setInterval(int(_SYNTH_TIMEOUT_S * 1000) + 1000)
+        self._unlock_timer.timeout.connect(self._release_stale_busy)
         # 让位钩子：由 AppShell 注入 Callable[[str], bool]，入参是本分钟的报时槽位，
         # 返回 True 表示该槽位让位给节日提醒（报时本分钟不说）。None = 无人让位。
         # 用注入而不是让报时反查节日服务，是为了保持本模块对外零依赖。
@@ -373,6 +512,11 @@ class VoiceChimeService:
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
+        # 启动清扫：上一次进程被斩（daemon worker 随退出死掉）留下的孤儿 ``*.part``
+        # 在这里清掉——它们永远不会被换名，留着只是垃圾（且会让缓存目录看起来有
+        # 一堆"半截缓存"）。只删在册之外的，见 _sweep_orphan_temp_files。
+        _sweep_orphan_temp_files(self._cache_dir)
+        self._attach_quiet_listener()
         self.apply_config()
         self._on_tick()
         self._timer.start()
@@ -382,16 +526,13 @@ class VoiceChimeService:
         self._stopped = True
         # 正在出声的这一段必须立刻停：关掉开关/退出后继续放完，用户听到的就是
         # "关不掉"；退出路径上播放器还可能正被析构。
-        player = self._player
-        if player is not None:
-            try:
-                player.stop()
-            except Exception:
-                logger.debug("停止语音播放失败（播放器可能已析构）", exc_info=True)
+        self._stop_current_segment()
         # 待播队列同样作废：关掉开关/退出后不该再补播一条排队的语音。
         self._pending_speech = None
         self._queued_fire = None
+        self._disarm_unlock_timer()
         self._timer.stop()
+        self._detach_quiet_listener()
 
     def is_running(self) -> bool:
         """调度 tick 是否在跑（AppShell 的懒启停门控据此决定重启还是只刷配置）。"""
@@ -496,6 +637,9 @@ class VoiceChimeService:
         if not self._channel_idle():
             logger.info("%s：音频通道忙，本次本地播报跳过：%s", log_tag, target.name)
             return False
+        # 这一段的免打扰口径是**豁免**：免打扰在它播放期间才生效时也不掐断（它就是
+        # 交互应答，同 speak(respect_quiet=False)），见 _on_quiet_state_changed。
+        self._current_respect_quiet = False
         return self._play_only(str(target))
 
     # ------------------------------------------------------------ 调度
@@ -586,10 +730,15 @@ class VoiceChimeService:
         self._busy = True
         self._busy_since = time.monotonic()
         self._synthesis_role = "precache"
+        self._arm_unlock_timer()
         generation = self._next_synthesis_generation()
+        # 音色必须用 ``resolve_voice`` 的**结果**：缓存 key 与即时合成（_fire）用的
+        # 都是替换后的音色，这里传配置原值会让预合成的产物落到另一个 key 上——音色
+        # 下架时预合成会白试两轮（配置原值在在线表里不存在），还正好踩进 45s 超时
+        # 自愈的竞态，到点只好回退即时合成。
         worker = _TTSWorker(
             sentence,
-            self._cfg["voice"],
+            voice,
             edge_rate_arg(self._cfg["rate"]),
             edge_pitch_arg(self._cfg["pitch"]),
             out_path,
@@ -664,9 +813,13 @@ class VoiceChimeService:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         out_path = self._cache_dir / f"{key}.mp3"
         # 缓存命中（含预合成已完成）直接播放，零网络延迟；合成中不阻塞缓存播放。
-        # 命中要求文件非空：失败的合成会留下 0 字节/半截文件，只判 exists() 会把
-        # 它当成「已有缓存」→ 播出一声静音且再也不重新合成。
+        # 命中要求文件非空：失败的合成会留下 0 字节文件，只判 exists() 会把它当成
+        # 「已有缓存」→ 播出一声静音且再也不重新合成。
         if _cache_hit(out_path):
+            # 起播前记下这一段的免打扰口径：免打扰在它播放**期间**才生效时按它决定
+            # 切不切（见 _on_quiet_state_changed）。放在这里而不是播放方法里，是为了
+            # 写入口径的地方与决定"播什么"的地方同一处。
+            self._current_respect_quiet = respect_quiet
             if show_bubble:
                 self._play_and_bubble(str(out_path), sentence, bubble)
             else:
@@ -692,6 +845,7 @@ class VoiceChimeService:
         # 本次合成有效：清掉上一次 stop() 留下的作废标记，
         # 否则新起的合成结果会被当成"迟到结果"丢弃。
         self._stopped = False
+        self._arm_unlock_timer()
         generation = self._next_synthesis_generation()
         worker = _TTSWorker(
             sentence,
@@ -702,6 +856,26 @@ class VoiceChimeService:
             self._worker_callback(generation),
         )
         worker.start()
+
+    def _arm_unlock_timer(self) -> None:
+        """起合成时布一道**只为解锁**的超时（见 ``_unlock_timer`` 的说明）。
+
+        单次表，重复调用即从此刻重新计时（同一时刻只有一个 ``_busy``，各次合成
+        共用它能表达的全部语义）。
+        """
+        timer = getattr(self, "_unlock_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _disarm_unlock_timer(self) -> None:
+        """合成有了结局（回调回来 / 超时自愈 / stop）就撤掉解锁表。
+
+        不撤的话它会一直挂着到 46s 后才响一声空炮（那一响的语义已经作废）；运行期
+        这条表与 20s tick 的 watchdog 互为冗余，撤掉不影响任何既有语义。
+        """
+        timer = getattr(self, "_unlock_timer", None)
+        if timer is not None:
+            timer.stop()
 
     def _worker_callback(self, generation: int):
         """取本次合成的 worker 回调（顺带保证信号桥已建好并接到本服务）。"""
@@ -739,6 +913,8 @@ class VoiceChimeService:
         respect_quiet = self._synthesis_respect_quiet
         self._synthesis_respect_quiet = True
         self._busy = False
+        # 本次合成已有结局：撤掉解锁表（若 drain 又起了新合成，_fire 会重新布一道）。
+        self._disarm_unlock_timer()
         try:
             self._handle_synthesized(role, path, text, error, respect_quiet)
         finally:
@@ -833,6 +1009,7 @@ class VoiceChimeService:
                 self._pending_speech = text
                 self._pending_respect_quiet = respect_quiet
                 return
+            self._current_respect_quiet = respect_quiet
             self._play_only(path)
             return
         if self._player_engaged():
@@ -847,6 +1024,7 @@ class VoiceChimeService:
             self._queued_fire = (text, self._synthesis_now, self._pending_bubble,
                                 self._pending_bubble is not None, role, respect_quiet)
             return
+        self._current_respect_quiet = respect_quiet
         self._play_and_bubble(path, text, self._pending_bubble)
 
     def _play_and_bubble(self, path: str, text: str, bubble_text: str | None = None) -> None:
@@ -868,6 +1046,9 @@ class VoiceChimeService:
             self._audio_out.setVolume(self._cfg["volume"] / 100.0)
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
+            # play 出口即置位"已发出 play、未见终止态"（见 _player_engaged）：
+            # 从这一刻到终止态之间，枚举判据在 LoadedMedia 窗口里会漏判。
+            self._play_pending_end = True
         except Exception:
             logger.exception("语音报时播放失败：%s", path)
             self._bubble("语音播放失败（设备/解码器异常）")
@@ -892,6 +1073,7 @@ class VoiceChimeService:
             self._audio_out.setVolume(self._cfg["volume"] / 100.0)
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
+            self._play_pending_end = True
             return True
         except Exception:
             logger.exception("外部播报播放失败：%s", path)
@@ -900,15 +1082,32 @@ class VoiceChimeService:
     def _player_engaged(self) -> bool:
         """播放器是否已**接管**音频通道（正在出声，或刚起播、媒体仍在加载）。
 
-        认 ``LoadingMedia`` 是必须的：``playbackState`` 判不了"刚起播"。实机实测
-        （QMediaPlayer + QAudioOutput，offscreen）——``setSource`` 后立刻 ``play()``，
-        那一刻 ``playbackState`` 仍是 ``StoppedState``、``mediaStatus`` 为
-        ``LoadingMedia``，约 300ms 后才转 ``PlayingState``/``BufferingMedia``；而本
-        模块的判据点（三个出队口与 speak/play_file 入口）恰恰可能落在那一刻，只看
-        ``playbackState`` 会把刚接管的通道当成空出，让新的语音顶掉刚起播的那一段。
+        三个子判据，缺任何一个都会漏判：
+
+        1. ``playbackState == PlayingState``——正在出声。
+        2. ``mediaStatus == LoadingMedia``——``playbackState`` 判不了"刚起播"。实机
+           实测（QMediaPlayer + QAudioOutput，offscreen，``assets/sounds/click.wav``）：
+           ``setSource`` 后立刻 ``play()`` 那一刻 ``playbackState`` 仍是 ``StoppedState``、
+           ``mediaStatus`` 为 ``LoadingMedia``，约 240ms 后才转 ``PlayingState``。
+        3. ``_play_pending_end``（"本服务已发出 play、还没见到终止态"）——实测同一探针
+           在 ``play()`` 之后约 **31ms** 由 ``LoadingMedia`` 转 **``LoadedMedia``**，而
+           ``playbackState`` 仍是 ``StoppedState``，直到约 **237ms** 才转 ``PlayingState``：
+           这约 **200ms** 的窗口里前两个判据**都不成立**，通道会被判成空闲，新语音当场
+           ``setSource`` 顶掉刚起播的那一段（它的音源被替换，永远等不到 EndOfMedia）。
+
+        为什么不干脆把 ``LoadedMedia`` 也算接管：同一探针实测，一段播完后 ``mediaStatus``
+        **停留在 ``LoadedMedia``**（EndOfMedia → LoadedMedia），``player.stop()`` 之后
+        也停在 ``LoadedMedia``——把 ``LoadedMedia`` 算作接管会让通道在每段播完后永久
+        判忙（"这个组合不可达"的前提不成立，故不用那条更简的改法）。自记标志只在
+        ``play()`` 出口置位、由终止态与 ``stop()`` 复位，没有这个滞留问题。
+
+        拿不到枚举判据（QtMultimedia 缺失 / ``object.__new__`` 测试替身没有这些方法）
+        时回落到自记标志：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
         """
         if self._player is None:
             return False
+        if getattr(self, "_play_pending_end", False):
+            return True
         try:
             from PySide6.QtMultimedia import QMediaPlayer
 
@@ -917,8 +1116,6 @@ class VoiceChimeService:
                 or self._player.mediaStatus() == QMediaPlayer.MediaStatus.LoadingMedia
             )
         except Exception:
-            # 拿不到判据（QtMultimedia 缺失 / object.__new__ 测试替身没有这些方法）
-            # 时按"未接管"处理：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
             return False
 
     def _channel_idle(self) -> bool:
@@ -945,6 +1142,11 @@ class VoiceChimeService:
         """
         if status not in getattr(self, "_terminal_statuses", ()):
             return
+        # 这一段真的结束了：复位"已发出 play、未见终止态"与"当前在播段"两个字段。
+        # 不复位标志就会被永久判忙（终止态之后 mediaStatus 停在 LoadedMedia，枚举
+        # 判据不成立，只剩这个标志撑着）。
+        self._play_pending_end = False
+        self._current_respect_quiet = None
         self._drain_queued_fire()
         self._drain_pending_speech()
 
@@ -996,6 +1198,68 @@ class VoiceChimeService:
         except Exception:
             logger.exception("创建 QMediaPlayer 失败（检查 QtMultimedia ffmpegmediaplugin）")
             return False
+
+    # ------------------------------------------------------------ 免打扰切断
+    def _attach_quiet_listener(self) -> None:
+        """订阅进程级免打扰状态边沿（幂等；随服务 start 走）。
+
+        用既有 ``QuietState.add_listener``，不改状态机：本服务只是它的第二个订阅方
+        （第一个是 ``QuietTicker``）。**必须与 stop() 成对**——订阅表持有的是绑定方法，
+        挂着不放就是一条指向半死服务的悬挂回调。
+        """
+        from . import quiet_mode
+
+        quiet_mode.shared_quiet_state().add_listener(self._on_quiet_state_changed)
+
+    def _detach_quiet_listener(self) -> None:
+        """摘掉免打扰订阅（幂等；随服务 stop 走）。"""
+        from . import quiet_mode
+
+        quiet_mode.shared_quiet_state().remove_listener(self._on_quiet_state_changed)
+
+    def _on_quiet_state_changed(self) -> None:
+        """免打扰状态边沿（GUI 线程，来自 QuietState 的订阅回调）。
+
+        只处理**进入**抑制态这一半：正在出声的那一段若尊重免打扰（报时 / 节日语音），
+        立即停掉。此前的三处静音闸只拦"未起播"（_fire / _handle_synthesized / 排队
+        入口），所以用户手动开免打扰或切全屏（``quiet_also_on_fullscreen`` 开）时，
+        已经起播的那一段会**一直放到完**——用户的开关不能等到这段放完。
+
+        ``respect_quiet=False`` 的交互应答（点击自言自语）**不切**：它与入口闸的豁免
+        是同一条口径（issue #208：点了就要有回应）。免打扰**退出**不补播，与 ``_fire``
+        的丢弃语义一致——这里对退出边沿什么都不做。
+
+        判据读``_quiet_muted()``（现读配置现值，全屏等效口径同 ``window_alerts``）。
+        """
+        if getattr(self, "_current_respect_quiet", None) is not True:
+            return
+        if not self._quiet_muted():
+            return
+        logger.info("免打扰生效，停止正在播放的语音")
+        self._stop_current_segment()
+        # 停掉这一段 = 通道空出，但**没有 EndOfMedia**（player.stop() 不产生媒体终止
+        # 事件），与"合成完成却没起播"是同一类结局：两个补播队列必须在这一拍结清，
+        # 否则留队的条目要等下一次合成完成（可能永远不来）。同序结算（报时优先），
+        # 判据在 drain 内部——豁免的待播语音照常出声，尊重免打扰的照常被丢弃。
+        self._drain_queued_fire()
+        self._drain_pending_speech()
+
+    def _stop_current_segment(self) -> None:
+        """立刻停住当前在播段，并放掉它的两个记账字段（不碰合成锁与队列）。
+
+        ``stop()``（关闭开关 / 退出）与免打扰切段两个调用方共用。
+        """
+        player = self._player
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:
+                logger.debug("停止语音播放失败（播放器可能已析构）", exc_info=True)
+        # ``player.stop()`` 不产生媒体终止态，且实测 stop 之后 ``mediaStatus`` 仍停在
+        # ``LoadedMedia``——"已发出 play、未见终止"标志必须在这里显式复位，否则通道
+        # 会被永久判忙（_player_engaged 的第三个子判据）。
+        self._play_pending_end = False
+        self._current_respect_quiet = None
 
     # ------------------------------------------------------------ 提示
     def _quiet_muted(self) -> bool:
@@ -1093,6 +1357,8 @@ class VoiceChimeService:
         logger.warning("语音合成超时未回调，复位合成锁（%.0fs）", _SYNTH_TIMEOUT_S)
         self._busy = False
         self._synthesis_role = "play"
+        # 解锁表已响过一次（单次表自然停表）；显式撤一下，让"由谁布、由谁撤"成对。
+        self._disarm_unlock_timer()
         # 代次递增 = 这次挂死的合成从此作废：它若日后才回调（网络超时后返回），
         # 回调带的旧代次会被 _on_synthesized 认出来并整条丢弃，不会串到随后起的
         # 新任务上（取走新任务的 role / respect_quiet / busy 锁）。

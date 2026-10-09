@@ -3,13 +3,15 @@
 
 断言走真实 ``ModernSettingsDialog``（设置窗口这个公开 seam），不碰私有调用顺序：
 默认值呈现、指标四开关（含 P3 的 GPU 占位行）与 ``island_metrics`` 的对应、
-依赖显隐（岛关 → 信息槽关 → 指标行）、保存回写（典范序）、脏值不炸设置页、子宠页置灰。
+依赖显隐（岛关 → 信息槽关 → 指标行）、保存回写（既有顺序保留 + 新勾选按典范序追尾）、
+脏值不炸设置页、子宠页可编辑（值落主配置）。
 
 ``island_metrics`` 是**唯一**的指标真值（旧键 ``island_network_enabled`` 只在归一化
 阶段单向迁移一次，设置页不再写它）。
 """
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -227,10 +229,11 @@ def test_save_writes_metrics_and_reloads(tmp_path, monkeypatch):
 
 
 def test_save_writes_the_canonical_metric_order(tmp_path, monkeypatch):
-    """四个复选框折成列表：按固定典范序 [network, cpu, mem, gpu] 过滤勾选态。
+    """配置里本来没有指标列表：全按典范序 [network, cpu, mem, gpu] 产出。
 
     复选框不表达顺序（拖动排序是后续版本的事），所以"勾了哪几个"必须落成唯一
     可预测的列表——顺序随勾选先后漂移会让岛上的段序在保存后莫名变化。
+    配置里已经有列表时保留原序，那是下一条用例的前半段。
     """
     dialog, cfg = _dialog(tmp_path, monkeypatch)
     try:
@@ -250,6 +253,39 @@ def test_save_writes_the_canonical_metric_order(tmp_path, monkeypatch):
     finally:
         dialog2.close()
     assert cfg2.get("island_metrics") == [NETWORK, CPU, MEM]
+
+
+def test_save_keeps_the_order_already_in_the_config(tmp_path, monkeypatch):
+    """保存不得把用户排好的顺序压回典范序（列表序 = 用户优先级 = 尾部先折叠）。
+
+    复选框只表达"在/不在"，顺序只存在于配置里——按固定序重写，等于用户手改
+    一次顺序后只要开过设置页保存就被改回去（折叠优先级是岛上的可见后果）。
+    契约：已有且仍勾选的按原序在前，新勾选的按 ``_METRIC_ORDER`` 追到末尾。
+    """
+    dialog, cfg = _dialog(tmp_path, monkeypatch, island_metrics=[MEM, CPU, NETWORK])
+    try:
+        dialog._write_config()
+    finally:
+        dialog.close()
+    assert cfg.get("island_metrics") == [MEM, CPU, NETWORK], "没碰过这几行的保存不得改顺序"
+
+    dropped, cfg_dropped = _dialog(tmp_path / "dropped", monkeypatch,
+                                  island_metrics=[MEM, CPU, NETWORK])
+    try:
+        dropped.island_cpu_check.setChecked(False)
+        dropped._write_config()
+    finally:
+        dropped.close()
+    assert cfg_dropped.get("island_metrics") == [MEM, NETWORK], "取消勾选的在原位淘汰"
+
+    added, cfg_added = _dialog(tmp_path / "added", monkeypatch,
+                               island_metrics=[MEM, NETWORK])
+    try:
+        added.island_gpu_check.setChecked(True)
+        added._write_config()
+    finally:
+        added.close()
+    assert cfg_added.get("island_metrics") == [MEM, NETWORK, GPU], "新勾选的追到末尾"
 
 
 def test_save_with_every_toggle_off_writes_an_empty_list(tmp_path, monkeypatch):
@@ -303,11 +339,11 @@ def test_network_rows_are_searchable(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------- 子宠页作用域
-def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
-    """子宠页：指标与网络键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
+def test_network_controls_are_editable_on_the_child_page(tmp_path, monkeypatch):
+    """子宠页：指标与网络键可编辑，保存落**主配置**（采样器/岛/菜单读的就是它）。
 
-    子宠页保存写 ``config-slot-N.json``，而采样器/岛/右键菜单一律读主配置，改了
-    等于没改；故如实置灰 + tooltip，主宠页不受影响。
+    这些键不在 ``PER_SLOT_SETTING_KEYS`` 里（子宠页曾经置灰：写了 slot 文件、
+    运行期读主配置 = 死开关）。独立设置进程现在按 key 分流到主配置，故恢复可用。
     """
     master, _cfg = _dialog(tmp_path, monkeypatch)
     child = settings_mod.ModernSettingsDialog(
@@ -319,11 +355,16 @@ def test_network_controls_are_main_pet_only(tmp_path, monkeypatch):
         child_controls = (child.island_network_check, child.island_cpu_check,
                           child.island_mem_check, child.network_probe_interval_spin,
                           child.network_info_menu_check)
-        for control in master_controls:
+        for control in master_controls + child_controls:
             assert control.isEnabled() is True
-        for control in child_controls:
-            assert control.isEnabled() is False
-            assert control.toolTip() == "仅主桌宠可设置"
+            assert control.toolTip() != "仅主桌宠可设置"
+
+        child.island_cpu_check.setChecked(True)
+        child.network_info_menu_check.setChecked(False)
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert "cpu" in on_disk["island_metrics"], "子宠页改的键必须真正生效"
+        assert on_disk["network_info_menu_enabled"] is False
     finally:
         for dlg in (master, child):
             dlg.close()
@@ -408,15 +449,22 @@ def test_save_writes_gpu_after_the_other_metrics(tmp_path, monkeypatch):
     assert cfg.get("island_metrics") == [NETWORK, CPU, MEM, GPU]
 
 
-def test_gpu_row_is_main_pet_only(tmp_path, monkeypatch):
-    """子宠页：gpu 与另三个指标开关同属进程级键 → 一并置灰。"""
+def test_gpu_row_is_editable_on_the_child_page(tmp_path, monkeypatch):
+    """子宠页：gpu 与另三个指标开关同属进程级键 → 同规可编辑，保存落主配置。"""
+    import json
+
     master, _cfg = _dialog(tmp_path, monkeypatch)
     child = settings_mod.ModernSettingsDialog(
         Config(base=tmp_path, instance_id="slot-1"), include_ai=True)
     try:
         assert master.island_gpu_check.isEnabled() is True
-        assert child.island_gpu_check.isEnabled() is False
-        assert child.island_gpu_check.toolTip() == "仅主桌宠可设置"
+        assert child.island_gpu_check.isEnabled() is True
+        assert child.island_gpu_check.toolTip() != "仅主桌宠可设置"
+
+        child.island_gpu_check.setChecked(True)
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert GPU in on_disk["island_metrics"], "子宠页改的键必须真正生效"
     finally:
         for dlg in (master, child):
             dlg.close()

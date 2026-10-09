@@ -1007,7 +1007,6 @@ python scripts/convert_to_gif.py --force --clean
 pet/
 ├── app.py                    # AppShell + PetInstance：进程级/每窗容器与装配（托盘、多窗共享）
 ├── config.py                 # 配置读取、迁移和持久化（reload 白名单 + schema 测试）
-├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
 ├── window.py                 # 桌宠主窗口（组合根；碰撞/平台层/动画链已拆出，受行数预算红线）
 ├── window_optional_services.py # 窗口可选服务懒装配 mixin（todo/file_eater 等）
 ├── collision.py              # 碰撞物理核心（纯 Python，无 Qt）

@@ -29,7 +29,6 @@ from .settings_widgets import (
     BrowserDoubleSpinBox,
     SettingRow,
     ToggleSwitch,
-    mark_main_pet_only,
 )
 
 #: 探测间隔的展示口径（真值口径在 net_monitor.clamp_interval，不在这里重写一份）
@@ -38,10 +37,11 @@ _MAX_INTERVAL = net_monitor.MAX_INTERVAL_SECONDS
 _DEFAULT_INTERVAL = net_monitor.DEFAULT_INTERVAL_SECONDS
 
 #: 指标行：``(段 id, 行 objectName 键, 行 label, 行 hint)``。
-#: **本元组的顺序就是写回 ``island_metrics`` 的固定典范序**（唯一来源，下面的
-#: ``_METRIC_ORDER`` 从它派生）：复选框不表达顺序（拖动排序留给后续版本），
-#: 几个布尔态只能折成一个列表，那就定死一序——否则"先勾内存再勾网络"会让保存后
-#: 的段序随勾选先后漂移，用户看不出为什么岛上的顺序变了。要自定义顺序等排序 UI。
+#: **本元组的顺序就是 ``_METRIC_ORDER``：新勾选项写回 ``island_metrics`` 的追加序**
+#: （唯一来源，下面从它派生）。复选框不表达顺序（拖动排序留给后续版本），
+#: 几个布尔态只能折成一个列表，那就给"新勾的"定死一序——否则"先勾内存再勾网络"
+#: 会让保存后的段序随勾选先后漂移，用户看不出为什么岛上的顺序变了。要自定义顺序
+#: 先改配置文件的列表序（保存保留它，见 ``save_network_settings``）、或等排序 UI。
 #: **新行一律追加在末尾**（P3 的 gpu 就是这么加的）：把新行插进中间会让老用户
 #: 保存一次就把自己的段序重排一次——那是用户看不见的破坏。
 #: 行 label 一律含「灵动岛指标」，CPU / 内存各一行（设置搜索按 label 命中）。
@@ -131,13 +131,8 @@ def create_network_controls(dialog) -> None:
             bool(dialog.config.get("network_info_menu_enabled", True)))
 
     # 这几个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，采样器/岛/右键菜单一律读
-    # 主配置）：子宠页改了不生效，如实置灰。
-    mark_main_pet_only(
-        dialog,
-        *(getattr(dialog, _metric_attr(metric_id), None) for metric_id in _METRIC_ORDER),
-        getattr(dialog, "network_probe_interval_spin", None),
-        getattr(dialog, "network_info_menu_check", None),
-    )
+    # 主配置）：子宠页保存由设置进程的配置路由直写主配置
+    # （pet/settings_slot_config.py），改了真生效——此前按死开关口径置灰，现摘除。
 
 
 def _fit_spin_to_content(spin) -> None:
@@ -264,17 +259,23 @@ def _install_visibility(dialog, rows: list[SettingRow]) -> None:
 def save_network_settings(dialog) -> None:
     """_write_config 委托：把指标列表与另两键写回 config（保存时调用一次）。
 
-    列表按**固定典范序** ``[network, cpu, mem, gpu]`` 过滤勾选态生成（取舍与
-    "新行追加在末尾"的理由见 ``_METRIC_ORDER``）；旧键 ``island_network_enabled``
-    不再写——它是归一化阶段的一次性迁移来源，在设置页再写一遍就会重新长出
-    "第二个真值"。
+    写回列表 = **保留配置里的既有顺序** + 新勾选的按典范序追尾：复选框只表达
+    "在/不在"（顺序属于配置，列表序 = 用户优先级 = 尾部先折叠，见 config 的
+    ``island_metrics`` 键注释）。无条件按典范序重写会把用户手改的顺序压回去，
+    所以已有且仍勾选的按原序在前、取消勾选的自然淘汰、新勾选的按
+    ``_METRIC_ORDER`` 追到末尾（"新行追加在末尾"的取舍见 ``_METRIC_ROWS``）——
+    勾选先后依旧不影响顺序。旧键 ``island_network_enabled`` 不再写——它是归一化
+    阶段的一次性迁移来源，在设置页再写一遍就会重新长出"第二个真值"。
     """
     if getattr(dialog, "island_network_check", None) is None:
         return
-    dialog.config.set("island_metrics", [
+    checked = {
         metric_id for metric_id in _METRIC_ORDER
         if getattr(dialog, _metric_attr(metric_id)).isChecked()
-    ])
+    }
+    kept = [metric_id for metric_id in _checked_metrics(dialog) if metric_id in checked]
+    dialog.config.set("island_metrics",
+                      kept + [m for m in _METRIC_ORDER if m in checked and m not in kept])
     dialog.config.set("network_probe_interval_seconds", _spin_value(dialog))
     dialog.config.set("network_info_menu_enabled",
                       bool(dialog.network_info_menu_check.isChecked()))

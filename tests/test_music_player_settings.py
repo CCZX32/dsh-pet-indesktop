@@ -377,12 +377,14 @@ def test_save_source_settings_skips_missing_widgets(tmp_path):
     assert cfg.get("foobar_lyrics_enabled") is True, "缺控件不该把开关写成 False"
 
 
-def test_foobar_controls_are_main_pet_only(monkeypatch, tmp_path):
-    """子宠页：foobar 两键是进程级歌词源开关（不在 PER_SLOT_SETTING_KEYS）→ 置灰。
+def test_foobar_controls_are_editable_on_the_child_page(monkeypatch, tmp_path):
+    """子宠页：foobar 两键可编辑，保存落**主配置**（歌词源解析读的就是它）。
 
-    子宠页保存写 ``config-slot-N.json``，而歌词源解析读主配置，改了等于没改；
-    故如实置灰 + tooltip，主宠页不受影响。
+    这两个键不在 ``PER_SLOT_SETTING_KEYS`` 里（子宠页曾经置灰：写了 slot 文件、
+    运行期读主配置 = 死开关）。独立设置进程现在按 key 分流到主配置，故恢复可用。
     """
+    import json
+
     from pet import settings_music
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
@@ -394,12 +396,18 @@ def test_foobar_controls_are_main_pet_only(monkeypatch, tmp_path):
                                  include_ai=False)
     try:
         assert master.foobar_lyrics_check is not None, "用例前置：Windows 下应建出控件"
-        assert master.foobar_lyrics_check.isEnabled() is True
-        assert master.foobar_title_format_edit.isEnabled() is True
-        for control in (child.foobar_lyrics_check, child.foobar_title_format_edit):
+        for control in (master.foobar_lyrics_check, master.foobar_title_format_edit,
+                        child.foobar_lyrics_check, child.foobar_title_format_edit):
             assert control is not None
-            assert control.isEnabled() is False
-            assert control.toolTip() == "仅主桌宠可设置"
+            assert control.isEnabled() is True
+            assert control.toolTip() != "仅主桌宠可设置"
+
+        child.foobar_lyrics_check.setChecked(True)
+        child.foobar_title_format_edit.setText("%artist% - %title%")
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["foobar_lyrics_enabled"] is True, "子宠页改的键必须真正生效"
+        assert on_disk["foobar_title_format"] == "%artist% - %title%"
     finally:
         for dialog in (master, child):
             dialog.close()
@@ -407,13 +415,10 @@ def test_foobar_controls_are_main_pet_only(monkeypatch, tmp_path):
         app.processEvents()
 
 
-def test_browser_media_control_is_main_pet_only(monkeypatch, tmp_path):
-    """子宠页：「浏览器媒体会话参与歌词」与 foobar 同 `_SOURCE_SWITCHES` 组 → 同规置灰。
+def test_browser_media_control_is_editable_on_the_child_page(monkeypatch, tmp_path):
+    """子宠页：「浏览器媒体会话参与歌词」与 foobar 同组同规——可编辑 + 落主配置。"""
+    import json
 
-    两个键的读取形态完全一致（``music_lyric_controller`` 的
-    ``self.win.cfg.get(...)``），只处置其中一个会留下同一行块里一个同样不生效的
-    兄弟开关。
-    """
     from pet import settings_music
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
@@ -426,8 +431,13 @@ def test_browser_media_control_is_main_pet_only(monkeypatch, tmp_path):
     try:
         assert master.music_browser_media_check is not None, "用例前置：Windows 下应建出控件"
         assert master.music_browser_media_check.isEnabled() is True
-        assert child.music_browser_media_check.isEnabled() is False
-        assert child.music_browser_media_check.toolTip() == "仅主桌宠可设置"
+        assert child.music_browser_media_check.isEnabled() is True
+        assert child.music_browser_media_check.toolTip() != "仅主桌宠可设置"
+
+        child.music_browser_media_check.setChecked(True)
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["music_browser_media_enabled"] is True
     finally:
         for dialog in (master, child):
             dialog.close()
@@ -435,12 +445,10 @@ def test_browser_media_control_is_main_pet_only(monkeypatch, tmp_path):
         app.processEvents()
 
 
-def test_music_player_pickers_are_main_pet_only(tmp_path):
-    """子宠页：播放器路径两键是进程级（右键菜单读 host 配置面）→ 置灰。
+def test_music_player_pickers_are_editable_on_the_child_page(tmp_path):
+    """子宠页：播放器路径两键与「自动检测」可编辑，保存落主配置（右键菜单读它）。"""
+    import json
 
-    「自动检测」按钮只服务这两行（填进去也没人读），一并置灰，免得留个点了没用的
-    入口；主宠页两个选择器与按钮都不受影响。
-    """
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
 
@@ -449,15 +457,18 @@ def test_music_player_pickers_are_main_pet_only(tmp_path):
     child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
                                  include_ai=False)
     try:
-        for picker in _pickers(master):
+        for picker in _pickers(master) + _pickers(child):
             assert picker.isEnabled() is True
+            assert picker.toolTip() != "仅主桌宠可设置"
         assert master.music_player_detect_btn.isEnabled() is True
+        assert child.music_player_detect_btn.isEnabled() is True
 
-        for picker in _pickers(child):
-            assert picker.isEnabled() is False
-            assert picker.toolTip() == "仅主桌宠可设置"
-        assert child.music_player_detect_btn.isEnabled() is False
-        assert child.music_player_detect_btn.toolTip() == "仅主桌宠可设置"
+        _pickers(child)[0].setText(r"D:\CloudMusic\cloudmusic.exe")
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["music_player_paths"] == {
+            "netease": r"D:\CloudMusic\cloudmusic.exe"
+        }
     finally:
         for dialog in (master, child):
             dialog.close()

@@ -603,7 +603,11 @@ def _pump(seconds: float) -> None:
 
 
 def test_spawn_in_process_slot_scan_cap_raises(tmp_path, app, monkeypatch):
-    """D6：slot 身份扫描超过上限抛 SpawnStateError（不许无限循环）。"""
+    """D6：128 个身份**全在活跃集合**时抛 SpawnStateError（不许无限循环）。
+
+    B01 起「目录里全是历史配置」不再等于耗尽（改为复用最小退役身份）；真耗尽
+    只剩「128 个身份同时活跃」这一条，本用例以活跃窗集合模拟该极限。
+    """
     from pet import overlay_spawn_state
 
     shell, _config, _handle = _make_primary_with_slot(tmp_path)
@@ -611,6 +615,8 @@ def test_spawn_in_process_slot_scan_cap_raises(tmp_path, app, monkeypatch):
         overlay_spawn_state, "scan_slot_configs",
         lambda *_a, **_k: set(
             range(1, overlay_spawn_state.MAX_SCAN_SLOTS + 1)))
+    shell._instances = [type("Inst", (), {"slot_id": slot})()
+                        for slot in range(1, overlay_spawn_state.MAX_SCAN_SLOTS + 1)]
     with pytest.raises(overlay_spawn_state.SpawnStateError):
         shell.spawn_in_process_window(1)
 

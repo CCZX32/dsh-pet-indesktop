@@ -12,7 +12,8 @@
    （``click_sound_enabled``）重置后**立即**写盘——落盘时机跟着该行自己的保存语义，
    重置不新增写回路径；
 4. 重置后保存并退出 → 新开的 Config 读回默认值（round trip 不绕开既有写回）；
-5. 子宠页的进程级行依旧置灰且**不提供重置入口**（同页的 per-slot 行不受影响）；
+5. 子宠页**真正**主桌宠专属的行（写 OS 登录项的开机自启）依旧置灰且**不提供重置
+   入口**（同页的 per-slot 行、以及改由配置路由接管的进程级行都不受影响）；
 6. 被依赖开关隐藏的行不显示标记；前置开关重新打开后标记回来（不做可见性记账）；
 7. 没有可比配置默认值的行（逐服务商字段 / 列表成员 / UI 记忆）不显示标记也不报错，
    四类之外的控件类型同样不参与。
@@ -316,7 +317,7 @@ def test_no_chat_build_still_installs_marks(tmp_path, monkeypatch):
         app.processEvents()
 
 
-# —— ⑤ 子宠页：进程级行置灰且不提供重置 ————————————————————————
+# —— ⑤ 子宠页：主宠专属行置灰且不提供重置 ————————————————————————
 
 def test_sub_pet_page_keeps_main_pet_only_rows_locked(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
@@ -325,11 +326,14 @@ def test_sub_pet_page_keeps_main_pet_only_rows_locked(tmp_path, monkeypatch):
     dialog.show()
     app.processEvents()
     try:
-        locked = _row(dialog, "harness_launch_target")
+        # 子宠页仍有一类**真正**主桌宠专属的行：开机自启写的是 OS 登录项，与哪只
+        # 桌宠无关（那些"进程级但声明读主配置"的键已改由设置进程的配置路由接管，
+        # 见 pet/settings_slot_config.py，harness 两行随之可编辑）。
+        locked = _row(dialog, "autostart")
         _reveal(dialog, locked)
-        locked.control.setCurrentData("web")
+        locked.control.setChecked(True)
         app.processEvents()
-        # 改得动数据也不行：进程级键在子宠页置灰，且不给"改回默认"入口
+        # 改得动数据也不行：主桌宠专属的行在子宠页置灰，且不给"改回默认"入口
         assert locked.control.isEnabled() is False
         assert not locked.modified_mark.isHidden()
         assert locked.default_reset_button.isVisible() is False

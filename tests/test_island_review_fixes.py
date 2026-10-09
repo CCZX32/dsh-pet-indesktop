@@ -9,7 +9,9 @@
   DSH 关闭 offline（用例在 tests/test_agent_link.py::TestDshDisableResetsPresentationState）
 - 网络包络振荡的回归在 ``test_island_network_envelope.py``（astra 阻塞 1）
 
-- R1-2 工作上升沿弹跳必须过与 ``notify_event`` 同一道闸门（event_effects + 免打扰）
+- R1-2 工作上升沿弹跳必须过与 ``notify_event`` 同一道闸门（event_effects + 免打扰；
+  2026-10-08 补：免打扰那一半的全屏口径必须读宿主 ``quiet_also_on_fullscreen``，
+  不许吃 ``suppression_active`` 的默认参数）
 - R1-3 squish 拉伸期（sy>1）横向只鼓不缩，宽岛内容不出外壳
 - R1-4 FontChange 后普通胶囊的窗口几何与行计划同步
 - R1-5 展开卡片 hover 暂停 15s 自动收起（离开重新倒计时）
@@ -132,6 +134,39 @@ def test_work_edge_bounce_respects_event_effects_and_quiet_mode(monkeypatch):
         assert bounces == [], "免打扰期间工作上升沿不许弹"
         # 状态本身照常（读数照常是 DND 规则的另一半）
         assert island._dsh_state == DshState.WORKING.value
+    finally:
+        island.close()
+
+
+def test_work_edge_bounce_reads_the_fullscreen_quiet_config(monkeypatch):
+    """全屏那一半的弹跳闸必须读宿主配置，不许吃 ``suppression_active`` 的默认参数。
+
+    ``quiet_also_on_fullscreen`` 关掉后全屏不算免打扰（quiet_mode 的口径：判据不
+    自己读配置，由调用方给），原先这条闸调 ``suppression_active()`` 吃默认 True，
+    于是用户在全屏游戏/视频里开工弹跳永远出不来。口径与
+    ``window_alerts.quiet_blocked`` 对齐——从岛自己持有的配置取。
+    """
+    state = quiet_mode.QuietState()
+    state.set_fullscreen(True)
+    monkeypatch.setattr(quiet_mode, "shared_quiet_state", lambda: state)
+
+    island = _island(monkeypatch)
+    try:
+        island.config.set("quiet_also_on_fullscreen", False)
+        bounces = []
+        monkeypatch.setattr(island, "_bounce", lambda impulse=4.0: bounces.append(impulse))
+        island.set_dsh_state(DshState.WORKING.value)
+        assert bounces == [3.0], "关掉「全屏时自动免打扰」后，全屏里的开工弹跳必须照弹"
+    finally:
+        island.close()
+
+    island = _island(monkeypatch)
+    try:
+        island.config.set("quiet_also_on_fullscreen", True)
+        bounces = []
+        monkeypatch.setattr(island, "_bounce", lambda impulse=4.0: bounces.append(impulse))
+        island.set_dsh_state(DshState.WORKING.value)
+        assert bounces == [], "开关开着时全屏仍等效免打扰：不许弹"
     finally:
         island.close()
 

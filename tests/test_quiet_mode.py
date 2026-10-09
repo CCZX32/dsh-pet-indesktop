@@ -1043,12 +1043,14 @@ def test_config_defaults_match_quiet_mode_constants(tmp_path):
 
 
 # ---------------------------------------------------------------- 子宠页作用域
-def test_quiet_controls_are_main_pet_only(qapp, tmp_path):
-    """子宠页：免打扰两键是进程级默认值（不在 PER_SLOT_SETTING_KEYS）→ 置灰。
+def test_quiet_controls_are_editable_on_the_child_page(qapp, tmp_path):
+    """子宠页：免打扰两键可编辑，保存落**主配置**（消费方读的就是它）。
 
-    子宠页保存写 ``config-slot-N.json``，而免打扰的消费方（右键菜单命令、全屏
-    联动、托盘的默认档）一律读主配置，改了等于没改；故如实置灰 + tooltip。
+    这两个键不在 ``PER_SLOT_SETTING_KEYS`` 里（子宠页曾经置灰：写了 slot 文件、
+    运行期读主配置 = 死开关）。独立设置进程现在按 key 分流到主配置，故恢复可用。
     """
+    import json
+
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
 
@@ -1056,12 +1058,20 @@ def test_quiet_controls_are_main_pet_only(qapp, tmp_path):
     child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
                                  include_ai=False)
     try:
-        assert master.quiet_minutes_select.isEnabled() is True
-        assert master.quiet_also_on_fullscreen_check.isEnabled() is True
-        for control in (child.quiet_minutes_select,
+        for control in (master.quiet_minutes_select,
+                        master.quiet_also_on_fullscreen_check,
+                        child.quiet_minutes_select,
                         child.quiet_also_on_fullscreen_check):
-            assert control.isEnabled() is False
-            assert control.toolTip() == "仅主桌宠可设置"
+            assert control.isEnabled() is True
+            assert control.toolTip() != "仅主桌宠可设置"
+
+        child.quiet_minutes_select.setCurrentIndex(
+            child.quiet_minutes_select.findData(120))
+        child.quiet_also_on_fullscreen_check.setChecked(True)
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["quiet_minutes_default"] == 120, "子宠页改的键必须真正生效"
+        assert on_disk["quiet_also_on_fullscreen"] is True
     finally:
         for dialog in (master, child):
             dialog.close()

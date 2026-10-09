@@ -1718,3 +1718,101 @@ def test_resample_after_disable_enable_is_processed(qapp, monkeypatch):
     finally:
         ctrl.shutdown()
 
+
+
+# ------------------------------------------ 取词在飞期间的暂停（B05）
+
+
+def test_pause_during_lyric_fetch_is_not_counted_as_playback(monkeypatch):
+    """取词在飞期间按的暂停不算播放时间（B05）。
+
+    网易云这类播放器不上报进度，位置只能按"检测到切歌的时刻"往下估算；而取词那
+    几秒里 tracker 里还没有歌词，``set_paused`` 冻结不了任何东西（位置基准要等
+    歌词到位才由 ``load()`` 建立），暂停边沿也就没人记。结果取词回来按
+    ``now - detected`` 估算时把暂停时长算成播放进度，歌词当场跳到未来。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)   # 取词停在"在飞"
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))          # 检测到歌 → 取词在飞
+    assert ctrl._current_key == key and key in ctrl._loading
+    assert ctrl._tracker.has_lyrics is False
+
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))   # 暂停
+    clock.now = 104.0
+    ctrl._on_playback_ready(_playback(None, playing=False))   # 还在暂停（同一段，不重复记）
+    ctrl._on_playback_ready(_playback(None))                  # 恢复播放
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    # 真实播放时间 = 105 - 100 - 3 = 2s（LINES: A0 B5 C10 D15 → 还没唱到第一句）
+    assert ctrl._tracker.position(105.0) == pytest.approx(2.0)
+    assert ctrl._tracker.has_lyrics is True
+    assert ctrl.align_available() is True, "估算位置仍然要能手动对齐"
+    # 暂停区间的结算：段内重复采样不重复记，恢复那一拍封口。
+    assert ctrl._paused_since is None and ctrl._paused_total == pytest.approx(3.0)
+
+
+def test_pause_still_open_when_lyrics_arrive_freezes_clock(monkeypatch):
+    """取词回来时仍在暂停：以暂停态装载、**不立即显示**，恢复后从正确位置接上。
+
+    暂停中的歌词位置必须冻结在"暂停那一刻"：``load()`` 会清掉暂停态，不显式冻结
+    的话恢复播放后基准仍从 load 的时刻起算，暂停的这几秒又会被算成播放时间。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    shown_before = list(win.shown)
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    assert win.shown == shown_before, "仍暂停时不显示歌词（恢复播放那一拍再显示）"
+    assert ctrl._tracker.position(105.0) == pytest.approx(1.0), "105-100-4=1s"
+    # 暂停期间位置不动
+    assert ctrl._tracker.position(108.0) == pytest.approx(1.0)
+
+    clock.now = 110.0
+    ctrl._on_playback_ready(_playback(None))          # 恢复播放
+    assert ctrl._tracker.position(110.0) == pytest.approx(1.0), "从冻结处顺延，不跳"
+    assert win.shown[-1] == ("我在唱《t》", "A"), win.shown[-1]
+
+    clock.now = 111.0
+    ctrl._on_playback_ready(_playback(None))
+    assert ctrl._tracker.position(111.0) == pytest.approx(2.0), "恢复后按真实播放时间走"
+
+
+def test_pause_bookkeeping_resets_on_track_change(monkeypatch):
+    """切歌重置暂停记账：上一首的暂停时长绝不能算进下一首的进度。"""
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+
+    ctrl._on_playback_ready(_playback(None))
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    assert ctrl._paused_since == pytest.approx(101.0)
+
+    clock.now = 102.0
+    ctrl._on_playback_ready(_playback(None, title="other", artist="x"))
+
+    assert ctrl._paused_since is None
+    assert ctrl._paused_total == pytest.approx(0.0)

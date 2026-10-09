@@ -3,7 +3,7 @@
 
 覆盖规格里的六件事：
 1. --settings 入口分流（免 pet.app、standalone 标志、单实例锁）；
-2. standalone 保存前 reload 合并（不覆盖主进程中途改的盘）；
+2. standalone 保存前 reload 合并（不覆盖主进程中途改的盘；即存型开关同此契约）；
 3. config 目录 watcher 触发应用链；
 4. 主进程单实例锁（已持有不再拉起）与 startDetached 失败回退进程内；
 5. 独立设置进程存活期气泡抑制；
@@ -179,6 +179,42 @@ def test_standalone_save_merges_external_disk_change(tmp_path):
         assert config.get("pnpm_bin") == "C:/tools/pnpm.cmd"
         on_disk = json.loads(Path(config.path).read_text(encoding="utf-8"))
         assert on_disk["pnpm_bin"] == "C:/tools/pnpm.cmd"
+    finally:
+        dialog.deleteLater()
+
+
+def test_immediate_sound_toggles_do_not_roll_back_external_changes(tmp_path):
+    """即存型音效开关写盘前也必须 reload：整表落盘不得盖回外部改的他键。
+
+    ``Config.save()`` 写的是**整份内存视图**，而设置默认跑在独立进程里——内存
+    快照从启动起就陈旧。用户开着设置窗时通过托盘改了别的键（这里用
+    ``mouse_through`` 当探针），随手拨一下音效开关就把托盘改动回滚了。
+    ``_write_config`` 早就有这条 reload 契约，两个即存回调漏了同一步。
+    """
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    _qapp()
+    config = Config(base=tmp_path)
+    dialog = ModernSettingsDialog(config, include_ai=False, standalone=True)
+    try:
+        external = Config(base=tmp_path)
+        external.set("mouse_through", True)
+        assert external.save()
+
+        dialog._apply_agent_sound_enabled_now(True)
+        on_disk = json.loads(Path(config.path).read_text(encoding="utf-8"))
+        assert on_disk["agent_link"]["sound_enabled"] is True, "目标键要写进去"
+        assert on_disk["mouse_through"] is True, "外部改的他键被旧快照盖回去了"
+
+        external = Config(base=tmp_path)
+        external.set("mouse_through", False)
+        assert external.save()
+
+        dialog._apply_click_sound_enabled_now(False)
+        on_disk = json.loads(Path(config.path).read_text(encoding="utf-8"))
+        assert on_disk["click_sound_enabled"] is False, "目标键要写进去"
+        assert on_disk["agent_link"]["sound_enabled"] is True, "上一次即存写入不该被回滚"
+        assert on_disk["mouse_through"] is False, "外部改的他键被旧快照盖回去了"
     finally:
         dialog.deleteLater()
 

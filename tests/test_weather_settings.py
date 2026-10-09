@@ -194,21 +194,31 @@ def _main_and_sub_dialogs(tmp_path, monkeypatch):
     return master, child
 
 
-def test_weather_controls_are_main_pet_only(tmp_path, monkeypatch):
-    """子宠页：天气三键是进程级（不在 PER_SLOT_SETTING_KEYS，运行时读主配置）→ 置灰。
+def test_weather_controls_are_editable_on_the_child_page(tmp_path, monkeypatch):
+    """子宠页：天气三键可编辑，保存落**主配置**（消费方读的就是它）。
 
-    子宠页保存写 ``config-slot-N.json``，而这些键的消费方一律读主配置，改了等于
-    没改；故如实置灰 + tooltip，主宠页不受影响。
+    这三个键不在 ``PER_SLOT_SETTING_KEYS`` 里（子宠页曾经置灰：写了 slot 文件、
+    运行期读主配置 = 死开关）。独立设置进程现在按 key 分流到主配置，故恢复可用。
     """
+    import json
+
     master, child = _main_and_sub_dialogs(tmp_path, monkeypatch)
     try:
         for control in (master.weather_enabled_check, master.weather_city_edit,
-                        master.weather_city_list_edit):
-            assert control.isEnabled() is True
-        for control in (child.weather_enabled_check, child.weather_city_edit,
+                        master.weather_city_list_edit,
+                        child.weather_enabled_check, child.weather_city_edit,
                         child.weather_city_list_edit):
-            assert control.isEnabled() is False
-            assert control.toolTip() == "仅主桌宠可设置"
+            assert control.isEnabled() is True
+            assert control.toolTip() != "仅主桌宠可设置"
+
+        child.weather_enabled_check.setChecked(False)
+        child.weather_city_edit.setText("鹿城")
+        child.weather_city_list_edit.setPlainText("北京\n鹿城")
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["weather_enabled"] is False, "子宠页改的键必须真正生效"
+        assert on_disk["weather_city"] == "鹿城"
+        assert on_disk["weather_city_list"] == ["北京", "鹿城"]
     finally:
         for dlg in (master, child):
             dlg.close()

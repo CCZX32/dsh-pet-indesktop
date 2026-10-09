@@ -83,6 +83,54 @@ recovery
 
 ## 变更记录
 
+### 2026-10-09 — 子宠设置页的配置读写路由（架构级死开关修复）
+
+本刀**不新增、不改动、不移除任何设置项**：配置键、默认值、归属、依赖与迁移零改动；
+改的是**保存语义与置灰可见性**（本文适用范围里的「保存语义」与「平台可见性」中的
+身份可见性）。键集、行键、搜索索引、默认值标记表一个都没动。
+
+| 项 | 本刀口径 |
+|---|---|
+| 问题 | overlay 拓扑下右键子宠 → 桌宠设置跑在独立设置进程里（`--instance slot-N` → 读写 `config-slot-N.json`），而运行期只有 `PER_SLOT_SETTING_KEYS` 的键逐宠取源（`overlay_shell._SpriteConfig.get`），**其余键一律读主配置**。于是子宠页上「语音报时 / 节日 / 待办 / 灵动岛 / 菜单外观 / 窗口级 7 键 …」约百行：保存成功、回显正确、运行期零效果。窗口级 7 行还标着「（对所有桌宠生效）」——实际对所有桌宠都不生效 |
+| 修法 | 设置进程的配置面按 key 分流（新增 `pet/settings_slot_config.py`）：分流键 → slot 文件，写走既有 `overlay_spawn_state.write_slot_setting` 的原子单键写（保留 `user_customized` 语义）；其余键 → 主 `config.json`，落盘遵守 **reload → set → save**（`Config.save` 是整表写，不先重读会盖回主进程/托盘的并发改动）。装配点是 `ModernSettingsDialog.__init__` 的配置入口（控件从配置构造，路由必须在构造前就位，否则初值仍来自 slot 文件的无效快照） |
+| 分流范围 | 仅 **overlay 拓扑下的 slot 身份**。主宠设置进程（无 `--instance`）与 legacy 单窗（含捕获模式）原样返回同一个配置对象、行为逐位不变——legacy 里那只宠读的就是自己那份 `config-slot-N.json` 的**全部**键，分流反而会让它的设置失效 |
+| 键集单一来源 | `PER_SLOT_SETTING_KEYS` 从 `overlay_shell.py` 挪进零 Qt 的 `overlay_spawn_state.py`（独立设置进程禁止导入 overlay_shell：会连带素材库/ffmpeg/托盘），壳侧改为引用它；`tests/test_settings_slot_config_route.py` 用 `is` 钉住两侧是同一对象。分流键集 = 该集合 ∪ `{"collision_enabled"}`（它有专属逐宠读点 `read_slot_collision_enabled`，写主配置既改不动这只宠也会改掉别的宠的继承值） |
+| 恢复默认 | `SlotRoutedConfig.reset_to_defaults` 只重置 slot 身份文件，**主配置一个键都不碰**。未闸住时 `Config.reset_to_defaults` 的整表语义会打到所有桌宠共用的主配置上（消融实测：`pet_opacity` 66→100、`voice_chime_enabled` True→False） |
+| 置灰摘除 | 原先因「改了等于没改」置灰的 7 处恢复可用（清单见下）；`settings_widgets.mark_main_pet_only` / `MAIN_PET_ONLY_TOOLTIP` 随之无消费者，整块删除。**仍在置灰**（理由与本问题不同）：开机自启（OS 登录项，`settings_pet_controls`）、直播捕获兼容（拓扑输入 + 捕获模式下 spawn 入口本就拒绝，`tests/test_stream_capture_copy.py` 另钉）、harness 的 desktop 平台项 |
+| 窗口级 7 行 | 「（对所有桌宠生效）」标注保留——路由接通后它变成真话 |
+| 不做 | 不改 `PER_SLOT_SETTING_KEYS` 内容、不改 slot 迁移/落种逻辑、不改 `settings.lock` 机制、不改 `collision_enabled` 的专属读点、不给分支加设置项 |
+
+置灰摘除清单（每组同一句理由：进程级键 + 子宠页曾写 slot 文件 + 运行期只读主配置）：
+
+| 位置 | 键 |
+|---|---|
+| `settings_music.py` 播放器路径两行 + 「自动检测」按钮 | `music_player_paths`（右键菜单与 `music_players` 读主配置） |
+| `settings_music.py` 浏览器媒体会话 | `music_browser_media_enabled`（歌词源解析读主配置） |
+| `settings_music.py` foobar 两行 | `foobar_lyrics_enabled` / `foobar_title_format`（歌词源解析读主配置） |
+| `settings_network.py` 指标四开关 + 探测间隔 + 菜单入口 | `island_metrics` / `network_probe_interval_seconds` / `network_info_menu_enabled`（采样器/岛/右键菜单读主配置） |
+| `settings_quiet.py` 免打扰两行 | `quiet_minutes_default` / `quiet_also_on_fullscreen`（右键菜单命令、全屏联动、托盘读主配置） |
+| `settings_weather.py` 天气三行 | `weather_enabled` / `weather_city` / `weather_city_list`（右键菜单与「查看天气」读主配置） |
+| `modern_settings_dialog.py` harness 自启开关 + 目标下拉 | `harness_autostart` / `harness_launch_target`（服务拉起读主配置） |
+
+准出对应：
+
+1. **契约**：无键/默认值/归属/依赖/迁移变更；搜索索引、行键、默认值标记覆盖率与
+   页内分组一字未改。失败路径不新增：保存失败时的报错路径仍是设置进程启动时那份
+   slot 文件路径（两份文件同目录，未变）。
+2. **TDD**：新增 `tests/test_settings_slot_config_route.py` 11 例（保存路由、per-slot
+   键不污染主配置、初值路由、恢复默认只碰 slot 文件、reload-merge 并发纪律、主身份/
+   legacy/非 slot 身份不分流、键集单一来源、harness 置灰摘除）；4 个既有文件的置灰
+   用例改为「可编辑 + 值落主配置」的契约（`test_music_player_settings.py` 3 例、
+   `test_quiet_mode.py`、`test_weather_settings.py`、`test_settings_network.py` 2 例）。
+   三组消融（撤分流 / 撤恢复默认闸 / 撤落盘前重读）各自令对应用例变红，先红后绿证据
+   在案。
+3. **布局与可访问性**：无新增控件、无新增 QSS、无行序变化；摘除置灰只影响
+   `setEnabled` 与 tooltip（子宠页这些行现在与主宠页同态）。
+4. **跨平台**：产品代码无新平台分支（路由只判拓扑与身份）；真实 GUI 验收仅本机
+   Windows（离屏平台 + 真实控件与真实配置文件断言），macOS / Linux 未跑（不推断）。
+5. **视觉与文档**：本记录即变更记录；`mark_main_pet_only` 的删除与仍在置灰的两处
+   已在上表登记。
+
 ### 2026-10-08 — 右键菜单模板键退役（`context_menu_template`，唯一设置项删除）
 
 旧版扁平右键菜单全量退役 ⇒ 唯一在设置页表达它的持久设置 `context_menu_template`

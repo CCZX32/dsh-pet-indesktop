@@ -757,8 +757,7 @@ def _clean_character_profiles(value) -> dict:
 def _clean_collision_data(value: dict) -> dict:
     """归一化碰撞设置：collision_* 一组 7 键。
 
-    从 Config._normalize_pet_settings 原样上提为模块级纯函数，供 Config 与
-    config_domains 的 CollisionConfig 共用；清洗逻辑本体一行未改。
+    从 Config._normalize_pet_settings 原样上提为模块级纯函数；清洗逻辑本体一行未改。
     """
     result = dict(value)
     result["collision_enabled"] = _bool_or_default(value.get("collision_enabled"), True)
@@ -1929,34 +1928,6 @@ class Config:
 
     def set_chat_settings(self, settings):
         self.data["chat"] = settings.to_dict(include_secrets=True)
-
-    # ---- 域 facade 便捷入口（批5：只建不用，调用点未迁移）----
-    # 返回对应域的轻量视图（pet/config_domains.py）。normalize 复用本模块现有
-    # _merge_*/_clean_* 函数；facade 只读，不写盘、不碰 secret 保留/version 迁移。
-    def chat_config(self):
-        from .config_domains import ChatConfig
-
-        return ChatConfig.from_dict(self.data.get("chat", {}))
-
-    def agent_link_config(self):
-        from .config_domains import AgentLinkConfig
-
-        return AgentLinkConfig.from_dict(self.data.get("agent_link", {}))
-
-    def proactive_config(self):
-        from .config_domains import ProactiveConfig
-
-        return ProactiveConfig.from_dict(self.data.get("proactive_screen", {}))
-
-    def collision_config(self):
-        from .config_domains import CollisionConfig
-
-        return CollisionConfig.from_dict(self.data)
-
-    def menu_config(self):
-        from .config_domains import MenuConfig
-
-        return MenuConfig.from_dict(self.data)
 
     def resolve_api_key(self, provider):
         from .chat.models import SecretStore

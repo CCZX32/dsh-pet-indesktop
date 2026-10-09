@@ -51,6 +51,27 @@ def _make(tmp_path, config_values=None):
     return shell, lib, ctrl
 
 
+def _spawn_hittable_child(shell, pos: QPointF):
+    """生一只可逐像素命中的子宠：走真 ``spawn_pet``，再给它独立素材库 +
+    spawn 后缺失的首帧命中图（口径同 ``_make`` 的主宠）。"""
+    shell.spawn_pet()
+    child = shell._spawned[-1]
+    child_lib = fac.RichLibrary()
+    child.library = child_lib
+    child.bind_clip("idle1")
+    child._rebuild_pixmap()
+    child.set_pos(pos)
+    return child, child_lib
+
+
+def _stub_say(shell, sprite):
+    """把某只 sprite 的跟随器 ``say`` 换成记录器，返回记录列表。"""
+    said: list = []
+    follower = shell._bubble_for(sprite)
+    follower.say = lambda text, **kw: said.append((text, kw)) or True
+    return said
+
+
 def test_accept_only_over_sprite(tmp_path):
     shell, _lib, ctrl = _make(tmp_path)
     try:
@@ -76,7 +97,8 @@ def test_drop_records_stats_and_plays_eat_anim(tmp_path):
         f1 = tmp_path / "snack.txt"
         f1.write_text("yummy", encoding="utf-8")
         bubbles = []
-        ctrl._bubble_cb = lambda files, folders, b, stats: bubbles.append((files, folders, b))
+        ctrl._bubble_cb = lambda result, sprite: bubbles.append(
+            (result["files"], result["folders"], result["bytes"], sprite))
         event = _drop_event(QPointF(shell.sprite.rect().center()), [str(f1)])
         result = ctrl.handle_drop(event)
         assert event.isAccepted()
@@ -89,7 +111,7 @@ def test_drop_records_stats_and_plays_eat_anim(tmp_path):
         # 吃动画一次性播放（acts 池的 act1 被选中）
         assert shell.sprite._clip_name == "act1"
         assert lib._clips["act1"].started is True
-        assert bubbles == [(1, 0, 5)]
+        assert bubbles == [(1, 0, 5, shell.sprite)]
     finally:
         shell._delete_runtime_marker()
 
@@ -153,6 +175,134 @@ def test_eat_paths_without_offer_is_silent(tmp_path):
         f1.write_text("x", encoding="utf-8")
         event = _drop_event(QPointF(shell.sprite.rect().center()), [str(f1)])
         assert ctrl.handle_drop(event) is not None
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_drop_on_child_pet_eats_and_bubbles_on_child(tmp_path):
+    """B02：拖到子宠 → 吃动画与气泡都落子宠，主宠一点不牵动。
+
+    旧行为：``handle_drop`` 把 ``sprite_at`` 的命中结果丢掉，吃动画固定打在主宠
+    身上、气泡固定走主宠跟随器（拖子宠喂出来的是主宠吃 + 主宠弹统计）。
+    """
+    shell, main_lib, _ctrl = _make(tmp_path)
+    try:
+        child, child_lib = _spawn_hittable_child(shell, QPointF(300, 300))
+        child_center = QPointF(child.rect().center())
+        assert shell.overlay.sprite_at(child_center) is child, "前提：落点命中子宠"
+        main_said = _stub_say(shell, shell.sprite)
+        child_said = _stub_say(shell, child)
+
+        f1 = tmp_path / "snack.txt"
+        f1.write_text("yummy", encoding="utf-8")
+        result = shell._feeding.handle_drop(_drop_event(child_center, [str(f1)]))
+
+        assert result["files"] == 1
+        assert child_lib._clips["act1"].started is True, "吃动画必须落在被投喂的子宠身上"
+        assert child._clip_name == "act1"
+        assert main_lib._clips["act1"].started is False, "主宠不许替子宠吃"
+        assert shell.sprite._clip_name != "act1"
+        assert len(child_said) == 1, "气泡必须走被投喂那只自己的跟随器"
+        assert not main_said
+        assert "啊呜～吃掉 1 个文件" in child_said[0][0]
+        assert child_said[0][1]["subtitle"] == "放心，只是做个样子，文件没有删除或移动哦"
+    finally:
+        shell.clear_spawned_pets()
+        shell._delete_runtime_marker()
+
+
+def test_overlay_drop_event_routes_to_hit_sprite(tmp_path):
+    """端到端接线：壳的原生 ``dropEvent`` → 控制器 → 子宠吃 + 子宠气泡。"""
+    shell, main_lib, _ctrl = _make(tmp_path)
+    try:
+        child, child_lib = _spawn_hittable_child(shell, QPointF(300, 300))
+        main_said = _stub_say(shell, shell.sprite)
+        child_said = _stub_say(shell, child)
+
+        f1 = tmp_path / "snack.txt"
+        f1.write_text("yummy", encoding="utf-8")
+        event = _drop_event(QPointF(child.rect().center()), [str(f1)])
+        shell.overlay.dropEvent(event)
+
+        assert event.isAccepted()
+        assert child_lib._clips["act1"].started is True
+        assert main_lib._clips["act1"].started is False
+        assert len(child_said) == 1 and not main_said
+    finally:
+        shell.clear_spawned_pets()
+        shell._delete_runtime_marker()
+
+
+def test_drop_on_main_pet_keeps_main_channel(tmp_path):
+    """落点在主宠：口径不变（主宠吃、主宠气泡，子宠不冒泡）。"""
+    shell, main_lib, _ctrl = _make(tmp_path)
+    try:
+        child, child_lib = _spawn_hittable_child(shell, QPointF(300, 300))
+        main_center = QPointF(shell.sprite.rect().center())
+        assert shell.overlay.sprite_at(main_center) is shell.sprite, "前提：落点命中主宠"
+        main_said = _stub_say(shell, shell.sprite)
+        child_said = _stub_say(shell, child)
+
+        f1 = tmp_path / "snack.txt"
+        f1.write_text("yummy", encoding="utf-8")
+        result = shell._feeding.handle_drop(_drop_event(main_center, [str(f1)]))
+
+        assert result["files"] == 1
+        assert main_lib._clips["act1"].started is True
+        assert child_lib._clips["act1"].started is False
+        assert len(main_said) == 1
+        assert not child_said
+    finally:
+        shell.clear_spawned_pets()
+        shell._delete_runtime_marker()
+
+
+def test_drop_truncated_dir_reports_budget_in_result_and_bubble(tmp_path, monkeypatch):
+    """B03：overlay 链同样走带预算的扫描——截断标记进结果，气泡如实提示。
+
+    旧行为：drop 事件里同步无上限递归 + 逐文件 ``stat()``，大目录/网络盘把整个
+    桌宠 UI 冻在 GUI 线程上。
+    """
+    import pet.file_eater as file_eater
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 3)
+    shell, _lib, _ctrl = _make(tmp_path)
+    try:
+        folder = tmp_path / "big-dir"
+        folder.mkdir()
+        for i in range(6):
+            (folder / f"f{i}.txt").write_text("x" * 10, encoding="utf-8")
+        said = _stub_say(shell, shell.sprite)
+
+        result = shell._feeding.eat_paths([str(folder)])
+
+        assert result["truncated"] is True
+        assert result["scanned"] == 3, "触文件数预算即停扫，计数停在预算内"
+        assert result["folders"] == 1 and result["bytes"] == 30
+        stats = json.loads((tmp_path / "file_eaten_stats.json").read_text(encoding="utf-8"))
+        assert stats["total_bytes"] == 30, "统计只记已统计的部分，格式不变"
+        assert said and "只统计了前 3 项" in said[0][0], "气泡必须如实提示截断"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_small_drop_is_not_marked_truncated(tmp_path):
+    """小目录/散文件不触预算：结果形状不变且截断标记为假。"""
+    shell, _lib, _ctrl = _make(tmp_path)
+    try:
+        folder = tmp_path / "small-dir"
+        folder.mkdir()
+        (folder / "a.txt").write_text("abc", encoding="utf-8")
+        f2 = tmp_path / "b.txt"
+        f2.write_text("de", encoding="utf-8")
+        said = _stub_say(shell, shell.sprite)
+
+        result = shell._feeding.eat_paths([str(folder), str(f2)])
+
+        assert result["truncated"] is False
+        assert result["scanned"] == 2
+        assert (result["files"], result["folders"], result["bytes"]) == (1, 1, 5)
+        assert said and "只统计了前" not in said[0][0]
     finally:
         shell._delete_runtime_marker()
 

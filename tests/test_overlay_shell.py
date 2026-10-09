@@ -689,3 +689,78 @@ def test_shell_attach_island_bridge():
     shell.attach_island(island)
     shell._on_about_to_quit()  # 退出收口（stop 只服务已 start 的壳）
     assert shell.island_bridge is None
+
+
+# ---------------------------------------------------------------- 角色切换：聊天面同步（B07）
+class _ChatSyncInstance(FakeInstance):
+    """记录聊天面角色同步的假实例（完整聊天窗 + 岛对话气泡由它统一转发）。"""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.chat_syncs: list[str] = []
+
+    def sync_chat_character(self, character_id):
+        self.chat_syncs.append(character_id)
+
+
+class _FakeQuickChatBubble:
+    def __init__(self):
+        self.switched: list[str] = []
+
+    def switch_character(self, character_id):
+        self.switched.append(character_id)
+
+
+def test_switch_character_syncs_chat_surfaces():
+    """B07：主宠切角色后聊天面同步新角色（快速气泡 + 完整聊天窗/岛气泡）。
+
+    换库只换了素材；聊天面的角色上下文（会话、头像、系统提示）此前无人更新，
+    切完再开口仍是旧角色。
+    """
+    instance = _ChatSyncInstance()
+    shell, _, _ = _make_shell(instance=instance)
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+
+    shell.switch_character("nova")
+
+    assert shell._config.get("character") == "nova"
+    assert bubble.switched == ["nova"]
+    assert instance.chat_syncs == ["nova"]
+
+
+def test_switch_character_without_bubble_sync_seam_is_quiet():
+    """气泡替身没有 ``switch_character``（未创建/降级实现）也不许影响切角色。"""
+    instance = _ChatSyncInstance()
+    shell, _, _ = _make_shell(instance=instance)
+    shell._quick_chat = object()  # 非气泡：无同步面
+
+    shell.switch_character("nova")
+
+    assert shell._config.get("character") == "nova"
+    assert instance.chat_syncs == ["nova"]
+
+
+def test_switch_child_character_does_not_touch_chat_surfaces():
+    """子宠换角色**不**同步聊天面：子宠没有自己的聊天身份通道。
+
+    快速对话气泡/完整聊天窗/岛气泡的身份都取主配置（``QuickChatBubble(
+    self._config)``、会话目录按主身份），子宠换角色没有对应身份可同步；这条
+    锁住「不做」的决定，防止未来把主宠的聊天面误改到子宠的角色上。
+    """
+    instance = _ChatSyncInstance()
+    shell = OverlayShell(
+        app, instance,
+        screen=FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040)),
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
+    shell._create_main_library = FakeLibrary
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+    shell.spawn_pet()
+    child = shell._spawned[0]
+
+    shell.switch_character("nova", child)
+
+    assert shell._spawned_libs[child] is not None
+    assert bubble.switched == []
+    assert instance.chat_syncs == []

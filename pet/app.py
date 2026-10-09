@@ -671,6 +671,26 @@ class PetInstance:
         # P1-4：任一窗切换后刷新托盘菜单（per-window 区闭包指向新窗，防陈旧窗）
         self.shell._refresh_tray_menu()
 
+    def sync_chat_character(self, character_id: str) -> None:
+        """把新角色同步到本窗的聊天面（B07：overlay 主宠切角色后由 sprite 壳调用）。
+
+        本窗的聊天面（完整聊天窗 + 进程级岛对话气泡）各自持一份角色快照，只换
+        素材库不会更新它们——切完角色再开口仍是旧角色的会话/头像/系统提示。这里
+        收敛成一条公开 seam，overlay 路径（``OverlayShell.switch_character``）
+        与捕获模式（``PetInstance.switch_character``）的对齐口径就是它。
+
+        快速对话气泡不在此列：它随渲染拓扑挂在各自宿主上（overlay 是 sprite 壳的
+        ``_quick_chat``，legacy 是本实例的 ``quick_chat``），由持有点自己同步。
+        """
+        if not self.enable_chat:
+            return
+        for chat_window in (self.legacy_chat_window, self.modern_chat_window):
+            if chat_window is not None:
+                chat_window.switch_character(character_id)
+        island_chat = getattr(self.shell, "island_chat", None)
+        if island_chat is not None:
+            island_chat.switch_character(character_id)
+
     def _apply_spawn_offset(self) -> None:
         """让新孵化的桌宠与母桌宠错开，避免两个窗口完全重叠。
 

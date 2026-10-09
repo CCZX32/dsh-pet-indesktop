@@ -10,6 +10,7 @@ spawn 增 sprite（per-pet 库/行为接管/错开落位）、D1 clip 所有权�
 from __future__ import annotations
 
 import json
+import logging
 import os
 from types import SimpleNamespace
 
@@ -224,6 +225,47 @@ def test_spawn_skips_legacy_slot_config_identities(tmp_path):
         legacy = json.loads(
             (config_dir / "config-slot-1.json").read_text(encoding="utf-8"))
         assert legacy["rx"] == 0.11 and legacy["ry"] == 0.22
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_spawn_reuses_retired_identity_when_history_is_full(tmp_path, caplog):
+    """B01：128 个历史身份占满目录时仍能生（复用最小退役身份，记 warning）。
+
+    普通用户反复生/退累计 128 次后目录里全是历史 ``config-slot-N.json``；旧实现
+    直接抛 ``SpawnStateError``，UI 也只写日志 → 「生小肥鱼」永久静默失效。
+    """
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    for slot in range(1, ovs.MAX_SCAN_SLOTS + 1):
+        (config_dir / f"config-slot-{slot}.json").write_text(
+            json.dumps({"version": 4}), encoding="utf-8")
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        with caplog.at_level(logging.WARNING, logger="pet.overlay_spawn_state"):
+            shell.spawn_pet()
+        assert [shell._spawned_slots[s] for s in shell._spawned] == [1]
+        assert ovs.load_active_slots(config_dir) == [1]
+        assert any("退役身份" in record.getMessage() for record in caplog.records)
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_spawn_exhausted_identities_reports_bubble(tmp_path, monkeypatch):
+    """B01：真耗尽（128 个身份全活跃）时不许再静默——失败出口必须冒泡告知。"""
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        monkeypatch.setattr(
+            ovs, "scan_slot_configs",
+            lambda *_a, **_k: set(range(1, ovs.MAX_SCAN_SLOTS + 1)))
+        shell._active_slots = lambda: list(range(1, ovs.MAX_SCAN_SLOTS + 1))
+        said: list[str] = []
+        shell.show_bubble = lambda text, **kwargs: said.append(str(text)) or True
+        shell.spawn_pet()
+        assert shell._spawned == []                       # 不留半只 sprite
+        assert shell.overlay.sprites == [shell.sprite]
+        assert len(said) == 1, "耗尽路径必须走壳上气泡通道告知用户"
+        assert "生小肥鱼失败" in said[0] and "128" in said[0]
     finally:
         shell._delete_runtime_marker()
 

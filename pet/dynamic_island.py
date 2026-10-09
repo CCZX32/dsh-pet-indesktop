@@ -724,6 +724,17 @@ class DynamicIsland(QWidget):
     def _event_effects_enabled(self) -> bool:
         return bool(self._cfg.get("event_effects", True))
 
+    def _quiet_also_on_fullscreen(self) -> bool:
+        """「全屏应用时自动免打扰」的宿主配置（默认开）。
+
+        ``suppression_active`` 是全应用唯一的免打扰判据，但它的
+        ``also_on_fullscreen`` 由**调用方**给（判据自己不读配置，见 quiet_mode
+        模块注释）：本层漏读就会在全屏时按默认 True 抑制，用户关掉开关后弹跳
+        依旧没有。口径与 ``window_alerts.quiet_blocked`` 一致（那里取 host.cfg）。
+        """
+        return bool(self.config.get("quiet_also_on_fullscreen",
+                                    quiet_mode.DEFAULT_QUIET_ALSO_ON_FULLSCREEN))
+
     def _net_enabled(self) -> bool:
         """网络段开关：``island_metrics`` 里有没有 network（默认关）。
 
@@ -901,11 +912,14 @@ class DynamicIsland(QWidget):
             self._stop_dot_done_timer()
         if (value in work_states and previous not in work_states
                 and self._event_effects_enabled()
-                and not quiet_mode.shared_quiet_state().suppression_active()):
+                and not quiet_mode.shared_quiet_state().suppression_active(
+                    also_on_fullscreen=self._quiet_also_on_fullscreen())):
             # 事件弹跳过两道闸：event_effects 开关（与 notify_event 同一道）+
             # 免打扰安静规则（裁决稿 §一-7：禁弹跳，读数照常——这条比
             # notify_event 多一道，是该裁决对本路径的单独要求；状态点本身不受
-            # 闸门影响。免打扰判据复用全应用唯一的 suppression_active）
+            # 闸门影响。免打扰判据复用全应用唯一的 suppression_active，全屏那一半
+            # 的口径按宿主配置走——判据不自己读配置，漏传就等于把用户关掉的
+            # 「全屏时自动免打扰」按默认值压回来）
             self._bounce(impulse=3.0)
         # 声纳环跟状态点同源起停（工作态才有）：状态点是"在用"的静态通道，
         # 环是它的节拍通道，两者共用 _status_dot_state 这一个判据

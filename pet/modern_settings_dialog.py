@@ -97,6 +97,7 @@ from .menu_layout import (
     merge_default_menu_actions,
     resolve_menu_layout,
 )
+from .settings_slot_config import route_settings_config
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 from .update_settings import UpdatePage
 
@@ -263,7 +264,10 @@ class ModernSettingsDialog(QDialog):
     def __init__(self, config, parent=None, *, include_ai: bool = True,
                  standalone: bool = False, initial_page: str | None = None):
         super().__init__(parent)
-        self.config = config
+        # 子宠设置页：非 per-slot 键直读**主**配置（而不是 slot 文件里的无效快照），
+        # 保存时按同一分流写回。不适用（主身份 / legacy 拓扑）时原样返回，
+        # 见 pet/settings_slot_config.py 的模块 docstring。
+        self.config = config = route_settings_config(config)
         self.include_ai = bool(include_ai)
         # standalone=True：本对话框跑在独立设置进程（python -m pet --settings）里，
         # 没有桌宠窗口/AppShell 可依附。只影响下面几处显式分支，默认 False 时
@@ -379,11 +383,10 @@ class ModernSettingsDialog(QDialog):
             target = "auto"
         idx = self.harness_launch_target_select.findData(target)
         self.harness_launch_target_select.setCurrentIndex(max(0, idx))
-        if self.config.instance_id:
-            self.harness_autostart_check.setEnabled(False)
-            self.harness_autostart_check.setToolTip("仅主桌宠可设置")
-            self.harness_launch_target_select.setEnabled(False)
-            self.harness_launch_target_select.setToolTip("仅主桌宠可设置")
+        # 子宠页曾经在这里置灰（"仅主桌宠可设置"）：当时子宠页保存写的是
+        # config-slot-N.json，而这两个键运行期只读主配置，改了等于没改。
+        # 独立设置进程现在按 key 分流（非 per-slot 键直写主配置，见
+        # pet/settings_slot_config.py），子宠页改的这两个键真生效，置灰随之摘除。
 
         # 灵动岛控件构建保留在对话框本体，便于上游直接修改后上传。
         island_cfg = self.config.get("dynamic_island", {})
@@ -1615,14 +1618,21 @@ class ModernSettingsDialog(QDialog):
             logging.warning("退出子肥鱼：写指令文件失败，本次未执行")
 
     def _apply_agent_sound_enabled_now(self, checked: bool) -> None:
-        """音效总开关即时生效，不等对话框关闭（合并写回，不动其他 agent_link 键）。"""
+        """音效总开关即时生效，不等对话框关闭（合并写回，不动其他 agent_link 键）。
+
+        写盘前先 reload（同 ``_write_config``）：``Config.save()`` 落的是整份内存
+        视图，而设置默认跑在独立进程里，内存快照从启动起就陈旧——不重读就会把
+        设置窗开着期间外部（托盘/主进程）改过的其他键一起盖回去。
+        """
+        self.config.reload()
         agent_cfg = dict(self.config.get("agent_link", {}))
         agent_cfg["sound_enabled"] = bool(checked)
         self.config.set("agent_link", agent_cfg)
         self.config.save()
 
     def _apply_click_sound_enabled_now(self, checked: bool) -> None:
-        """点击音效开关即时生效，不等对话框关闭。"""
+        """点击音效开关即时生效，不等对话框关闭（写盘前 reload，理由同上）。"""
+        self.config.reload()
         self.config.set("click_sound_enabled", bool(checked))
         self.config.save()
         if bool(checked):
