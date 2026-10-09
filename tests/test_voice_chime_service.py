@@ -3011,9 +3011,12 @@ def test_play_pending_cap_heals_a_player_stuck_in_loading(tmp_path, monkeypatch)
     只清自记标志治不彻底：``_player_engaged`` 的第二个子判据 ``mediaStatus == LoadingMedia``
     仍为真 → ``_player_engaged()`` 恒真 → drain 判忙留队；而此时两个期限都空，表也随
     ``_clear_play_pending`` 真撤了（手动通道没有 20s tick）→ 此后再无挂钟可布，通道
-    **永久判忙**。修法：超时那一拍对**非 PlayingState** 的播放器主动 ``stop()``，把
-    mediaStatus 拽出 LoadingMedia（实测 stop() 之后停在 LoadedMedia，不算接管），再按
-    既有同序结算两个队列。
+    **永久判忙**。
+
+    真正的解法是 **stop() + 清空音源**：Qt 的 ``stop()`` 在 LoadingMedia 期间只写
+    ``m_requestedStatus`` 就 return，**不改 mediaStatus**（替身按这条真实行为建模，
+    不再把"stop 后转 LoadedMedia"这个待证行为当前提）；``setSource(QUrl())`` 才会让
+    mediaStatus 落到 ``NoMedia``（~5ms，探针实测 9.4ms），判据彻底解除。
     """
     import time as _time
 
@@ -3030,7 +3033,13 @@ def test_play_pending_cap_heals_a_player_stuck_in_loading(tmp_path, monkeypatch)
     _cache_file_for(service, cfg, sentence)
 
     class _StuckLoadingPlayer(_FakePlayer):
-        """既不给终止态、也进不了 PlayingState 的卡死播放器（枚举判据可查、可控）。"""
+        """按**真实 Qt 行为**建模的卡死播放器：加载永远不完成。
+
+        - ``stop()`` 在 LoadingMedia 期间**不动** mediaStatus（Qt 6.11 FFmpeg 后端
+          ``QFFmpegMediaPlayer::stop()``：mediaStatus == LoadingMedia 时只写
+          m_requestedStatus 直接 return；只有加载**自然完成**才转 LoadedMedia）；
+        - ``setSource(QUrl())``（空源）→ mediaStatus 转 ``NoMedia``，接管判据解除。
+        """
 
         def __init__(self) -> None:
             super().__init__()
@@ -3042,22 +3051,29 @@ def test_play_pending_cap_heals_a_player_stuck_in_loading(tmp_path, monkeypatch)
         def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
             return self.status
 
+        def setSource(self, url) -> None:  # noqa: N802 - 对齐 Qt API
+            super().setSource(url)
+            target = url.toLocalFile() if hasattr(url, "toLocalFile") else str(url)
+            self.status = (QMediaPlayer.MediaStatus.LoadingMedia if target
+                           else QMediaPlayer.MediaStatus.NoMedia)
+
         def stop(self) -> None:
             super().stop()
-            # 实机：``stop()`` 之后 mediaStatus 停在 LoadedMedia（而 LoadedMedia 不算接管）
-            self.status = QMediaPlayer.MediaStatus.LoadedMedia
+            # 真实 Qt：LoadingMedia 期间 stop() 不改 mediaStatus（见类 docstring）
 
     service._player = _StuckLoadingPlayer()
     service.say_now(sentence)                     # 缓存命中起播 → 置位标志与起点
     assert service._play_pending_end is True
     assert service._player_engaged() is True, "前提：枚举判据也判接管（LoadingMedia）"
-    assert service._player.stops == 0
+    assert service._player.stops == 0 and len(service._player.sources) == 1
 
     service._pending_speech = "卡死期间排队的播报"
     service._play_pending_since = _time.monotonic() - (svc_mod._PLAY_PENDING_MAX_S + 1.0)
     service._release_stale_busy()                 # 上限到点那一拍（表/tick 的同一个入口）
 
-    assert service._player.stops == 1, "非 PlayingState 的播放器必须被 stop 出 LoadingMedia"
+    assert service._player.stops == 1, "先停住这一段"
+    assert service._player.sources[-1] == "", "治愈必须经过'清空音源'这条机制（stop 改不了 LoadingMedia）"
+    assert service._player.mediaStatus() == QMediaPlayer.MediaStatus.NoMedia
     assert service._player_engaged() is False, "治愈之后通道必须真的空出来"
     assert service._play_pending_end is False
     assert service._pending_speech is None, "治愈即通道空出：排队项同序结算"
@@ -3099,6 +3115,7 @@ def test_play_pending_cap_does_not_touch_a_genuinely_playing_segment(tmp_path, m
     service._release_stale_busy()
 
     assert service._player.stops == 0, "合法在播的段绝不能被停"
+    assert len(service._player.sources) == 1, "在播段的音源也不许被清空（上限不碰它）"
     assert service._play_pending_end is True, "上限不杀合法播放：标志一个字段都不动"
     assert service._pending_speech == "在播期间排队的播报", "在播期间不许出队补播（会叠音）"
     assert service._channel_idle() is False, "通道仍被这一段占着"
