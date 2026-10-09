@@ -67,8 +67,9 @@
   mediaStatus**（"加载永远不完成"的真死局下 stop() 等于没做，``LoadingMedia`` 仍让
   ``_player_engaged()`` 恒真、drain 判忙留队；之后加载自然完成才转 LoadedMedia，
   那不是 stop 的功劳）；空源才会让 mediaStatus 落到 ``NoMedia``（真机探针实测 ~5ms，9.4ms 内确认）。
-  **真在 PlayingState 的段一个字段都不动**（上限只管"卡住"，掐合法在播就是"报时被
-  截断"），只把期限顺延一个窗口再查。
+  **真在 PlayingState 的段照旧在播、上限不碰它**：不停播放器、不清标志与两个队列、
+  不动音源，只把期限起点顺延一个窗口再查（上限只管"卡住"，掐合法在播就是"报时被
+  截断"）。
 - **缓存原子落盘**：worker 先写同目录临时文件（``*.part``），完成后经
   ``config.atomic_replace_with_retry`` 原子换名到最终缓存路径——``edge_tts.save`` 是
   边收边写，直接写最终路径时进程被斩（daemon worker 随退出死掉）会留下永久截断的
@@ -1277,7 +1278,7 @@ class VoiceChimeService:
         没有"的那种静默滞留；③ 同一拍还把播放器治到 ``NoMedia``——``stop()`` +
         ``setSource(QUrl())``（只清标志治不彻底，本方法的第二个子判据仍为真；而单单
         ``stop()`` 也治不掉 LoadingMedia，理由见 :meth:`_unload_player_source`）。
-        真在 PlayingState 的段则一个字段都不动。
+        真在 PlayingState 的段则照旧在播、上限不碰它（只顺延期限起点）。
 
         拿不到枚举判据（QtMultimedia 缺失 / ``object.__new__`` 测试替身没有这些方法）
         时回落到自记标志：出队总比滞留安全（滞留就是本模块要修的那类静默丢语音）。
@@ -1478,11 +1479,14 @@ class VoiceChimeService:
         self._drain_pending_speech()
 
     def _stop_current_segment(self) -> None:
-        """立刻停住当前在播段，并放掉它的两个记账字段（不碰合成锁与队列）。
+        """立刻停住当前在播段：停住播放器、**清空音源**、放掉它的两个记账字段。
 
-        三个调用方：``stop()``（关闭开关 / 退出）、免打扰切段、以及播放接管的**超时
-        治愈**（后者在 stop() 之后还要补一次 ``_unload_player_source`` 清空音源，
-        见那里——单单 stop() 拽不出 LoadingMedia）。
+        三个调用方共用（语义都是"停掉这一段"）：``stop()``（关闭开关 / 退出）、免打扰
+        切段、以及播放接管的**超时治愈**。清载是切段语义的一部分，不是某条路径的补丁：
+        Qt 的 ``stop()`` 在 ``LoadingMedia`` 期间不改 mediaStatus（见
+        :meth:`_unload_player_source`），只停不清就会留下 `LoadingMedia` 判忙——三个
+        调用方谁撞上这个死局都一样永久判忙（手动通道没有 tick）。清载没有副作用：
+        下一段起播前 ``_play_and_bubble`` 本来就会 ``setSource`` 新源。
         """
         player = self._player
         if player is not None:
@@ -1490,6 +1494,9 @@ class VoiceChimeService:
                 player.stop()
             except Exception:
                 logger.debug("停止语音播放失败（播放器可能已析构）", exc_info=True)
+        # stop() 之后补一次清载：把 mediaStatus 拽出 LoadingMedia（详见
+        # _unload_player_source —— 单单 stop() 治不掉"加载永不完成"那条死局）。
+        self._unload_player_source()
         # ``player.stop()`` 不产生媒体终止态，且实测 stop 之后 ``mediaStatus`` 仍停在
         # ``LoadedMedia``——"已发出 play、未见终止"标志必须在这里显式复位，否则通道
         # 会被永久判忙（_player_engaged 的第三个子判据）。
@@ -1635,10 +1642,11 @@ class VoiceChimeService:
         只有空源才把 mediaStatus 落到 ``NoMedia``、真正解除接管判据；之后按既有同序
         结算两个队列。
 
-        **真在 PlayingState 的那一段一个字段都不动**（标志/队列/播放器都不碰）：上限的
-        语义只管"卡住"，合法在播的长音频被掐就是"报时被截断"。只把期限**顺延一个窗口**
-        再查——不是原地重布（期限已过，原地重布会算出 ≤0 的剩余时间 → 1ms 忙转表），
-        这样它若之后才卡住，下一个窗口照样收得住。
+        **真在 PlayingState 的那一段照旧在播，上限不碰它**：不停播放器、不清播放标志与
+        两个队列、不动音源，**只**把期限起点（``_play_pending_since``）顺延一个窗口再查
+        ——上限的语义只管"卡住"，合法在播的长音频被掐就是"报时被截断"；顺延不是原地
+        重布（期限已过，原地重布会算出 ≤0 的剩余时间 → 1ms 忙转表），这样它若之后才
+        卡住，下一个窗口照样收得住。
 
         未到上限时同样只是重布（单次表被提前叫醒后不重布就没了）。没有起点
         （``_play_pending_since`` 为 None，例如测试替身直接置位标志）时无从判定，
@@ -1661,10 +1669,8 @@ class VoiceChimeService:
             return
         logger.warning("播放接管状态超时未结（%.0fs），按通道空出收（停住并清空卡住的播放器）",
                        _PLAY_PENDING_MAX_S)
+        # 停住这一段 + 清空音源（_stop_current_segment 内统一做，见那里）
         self._stop_current_segment()
-        # stop() 单独治不掉这条死局（见 _unload_player_source）：再清空音源，把
-        # mediaStatus 拽出 LoadingMedia，否则枚举判据仍判接管、drain 继续留队。
-        self._unload_player_source()
         self._drain_queued_fire()
         self._drain_pending_speech()
 
@@ -1674,15 +1680,15 @@ class VoiceChimeService:
         **为什么 stop() 不够**（Qt 6.11 FFmpeg 后端 ``QFFmpegMediaPlayer::stop()`` 的
         行为）：mediaStatus == ``LoadingMedia`` 时它只写 ``m_requestedStatus`` 就 return，
         **不改 mediaStatus**——「加载永远不完成」的真死局下，stop() 之后
-        ``_player_engaged()`` 仍因第二个子判据（``LoadingMedia``）判接管，治愈等于没做
+        ``_player_engaged()`` 仍因第二个子判据（``LoadingMedia``）判接管，停段等于没做
         （之后若加载自然完成会转 ``LoadedMedia``，但那不是 stop 的功劳）。空源才是
         确定解除：实测（真机 QMediaPlayer + FFmpeg 后端）``stop()`` 后紧跟
         ``setSource(QUrl())``，mediaStatus 在毫秒量级内（~5ms，探针实测 9.4ms）转
         ``NoMedia``。
 
-        只给**超时治愈**这一条路径用：``_stop_current_segment`` 的另两个调用方
-        （免打扰切段 / ``stop()`` 收口）的语义是"停住这一段、播放器可能还要接着用"，
-        清空音源对它们无害但没必要，故不动它们。
+        调用方只有 :meth:`_stop_current_segment`——清载是"切段"语义的一部分（三个调用方
+        谁撞上 LoadingMedia 死局都一样），所以统一在那里做，不在各条路径各补一次；
+        清载无副作用：下一段起播前 ``_play_and_bubble`` 本来就会 ``setSource`` 新源。
         """
         player = self._player
         if player is None:

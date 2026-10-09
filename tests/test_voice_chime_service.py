@@ -306,7 +306,9 @@ def test_synthesis_result_is_dropped_after_stop(tmp_path, monkeypatch):
     service.stop()
     worker.finish()  # 合成结果在 stop() 之后才回来
 
-    assert service._player.sources == player_before
+    # stop() 自己会给播放器清一次载（空源，见 _unload_player_source），所以这里只断言
+    # "没有再顶上一个**新音源**"——真正的回放会带一个非空路径。
+    assert [src for src in service._player.sources if src] == player_before
     assert service._player.plays == 0
     assert len(app.win.bubbles) == bubbles_before
 
@@ -3081,7 +3083,7 @@ def test_play_pending_cap_heals_a_player_stuck_in_loading(tmp_path, monkeypatch)
 
 
 def test_play_pending_cap_does_not_touch_a_genuinely_playing_segment(tmp_path, monkeypatch):
-    """真在 PlayingState 的段：上限只把期限顺延，不停播放器、不清标志、不出队。
+    """真在 PlayingState 的段：上限只顺延期限起点，不停播放器、不清标志与队列、不动音源。
 
     "上限只管卡住"：长音频（合法在播）到点被掐，用户听到的就是报时被截断。
     """
@@ -3116,7 +3118,7 @@ def test_play_pending_cap_does_not_touch_a_genuinely_playing_segment(tmp_path, m
 
     assert service._player.stops == 0, "合法在播的段绝不能被停"
     assert len(service._player.sources) == 1, "在播段的音源也不许被清空（上限不碰它）"
-    assert service._play_pending_end is True, "上限不杀合法播放：标志一个字段都不动"
+    assert service._play_pending_end is True, "上限不杀合法播放：标志/队列/音源都不动"
     assert service._pending_speech == "在播期间排队的播报", "在播期间不许出队补播（会叠音）"
     assert service._channel_idle() is False, "通道仍被这一段占着"
     # 期限顺延一个窗口再查，而不是原地重布（期限已过，原地重布会算出 ≤0 → 1ms 忙转表）
@@ -3124,3 +3126,63 @@ def test_play_pending_cap_does_not_touch_a_genuinely_playing_segment(tmp_path, m
     assert service._unlock_timer.isActive() and \
         int(svc_mod._PLAY_PENDING_MAX_S * 1000) - 2_000 <= interval \
         <= int(svc_mod._PLAY_PENDING_MAX_S * 1000), interval
+
+
+def test_quiet_cut_heals_a_player_stuck_in_loading(tmp_path, monkeypatch):
+    """免打扰切段撞上 LoadingMedia 死局：同样必须清载，不许留下永久判忙（ops5.5 P3）。
+
+    ``_stop_current_segment`` 的三个调用方语义都是"停掉这一段"，而 Qt 的 ``stop()``
+    在 ``LoadingMedia`` 期间不改 mediaStatus（见 ``_unload_player_source``）——免打扰
+    切段若恰好撞上"加载永不完成"，只 stop 会清掉标志、撤掉表，却把通道留在
+    ``LoadingMedia`` 判忙（手动通道没有 20s tick，与超时治愈那条死局同款机制）。
+    所以清载是**切段语义的一部分**，统一进 ``_stop_current_segment``。
+    """
+    try:
+        from PySide6.QtMultimedia import QMediaPlayer
+    except ImportError:  # pragma: no cover - 缺系统库的 Linux CI 上跳过而非红
+        pytest.skip("QtMultimedia 不可用")
+
+    service, _app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service.start()
+    try:
+        sentence = "现在是上午九点整。切段撞上加载"
+        _cache_mp3(service, sentence)
+
+        class _StuckLoadingPlayer(_FakePlayer):
+            """按真实 Qt 行为建模：停止不改 LoadingMedia，只有空源才转 NoMedia。"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.status = QMediaPlayer.MediaStatus.LoadingMedia
+
+            def playbackState(self):  # noqa: N802 - 对齐 Qt API
+                return QMediaPlayer.PlaybackState.StoppedState
+
+            def mediaStatus(self):  # noqa: N802 - 对齐 Qt API
+                return self.status
+
+            def setSource(self, url) -> None:  # noqa: N802 - 对齐 Qt API
+                super().setSource(url)
+                target = url.toLocalFile() if hasattr(url, "toLocalFile") else str(url)
+                self.status = (QMediaPlayer.MediaStatus.LoadingMedia if target
+                               else QMediaPlayer.MediaStatus.NoMedia)
+
+            def stop(self) -> None:
+                super().stop()
+                # 真实 Qt：LoadingMedia 期间 stop() 不改 mediaStatus
+
+        service._player = _StuckLoadingPlayer()
+        service.say_now(sentence)                       # 缓存命中 → 起播（报时口径）
+        assert service._current_respect_quiet is True, "前提：这一段尊重免打扰"
+        assert service._player_engaged() is True, "前提：枚举判据也判接管（LoadingMedia）"
+
+        _quiet().start(15)                              # 走真实订阅链： notify → 切段
+
+        assert service._player.stops == 1, "在播段必须被切"
+        assert service._player.sources[-1] == "", "切段同样要清空音源（stop 拽不出 LoadingMedia）"
+        assert service._player.mediaStatus() == QMediaPlayer.MediaStatus.NoMedia
+        assert service._player_engaged() is False, "通道判据必须解除，不许永久判忙"
+        assert service._channel_idle() is True
+    finally:
+        service.stop()
