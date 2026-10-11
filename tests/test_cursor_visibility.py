@@ -2,12 +2,32 @@
 """Cursor visibility API adapter and automatic passthrough state tests."""
 from __future__ import annotations
 
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from pet import vision
+from pet import vision, window
 from pet.window import PetWindow
+
+
+def _ns_shim(real, **overrides):
+    """模块命名空间垫片：显式给出的成员覆盖，其余全部转发给真模块。
+
+    用法是 ``monkeypatch.setattr(<被测模块>, 'os'/'sys', _ns_shim(os, name='nt'))``
+    ——只换**被测模块里那个名字的绑定**。若写成 ``setattr('pet.window.os.name', …)``
+    或 ``setattr(vision.sys, 'platform', …)``，改的其实是**全局** os/sys 模块：
+    pathlib 的平台分派只看全局 ``os.name``，窗口期里 pytest 生成失败报告时会抛
+    ``NotImplementedError: cannot instantiate …Path`` ⇒ 整场 INTERNALERROR。
+    转发而不是只给被测的那一个成员，是因为同一窗口里被测模块的其它 os/sys
+    成员仍要能用。
+    """
+    class _Shim(SimpleNamespace):
+        def __getattr__(self, item):
+            return getattr(real, item)
+
+    return _Shim(**overrides)
 
 
 class FakeUser32:
@@ -46,7 +66,7 @@ class _FakeFunction:
     ],
 )
 def test_get_cursor_visibility_maps_flags(monkeypatch, flags, expected):
-    monkeypatch.setattr(vision.sys, 'platform', 'win32')
+    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='win32'))
     user32 = FakeUser32(flags=flags)
 
     assert vision.get_cursor_visibility(user32) == expected
@@ -55,12 +75,12 @@ def test_get_cursor_visibility_maps_flags(monkeypatch, flags, expected):
 
 @pytest.mark.parametrize('user32', [FakeUser32(result=0), FakeUser32(error=OSError())])
 def test_get_cursor_visibility_failures_are_unknown(monkeypatch, user32):
-    monkeypatch.setattr(vision.sys, 'platform', 'win32')
+    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='win32'))
     assert vision.get_cursor_visibility(user32) == 'UNKNOWN'
 
 
 def test_get_cursor_visibility_non_windows_does_not_access_user32(monkeypatch):
-    monkeypatch.setattr(vision.sys, 'platform', 'linux')
+    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='linux'))
     assert vision.get_cursor_visibility(SimpleNamespace()) == 'UNKNOWN'
 
 
@@ -172,7 +192,7 @@ def test_apply_mouse_through_windows_uses_native_style(monkeypatch):
     win._auto_cursor_hidden = False
     win.mouse_through = False
     native_calls = []
-    monkeypatch.setattr('pet.window.os.name', 'nt')
+    monkeypatch.setattr(window, 'os', _ns_shim(os, name='nt'))
     monkeypatch.setattr('pet.window._set_windows_click_through',
                         lambda hwnd, enabled: native_calls.append((hwnd, enabled)) or True)
     monkeypatch.setattr(PetWindow, 'winId', lambda self: 43210)

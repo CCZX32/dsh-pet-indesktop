@@ -24,6 +24,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from pet import game_fps as gf
 from pet import island_fps
 from pet.config import Config
 
@@ -148,6 +149,12 @@ def test_the_real_teardown_stops_the_shared_hub_and_refuses_to_resurrect(
         built.append(monitor)
         return monitor
 
+    # 能力闸门是可注入的**当刻判定**（真实现读 ``sys.platform``，非 Windows 上为假），
+    # 而本用例测的是退出收口，与宿主平台无关。所以把它的两个视图一起钉成"这台机器有
+    # 能力"——``platform_support()`` 就是 ``platform_problem() == ""`` 的别名，只钉一个
+    # 会让替身世界自相矛盾（没能力的机器却报得出"有能力"）。
+    monkeypatch.setattr(gf, "platform_support", lambda: True)
+    monkeypatch.setattr(gf, "platform_problem", lambda: "")
     monkeypatch.setattr(island_fps, "_HUB", island_fps.FpsHub(monitor_factory=_factory))
     slot = island_fps.FpsSlot(key="pet-1")          # hub=None → 走真实 shared_hub()
     slot.sync(enabled=True, visible=True)

@@ -414,3 +414,58 @@ def _close_webm_readers_at_session_end():
         _webm_clip_mod._reset_session_ending_for_tests()
     except Exception:
         pass
+
+
+# ------------------------------------------- 原生崩溃取证位（CI 诊断，非门禁）
+#
+# 原生崩溃杀掉整个 pytest 进程后，`-q` 的失败详情与进度点都还在缓冲里：既不知道
+# "死在哪一例哪一阶段"，也看不到"崩之前已经红了哪些用例"。不碰 pytest 自己的
+# faulthandler、不装信号处理器（faulthandler.register 对 SIGSEGV/SIGABRT 这类致命
+# 信号直接 RuntimeError 拒绝，见 CPython Modules/faulthandler.c 的 check_signum）。
+# 开关：DSPET_TEST_DIAG_DIR=<目录>；GH Actions 自动落 $RUNNER_TEMP/dspet-pytest-diag/；
+# 未开启时两个钩子第一行返回，不建文件、不写一行。
+_diag_crumb = None
+
+
+def _diag_open():
+    import os
+    import tempfile
+    base = os.environ.get('DSPET_TEST_DIAG_DIR', '').strip()
+    if not base and os.environ.get('GITHUB_ACTIONS') == 'true':
+        base = os.path.join(os.environ.get('RUNNER_TEMP') or tempfile.gettempdir(),
+                            'dspet-pytest-diag')
+    if not base:
+        return None
+    try:
+        os.makedirs(base, exist_ok=True)
+        return open(os.path.join(base, 'pytest-breadcrumb.txt'), 'w',
+                    encoding='utf-8', buffering=1)
+    except OSError:
+        return None
+
+
+def pytest_configure(config):
+    global _diag_crumb
+    _diag_crumb = _diag_open()
+
+
+def pytest_runtest_logstart(nodeid, location):
+    if _diag_crumb is not None:
+        try:
+            _diag_crumb.write(f'[start] {nodeid}\n')
+        except (OSError, ValueError):
+            pass  # 诊断写入失败不得改变测试结果。
+
+
+def pytest_runtest_logreport(report):
+    if _diag_crumb is None:
+        return
+    # 阶段结束即落盘（buffering=1 逐行 flush）：最后一行记录最后完成的阶段。
+    try:
+        _diag_crumb.write(f'[{report.when}] {report.nodeid}\n')
+        if report.failed and report.longrepr is not None and sys.__stderr__ is not None:
+            # 失败详情默认攒到会话末尾才打（进程被原生杀死就全丢）：改成立刻回显。
+            print(f'[diag-fail/{report.when}] {report.nodeid}\n{report.longrepr}',
+                  file=sys.__stderr__, flush=True)
+    except (OSError, ValueError):
+        pass  # 磁盘满或输出关闭时，保留 pytest 本身的判定和报告。

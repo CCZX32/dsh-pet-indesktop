@@ -2864,10 +2864,18 @@ def test_creation_flags_hide_ffmpeg_console_on_windows(monkeypatch):
     CREATE_NO_WINDOW = 0x08000000
     BELOW_NORMAL = 0x00004000
 
-    monkeypatch.setattr(os, "name", "nt")
+    # 只换 fp 命名空间里的 os/subprocess：改全局 os.name 会让 pathlib 在
+    # POSIX 上实例化 WindowsPath（失败报告生成即 INTERNALERROR、monkeypatch
+    # 来不及还原）；POSIX 的 subprocess 也没有这两个 Windows 常量。
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(fp, "subprocess", SimpleNamespace(
+        CREATE_NO_WINDOW=CREATE_NO_WINDOW,
+        BELOW_NORMAL_PRIORITY_CLASS=BELOW_NORMAL))
+    monkeypatch.setattr(fp, "os", SimpleNamespace(name="nt"))
     flags = fp._creation_flags()
     assert flags & CREATE_NO_WINDOW, "转换子进程不能闪终端窗口"
     assert flags & BELOW_NORMAL, "低优先级档位不能丢"
 
-    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(fp, "os", SimpleNamespace(name="posix"))
     assert fp._creation_flags() == 0

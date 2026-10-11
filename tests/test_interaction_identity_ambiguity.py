@@ -31,6 +31,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from pet import harness_launcher  # noqa: E402
 from pet.agent_link import AgentLinkManager  # noqa: E402
 from pet.config import Config  # noqa: E402
 
@@ -110,6 +111,20 @@ def _write(events_dir: Path, name: str, *records) -> None:
     with (events_dir / name).open("a", encoding="utf-8") as fh:
         for rec in records:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+@pytest.fixture(autouse=True)
+def _dsh_probe_pinned_online(monkeypatch):
+    """把 DSH 探活（真连 3080/19387/38080 + 枚举 OS 进程）钉成「在线」。
+
+    ``DshMonitor._poll`` 每 2 拍探活一次，本模块手动驱动 ``_poll`` 且都要记录被
+    消费——不钉就取决于跑测试这台机器上有没有 DSH：本机有 ⇒ 假绿，CI 没有 ⇒
+    第 2 拍转 offline、``dismiss_all_interactions()`` 清空 pending ⇒ 一批断言红。
+    只钉网络/OS 边界，产品探活行为不改；副作用是真 socket 不再发生。
+    （离线口径的反向回归只在 ``test_final_interaction_regressions.py`` 保留一条。）
+    """
+    monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+    monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: True)
 
 
 def _build(tmp_path, win):

@@ -307,6 +307,51 @@ def test_unsupported_platform_never_spawns_worker():
     monitor.close()
 
 
+def test_injected_capability_is_not_overruled_by_the_real_platform_gate(monkeypatch):
+    """能力判据只问注入的那一次：真实平台判据说非 Windows，注入说有能力 → 照常采。
+
+    为什么单独锁这条：``game_fps.backend_state`` 会**再查一次真实的** ``sys.platform``，
+    于是"注入能力可用"的替身用例在非 Windows 宿主上会静默不启动——同一份代码在开发机
+    （Windows）跑绿、在 CI（Linux/macOS）红。平台判据只许问注入的那一次；后端仍然要查，
+    但只查文件（``backend_problem`` 不碰平台，缺程序照样 ``unsupported``，见下一条用例）。
+    """
+    monkeypatch.setattr(gf, "platform_problem", lambda: gf.PLATFORM_UNSUPPORTED_REASON)
+    fg = FakeForeground((4242, "game.exe"))
+    log = SessionLog()
+    monitor = _monitor(foreground_reader=fg, session_factory=log)
+    monitor.subscribe("fps")
+    assert monitor.start() is True, "注入的能力可用时 start 必须真的起线程"
+    assert _wait_until(lambda: log.sessions and log.latest.started), \
+        "会话没开起来：真实平台判据把注入的能力压掉了"
+    assert log.latest.pid == 4242
+    sample = monitor.snapshot()
+    assert sample.state != gf.STATE_UNSUPPORTED
+    assert gf.PLATFORM_UNSUPPORTED_REASON not in (sample.error_reason or "")
+    assert fg.calls > 0, "有能力就必须真的去解析目标（不是只起了个空线程）"
+    monitor.close()
+
+
+def test_default_capability_gate_still_blocks_and_keeps_the_platform_reason(monkeypatch):
+    """默认能力判据（没注入，取 ``game_fps.platform_support``）说没能力 → 不建线程、不起会话。
+
+    与上一条配对：注入只是**换掉那一次判定**，不是把它关掉——没注入时平台闸门照拦，
+    原因照抄平台那一句（非 Windows / ARM64 未验证 / 架构不匹配都走同一条）。
+    """
+    monkeypatch.setattr(gf, "platform_support", lambda: False)
+    monkeypatch.setattr(gf, "platform_problem", lambda: gf.PLATFORM_UNSUPPORTED_REASON)
+    fg = FakeForeground((4242, "game.exe"))
+    log = SessionLog()
+    monitor = _monitor(platform_supported=None, foreground_reader=fg, session_factory=log)
+    monitor.subscribe("fps")
+    assert monitor.start() is False, "没有这个能力时不许起线程"
+    sample = monitor.snapshot()
+    assert sample.state == gf.STATE_UNSUPPORTED
+    assert sample.error_reason == gf.PLATFORM_UNSUPPORTED_REASON
+    assert log.sessions == [] and monitor.running is False
+    assert fg.calls == 0, "没有这个能力时连目标都不该枚举"
+    monitor.close()
+
+
 def test_missing_backend_reports_unsupported_with_expected_path(tmp_path):
     log = SessionLog()
     missing = tmp_path / gf.BACKEND_EXE_NAME

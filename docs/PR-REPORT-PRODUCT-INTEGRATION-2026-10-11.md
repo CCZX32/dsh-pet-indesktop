@@ -1031,3 +1031,207 @@ PR**。该分支的远端地址与 SHA 只记录在本地交接文件里（`docs
   `_internal` 逐文件无差异；实机启动后灵动岛正常渲染时钟、网速、延迟与占用指标。
 - **仍未验（如实保留）**：§7.1 #1 三端 runner、#3 合格 Inno 安装器；§7.2 各实机欠项；真实 DSH 桌面端中止回合端到端；
   多 DSH 实例聚合作用域（下一版）。fable5-1 保底审查：本环境未提供该模型，未调用。
+
+## 十四、CI 收口轮（2026-10-11）：跨平台判据收口与原生崩溃取证位
+
+**本节定位**：PR243 三端 CI 首次跑红之后的一批**最小修复**，按三份证据纪律记账。
+只追加本节；上文各节结论一律不变（尤其 §6.1 / §十三 的全量门仍只属于它们各自那份源码），
+本节**不回填** §0.1 的 298 文件统计（口径见 §0.2）。
+
+**状态：待完成。** §14.6 列出的收口门在本节写作时**仍在跑**（写作期间复查进度：21:51 → 75%、21:52 → 79%、21:53 → 86%），
+因此本节**不写**全量通过数字，也不声称三端全绿、真实 FPS 已验或 GUI 已验。
+
+三端首次跑红的形态（只读日志，不作修复结论）：
+
+| runner | 退出 | 形态 | 证据 |
+|---|---|---|---|
+| windows-latest | 1 | 主套件原生崩溃（access violation），无 Python 断言栈 | `.scratch/ci243/114459265643.log` |
+| ubuntu-latest | 134 | SIGABRT（core dumped），日志里**一行原生栈都没有** | `.scratch/ci243/114459265812.log`、`linux_full.log` |
+| macos-latest | 1 | pytest `INTERNALERROR: cannot instantiate 'WindowsPath' on your system`（`nodes.py` → `Path(os.getcwd())`） | `.scratch/ci243/114459265845.log` |
+
+崩溃取证与已排除项详见 `.scratch/ci243/WIN-LINUX-NATIVE-CRASH-FINDINGS-2026-10-11.md`
+（该文件的结论是**根因未确证**，本轮交付的是诊断位，不是修复）。
+
+### 14.1 修改文件说明（本节增量）
+
+`git diff --numstat`（工作树 vs `HEAD = 2ae2c273930bc7e122a2283d4203745473525c55`）：
+**11 个文件，`+263 / −10`**，其中产品实现只有 **1 个**文件（`pet/fps_monitor.py`）。
+
+产品与 CI：
+
+| 文件 | 增/删 | 改了什么 + 为什么 |
+|---|---|---|
+| `pet/fps_monitor.py` | +10 / −2 | `_blocked()` 的平台判据**只问注入的那一次**。改前 `platform_supported()`（默认取 `game_fps.platform_support`）之后又调 `game_fps.backend_state()`，后者**再查一次真实 `sys.platform`**，把"注入的能力可用"在非 Windows 宿主上静默压掉（本机是 Windows，这条分支天然通过 ⇒ 本机绿、CI 红）。现改成只查后端文件（`game_fps.backend_problem`，不碰平台），状态码与原因串逐字不变（§14.3 五组接线实测）。这是本批**唯一**产品运行态改动 |
+| `tests/conftest.py` | +49 / −0 | 新增两处**崩溃取证位**，不改任何红绿判定：① 面包屑 `pytest-breadcrumb.txt` 逐阶段（`[start]`/`[setup]`/`[call]`/`[teardown]`）写盘、`buffering=1` 逐行 flush，进程被原生杀死也留得下"死在哪个用例的哪个阶段"；② `pytest_runtest_logreport` 里失败当刻把 `longrepr` 直写 `sys.__stderr__` —— `-q` 的失败详情本来攒到会话末尾才打，进程被杀死就全丢。开关 `DSPET_TEST_DIAG_DIR`，GH Actions 自动落 `$RUNNER_TEMP/dspet-pytest-diag/`，未开启时两个钩子第一行返回、不建文件不写一行；不碰 pytest 自己的 faulthandler、不装信号处理器 |
+| `.github/workflows/pr-test.yml` | +13 / −0 | 主套件之后加 `if: failure()` 的 `Pytest crash diagnostics` 步骤，**只 `tail -n 30`** 面包屑（全量两万多行，绝不整篇进日志） |
+
+测试（跨平台判据与确定输入）：
+
+| 文件 | 增/删 | 改了什么 + 为什么 |
+|---|---|---|
+| `tests/test_cursor_visibility.py` | +25 / −5 | 三处 `monkeypatch.setattr(vision.sys, 'platform', …)` 与 `setattr('pet.window.os.name', 'nt')` 换成**模块命名空间垫片** `_ns_shim`（显式成员覆盖、其余转发真模块）。原写法看着像命名空间、改的其实是**全局** `os`/`sys` 模块，而 `pathlib` 的平台分派只看全局 `os.name` ⇒ 窗口期里 pytest 生成失败报告时抛 `NotImplementedError: cannot instantiate 'WindowsPath'`= 整场 INTERNALERROR，正是 mac runner 的死法 |
+| `tests/test_updater.py` | +20 / −1 | 同上一族：`setattr(updater.os, "name", "nt")` → `setattr(updater, "os", _ns_shim(os, name="nt"))` |
+| `tests/test_frameseq_provision.py` | +10 / −2 | 同上一族：`test_creation_flags_hide_ffmpeg_console_on_windows` 的全局 `os.name` 伪装换成 `fp.os` / `fp.subprocess` 两个模块级垫片（POSIX 的 `subprocess` 也没有那两个 Windows 常量）。这一例正是 mac 崩溃前已报告 1728 例处的 `order.txt:1792` |
+| `tests/test_fps_monitor.py` | +45 / −0 | 两条新回归：① 注入能力为真 + 真实平台判据说"非 Windows" ⇒ 断言 `start() is True`、会话真起、段非 `unsupported`（**在 Windows 上改前也是红的**，所以它本身就是跨平台回归）；② 默认判据 + 无能力 ⇒ 不起会话/线程、不枚举目标、原因逐字等于平台那句 |
+| `tests/test_game_fps_exit_teardown.py` | +7 / −0 | 修的是真缺陷、不是加 skip：该用例用**默认**闸门建段，非 Windows 上 `sync()` 会走 `_detach()` ⇒ `assert isinstance(slot.monitor, _Monitor)` 必然失败。建段前把 `gf.platform_support` 与 `gf.platform_problem` **两个视图一起钉**（只钉一个会造出"没能力却报有能力"的自相矛盾的替身世界）；未删改任何既有断言 |
+| `tests/test_final_interaction_regressions.py` | +56 / −0 | 新增 `autouse` 夹具把 DSH 探活（真连 3080/19387/38080 + 全 miss 时枚举 OS 进程）钉成"在线"：本模块手动驱动 `_poll` 且都要"桥接记录被消费"，不钉就取决于**跑测试这台机器上有没有 DSH**（本机有 ⇒ 假绿；CI 没有 ⇒ 第 2 拍转 offline、`_on_parsed_record` 早退且 `dismiss_all_interactions()` 清空本地 pending ⇒ 一批断言红）。另加一条**离线口径**回归：用例体内把探活钉回真离线，断言离线收敛、屏上提醒被撤、pending 清空、离线期间记录不再进收敛器。只钉网络/OS 边界，产品探活行为一字不改 |
+| `tests/test_interaction_identity_ambiguity.py` | +15 / −0 | 同一个共享夹具 + `from pet import harness_launcher`（该模块此前没导入它）。离线反向回归只在上一行那个模块保留一条，避免两处重复 |
+| `tests/test_cleanup_mei_cache_cli.py` | +13 / −0 | `test_delete_removes_owned_and_keeps_unmarked` 在 POSIX 上必红：标记里写的是**当前** PID，跑测试时它当然活着，产品按"在用"保守跳过是**正确行为**（不是缺陷）。夹具改成先把标记 PID 改写成**一个已退出进程**的 PID（起一个立即退出的子进程取 PID），模拟"崩溃遗留"，让该用例真正测它要测的那条路径 |
+
+**审查留档与工作树的差异（如实记录）**：`.scratch/ci243/staged-fixes/fps-platform-gate/` 的
+`pet/fps_monitor.py` 与 `tests/test_fps_monitor.py` 与工作树**逐字节相同**；
+`.scratch/ci243/staged-fixes/dsh-probe-tests/` 的两份副本与工作树**不同**（工作树是缩过的版本：
+夹具 docstring 精简，且离线反向回归只落在 `test_final_interaction_regressions.py`），
+记账以上表的 `git diff --numstat` 为准，staged 目录只作审查留档。
+
+### 14.2 性能分析
+
+**这是微基准，不是产品整树 CPU 测量，也不是真实 FPS 测量**：只测 `FpsMonitor._blocked()`
+这一个同步判据调用本身的开销与它触发的边界。**全程不开启采集**——不调
+`start()` / `subscribe()` / `configure()`，实测两个监视器 `running is False`、`_thread is None`、
+订阅集合为空；整个基准运行窗口内 `socket.socket.connect` / `socket.create_connection` 调用 **0** 次、
+`subprocess.Popen` **0** 次、线程数 1 → 1（无新增线程）。
+
+命令与环境（样本量写在命令里）：
+
+```
+.scratch/venv311/Scripts/python.exe .scratch/ci243/fps_blocked_bench.py --rounds 5 --calls 10000
+  → EXIT=0（2026-10-11T21:48:49+0800；脚本 + 机器可读结果：.scratch/ci243/fps_blocked_bench.py / .json / .out）
+Python 3.11.15（与 CI 同档）· win32 · 16 逻辑核 · 本机**同时在跑**收口全量套件（§14.3）
+```
+
+**判据是默认接线，无 fake platform**：`platform_supported=None` ⇒ 真 `game_fps.platform_support()`
+（实测 `True`）；`backend_path=None` ⇒ 真实随包路径
+`resources/presentmon/PresentMon-2.6.0-x64.exe`（实测 `is_file() is True`）。
+**对照**：`git show HEAD:pet/fps_monitor.py`（blob sha256 `31a540e1…`）加载成独立模块
+`fps_monitor_baseline`；当前模块＝工作树 `pet/fps_monitor.py`（sha256 `706d720c…`），两者字节不同。
+
+每轮 10000 次调用、共 5 轮；因机器同时有负载，HEAD 与 worktree **在同轮内相邻测、顺序逐轮对调**
+（配对）。单位 µs：
+
+| 轮 | HEAD mean | HEAD p50 | HEAD p90 | HEAD p99 | HEAD max | worktree mean | worktree p50 | worktree p90 | worktree p99 | worktree max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 669.5 | 617.3 | 888.8 | 1539.6 | 22796.3 | 638.3 | 601.6 | 797.6 | 1216.5 | 10017.2 |
+| 2 | 638.1 | 605.8 | 786.5 | 1149.4 | 17332.6 | 650.0 | 617.8 | 813.5 | 1162.3 | 2559.6 |
+| 3 | 652.0 | 620.8 | 813.5 | 1177.6 | 10638.0 | 662.0 | 628.6 | 827.8 | 1233.9 | 20757.1 |
+| 4 | 691.4 | 658.1 | 868.0 | 1289.9 | 14106.2 | 680.4 | 639.4 | 873.8 | 1383.3 | 5023.4 |
+| 5 | 707.2 | 659.4 | 918.2 | 1462.4 | 8842.6 | 626.2 | 599.7 | 772.6 | 1115.6 | 2767.7 |
+| 均值 | **671.6** | 605.8–659.4 | — | — | — | **651.4** | 599.7–639.4 | — | — | — |
+
+- 逐轮配对差值（worktree − HEAD，mean）：−31.2 / +11.8 / +10.0 / −10.9 / −81.0 ⇒
+  **均值 −20.2 µs，标准差 34.2 µs**（`|差值| < sigma`）。
+- 空循环地板（同一 per-call 计时方式，只 `perf_counter` 与循环）：mean 0.104 µs、p50 0.1 µs
+  ⇒ 计时仪器开销不是这几百微秒的来源。`max` 列的毫秒级尖刺是并发负载/调度抢占。
+- **结论**：本次改动在 `_blocked()` 上**没有统计上可分辨的耗时差异**（它省下的两次平台判据
+  查询被下面那个固定成本淹没）。省掉的部分本身有确定量级：`game_fps.platform_problem()` 实测
+  mean **1.6 µs / 次**，而改动把每调用的它从 2 次减到 1 次 ⇒ 量级 **≤ 约 2 µs/次**。
+
+`_blocked()` 的成本落在哪（同一台机器、每项独立 10000 次；两侧共用，故不构成差异来源）：
+
+| 组成部分 | mean µs | p50 µs | 说明 |
+|---|---|---|---|
+| `game_fps.bundled_backend_path()` | 483.7 | 454.4 | 固定成本主体：`pathlib.Path(__file__).resolve()` 的 Windows 真实路径解析；两侧都调 |
+| `game_fps.backend_problem(真实路径)` | 111.6 | 107.7 | 其中 `Path.is_file()` 实测 mean 100.1 µs |
+| `game_fps.platform_problem()` | **1.6** | 1.5 | 改动把它从 2 次/调用减到 1 次 |
+| 三者相加 ≈ 597 µs | — | — | 与上表实测 626–707 µs（含循环与计时开销）一致 |
+
+**文件系统调用的归属（独立探针，1000 次/项，`os.stat`/`os.lstat` 挂在全局 `os` 上数、finally 还原）**：
+`bundled_backend_path()` = 1 次 `os.stat`（`Path(__file__).resolve()`）、`Path.is_file(真实 exe)` = 1 次 `os.stat`、
+`backend_problem(None)` = 2 次 `os.stat`（上面两者之和 = `_blocked()` 每次那 2 次）、
+`backend_problem(真实路径)` = 1 次、**`platform_problem()` / `platform_support()` 各 0 次文件系统调用**、
+`os.lstat` 全程 0 次。日志 `.scratch/ci243/fps_blocked_syscall_split.log`。
+
+逐条回答三份证据纪律要求的问题（下表全部为**实测计数**，每批 2000 次调用；`os.stat` 从全局 `os` 上数、
+`sys.platform` 与 `os.environ` 从 `game_fps` 模块命名空间垫片上数）：
+
+| 每次 `_blocked()` | HEAD | worktree | 差值 |
+|---|---|---|---|
+| `sys.platform` 属性读取 | 4 | **2** | −2（纯进程内属性读取，非 syscall） |
+| `os.environ` 读取 | 4 | **2** | −2（纯进程内 mapping 读取，非 syscall） |
+| `sys._MEIPASS` 读取 | 1 | 1 | 0 |
+| `os.stat`（文件系统） | 2 | 2 | 0（一次来自 `bundled_backend_path()` 里的 `Path.resolve()`，一次来自 `Path.is_file()`；两者在两侧完全相同） |
+
+- **稳态开销**：`_blocked()` 只被 `snapshot()` 的降级路径、`subscribe()`、`_build_fallback()`、
+  `_maybe_start_worker()` 调用（宿主按岛刷新率取 `snapshot()`；有快照时走 `self._snapshot` 提前返回，
+  根本不进 `_blocked()`）。改动**没有**新增任何调用点。
+- **新增路径成本与触发频率**：零新增路径——改的是既有路径内部少问一次平台判据。
+- **新的系统调用 / 网络 / 磁盘 / 线程**：**无**。文件系统调用数不变（2 次/调用，两侧相同）；
+  网络连接实测 0 次；子进程实测 0 次；线程数 1 → 1。磁盘读写只在 `is_file()` 的元数据查询上，
+  与改前完全一致。
+- **内存有无增长**：**无随调用次数的增长**。不装 tracemalloc 的独立探针：每个模块连续 6 个子轮 ×
+  5000 次调用（累计到 30000 次），GC 后对象数 delta 恒定（HEAD 恒 −10、worktree 恒 +1，
+  从 5000 次到 30000 次不漂移），进程 WorkingSet 与 Private 增量**恒为 0.0 KB**。
+  tracemalloc 那条线出现过一个**测量层伪影**：某些子轮次 GC 后留存 ≈ 406 KB，来源是单次
+  415088 B、`count=1` 的分配（`pathlib.py` 的 `sys.intern` 行），它在 HEAD 与 worktree
+  **两侧、两种测量顺序下都出现过也都没出现过**（同一模块的相邻子轮从 406 KB 掉回 0.4 KB），
+  空函数对照（同样 tracemalloc 节奏、不调 pathlib）从不出现 ⇒ 记为伪影，**不作为内存结论**。
+
+### 14.3 实机运行记录（本机真实 Windows，非 CI、非 mock）
+
+| # | 做了什么 | 命令 | 真实结果 |
+|---|---|---|---|
+| 1 | `FpsMonitor._blocked` 微基准（默认判据、真实随包 PresentMon 路径、HEAD 对照） | `.scratch/venv311/Scripts/python.exe .scratch/ci243/fps_blocked_bench.py --rounds 5 --calls 10000` | EXIT=**0**；数字见 §14.2；`running=false`、`socket=0`、`Popen=0`、线程 1→1 |
+| 2 | 取值等价性（5 组接线，证明改动只减少一次平台查询、不改返回值） | `.scratch/venv311/Scripts/python.exe .scratch/ci243/fps_blocked_equivalence.py` | EXIT=**0**，`all_identical=true`：S1 默认接线（真平台判据+真实随包路径）⇒ 两侧 `("","")`、段状态同为 `unknown`；S2 注入缺失后端路径 ⇒ 两侧同为 `unsupported` + 逐字相同的原因串；S3 注入能力为假 ⇒ 两侧同为 `unsupported` + 同一句平台原因；S4 能力为真+缺失后端 ⇒ 同上；S5 能力为真+真实后端 ⇒ 两侧同为空。日志 `.scratch/ci243/fps_blocked_equivalence.log` / `.json` |
+| 3 | 收口全量门（`final_prepush311`，与 `.github/workflows/pr-test.yml` 主套件同口径） | `python -m pytest -q --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py` | **未结束，待补**（见 §14.6）。日志 `.scratch/ci243/final_prepush311_full.log`：21:36:39 起跑，写作期间复查进度 **21:51 → 75%、21:52 → 79%、21:53 → 86%**，进程仍在跑。**本节点不写通过、不写 passed 数字** |
+| 4 | 文件系统调用归属（那 2 次 `os.stat` 从哪来） | `.scratch/venv311/Scripts/python.exe .scratch/ci243/fps_blocked_syscall_split.py` | EXIT=**0**：`bundled_backend_path()` 1 次 / `is_file()` 1 次 / `backend_problem(None)` 2 次 / `backend_problem(真实路径)` 1 次 / **`platform_problem()` 与 `platform_support()` 各 0 次** / `os.lstat` 0 次；`restored: True True`。日志 `.scratch/ci243/fps_blocked_syscall_split.log` |
+| 5 | 前一轮同命令全量门（**只覆盖本批一部分**，仅作基线参考） | 同上 | `.scratch/ci243/prepush311_full.log` → **6735 passed, 18 skipped**（1035.87 s，21:29:42 结束）。按文件 mtime 核对：它覆盖本批的 `tests/conftest.py`（21:10:24）、workflow（21:10:00）与 `tests/test_frameseq_provision.py`（20:22:32），但**早于** `pet/fps_monitor.py`（21:30:47）与另外 7 个测试文件（21:30:52–21:35:00）⇒ **不覆盖本批全部改动**，**不能**当作本次收口的通过证据 |
+
+**本机做不到、因此没有做的**（不用沉默代替结论）：
+
+- 三端 runner：macOS / Linux 都没有真机，本批的跨平台结论来自 `.scratch/ci243/` 里的
+  隔离沙箱与一次性子进程探针（真 `sys.platform='darwin'` 只在子进程的模块命名空间里构造过），
+  **不是**三端真机、也**不是**三端 CI 已通过。
+- 真实 FPS 读数与 ETW 会话：本机权限边界未变（未入 Performance Log Users 时不采集、不伪报 0），
+  本批没有开启任何采集会话，因此**没有任何实测 FPS**。
+- GUI 目视：本批全是测试/判据/CI 诊断位，没有起界面、没有截屏。
+
+### 14.4 覆盖与不吸收（#239 / #240 / #241，精确口径）
+
+上游三条开放 PR 的核真结论沿用 `.scratch/product-release-continuation-20261009/UPSTREAM-TRIAGE-20261011.md`
+§3，本节给出**准确口径**，避免被读成"本版遗漏"：
+
+- **#239（恢复默认设置入口，对应 issue #220）已覆盖**：本树 `pet/settings_reset_defaults.py` 是
+  **双作用域 + slot 路由 + 位置相干预留 + 重置后关窗**，PR 只做单一作用域 ⇒ **不吸收**（吸收会造同一功能两份真值）。
+- **#240（动作菜单点后不收起，对应 issue #221）已覆盖**：本树 `pet/context_menus/shared.py`
+  的 `_populate_animation_category` 已对触发动作叶子设 `closeOnTrigger`，并多一层
+  `anim_menu_stay_open` 偏好 ⇒ **不吸收**。
+- **#241（低速松手重力下落，对应 issue #219）已有产品范围，不是遗漏**：本树 `drop_gravity`
+  在 **overlay / sprite 路径**下已实现（`pet/pet_sprite.py` 消费、`pet/overlay_shell.py` 注入、
+  每宠键 + 设置行）；capture（legacy 单窗）拓扑下该行按设计**置灰并带 tooltip**——这是
+  **既有的产品口径**（capture 模式下宠是真实带标题窗口、无 sprite 路径），**不是本版没做完的缺口**。
+  PR 把同名键接到 legacy `pet/window.py` 低速分支 + 仅配置文件无 UI + 全局键语义，
+  与本树**键名相同而语义不同** ⇒ **不吸收**（否则两套语义/两份真值）。
+
+三条都属于"本树是超集或已有既定量法"，因此**本轮 CI 收口不把它们当作待办**。
+
+### 14.5 未确证与未修（诚实边界）
+
+1. **Windows 的 access violation 与 Linux 的 SIGABRT 两次原生崩溃根因仍未确证**。本轮只加取证位
+   （面包屑 + 失败实时回显 + CI 失败时回读 tail-30），**没有**声称修好它们；
+   Linux 那次连一行原生栈都没有，`faulthandler.register` 兜底那条路已被证伪
+   （CPython 对致命信号一律 `RuntimeError` 拒绝），详见
+   `.scratch/ci243/WIN-LINUX-NATIVE-CRASH-FINDINGS-2026-10-11.md` §5、§7。
+2. **mac 的 `INTERNALERROR` 是确证根因**（全局 `os.name` 伪装 ⇒ `pathlib` 实例化 `WindowsPath`），
+   本批已消除该写法：当前全仓 `monkeypatch.setattr(os, "name", …)` 站点数 = **0**（grep 实测）。
+3. **同一族但未动**：仍有 **53 处**测试在改**全局 `sys.platform`**（12 个文件：`test_feature_gating.py`、
+   `test_game_fps.py`、`test_island_fps_integration.py`、`test_lyric_sources.py`、`test_memory_trim.py`、
+   `test_music_player_settings.py`、`test_now_playing_media_type.py`、`test_platform_mac_shadow.py`、
+   `test_platform_passthrough.py`、`test_proactive.py`、`test_requested_regressions.py`、
+   `test_wayland_platform.py`）。`pathlib` 只按 `os.name` 选路径类，所以它们**不是** mac 那条
+   INTERNALERROR 的成因；本批未动，登记为下一批候选（不在本轮 CI 收口范围内）。
+4. 本批**没有**验证任何真实 FPS、**没有**起 GUI、**没有**跑三端 runner（见 §14.3）。
+
+### 14.6 本地收口与待验边界
+
+1. **收口全量门已结束**：Python 3.11.15 / PySide6 6.12.0，
+   `.scratch/ci243/final_prepush311_full.log` = **6738 passed / 18 skipped**，
+   1082.35 秒，后台任务真实退出码 **0**；按 CI 主套件命令隔离四个文件，不冒称其包含所有隔离族。
+2. **时序高负载三轮**：12 个纯 CPU worker 下，四文件每轮 **91 passed / exit 0**，
+   用时 20.37 / 24.82 / 52.18 秒，日志 `.scratch/ci243/highload/round{1,2,3}.log`。
+   负载未绑核，不能声称固定保留四核空闲；负载子进程退出后无残留。
+3. **诊断末次加固**：写入错误不得打断 pytest；回读步骤移到全部 pytest 步骤之后。
+   这是全量后两处诊断调整，未再跑全量；启用诊断的工作流、FPS/交互、报告契约及四隔离文件
+   合并复验 **319 passed / 5 skipped / exit 0**，77.66 秒；ruff 与 diff-check 通过。
+4. **三端 runner 待修复后复跑**：用户已授权继续自主推进及候选分支验证，不再以缺许可阻塞。
+   本地通过不代表 Windows/macOS/Linux CI 已通过，原生崩溃仍待新日志核真。
+5. 真实 DSH 桌面端中止回合端到端、多 DSH 实例聚合作用域（§十二末条）等既有欠项不受本节影响。

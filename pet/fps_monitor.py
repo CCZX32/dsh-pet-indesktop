@@ -653,10 +653,18 @@ class FpsMonitor:
             return self._fallback
 
     def _blocked(self) -> tuple[str, str]:
-        """能力层面的阻塞原因 ``(状态, 原因)``；可用返回 ``("", "")``。"""
+        """能力层面的阻塞原因 ``(状态, 原因)``；可用返回 ``("", "")``。
+
+        平台判据**只问注入的那一次**（:attr:`_platform_supported`）：``backend_state``
+        会再查一次真实 ``sys.platform``，把"注入的能力可用"在非 Windows 宿主上静默压掉。
+        后端只查文件（``backend_problem`` 不碰平台），缺程序照样 ``unsupported`` 带路径。
+        """
         if not self._platform_supported():
             return game_fps.STATE_UNSUPPORTED, self._platform_blocked_reason()
-        return game_fps.backend_state(self._backend_path)
+        problem = game_fps.backend_problem(self._backend_path)
+        if problem:
+            return game_fps.STATE_UNSUPPORTED, problem
+        return "", ""
 
     def _platform_blocked_reason(self) -> str:
         """平台/架构闸门的人话原因（非 Windows / ARM64 未验证 / 架构不匹配）。

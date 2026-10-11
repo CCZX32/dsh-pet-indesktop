@@ -179,6 +179,20 @@ def _write(events_dir: Path, name: str, *records) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+@pytest.fixture(autouse=True)
+def _dsh_probe_pinned_online(monkeypatch):
+    """把 DSH 探活（真连 3080/19387/38080 + 枚举 OS 进程）钉成「在线」。
+
+    ``DshMonitor._poll`` 每 2 拍探活一次，本模块手动驱动 ``_poll`` 且都要记录被
+    消费——不钉就取决于跑测试这台机器上有没有 DSH：本机有 ⇒ 假绿，CI 没有 ⇒
+    第 2 拍转 offline、``dismiss_all_interactions()`` 清空 pending ⇒ 一批断言红。
+    只钉网络/OS 边界，产品探活行为不改；副作用是真 socket 不再发生。
+    真实离线口径由 ``test_offline_probe_override_...`` 在用例体内覆盖（后打的补丁生效）。
+    """
+    monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+    monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: True)
+
+
 def _build(tmp_path, win):
     """真 manager + 真 DshMonitor（worker 不启动、手动驱动 ``_poll``）。"""
     cfg = Config(base=tmp_path / "cfg")
@@ -520,6 +534,48 @@ def test_same_record_delivered_once_across_two_replays(tmp_path):
         assert len(win.alerts) == calls_after_first, \
             f"重放不得再投一次正文：{win.alerts}"
         assert list(win.visible_by_id) == [f"interaction:{_iid('approval', 'dsh', 'rpc_id', 'r-once', 's-1')}"]
+    finally:
+        mgr.shutdown()
+
+
+# ======================================================================
+# 探活边界：共享桩只钉「在线」，真实离线口径由本用例覆盖
+# ======================================================================
+def test_offline_probe_override_clears_pending_and_stops_converging(tmp_path, monkeypatch):
+    """钉回真实离线：共享桩不得盖住 offline 分支（它只表达「这台机器有 DSH」）。
+
+    离线那一拍的可观测语义：offline 收敛撤掉屏上常驻提醒、清空本地 pending 真值，
+    且此后的桥接记录不再进收敛器（``_on_parsed_record`` 早退）——这正是「记录被
+    消费」要求探活在线的机制。
+    """
+    monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
+    monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: False)
+    win = _MergingWin()
+    mgr, mon = _build(tmp_path, win)
+    converged: list[tuple] = []
+    mon.dsh_state_changed.connect(lambda *args: converged.append(args))
+    try:
+        _write(mon.events_dir, "dsh-1001.jsonl",
+               {"event": "approval/request", "tool": "bash", "rpcId": "r-off",
+                "sessionId": "s-1"})
+        mon._poll()   # 第 1 拍不探活（_online 仍是 None）：记录照旧被消费
+        assert ("", "waiting_approval", "approval/request") in converged
+        assert len(mgr.pending_interactions_for("dsh")) == 1
+
+        mon._poll()   # 第 2 拍触发探活：钉成跑不通 ⇒ 真离线
+        assert mon._online is False, "钉死的探活必须落到离线"
+        assert ("waiting_approval", "offline", "") in converged, \
+            f"离线收敛必须发生：{converged}"
+        assert mgr.pending_interactions_for("dsh") == {}, \
+            "离线收敛清空本地 pending 真值（dismiss_all_interactions）"
+        assert win.visible_by_id == {}, "离线必须把常驻提醒从屏上撤掉"
+
+        converged.clear()
+        _write(mon.events_dir, "dsh-1001.jsonl",
+               {"event": "approval/request", "tool": "pwsh", "rpcId": "r-off2",
+                "sessionId": "s-1"})
+        mon._poll()
+        assert converged == [], f"离线期间记录不得喂收敛器：{converged}"
     finally:
         mgr.shutdown()
 
