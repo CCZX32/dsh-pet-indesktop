@@ -112,12 +112,34 @@ def _config(tmp_path, *, metrics=(), **island_overrides) -> Config:
     return cfg
 
 
-def _island(config, monkeypatch, monitor=None):
+def _pin_fps_platform(monkeypatch, *, supported: bool = True) -> None:
+    """把"这台机器有没有帧率采集能力"钉成注入值（两个视图一起钉）。
+
+    ``FpsSlot`` / ``FpsMonitor`` 在**构造期**就把 ``game_fps.platform_support`` 取成
+    自己的判据（存的是当时的函数对象），而它读的是真实 ``sys.platform``：在 macOS /
+    Linux runner 上默认判定为"这台机器没有这个能力"，于是**接线**用例整体退化成
+    "段不占位、采集器根本不建"（mac CI 实测 22 条）。接线与宿主平台无关，所以建岛
+    之前先钉住。
+
+    两个视图一起钉是刻意的：``platform_support()`` 就是 ``platform_problem() == ""``
+    的别名，只钉一个会造出"没能力却报有能力"的自相矛盾替身世界。
+    """
+    monkeypatch.setattr(gf, "platform_support", lambda: bool(supported))
+    monkeypatch.setattr(
+        gf, "platform_problem",
+        lambda: "" if supported else gf.PLATFORM_UNSUPPORTED_REASON)
+
+
+def _island(config, monkeypatch, monitor=None, *, platform_supported: bool = True):
     """建岛：网络/设备/第三方三条采样路径与帧率采集器全换替身。
 
     采集器宿主必须在**建岛之前**换掉：岛构造的最后一步就会同步采样闸门
     （``_sync_fps_slot``），那时段已经要去共享宿主拿实例了。
+
+    平台闸门同样要在**建岛之前**钉住（见 :func:`_pin_fps_platform`）；确实要验
+    "这台机器没有这个能力"的用例显式传 ``platform_supported=False``。
     """
+    _pin_fps_platform(monkeypatch, supported=platform_supported)
     monitor = monitor if monitor is not None else _StubMonitor()
     built: list[_StubMonitor] = []
 
@@ -548,9 +570,8 @@ def test_strip_dock_stops_the_frame_rate_too(tmp_path, monkeypatch):
 def test_a_platform_without_the_capability_takes_no_slot_but_keeps_the_reason(
         tmp_path, monkeypatch):
     """非 Windows：胶囊上连 ``--`` 都不占（段增删），卡片仍写清原因。"""
-    monkeypatch.setattr(gf, "platform_support", lambda: False)
-    monkeypatch.setattr(gf, "platform_problem", lambda: gf.PLATFORM_UNSUPPORTED_REASON)
-    island, monitor, hub = _island(_config(tmp_path, metrics=[FPS]), monkeypatch)
+    island, monitor, hub = _island(
+        _config(tmp_path, metrics=[FPS]), monkeypatch, platform_supported=False)
     try:
         island.show()
         app.processEvents()
@@ -669,6 +690,7 @@ def test_the_app_quit_hook_releases_the_collector(tmp_path, monkeypatch):
 def test_two_pets_share_one_collector_and_one_stay_alive_after_the_other_closes(
         tmp_path, monkeypatch):
     """多宠唯一：两只宠 = 一个采集器；关掉一只不影响另一只的读数。"""
+    _pin_fps_platform(monkeypatch)      # 见 _island：段要在宿主平台之外也真的挂上
     monitor = _StubMonitor()
     hub = island_fps.FpsHub(monitor_factory=lambda: monitor)
     monkeypatch.setattr(island_fps, "_HUB", hub)

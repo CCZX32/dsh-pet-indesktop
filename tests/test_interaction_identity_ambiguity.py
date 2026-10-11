@@ -136,6 +136,14 @@ def _build(tmp_path, win):
     mon._running = True
     mon.events_dir.mkdir(parents=True, exist_ok=True)
     mon._tailer._initial_backfill_done = True
+    # 本文件不测扫描节流，所以把它关掉（scan_interval=0 即「每拍全量枚举」，是产品合法
+    # 取值，见 test_agent_link.py::test_scan_interval_elapsed_rescans_without_directory_change）。
+    # 原因：节流下的「新文件当拍发现」压在**目录 mtime 变化**上，而那不是确定前提——
+    # 建文件后目录时间戳在 Windows 上惰性更新（本机实测：40 次里只有 22-33 次读得回变化，
+    # 仓库既有探针实测 25/50），低精度文件系统上整拍都不变，新文件只能等 scan_interval
+    # （默认 5s）兜底。本文件要测的是身份 / 收尾语义，不该赌文件系统时序；节流契约本身
+    # 由 test_agent_link.py::TestDirGlobTailer 那一族负责。
+    mon._tailer.scan_interval = 0.0
     return mgr, mon
 
 

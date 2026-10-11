@@ -2237,12 +2237,19 @@ class AppShell:
             pass
 
     def _config_signature(self):
-        """(mtime_ns, size) 签名：目录信号不带文件名，用它兜底判断 config 是否变了。"""
+        """(st_ino, mtime_ns, size) 签名：判断 config 是否真的变了（目录信号不带文件名）。
+
+        ``st_ino`` 让原子 ``os.replace`` 落盘换到的新 inode 与上一份区分开——同字节
+        数、同时间戳刻度（FAT/exFAT 2s）的改动不再被判重。**非绝对保证**：原位改写、
+        inode 号复用、或取不到 inode（部分网络/FUSE 挂载返回 0）时退化为
+        ``(mtime_ns, size)``（与改造前同口径，不会更严），故去重门只许偏保守
+        （宁可多应用一次，见 ``_on_config_change_debounced``）。
+        """
         try:
             stat = self.config.path.stat()
         except OSError:
             return None
-        return (stat.st_mtime_ns, stat.st_size)
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
     def _arm_config_reload(self) -> None:
         """重启去抖窗口：窗口内的多次变动合并成一次 reload+应用。"""
@@ -2254,7 +2261,11 @@ class AppShell:
         if Path(path).name != self.config.path.name:
             return  # 只认本配置文件的 basename（同目录还有 settings.lock 等）
         self._watch_config_file()
-        self._arm_config_reload()
+        # 盘上内容没变就不重启去抖窗口：同一次 os.replace 的重复通知可能迟到于
+        # 首轮应用之后（mac 实测一次保存两次应用链），无门就会再应用一次。
+        # 签名口径与目录侧（_on_config_dir_changed）同源；新内容照常进窗口。
+        if self._config_signature() != getattr(self, "_last_config_signature", None):
+            self._arm_config_reload()
 
     def _on_config_dir_changed(self, path: str) -> None:
         self._watch_config_file()
@@ -2273,13 +2284,17 @@ class AppShell:
             self._mark_settings_child(False)
 
     def _on_config_change_debounced(self) -> None:
+        # 先采样再 reload，finally 记**采样值**：应用期间外部落盘的第二次保存不能
+        # 被算成"已应用"（那会让它随后的通知全被去重门吞掉）。采样只会偏旧 →
+        # 失效方向只可能是多应用一次，不可能是漏。
+        sampled = self._config_signature()
         self.config.reload()
         try:
             self._apply_external_config_change()
         except Exception:
             logging.exception("应用外部配置变更失败")
         finally:
-            self._last_config_signature = self._config_signature()
+            self._last_config_signature = sampled
 
     def _teardown_config_watcher(self) -> None:
         """释放 watcher 与两个定时器（退出/测试收口共用）。"""

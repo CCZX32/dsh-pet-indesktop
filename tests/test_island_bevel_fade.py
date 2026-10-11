@@ -569,10 +569,16 @@ def _mid_fade_frame(island: DynamicIsland) -> QImage:
 
 
 def test_structure_change_starts_fade_with_new_content_in_place(tmp_path, monkeypatch):
-    """结构变化触发淡化；新增内容**即时就位**（不参与系数），共用区全程零稀释。"""
+    """结构变化触发淡化；新增内容**即时就位**（不参与系数），共用区全程零稀释。
+
+    ``show_icon=True``：**取样锚**。共用区用的是 ``hit=255`` 的逐像素比对，所以
+    必须有一个"不透明墨够多、且与字体无关"的区域可量——文字的核心墨随机器字体/
+    抗锯齿走（mac CI 实测只剩 10 个 alpha=255 的像素，门槛形同虚设），而头像是内容
+    层里**纯几何**画出来的实心圆底（强调色 drawEllipse），换字体一个像素不变。
+    """
     _qapp()
     monkeypatch.setattr(island_mod, "_CONTENT_FADE_MS", 900)  # 拉长：不赌时序
-    island = _island(tmp_path)
+    island = _island(tmp_path, show_icon=True)
     island.show()
     try:
         _qapp().processEvents()
@@ -614,10 +620,13 @@ def test_structure_change_starts_fade_with_new_content_in_place(tmp_path, monkey
 
 
 def test_old_structure_fades_out_while_shared_stays_intact(tmp_path, monkeypatch):
-    """单侧淡化（主代理裁决）：旧结构独有区按 (1−t) 渐出；共用区全程零稀释。"""
+    """单侧淡化（主代理裁决）：旧结构独有区按 (1−t) 渐出；共用区全程零稀释。
+
+    ``show_icon=True`` = 共用区的取样锚（见上一条用例的说明）。
+    """
     _qapp()
     monkeypatch.setattr(island_mod, "_CONTENT_FADE_MS", 3000)
-    island = _island(tmp_path, show_status=True)
+    island = _island(tmp_path, show_status=True, show_icon=True)
     island.show()
     try:
         _qapp().processEvents()
@@ -706,10 +715,15 @@ def _assert_frame_is_content(frame: QImage, content: QImage, island: DynamicIsla
 
 
 def test_fade_end_destroys_timer_and_final_frame_is_new_content(tmp_path, monkeypatch):
-    """停表纪律：到点定时器销毁；终点帧与新位图逐像素一致（没有残影）。"""
+    """停表纪律：到点定时器销毁；终点帧与新位图逐像素一致（没有残影）。
+
+    ``show_icon=True`` = 逐像素比对（``_assert_frame_is_content`` 的 ``checked``）
+    的取样锚：纯几何的实心头像圆底换字体不变，字形核心墨不是（mac CI 实测只剩 42
+    个可取样点，门槛形同虚设）。对照岛必须用同一份素材，否则比的是两张不同的图。
+    """
     _qapp()
     monkeypatch.setattr(island_mod, "_CONTENT_FADE_MS", 60)
-    island = _island(tmp_path)
+    island = _island(tmp_path, show_icon=True)
     island.show()
     try:
         _qapp().processEvents()
@@ -732,7 +746,7 @@ def test_fade_end_destroys_timer_and_final_frame_is_new_content(tmp_path, monkey
         assert checked >= 60, f"取样点太少（{checked}）"
 
         # 强断言：终点帧与"从未淡化过的同状态岛"逐像素一致——旧位图零残留
-        fresh = _island(tmp_path, show_status=True)
+        fresh = _island(tmp_path, show_status=True, show_icon=True)
         fresh.show()
         try:
             _qapp().processEvents()

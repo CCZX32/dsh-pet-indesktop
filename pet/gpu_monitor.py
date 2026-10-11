@@ -166,6 +166,13 @@ def _safe_name(address: Any, base: int, end: int) -> str | None:
     都落在界内、都以 ``\\0`` 结尾。所以这里的边界与终止符检查**不是**对合法 API 用法
     设卡：真 PDH 的名字永远在界内。落到界外或没有终止符，说明读数缓冲区的契约已经不成立
     （并发改写 / 内存损坏 / 不是真 PDH），此时解引用就是在读别人的内存。
+
+    名字是 **UTF-16LE**（Windows 的 ``wchar_t`` 恰好是 2 字节，POSIX 上是 4 字节），
+    所以按**字节**读固定长度再自己解码，不用 ``ctypes.wstring_at``——后者按**本平台的**
+    ``wchar_t`` 读，同一块缓冲区在 macOS 上会把相邻两个 UTF-16 码元拼成一个越界码点而抛
+    ``ValueError``（本机按 POSIX 语义复现：``0x41 0x00 0x42 0x00`` 被读成 ``U+420041``）。
+    这里的解码口径与 Windows 的 ``wstring_at`` 实测等价（代理对合成一个字符、孤立代理项
+    原样保留而不抛错），所以换实现不改变 Windows 上的取值。
     """
     try:
         start = int(address or 0)
@@ -174,7 +181,7 @@ def _safe_name(address: Any, base: int, end: int) -> str | None:
     if start < base or start + 2 > end:  # 连一个宽字符都放不下
         return None
     limit = min((end - start) // 2, MAX_INSTANCE_NAME_CHARS)
-    text = ctypes.wstring_at(start, limit)
+    text = ctypes.string_at(start, limit * 2).decode("utf-16-le", "surrogatepass")
     terminator = text.find("\0")
     return text[:terminator] if terminator >= 0 else None
 

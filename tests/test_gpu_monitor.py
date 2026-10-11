@@ -982,8 +982,13 @@ def test_dxgi_running_out_of_adapters_is_a_normal_end(monkeypatch):
     assert log["factory_releases"] == [log["factory_addr"]]
 
 
+@requires_com
 def test_fake_dxgi_itself_behaves_like_com(monkeypatch):
-    """替身自检：打错一个槽位就该被这个替身抓出来（防"替身和实现一起错"）。"""
+    """替身自检：打错一个槽位就该被这个替身抓出来（防"替身和实现一起错"）。
+
+    它和上面五条一样是**按 COM ABI 造替身**的用例（``_fake_dxgi`` 用 ``WINFUNCTYPE``
+    造虚表回调），所以走同一道 ``requires_com`` 闸门；纯解析用例不受此门影响。
+    """
     fake, log = _fake_dxgi(names=("A",), luids=((0, 1),))
     _use_fake_dxgi(monkeypatch, fake)
     table = gm.dxgi_adapters()

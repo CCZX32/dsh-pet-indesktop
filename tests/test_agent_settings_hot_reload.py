@@ -374,6 +374,31 @@ def test_overlay_external_change_does_not_expand_harness_autostart(overlay_shell
     assert shell._harness_autostart_wanted() is False, "自启门只读 harness_autostart + 联动门"
 
 
+def test_late_duplicate_notification_does_not_restop_harness(overlay_shell):
+    """首轮应用后迟到的同内容重发 → 不得第二次收口自拉起 dsh（也不得拉起）。
+
+    mac CI 那一轮的形态：``_set_link(config, False)`` 之后 ``env.stopped`` 成了
+    ``[1, 1]``——同一次保存的重复通知迟到于首轮应用之后，第二次
+    ``_apply_external_config_change`` 又派了一次 harness 收口线程。与
+    ``test_background_service_gates`` 里的同族用例同一个成因（文件侧 arm 无
+    签名门），这里钉住它落在 DSH 联动链上的后果：收口恰一次、不新拉起服务。
+    """
+    shell, config, env = overlay_shell.shell, overlay_shell.config, overlay_shell.env
+    watcher = shell._config_watcher
+    _set_link(config, False)
+    _wait_until(lambda: _dsh_monitor(shell)._running is False, what="关")
+    _wait_until(lambda: bool(env.stopped), what="关联动后的 harness 收口线程")
+    _pump(0.4)
+
+    watcher.fileChanged.emit(str(shell.config.path))  # 迟到的重复通知（内容未变）
+    _pump(1.0)  # 去抖窗口（300ms）+ 收口线程调度的余量
+    assert env.stopped == [1], f"迟到的重复通知不得再收口一次，实为 {env.stopped}"
+    assert env.launches == [], "关联动不得拉起 dsh 服务"
+    assert _dsh_monitor(shell)._running is False, "读方保持关闭"
+    assert shell._harness_autostart_wanted() is False
+    assert_no_process_side_effects(env)
+
+
 def test_legacy_external_change_applies_shared_manager_once(tmp_path, monkeypatch, out_of_box):
     """legacy 逐位不变：窗链照旧应用一次，应用级不得再补一次（无重复副作用）。"""
     shell, config = _start_shell(tmp_path, monkeypatch,

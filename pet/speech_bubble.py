@@ -20,7 +20,7 @@ import logging
 import sys
 
 log = logging.getLogger(__name__)
-from math import ceil
+from math import ceil, floor
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -136,13 +136,60 @@ SELF_TALK_IMAGE_BOX_H = 140
 # 呼吸泡正文盒的最小高度（逻辑像素）：低于它正文会被挤成一条缝，宁可放大画布。
 BREATH_LABEL_MIN_H = 42
 
-# 呼吸泡副标题的左右安全内边距（参考画布 240 宽下的逻辑像素）：有机轮廓底部
-# 两角向内收到画布宽度的约 13%/86%，左对齐的副标题末行会压到轮廓外沿。
+# 呼吸泡副标题的左右安全内边距下限（参考画布 240 宽下的逻辑像素）：有机轮廓
+# 底部两角向内收，左对齐的副标题末行会压到轮廓外沿。真正使用的内边距由
+# ``PetSpeechBubble._breath_subtitle_side_insets`` 按轮廓弦算出，这里是取不到
+# 轮廓时的兜底与最小值——保证轮廓宽松处观感不变。
 BREATH_SUBTITLE_SIDE_INSET = 14
+
+# 副标题文本列与轮廓弦之间再留的像素（逻辑像素）：轮廓是三次贝塞尔，按行采样
+# 的弦有半像素级误差，文字自身也带一点侧边距，留 1px 让墨迹整格落在轮廓内。
+BREATH_SUBTITLE_SIDE_CLEARANCE = 1
 
 # 呼吸泡画布宽度上限（参考画布 240 宽下的逻辑像素）：文字/配图内容按缩放系数
 # 换算，超长内容不允许把水泡顶成整屏。
 BREATH_CANVAS_MAX_W = 320
+
+
+def breath_main_bubble_path(canvas: QSize) -> QPainterPath:
+    """呼吸泡主泡的有机轮廓：画布尺寸 → 路径（纯函数）。
+
+    主泡绘制与副标题安全区（``PetSpeechBubble._breath_subtitle_side_insets``）
+    共用同一出处：文字列按轮廓的弦收进，两边各画一套几何必然分叉。
+    """
+    sx = max(0.01, canvas.width() / 240.0)
+    sy = max(0.01, canvas.height() / 195.0)
+    rect = QRectF(5 * sx, 4 * sy, 193 * sx, 163 * sy)
+    x, y, width, height = rect.x(), rect.y(), rect.width(), rect.height()
+    main = QPainterPath()
+    main.moveTo(x + width * 0.17, y + height * 0.06)
+    main.cubicTo(
+        x + width * 0.43, y - height * 0.03,
+        x + width * 0.73, y + height * 0.01,
+        x + width * 0.89, y + height * 0.20,
+    )
+    main.cubicTo(
+        x + width * 1.01, y + height * 0.35,
+        x + width * 1.01, y + height * 0.65,
+        x + width * 0.86, y + height * 0.83,
+    )
+    main.cubicTo(
+        x + width * 0.67, y + height * 1.02,
+        x + width * 0.33, y + height * 1.02,
+        x + width * 0.13, y + height * 0.84,
+    )
+    main.cubicTo(
+        x - width * 0.02, y + height * 0.68,
+        x - width * 0.04, y + height * 0.39,
+        x + width * 0.07, y + height * 0.22,
+    )
+    main.cubicTo(
+        x + width * 0.09, y + height * 0.16,
+        x + width * 0.12, y + height * 0.10,
+        x + width * 0.17, y + height * 0.06,
+    )
+    main.closeSubpath()
+    return main
 
 
 class FlowLayout(QLayout):
@@ -532,7 +579,6 @@ class PetSpeechBubble(QFrame):
         bubble_size = self._breath_size_for_content(base_size)
         bubble_size, label_height = self._breath_size_for_subtitle(bubble_size)
         self._breath_scale = bubble_size.width() / 240.0
-        scale = self._breath_scale
         if self._content_kind == "image":
             self._layout.setContentsMargins(
                 round(bubble_size.width() * 0.15),
@@ -541,10 +587,7 @@ class PetSpeechBubble(QFrame):
                 round(bubble_size.height() * 0.18),
             )
         else:
-            self._layout.setContentsMargins(
-                round(28 * scale), round(56 * scale),
-                round(52 * scale), round(44 * scale),
-            )
+            self._layout.setContentsMargins(*self._breath_text_margins(bubble_size))
         margins = self._layout.contentsMargins()
         label_width = max(
             92, bubble_size.width() - margins.left() - margins.right()
@@ -552,15 +595,15 @@ class PetSpeechBubble(QFrame):
         if label_height is None:      # 无副标题/配图：旧口径（正文盒吃满内高）
             label_height = self._breath_label_height(
                 bubble_size.height() - margins.top() - margins.bottom(),
-                label_width, bubble_size.width(),
+                label_width, bubble_size,
             )
         self._sync_subtitle_max_width(label_width)
         # 有机轮廓在底部两角向内收，左对齐的副标题最后一行会贴到轮廓外沿
         # （issue #216 的「跨到气泡轮廓外」——文字落在透明区，深色桌面上直接
-        # 看不见）。给副标题左右各留一段安全内边距，正文盒不动（正文居中，
-        # 天然避让两角）。
-        inset = self._breath_subtitle_inset(bubble_size.width())
-        self._subtitle_label.setContentsMargins(inset, 0, inset, 0)
+        # 看不见）。副标题文字列按轮廓弦收进，正文盒不动（正文居中，天然避让
+        # 两角）。
+        left_inset, right_inset = self._breath_subtitle_side_insets(bubble_size)
+        self._subtitle_label.setContentsMargins(left_inset, 0, right_inset, 0)
         self.label.setFixedSize(label_width, label_height)
         self.setFixedSize(bubble_size)
         if self._content_kind == "image" and not self._source_pixmap.isNull():
@@ -582,15 +625,77 @@ class PetSpeechBubble(QFrame):
             ))
 
     def _breath_subtitle_inset(self, canvas_width: int) -> int:
-        """呼吸泡副标题的左右安全内边距（画布尺寸等比换算）。
+        """呼吸泡副标题左右安全内边距的下限（画布尺寸等比换算）。
 
-        有机轮廓在底部两角向内收到画布宽度的 ~13%/~86%，左对齐的副标题末行
-        会压到轮廓外沿——那段像素落在气泡之外的透明区，深色桌面上直接看不见
-        （issue #216 的①③）。内边距按画布宽等比，形状与观感一致。
+        有机轮廓在底部两角向内收，这是参考画布上的观感基准；真正使用的内边距
+        由 ``_breath_subtitle_side_insets`` 按轮廓弦算出，取不到弦时退回这里。
         """
         return int(round(BREATH_SUBTITLE_SIDE_INSET * canvas_width / 240.0))
 
-    def _breath_subtitle_reserve(self, label_width: int, canvas_width: int) -> int:
+    def _breath_text_margins(self, canvas: QSize) -> tuple[int, int, int, int]:
+        """文字内容的四边内边距（画布等比换算）：布局与副标题安全区同源。"""
+        scale = canvas.width() / 240.0
+        return (
+            round(28 * scale), round(56 * scale),
+            round(52 * scale), round(44 * scale),
+        )
+
+    def _breath_chord_at(self, canvas: QSize, row: float) -> tuple[int, int] | None:
+        """主泡轮廓在 ``row`` 这一行的弦：``(左端像素, 右端开区间)``；该行在轮廓外 = None。
+
+        取法是「路径 ∩ 水平细带」的包围盒——一次布尔运算换掉逐像素 ``contains``
+        （实测单次 0.036ms vs 0.60ms）。布尔运算会先展平曲线、细带又跨一两行，
+        包围盒与该行真实弦有 1px 级偏差（两侧各可宽出 ≤1.6px，局部也可能窄不到
+        1px），所以两端各让 2px 再用 ``contains`` 向内收到端点确实在轮廓内
+        （与逐像素扫描逐行等价：画布宽 120..640 的内盒全部 78905 行零差异）。
+        """
+        main = breath_main_bubble_path(canvas)
+        band = QPainterPath()
+        band.addRect(QRectF(0.0, row - 0.5, float(canvas.width()), 1.0))
+        bounds = main.intersected(band).boundingRect()
+        if bounds.isEmpty():
+            return None
+        # 两端各多让 2px 再向内收：收到「第一个/最后一个落在轮廓内的像素」，与扫描同解。
+        left = max(0, int(floor(bounds.left())) - 2)
+        right = min(canvas.width(), int(ceil(bounds.right())) + 2)
+        while left + 1 < right and not main.contains(QPointF(left + 0.5, row)):
+            left += 1
+        while left + 1 < right and not main.contains(QPointF(right - 0.5, row)):
+            right -= 1
+        if not (main.contains(QPointF(left + 0.5, row))
+                and main.contains(QPointF(right - 0.5, row))):
+            return None
+        return left, right
+
+    def _breath_subtitle_side_insets(self, canvas: QSize) -> tuple[int, int]:
+        """副标题文字列的左右安全内边距（逻辑像素）。
+
+        呼吸泡的轮廓在底部两角向内收，而布局四边内边距相对轮廓是偏的（主泡
+        矩形在画布内靠左），同一个内边距在左右两侧的含义并不相同；固定参考值
+        只对某一种字体度量成立——换字体（Linux 的 Noto CJK 行高与字宽和
+        Windows 不同）副标题末行就会探进右下角「主泡与副泡之间」的透明缝，
+        深色桌面上直接看不见（issue #216 的①③，CI 上 32/49 像素）。
+
+        这里直接取主泡轮廓在**副标题文字底行**处的弦：文字列落在弦内，QLabel
+        又按自身矩形裁切，墨迹就不可能画到轮廓外。文字底行取布局内盒底边——
+        副标题吃掉正文盒让位后的剩余高度、贴底排（正文盒占满剩余空间时两者
+        相等；正文盒触底撑开时文字居中，取内盒底边只会更保守）。
+        """
+        margins = self._breath_text_margins(canvas)
+        base = self._breath_subtitle_inset(canvas.width())
+        chord = self._breath_chord_at(canvas, float(canvas.height() - margins[3]))
+        if chord is None:
+            # 该行整行落在轮廓外（画布过小）：退回参考内边距，不制造负文本列。
+            return base, base
+        left_edge, right_edge = chord
+        clearance = BREATH_SUBTITLE_SIDE_CLEARANCE
+        left = max(base, int(round(left_edge + clearance - margins[0])))
+        right = max(base, int(round(
+            (canvas.width() - margins[2]) - (right_edge - clearance)
+        )))
+        return left, right
+
+    def _breath_subtitle_reserve(self, label_width: int, canvas: QSize) -> int:
         """副标题要从正文盒里让出的高度（行距 + 它自己的行高）；无副标题 = 0。
 
         必须用正文 label 宽度量：副标题落到布局里拿到的就是这个宽度
@@ -598,8 +703,8 @@ class PetSpeechBubble(QFrame):
         """
         if not self._subtitle_shown():
             return 0
-        inset = self._breath_subtitle_inset(canvas_width)
-        self._subtitle_label.setContentsMargins(inset, 0, inset, 0)
+        left, right = self._breath_subtitle_side_insets(canvas)
+        self._subtitle_label.setContentsMargins(left, 0, right, 0)
         self._sync_subtitle_max_width(label_width)
         self._subtitle_label.ensurePolished()
         # 标题态（歌词歌名）会关掉 wordWrap，此时 heightForWidth 返回 -1，
@@ -609,7 +714,7 @@ class PetSpeechBubble(QFrame):
             sub_height = self._subtitle_label.sizeHint().height()
         return self._layout.spacing() + sub_height
 
-    def _breath_label_height(self, inner: int, label_width: int, canvas_width: int) -> int:
+    def _breath_label_height(self, inner: int, label_width: int, canvas: QSize) -> int:
         """呼吸泡正文盒高度（旧口径）：吃满内高，下限 ``BREATH_LABEL_MIN_H``。
 
         只在「没有副标题」时用到（有副标题时 ``_breath_size_for_subtitle`` 已经把
@@ -617,7 +722,7 @@ class PetSpeechBubble(QFrame):
         复用同一出处、不出现第二套公式。
         """
         return max(BREATH_LABEL_MIN_H,
-                   inner - self._breath_subtitle_reserve(label_width, canvas_width))
+                   inner - self._breath_subtitle_reserve(label_width, canvas))
 
     def _breath_size_for_subtitle(self, bubble_size: QSize) -> tuple[QSize, int | None]:
         """把副标题的行高算进呼吸泡画布高度（issue #216）。
@@ -642,15 +747,11 @@ class PetSpeechBubble(QFrame):
         size = QSize(bubble_size)
         label_height = BREATH_LABEL_MIN_H
         for _ in range(3):
-            scale = size.width() / 240.0
-            self._layout.setContentsMargins(
-                round(28 * scale), round(56 * scale),
-                round(52 * scale), round(44 * scale),
-            )
+            self._layout.setContentsMargins(*self._breath_text_margins(size))
             margins = self._layout.contentsMargins()
             label_width = max(92, size.width() - margins.left() - margins.right())
             inner = size.height() - margins.top() - margins.bottom()
-            reserve = self._breath_subtitle_reserve(label_width, size.width())
+            reserve = self._breath_subtitle_reserve(label_width, size)
             label_height = max(BREATH_LABEL_MIN_H, inner - reserve)
             if label_height + reserve <= inner:
                 return size, label_height
@@ -1459,36 +1560,7 @@ class PetSpeechBubble(QFrame):
         sx = max(0.01, local.width() / 240.0)
         sy = max(0.01, local.height() / 195.0)
         self._breath_scale = min(sx, sy)
-        rect = QRectF(5 * sx, 4 * sy, 193 * sx, 163 * sy)
-        x, y, width, height = rect.x(), rect.y(), rect.width(), rect.height()
-        main = QPainterPath()
-        main.moveTo(x + width * 0.17, y + height * 0.06)
-        main.cubicTo(
-            x + width * 0.43, y - height * 0.03,
-            x + width * 0.73, y + height * 0.01,
-            x + width * 0.89, y + height * 0.20,
-        )
-        main.cubicTo(
-            x + width * 1.01, y + height * 0.35,
-            x + width * 1.01, y + height * 0.65,
-            x + width * 0.86, y + height * 0.83,
-        )
-        main.cubicTo(
-            x + width * 0.67, y + height * 1.02,
-            x + width * 0.33, y + height * 1.02,
-            x + width * 0.13, y + height * 0.84,
-        )
-        main.cubicTo(
-            x - width * 0.02, y + height * 0.68,
-            x - width * 0.04, y + height * 0.39,
-            x + width * 0.07, y + height * 0.22,
-        )
-        main.cubicTo(
-            x + width * 0.09, y + height * 0.16,
-            x + width * 0.12, y + height * 0.10,
-            x + width * 0.17, y + height * 0.06,
-        )
-        main.closeSubpath()
+        main = breath_main_bubble_path(local.size())
 
         # The two trailing bubbles intentionally use hand-drawn cubic contours,
         # not QPainterPath.addEllipse(), matching the reference's irregular rims.

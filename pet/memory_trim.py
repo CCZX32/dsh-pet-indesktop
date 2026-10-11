@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import ntpath
 import os
 import sys
 import threading
@@ -288,12 +289,18 @@ class Win32ProcessApi:
     "打开必关闭"一起走真实代码路径。
     """
 
+    #: 类级判定按**宿主平台**：``run_in_background`` 在构造之前就用它决定要不要开工。
     supported = sys.platform == "win32"
 
     def __init__(self, kernel32=None, psapi=None, user32=None) -> None:
         self._kernel32 = kernel32 if kernel32 is not None else _load_library("kernel32")
         self._psapi = psapi if psapi is not None else _load_library("psapi")
         self._user32 = user32 if user32 is not None else _load_library("user32")
+        if kernel32 is not None and psapi is not None:
+            # 显式注入了 kernel32 + psapi：这一份实例自带整套 Win32 面（替身走的就是这条
+            # 路），而本类的职责——缓冲区解析、句柄按指针语义判定、"打开必关闭"——与宿主
+            # 平台无关。类级常量是"这台机器能不能自己加载 Win32 库"，对注入了库的实例不成立。
+            self.supported = True
         self._configure_signatures()
 
     def _configure_signatures(self) -> None:
@@ -370,7 +377,10 @@ class Win32ProcessApi:
             handle, 0, buffer, ctypes.byref(size)
         ):
             return ""
-        return os.path.basename(buffer.value or "")
+        # 路径是 Win32 给的，分隔符**永远**是反斜杠：取 basename 必须用 ``ntpath``，用
+        # ``os.path`` 在 POSIX 宿主上会把 ``C:\x\chrome.exe`` 整条原样返回（关键进程名单
+        # 按可执行名比对，于是比对全部落空）。Windows 上两者等价，行为不变。
+        return ntpath.basename(buffer.value or "")
 
     def working_set_bytes(self, handle) -> int:
         """读不到返回 ``-1``（**不是** 0）：0 会被当成"小于阈值"而掩盖查询失败。"""

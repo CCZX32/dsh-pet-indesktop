@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -364,3 +365,140 @@ def test_one_settings_save_applies_external_change_exactly_once(tmp_path, monkey
     _pump(0.8)  # 去抖窗口（300ms）之后的余量：不得出现第二次
     assert len(applies) == 1, f"一次保存触发了 {len(applies)} 次应用链"
     assert shell.config.get("pnpm_bin") == "C:/tools/pnpm.cmd"
+
+
+def test_late_duplicate_notification_does_not_reapply_same_content(tmp_path, monkeypatch):
+    """首轮应用后迟到的**同内容** fileChanged 重发 → 不得第二次应用。
+
+    CI 实测（mac 轮，一轮 6735 项的套件里）：一次保存触发 2 次
+    ``_apply_external_config_change``。成因是文件侧的 arm 点没有签名门——
+    目录侧（``_on_config_dir_changed``）按 (mtime_ns, size) 签名判变，文件侧
+    只 ``_arm_config_reload()``；mac 上同一次 ``os.replace`` 的重复通知会迟到
+    于 300ms 去抖窗口之后，于是重启窗口、再应用一次（盘上内容并未再变）。
+
+    这里不赌 OS 事件时序：首轮应用完成后，直接用真实 watcher 的
+    ``fileChanged`` 把同一条通知重发一次——这就是"迟到重发"的确定性形态。
+    同一条用例钉住三件事：重发不二次应用、新内容照常应用、原子 replace 后
+    监听恢复（换 inode 后路径仍在监视表内）。
+    """
+    shell = _start_shell(tmp_path, monkeypatch, win=_StubWin())
+    applies: list[int] = []
+    shell._apply_external_config_change = lambda: applies.append(1)
+    watcher = shell._config_watcher
+    external = Config(base=tmp_path)
+    external.set("pnpm_bin", "C:/tools/pnpm.cmd")
+    _save_external(external)
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not applies:
+        app.processEvents()
+        time.sleep(0.02)
+    _pump(0.8)
+    assert applies == [1], f"首轮应用链必须是恰好一次，实为 {applies}"
+    assert str(shell.config.path) in watcher.files(), \
+        "原子 replace 换 inode 后必须把配置路径监听起来（否则后续变更全丢）"
+
+    watcher.fileChanged.emit(str(shell.config.path))  # 迟到的重复通知（内容未变）
+    _pump(0.8)
+    assert applies == [1], f"同内容重发不得二次应用，实为 {applies}"
+
+    external.set("pnpm_bin", "C:/tools/pnpm2.cmd")
+    _save_external(external)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and len(applies) < 2:
+        app.processEvents()
+        time.sleep(0.02)
+    _pump(0.8)
+    assert applies == [1, 1], f"新的真实改动必须照常应用且只应用一次，实为 {applies}"
+    assert shell.config.get("pnpm_bin") == "C:/tools/pnpm2.cmd"
+
+
+def test_write_during_apply_window_is_not_lost(tmp_path, monkeypatch):
+    """应用链执行期间外部落下第二份配置 → 必须照常应用（漏 = 缺陷）。
+
+    签名记成"应用之后"的盘上状态时，这次落盘会被算成已应用，它随后的通知全被去重
+    门吞掉（内容只落盘、运行期看不到）。这里 apply 期间真落盘第二份，再按真实通知
+    形态 emit 一次 fileChanged。
+    """
+    shell = _start_shell(tmp_path, monkeypatch, win=_StubWin())
+    applies: list[int] = []
+    watcher = shell._config_watcher
+    second = Config(base=tmp_path)
+
+    def apply_with_concurrent_write():
+        applies.append(1)
+        if len(applies) == 1:  # 应用链执行期间（去抖回调内）外部写下第二份配置
+            second.set("pnpm_bin", "C:/tools/during-apply.cmd")
+            _save_external(second)
+
+    shell._apply_external_config_change = apply_with_concurrent_write
+    external = Config(base=tmp_path)
+    external.set("pnpm_bin", "C:/tools/pnpm.cmd")
+    _save_external(external)
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not applies:
+        app.processEvents()
+        time.sleep(0.02)
+    _pump(0.8)
+    watcher.fileChanged.emit(str(shell.config.path))
+    deadline = time.monotonic() + 10.0
+    while (time.monotonic() < deadline
+           and shell.config.get("pnpm_bin") != "C:/tools/during-apply.cmd"):
+        app.processEvents()
+        time.sleep(0.02)
+    _pump(0.6)
+    assert shell.config.get("pnpm_bin") == "C:/tools/during-apply.cmd", \
+        "应用期间落盘的第二次保存被去重门吞掉了（只落盘、未进运行期）"
+    assert applies == [1, 1], f"第二份配置应恰好再应用一次，实为 {applies}"
+
+
+def test_same_mtime_size_new_inode_is_not_suppressed(tmp_path, monkeypatch):
+    """同 (mtime_ns, size)、只换 inode → 不得误屏蔽（用局部 stat 替身，跨平台）。
+
+    真机 inode 能否区分取决于文件系统（NTFS/APFS/ext4 可以，部分网络/FUSE 挂载
+    返回 0），所以这里不依赖宿主能力：在同一台机器上用局部 stat 替身造出"同时间
+    戳、同字节数、inode 换了一个"的形态。能力边界如实记在 ``_config_signature``
+    的 docstring 里——替身证明的是门与指纹的判定，不是某个文件系统的 inode 语义。
+    真实原子 replace 的行为由本文件另两条用例（迟到的同内容重发、应用期间落盘）
+    照常覆盖。
+    """
+    shell = _start_shell(tmp_path, monkeypatch, win=_StubWin())
+    applies: list[int] = []
+    shell._apply_external_config_change = lambda: applies.append(1)
+    path = shell.config.path
+    external = Config(base=tmp_path)
+    external.set("pnpm_bin", "C:/tools/pnpm.cmd")
+    _save_external(external)
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not applies:
+        app.processEvents()
+        time.sleep(0.02)
+    _pump(0.8)
+    assert applies == [1], f"首轮应用链必须是恰好一次，实为 {applies}"
+
+    base = path.stat()
+    real_stat = pathlib.Path.stat
+
+    class _Stat:
+        """只提供 ``_config_signature`` 读的三个字段：mtime/size 不变、inode 换号。"""
+
+        def __init__(self, ino):
+            self.st_ino = ino
+            self.st_mtime_ns = base.st_mtime_ns
+            self.st_size = base.st_size
+            self.st_mode = base.st_mode
+
+    def fake_stat(self, *, follow_symlinks=True):
+        if self == path:
+            return _Stat(int(base.st_ino) + 1)
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(pathlib.Path, "stat", fake_stat)
+    shell._config_watcher.fileChanged.emit(str(path))
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(applies) < 2:
+        app.processEvents()
+        time.sleep(0.02)
+    assert applies == [1, 1], f"同 mtime/size 的新 inode 被误屏蔽了，实为 {applies}"

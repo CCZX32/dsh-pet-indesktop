@@ -268,7 +268,15 @@ def test_standard_bubble_images_keep_retina_device_pixel_density(tmp_path, monke
     image = tmp_path / "retina.png"
     Image.new("RGB", (600, 600), "blue").save(image)
     bubble = PetSpeechBubble(style_id="paper_left")
-    monkeypatch.setattr(bubble, "devicePixelRatioF", lambda: 2.0)
+    # 打在**类**上，不打在实例上：monkeypatch 对实例属性记下的旧值是本类的
+    # bound method，undo() 会把它写回 ``bubble.__dict__``，形成
+    # ``bubble -> __dict__ -> bound method -> bubble`` 的自环 ⇒ 引用计数永远归不了
+    # 零，Python 包装只能等周期性 GC 回收，C++ 侧 QWidget 也就落到任意时点销毁
+    # （实测落在别的用例的 import 里，属于 conftest 记的「Garbage-collecting /
+    # no Python frame」原生崩溃家族；本用例的顶层窗口清扫因此看不到它，收口失效）。
+    # ``devicePixelRatioF`` 来自 QWidget、不在 ``PetSpeechBubble.__dict__`` 里，
+    # 类级补丁的旧值是 NOTSET，undo() 走 delattr，不留自环。
+    monkeypatch.setattr(PetSpeechBubble, "devicePixelRatioF", lambda self: 2.0)
     assert bubble.show_image(image, QRect(420, 460, 220, 260), 5000)
     app.processEvents()
     bubble.grab()
@@ -277,6 +285,8 @@ def test_standard_bubble_images_keep_retina_device_pixel_density(tmp_path, monke
     assert bubble._standard_image_rect.toRect() == bubble.label.geometry()
     bubble.close()
     app.processEvents()
+    # 类级补丁不应给实例留下方法覆盖，避免 undo 恢复 bound method 形成自环。
+    assert "devicePixelRatioF" not in bubble.__dict__
 
 
 def test_all_bubble_presets_use_soft_layered_shadows():

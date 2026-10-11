@@ -110,6 +110,45 @@ def _assert_subtitle_in_bubble(bubble: PetSpeechBubble, *, case: str) -> None:
     )
 
 
+def _subtitle_text_column(bubble: PetSpeechBubble) -> tuple[float, float]:
+    """副标题文本列的左右边界（气泡局部坐标，已扣掉安全内边距）。"""
+    sub = bubble._subtitle_label
+    margins = sub.contentsMargins()
+    return (
+        sub.x() + margins.left(),
+        sub.x() + sub.width() - margins.right(),
+    )
+
+
+def _assert_subtitle_column_inside_contour(bubble: PetSpeechBubble, *, case: str) -> None:
+    """副标题文本列必须落在主泡轮廓内（与字体度量无关的几何判据）。
+
+    取文字底行那一行的主泡弦：轮廓在底部两角向内收，内盒底边比它上面任何一行
+    都靠下，弦也最窄。文字列两端落在弦内，任何字体的墨迹都被 label 自身的矩形
+    裁住，不可能画到轮廓外。旧口径左右用同一个固定内边距，而布局内边距相对
+    轮廓是偏的（主泡矩形在画布内靠左），右端必然越出这条弦。
+
+    两个端点各向列内收 0.5px 再判：轮廓是三次贝塞尔，端点正好压在弦边界上时
+    浮点判内外不稳定，收半个像素不影响结论（旧口径的越界量是十几像素级）。
+    """
+    bubble._build_breath_bubble_geometry(bubble.rect())
+    path = bubble._main_bubble_path
+    sub = bubble._subtitle_label
+    needed = sub.heightForWidth(max(1, sub.width()))
+    # 文字底行：超长副标题被画布上限裁切时，墨迹只画到 label 自己的矩形下沿
+    # （再往下的行根本不绘制），取两者较低值；正常情形下两者相等。
+    row = float(sub.y() + min(needed, sub.height()))
+    left, right = _subtitle_text_column(bubble)
+    assert path.contains(QPointF(left + 0.5, row - 0.5)), (
+        f"{case}: 副标题文本列左端 {left}px 不在文字底行（{row}px）的主泡轮廓内 "
+        f"（画布 {bubble.width()}x{bubble.height()}）"
+    )
+    assert path.contains(QPointF(right - 0.5, row - 0.5)), (
+        f"{case}: 副标题文本列右端 {right}px 不在文字底行（{row}px）的主泡轮廓内"
+        f"（画布 {bubble.width()}x{bubble.height()}）——末行墨迹会落到轮廓外的透明区"
+    )
+
+
 @pytest.mark.parametrize("style", STANDARD_STYLES)
 @pytest.mark.parametrize("scale", (1.5, 2.0, 3.0))
 def test_balance_subtitle_stays_inside_scaled_standard_bubble(style, scale):
@@ -147,6 +186,15 @@ def test_balance_subtitle_stays_inside_breath_bubble(scale):
             f"breath_bubble scale={scale}: 画布内高 {inner}px 装不下正文盒 "
             f"{bubble.label.height()}px + 副标题 {sub.heightForWidth(bubble.label.width())}px"
         )
+        # 几何判据先跑：下面数墨迹的那条会把两个 label 的文字清空（差值渲染），
+        # 清空后副标题的 heightForWidth 不再是绘制时的口径。
+        #
+        # 墨迹数只反映**本机字体**：Windows 的 YaHei 恰好让末行比文本列窄，墨迹
+        # 越不出轮廓；换字体（CI 的 Linux/Noto CJK 行高与字宽都不同）同一段文字
+        # 末行更长，就落到主泡与副泡之间的透明缝里（CI 实测 1.5/2.0 各 32/49
+        # 像素）。这条与字体度量无关：文本列两端必须落在「文字底行处的主泡弦」
+        # 内——文字列在弦内时，任何字体的墨迹都被 label 自身的矩形裁住。
+        _assert_subtitle_column_inside_contour(bubble, case=f"breath_bubble scale={scale}")
         # 副标题墨迹必须落在水泡轮廓内：轮廓在底部两角向内收，副标题末行
         # 首字会压到轮廓外沿——那段像素画在气泡外的透明区，深色桌面上就是
         # 看不见的灰字（issue #216 的①③）。这里直接数渲染墨迹（几何断言无法

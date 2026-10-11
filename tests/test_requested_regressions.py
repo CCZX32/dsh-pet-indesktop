@@ -1258,6 +1258,11 @@ def _answer_save_failure(monkeypatch, seen: list, *, discard: bool = False) -> N
 
     只有"用户点了哪个按钮"这一处可注入：``settings_close_flow.confirm_discard_unsaved``
     （conftest 里默认桩成"继续编辑"，这里换成取真框并读回文案的替身）。
+
+    ``seen`` 里也收了一份标题，但**断言不许只看标题**：macOS 的 QMessageBox 走系统原生
+    对话框，``windowTitle()`` 在那边恒为空（仓库既有结论与同族修法见
+    ``tests/test_harness_lifecycle.py::test_confirm_dialog_text_names_pid_and_port``）。
+    承载"用户看得见什么"的是 ``text`` / ``info``——标题只在 Windows/Linux 上读得到。
     """
     from pet import settings_close_flow
 
@@ -1340,7 +1345,8 @@ def test_modern_settings_escape_keeps_the_dialog_open_when_save_fails(tmp_path, 
         assert finished == [], "保存失败时 Esc 不得关窗（草稿会丢）"
         assert shiboken6.isValid(dialog) and dialog.isVisible(), "窗口必须还在"
         assert dialog.bubble_style_select.currentData() == "breath_bubble", "草稿必须还在"
-        assert seen and "保存失败" in seen[-1]["title"], "必须给出可见的失败提示"
+        assert seen and "配置未能写入磁盘" in seen[-1]["text"], (
+            "必须给出可见的失败提示（macOS 取不到窗口标题，见本文件 _answer_save_failure 的注释）")
         assert seen[-1]["discard"].text() == "放弃未保存的改动并关闭", "出口必须可达且写明"
     finally:
         config.path.rmdir()                          # 恢复可写，收尾关窗
@@ -1527,7 +1533,7 @@ def test_modern_settings_save_warns_on_failure(tmp_path, monkeypatch):
     dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
     dialog._save()
     assert seen, "保存失败必须给用户可见提示"
-    assert "保存失败" in seen[-1]["title"]
+    assert "配置未能写入磁盘" in seen[-1]["text"]
     assert str(config.path) in seen[-1]["info"]
     dialog.close()
     app.processEvents()

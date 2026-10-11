@@ -333,14 +333,17 @@ def _close_qt_top_level_widgets():
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app is not None:
+            _diag_sweep_reset()
             for widget in list(app.topLevelWidgets()):
                 try:
                     if not shiboken6.isValid(widget):
                         continue  # C++ 侧已销毁的半死窗口：跳过
+                    _diag_sweep(widget, 'pre')  # 只读取证：见 _diag_sweep（默认不写）
                     widget.deleteLater()
                     # 接收者定向：只处理这一个对象的 DeferredDelete，不触碰共享队列里
                     # 其他对象的删除任务与排队事件。
                     QCoreApplication.sendPostedEvents(widget, QEvent.Type.DeferredDelete)
+                    _diag_sweep(widget, 'post')
                 except RuntimeError:
                     pass
     except Exception:
@@ -423,8 +426,11 @@ def _close_webm_readers_at_session_end():
 # faulthandler、不装信号处理器（faulthandler.register 对 SIGSEGV/SIGABRT 这类致命
 # 信号直接 RuntimeError 拒绝，见 CPython Modules/faulthandler.c 的 check_signum）。
 # 开关：DSPET_TEST_DIAG_DIR=<目录>；GH Actions 自动落 $RUNNER_TEMP/dspet-pytest-diag/；
-# 未开启时两个钩子第一行返回，不建文件、不写一行。
+# 未开启时两个钩子第一行返回、清扫 fixture 里的取证行也不写：不建文件、不写一行。
 _diag_crumb = None
+# 清扫 fixture 的逐对象取证（见 _diag_sweep）：本轮已写行数 + 每轮上限。
+_diag_sweep_n = 0
+_DIAG_SWEEP_LINES = 12
 
 
 def _diag_open():
@@ -442,6 +448,44 @@ def _diag_open():
                     encoding='utf-8', buffering=1)
     except OSError:
         return None
+
+
+def _diag_note(line):
+    """落一行取证。诊断写入失败不得改变测试结果。"""
+    if _diag_crumb is None:
+        return
+    try:
+        _diag_crumb.write(line + '\n')
+    except (OSError, ValueError):
+        pass
+
+
+def _diag_sweep_reset():
+    global _diag_sweep_n
+    _diag_sweep_n = 0
+
+
+def _diag_sweep(widget, phase):
+    """清扫每个顶层窗口的**前/后**各写一行 ``[qt-sweep/{phase}] 类名(objName)``。
+
+    只在取证开关打开时写，且每轮最多 ``_DIAG_SWEEP_LINES`` 行（workflow 只
+    ``tail -n 30`` 面包屑，不封顶会被大户用例挤掉真崩点）。收口只在"包装还活着"时
+    生效：包装若被别处强引用（典型：``monkeypatch.setattr`` 打在 QWidget *实例*上，
+    undo 把旧值 bound method 写回实例字典形成自环），C++ 会先在这里被删掉而包装继续
+    活着——这两行就是用来区分"清扫删掉了什么"和"删完还剩什么"的。
+    """
+    global _diag_sweep_n
+    if _diag_crumb is None or _diag_sweep_n >= _DIAG_SWEEP_LINES:
+        return
+    _diag_sweep_n += 1
+    try:
+        try:
+            name = repr(widget.objectName())
+        except RuntimeError:
+            name = '<C++ 已删>'
+        _diag_note(f'[qt-sweep/{phase}] {type(widget).__name__}({name})')
+    except Exception:
+        pass
 
 
 def pytest_configure(config):

@@ -1235,3 +1235,160 @@ Python 3.11.15（与 CI 同档）· win32 · 16 逻辑核 · 本机**同时在�
 4. **三端 runner 待修复后复跑**：用户已授权继续自主推进及候选分支验证，不再以缺许可阻塞。
    本地通过不代表 Windows/macOS/Linux CI 已通过，原生崩溃仍待新日志核真。
 5. 真实 DSH 桌面端中止回合端到端、多 DSH 实例聚合作用域（§十二末条）等既有欠项不受本节影响。
+
+## 十五、三端 CI 第二轮（2026-10-11/12）实际结果与本轮修复
+
+**本节定位**：PR243 三端 CI **第二轮**（run 38145642262，候选 HEAD `b8c4f3a9bfb2ec8b3a19f442ee9cbbe5fa1fdec0`）
+跑完之后的一批最小修复，按三份证据纪律记账。只追加本节；§一–§十四 的结论一律不变，也不回填 §0.1 统计（口径见 §0.2）。
+
+**状态：本机门已闭合；三端未复跑，故仍不称最终审通过。** 本轮两个统一全量门都在本机跑完，日志尾行原文如下：
+
+- 修复**前**的中间门（`.scratch/ci243/round3_prepush_full.log`）：`6741 passed, 18 skipped, 19 warnings in
+  1144.32s (0:19:04)`（23:26:03 起跑 → 23:45:07 结束），**结束早于**配置重载竞态修复落主树（§15.5，23:49）
+  ⇒ 这个数字**不覆盖**那次竞态补丁。
+- **最终统一门（`.scratch/ci243/round3_final_full.log`）：`6743 passed, 18 skipped, 19 warnings in
+  1116.25s (0:18:36)`**（mtime 00:12:23；起跑时刻由时长反推 ≈23:53:47，日志本身不落起跑时间戳），
+  **晚于**竞态修复落树的 23:49 ⇒ 该门**覆盖**修复后的主树，比中间门多 2 条通过、跳过数不变。
+
+两个日志都**不落退出码**：最终门的进程真实退出由父层另行核对（本节不替代该确认；中间门的退出状态此前已确认）。
+**这不等于三端全绿**（§15.1 的三端结果不变，Linux 原生崩的根因仍未证），也不等于整体审查通过——
+本节据此只记「竞态修复已落地，且落地后有本机门」，不记三端通过。
+
+### 15.1 第二轮真实结果（日志原文口径）
+
+| runner | 退出码 | 计数（日志原文） | 形态 | 日志 |
+|---|---|---|---|---|
+| windows-latest | 1 | **2 failed, 6735 passed, 19 skipped**，966.09 s | 完整跑完，**无原生崩溃** | `.scratch/ci243/windows_round2.log` |
+| macos-latest | 1 | **37 failed, 6646 passed, 73 skipped**，879.14 s | 完整跑完，**无 INTERNALERROR、无原生崩溃**（§14.5.2 的写法消除生效） | `.scratch/ci243/mac_round2.log` |
+| ubuntu-latest job 114488278822 | **134** | **无 summary**——14% 处 `Aborted (core dumped)`（14:05:38） | 仍**一行原生栈都没有**；取证位给出的只有面包屑 | `.scratch/ci243/linux_round2.log` |
+
+失败分类（逐条落在哪个族，与 §15.2 的修复一一对应）：
+
+- **Windows（2 条）**：「第二个写者 / 第二条身份没在**当拍**被读入」——`test_g2_event_delivery.py::test_duplicate_question_request_keeps_one_pending_and_closes`（`resolved` 必须收掉 pending，655–731）、`test_interaction_identity_ambiguity.py::test_identity_namespaces_get_distinct_keys_and_closes`（第二条未读入，737–764）。两条 longrepr 都在日志里，不是推断。
+- **Linux**：先是字幕墨迹越界（`scale=1.5` → 32 像素、`scale=2.0` → 49 像素画在主泡轮廓外），随后 abort 精确落在 `tests/test_desktop_pet_features.py::test_standard_bubble_images_keep_retina_device_pixel_density` 的 **teardown**（面包屑有 `[call]` 无 `[teardown]`：call 已出报告）。
+- **mac（37 条）**：26 = 岛三文件的平台/字体假设（22 `island_fps_integration` + 1 `card_sections` + 3 `bevel_fade`）；2 = `test_memory_trim.py`（POSIX 上 `os.path.basename` 取不出 Win32 名字 + 注入替身被类级 `supported` 挡在启动闸门外）；3 = `test_gpu_monitor.py`（POSIX `wchar_t` 4 字节读 UTF-16LE + 替身自检漏 `requires_com`）；4 = 设置页的原生对话框/lint 平台假设（`requested_regressions` 2、`settings_copy_lint` 1、`settings_stale_form_exit` 1）；**2 = 真实缺陷**（一次保存触发两次应用链：`agent_settings_hot_reload` 1 + `background_service_gates` 1）。
+
+### 15.2 修改文件说明（本节增量）
+
+`git diff --numstat`（工作树 vs `HEAD = b8c4f3a9…`）：**18 个文件，`+453 / −83`**，其中产品实现 **4 个**；
+本轮**未 commit、未 push**。
+
+产品：
+
+| 文件 | 增/删 | 改了什么 + 为什么 |
+|---|---|---|
+| `pet/speech_bubble.py` | +130 / −58 | 主泡轮廓抽成纯函数 `breath_main_bubble_path`（绘制与安全区同源）；副标题左右内边距改为按**文字底行处的主泡弦**取值（`_breath_chord_at`：路径∩水平细带包围盒 + 两端各 2px 用 `contains` 收边，替代逐像素扫描），布局四边内边距抽成 `_breath_text_margins`。修的是换字体（CI 的 Noto CJK）后末行探进「主泡与副泡之间透明缝」的 issue #216 ①③（32/49 像素） |
+| `pet/app.py` | +5 / −1 | `_on_config_file_changed` 补签名门（与目录侧同源的 `(mtime_ns, size)`）：同一次 `os.replace` 的**迟到重复通知**不再重启去抖窗口 ⇒ 一次保存只应用一次。mac 实测一次保存两次 `_apply_external_config_change` |
+| `pet/gpu_monitor.py` | +8 / −1 | `_safe_name` 由 `ctypes.wstring_at` 改为 `string_at(ptr, limit*2).decode("utf-16-le","surrogatepass")`：名字按契约是 UTF-16LE，而 `wstring_at` 按**宿主** `wchar_t` 宽度读——POSIX 上 4 字节/码元，相邻两码元被拼成越界码点抛 `ValueError` |
+| `pet/memory_trim.py` | +11 / −1 | ① `Win32ProcessApi.__init__`：显式注入 kernel32+psapi 的实例自认 `supported`（类级常量只回答"宿主能不能自带 Win32 库"，而 `run_in_background` 在**构造前**就按它决定开不开工）；② 解析路径的 `os.path.basename` → `ntpath.basename`（Win32 分隔符恒为反斜杠，`os.path` 在 POSIX 宿主上整条返回 ⇒ 关键进程名单比对全部落空） |
+
+测试（14 个，均为平台/时序判据或回归，无 `skip`、无删除用例）：
+
+| 文件 | 增/删 | 改了什么 + 为什么 |
+|---|---|---|
+| `tests/conftest.py` | +45 / −1 | 顶层窗口清扫加 **pre/post 逐对象取证**（每轮 ≤12 行；只在 `DSPET_TEST_DIAG_DIR` 开启时写）。用来区分"清扫删掉了什么"和"删完还剩什么" |
+| `tests/test_desktop_pet_features.py` | +11 / −1 | DPR 补丁从**实例**改到**类**：`monkeypatch` 对实例属性记的旧值是 bound method，`undo()` 写回实例字典形成自环 ⇒ 引用计数归不了零 ⇒ 无父 QWidget 落到任意时点销毁（本机红/绿成对实证；**Linux 直接触发仍待复验**，不说根治） |
+| `tests/test_bubble_subtitle_budget.py` | +48 / −0 | 新增**与字体度量无关**的几何判据：副标题文本列两端必须落在「文字底行处的主泡弦」内。原像素阈值一字未放宽 |
+| `tests/test_background_service_gates.py` | +46 / −0 | 新增「首轮应用后迟到的**同内容** `fileChanged` 重发 ⇒ 不得二次应用」，用真实 watcher 的 `fileChanged` 重发（确定性形态），不赌 OS 事件时序；同用例一并钉"新内容照常应用"与"原子 replace 后监听恢复" |
+| `tests/test_agent_settings_hot_reload.py` | +25 / −0 | 同族 overlay 侧回归：迟到重发不得再收口自拉起 dsh |
+| `tests/test_g2_event_delivery.py` | +8 / −0 | 关掉本文件的扫描节流（`scan_interval=0`，产品合法取值）：**当拍发现新文件**压在目录 mtime 变化上，而 Windows 目录时间戳惰性更新（本机 40 次只 22–33 次读得回变化），低精度文件系统上整拍不变；节流契约仍由 `test_agent_link.py` 那一族负责 |
+| `tests/test_interaction_identity_ambiguity.py` | +8 / −0 | 同上（本文件测身份/收尾语义，不该赌文件系统时序） |
+| `tests/test_island_fps_integration.py` | +26 / −4 | 新增 `_pin_fps_platform(...)`：`_island()` 构造**前**钉住 `game_fps` 的能力视图（mac 上 22 条全因默认判据返回 unsupported） |
+| `tests/test_island_card_sections.py` | +15 / −3 | 去掉写死的折叠预算 `580`，改用 `test_island_shrink_pipeline` 的真实字体搜索实测 |
+| `tests/test_island_bevel_fade.py` | +21 / −7 | 三条淡化用例加 `show_icon=True`，用内容层里的**纯几何实心圆底**当字体无关的 `alpha=255` 取样锚；`>=20`/`>=60`/`hit=255` 三条阈值一字未放宽 |
+| `tests/test_gpu_monitor.py` | +6 / −1 | 替身自检 `test_fake_dxgi_itself_behaves_like_com` 补 `@requires_com`（它同族按 COM ABI 造替身，缺 `WINFUNCTYPE` 的平台本应整族跳过） |
+| `tests/test_settings_copy_lint.py` | +28 / −2 | 缩写判据左界只排 ASCII 字母 `(?<![A-Za-z])`（`macOS` 的 `OS` 是产品名）；新增边界用例钉"紧贴中文的缩写仍必须命中"（不许改用 `\b`：Python 的 `\w` 含 CJK，会整条漏检） |
+| `tests/test_requested_regressions.py` | +8 / −2 | 保存失败提示改按 `text`/`info` 可见文案断言（macOS 的 `QMessageBox` 走原生对话框，`windowTitle()` 恒空） |
+| `tests/test_settings_stale_form_exit.py` | +4 / −1 | 同上：改按标题+正文拼起来的可见文案钉 |
+
+### 15.3 证据（本地原始日志，路径相对 `.scratch/ci243/`）
+
+- 三端第二轮：`windows_round2.log`（2F/6735P/19S）、`mac_round2.log`（37F/6646P/73S）、`linux_round2.log`（14% 处 exit 134）。
+- Windows 两族修复：`red_coarse_dirmtime.log` = **6 failed / 31 passed**（用降精度目录 mtime 插件把红确定性复现）→
+  `green_coarse_dirmtime.log` = **37 passed**；`fix243_scope_green.log` = **309 passed / 1 skipped**、
+  `fix243_agent_link_family.log` = **214 passed / 1 skipped**。
+- GPU 等价性：`probe_safe_name_equivalence.log` = **16 组输入，不一致用例 0**（含中文名、孤立高位/低位代理项、
+  无终止符、满 512 字、起点在界外）；`red_posix_wchar_gpu.log` = 3 failed / 50 passed / 5 skipped（红）→
+  `green_posix_wchar_gpu.log` = **52 passed / 6 skipped**（POSIX `wchar_t` 语义插件）。
+- 岛三文件：`island-tests-scope/EVIDENCE-island-tests-platform-font.md`——`before-mac` **23 failed / 210 passed**
+  → `fake-mac` **1 failed / 324 passed**（剩的那 1 条是已知沙箱失真，mac 真日志里它是通过的）；
+  主树真 Windows 聚焦 **233 passed**，扩到 16 个岛相关文件再 **92 passed**；`ruff` 三文件 `All checks passed!`。
+- Linux teardown/自环：`linux-abort-243/FINDINGS.md` + `order-probe/life_plugin.py`（红/绿成对：
+  `red_before_fix.log` 显示回收点在 GC 期间且每次落在不同模块 import，`green_after_fix.log` 显示 call 阶段即回收）。
+  **Linux 上 134/SIGABRT 的直接触发点仍未被本机证据坐实**。
+- 视觉对照：`visual/before_{1.0,1.5,2.0}.png` 与 `visual/after_{1.0,1.5,2.0}.png`（深色底，供人眼复核；数值化自审见 `audit_visual.py`）。
+- 统一全量门与竞态隔离（**均已结束**）：
+  - 修复**前**的中间门 `round3_prepush_full.log` = **6741 passed / 18 skipped**，1144.32 s
+    （父层确认真实退出；该轮不含 §15.5 的竞态修复）。
+  - **最终统一门 `round3_final_full.log` = 6743 passed / 18 skipped**，1116.25 s（0:18:36），
+    起跑晚于修复落树（§15.5）⇒ 覆盖修复后的主树。**日志不含退出码**，真实进程退出由父层另行核对。
+  - 竞态隔离红绿与主树落地状态见 §15.5（隔离集即上文 6 文件：`test_settings_process_isolation` /
+    `test_overlay_app_hosts` / `test_update_feature` / `test_settings_reset_defaults` / `test_config_write_lock` /
+    `test_config_concurrent_save`）。
+- 高负载门（`round3-highload/`：`highload_result.json` + `highload_runner.log` + `round{1,2,3}.log` +
+  `load_evidence.json` + `collect_smoke.log`）：四文件（`test_settings_process_isolation` /
+  `test_background_service_gates` / `test_g2_event_delivery` / `test_interaction_identity_ambiguity`）共 **90 条**，
+  ×3 轮**全部 exit 0 / `90 passed`**（墙钟 37.77 / 34.71 / 55.11 s，pytest 自报 36.17 / 33.34 / 53.26 s）。
+  **负载口径（不能当干净基线引用）**：负载子进程**从未真正绑核**——`SetProcessAffinityMask` 的 `restype` 未声明、
+  句柄被 `c_int` 截断，8 个子进程 affinity 实测全为 `[0..15]`（`load_evidence.json`；上午 12 worker 那轮同形）；
+  同时段采样 16 个逻辑 CPU 全在 95–100%，且轮次之后复查发现本机另有环境占用（Defender ≈5 核、另一工具的 `find` ≈2.5 核、
+  他人作业 `generate_clouds_v3.py` ≈2.5 核等）。故实际形态是「8 个不绑核的烧 CPU 进程 + 可观环境负载」——
+  条件比干净基线更严，但**不是**干净基线；细节与保留项见 `round3-highload/LOAD-PHASE-NOTES.md`。
+  回收：8 个 tracked 在 terminate→有界 wait 后退出，按 load 标记的兜底清扫返回 `[]`，`wait_phase.txt` 的
+  `residual_pytest=[]`。
+
+### 15.4 性能边界
+
+- **`pet/speech_bubble.py` — 新增成本只在"泡出现/几何重建"，不是逐帧**：`_breath_subtitle_side_insets` 只在
+  `show_text` / `_configure_breath_content` / `_breath_subtitle_reserve` 路径上调用，动画帧不经过它。
+  取弦本身比原来那条扫描便宜：**单次取弦 0.036 ms vs 逐像素扫描 0.60 ms**（640×520，300 次各）。
+  `bench_configure.py` 的净增（脚本运行输出，父层记录在 `HANDOFF.md`，**本节的 bench 输出未落盘日志**）：
+  `_configure_breath_content` ≈ **+0.18 ms**、`show_text` ≈ **+0.23–0.46 ms**。
+- **视觉代价是显式的**：安全内距变大 ⇒ 副标题泡变宽。PNG 实测（含 12px 深色边，减 24 后为泡自身尺寸）：
+  `1.0` → 187×152 → **220×179（宽 +17.6%）**；`1.5` → 252×205 → 266×216（**+5.6%**）；
+  `2.0` → 336×273 → **336×273（0%）**——该规模上新内距 (26, 49) 已大于旧值 (20, 20)，但副标题列仍有富余，
+  未触发加宽（同一次运行里逐规模复核过内距与泡宽，见上列数字）。
+- **无新增系统调用 / 网络 / 磁盘 / 线程**：整条新路径是进程内几何（`QPainterPath.intersected` + 少量 `contains`）。
+- **边界与退化输入**：画布退化（`0×0 / 1×1 / 10×8 / 120×98 / 168×137`）取不到弦时退回参考内边距，**不产生负文本列**；
+  画布宽 120..640 的内盒行**端点零差异**（78905 行逐行比对，`probe_chord_equivalence.py`）。
+  72 例边界矩阵（`pet_scale × text_scale × 副标题形态`，`probe_matrix.py`）绿，**Linux 未验**。
+- **`pet/gpu_monitor.py`**：同一字节区间的**同一次**读取，只把"按宿主 `wchar_t` 读"换成"按字节读 + UTF-16LE 解码"
+  ⇒ 无新增 syscall、无新增调用点；Windows 默认行为等价由上面 16/16 等价性证明。**未计时**（本批不做微基准，不用形容词代替）。
+- **`pet/app.py`**：每次**被接受**的 `fileChanged` 通知 **+1 次 `Path.stat()`**（1 次 `os.stat`）；无通知 = **0 次**；
+  不新增线程/网络/持久状态，只读既有的 `_last_config_signature`。
+- **`pet/memory_trim.py`**：`ntpath.basename` 与 `os.path.basename` 同为纯字符串操作，无新增 syscall；
+  注入实例上多 1 个实例属性（不进任何持久化）。
+- **`tests/conftest.py` 取证位**：未开 `DSPET_TEST_DIAG_DIR` 时两个钩子与清扫取证**首行返回**——不建文件、不写一行，
+  不改任何红绿判定；开启时每轮清扫**最多 12 行**（workflow 只 `tail -n 30` 面包屑），写失败被吞掉、不打断 pytest。
+- **本节未做的测量（诚实边界）**：没有重跑 bench（复用已有数字）、没有测内存增长曲线、没有真实 FPS、
+  没有起 GUI 目视、没有三端真机（见 §14.3 的同类边界）；高负载门（§15.3 末条）的负载**未绑核且含环境占用**，
+  只能算「更严的条件」，**不作为干净基线的数字引用**。
+
+### 15.5 配置重载竞态的发现、隔离红绿与主树落地（**已闭合**；三端未复跑）
+
+- **发现**：复审指出 §15.2 的去重门可能吞掉**应用期间落盘的第二次保存**——`_on_config_change_debounced`
+  在 `finally` 里用**应用之后**的 stat 记"最后应用的签名"，而应用链执行期间写下的第二份配置已被那次 stat 计入
+  ⇒ 它的迟到通知全被判重复，内容只落盘、运行期永久看不到。它与 mac 症状（同内容重复通知二次应用：修前
+  `applies=[1,1]`、修后恰一次）是**同一扇门的两个方向**：宁可多应用一次，绝不吞掉一次真实改动。
+- **隔离红绿（副本）**（`.scratch/ci243/hotreload-race/` = `git archive HEAD` + 当时主树状态的 `pet/app.py` 与两个测试文件，
+  副本自带 git index 作 baseline；隔离复跑时**主树未改**，现已镜像落地后状态供 A/B 复跑；记录 `.../hotreload-race/EVIDENCE.md`）：
+  B 用例修前红（`应用期间落盘的第二次保存被去重门吞掉了`，`'C:/tools/pnpm.cmd' != 'C:/tools/during-apply.cmd'`）→
+  修后绿（`applies == [1, 1]`，收敛无风暴）；`st_ino` hunk 有专属红绿（去掉 → `同 mtime/size 的新 inode 替换被误屏蔽了，实为 [1]`；
+  带回 → 1 passed）；只回退采样修复（留 `st_ino`）B 用例仍红 ⇒ **两 hunk 互不替代**。
+- **主树落地与落地后门禁（原"待验"项已收口）**：三个 hunk 已落在**主树工作树**（23:49，Read+Edit 逐处写入，
+  非 `git apply`／非覆盖拷贝；精简文案、用例名 `test_same_mtime_size_new_inode_is_not_suppressed`）——
+  实测 `_config_signature` 返回 `(st_ino, mtime_ns, size)`、回调先采样后 `reload()`、`finally` 记采样值；
+  两条新用例在位（应用期间落盘不丢、同 mtime/size 换 inode 不误屏蔽）。
+  `.scratch/ci243/hotreload-race-fix.patch` 因此已**不再 apply**（`git apply --check` exit 1；23:47 时曾通过，因为树里那时还没有）。
+  落地后门禁：① 最终统一全量门 **6743 passed / 18 skipped**（§15.3；起跑 ≈23:53:47 晚于落树 23:49 ⇒ 覆盖本补丁）；
+  ② 焦点两文件 **22 passed**、关联六文件 **141 passed**、`ruff` clean（`hotreload-race/EVIDENCE.md` 记为"应用后主树"；
+  同一批用例在隔离副本的 `.pytest_cache` 里也留有同批 nodeids，故此处只转录该文件的记载，未逐次核对运行目录）；
+  ③ 同文件另记：焦点两文件在 5 个 CPU burner 打满下 ×3 遍为 3 × 21–22 passed；
+  ④ 高负载门四文件 ×3 轮 90 passed / exit 0（§15.3，其中 `test_background_service_gates.py` 即本补丁所在文件）。
+  **仍不做声称的部分**：最终门的进程真实退出码由父层另行核对（日志不含）；三端 CI 未复跑；
+  mac FSEvents 的真实投递时序、真机 inode 语义在本机无法复现 / 未逐个实测（见 `EVIDENCE.md` 的边界）。
+- **当前 `git diff --numstat`（工作树 vs `HEAD = b8c4f3a9…`）**：产品 + 测试 **18 个文件 `+559 / −86`**
+  （产品 4 个 + 测试 14 个；其中 `pet/app.py` `+19/−4`、`tests/test_background_service_gates.py` `+138/−0`）——
+  §15.2 的 `+453/−83` 是同一批文件在竞态修复落树**前**的快照。
+  **报告本文件自身的行数变化另计、不并入上面的和**（本节每改一次它就变，并进来只会得到一个自引用总数）。
+  工作树仍未 commit、未 push。

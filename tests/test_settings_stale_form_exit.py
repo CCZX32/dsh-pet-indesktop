@@ -1231,7 +1231,10 @@ def test_discard_unverified_notice_is_a_real_visible_box(tmp_path, app, monkeypa
         assert len(seen) == 1
         assert observed, "放弃没能核对磁盘时，用户手上必须真的出现一个说明框"
         title, text = observed[0]
-        assert "磁盘" in title
+        # 标题不能单独当判据：macOS 的 QMessageBox 走系统原生对话框，``windowTitle()``
+        # 在那边恒为空（仓库既有结论见 tests/test_harness_lifecycle.py）。「没能核对磁盘」
+        # 这句话标题与正文都说了，按标题+正文拼起来的可见文案钉。
+        assert "磁盘" in "\n".join(observed[0])
         assert "已经作废" in text and str(main_path) in text
     finally:
         _drop(dialog)

@@ -36,6 +36,7 @@ from pet.dynamic_island import DynamicIsland
 from pet.dsh_state import DshState
 from pet.island_segments import CPU, MEM, NETWORK
 from tests.test_island_segment_render import _StubConfig, _StubMonitor
+from tests.test_island_shrink_pipeline import FakeScreen, _narrow_to
 
 app = QApplication.instance() or QApplication([])
 
@@ -246,15 +247,26 @@ def test_card_detail_drops_the_unit_name_before_eliding(tmp_path, monkeypatch):
 
 def test_folded_segment_row_says_its_sampling_is_paused(tmp_path, monkeypatch):
     """卡片列的是**全量段**：被胶囊折进 +N 的段没在采样（性能契约），
-    卡片如实标注，不拿"采样中"糊弄（采样闸门语义不动）。"""
+    卡片如实标注，不拿"采样中"糊弄（采样闸门语义不动）。
+
+    收缩级靠**真实字体实测搜索**（``test_island_shrink_pipeline._narrow_to``），
+    不写死预算 px：段宽来自当前系统字体，写死的阈值换台机器（换字体/DPI）就会落到
+    别的收缩级上——mac CI 上写死 580 时整个行都不会折，这条用例变成环境相关的假红。
+    """
     cfg = _config(tmp_path)
     cfg.set("island_metrics", [CPU, MEM, NETWORK])
+    screen = FakeScreen(1400)
+    monkeypatch.setattr(island_mod.DynamicIsland, "_current_screen", lambda self: screen)
     island = _island(cfg, monkeypatch)
     try:
-        island._shrink_budget = lambda: 580       # 只折掉尾部一段的网络段
         island.show()
-        _feed_sys(island, _sys_sample(cpu=38.0, mem=61.0, age=2.0))
+        # 从宽往窄搜到"刚好折掉尾部那一段（网络）"的一档：另外两段还在画
+        _narrow_to(island, screen, lambda plan: plan.folded == (NETWORK,))
         assert island._row_plan().folded == (NETWORK,)
+        # 样本在收缩级**定下来之后**再喂：折叠只由段结构与盒宽样本决定，与读数无关；
+        # 而卡片的"更新时间"是按真实时钟算的，搜索本身要跑几百次 refresh_from_config
+        # （慢机更久），先喂就会把 2 秒跨成 3 秒——那是时钟边界，不是行为回归。
+        _feed_sys(island, _sys_sample(cpu=38.0, mem=61.0, age=2.0))
         _expanded(island)
         rows = _rows(island)
         assert set(rows) == {CPU, MEM, NETWORK}
