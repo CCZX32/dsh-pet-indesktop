@@ -77,6 +77,9 @@ class FakeScreen(QObject):
 
 def _make_shell(tmp_path, screen, values=None):
     config = cap.CapConfig(tmp_path, values)
+    from pet import pet_profiles
+
+    pet_profiles.write_profile_settings(tmp_path, 0, values or {"scale": 0.5})
     shell = OverlayShell(
         app, cap.CapInstance(config), screen=screen,
         sprite_factory=lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))

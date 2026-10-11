@@ -228,6 +228,45 @@ def test_slot_from_instance_id():
     assert cmd.slot_from_instance_id("3") is None
 
 
+# ---------------------------------------------------------------- target 规范（G1b）
+def test_target_zero_is_a_valid_slot_identity(tmp_path):
+    """``target=0`` 是**合法**身份（slot0 的主宠档案），不是"非法值"。
+
+    旧 ``_normalize_target`` 只认 ``>= 1``：主宠（slot0）的每宠 reset 写指令时被当成
+    非法 target **直接拒写**（``write_command`` 返回 False），用户点了却没有任何动静；
+    解析侧同样会把它当坏指令跳过。身份空间含 0 之后，这条上界必须跟着放开。
+    """
+    assert cmd.write_command(tmp_path, cmd.CMD_PROFILE_RESET, target=0, now=_now()) is True
+    assert cmd.read_command(tmp_path, now=_now())["target"] == 0
+    got = cmd.consume_command(tmp_path, now=_now())
+    assert got is not None and got["target"] == 0
+    assert not cmd.command_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("bad", [-1, True, False, "0", 1.5, "slot-2"])
+def test_invalid_targets_are_still_rejected(tmp_path, bad, caplog):
+    """放开下界不等于放宽类型：负数/bool/字符串/浮点照旧拒写、拒解析。"""
+    assert cmd.write_command(
+        tmp_path, cmd.CMD_EXIT_SPAWNED_PETS, target=bad, now=_now()) is False
+    cmd.command_path(tmp_path).write_text(json.dumps(
+        {"version": 1, "command": cmd.CMD_EXIT_SPAWNED_PETS,
+         "issued_at": _now(), "target": bad}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert cmd.consume_command(tmp_path, now=_now()) is None
+    assert not cmd.command_path(tmp_path).exists()
+
+
+def test_profile_reset_command_is_known_and_round_trips(tmp_path):
+    """``profile_reset``（本宠 reset 的运行态同步）是一条已知指令，target 带 slot。"""
+    assert cmd.CMD_PROFILE_RESET in cmd.KNOWN_COMMANDS
+    assert cmd.write_command(tmp_path, cmd.CMD_PROFILE_RESET, target=2, now=_now()) is True
+
+    got = cmd.consume_command(tmp_path, now=_now())
+
+    assert got is not None and got["command"] == cmd.CMD_PROFILE_RESET
+    assert got["target"] == 2
+
+
 # ---------------------------------------------------------------- 写：原子
 def test_write_command_is_atomic_and_leaves_no_temp(tmp_path):
     assert cmd.write_command(
@@ -381,3 +420,26 @@ def test_unreadable_file_leaves_command_for_retry(tmp_path, monkeypatch, caplog)
     with caplog.at_level(logging.WARNING):
         assert cmd.consume_command(tmp_path, now=_now()) is None
     assert path.is_file()
+
+
+def test_claim_lease_recovers_without_removing_other_pending(tmp_path):
+    now = _now()
+    assert cmd.write_command(tmp_path, cmd.CMD_PROFILE_RESET, target=1, now=now)
+    first = cmd.claim_command(tmp_path, now=now)
+    assert cmd.claim_command(tmp_path, now=now + 1) is None
+    recovered = cmd.claim_command(tmp_path, now=now + cmd.CLAIM_LEASE_S)
+    assert recovered["id"] == first["id"] and recovered["claim"] != first["claim"]
+
+
+def test_same_slot_reset_does_not_replace_exit(tmp_path):
+    for name in (cmd.CMD_PROFILE_RESET, cmd.CMD_EXIT_SPAWNED_PETS, cmd.CMD_PROFILE_RESET):
+        assert cmd.write_command(tmp_path, name, target=1, now=_now())
+    assert [cmd.consume_command(tmp_path, now=_now())["command"] for _ in range(3)] == [
+        cmd.CMD_PROFILE_RESET, cmd.CMD_EXIT_SPAWNED_PETS, cmd.CMD_PROFILE_RESET]
+
+
+@pytest.mark.parametrize("raw", [b"\xff", b'{"version":1,"command":[],"issued_at":1}'])
+def test_corrupt_encoding_or_command_type_does_not_block_next_write(tmp_path, raw):
+    cmd.command_path(tmp_path).write_bytes(raw)
+    assert cmd.write_command(tmp_path, cmd.CMD_EXIT_SPAWNED_PETS, target=2, now=_now())
+    assert cmd.consume_command(tmp_path, now=_now())["target"] == 2

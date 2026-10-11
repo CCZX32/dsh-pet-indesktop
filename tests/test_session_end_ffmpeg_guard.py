@@ -723,3 +723,49 @@ def test_ffmpeg_exe_probe_is_gated():
             f"webm_clip.py:{i + 1}: exe 探测缺少 session_ending() 门"
         )
     assert call_sites == 1, f"get_ffmpeg_exe 调用点数量异常：{call_sites}"
+
+
+def test_normal_quit_survives_a_missing_chat_module(app, tmp_path):
+    """no-chat 打包变体（excludes=['pet.chat']）的正常退出不许提前炸。
+
+    ``_on_about_to_quit`` 以前在方法体第一行就 ``from .chat import session_store``。
+    那个模块在纯桌宠版里被排除，于是**正常退出**（托盘退出/最后窗口关闭）第一步就
+    ModuleNotFoundError——它发生在 ``_mark_session_ending`` / ``_quitting`` 之前，
+    位置回写、共享子系统停表、ffmpeg reader 收尾全部被跳过（2026-10-10 终审附加项）。
+
+    这里用 ``sys.modules[...] = None`` 模拟"模块不存在"（不新建打包变体）：导入系统
+    对 None 条目直接抛 ImportError，与真实缺失同一条路径。**必须同时毒 ``pet.chat``
+    本身**——只毒 ``pet.chat.session_store`` 不够：``from .chat import session_store``
+    会先在已导入的 ``pet.chat`` 上取同名属性，而测试进程里它早被别处导入过（打包变体里
+    连 ``pet.chat`` 都不存在，那才是真实入口）。
+    """
+    import sys
+
+    from pet.app import AppShell
+
+    lib = _RecordingLibrary()
+    win = _FakeWindow(lib=lib)
+    shell = _shell_with_window(app, tmp_path, win)
+    calls: list[str] = []
+    shell._shared.stop_all = lambda: calls.append("shared")
+    shell._decode_hub.stop_all = lambda: calls.append("decode-hub")
+    poisoned = ("pet.chat", "pet.chat.session_store")
+    saved = {name: sys.modules.get(name) for name in poisoned}
+    try:
+        for name in poisoned:
+            sys.modules[name] = None            # 等价于"这个模块不存在"
+        try:
+            shell._on_about_to_quit()
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        assert shell._plain_about_to_quit is True, "退出兜底标记必须已置"
+        assert shell._quitting is True, "退出标记必须已置（在途 worker 靠它收口）"
+        assert calls == ["shared", "decode-hub"], (
+            "缺 chat 模块不许把退出收口截断在半路")
+    finally:
+        AppShell._shutdown_live_for_tests()

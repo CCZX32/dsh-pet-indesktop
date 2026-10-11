@@ -34,6 +34,8 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import json
+
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
@@ -48,6 +50,12 @@ from pet.pet_sprite import PetSprite
 from pet.sprite_menu_facade import SpriteMenuFacade, build_sprite_full_menu
 
 app = QApplication.instance() or QApplication([])
+
+
+def _slot0_scale(config) -> float:
+    """主宠档案（``config-slot-0.json``）里的 scale：每宠键的唯一真值。"""
+    path = config.dir / "config-slot-0.json"
+    return json.loads(path.read_text(encoding="utf-8"))["scale"]
 
 # 素材池：两侧同源（分类逻辑不是本测试对象；内容一致才能比较动画分类子树）
 POOLS = {
@@ -566,7 +574,9 @@ def test_settings_entry_present_once(tmp_path):
                   if call[0] == "open_settings_process"]
         assert len(opened) == 1, f"入口未落到设置进程（实际 {opened}）"
         identity = opened[0][1][0]
-        assert identity.config.instance_id == str(config.instance_id or ""), \
+        # 主宠（slot0）的档案身份 = "slot-0"（身份空间含 0）：设置进程显式带
+        # ``--instance slot-0``，打开的是这只宠自己的档案，不是笼统的"主身份"。
+        assert identity.config.instance_id == "slot-0", \
             "设置入口必须带上被点 sprite 的配置身份"
         menu.close()
     finally:
@@ -617,7 +627,9 @@ def test_menu_routes_service_semantics(tmp_path, monkeypatch):
         expected_scale = next(s for s in SCALE_STEPS
                               if int(round(CANVAS_W * s)) == px)
         assert abs(shell.sprite.scale - expected_scale) < 1e-9
-        assert config.get("scale") == shell.sprite.scale
+        # "大小"是**每宠键**：真值落这只宠自己的档案（主宠 = config-slot-0.json），
+        # 不再回写全局那份（规范 §五「一处真值」）。
+        assert _slot0_scale(config) == shell.sprite.scale
         # 主动识屏 → proactive_screen 配置 + 共享监视器 apply_config
         # （Windows 专有：posix 菜单按设计不含该项，路由无从点击）
         if sys.platform == "win32":

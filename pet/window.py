@@ -933,6 +933,20 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """稳定身体框（窗口局部坐标）；实现见 window_placement.stable_body_local_rect。"""
         return window_placement.stable_body_local_rect(self)
 
+    def stable_body_local_rect(self) -> QRect:
+        """``_stable_body_local_rect`` 的公开面（跨模块定位用，见架构闸）。"""
+        return self._stable_body_local_rect()
+
+    @property
+    def profile_character(self) -> str | None:
+        """本窗档案角色（未绑定档案时为 None）；公开面，跨模块只经它读。"""
+        return getattr(self, "_profile_character", None)
+
+    def set_profile_identity(self, character_id, generation=None) -> None:
+        """绑定本窗的档案身份（角色 + 代次 token）：迟到几何/档案重下发据此判代次。"""
+        self._profile_character = str(character_id or "")
+        self._profile_generation = generation
+
     def _virtual_pos(self) -> QPoint:
         """虚拟窗口位置 = 实际位置 + 绘制偏移；实现见 window_placement.virtual_pos。"""
         return window_placement.virtual_pos(self)

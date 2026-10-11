@@ -175,6 +175,11 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
         def install_file_interpreter(self):
             self.file_interpret_install_calls += 1
 
+        def set_profile_identity(self, character_id, generation=None):
+            """建窗路径会经这个**公开面**绑定档案身份（架构闸不许跨模块写私有名）。"""
+            self.profile_character = str(character_id or "")
+            self.profile_generation = generation
+
         def show(self):
             pass
 

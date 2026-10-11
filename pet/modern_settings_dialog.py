@@ -97,6 +97,7 @@ from .menu_layout import (
     merge_default_menu_actions,
     resolve_menu_layout,
 )
+from . import settings_close_flow
 from .settings_slot_config import route_settings_config
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 from .update_settings import UpdatePage
@@ -267,7 +268,11 @@ class ModernSettingsDialog(QDialog):
         # 子宠设置页：非 per-slot 键直读**主**配置（而不是 slot 文件里的无效快照），
         # 保存时按同一分流写回。不适用（主身份 / legacy 拓扑）时原样返回，
         # 见 pet/settings_slot_config.py 的模块 docstring。
-        self.config = config = route_settings_config(config)
+        config = route_settings_config(config)
+        # 每张表单一份**独立编辑视图**（草稿 + 编辑代次基线各自一份，运行期那份保持只读）：
+        # 复用运行期那份会让"旧表单钉住的代次"跨窗存活，重开设置永远存不进去。
+        opener = getattr(config, "new_form_view", None)
+        self.config = config = opener() if callable(opener) else config
         self.include_ai = bool(include_ai)
         # standalone=True：本对话框跑在独立设置进程（python -m pet --settings）里，
         # 没有桌宠窗口/AppShell 可依附。只影响下面几处显式分支，默认 False 时
@@ -484,24 +489,13 @@ class ModernSettingsDialog(QDialog):
         general_layout = QVBoxLayout(general_content)
         general_layout.setContentsMargins(0, 0, 0, 0)
         general_layout.setSpacing(18)
-        autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（仅主桌宠可设置）"
+        autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（影响所有桌宠）"
         # 「自启目标」的说明随平台变：桌面端项在非 Windows 上置灰，文案必须
-        # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。
-        if self._harness_desktop_available:
-            harness_target_hint = (
-                "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
-                "也可以显式选择打开 web 界面或桌面端。右键菜单的手动启动不受此设置影响。"
-                "仅主桌宠可设置。"
-            )
-        else:
-            # 非 Windows 分支保留本平台事实：桌面端置灰（DESKTOP_SUPPORTED=False），
-            # dsh web 界面仍可选——不写成「只有服务可选」（那与下拉框实际能力不符）。
-            harness_target_hint = (
-                "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
-                "本平台暂不支持自动拉起桌面端（本版本仅 Windows），「桌面端界面」置灰，"
-                "想在自启时进界面只能显式选「dsh web 界面」。"
-                "右键菜单的手动启动不受此设置影响。仅主桌宠可设置。"
-            )
+        # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。逐字文案
+        # 落在 settings_pet_controls.harness_target_hint（同行数预算约定）。
+        harness_target_hint = settings_pet_controls.harness_target_hint(
+            self._harness_desktop_available
+        )
         launch_rows = [
             SettingRow("autostart", "开机自启", autostart_desc, self.autostart_check),
             SettingRow(
@@ -511,7 +505,7 @@ class ModernSettingsDialog(QDialog):
                 "本项要同时开着 DSH 联动才会自启——联动关着时 dsh web 没有消费者，拉起只是白占一个进程。"
                 "关闭本项后不再自动拉起；已经跑起来的 dsh web 不因此退出，例外是刚在拉起探测期间关掉本项——"
                 "那一次刚拉起的实例会被立刻收掉。稳态下要等桌宠退出或关闭 DSH 联动时才收口。"
-                "桌面端是你自己的应用，桌宠退出或关闭本项都不会结束它。仅主桌宠生效。",
+                "桌面端是你自己的应用，桌宠退出或关闭本项都不会结束它。此设置影响所有桌宠。",
                 self.harness_autostart_check,
             ),
             SettingRow(
@@ -653,7 +647,9 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "动画",
                 [
-                    SettingRow("playback_speed", "播放速率", "控制所有桌宠动画的播放速度。", self.speed_select),
+                    # F06：``playback_speed`` 是**每宠**键（``PER_PET_KEYS``，B7b 起
+                    # 右键菜单的速率也只改被点的那一只），文案不许再说"所有桌宠"。
+                    SettingRow("playback_speed", "播放速率", "控制这只桌宠动画的播放速度。", self.speed_select),
                     SettingRow("animation_gap", "动作等待间隔", "非待机动作之间的休息时间；0 秒表示连续播放。", self.gap_spin),
                     SettingRow(
                         "idle_low_fps",
@@ -715,13 +711,7 @@ class ModernSettingsDialog(QDialog):
                     ),
                     SettingRow("spawn_scale", "小肥鱼大小", "关闭“继承大小”时，新生成小肥鱼使用的桌面尺寸。", self.spawn_scale_combo, stacked=True),
                     SettingRow(
-                        "spawn_inherit_dynamic_island",
-                        "生小肥鱼继承灵动岛",
-                        "默认关闭：新生成的小肥鱼不打开自己的灵动岛。开启后小肥鱼继承主肥鱼的灵动岛设置。",
-                        self.spawn_inherit_dynamic_island_check,
-                    ),
-                    SettingRow(
-                        "clear_spawned_pets", "一键退出子肥鱼", "关闭所有已生成的小肥鱼，并删除它们的配置、会话与待办数据。", self.clear_spawned_pets_btn
+                        "clear_spawned_pets", "一键退出子肥鱼", "关闭所有已生成的小肥鱼。它们的档案、设置、会话与待办数据全部保留，随时可以再生成。", self.clear_spawned_pets_btn
                     ),
                 ],
                 behavior_content,
@@ -1593,12 +1583,17 @@ class ModernSettingsDialog(QDialog):
         优先走 PetWindow 上已接线的 ``on_clear_spawned_pets``（= AppShell 路径，
         含进程内子窗前置于关闭）；拿不到回调（独立设置进程：本进程既无桌宠壳也
         无 sprite 世界）时统一走 **D12 指令通道**：写指令文件，由主进程
-        （OverlayShell / AppShell）经 config 目录 watcher + 轮询消费；按本配置
-        身份回填 target，语义收窄到"这一只"（主身份 = 全部）。
+        （OverlayShell / AppShell）经 config 目录 watcher + 轮询消费。
 
-        4.4a：legacy 的跨进程 taskkill 回退（child_pet_cleanup：runtime 标记 +
-        slot 锁 + taskkill）随多进程多宠退役层停用——两个拓扑现在共用同一条
-        指令通道，不再有"按钮静默失效"的拓扑分叉。
+        **这是全局动作，target 由"身份是不是主宠"决定，不由身份字符串真值决定**（判据与
+        ``settings_slot_config.is_main_identity`` 同源 = slot 号，不是字符串）：主身份 →
+        ``target=None``（= 退全部子肥鱼，两个消费者的"No target"分支），子宠身份 → 该子槽。
+        旧写法回填 ``slot_from_instance_id(instance_id)``，而 slot0 从 G1 起有显式
+        ``slot-0`` 身份 ⇒ 主宠页写出 ``target=0``，消费者把它当**子槽**去 ``_spawned`` 里找
+        （主 sprite 不在其中）→ 静默 no-op。
+
+        4.4a：legacy 的跨进程 taskkill 回退（child_pet_cleanup / runtime 标记 / slot 锁）
+        随多进程多宠退役层停用——两个拓扑现在共用同一条指令通道，不再有拓扑分叉。
 
         批 I：无确认框无结果框（操作不删数据可重新生成，子肥鱼消失即反馈）。
         """
@@ -1611,7 +1606,9 @@ class ModernSettingsDialog(QDialog):
             slot_from_instance_id,
             write_command,
         )
-        target = slot_from_instance_id(self.config.instance_id)
+        from .settings_slot_config import is_main_identity
+        target = (None if is_main_identity(self.config.instance_id)
+                  else slot_from_instance_id(self.config.instance_id))
         if write_command(self.config.dir, CMD_EXIT_SPAWNED_PETS, target=target):
             logging.info("退出子肥鱼：已写下指令（target=%s，主进程消费）", target)
         else:
@@ -1822,7 +1819,7 @@ class ModernSettingsDialog(QDialog):
                     ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
                     ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                     ("边缘探头", claim("edge_probe")),
-                    ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
+                    ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "clear_spawned_pets")),
                     ("多开碰撞", collision_primary),
                     ("碰撞参数（高级）", collision_advanced, True),
                 ]
@@ -2159,11 +2156,12 @@ class ModernSettingsDialog(QDialog):
                 )
 
     def _save(self) -> None:
-        """「保存并退出」：写入配置并关闭对话框。"""
-        if not self._write_config():
+        """「保存并退出」：写入配置并关闭对话框（失败走同一条关闭闸门）。"""
+        if not self._save_before_close():
             return
+        # 闸门这次关闭已经做过决定（落盘成功，或用户明确选择放弃）：这里只负责关窗，
+        # 并闸住关闭路径再写一遍整表（放弃时尤其不能写——那正是要放弃的东西）。
         self._saved_via_button = True
-        self._apply_autostart()
         self.accept()
 
     def _write_config(self) -> bool:
@@ -2173,8 +2171,11 @@ class ModernSettingsDialog(QDialog):
         standalone 下这条尤其关键——主进程在设置开着期间会自己写 config
         （托盘菜单开关等），不 reload 就把别人的改动回滚了。
         已知限制：已暴露字段仍是 last-writer-wins（对话框获胜）。
-        返回是否成功落盘；失败时提示用户。
+        返回是否成功落盘；失败**不在这里弹**——把类别记进 ``self._write_failure``，
+        由关闭闸门（``pet/settings_close_flow``）统一给文案与「放弃未保存的改动并关闭」
+        出口（自己再弹一次就是同一件事弹两遍，且那两个出口只有闸门知道）。
         """
+        self._write_failure = None
         menu_layout_value = self.menu_layout_editor.value()
         menu_validation = resolve_menu_layout(
             menu_layout_value,
@@ -2182,11 +2183,8 @@ class ModernSettingsDialog(QDialog):
             available_actions=MENU_ACTIONS.ids,
         )
         if menu_validation.source == "fallback":
-            QMessageBox.warning(
-                self,
-                "菜单布局无效",
-                "菜单布局未保存：" + "、".join(menu_validation.diagnostics),
-            )
+            self._write_failure = settings_close_flow.layout_failure(
+                menu_validation.diagnostics)
             return False
         self.config.reload()
         minimum = min(self.min_spin.value(), self.max_spin.value())
@@ -2195,7 +2193,6 @@ class ModernSettingsDialog(QDialog):
         self.config.set("scale", float(self.scale_combo.currentData()))
         self.config.set("spawn_inherit_size", self.spawn_inherit_size_check.isChecked())
         self.config.set("spawn_scale", float(self.spawn_scale_combo.currentData()))
-        self.config.set("spawn_inherit_dynamic_island", self.spawn_inherit_dynamic_island_check.isChecked())
         self.config.set("on_top", self.on_top_check.isChecked())
         if self.dock_icon_check is not None:
             self.config.set("show_dock_icon", self.dock_icon_check.isChecked())
@@ -2439,11 +2436,7 @@ class ModernSettingsDialog(QDialog):
             self.config.set("user_customized", True)
         ok = self.config.save()
         if not ok:
-            QMessageBox.warning(
-                self,
-                "保存失败",
-                "配置未能写入磁盘，改动可能在重启后丢失。\n\n配置路径：" + str(self.config.path),
-            )
+            self._write_failure = settings_close_flow.failure_of(self)
         # 写回之后再对齐一次标记：落盘后的配置值才是「已改过没」的现行答案
         settings_default_marks.refresh(self)
         return ok
@@ -2475,22 +2468,17 @@ class ModernSettingsDialog(QDialog):
         self.accept()
 
     def _save_before_close(self) -> bool:
-        """关闭前落盘（X / Esc / 关闭按钮共用）；False = 没写成功，调用方不关窗。
+        """关闭前落盘（X / Esc / 关闭按钮 /「保存并退出」共用）；False = 要留在窗口里继续改。
 
-        即时型偏好与右键菜单/托盘同一写入时机；失败提示由 ``_write_config`` 内部弹。
+        落盘、失败文案与出口全在 ``pet/settings_close_flow``：保存成功或用户明确选择
+        「放弃未保存的改动并关闭」→ True（调用方照常 accept/reject），用户选「继续编辑」
+        → False（不关窗，草稿留在控件里）。这里只回答"这次关闭能不能真的关"。
         """
-        if getattr(self, "_saved_via_button", False):
-            return True
-        try:
-            if not self._write_config():
-                return False
-            self._apply_autostart()
-        except Exception:
-            logging.exception("关闭设置时保存配置失败")
-        return True
+        outcome = settings_close_flow.save_before_close(self)
+        return outcome != settings_close_flow.CLOSE_KEEP_EDITING
 
     def reject(self) -> None:  # noqa: N802 - Qt API
-        """Esc / 关闭按钮与 X 同契约：保存失败不关窗（草稿留在控件里）。"""
+        """Esc / 关闭按钮与 X 同契约：保存失败不关窗，除非用户明确选择放弃改动。"""
         if self._save_before_close():
             super().reject()
 

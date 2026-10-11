@@ -6,6 +6,18 @@ import sys
 from pathlib import Path
 
 
+def _slot0_config(tmp_path):
+    """生产形态的配置面：slot0 身份经 ``SlotRoutedConfig`` 分流。
+
+    每宠键（自言自语族、气泡样式、尺寸…）的真值在 ``config-slot-0.json``：
+    裸全局 ``Config.set/save`` 出闸时会过滤掉它们，改不动任何一只宠。
+    """
+    from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+
 def test_speech_bubble_never_accepts_focus():
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
@@ -391,12 +403,12 @@ def test_self_talk_images_and_duration_are_normalized_and_scheduled_after_hide(t
     Image.new("RGB", (20, 10), "blue").save(image_dir / "one.png")
     (image_dir / "ignore.txt").write_text("not an image", encoding="utf-8")
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_duration_seconds") == DEFAULT_SELF_TALK_DURATION_SECONDS
     config.set("self_talk_duration_seconds", 7.5)
     config.set("self_talk_image_dir", str(image_dir))
-    config.save()
-    loaded = Config(tmp_path)
+    assert config.save() is True
+    loaded = _slot0_config(tmp_path)
     assert loaded.get("self_talk_duration_seconds") == 7.5
     assert loaded.get("self_talk_image_dir") == str(image_dir)
     assert list_self_talk_images(str(image_dir)) == [image_dir / "one.png"]
@@ -426,19 +438,19 @@ def test_self_talk_image_scale_config_and_bubble_size(tmp_path):
     image_dir.mkdir()
     Image.new("RGB", (20, 10), "blue").save(image_dir / "one.png")
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_image_scale") == 100  # 默认
     config.set("self_talk_image_scale", 250)
-    config.save()
-    loaded = Config(tmp_path)
+    assert config.save() is True
+    loaded = _slot0_config(tmp_path)
     assert loaded.get("self_talk_image_scale") == 250
     # 钳位：越界/非数值
     config.set("self_talk_image_scale", 9999)
-    config.save()
-    assert Config(tmp_path).get("self_talk_image_scale") == 300
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 300
     config.set("self_talk_image_scale", "abc")
-    config.save()
-    assert Config(tmp_path).get("self_talk_image_scale") == 100
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 100
 
     from PySide6.QtCore import QRect
     from PySide6.QtWidgets import QApplication
@@ -575,13 +587,16 @@ def test_speech_bubble_tail_is_one_surface_and_shadow_has_no_graphics_effect():
 def test_self_talk_bubble_style_is_normalized_and_persisted(tmp_path):
     from pet.config import Config
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_bubble_style") == "classic_top"
     config.set("self_talk_bubble_style", "glass_right")
-    config.save()
-    assert Config(tmp_path).get("self_talk_bubble_style") == "glass_right"
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_bubble_style") == "glass_right"
     config.set("self_talk_bubble_style", "unknown")
-    assert config.get("self_talk_bubble_style") == "classic_top"
+    # 脏值在**落盘后的读端**被归一（路由视图对未保存的草稿按原样回显，清洗发生在
+    # 同源默认那条读规则上——唯一清洗实现仍是 Config 的每宠快照规范化）。
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_bubble_style") == "classic_top"
 
 
 def test_icon_composition_ignores_low_alpha_noise_and_fills_canvas():
@@ -3026,12 +3041,12 @@ def test_modern_settings_reject_saves_config(tmp_path):
     from pet.config import Config
 
     app = QApplication.instance() or QApplication([])
-    cfg = Config(tmp_path)
+    cfg = _slot0_config(tmp_path)
     dlg = settings_mod.ModernSettingsDialog(cfg, include_ai=False)
     dlg.self_talk_image_scale_spin.setValue(180)
     dlg.reject()
     app.processEvents()
-    assert Config(tmp_path).get("self_talk_image_scale") == 180
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 180
 
 
 def test_settings_image_directories_use_preview_but_audio_folders_do_not(tmp_path, monkeypatch):

@@ -60,9 +60,17 @@ from .settings_widgets import (
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
 
+#: 全局键的作用域声明（措辞与「开机自启」行同源，见 ``modern_settings_dialog``
+#: 的 ``autostart_desc`` 与设置门禁 2026-10-10 条目；规范 §五的原文也是「影响所有桌宠」）。
+#:
+#: 与 ``ALL_PETS_SCOPE_NOTE`` 分开：那条是**窗口级键**在子宠页的补充说明
+#: （"这一行在一窗多宠里作用于整窗"），这条是**全局键**的作用域声明
+#: （"改了影响所有桌宠"）。两句话的适用对象不同，不合并成一句。
+GLOBAL_SCOPE_NOTE = "（影响所有桌宠）"
+
 #: 「直播捕获兼容」基础文案（描述能力本身）；显式 env legacy（运行期即时切换）
 #: 逐字用它。
-STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
+STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
 #: 默认（非显式 env legacy）路径的补充说明（T4：重启级切换）。
 #:
 #: 该键是**拓扑输入**（见 ``overlay_settings_command.is_overlay_topology``）：
@@ -70,9 +78,17 @@ STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
 #: 重启时按 T4 口径多只桌宠先收拢为主宠物（活跃宠清单保留，不删档）。
 #: 已勾选未重启、以及 overlay 未勾选两种状态共用这句：省略"勾选后"这类前提，
 #: 免得用户在已勾选状态下看到「勾选后生效」而以为还要再勾一次。
+#:
+#: F03：末尾按规范 §五「任意宠可以编辑全局设置，但界面必须说明影响所有桌宠」
+#: 补上范围声明——这个键在**每个**身份的设置页上都能编辑（``SlotRoutedConfig``
+#: 把它路由进主配置），旧的"子宠页置灰只归主宠页"判据已被推翻。
 STREAM_CAPTURE_RESTART_HINT = (
     STREAM_CAPTURE_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+    + GLOBAL_SCOPE_NOTE
 )
+
+#: 子宠设置页对这些键的补充说明（窗口级键：一窗多宠里作用于整窗）。
+ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
 
 #: 「省电模式」（idle_low_fps_enabled）文案，按拓扑分流：
 #: overlay 下该键唯一作用是关掉后台动画预热（``app.py`` 建库与
@@ -87,6 +103,25 @@ IDLE_LOW_FPS_LEGACY_HINT = (
     "并停止后台动画预热，任何交互立即恢复全帧率。"
 )
 
+#: 「自启目标」（harness_launch_target）说明文案，按桌面端能力分流（能力口径是
+#: ``harness_launcher.DESKTOP_SUPPORTED``，设置页不另写一份平台判定）。
+#:
+#: 两句共用首句与末句，差别只在桌面端能不能自动拉起：支持时如实说可选
+#: web / 桌面端；不支持时该项在设置页保留但置灰（"暂不可用 ≠ 永久不支持"），
+#: 文案必须给出原因——不能留着「选桌面端界面」这种本平台做不到的话，也不能
+#: 反过来说成「只有服务可选」（dsh web 界面在本平台仍可选，见下方分流函数）。
+HARNESS_TARGET_HINT_DESKTOP = (
+    "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+    "也可以显式选择打开 web 界面或桌面端。右键菜单的手动启动不受此设置影响。"
+    "此设置影响所有桌宠。"
+)
+HARNESS_TARGET_HINT_UNSUPPORTED = (
+    "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+    "本平台暂不支持自动拉起桌面端（本版本仅 Windows），「桌面端界面」置灰，"
+    "想在自启时进界面只能显式选「dsh web 界面」。"
+    "右键菜单的手动启动不受此设置影响。此设置影响所有桌宠。"
+)
+
 #: overlay 单合成窗下物理上只能整窗生效的窗口级键（一窗多宠）：一套窗旗标
 #: （置顶 / 鼠标穿透 / 光标隐藏穿透 / 全屏隐藏）、一个窗口透明度、一份锁位与
 #: 拖拽修饰钳制。
@@ -99,9 +134,6 @@ OVERLAY_WINDOW_SCOPE_IDS = (
     "cursor_hidden_passthrough",
     "auto_hide_fullscreen",
 )
-
-#: 子宠设置页对这些键的补充说明。
-ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
 
 
 def _is_overlay_topology() -> bool:
@@ -137,6 +169,21 @@ def idle_low_fps_hint() -> str:
     if _is_overlay_topology():
         return IDLE_LOW_FPS_OVERLAY_HINT
     return IDLE_LOW_FPS_LEGACY_HINT
+
+
+def harness_target_hint(desktop_available: bool) -> str:
+    """「自启目标」说明文案（按桌面端能力分流）。
+
+    ``desktop_available`` 由调用方从 ``harness_launcher.DESKTOP_SUPPORTED`` 读入
+    （该常量是桌面端能力的唯一平台口径，设置页不另写一份判定）：本函数只做文案
+    选择，不自己探平台，两个分支都能脱离真实平台直接测。
+
+    文案落在本模块（与 ``stream_capture_hint`` 同一先例）而不是
+    ``modern_settings_dialog``：后者的行数预算只随实测校准，能不加行就不加。
+    """
+    if desktop_available:
+        return HARNESS_TARGET_HINT_DESKTOP
+    return HARNESS_TARGET_HINT_UNSUPPORTED
 
 
 def _apply_window_scope_rows(host) -> None:
@@ -190,16 +237,18 @@ def build_pet_controls(host) -> None:
     for scale in spawn_scales:
         host.spawn_scale_combo.addItem(f"{int(round(catalog.CANVAS_W * scale))} px", scale)
     host.spawn_scale_combo.setCurrentIndex(host.spawn_scale_combo.findData(current_spawn_scale))
-    host.spawn_inherit_dynamic_island_check = ToggleSwitch(host)
-    host.spawn_inherit_dynamic_island_check.setChecked(
-        bool(host.config.get("spawn_inherit_dynamic_island", False))
-    )
     host.clear_spawned_pets_btn = QPushButton("一键退出…", host)
     host.clear_spawned_pets_btn.clicked.connect(host._on_clear_spawned_pets)
-    if host.config.instance_id:
-        # 子肥鱼不能关闭主肥鱼进程，只允许主肥鱼执行退出操作。
+    from .settings_slot_config import is_main_identity
+
+    if not is_main_identity(host.config.instance_id):
+        # 这个动作是**全局**的「退出全部子肥鱼」：只有主身份页能发（子宠页里没有
+        # "子肥鱼"这个对象可管）。判据必须是"主身份"而不是"身份非空"——slot0 从
+        # G1 起有显式 `slot-0` 身份，按非空判会把**主宠自己的页面**也置灰，而
+        # tooltip 让用户"去主肥鱼设置"，用户就在那儿。子宠页的提示必须指向真实
+        # 可达的入口（托盘/右键菜单里有同一条动作），不能指向不存在的地方。
         host.clear_spawned_pets_btn.setEnabled(False)
-        host.clear_spawned_pets_btn.setToolTip("请在主肥鱼的设置里操作")
+        host.clear_spawned_pets_btn.setToolTip("这是全局操作：请在主肥鱼的设置或托盘菜单里操作")
 
     host.on_top_check = ToggleSwitch(host)
     host.on_top_check.setChecked(bool(host.config.get("on_top", True)))
@@ -282,9 +331,11 @@ def build_pet_controls(host) -> None:
     host.autostart_check = ToggleSwitch(host)
     host._autostart_initial = autostart_mod.is_enabled()
     host.autostart_check.setChecked(host._autostart_initial)
-    if host.config.instance_id:
-        host.autostart_check.setEnabled(False)
-        host.autostart_check.setToolTip("仅主桌宠可设置")
+    # 开机自启是**全局**键（`autostart_wanted` 写在主配置，系统登录项只有一份），
+    # 但**任意宠**都能改它——界面必须自己说清影响范围，而不是把自己置灰。旧判据
+    # `if instance_id` 在 slot0 拿到显式身份后把主宠页也一起禁掉了，tooltip 却让人
+    # "去主桌宠设置"，指向一个用户正站着的地方（2026-10-10 终审 A04-b）。
+    host.autostart_check.setToolTip("影响所有桌宠：系统登录项只有一份。")
     host.dock_icon_check = None
     if sys.platform == "darwin":
         host.dock_icon_check = ToggleSwitch(host)
@@ -400,14 +451,13 @@ def build_pet_controls(host) -> None:
         host.auto_hide_fullscreen_check.setChecked(bool(host.config.get("auto_hide_fullscreen", True)))
         host.stream_capture_check = ToggleSwitch(host)
         host.stream_capture_check.setChecked(bool(host.config.get("stream_capture_mode", False)))
-        if getattr(getattr(host, "config", None), "instance_id", None):
-            # T4 Phase A：捕获开关是**进程级重启级**开关（拓扑输入），归主桌宠页
-            # 那一份主配置所有。子宠页保存写的是 config-slot-N.json
-            # （modern_settings_dialog 的保存回写），而拓扑判定只读主配置 ⇒ 在这里
-            # 点什么都不会生效（死开关）。同 modern_settings_dialog 对
-            # harness 自启的「仅主桌宠可设置」口径：置灰 + tooltip 说明。
-            host.stream_capture_check.setEnabled(False)
-            host.stream_capture_check.setToolTip("仅主桌宠可设置")
+        # F03（2026-10-10 终审）：这里**不**按身份置灰。旧实现的理由是"子宠页保存只写
+        # config-slot-N.json、拓扑判定只读主配置 ⇒ 点什么都不生效"，但这条理由已被
+        # ``SlotRoutedConfig`` 的全局路由推翻：非每宠键一律落主 config.json，
+        # 而正常 UI 入口**只有** slot 身份（``--instance slot-0`` / ``slot-N``），
+        # 按"身份非空"判会把 slot0 自己的页面也拒掉，连已开捕获模式的用户都关不掉它。
+        # 规范 §五：任意宠可以编辑全局设置，界面说清"影响所有桌宠"即可（文案在
+        # ``stream_capture_hint``）。
 
     host.speed_select = ModernSelect(host, width=112)
     current_speed = float(host.config.get("playback_speed", 1.0))

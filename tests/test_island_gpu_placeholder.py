@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
-"""GPU 能力占位（P3 Slice F1）的契约测试：已知 id + 不可用态 + 不占位 + 卡片原因行。
+"""GPU 段的接线合同：设置里的白名单 → 共享采样 → 胶囊读数 → 卡片详情。
 
-**本 slice 不实现数据源**，所以 gpu 是"已注册但恒不可用"的段——这里的断言就是
-把这句话钉死，免得将来有人以为它只是"还没接上"的临时缺口：
+P3 Slice F1 里 ``gpu`` 是"已注册但恒不可用"的能力占位；本版本它接了数据源
+（``pet/gpu_monitor.py`` 的 Windows PDH 最忙引擎占用，经共享采样线程喂），所以
+占位语义整体作废——本文件把**真接线后的四面**钉死：
 
 1. **config 白名单放行**：``gpu`` 是合法 ``island_metrics`` 成员，落盘 → 重启往返
    不被归一化丢掉（与 network/cpu/mem 同一口径）。
-2. **胶囊不占位**：段列表里没有它、行计划看不见它（也折不到 +N）、自然宽/高/停靠
-   尺寸与"配置里根本没有这个 id"逐像素相同。
-3. **卡片有原因行**：B 区一行「该指标不可用 + 原因」，段名走 ``_CARD_METRIC_NAMES``。
-4. **不采样**：它不在设备槽订阅集合里（没有数据源就不能占采样线程）。
+2. **它是普通段**：采到读数就进胶囊（固定 label、定宽数值盒 + 单位盒），不再恒
+   不可用；胶囊几何与"配置里根本没有这个 id"的差别恰好是一个段宽。
+3. **订阅走 GPU 那一本账**：``subscribe_gpu``（不是 CPU/内存的 ``subscribe``）；
+   GPU-only 时设备槽一个订阅都没有。
+4. **降级两态都在卡片里有话说**：unsupported 不占位 + 原因行，error 占位 +
+   原因行，两者都不是"读数就是 0"。
 
-E5 的机制（``_unavailable_reasons`` + ``_compose_info_segments`` 跳过）已经铺好，
-本文件验的是 **F1 把它真的接上了**——而不是机制还在原地空转。
+生命周期（隐藏/折叠/停靠/销毁的订阅联动）与真实后端链路见
+``tests/test_island_gpu_integration.py``。
 """
 from __future__ import annotations
 
@@ -26,7 +29,8 @@ import pet.dynamic_island as island_mod
 from pet import island_segments as isl
 from pet.config import Config
 from pet.island_segments import CPU, GPU, MEM, NETWORK
-from tests.test_island_segment_render import _config, _island
+from tests.test_island_gpu_integration import _config, _gpu_sample
+from tests.test_island_segment_render import _island
 
 app = QApplication.instance() or QApplication([])
 
@@ -50,97 +54,94 @@ def test_gpu_sits_after_the_three_builtin_ids(tmp_path):
     assert cfg.get("island_metrics") == [MEM, NETWORK, CPU, GPU]
 
 
-# ---------------------------------------------------------------- 占位四面
-def test_gpu_is_registered_as_unavailable_with_a_truthful_reason(tmp_path, monkeypatch):
-    cfg = _config(tmp_path)
-    cfg.set("island_metrics", [CPU, GPU])
-    island, _made = _island(cfg, monkeypatch)
+# ---------------------------------------------------------------- 普通段（不再是占位）
+def test_gpu_is_not_a_static_unavailable_segment_any_more(tmp_path, monkeypatch):
+    """没有静态"本版本未接入"的占位条目了：可用性由**当刻读数**决定。"""
+    island, _made = _island(_config(tmp_path, metrics=[CPU, GPU]), monkeypatch)
     try:
-        unavailable = island._unavailable_segments()
-        assert set(unavailable) == {GPU}
-        reason = unavailable[GPU]
-        assert reason == isl.GPU_UNAVAILABLE_REASON
-        assert "未接入" in reason or "占位" in reason, \
-            "原因必须如实说「本版本没实现」，不许声称探测过本机硬件"
+        assert island._unavailable_segments() == {}, "没有读数说它不可用就不许占位"
+        assert "GPU_UNAVAILABLE_REASON" not in dir(isl), "占位常量必须随接线一起删掉"
     finally:
         island.close()
 
 
-def test_gpu_never_takes_a_capsule_slot(tmp_path, monkeypatch):
-    """胶囊四面都对不上它：段列表、行计划、折叠、几何尺寸。"""
+def test_gpu_takes_a_capsule_slot_once_it_has_a_reading(tmp_path, monkeypatch):
+    """采到读数就进胶囊：段列表里有它、行计划画它、自然宽正好多出一个段。"""
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    with_gpu, _m1 = _island(_config(tmp_path / "a"), monkeypatch)
-    without_gpu, _m2 = _island(_config(tmp_path / "b"), monkeypatch)
+    with_gpu, _m1 = _island(_config(tmp_path / "a", metrics=[CPU, GPU]), monkeypatch)
+    without_gpu, _m2 = _island(_config(tmp_path / "b", metrics=[CPU]), monkeypatch)
     try:
-        with_gpu.config.set("island_metrics", [CPU, GPU])
-        without_gpu.config.set("island_metrics", [CPU])
-        assert [seg.seg_id for seg in with_gpu._compose_info_segments()] == ["primary", CPU]
-        assert GPU not in with_gpu._row_plan().visible
-        assert GPU not in with_gpu._row_plan().folded, "不占位段连 +N 都折不到"
-        assert with_gpu._capsule_width() == without_gpu._capsule_width()
-        assert with_gpu.height() == without_gpu.height()
-        assert with_gpu._rest_size() == without_gpu._rest_size()
+        for island in (with_gpu, without_gpu):
+            island.show()
+        app.processEvents()
+        with_gpu._sys_monitor.gpu_sample = _gpu_sample(42.0)
+        with_gpu._tick_sys()
+        assert [seg.seg_id for seg in with_gpu._compose_info_segments()] == \
+            ["primary", CPU, GPU]
+        assert GPU in with_gpu._row_plan().visible
+        assert GPU not in with_gpu._row_plan().folded, "两段都放得下（用例前提）"
+        assert with_gpu._capsule_width() > without_gpu._capsule_width()
+        assert with_gpu._rest_size().width() > without_gpu._rest_size().width()
     finally:
         with_gpu.close()
         without_gpu.close()
 
 
-def test_gpu_gets_a_reason_row_in_the_card(tmp_path, monkeypatch):
-    """卡片 B 区：一行写明「该指标不可用 + 原因」，与 E5 的不可用段同一写法。"""
-    cfg = _config(tmp_path)
-    cfg.set("island_metrics", [CPU, GPU])
-    island, _made = _island(cfg, monkeypatch)
+def test_gpu_gets_a_reading_row_in_the_card(tmp_path, monkeypatch):
+    """卡片 B 区：一行真实读数 + 量纲/来源/更新时间（与 CPU/内存同一套三列）。"""
+    island, made = _island(_config(tmp_path, metrics=[CPU, GPU]), monkeypatch)
     try:
+        island.show()
+        app.processEvents()
+        made[0].sample = None
+        made[0].gpu_sample = _gpu_sample(42.0)
+        island._tick_sys()
         rows = {row.seg_id: row for row in island._card_metric_rows()}
         assert set(rows) == {CPU, GPU}
         row = rows[GPU]
-        assert row.name == "GPU", "卡片段名走 _CARD_METRIC_NAMES"
-        assert row.state == isl.STATE_UNSUPPORTED
-        assert row.value == isl.UNKNOWN_TEXT
-        assert row.note == f"该指标不可用：{isl.GPU_UNAVAILABLE_REASON}"
-        assert row.detail == row.note
+        assert row.name == "GPU"
+        assert row.state == isl.STATE_OK
+        assert row.value == "42%"
+        assert row.unit_full
+        assert row.updated != "未采样"
     finally:
         island.close()
 
 
 def test_gpu_row_keeps_the_configuration_order_in_the_card(tmp_path, monkeypatch):
-    """卡片行序 = 配置序（不可用段按它本该在的位置插进去，不飘到末尾）。"""
-    cfg = _config(tmp_path)
-    cfg.set("island_metrics", [GPU, CPU])
-    island, _made = _island(cfg, monkeypatch)
+    """卡片行序 = 配置序（不飘到末尾）。"""
+    island, _made = _island(_config(tmp_path, metrics=[GPU, CPU]), monkeypatch)
     try:
         assert [row.seg_id for row in island._card_metric_rows()] == [GPU, CPU]
     finally:
         island.close()
 
 
-def test_gpu_takes_no_sampling_subscription(tmp_path, monkeypatch):
-    """没有数据源就不许占采样线程：设备槽订阅集合里只有真正可采的段。"""
-    cfg = _config(tmp_path)
-    cfg.set("island_metrics", [CPU, GPU, MEM])
-    island, made = _island(cfg, monkeypatch)
+# ---------------------------------------------------------------- 订阅账本
+def test_gpu_takes_the_gpu_subscription_not_the_device_one(tmp_path, monkeypatch):
+    """GPU 走 ``subscribe_gpu``：设备槽那本账里不许有它（否则会去读内存百分比）。"""
+    island, made = _island(_config(tmp_path, metrics=[CPU, GPU, MEM]), monkeypatch)
     try:
         island.show()
         app.processEvents()
-        subscribed = set().union(*(monitor.subscribed for monitor in made))
-        assert isl.CPU in subscribed or isl.MEM in subscribed
-        assert GPU not in subscribed
-        assert GPU not in island_mod._DEVICE_LABELS
+        monitor = made[0]
+        assert monitor.gpu_subscribed == {GPU}
+        assert monitor.subscribed == {CPU, MEM}
         assert GPU not in island_mod._SYS_METRIC_IDS
+        assert GPU not in island_mod._DEVICE_LABELS, "它不是设备槽的成员"
     finally:
         island.close()
 
 
-def test_turning_gpu_on_alone_still_renders_the_capsule(tmp_path, monkeypatch):
-    """只勾 GPU：胶囊照画（只剩主信息段），卡片多一行原因，不崩不空窗。"""
-    cfg = _config(tmp_path)
-    cfg.set("island_metrics", [GPU])
-    island, _made = _island(cfg, monkeypatch)
+def test_turning_gpu_on_alone_samples_only_the_gpu(tmp_path, monkeypatch):
+    """只勾 GPU：胶囊照画、卡片一行，且一个 psutil 订阅都没有。"""
+    island, made = _island(_config(tmp_path, metrics=[GPU]), monkeypatch)
     try:
         island.show()
         app.processEvents()
-        assert [seg.seg_id for seg in island._compose_info_segments()] == ["primary"]
+        assert made[0].subscribed == set()
+        assert island._compose_info_segments()[0].seg_id == "primary"
         assert island._capsule_width() > 0
         assert [row.seg_id for row in island._card_metric_rows()] == [GPU]
     finally:

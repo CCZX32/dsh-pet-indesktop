@@ -76,7 +76,8 @@ class QuickChatBubble(QFrame):
         self.character_id = str(config.get("character", "shenshen"))
         self.settings = config.chat_settings()
         self.prompt_builder = PromptBuilder(Path(__file__).resolve().parent.parent / "assets" / "characters")
-        self.store = SessionStore(config.dir, getattr(config, "instance_id", ""))
+        identity = getattr(config, "instance_id", "")
+        self.store = SessionStore(config.dir, "" if identity == "slot-0" else identity)
         self.session = self._get_session()
         self.service = ChatService(parent=self)
         self._active_request_id: str | None = None
@@ -396,6 +397,7 @@ class QuickChatBubble(QFrame):
         messages = self.prompt_builder.build_messages(
             self.settings, self.character_id, self.session.messages[:-1], text
         )
+        self._request_pet_window = self.pet_window
         self._active_request_id = self.service.send(messages, config)
 
     def _started(self, request_id: str) -> None:
@@ -403,8 +405,13 @@ class QuickChatBubble(QFrame):
             return
         self.hint_label.setText("生成中…")
 
+    def _request_presentation_valid(self) -> bool:
+        target = getattr(self, "_request_pet_window", self.pet_window)
+        valid = getattr(target, "presentation_valid", None)
+        return target is self.pet_window and (not callable(valid) or bool(valid()))
+
     def _delta(self, request_id: str, text: str) -> None:
-        if request_id != self._active_request_id:
+        if request_id != self._active_request_id or not self._request_presentation_valid():
             return
         self._set_reply_text(self._reply_full + str(text))
         self._render_reply()
@@ -422,7 +429,10 @@ class QuickChatBubble(QFrame):
             self.session = synced
         self._active_request_id = None
         self.hint_label.setText("")
-        self._render_reply()
+        if self._request_presentation_valid():
+            self._render_reply()
+        else:
+            self.hide()
 
     def _error(self, request_id: str, text: str) -> None:
         if request_id != self._active_request_id:

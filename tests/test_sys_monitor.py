@@ -7,7 +7,8 @@ sleep 猜时序——冻结的 runner 上事件派发时刻会漂。
 
 覆盖：差分首样本为 None（psutil 首调恒 0，绝不伪造 0）、格式化、error 态、
 启停幂等、无订阅不采样、间隔 1Hz 下限与运行中即时生效、线程收口有界、
-旧代晚到的样本不得覆盖新代快照。
+旧代晚到的样本不得覆盖新代快照。GPU 接线的向后兼容面（本文件末尾）：
+无 GPU 订阅时不建读数器/不踩 PDH、``sample_once`` 不碰 GPU 路径。
 """
 from __future__ import annotations
 
@@ -477,3 +478,50 @@ def test_stale_generation_result_never_overwrites_new_snapshot():
         gate.set()
         monitor.stop(wait=True)
         monitor.close()
+
+
+# ---------------------------------------------------------------- GPU 接线的向后兼容面
+def test_cpu_only_run_never_constructs_a_gpu_reader_or_touches_pdh(monkeypatch):
+    """CPU-only（默认工厂路径）：一个 GPU 读数器都不建，PDH 一次都不踩。
+
+    共享采样器现在也能喂 GPU 段，但"没订阅就不采"对 GPU 同样成立：工厂没被调用 =
+    没有 ``GpuReader`` = 没加载 ``pdh.dll``、没建 query。这是把"无订阅零开销"钉在
+    默认工厂路径上的守卫（而不是只钉在注入替身的用例上）。
+    """
+    from pet import gpu_monitor as gpu_mod
+
+    def boom(*args, **kwargs):  # pragma: no cover - 只有违约时才会走到
+        raise AssertionError("CPU-only 仍然构造了 GPU 读数器 / 踩了 PDH")
+
+    monkeypatch.setattr(gpu_mod, "GpuReader", boom)
+    monkeypatch.setattr(gpu_mod, "WindowsPdh", boom)
+    samples: list[sm.SysSample] = []
+    monitor = sm.SysMonitor(
+        cpu_reader=Reader(), mem_reader=lambda: 61.0, on_sample=samples.append)
+    monitor.subscribe(isl.CPU)
+    monitor.start()
+    try:
+        assert _wait_until(lambda: len(samples) >= 2, timeout=5.0), "CPU 样本未出"
+        assert monitor.gpu_subscriber_count == 0
+        assert monitor.gpu_snapshot() is None
+    finally:
+        monitor.close()
+
+
+def test_sample_once_does_not_start_gpu_sampling():
+    """``sample_once`` 只管设备槽：GUI 线程调它不该在 GUI 线程里建 PDH query
+    （读数器绑定创建线程；进程内第一次 read 还要付约 0.54s 的 provider 装载）。"""
+    created: list[object] = []
+
+    def factory():
+        created.append(threading.get_ident())
+        raise AssertionError("sample_once 触发了 GPU 读数器创建")
+
+    monitor = sm.SysMonitor(
+        cpu_reader=Reader(), mem_reader=lambda: 61.0, gpu_reader_factory=factory)
+    monitor.subscribe_gpu(isl.GPU)
+    sample = monitor.sample_once(now=3.0)
+    assert sample.state == sm.STATE_OK
+    assert created == []
+    assert monitor.gpu_snapshot() is None
+    monitor.close()

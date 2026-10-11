@@ -472,7 +472,8 @@ class SessionStore:
     def __init__(self, config_dir, instance_id=''):
         # 多开隔离：带实例 ID 时使用独立会话目录，避免多实例互覆同一会话；
         # 不传实例 ID 时保持原目录，历史会话无缝沿用。
-        suffix = f'-{instance_id}' if str(instance_id or '').strip() else ''
+        identity = str(instance_id or '').strip()
+        suffix = f'-{identity}' if identity and identity != 'slot-0' else ''
         self.root = Path(config_dir) / f'sessions{suffix}'
 
     def _path(self, character_id, session_id):

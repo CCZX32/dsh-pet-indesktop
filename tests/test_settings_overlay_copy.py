@@ -46,7 +46,7 @@ WINDOW_SCOPE_IDS = (
 )
 
 SCOPE_NOTE = "对所有桌宠生效"
-LEGACY_STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
+LEGACY_STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
 
 
 def _dialog(tmp_path, monkeypatch, *, topology: str = "overlay", instance_id: str = "",
@@ -113,10 +113,11 @@ def test_idle_low_fps_copy_keeps_legacy_frame_reduction(tmp_path, monkeypatch):
 # T2 直播捕获兼容
 # --------------------------------------------------------------------------
 def test_stream_capture_enabled_with_restart_level_copy_under_overlay(overlay_dialog):
-    """overlay：可点 + T4 口径（重启后生效、多宠先收拢为主宠物）。"""
+    """overlay：可点 + T4 口径（重启后生效、多宠先收拢为主宠物、影响所有桌宠）。"""
     hint = _hint(overlay_dialog, "stream_capture")
     assert overlay_dialog.stream_capture_check.isEnabled() is True
-    assert hint == LEGACY_STREAM_CAPTURE_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+    assert hint == (LEGACY_STREAM_CAPTURE_HINT
+                    + "重启后生效；重启时多只桌宠会先收拢为主宠物。（影响所有桌宠）")
     assert "暂不支持" not in hint
 
 

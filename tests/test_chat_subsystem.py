@@ -2144,8 +2144,11 @@ def test_pet_animation_and_self_talk_defaults_are_persisted(tmp_path: Path):
     cfg.save()
     loaded = Config(tmp_path)
     assert loaded.get("animation_gap_seconds") == 2.5
-    assert loaded.get("self_talk_enabled") is True
-    assert loaded.get("self_talk_texts") == ["one", "two"]
+    from pet.settings_slot_config import route_settings_config
+
+    profile = route_settings_config(Config(tmp_path, instance_id="slot-0"))
+    assert profile.get("self_talk_enabled") is True
+    assert profile.get("self_talk_texts") == ["one", "two"]
 
 
 def test_reference_animation_materials_are_folder_classified():

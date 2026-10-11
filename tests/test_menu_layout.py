@@ -2321,16 +2321,29 @@ def test_menu_editor_exposes_future_default_action_for_customization(monkeypatch
 
 def test_settings_rejects_invalid_nested_menu_draft_before_writing(tmp_path, monkeypatch):
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication, QMessageBox, QTreeWidgetItem
+    from PySide6.QtWidgets import QApplication, QTreeWidgetItem
 
     from pet import modern_settings_dialog as settings_mod
+    from pet import settings_close_flow
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    warnings = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    # 提示形态自 2026-10-10 起统一由关闭闸门给（pet/settings_close_flow）：判据从
+    # QMessageBox.warning 换成**产品真实构造**的失败框里那段话（布局诊断必须出现在
+    # 用户看到的那一段里），出口仍是"继续编辑"与「放弃未保存的改动并关闭」。
+    notices: list = []
+
+    def answer(parent, failure):
+        box, _keep, _discard = settings_close_flow.build_save_failure_box(parent, failure)
+        try:
+            notices.append(box.text())
+        finally:
+            box.deleteLater()
+        return False
+
+    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved", answer)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
     outer = next(
         dialog.menu_layout_editor.tree.topLevelItem(i)
@@ -2346,7 +2359,7 @@ def test_settings_rejects_invalid_nested_menu_draft_before_writing(tmp_path, mon
 
     assert dialog.result() == 0
     assert Config(tmp_path).get("context_menu_layout") is None
-    assert warnings and "菜单布局" in warnings[0]
+    assert notices and "菜单布局" in notices[0]
     dialog.reject()
     app.processEvents()
 # --- Settings menu customization regressions (2026-09-03) ---

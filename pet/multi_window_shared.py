@@ -73,7 +73,20 @@ class MultiWindowProxy:
     呈现类方法只扇出到**可见**窗（隐藏窗不跳舞/不弹泡，与多进程各窗独立显隐
     等价）；状态类属性做成聚合值（任一可见 / 任一生效），供 Reducer 与
     proactive 的 G1 守卫读取。
+
+    **状态类提醒是唯一例外**（``_STATEFUL_ALERT_TYPES``）：审批/问题这类请求的
+    真值在共享 agent_link 的 pending 表里，请求到达时没有可见窗也**不能当场丢掉**
+    ——要交给应用级 owner（``OverlayShell`` 的提醒队列与岛反馈面能在无可见宠期间
+    持有/改道它），由 manager 在恢复可见时按同一 alert_id 补投。
     """
+
+    #: 不可见期间也**不能丢**的状态类提醒（阻塞型交互 + 硬失败）：这些事件的本地
+    #: 真值在 manager 的 pending 表里，owner 拿到后可以持有/改道，恢复可见时按同一
+    #: id 补投。其余（过程汇报、模型访问、余额等瞬时提醒）保持"没有可见目标就不投"
+    #: 的既有语义，避免隐藏期凭空多出正文落点。
+    _STATEFUL_ALERT_TYPES = frozenset({
+        "approval", "question", "interaction", "cordis", "execution/failed",
+    })
 
     def __init__(self, shell) -> None:
         self._shell = shell
@@ -126,7 +139,8 @@ class MultiWindowProxy:
                 alert_type, sticky=sticky, buttons=buttons, priority=priority):
             window_alerts.defer_quiet(text)
             return True
-        for w in self._visible_windows():
+        visible = self._visible_windows()
+        for w in visible:
             method = getattr(w, "show_alert", None)
             if callable(method):
                 method(text, subtitle=subtitle, duration_ms=duration_ms,
@@ -134,7 +148,7 @@ class MultiWindowProxy:
                        priority=priority, alert_type=alert_type, metadata=metadata)
                 return True
         # 可见窗都不支持 show_alert：退化到首个可见窗的 show_bubble
-        for w in self._visible_windows():
+        for w in visible:
             if hasattr(w, "show_bubble"):
                 try:
                     w.show_bubble(text, sticky=sticky, buttons=buttons,
@@ -142,6 +156,17 @@ class MultiWindowProxy:
                 except TypeError:
                     w.show_bubble(text, duration_ms=max(duration_ms, 4500))
                 return True
+        # 没有可见窗：状态类请求仍交给应用级 owner（它的提醒队列/岛反馈面能在
+        # 无可见宠期间持有这条请求；恢复可见时 manager 按同一 alert_id 补投）。
+        # 其余提醒保持"没有可见目标就不投"（多窗只弹一处、隐藏不冒泡的既有语义）。
+        if str(alert_type or "").strip().lower() in self._STATEFUL_ALERT_TYPES:
+            for w in self._windows():
+                method = getattr(w, "show_alert", None)
+                if callable(method):
+                    method(text, subtitle=subtitle, duration_ms=duration_ms,
+                           buttons=buttons, sticky=sticky, alert_id=alert_id,
+                           priority=priority, alert_type=alert_type, metadata=metadata)
+                    return True
         return False
 
     def resolve_alert(self, alert_id: str) -> None:
@@ -337,7 +362,10 @@ class SharedAgentLinkManager(AgentLinkManager):
         pass
 
     def resume(self) -> None:
-        pass
+        # 共享监视器不随单窗显隐启停（呈现扇出已按可见窗过滤），但恢复显示时必须
+        # 把隐藏/无宠期间到达、当时无处可投的常驻交互补投出去——显示 owner 的队列
+        # 在不可见宿主上收不到条目，这是"隐藏期审批在恢复后仍能看到"的唯一恢复路径。
+        self.redeliver_pending_interactions()
 
     def shutdown(self) -> None:
         # 单窗关闭/切换角色不动共享监视器；全部退出由 stop_all() 收口。

@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections import OrderedDict
 from enum import Enum
 from typing import Optional
 
@@ -105,6 +106,10 @@ _EVENT_TO_STATE = {
 }
 
 
+# turn/end 的 reasonKind（新桥接写出）中按「静默收尾」处理的取值：用户主动中止。
+_TURN_END_SILENT_REASONS = frozenset({"aborted"})
+
+
 def map_event_to_state(record: dict) -> Optional[DshState]:
     """把一条桥接记录映射为统一状态；无法识别返回 None（忽略）。
 
@@ -126,7 +131,100 @@ def map_event_to_state(record: dict) -> Optional[DshState]:
                 return None
         elif record.get("requiresApproval") is not True:
             return None
+    if event == "turn/end" and str(record.get("reasonKind") or "").strip() in _TURN_END_SILENT_REASONS:
+        # 用户中止的回合：回待机、不报完成（无完成气泡/音效）。reasonKind 缺失 =
+        # 旧桥接，保持原 SUCCESS 行为。
+        return DshState.IDLE
     return _EVENT_TO_STATE.get(event)
+
+
+# 回合起点标记：live 读到即视为「本会话进入了一个新回合」。
+# turn/start 与 user/message 都是桥接真实写出的事件（index.js：前者在
+# STATE_EVENT_TYPES 里、后者显式转发），且两者都收敛为 THINKING/新对话。
+_TURN_START_EVENTS = ("turn/start", "user/message")
+
+# 会话表容量（身份 token 的有界声明）：每会话只留最新 token，超出按「最久没有
+# live 起点」淘汰。桌宠是长跑进程，DSH 每换一次会话就是一个新 sessionId——不设
+# 上界就是一条随会话数线性增长的内存。
+TURN_TOKEN_MEMORY = 512
+
+
+class TurnCompletionTracker:
+    """live 回合收尾的身份追踪（纯逻辑：无 Qt、无线程、无时钟）。
+
+    判据为什么不放在收敛状态上：``turn/end`` 不带源 ID（不像 ``tool/call`` 有
+    callId），收敛器又是 edge-trigger——已停在 SUCCESS 时再收一条收尾零产出，
+    而「桌宠中途接上 / 关开联动残留终态 / 聚合 idle 基线先到」这些来向上，呈现
+    管线里的上一个状态都不是 busy。此时唯一稳定的事实是**这条 live 记录本身**。
+
+    身份 = ``("turn-end", session_id, step, token)``：
+
+    - ``session_id`` / ``step``：桥接 ``writeStateEvent`` 真实写出的字段
+      （step = DSH 的 ``data.step``，桥接在它缺失时回退成 ``turn:<turn>``）；
+    - ``token``：**全局单调 generation**——每条 live 起点标记递增一次后记到该会话
+      名下。它把「同一回合的重复投递」（没有新起点 → token 不变）与「同一会话的
+      下一回合」（接上之后必有 live 起点 → token 变大）分开，并顺带兜住「两回合
+      step 取值相同」这一残量。
+
+    token 为什么必须是**全局**计数、而不是「每会话自增 + 只加容量」：消费侧
+    （``AgentLinkManager._on_dsh_turn_completed``）按身份去重，身份相同 = 同一回合
+    的重复投递 = 直接丢弃。每会话计数在会话被挤出表后会从 1 重来，新回合 step 与
+    旧回合相同时身份就撞上**消费者已经见过**的那个，新回合被静默吞掉（无完成气泡、
+    无 done 音效）。全局计数在实例生命周期内不复用，因此淘汰只丢「记忆」，不会
+    造出假身份。
+
+    有界：会话表 ≤ ``TURN_TOKEN_MEMORY`` 条，且只由 live 起点写入——只见过收尾的
+    会话（中途挂载，从没见过起点）token 恒为 0 且**不落表**，身份靠 session + step
+    逐条唯一（不按正文造 ID、不写任何持久状态）。``reset()`` 清表但同样不回收全局
+    计数（见其文档）。
+
+    两个字段都取不到时退回摄入游标 ``(文件, 文件身份, 行首偏移)``：同一行读两次
+    已由摄入账本（``BaseAgentMonitor._event_ledger``）挡住，这里只保证身份唯一。
+
+    追的是 **live** 记录：``ByteOffsetTailer`` 回填之后才读到的字节才会到达
+    ``observe``——历史记录到不了这里，所以「返回身份」本身就等于「接上之后真的
+    发生了一次回合收尾」。
+    """
+
+    def __init__(self) -> None:
+        # 全局起点计数（整数，不随会话数占内存）：只增不减（含 reset），保证身份
+        # token 在实例生命周期内不复用。
+        self._generation = 0
+        # 会话 → 该会话最新的起点 token。插入次序 = LRU 次序（起点刷新次序，收尾
+        # 只读不刷新——读不该驱动淘汰），淘汰端是最久没有起点的会话。
+        self._tokens: OrderedDict[str, int] = OrderedDict()
+
+    def reset(self) -> None:
+        """读方重启（监视器 start）时清会话表：上一代次的起点记忆不跨代次存活。
+
+        **全局计数不回收**：回收会让重启后同一会话的下一回合重新拿到旧 token，而
+        消费侧的身份记忆（``_dsh_turn_ids``）不随监视器生命周期清空——「关掉再开启
+        联动、同一会话继续跑」时那正好把新回合当成重复投递吞掉。清表本身已足以隔离
+        代次：没见过起点的会话 token 仍是 0，身份照旧由 session + step 唯一。
+        """
+        self._tokens.clear()
+
+    def observe(self, record: dict, cursor: Optional[tuple] = None) -> Optional[tuple]:
+        """喂一条 live 桥接记录：是回合成功收尾事件时返回其身份，否则 None。"""
+        if not isinstance(record, dict):
+            return None
+        event = str(record.get("event") or "")
+        session = str(record.get("sessionId") or record.get("session_id") or "")
+        if event in _TURN_START_EVENTS:
+            self._generation += 1
+            self._tokens.pop(session, None)  # 重入表尾：本会话成为最近使用
+            self._tokens[session] = self._generation
+            while len(self._tokens) > TURN_TOKEN_MEMORY:
+                self._tokens.popitem(last=False)
+            return None
+        if map_event_to_state(record) is not DshState.SUCCESS:
+            return None
+        step = str(record.get("step") or "")
+        if session or step:
+            return ("turn-end", session, step, self._tokens.get(session, 0))
+        if cursor is None:
+            return None
+        return ("turn-end-cursor", str(cursor[0]), cursor[1], int(cursor[2]))
 
 
 def candidate_ports(port: Optional[int] = None) -> list[int]:
@@ -243,6 +341,20 @@ class DshStateConverger:
             self._release_question()
             if was_latched:
                 self._transition(DshState.WORKING, out)
+            return out
+
+        if event == "turn/end" and state is DshState.IDLE:
+            # 用户中止的回合：必须带 source 产出，消费侧据此回待机并撤掉完成确认。
+            # 放在锁存闸之前：中止会终结整轮，审批/问题锁存一并解除（否则岛一直
+            # 等待，超时又被 working 顶回）。
+            # 旧 AgentStatus idle 基线可能先到（已是 IDLE），同态去重会吞掉这条
+            # 中止——此时仍产出一条 idle→idle 标记，让消费侧撤掉基线排下的确认。
+            self._release_approval()
+            self._release_question()
+            if self.current_state is DshState.IDLE:
+                out.append(("state", DshState.IDLE.value, DshState.IDLE.value, event))
+            else:
+                self._transition(state, out, source=event)
             return out
 
         # 审批类权威事件（cordis/request-run、旧式 approval/request、显式

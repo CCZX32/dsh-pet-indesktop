@@ -81,6 +81,12 @@ class _StubMonitor:
         self.closed = False
         self.started = False
         self.subscribed: set[str] = set()
+        #: GPU 那套订阅各自记账（与真底座的两套计数同形）；``gpu_calls`` 是
+        #: "有没有段在碰 GPU 这条路"的总探针——CPU-only 用例靠它证明一次都没碰。
+        self.gpu_sample = None
+        self.gpu_subscribed: set[str] = set()
+        self.gpu_unsubscribed: list[str] = []
+        self.gpu_calls = 0
 
     def start(self) -> bool:
         """起始幂等（与真 ``SysMonitor.start`` 同契约：已在跑就返回 False）。"""
@@ -112,6 +118,21 @@ class _StubMonitor:
 
     def snapshot(self):
         return self.sample
+
+    def subscribe_gpu(self, key: str) -> int:
+        self.gpu_calls += 1
+        self.gpu_subscribed.add(str(key))
+        return len(self.gpu_subscribed)
+
+    def unsubscribe_gpu(self, key: str) -> int:
+        self.gpu_calls += 1
+        self.gpu_unsubscribed.append(str(key))
+        self.gpu_subscribed.discard(str(key))
+        return len(self.gpu_subscribed)
+
+    def gpu_snapshot(self):
+        self.gpu_calls += 1
+        return self.gpu_sample
 
 
 class _StubConfig:

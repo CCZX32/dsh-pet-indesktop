@@ -14,21 +14,28 @@ settings.lock 单实例）里点「一键退出子肥鱼」无法跨进程删 sp
 多宠退役层删除后不再有跨进程子宠；见 modern_settings_dialog._on_clear_spawned_pets）。
 
 第二条指令 ``CMD_APPLY_SETTINGS_RESET``（issue #220 M10）走同一条通道，语义是
-「设置页刚把全部设置恢复默认，请做一次重置级运行态对齐」（当前 = 位置回默认落位）：
+「设置页刚把全部设置恢复默认，请做一次重置级运行态对齐」（= 位置回默认落位）：
 位置类键 ``rx/ry`` 被重置成 null（没有位置记忆），运行期不跟着对齐的话，本次退出
 ``save_position()`` 会把重置前的旧位置写回磁盘、重置被静默抵消。
+
+第三条指令 ``CMD_PROFILE_RESET``（G1b）是**每宠档案**（slot 作用域）的「恢复默认」
+运行态同步：偏好/尺寸/角色按新值刷新，**位置保留**（本宠 reset 不搬家）。它与上面
+那条不是同义反复——两者的位置语义相反，复用一个就会让"保位置"当场失效（见该常量
+的注释）。
 
 硬约束（本模块承载的纯逻辑部分）：
 
 - **原子写**：临时文件 + ``os.replace``（命名与 ``overlay_spawn_state`` /
   ``Config.save`` 同惯例），读取方永远看到完整 JSON 或旧内容；
-- **消费即删**：``consume_command`` 读到内容就摘除文件——包括损坏/未知/陈旧
-  指令，否则 3s 轮询会把坏文件永远重放；读失败（被占用/权限）不摘除，留给下
-  一轮重试，绝不吞掉用户的一次点击；
+- **有界 pending**：单文件最多 32 条，满队列拒写；writer/read/claim/ack 使用
+  同一目录锁。保留 version1 单条外观，多条附 pending 列表。兼容 consume 只移除
+  本条；壳 claim 后锁外应用、按 id/claim 确认，失败移队尾最多三次；30s claim 租期
+  防消费者中断永久占住条目。损坏/未知/陈旧条目丢弃并记录，读失败保留重试；
 - **损坏/未知指令静默跳过**：返回 None + 一行日志，绝不抛给 GUI；
 - **陈旧丢弃**：``issued_at`` 超过 ``DEFAULT_MAX_AGE_S`` 的指令视为"桌宠当时
   没在跑"，丢弃并留日志（否则设置页关掉桌宠后再开，会突然清空全部子肥鱼）；
-- **身份**：``target`` 为 slot 编号 = 只退那一只；``None`` = 全部子肥鱼。
+- **身份**：``target`` 为 slot 编号 = 只退/只对齐那一只（``0`` 是合法身份：主宠的档案）；
+  ``None`` = 全部子肥鱼。
 
 拓扑门 ``is_overlay_topology`` 也收口在本模块：设置进程必须按拓扑分流，而
 ``pet/__main__.py --settings`` 禁止导入重量级模块（pet.app / overlay_shell，
@@ -63,7 +70,14 @@ import math
 import os
 import re
 import time
+import uuid
 from pathlib import Path
+
+from . import config_write_lock as cwl
+
+MAX_PENDING_COMMANDS = 32
+MAX_COMMAND_ATTEMPTS = 3
+CLAIM_LEASE_S = 30.0
 
 # 配置目录口径复用 ``config`` 的既有解析（``app.main`` 的
 # ``config_dir = _default_base() / APP_DIR_NAME`` 同源）。模块级导入是有意的：
@@ -104,10 +118,25 @@ COMMAND_VERSION = 1
 
 # 已知指令：设置页「一键退出子肥鱼」（全部子肥鱼 / 指定 slot 身份）、
 # 「恢复默认设置」后的运行态对齐（issue #220 M10：位置回默认落位等，
-# 见 pet/settings_reset_defaults.py）。
+# 见 pet/settings_reset_defaults.py）、以及 G1b 新增的**每宠档案恢复默认**
+# （``profile_reset``：偏好/尺寸/角色的运行态同步，**保留位置**）。
 CMD_EXIT_SPAWNED_PETS = "exit_spawned_pets"
 CMD_APPLY_SETTINGS_RESET = "apply_settings_reset"
-KNOWN_COMMANDS = frozenset({CMD_EXIT_SPAWNED_PETS, CMD_APPLY_SETTINGS_RESET})
+#: G1b：**每宠档案**（slot 作用域）的「恢复默认」运行态同步。
+#:
+#: 为什么必须是**独立**指令而不是复用 ``apply_settings_reset``：后者的语义就是
+#: "位置回默认落位"（消费者按它重摆窗口），而本宠 reset 的口径是**保留位置**
+#: （``docs/PRODUCT-NEXT-STEPS-SPEC-2026-10-09.md`` §五：位置不属"恢复默认"，"回到
+#: 默认落位"是独立操作）。复用会当场把这只宠搬走，与档案里保留下来的位置键矛盾；
+#: 给旧指令加 ``preserve_position`` 之类的开关同样不行——过渡期在跑的老消费者会
+#: **忽略**未知字段而照旧重定位（最坏情况：用户没要求却被搬家）。
+#:
+#: OverlayShell 已接子 slot；slot0 明确失败结束而非无限阻塞队列。
+#: AppShell 的档案 reset 消费仍属后续整合，不把新命令误当旧 reset。
+CMD_PROFILE_RESET = "profile_reset"
+KNOWN_COMMANDS = frozenset(
+    {CMD_EXIT_SPAWNED_PETS, CMD_APPLY_SETTINGS_RESET, CMD_PROFILE_RESET})
+
 
 # 指令保鲜窗口：超过即视为"写下时主进程不在跑"。
 DEFAULT_MAX_AGE_S = 120.0
@@ -286,12 +315,17 @@ def _finite(value):
 
 
 def _normalize_target(target) -> int | None:
-    """target 合法化：None 或 >=1 的 int；其它（含 bool/字符串）→ None 表示非法。"""
+    """target 合法化：``None``（= 该指令的"全部"口径）或 **>= 0 的 int**；其它 → None。
+
+    下界是 0（不是 1）：身份空间含 ``slot0``（主宠的**档案**身份），而每宠 reset 的指令
+    必须能点名它——``write_command(target=0)`` 在旧口径下被当成非法值**直接拒写**，
+    用户点了重置却没有任何动静。负数 / bool / 字符串 / 浮点仍然是非法值（类型不放宽）。
+    """
     if target is None:
         return None
     if isinstance(target, bool) or not isinstance(target, int):
         return None
-    return target if target >= 1 else None
+    return target if target >= 0 else None
 
 
 def write_command(config_dir: Path | str, command: str, *, target=None,
@@ -318,12 +352,18 @@ def write_command(config_dir: Path | str, command: str, *, target=None,
         "issuer_pid": os.getpid() if issuer_pid is None else int(issuer_pid),
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
-        os.replace(temp, path)
-    except OSError:
+        with cwl.config_write_lock(config_dir):
+            entries = _load_entries(path, now=payload["issued_at"], max_age_s=DEFAULT_MAX_AGE_S)
+            if entries is None:
+                return False
+            if len(entries) >= MAX_PENDING_COMMANDS:
+                logger.warning("指令通道：队列已满（%s），拒绝写入，不覆盖旧指令", MAX_PENDING_COMMANDS)
+                return False
+            payload["id"] = uuid.uuid4().hex
+            payload["attempts"] = 0
+            entries.append(payload)
+            _store_entries(path, entries)
+    except (OSError, cwl.ConfigWriteError):
         logger.warning("指令通道：写指令文件失败: %s", path, exc_info=True)
         return False
     return True
@@ -339,6 +379,9 @@ def _read_text(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
+    except UnicodeError:
+        logger.warning("指令通道：指令编码损坏，已跳过: %s", path)
+        return "{broken"
     except OSError:
         logger.warning("指令通道：指令文件不可读，留给下一轮重试: %s", path)
         return None
@@ -358,7 +401,7 @@ def _parse(raw: str, *, now: float, max_age_s: float) -> dict | None:
         logger.warning("指令通道：指令版本不匹配 (%r)，已跳过", data.get("version"))
         return None
     name = data.get("command")
-    if name not in KNOWN_COMMANDS:
+    if not isinstance(name, str) or name not in KNOWN_COMMANDS:
         logger.warning("指令通道：未知指令 %r，已跳过", name)
         return None
     issued_at = _finite(data.get("issued_at"))
@@ -382,34 +425,138 @@ def _parse(raw: str, *, now: float, max_age_s: float) -> dict | None:
     }
 
 
+def _load_entries(path, *, now, max_age_s):
+    raw = _read_text(path)
+    if raw is None:
+        return None
+    if not raw:
+        return []
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        logger.warning("指令通道：指令文件损坏，已跳过")
+        return []
+    source = document.get("pending", [document]) if isinstance(document, dict) else [document]
+    if not isinstance(source, list) or len(source) > MAX_PENDING_COMMANDS:
+        logger.warning("指令通道：pending 非法，已跳过")
+        return []
+    entries = []
+    seen = set()
+    for item in source:
+        parsed = _parse(json.dumps(item), now=now, max_age_s=max_age_s)
+        if parsed is None:
+            continue
+        identity = item.get("id") or uuid.uuid4().hex
+        if not isinstance(identity, str) or identity in seen:
+            logger.warning("指令通道：重复/非法 id，已跳过")
+            continue
+        seen.add(identity)
+        parsed["id"] = identity
+        attempts = item.get("attempts", 0)
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or not 0 <= attempts < MAX_COMMAND_ATTEMPTS:
+            logger.warning("指令通道：非法/耗尽 attempts，失败结束")
+            continue
+        parsed["attempts"] = attempts
+        claim = item.get("claim")
+        if isinstance(claim, str) and _finite(item.get("claimed_at")) is not None:
+            parsed["claim"] = claim
+            parsed["claimed_at"] = float(item["claimed_at"])
+        entries.append(parsed)
+    return entries
+
+
+def _store_entries(path, entries):
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    document = dict(entries[0])
+    if len(entries) > 1 or "claim" in document:
+        document["pending"] = entries
+    cwl.atomic_write_json(path, document)
+
+
+def _available(entry, now):
+    return "claim" not in entry or now - entry["claimed_at"] >= CLAIM_LEASE_S
+
+
 def read_command(config_dir: Path | str, *, now: float | None = None,
                  max_age_s: float = DEFAULT_MAX_AGE_S) -> dict | None:
-    """诊断用读（**不消费**）：返回合法指令 dict，否则 None。"""
-    raw = _read_text(command_path(config_dir))
-    if not raw:
+    """锁内诊断读队头，不改变 pending 或 claim。"""
+    current = time.time() if now is None else float(now)
+    try:
+        with cwl.config_write_lock(config_dir):
+            entries = _load_entries(command_path(config_dir), now=current, max_age_s=max_age_s)
+            return dict(entries[0]) if entries else None
+    except (OSError, cwl.ConfigWriteError):
+        logger.warning("指令通道：读指令失败，保留重试", exc_info=True)
         return None
-    return _parse(raw, now=time.time() if now is None else float(now),
-                  max_age_s=max_age_s)
 
 
 def consume_command(config_dir: Path | str, *, now: float | None = None,
                     max_age_s: float = DEFAULT_MAX_AGE_S) -> dict | None:
-    """消费指令：读到内容即摘除文件，返回合法指令 dict（否则 None）。
-
-    摘除在解析**之前**：坏文件也必须在一次消费里消失，否则 3s 轮询会永远重放
-    同一份坏内容。摘除失败则本轮不执行（宁可漏一次点击，也不让同一条指令被
-    反复执行）。读失败不摘除（下一轮重试）。
-    """
+    """兼容消费：锁内取一条并移除，只移除自己的条目，不碰后来的写入。"""
+    current = time.time() if now is None else float(now)
     path = command_path(config_dir)
-    raw = _read_text(path)
-    if not raw:
-        return None
     try:
-        path.unlink()
-    except FileNotFoundError:
-        pass  # 已被别的消费者摘走（overlay 只有主进程消费，防御而已）
-    except OSError:
-        logger.warning("指令通道：指令文件摘除失败，本轮不执行: %s", path)
+        with cwl.config_write_lock(config_dir):
+            entries = _load_entries(path, now=current, max_age_s=max_age_s)
+            if entries is None:
+                return None
+            index = next((i for i, entry in enumerate(entries) if _available(entry, current)), None)
+            command = entries.pop(index) if index is not None else None
+            _store_entries(path, entries)
+            return command
+    except (OSError, cwl.ConfigWriteError):
+        logger.warning("指令通道：消费失败，保留重试", exc_info=True)
         return None
-    return _parse(raw, now=time.time() if now is None else float(now),
-                  max_age_s=max_age_s)
+
+
+def claim_command(config_dir: Path | str, *, now: float | None = None,
+                  max_age_s: float = DEFAULT_MAX_AGE_S) -> dict | None:
+    """短锁内领取一条，30 秒租期支持消费者中断后重试；应用必须在锁外。"""
+    current = time.time() if now is None else float(now)
+    path = command_path(config_dir)
+    try:
+        with cwl.config_write_lock(config_dir):
+            entries = _load_entries(path, now=current, max_age_s=max_age_s)
+            if entries is None:
+                return None
+            command = next((entry for entry in entries if _available(entry, current)), None)
+            if command is not None:
+                command["claim"] = uuid.uuid4().hex
+                command["claimed_at"] = current
+            _store_entries(path, entries)
+            return dict(command) if command is not None else None
+    except (OSError, cwl.ConfigWriteError):
+        logger.warning("指令通道：claim 失败，保留重试", exc_info=True)
+        return None
+
+
+def finish_command(config_dir: Path | str, command: dict, *, retry=False) -> bool:
+    """只确认已领取的 id/claim；失败重试移队尾，最多三次，过期失败有日志。"""
+    path = command_path(config_dir)
+    try:
+        with cwl.config_write_lock(config_dir):
+            entries = _load_entries(path, now=time.time(), max_age_s=DEFAULT_MAX_AGE_S)
+            if entries is None:
+                return False
+            index = next((i for i, entry in enumerate(entries)
+                          if entry["id"] == command.get("id")
+                          and entry.get("claim") == command.get("claim")), None)
+            if index is None:
+                return False
+            entry = entries.pop(index)
+            if retry:
+                entry["attempts"] += 1
+                entry.pop("claim", None)
+                entry.pop("claimed_at", None)
+                if entry["attempts"] < MAX_COMMAND_ATTEMPTS:
+                    entries.append(entry)
+                else:
+                    logger.warning("指令通道：%s target=%s 重试耗尽，失败结束（未报告成功）",
+                                   entry["command"], entry["target"])
+            _store_entries(path, entries)
+            return True
+    except (OSError, cwl.ConfigWriteError):
+        logger.warning("指令通道：确认失败，保留租期重试", exc_info=True)
+        return False

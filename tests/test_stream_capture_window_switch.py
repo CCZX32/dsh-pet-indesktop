@@ -37,16 +37,32 @@ def _close(win):
     app.processEvents()
 
 
-def _make_slot_before_main_switch(tmp_path):
-    """先落出 slot 配置（此时主配置还没开捕获），再让主配置开捕获。
+def _write_slot_file(tmp_path, slot_id: int, payload: dict):
+    """直接落一份 ``config-slot-N.json``（模拟升级前遗留的槽档案）。
 
-    顺序有讲究：``Config(instance_id=...)`` 首次构造会按主配置落种
-    （``seed_slot_config_from_main``），后开主配置才能造出「主 true / slot false」
-    这个真实场景（用户在 slot 自己的设置页从没碰过该键）。
+    ``stream_capture_mode`` 现在是**全局**键（规范 §五）：槽档案里不再写它，
+    裸 slot ``Config.save`` 会被归属表拒绝。这里造的是旧版留下的真实文件——
+    "主配置 true + 槽档案里还残着 false"正是窗口能力归并要处理的输入。
     """
+    from pet.config import APP_DIR_NAME
+
+    cfg_dir = tmp_path / APP_DIR_NAME
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg_dir / f"config-slot-{slot_id}.json"
+    path.write_text(json.dumps({"version": 4, **payload}, ensure_ascii=False),
+                    encoding="utf-8")
+    return path
+
+
+def _make_slot_before_main_switch(tmp_path):
+    """先落出槽档案（此时主配置还没开捕获），再让主配置开捕获。
+
+    槽那份窗口视图读它自己的 ``config-slot-N.json``（遗留值 false），主配置随后
+    置 true——正是"归并只看主配置、且不改写槽档案"要覆盖的组合。
+    """
+    _write_slot_file(tmp_path, 1, {"stream_capture_mode": False})
     slot = Config(base=tmp_path, instance_id="slot-1")
     assert slot.get("stream_capture_mode") is False
-    assert slot.save()
     main = Config(base=tmp_path)
     main.set("stream_capture_mode", True)
     assert main.save()
@@ -72,9 +88,9 @@ def test_slot_window_follows_main_capture_switch(tmp_path):
 def test_slot_window_keeps_own_switch_when_main_capture_off(tmp_path, monkeypatch):
     """对照：主配置没开捕获（env 逃生门）时，slot 自己那份配置仍然算数、可运行期切。"""
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
+    _write_slot_file(tmp_path, 1, {"stream_capture_mode": True})
     slot = Config(base=tmp_path, instance_id="slot-1")
-    slot.set("stream_capture_mode", True)
-    assert slot.save()
+    assert slot.get("stream_capture_mode") is True
 
     win = PetWindow(FakeLibrary(), slot)
     try:

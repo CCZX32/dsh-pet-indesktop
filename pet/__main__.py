@@ -97,7 +97,7 @@ def _run_settings(config=None) -> int:
         # DSH_PET_INSTANCE 由主进程经环境继承下来：子肥鱼的设置进程编辑的是
         # 它自己的 config-slot-N.json，与主进程同一份文件；多窗场景由主进程
         # 追加 --instance 显式指明。
-        config = Config(instance_id=_settings_instance_id(sys.argv) or None)
+        config = Config(instance_id=_settings_instance_id(sys.argv))
     try:
         config.dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -108,13 +108,12 @@ def _run_settings(config=None) -> int:
 
 
 def _main() -> int:
-    # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环）。
+    # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环），
+    # 并与两个冻结入口共用 pet.uninstall_cleanup.main——逐步诊断输出、配置目录留痕、
+    # 退出码语义只有那一处实现，入口侧不再自己复刻一份。
     if "--uninstall-cleanup" in sys.argv:
-        from .uninstall_cleanup import run_uninstall_cleanup
-        results = run_uninstall_cleanup()
-        # 关键步骤失败（值为 False）返回非零，跳过（"skipped"）或成功（True）为 0
-        failed = any(v is False for v in results.values())
-        return 1 if failed else 0
+        from .uninstall_cleanup import main as uninstall_cleanup_main
+        return uninstall_cleanup_main()
     # 设置页独立进程同样不导入 pet.app（模块集合是主进程的子集，见模块 docstring）。
     if "--settings" in sys.argv:
         return _run_settings()

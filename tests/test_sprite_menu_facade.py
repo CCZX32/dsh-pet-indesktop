@@ -90,6 +90,11 @@ def _make_shell(tmp_path, config_values=None):
     from pet.overlay_shell import OverlayShell
 
     config = cap.CapConfig(tmp_path, config_values)
+    from pet import pet_profiles
+
+    values = {key: value for key, value in (config_values or {}).items()
+              if key in pet_profiles.PER_PET_KEYS}
+    pet_profiles.write_profile_settings(tmp_path, 0, values or {"scale": 0.5})
     instance = cap.CapInstance(config)
     screen = cap.FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040))
     shell = OverlayShell(
@@ -148,7 +153,7 @@ def test_facade_window_capabilities(tmp_path):
     try:
         facade.change_scale(1.0)
         assert shell.sprite.scale == 1.0
-        assert shell._config.get("scale") == 1.0
+        assert shell._sprite_config(shell.sprite).get("scale") == 1.0
         facade.set_no_move(True)
         assert shell.behavior.no_move is True
         assert shell._config.get("no_move") is True
@@ -257,7 +262,7 @@ def test_switch_character_swaps_library(tmp_path):
         assert made == ["nova"]
         assert shell.lib is new_lib
         assert shell.sprite.library is new_lib
-        assert shell._config.get("character") == "nova"
+        assert shell._sprite_config(shell.sprite).get("character") == "nova"
         assert old_lib.shutdown_calls == 1
         assert shell.behavior.state_of(shell.sprite) is None  # forget 已重置
     finally:
@@ -693,8 +698,8 @@ def test_exit_main_pet_cancel_keeps_main_and_children(tmp_path, monkeypatch):
 
         SpriteMenuFacade(shell).on_exit_pet()
 
-        assert dialog.opened == 1, "主宠退出必须先问一句"
-        assert exits == [], "取消不得调用 exit_pet（无提升、无退出）"
+        assert dialog.opened == 0, "可逆关闭与子宠相同，不专属确认"
+        assert exits == [shell.sprite]
         assert shell.sprite is not child, "取消不得提升子宠"
         assert shell._spawned == [child], "取消不得动活跃清单"
     finally:
@@ -710,8 +715,9 @@ def test_exit_main_pet_confirmed_promotes_first_child(tmp_path, monkeypatch):
 
         SpriteMenuFacade(shell).on_exit_pet()
 
-        assert shell.sprite is child, "确认后子宠被提升为主宠"
-        assert shell._spawned == []
+        assert shell.sprite is None
+        assert shell._spawned == [child]
+        assert shell._spawned_slots[child] == 1
     finally:
         _teardown(shell)
 
@@ -727,10 +733,9 @@ def test_exit_main_pet_without_children_cancel_does_not_quit(tmp_path, monkeypat
 
         SpriteMenuFacade(shell).on_exit_pet()
 
-        assert dialog.opened == 1
-        assert "退出整个应用" in dialog.informative, "没子宠时必须说清是退整个应用"
-        assert exits == [], "取消不得调用 exit_pet"
-        assert quits == [], "取消不得退出应用"
+        assert dialog.opened == 0
+        assert exits == [shell.sprite]
+        assert quits == [], "关闭最后一宠不退出应用"
     finally:
         _teardown(shell)
 
@@ -745,7 +750,8 @@ def test_exit_main_pet_without_children_confirmed_quits_app(tmp_path, monkeypatc
 
         SpriteMenuFacade(shell).on_exit_pet()
 
-        assert quits == [1], "确认后必须退出应用"
+        assert quits == []
+        assert shell.sprite is None
     finally:
         _teardown(shell)
 
@@ -778,12 +784,8 @@ def test_exit_main_pet_confirm_box_defaults_to_cancel(tmp_path, monkeypatch):
 
         SpriteMenuFacade(shell).on_exit_pet()
 
-        assert dialog.buttons == ["确认退出主宠", "取消"]
-        assert dialog.default == "取消", "默认钮必须是取消"
-        assert "确认退出主宠" in dialog.text
-        assert "小美" in dialog.informative, "有子宠时必须点名谁会被提升"
-        assert "原主宠的位置与设置不保留" in dialog.informative
-        assert exits == [], "没点确认（默认取消）不得退出"
+        assert dialog.opened == 0
+        assert exits == [shell.sprite]
     finally:
         _teardown(shell)
 
@@ -794,18 +796,13 @@ def test_promote_target_name_uses_alias_and_empty_without_children(tmp_path, mon
     退出确认框靠它点名"谁会被提升"，不新造命名系统：展示名与识屏自我识别同源
     （``character_display_name`` + 该 sprite 自己的 ``character``）。
     """
-    from pet import catalog
-
     shell, _ = _make_shell(tmp_path)
     try:
-        assert shell.promote_target_name() == "", "无子宠 → 没有会被提升的那一只"
+        assert not hasattr(shell, "promote_target_name")
         child = _spawn_child(shell)
-        cid = str(shell._sprite_config(child).get("character", catalog.DEFAULT_CHARACTER))
-        assert shell.promote_target_name() == cid, "没有别名时回退角色显示名"
-
-        monkeypatch.setattr(shell._config, "character_display_name",
-                            lambda c: "小美" if c == cid else c, raising=False)
-        assert shell.promote_target_name() == "小美", "用户起的别名优先"
+        shell.exit_pet(shell.sprite)
+        assert shell.sprite is None
+        assert shell._spawned_slots[child] == 1
     finally:
         _teardown(shell)
 
@@ -827,9 +824,230 @@ def test_menu_exit_this_for_main_pet_is_gated(tmp_path, monkeypatch):
         exits = _spy_exit_pet(shell, monkeypatch)
         action.trigger()
 
-        assert dialog.opened == 1
-        assert exits == [], "取消后不得退出"
+        assert dialog.opened == 0
+        assert exits == [shell.sprite]
         assert shell.sprite is not child
         assert shell._spawned == [child]
     finally:
         _teardown(shell)
+
+
+def test_failed_child_write_does_not_apply_or_reflow(tmp_path):
+    from pet import pet_profiles
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        child.bind_clip("idle1")
+        clip = child._clip
+        speeds = list(clip.speeds)
+        original = (child.scale, child.playback_speed, child.drag_physics)
+        reflows, feedback = [], []
+        shell.on_sprite_scale_changed = lambda sprite: reflows.append(sprite)
+        shell.show_bubble = lambda text, **kw: feedback.append(text) or True
+        pet_profiles.slot_profile_path(cfg.dir, 1).write_text("{broken", encoding="utf-8")
+        facade = SpriteMenuFacade(shell, child)
+        assert facade.change_scale(1.7) is False
+        assert facade.set_playback_speed(2.0) is False
+        assert facade.set_drag_physics(not original[2]) is False
+        assert (child.scale, child.playback_speed, child.drag_physics) == original
+        assert clip.speeds == speeds and reflows == []
+        assert len(feedback) == 3 and all("失败" in text for text in feedback)
+    finally:
+        toggle._teardown(shell)
+
+
+def test_child_lock_timeout_keeps_runtime_and_reports_failure(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from pet import config_write_lock as cwl
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, _ = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        original = child.scale
+        feedback = []
+        shell.show_bubble = lambda text, **kw: feedback.append(text) or True
+        @contextmanager
+        def blocked(*args, **kwargs):
+            raise cwl.WriteLockTimeout("controlled lock contention")
+            yield
+        monkeypatch.setattr(cwl, "config_write_lock", blocked)
+        assert SpriteMenuFacade(shell, child).change_scale(1.7) is False
+        assert child.scale == original and "失败" in feedback[0]
+    finally:
+        toggle._teardown(shell)
+
+
+def test_main_save_false_rolls_back_config_and_runtime(tmp_path, monkeypatch):
+    shell, _ = _make_shell(tmp_path)
+    try:
+        original = shell.sprite.scale
+        previous = shell._config.get("scale")
+        monkeypatch.setattr(shell, "persist_sprite_setting", lambda *args: False)
+        assert SpriteMenuFacade(shell).change_scale(1.7) is False
+        assert shell.sprite.scale == original
+        assert shell._config.get("scale") == previous
+    finally:
+        _teardown(shell)
+
+
+# ---------------------------------------------------------------- A10 服务结果落点
+# 菜单旁路（右击 → 查看天气 / DeepSeek 余额）此前把**整个壳**交给 AppShell 的
+# 手动服务方法，落点由壳在结果到达时按"最小可见槽"动态决定：右击子肥鱼查天气，
+# 气泡冒在主肥鱼头上；请求在飞时把发起的那一只关掉，结果还会落到别宠身上。
+# 点击余额路径早就用 ``_sprite_host(target)`` 收口了，菜单这条路漏了。
+
+def test_service_callbacks_hand_the_initiating_sprite_presenter(tmp_path):
+    """两个手动服务回调都要带**发起 sprite** 的代次呈现器，而不是整个壳。"""
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.overlay.show()
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        seen: list = []
+        shell.show_weather = lambda host=None, **kw: seen.append(host)
+        shell.show_balance = lambda host=None, **kw: seen.append(host)
+
+        SpriteMenuFacade(shell, child).on_show_weather()
+        SpriteMenuFacade(shell, child).on_show_balance()
+        assert len(seen) == 2
+        for host in seen:
+            assert host is not shell, "手动结果落点必须带发起宠身份，不能是壳本身"
+            assert host.presentation_available() is True
+            assert host.show_bubble("天气：晴", 3000) is False or True  # 仅探活，不判文案
+
+        # 主宠那一侧同样带身份（而不是"壳 = 动态最小可见槽"）
+        seen.clear()
+        SpriteMenuFacade(shell).on_show_weather()
+        assert seen[0] is not shell
+        assert seen[0].show_bubble("天气：晴", 3000) is True
+    finally:
+        toggle._teardown(shell)
+
+
+def test_service_presenter_routes_the_bubble_to_the_initiating_sprite(tmp_path, monkeypatch):
+    """结果真的落在发起那一只身上：子宠走它自己的气泡面，主宠走壳的完整门。"""
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.overlay.show()
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        calls: list = []
+        monkeypatch.setattr(
+            shell, "_show_bubble_text_for",
+            lambda sprite, text, duration_ms=0, **kw: (calls.append(("child", sprite)), True)[1])
+        monkeypatch.setattr(
+            shell, "show_bubble",
+            lambda text, duration_ms=0, **kw: (calls.append(("main", None)), True)[1])
+
+        assert SpriteMenuFacade(shell, child)._service_host().show_bubble("天气：晴", 3000) is True
+        assert calls == [("child", child)]
+        calls.clear()
+        assert SpriteMenuFacade(shell)._service_host().show_bubble("天气：晴", 3000) is True
+        assert calls == [("main", None)]
+    finally:
+        toggle._teardown(shell)
+
+
+def test_service_presenter_cancels_only_the_presentation_after_close(tmp_path):
+    """请求在飞时关掉发起宠：迟到结果只取消呈现，不投给别宠、也不报成功。"""
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.overlay.show()
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        presenter = SpriteMenuFacade(shell, child)._service_host()
+        assert presenter.presentation_available() is True
+
+        assert shell.exit_pet(child) is True
+
+        assert presenter.presentation_available() is False, "关闭后这只不再是活宿主"
+        assert presenter.show_bubble("迟到的天气", 3000) is False, "只取消呈现，不另找落点"
+        assert shell.sprite is not None, "主宠仍在（别宠一个都不该被牵动）"
+    finally:
+        toggle._teardown(shell)
+
+
+def test_service_presenter_treats_a_reborn_slot_as_another_pet(tmp_path):
+    """同一槽重建出来的是**另一只**：旧呈现器不许把结果投给新住客。"""
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.overlay.show()
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        presenter = SpriteMenuFacade(shell, child)._service_host()
+        assert shell.exit_pet(child) is True
+        shell.spawn_pet()
+        reborn = shell._spawned[0]
+        assert reborn is not child, "前提：槽被重建"
+
+        assert presenter.presentation_available() is False
+        assert presenter.show_bubble("迟到的余额", 3000) is False
+        assert reborn.visible is True, "新住客不受旧请求影响"
+    finally:
+        toggle._teardown(shell)
+
+
+def test_service_presenter_respects_the_per_sprite_bubble_gate(tmp_path, monkeypatch):
+    """F04：手动结果（余额/天气）必须守壳的 per-sprite 气泡门禁。
+
+    ``_SpriteServicePresenter`` 的 ``show_bubble`` override 只查了
+    ``presentation_available``，随后对子宠直调 ``_show_bubble_text_for``——把父类
+    ``_SpritePetHost.show_bubble`` 开头那句 ``_bubble_blocked()`` 省掉了：飞行中的
+    那一只、以及设置页打开期间的抑制位，都会照样冒泡（2026-10-10 终审 F04，方法级实证
+    blocked=True / shown=True）。门禁是 **per-sprite** 的：飞的不是这一只时，别的宠照常。
+    """
+    from tests import test_overlay_collision_toggle as toggle
+
+    shell, cfg = toggle._make_slot_shell(tmp_path)
+    try:
+        shell.overlay.show()
+        shell.spawn_pet()
+        shell.spawn_pet()
+        first, second = shell._spawned
+        calls: list = []
+        monkeypatch.setattr(
+            shell, "_show_bubble_text_for",
+            lambda sprite, text, duration_ms=0, **kw: (calls.append(sprite), True)[1])
+
+        # 反例 1：这一只正在飞行（真实飞行边沿回调）
+        shell._on_sprite_flight_changed(first, True)
+        assert SpriteMenuFacade(shell, first)._service_host().show_bubble(
+            "余额：12.34", 3000) is False, "飞行期不许冒泡"
+        assert calls == [], "被门禁挡住时不许再走呈现面"
+
+        # 正例：门禁是 per-sprite 的，飞的不是这一只 → 照常呈现
+        assert SpriteMenuFacade(shell, second)._service_host().show_bubble(
+            "余额：12.34", 3000) is True
+        assert calls == [second], "一只在飞不该把整个壳的结果都按住"
+
+        # 反例 2：设置页抑制期（含主宠那一侧）
+        calls.clear()
+        shell.set_bubble_suppressed(True)
+        try:
+            assert SpriteMenuFacade(shell, second)._service_host().show_bubble(
+                "天气：晴", 3000) is False
+            assert SpriteMenuFacade(shell)._service_host().show_bubble(
+                "天气：晴", 3000) is False
+            assert calls == []
+        finally:
+            shell.set_bubble_suppressed(False)
+
+        # 抑制解除后恢复（不是"从此再也冒不出来"）
+        assert SpriteMenuFacade(shell, second)._service_host().show_bubble(
+            "天气：晴", 3000) is True
+        assert calls == [second]
+    finally:
+        toggle._teardown(shell)

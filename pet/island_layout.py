@@ -18,8 +18,10 @@
 - :class:`_InfoSeg` / :class:`_SegPlacement` / :func:`place_info_segments`：
   段的落位（段间 19px 槽位、竖线居中、字段盒右对齐、**有单位时数值盒 + 单位盒
   双盒**、chip 居中）；
-- :func:`plan_info_row`：收缩流水线（名字省略 → 名字隐藏 → 尾部整段折 +N →
-  custom 主信息省略 → 保底），返回"可见段集 + 折叠段 + 名字态"；
+- :func:`plan_info_row`：收缩流水线（名字省略 → 名字隐藏 → 整段折 +N →
+  custom 主信息省略 → 保底）。折叠次序 = **首批候选（声明盒宽 >120px 的第三方段，
+  由宿主用 ``island_segments.oversize_segment_ids`` 喂入）在前**，其余段尾部优先；
+  中间段被折时按 id 集合生效，不做前缀截断（见 :func:`apply_shrink`）。
 - :func:`apply_shrink`：把计划的结构套到**当刻**的段列表上——这是绘制层与测宽层
   取行的唯一方式（计划不持有段对象，读数每秒在变）；
 - :func:`anchored_x`：宽度变化时按屏幕三分区决定伸长方向的锚点。
@@ -79,6 +81,10 @@ _NETWORK_BOX_SAMPLE = net_monitor.format_network_slot(
 _DEVICE_LABELS = {island_segments.CPU: "CPU", island_segments.MEM: "内存"}
 #: 设备槽段 id（订阅 key 同 id；cpu/mem 共用一条采样线程）。
 _SYS_METRIC_IDS = (island_segments.CPU, island_segments.MEM)
+#: GPU 段的胶囊标签。GPU **不是设备槽成员**（它的读数来自 PDH 读数器而不是 psutil
+#: 快照，订阅也走 ``subscribe_gpu`` 那本账），所以它有独立常量而不是进
+#: :data:`_DEVICE_LABELS`：那张表同时是"设备槽的段 id 集合"（胶囊分发用它）。
+_GPU_LABEL = "GPU"
 
 # ---------------------------------------------------------------- 段数据
 #: 折叠 chip 的段类型（"+N"）。它不是指标段：没有 label、不参与折叠、不画竖线、
@@ -336,7 +342,7 @@ class ShrinkPlan:
     name: str                        # 实际显示的名字（"" = 隐藏）
     name_w: int                      # 名字占位宽（隐藏时 0）
     visible: tuple[str, ...]         # 实际排版的段 id（收尾的 chip 是 "chip"）
-    folded: tuple[str, ...]          # 被折进 +N 的段 id，**折叠顺序（尾段在前）**
+    folded: tuple[str, ...]          # 被折进 +N 的段 id，**折叠次序（先牺牲的在前）**
     segments_x: float                # 首段的绝对起点（绘制层照它落笔）
     width: int                       # 该级下的自然宽（未截断）
     elide_primary: bool = False      # 主信息是否按 elide_px 省略（custom 才会开）
@@ -351,30 +357,48 @@ def apply_shrink(plan: ShrinkPlan, segments, *, primary_fm) -> tuple[_InfoSeg, .
     """把行计划的**结构**套到当刻的段列表上（绘制/测宽两处的唯一取行方式）。
 
     ``segments`` 是调用方刚刚组合出来的段列表（文案是当前值），计划只负责"折掉
-    尾巴几段、主信息省不省"——所以读数每一秒在变也不影响这一行画哪些段。
+    哪几段、主信息省不省"——所以读数每一秒在变也不影响这一行画哪些段。
 
-    chip 的告警级也取**当刻**段列表（不是 ``plan.chip_alert``）：计划按
-    ``_plan_inputs`` 缓存，而那个键刻意不含采样值与 severity（宽度白名单的纪律），
-    于是"读数变、四舍五入后的文本没变、severity 变了"这一拍会命中旧计划——照抄
-    计划里的告警级等于让 chip 色点停在上一拍的账上。段列表是当刻的，取它就没有
-    这个窗口；chip 的 ``+N`` 文案仍按计划的折叠数（结构面）。
+    **折叠按 id 而不是按"前缀截断"**（F2 起）：超宽第三方段是首批折叠候选，
+    它可能落在列表**中间**——按前缀切片会折错段。这里只认计划给出的
+    :attr:`ShrinkPlan.folded` id 集合，所以中间段被折时：
+
+    - 可见段顺序照旧（去掉被折的那几个，chip 仍排在行尾作为"还有 N 段"的标记）；
+    - ``+N`` 的 N = **实际折掉的段数**（不是计划里的数——计划被冻结期间配置可能
+      刚被改小，报一个折不了的数就是骗人）；
+    - chip 的告警级取**当刻**被折段的最高级（不是 ``plan.chip_alert``）：计划按
+      ``_plan_inputs`` 缓存，而那个键刻意不含采样值与 severity（宽度白名单的纪律），
+      于是"读数变、四舍五入后的文本没变、severity 变了"这一拍会命中旧计划——照抄
+      计划里的告警级等于让 chip 色点停在上一拍的账上。
+
+    计划里的 id 在当前列表里凑不够折叠数（拖拽冻结计划 + 配置刚被改小）时**按尾部
+    补足**：宁可多折尾部，也不许把段数算成负数（负索引会从尾部吃段，那才是真的把
+    主信息折了）。
     """
     segments = tuple(segments)
-    keep = len(segments)
-    if plan.folded_count and keep:
-        # 至少留首段（主信息永不折）。拖拽中计划被冻结、配置刚被设置页改小时，
-        # 折叠数可能比现有段还多——宁可少折也不许切片算成负数（负索引会从尾部
-        # 吃段，那才是真的把主信息折了）
-        keep = max(1, keep - plan.folded_count)
-    row = [
-        _elide_primary_segment(seg, primary_fm) if (index == 0 and plan.elide_primary)
-        else seg
-        for index, seg in enumerate(segments[:keep])
-    ]
-    if plan.folded_count and keep:
+    if not segments:
+        return ()
+    primary, metrics = segments[0], segments[1:]
+    target = min(plan.folded_count, len(metrics))
+    dropped: set[str] = set()
+    if target:
+        present = {seg.seg_id for seg in metrics}
+        for segment_id in plan.folded:      # 计划里的折叠顺序（先牺牲的在前）
+            if len(dropped) >= target:
+                break
+            if segment_id in present:
+                dropped.add(segment_id)
+        for seg in reversed(metrics):       # 凑不够：按尾部补足（不折主信息）
+            if len(dropped) >= target:
+                break
+            dropped.add(seg.seg_id)
+    row: list[_InfoSeg] = [
+        _elide_primary_segment(primary, primary_fm) if plan.elide_primary else primary]
+    row.extend(seg for seg in metrics if seg.seg_id not in dropped)
+    if dropped:
         alert = island_segments.highest_severity(
-            _folded_alert(seg) for seg in segments[keep:])
-        row.append(chip_segment(plan.folded_count, alert))
+            _folded_alert(seg) for seg in metrics if seg.seg_id in dropped)
+        row.append(chip_segment(len(dropped), alert))
     return tuple(row)
 
 
@@ -420,13 +444,20 @@ def _folded_alert(seg: _InfoSeg) -> str:
 
 def plan_info_row(
     segments, *, lead_w, trail_w, name_text, available_w,
-    primary_fm, value_fm, label_fm, name_fm,
+    primary_fm, value_fm, label_fm, name_fm, fold_first_ids=(),
 ) -> ShrinkPlan:
     """收缩流水线（纯函数）：给「段列表 + 行首行尾固定件 + 可用宽」返回行计划。
 
     ``available_w`` 是收缩触发线（屏可用宽 − 32px；≤0 表示拿不到屏信息 → 不收缩）。
     ``lead_w`` 是名字之前的固定件宽（左内边距 + 头像 + 间距），``trail_w`` 是段之后
     的固定件宽（状态点 + 间距）——两者由调用方按可见项算好，本函数不查任何配置。
+
+    ``fold_first_ids`` 是**首批折叠候选**（宿主用
+    ``island_segments.oversize_segment_ids`` 的判决喂进来）：声明盒宽 >120px 的
+    第三方段先被牺牲，**哪怕它不在列表尾部**——长段自付代价，而"尾部先折"仍然是
+    其余段之间的次序。折叠计数、``+N`` chip 与实际可见段集都按这个次序算，所以
+    中间段被折不会折错段（见 :func:`apply_shrink`）。内置段默认不在候选里
+    （它们的盒宽是产品自己定的模板，不受第三方 120px 规则约束）。
 
     逐级候选**按牺牲顺序排列**，取第一个 fits 的；一个都不 fits 就取最后一个
     （保底：头像 + 主信息 + 状态点永不折，宽度如实溢出，由绘制的截断护栏兜）。
@@ -440,20 +471,24 @@ def plan_info_row(
     name_shrunk = (elide_to_width(name_text, _NAME_SHRINK_PX, name_fm)
                    if name_text else "")
 
-    def build(name: str, folded_count: int, elide_primary: bool, level: int) -> ShrinkPlan:
+    # 牺牲次序：首批候选（注册序）在前，其余段按列表序的严格倒序（尾部优先）。
+    first = set(fold_first_ids)
+    fold_order: list[_InfoSeg] = [seg for seg in metrics if seg.seg_id in first]
+    fold_order.extend(seg for seg in reversed(metrics) if seg.seg_id not in first)
+
+    def build(name: str, folded_segments, elide_primary: bool, level: int) -> ShrinkPlan:
+        sacrificed = tuple(folded_segments)        # 已是牺牲次序（先牺牲的在前）
+        fold_set = {seg.seg_id for seg in sacrificed}
         row: list[_InfoSeg] = []
         if primary is not None:
             row.append(_elide_primary_segment(primary, primary_fm)
                        if elide_primary else primary)
-        visible = metrics[:len(metrics) - folded_count] if folded_count else metrics
-        row.extend(visible)
-        # 折叠顺序 = 尾部优先（folded[0] 是第一个被牺牲的那一段）
-        sacrificed = tuple(reversed(metrics[len(visible):])) if folded_count else ()
+        row.extend(seg for seg in metrics if seg.seg_id not in fold_set)
         folded = tuple(seg.seg_id for seg in sacrificed)
         chip_alert = island_segments.highest_severity(
             _folded_alert(seg) for seg in sacrificed)
-        if folded_count:
-            row.append(chip_segment(folded_count, chip_alert))
+        if sacrificed:
+            row.append(chip_segment(len(sacrificed), chip_alert))
         name_w = int(name_fm.horizontalAdvance(name)) if name else 0
         x = float(lead_w) + (name_w + _NAME_GAP_PX if name else 0.0)
         placements = place_info_segments(row, start_x=x, primary_fm=primary_fm,
@@ -470,16 +505,16 @@ def plan_info_row(
 
     candidates: list[ShrinkPlan] = []
     if name_full:
-        candidates.append(build(name_full, 0, False, LEVEL_NONE))
+        candidates.append(build(name_full, (), False, LEVEL_NONE))
         if name_shrunk != name_full:
-            candidates.append(build(name_shrunk, 0, False, LEVEL_NAME_ELIDE))
-        candidates.append(build("", 0, False, LEVEL_NAME_HIDE))
+            candidates.append(build(name_shrunk, (), False, LEVEL_NAME_ELIDE))
+        candidates.append(build("", (), False, LEVEL_NAME_HIDE))
     else:
-        candidates.append(build("", 0, False, LEVEL_NONE))
+        candidates.append(build("", (), False, LEVEL_NONE))
     for count in range(1, len(metrics) + 1):
-        candidates.append(build("", count, False, LEVEL_FOLD_BASE + count))
+        candidates.append(build("", fold_order[:count], False, LEVEL_FOLD_BASE + count))
     if primary is not None and primary.elide_px > 0:
-        candidates.append(build("", len(metrics), True, LEVEL_FOLD_BASE + len(metrics) + 1))
+        candidates.append(build("", fold_order, True, LEVEL_FOLD_BASE + len(metrics) + 1))
 
     if available_w <= 0:
         return candidates[0]        # 拿不到屏信息：不收缩（clamp 兜底）

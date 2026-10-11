@@ -4,7 +4,8 @@
 断言走真实 ``ModernSettingsDialog``（设置窗口这个公开 seam），不碰私有调用顺序：
 默认值呈现、指标四开关（含 P3 的 GPU 占位行）与 ``island_metrics`` 的对应、
 依赖显隐（岛关 → 信息槽关 → 指标行）、保存回写（既有顺序保留 + 新勾选按典范序追尾）、
-脏值不炸设置页、子宠页可编辑（值落主配置）。
+脏值不炸设置页、子宠页可编辑（值落主配置）、**窗口打开后组件清单变动**（保存不许
+断链，表单没覆盖的 id 保留磁盘偏好）。
 
 ``island_metrics`` 是**唯一**的指标真值（旧键 ``island_network_enabled`` 只在归一化
 阶段单向迁移一次，设置页不再写它）。
@@ -19,9 +20,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 import pet.modern_settings_dialog as settings_mod
+from pet import island_extension_host as host
 from pet import net_monitor
 from pet.config import Config
 from pet.island_segments import CPU, GPU, MEM, NETWORK
+from tests.test_island_extension_host import MANIFEST, _write_component
 
 app = QApplication.instance() or QApplication([])
 
@@ -372,12 +375,13 @@ def test_network_controls_are_editable_on_the_child_page(tmp_path, monkeypatch):
         app.processEvents()
 
 
-# ---------------------------------------------------------------- GPU 占位行（P3 Slice F1）
+# ---------------------------------------------------------------- GPU 行（P3 F1 占位 → F2 真接线）
 def test_gpu_row_exists_and_is_searchable(tmp_path, monkeypatch):
-    """GPU 占位行与 cpu/mem 同款：一行一开关、可搜索、文案如实说没数据源。
+    """GPU 行与 cpu/mem 同款：一行一开关、可搜索、文案说清真实口径与代价。
 
-    它跟 cpu/mem 走**同一份** ``_METRIC_ROWS``（行装配/依赖/搜索/置灰全部复用），
-    所以这里断言的是"它真的进了那张表"，而不是另开一条平行通道。
+    它跟 cpu/mem 走**同一份** ``_METRIC_ROWS``（行装配/依赖/搜索置灰全部复用），
+    所以这里断言的是"它真的进了那张表"，而不是另开一条平行通道；文案则必须与
+    接线后的真实行为一致（1 秒采样、最忙引擎不是总算力、看不见就不采、首拍 --）。
     """
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
@@ -385,8 +389,11 @@ def test_gpu_row_exists_and_is_searchable(tmp_path, monkeypatch):
         assert "灵动岛指标" in row.label.text()
         assert "GPU" in row.label.text()
         hint = row.hint_label.text()
-        assert "不占位" in hint, "要写明勾了之后胶囊上没有它"
-        assert "原因" in hint, "要写明卡片里会说明原因"
+        assert "最忙" in hint and "总算力" in hint, "口径必须说清不是整卡总算力"
+        assert "1 秒" in hint, "采样节拍如实写（后台共享线程，不进动画帧）"
+        assert "不采样" in hint, "隐藏/折叠/关掉都不采样（零开销）"
+        assert "--" in hint, "首拍/读不到时是 --，不是 0"
+        assert "不占位" in hint and "原因" in hint, "不支持的平台：不占位 + 卡片写原因"
 
         names = {r.objectName() for r in dialog._search_rows}
         assert "settingRow_island_gpu" in names
@@ -470,3 +477,61 @@ def test_gpu_row_is_editable_on_the_child_page(tmp_path, monkeypatch):
             dlg.close()
             dlg.deleteLater()
         app.processEvents()
+
+
+# ---------------------------------------------------------------- 窗口打开后清单变动
+def _isolated_extension_root(tmp_path, monkeypatch):
+    """把可信组件根指到用例自己的临时目录（不读用户真实目录）。"""
+    root = tmp_path / "island-extensions"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(host.ENV_DIRS, str(root))
+    host.reset_cache()
+    return root
+
+
+def test_save_survives_a_component_that_appears_after_the_form_was_built(tmp_path, monkeypatch):
+    """窗口开着时清单多了组件：保存不许抛，也不许顺手删掉表单没覆盖的偏好。
+
+    设置页的控件是**建窗那一刻**按清单建的（用户装组件不需要重启设置进程）。
+    保存时再问一次 ``metric_order()`` 就会拿到一个没有控件的 id——无默认值的
+    ``getattr`` 直接抛 AttributeError，整条保存链（网络 → 音乐 → 静音 → 天气 →
+    ``config.save()``）在写入之前断掉：这次保存一个键都没落盘，而窗口还照常关。
+    """
+    root = _isolated_extension_root(tmp_path, monkeypatch)
+    try:
+        dialog, cfg = _dialog(tmp_path, monkeypatch, island_metrics=[NETWORK])
+        try:
+            assert dialog.island_network_check.isChecked() is True
+            assert "probe_late" not in dialog._island_metric_controls, \
+                "控件快照 = 建窗那一刻真的建过控件的 id"
+            # 窗口开着的时候：用户往可信目录装了一个合法组件，别处（主进程也是同一份
+            # config.json）已经把它写进了 island_metrics——表单里根本没有它的控件。
+            _write_component(root, "late",
+                             manifest=dict(MANIFEST, id="probe_late", label="新组件"))
+            cfg.set("island_metrics", [NETWORK, "probe_late"])
+
+            assert dialog._write_config() is True, "清单变动不许把整条保存链打断"
+            assert cfg.get("island_metrics") == [NETWORK, "probe_late"], \
+                "表单没覆盖的 id 保留磁盘偏好，表单覆盖的 id 按控件走"
+        finally:
+            dialog.close()
+    finally:
+        host.reset_cache()
+
+
+def test_save_keeps_the_preference_of_a_declared_component_whose_provider_is_missing(
+        tmp_path, monkeypatch):
+    """组件暂缺（清单在、provider 文件不在）：行仍在表单里 → 勾选态就是偏好，保存不删。"""
+    root = _isolated_extension_root(tmp_path, monkeypatch)
+    try:
+        _write_component(root, "cpu_temp", provider=None)     # 只落清单
+        dialog, cfg = _dialog(tmp_path, monkeypatch, island_metrics=["cpu_temp"])
+        try:
+            assert dialog.island_cpu_temp_check.isChecked() is True
+            assert dialog._write_config() is True
+            assert cfg.get("island_metrics") == ["cpu_temp"], \
+                "暂缺 ≠ 卸载：这份偏好要留着，文件回来即恢复"
+        finally:
+            dialog.close()
+    finally:
+        host.reset_cache()

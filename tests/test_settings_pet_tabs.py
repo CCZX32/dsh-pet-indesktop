@@ -45,7 +45,7 @@ TAB2_ROWS = (
     "playback_speed", "animation_gap", "idle_low_fps", "no_move",
     "drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled",
     "lock_position", "shift_drag", "edge_probe",
-    "spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets",
+    "spawn_inherit_size", "spawn_scale", "clear_spawned_pets",
     "collision_enabled", "collision_sound_enabled",
 )
 TAB2_ADVANCED_ROWS = (
@@ -69,10 +69,14 @@ def _qapp():
 def dialog(tmp_path, monkeypatch):
     import pet.modern_settings_dialog as settings_mod
     from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
 
     app = _qapp()
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    dlg = settings_mod.ModernSettingsDialog(Config(base=tmp_path), include_ai=True)
+    # 生产形态：当前宠的设置页拿 slot0 的路由视图（每宠键写进 config-slot-0.json）
+    dlg = settings_mod.ModernSettingsDialog(
+        route_settings_config(Config(base=tmp_path, instance_id="slot-0")),
+        include_ai=True)
     yield dlg
     dlg.close()
     app.processEvents()
@@ -300,7 +304,10 @@ def test_pet_settings_save_round_trip_is_unchanged(dialog, tmp_path):
     dialog._save()
     _qapp().processEvents()
 
-    saved = Config(base=tmp_path)
+    # 每宠键（碰撞/拖拽）真值在 slot0 档案；全局键（歌词提前量）在主配置
+    from pet.settings_slot_config import route_settings_config
+
+    saved = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
     assert saved.get("collision_enabled") is False
     assert saved.get("drag_physics") is True
     assert float(saved.get("music_lyric_lead_seconds")) == pytest.approx(lead)

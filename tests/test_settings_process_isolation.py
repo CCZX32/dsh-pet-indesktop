@@ -194,7 +194,9 @@ def test_immediate_sound_toggles_do_not_roll_back_external_changes(tmp_path):
     from pet.modern_settings_dialog import ModernSettingsDialog
 
     _qapp()
-    config = Config(base=tmp_path)
+    from pet.settings_slot_config import route_settings_config
+
+    config = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
     dialog = ModernSettingsDialog(config, include_ai=False, standalone=True)
     try:
         external = Config(base=tmp_path)
@@ -202,7 +204,7 @@ def test_immediate_sound_toggles_do_not_roll_back_external_changes(tmp_path):
         assert external.save()
 
         dialog._apply_agent_sound_enabled_now(True)
-        on_disk = json.loads(Path(config.path).read_text(encoding="utf-8"))
+        on_disk = json.loads(Path(config._main.path).read_text(encoding="utf-8"))
         assert on_disk["agent_link"]["sound_enabled"] is True, "目标键要写进去"
         assert on_disk["mouse_through"] is True, "外部改的他键被旧快照盖回去了"
 
@@ -211,8 +213,10 @@ def test_immediate_sound_toggles_do_not_roll_back_external_changes(tmp_path):
         assert external.save()
 
         dialog._apply_click_sound_enabled_now(False)
-        on_disk = json.loads(Path(config.path).read_text(encoding="utf-8"))
-        assert on_disk["click_sound_enabled"] is False, "目标键要写进去"
+        on_disk = json.loads(Path(config._main.path).read_text(encoding="utf-8"))
+        profile = json.loads(Path(config.path).read_text(encoding="utf8"))
+        assert profile["click_sound_enabled"] is False
+        assert "click_sound_enabled" not in on_disk
         assert on_disk["agent_link"]["sound_enabled"] is True, "上一次即存写入不该被回滚"
         assert on_disk["mouse_through"] is False, "外部改的他键被旧快照盖回去了"
     finally:

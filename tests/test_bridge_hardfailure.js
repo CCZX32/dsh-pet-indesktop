@@ -143,3 +143,10 @@ test("execution/failed 不再带 source 字段（改名 failureType，避免与�
   assert.equal("source" in out2, false);
   assert.equal(out2.failureType, "tool_failed");
 });
+
+test("turn/end 原因 kind 只取短字符串枚举", () => {
+  assert.equal(hard.turnEndReasonKind({ data: { reason: { kind: "aborted" } } }), "aborted");
+  assert.equal(hard.turnEndReasonKind({ data: { reason: { kind: 5 } } }), "");
+  assert.equal(hard.turnEndReasonKind({ data: {} }), "");
+  assert.equal(hard.turnEndReasonKind({ data: { reason: { kind: "x".repeat(40) } } }), "");
+});

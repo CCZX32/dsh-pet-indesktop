@@ -258,7 +258,11 @@ def test_scale_applies_at_runtime(tmp_path):
     shell, cfg = toggle._make_slot_shell(tmp_path, scale=0.5)
     try:
         assert shell.sprite.scale == pytest.approx(0.5)
-        cfg.set("scale", 1.0)
+        # 主宠的"大小"同样是每宠键：真值在 ``config-slot-0.json``（生产里设置页经
+        # SlotRoutedConfig 写它；裸 ``Config.set`` 只改全局那份，全局保存会把每宠键
+        # 过滤掉，改不动任何一只宠）。
+        assert ovs.write_slot_setting(cfg.dir, 0, "scale", 1.0,
+                                      user_customized=True)
         shell.refresh_settings()
         assert shell.sprite.scale == pytest.approx(1.0)
 
@@ -271,8 +275,9 @@ def test_scale_applies_at_runtime(tmp_path):
         assert child.scale == pytest.approx(0.5)
         assert shell.sprite.scale == pytest.approx(1.0)
 
-        # 主配置再改：主宠跟着变，子宠按自己那份不变
-        cfg.set("scale", 0.72)
+        # slot0 档案再改：主宠跟着变，子宠按自己那份不变
+        assert ovs.write_slot_setting(cfg.dir, 0, "scale", 0.72,
+                                      user_customized=True)
         shell.refresh_settings()
         assert shell.sprite.scale == pytest.approx(0.72)
         assert child.scale == pytest.approx(0.5)

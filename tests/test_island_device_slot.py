@@ -200,6 +200,37 @@ def test_device_slot_sleeps_when_hidden_and_resumes_on_show(tmp_path, monkeypatc
         island.close()
 
 
+def test_resume_after_hiding_waits_for_a_fresh_sample(tmp_path, monkeypatch):
+    """隐藏→显示：暂停前那一代的快照不许在恢复后冒充实时值（恢复屏障）。
+
+    底座 ``stop()`` 不清最后一份快照，恢复时它可能还是暂停前那个对象——直接读它
+    就等于把"上一代的读数"说成"这一代的实时值"。屏障的做法是记住**暂停时底座手里
+    那一个对象**，只接纳它之后的新样本；订阅本身照旧保留（与 GPU 同一套口径）。
+    """
+    island, made = _island(tmp_path, monkeypatch, metrics=[CPU, MEM])
+    try:
+        island.show()
+        app.processEvents()
+        stale = _sys_sample(cpu=24.0, mem=61.0)
+        made[0].sample = stale
+        island._tick_sys()
+        assert _segment(island, CPU).text == "24"
+
+        island.hide()
+        island.show()
+        app.processEvents()
+        assert _segment(island, CPU).state == isl.STATE_SAMPLING, "恢复后先报采样中"
+        island._tick_sys()               # 底座还在吐暂停前那一份
+        assert made[0].snapshot() is stale
+        assert _segment(island, CPU).text == "--", "旧快照被当成了实时值"
+
+        made[0].sample = _sys_sample(cpu=7.0, mem=8.0)
+        island._tick_sys()
+        assert _segment(island, CPU).text == "7"
+    finally:
+        island.close()
+
+
 def test_removing_a_segment_unsubscribes_it(tmp_path, monkeypatch):
     """段撤掉 = 退订那一段（0 订阅时底座零 syscall）。"""
     island, made = _island(tmp_path, monkeypatch, metrics=[CPU, MEM])

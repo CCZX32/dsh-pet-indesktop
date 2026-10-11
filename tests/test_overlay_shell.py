@@ -158,7 +158,7 @@ def _make_shell(screen=None, instance=None):
     instance = instance or FakeInstance()
     shell = OverlayShell(
         app, instance, screen=screen,
-        sprite_factory=lambda lib, pos, scale: FakeSprite(lib, pos, scale))
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
     return shell, screen, instance
 
 
@@ -235,7 +235,9 @@ def test_shell_library_character_fallback():
     instance = MissingLibInstance(FakeConfig({"character": "dlc-gone"}))
     shell, _, _ = _make_shell(instance=instance)
     assert instance.created_character_ids == ["dlc-gone", "shenshen"]
-    assert instance.config.get("character") == "shenshen"
+    # 回退写回的是**这只宠自己的**每宠配置（有 dir 时 = config-slot-0.json），
+    # 不再回写全局配置——"character" 是每宠键，单一真值在档案里。
+    assert shell._sprite_config(shell.sprite).get("character") == "shenshen"
     assert shell.lib is not None
 
 
@@ -724,7 +726,9 @@ def test_switch_character_syncs_chat_surfaces():
 
     shell.switch_character("nova")
 
-    assert shell._config.get("character") == "nova"
+    # 主宠的"角色"是**每宠键**：真值是这只宠自己的档案（生产里 ``_config`` 是
+    # SlotRoutedConfig，这里用假配置无 dir，故直接断言生效的每宠配置）。
+    assert shell._sprite_config(shell.sprite).get("character") == "nova"
     assert bubble.switched == ["nova"]
     assert instance.chat_syncs == ["nova"]
 
@@ -737,7 +741,7 @@ def test_switch_character_without_bubble_sync_seam_is_quiet():
 
     shell.switch_character("nova")
 
-    assert shell._config.get("character") == "nova"
+    assert shell._sprite_config(shell.sprite).get("character") == "nova"
     assert instance.chat_syncs == ["nova"]
 
 
@@ -766,9 +770,9 @@ def test_switch_child_character_does_not_touch_chat_surfaces():
     assert instance.chat_syncs == []
 
 
-# ---------------------------------------------------------------- 主宠提升：聊天面跟提升者（R03）
-class _PromotionInstance(FakeInstance):
-    """真 Config 的假实例 + 聊天面同步记录（提升路径要读真 slot 文件）。"""
+# ------------------------------------------------- 关闭主位：留空、不提升、不退出应用（G1）
+class _Slot0CloseInstance(FakeInstance):
+    """真 Config 的假实例 + 聊天面同步记录（关闭 slot0 要读真 slot 文件）。"""
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -778,16 +782,16 @@ class _PromotionInstance(FakeInstance):
         self.chat_syncs.append(character_id)
 
 
-def _make_promotion_shell(tmp_path, main_character, child_character):
+def _make_slot0_close_shell(tmp_path, main_character, child_character):
     """真落盘 Config + 主宠 + 一只**异角色**子宠（子宠角色写在它自己的 slot 里）。
 
     子宠的角色经 ``switch_character(cid, child)`` 真写进 ``config-slot-1.json``
-    （产品路径，不是测试手搓文件）：主宠退出时提升者正是按这份文件接管主身份。
+    （产品路径，不是测试手搓文件）：关闭主位时**不许**由这份文件接管主身份。
     """
     config = Config(base=tmp_path)
     config.set("character", main_character)
     config.save()
-    instance = _PromotionInstance(config)
+    instance = _Slot0CloseInstance(config)
     shell = OverlayShell(
         app, instance,
         screen=FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040)),
@@ -799,39 +803,48 @@ def _make_promotion_shell(tmp_path, main_character, child_character):
     return shell, instance, child
 
 
-def test_promotion_syncs_chat_surfaces_to_promoted_character(tmp_path):
-    """R03-A：子宠提升为主宠后，聊天面必须跟**提升者**的角色。
+def test_closing_slot0_leaves_it_empty_without_promoting_a_child(tmp_path):
+    """关闭主宠 = slot0 留空，档案保留：子宠**不**接管主身份、不退出应用。
 
-    提升路径把提升者的角色（它自己那份 slot 配置）接管进主配置，但已有聊天面
-    （快速气泡 + 完整聊天窗/岛气泡）的角色仍是构造期快照——B07 的
-    ``_sync_chat_surfaces`` 只接在主动切角色上，提升这条没调它，于是提升完
-    再开口还是旧主的会话与系统提示。
+    旧语义（子宠提升为主身份、角色接管进主配置）已废除：身份空间稳定，
+    没有任何路径能把一只宠的身份"接管"成主身份。
     """
-    shell, instance, child = _make_promotion_shell(tmp_path, "shenshen", "nova")
+    shell, instance, child = _make_slot0_close_shell(tmp_path, "shenshen", "nova")
     bubble = _FakeQuickChatBubble()
     shell._quick_chat = bubble
 
     assert shell.exit_pet(shell.sprite) is True
 
-    assert shell.sprite is child
-    assert shell._config.get("character") == "nova"     # 提升者身份已接管主配置
-    assert bubble.switched == ["nova"], "快速对话气泡必须跟提升者的角色"
-    assert instance.chat_syncs == ["nova"], "完整聊天窗/岛气泡必须跟提升者的角色"
+    assert shell.sprite is None, "关闭主宠后 slot0 留空，不被子宠接管"
+    assert shell._spawned == [child], "子宠仍在它自己的身份上"
+    assert 0 not in shell._remembered_active, "活跃集合只去掉 slot0"
+    assert 1 in shell._remembered_active, "子宠的活跃身份不受影响"
+    assert bubble.switched == [], "关闭主宠不把聊天面改到子宠的角色上"
+    assert instance.chat_syncs == [], "共享会话的角色不因主位留空而改变"
 
 
-def test_promotion_same_character_syncs_through_the_same_entry(tmp_path):
-    """新旧主同角色：提升仍走同一入口（"角色没变"由聊天面自己早退，不是跳过同步）。
+def test_closing_slot0_keeps_its_profile_and_can_be_restored(tmp_path):
+    """关闭主宠可逆：slot0 档案（角色/几何）留在盘上，再生成时按它恢复。
 
-    锁住提升路径的角色值取自**接管后的主配置**：这里它等于旧主的角色，入口照调、
-    主配置不变（真气泡/聊天窗在同角色时早退，不会重建正在续聊的那条会话）。
+    旧"新旧主同角色仍走同一提升入口"的断言随之废除——不提升就没有"接管后的
+    主配置"可读，这里改为锁住**档案保留 + 可再生成**这条可逆契约。
     """
-    shell, instance, child = _make_promotion_shell(tmp_path, "shenshen", "shenshen")
+    shell, instance, child = _make_slot0_close_shell(tmp_path, "shenshen", "shenshen")
     bubble = _FakeQuickChatBubble()
     shell._quick_chat = bubble
+    from pet import pet_profiles
+
+    config_dir = shell._spawn_config_dir()
+    profile_before = pet_profiles.read_slot_profile(config_dir, 0).data
 
     assert shell.exit_pet(shell.sprite) is True
 
-    assert shell.sprite is child
-    assert shell._config.get("character") == "shenshen"
-    assert bubble.switched == ["shenshen"]
-    assert instance.chat_syncs == ["shenshen"]
+    assert shell.sprite is None
+    assert pet_profiles.read_slot_profile(config_dir, 0).data == profile_before, \
+        "关闭主宠不动它的档案"
+    assert shell._config.get("character") == "shenshen", "主配置的角色不被改写"
+
+    shell.spawn_pet()
+    assert shell.sprite is not None, "关闭后可再生成 slot0"
+    assert shell._sprite_config(shell.sprite).get("character") == "shenshen"
+    assert instance.chat_syncs == [], "重生成不重打招呼（没有提升事件）"

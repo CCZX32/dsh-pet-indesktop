@@ -125,14 +125,17 @@ def test_missing_speak_key_at_runtime_reads_as_off():
 def test_speak_setting_defaults_off_and_persists(tmp_path):
     """朗读是「额外出声」：默认关闭（与 config.py 默认值一致），打开后能落盘回读。"""
     from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
 
-    config = Config(base=tmp_path)
+    # 每宠键真值在 slot0 档案：生产里设置页拿到的就是这份路由视图
+    config = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
     assert config.get("self_talk_speak_enabled") is False
 
     config.set("self_talk_speak_enabled", True)
-    config.save()
+    assert config.save() is True
 
-    assert Config(base=tmp_path).get("self_talk_speak_enabled") is True
+    assert route_settings_config(
+        Config(base=tmp_path, instance_id="slot-0")).get("self_talk_speak_enabled") is True
 
 
 def test_missing_speak_key_normalizes_to_off(tmp_path):

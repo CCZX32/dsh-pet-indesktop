@@ -13,8 +13,9 @@
 2. ``trigger_golden_spin(sprite=...)`` 转被点的那只；
 3. ``hide`` 只隐藏被点的那只（主宠 = 宿主窗，维持整窗隐藏语义）；
 4. ``look_at_screen(sprite=...)`` 记住发起者；
-5. ``DeepSeek 余额`` / ``检查更新`` 的父窗传壳（不是 OverlayWindow），
-   ``check_update`` 不得因 AttributeError 永久自锁 ``_update_checking``。
+5. ``DeepSeek 余额`` 的父窗传**发起的那一只**的代次呈现器（手动结果归发起者），
+   ``检查更新`` 的父窗传壳（进程级服务），``check_update`` 不得因 AttributeError
+   永久自锁 ``_update_checking``。
 
 装配：真 ``OverlayShell`` + 真 ``PetSprite`` + 真 ``Config``；子宠走真
 ``shell.spawn_pet()``；余额/更新复用 ``pet.app`` 的真实展示实现（只桩网络边界）。
@@ -228,18 +229,30 @@ def test_child_menu_settings_keep_master_config_clean(tmp_path):
 
 
 def test_main_menu_still_persists_to_master_config(tmp_path):
-    """主宠菜单（回归守）：写入照旧落主配置并保存。"""
+    """主宠菜单（回归守）：逐只设置落 **slot0 档案**，全局那份不被回写。
+
+    契约随规范 §五更新：``scale`` / ``playback_speed`` / ``drag_physics`` 都是每宠键，
+    真值在 ``config-slot-0.json``（与子宠那条用例同构）；主配置里那份旧值不参与，
+    也不许被当成"第二真值"改写。
+    """
     shell, _instance, config = _make_shell(tmp_path)
     try:
+        import json
+
         facade = SpriteMenuFacade(shell)
         assert facade.sprite is shell.sprite
+        before = {key: config.get(key) for key in
+                  ("scale", "playback_speed", "drag_physics")}
         facade.change_scale(0.5)
         facade.set_playback_speed(1.6)
         facade.set_drag_physics(True)
-        assert config.get("scale") == 0.5
-        assert config.get("playback_speed") == 1.6
-        assert config.get("drag_physics") is True
         assert shell.sprite.scale == 0.5
+        slot = json.loads((config.dir / "config-slot-0.json").read_text(
+            encoding="utf-8"))
+        assert slot["scale"] == 0.5
+        assert slot["playback_speed"] == 1.6
+        assert slot["drag_physics"] is True
+        assert {key: config.get(key) for key in before} == before
     finally:
         shell._delete_runtime_marker()
 
@@ -366,9 +379,18 @@ def test_look_screen_remembers_clicked_sprite(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------- A 余额/更新
-def test_balance_and_update_get_shell_as_parent(tmp_path, monkeypatch):
-    """余额/更新父窗 = 壳（与 overlay 点击路径同口径），更新不永久自锁。"""
-    instance = None
+def test_balance_targets_the_initiating_pet_and_update_still_uses_the_shell(
+        tmp_path, monkeypatch):
+    """余额落**发起的那一只**（真 ``overlay.show()`` + 子宠定位），更新仍落壳。
+
+    A10/F04 契约（2026-10-10 终审）：手动服务结果归**发起 sprite**——右击子肥鱼查余额，
+    气泡必须冒在子肥鱼头上；子宠没有联动动作链，余额档位动画**不许**改播到主肥鱼身上。
+    旧用例钉的"余额也必须落壳"是错的合同：其理由（"OverlayWindow 没有 show_bubble"）
+    早在 A10 就让位给代次呈现器了。
+
+    「检查更新」那一半是壳级服务（``AppShell.check_update``），落点与自锁语义**逐字不动**：
+    必须跑过 ``_update_checking = True`` 那一行、异常后复位、并能再次检查。
+    """
     mini = _MiniAppShell()
 
     def _release():
@@ -377,17 +399,32 @@ def test_balance_and_update_get_shell_as_parent(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.updater, "latest_release", _release)
     shell, instance, _config = _make_shell(tmp_path, app_shell=mini)
     mini.instance = instance
+    # 壳级气泡面（更新路径的落点）+ 主宠联动动画入口：两者都只该被"命中壳"的结果用到。
     bubbles: list = []
     monkeypatch.setattr(
         shell, "show_bubble",
-        lambda text, duration_ms=3200, **kw: bubbles.append(text))
+        lambda text, duration_ms=3200, **kw: bubbles.append(text) or True)
+    link_anims: list = []
+    monkeypatch.setattr(shell, "request_link_anim", lambda name: link_anims.append(name))
     try:
         child = _spawn_child(shell)
+        shell.overlay.show()
+        app.processEvents()
         menu = build_sprite_full_menu(shell, child)
+
         _require(menu, "DeepSeek 余额").trigger()
-        # 真实 _show_balance_payload 落壳（含 persona 文案渲染，需壳的 cfg 面）
-        assert any("余额 12.34" in text for text in bubbles), \
-            "余额气泡必须落壳（OverlayWindow 没有 show_bubble）"
+
+        # 真实呈现面：余额进**子宠自己那只气泡**（真 PetSpeechBubble 的 _raw_text）
+        child_bubble = shell._bubble_followers[child].bubble
+        assert child_bubble is not None, "前提：子宠有自己的气泡跟随器"
+        assert "余额 12.34" in str(child_bubble._raw_text), \
+            "余额必须冒在发起的那一只头上（旧合同让它落壳 = 冒在主肥鱼头上）"
+        main_bubble = shell._bubble_follower.bubble
+        assert main_bubble is not None and "余额 12.34" not in str(main_bubble._raw_text), \
+            "主宠气泡不许被子宠发起的余额占用"
+        assert bubbles == [], "余额不该再走壳的气泡面"
+        assert link_anims == [], \
+            "子宠没有联动动画链：余额档位动画不许改播到主肥鱼（不播好过错播）"
 
         update = _require(menu, "检查更新")
         update.trigger()                 # 旧实现：AttributeError + _update_checking 永锁

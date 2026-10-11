@@ -83,6 +83,148 @@ recovery
 
 ## 变更记录
 
+### 2026-10-12 — 游戏帧率的权限模型改为「一次性加入 `Performance Log Users` 组」（取代下一条）
+
+下一条的「按需 UAC 独立助手」已整体归档（源码、测试、原生工程、随包资源移入
+`.scratch/product-fps-uac-20261011/archived-uac-helper/`，产品与打包不再引用）。
+原因：常驻提权进程 + 自产未签名原生程序 + 跨进程授权协议，维护面和安全面都远大于
+它解决的问题。
+
+| 项 | 本刀口径 |
+|---|---|
+| 权限模型 | 用户在设置页点「授予采集权限…」→ 系统弹**一次**管理员授权窗口 → 以管理员身份执行 `Add-LocalGroupMember -SID S-1-5-32-559`，把**当前账户**加入 `Performance Log Users`。桌宠本体始终普通权限：**不常驻提权进程、不装服务、不改注册表** |
+| 实现 | `pet/fps_permission.py`：按 SID 定位组（与系统语言无关）；**当前用户身份取自进程令牌**（`GetTokenInformation(TokenUser)` 的 SID，不信 `USERNAME`/`USERDOMAIN` 环境变量），SID 过严格正则（只含数字与连字符）才进脚本，脚本里不出现任何用户可控文本；两层 PowerShell 都用 `GetSystemDirectoryW` 下的绝对路径；内外两层走 `-EncodedCommand`；管理员脚本自带执行期限（等待上限前 10 秒），超时后才批准的 UAC 不加组；已是成员视为成功（幂等）；只有原生 `ERROR_CANCELLED` 才算 `cancelled`，其余启动失败单独报错 |
+| 设置行 | 灵动岛页帧率段下一行 `game_fps_permission`（**仅 Windows 创建**，跟随帧率开关显隐）。**没有配置键、不写盘**；状态用进程内 API 现查（`CheckTokenMembership` 只认**已启用**的组；`NetLocalGroupGetMembers` 按 SID 查账户实际组成员关系；不起子进程，不卡设置页）。授权任务是设置进程内的后台线程（同一时刻只跑一个），GUI 用挂在对话框上的 `QTimer` 轮询回填。**设置页默认是独立进程**：关掉设置页即结束等待线程（已拉起的 UAC/管理员进程不受影响），重开后以账户实际组成员关系判「待重新登录」，不靠内存；加组幂等，重复授权无副作用 |
+| 状态口径 | 三态：已具备（当前令牌含该组）／已授权待重新登录（账户已在组里，跨设置进程判得出，但组成员关系只进**新登录令牌**）／未授权。**不把"已加入"说成"已能采集"** |
+| 哪些路径不许弹授权窗口 | 只有用户点那个按钮才弹；开关、开机恢复、切目标、重试一律不弹。权限类采集失败仍是终态不自动重试 |
+| 撤销 | 文案写明：在「计算机管理 · 本地用户和组」把自己移出该组 |
+| 已验 | `tests/test_fps_permission.py`（SID 校验拒 ASCII/弯引号注入、四种引号全拒、绝对路径、过期检查先于加组、退出码映射、超时 = `unknown` 且不记已授权、进程级状态）、`tests/test_settings_fps_permission.py`（Windows 创建/非支持平台不创建、显隐、三态按钮、成功/取消/错误/未知/异常回填、同进程内授权中关闭销毁再重开接上结果且只跑一次、已结束结果在重建后回填、待重新登录跨对话框保留、状态查询不起子进程、不写配置；`query_status` 用账户实际组成员判跨进程「待重新登录」）；本机真跑：令牌 SID 合法、`CheckTokenMembership` 返回 False、`account_in_group` 返回 False → `missing`（对照：同函数查 Administrators 组返回 True，查 Users 组返回 False），耗时约 8 ms；生成的内外两层脚本经 PowerShell Parser 0 语法错误，过期分支真跑退出码 3 |
+| **未验** | 真实提权加组（本机从未执行）、重新登录后真实 ETW 会话、任何真实帧读数；真实独立设置子进程关闭/重开的端到端（单测只覆盖同进程重建 + 组成员真值函数） |
+
+### 2026-10-11（追补，**已被上一条取代**）— 游戏帧率的权限模型改为「按需 UAC 独立助手」
+
+本刀**不动任何设置键、不动设置页布局**，只登记一条**权限模型变更**（设置页文案与交互
+口径的输入）。它取代本文件同日游戏帧率条目、以及 `PR-REPORT-GAME-FPS-2026-10-11.md`
+早先「把用户加进 `Performance Log Users` 组 / 桌宠以管理员运行」的二选一建议。
+
+| 项 | 本刀口径 |
+|---|---|
+| 权限模型 | **不加组、不把桌宠整体提权**。改为**按需 UAC 独立助手**（随包 `resources/fps-helper/`）。**模型是**：设置页给出一个明确的「授权本次采集」操作 → 主进程先弹自己的确认 → 用户确认后才 `runas` 拉起助手读 ETW。授权在**本次 FPS 明确开启期间**有效，关功能 / 退出桌宠即退出助手，**不保留跨重启权限** |
+| 持久化 | **不持久化"已获权限"**：磁盘上的 `island_metrics` / `game_fps_*` 只表达功能意愿，**不构成授权**；授权是当前进程实例/会话内的短期状态，去重、可取消，旧磁盘消息不得启动授权 |
+| 哪些路径不许弹 UAC | 开关、开机恢复、切游戏目标、隐藏/显示、暂停恢复、重试退避**一律不弹**；只有用户点那一个操作才弹。用户在 UAC 上点"否"= 取消，**不重试、不循环弹窗**，等待再次点击 |
+| 依赖与恢复 | 未授权时 `session_factory` 抛异常、卡片写**「需要授权」**（不摆假数字、不显示 0）；权限类失败仍是**终态不自动重试**。已经在 `Performance Log Users` 组里、普通权限就能采的机器**不经 UAC**（不强制提权） |
+| 必须如实说的常驻事实 | 授权期间助手是**一个常驻进程**（暂停采集时也在，只停 ETW 与后端）。设置页文案**不许**写"零开销 / 零进程" |
+| 代码状态（**接线已完成 ≠ 权限已验证**） | 传输层（`pet/fps_elevation_transport.py`：授权控制器 / 状态 / 取消 / 去重 / 会话适配）与请求线（`pet/fps_authorization.py`：主进程 `QLocalServer` 服务 + 设置进程异步客户端 + 主进程真确认框 + "已授权才走提权助手"的分发）都已实现并有独立测试；**设置页接线已完成**——灵动岛页帧率段下两行：只读状态行 `game_fps_authorization` + 动作行 `game_fps_authorize`（按钮「授权本次采集…」），点它只向主进程发一条本机请求、由**主进程**弹确认框，状态每 2 秒轮询一次且**只在帧率段开着时**跑。**两行不是设置项**：没有配置键、不写盘，"不持久化已获权限"因此在设置面也成立。指标行那句"首次使用可能需要在系统里授予相应权限"**保留**——普通权限机器（已在 `Performance Log Users` 组里）本来就照常出读数、不必授权。**仍未验**：真实 UAC 提权、真实 ETW 会话、任何真实帧读数（本机从未执行过 `runas`）。取证见 [`PR-REPORT-GAME-FPS-2026-10-11.md`](PR-REPORT-GAME-FPS-2026-10-11.md) §十 |
+| 边界 | 助手是本地构建的**未签名**候选（UAC 显示未知发布者）；**真实 UAC 提权、ETW 采集与任何真实帧读数本机均未验证**。打包侧三道校验与这一处边界见 [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md)「按需 UAC 采集助手」、[`PR-REPORT-GAME-FPS-2026-10-11.md`](PR-REPORT-GAME-FPS-2026-10-11.md) §九 |
+
+### 2026-10-11 — 游戏帧率段：`island_metrics` 新增 `fps` 成员 + 2 个进程级目标键
+
+本刀**新增 1 个岛指标成员与 2 个持久设置键**（3 行设置：1 个指标开关 + 2 个跟随设置），
+**不动**任何既有键的默认值、归属与迁移。后端来自官方 PresentMon 独立程序（随 Windows
+包分发，见 [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md) 的「随包分发的第三方二进制」）。
+
+| 项 | 本刀口径 |
+|---|---|
+| 新增键 | `game_fps_target_mode`（枚举 `foreground`（默认）/ `process`）与 `game_fps_process`（默认空）。**都是进程级（全局）键**：不在 `PER_SLOT_SETTING_KEYS` 里，岛与采集链路一律读主配置；子宠页由设置进程的配置路由直写主配置（`settings_slot_config` 的 2026-10-09 口径），**因此不置灰**——这次没有"改了等于没改"的行 |
+| `game_fps_process` 的准入形态 | 只存**一个纯 exe 名**（如 `game.exe`）。归一化四步且幂等（取最后一段路径 → 只取第一个空白段 → 剥引号并从首个非法字符处截断 → 限长 120）：路径分隔符、空白、引号与命令元字符（分号 / 与号 / 竖线 / 美元符 / 反引号 / 尖括号 / `^` / `%` / `*` / `?` / 冒号）全部不合法。这是**安全契约**而非排版洁癖——该值只与进程镜像名比对，**永不拼进命令行、永不 shell、永不作为程序启动**；空 = 没有指定（不是"随便挑一个帧率最高的程序"，设置页文案明说） |
+| 新指标成员 | `island_metrics` 的 `fps`（行键 `island_fps`，label「灵动岛指标 · 游戏帧率」）。**默认关**（`island_metrics` 出厂仍是空列表）——升级用户不会突然多出一段；开启才启动采集，关闭/折叠/隐藏/退出都停 |
+| 归属 | 「灵动岛」页 → 「桌面组件」组，与其它内置指标行**同层级、同风格、同可见性依赖**（同一个 `SettingRow` 装配、同一个「灵动岛指标 ·」前缀、同一套 island_on × info_on 门）。两行跟随设置只在帧率段开启时显示（与「延迟探测间隔」跟网络开关同规） |
+| 依赖与恢复 | 依赖链：岛可见 × 信息槽开 × 帧率段勾选 → 才采集。能力缺失（非 Windows / 内置采集程序不在）→ 段**不占位**、卡片写原因；权限被拒 → 卡片写真实原因（不拿假读数顶上），且**权限类失败是终态不重试**（显式重开或改设置才重试），失败路径不新增阻塞 |
+| 契约完整性 | 平台差异（仅 Windows，其余平台保持行 + 说明「不支持」，不隐藏）、保存时机（随设置窗关闭的既有写回，不新增路径）、迁移（两个键都是**新键**：老配置没有它们 → 取默认，出厂默认与重置共用 `Config._initial_data()`，没有第二份真值）、搜索别名（`帧数` → `island_fps`；关键词 FPS/fps/帧率/帧数 四条实测命中）、默认值标记（`island_fps` 进 `NO_DEFAULT_ROWS`——它是 `island_metrics` 的**列表成员**，没有单一标量默认值，与另四个岛指标行同归类） |
+| 文案纪律 | 三行都写明"这是游戏的 Present 帧率、不是桌宠动画帧率、不是显卡占用推算"，并如实写"首次使用可能需要在系统里授予权限""有一定开销（多少以实机测量为准）"——**不承诺零开销**，不把未授权的机器说成"暂时没有数据" |
+
+准出对应：
+
+1. **契约**：键、默认值、归属、依赖、平台可见性、失败路径逐条见上表；两个键都是新键，
+   无旧键/旧入口/旧别名迁移；默认关 + 默认空目标 ⇒ 存量用户行为逐位不变。
+2. **TDD**：`tests/test_settings_game_fps.py`（606 行）在**公开 seam**（真实
+   `ModernSettingsDialog` + 真实 `Config`）上覆盖配置准入（`fps` 成员、枚举归一、
+   纯 exe 名归一含路径/参数/引号/元字符/限长/幂等、reload 与 `set()` 往返、出厂默认
+   与重置）与设置页（三行存在与文案口径、下模式启用态、岛 × 信息槽 × 帧率三条依赖
+   显隐、保存写回保既有指标序 + fps 追尾、搜索四词、默认值标记与单项重置、子宠页
+   可编辑且落主配置、窄窗与放大字体布局）；配套快照文件同步更新
+   （`tests/test_settings_default_marks.py` 的 `NO_DEFAULT_ROWS`、
+   `tests/test_settings_copy_lint.py` 的 `island_fps` 白名单）。后端与岛侧的用例见
+   `.scratch/product-game-fps-20261011/HANDOFF.md`。
+3. **布局与可访问性**：真实 `windows` 平台插件（**不是 offscreen**）下四种组合实测
+   （900×760 明色 foreground、900×760 明色 process、1200×820 暗色 process、
+   720×560 暗色 + 1.5 倍字体），几何断言全过（行不越出视口、滚到底后可见、
+   程序名输入框装得下自己的内容、标签说明无纵向裁切）；证据脚本
+   `.scratch/game-fps/real_plugin_layout_probe.py`，截图
+   `.scratch/game-fps/settings_capture.py` → `.scratch/game-fps/shots/*.png`（四张）。
+   下拉与输入框宽度按字体度量给最小宽度，窄窗由 `SettingRow` 的响应式换行接管。
+4. **跨平台**：产品代码无新平台分支（判据是 `sys.platform`，已有的能力判定路径）；
+   非 Windows 上**保留行并说明原因**（"只在 Windows 上有这条采集能力"），不隐藏、
+   不假装支持。真实 GUI 验收仅本机 Windows，macOS / Linux 未跑（不推断）。
+5. **视觉与文档**：本记录即变更记录；`ONEDIR_PACKAGING.md`（后端随包与两道构建门）、
+   `THIRD_PARTY_NOTICES.md` 第 6 节（MIT 许可随包）、`docs/INDEX.md` 与
+   `docs/PR-REPORT-GAME-FPS-2026-10-11.md`（本次交付证据）同步；`CONTEXT.md`
+   无新概念需要登记（"Present 帧率"的口径写在 `pet/game_fps.py` 与设置页文案里）。
+
+### 2026-10-10 — 终审修复批：全局 reset 入口 / 开机自启权限 / 死开关退役
+
+本刀**删除 1 个持久设置的可见入口**、**摘除 1 处置灰**、**新增 2 个命令类入口**，
+没有新增设置键、没有改默认值/归属/依赖/迁移。
+
+| 项 | 本刀口径 |
+|---|---|
+| 全局 reset 无 UI 可达 | 设置页所有产品入口都带 `--instance slot-N`（含 slot0），侧栏原先只有一个「恢复默认设置…」按钮 → 走 `SlotRoutedConfig.reset_to_defaults`（本宠），而**已经在实现里活着的全局 reset 在产品 UI 上完全不可达**（只有手工命令行 `--settings` 能到）。修法：slot 页侧栏给出**两个动作**——「恢复默认设置…」（本宠，原按钮与文案逐字不变）与新增「恢复全局默认…」；全局动作落在 `settings_slot_config.global_config_of(config)`（= 路由视图背后的那份 `config.json`，显式全局身份，**不新建第三个 Config 实例**），文案复用既有的 `RESET_HEADLINE / RESET_KEPT / RESET_BODY`。作用域由 `resolve_reset_scope(host, scope)` 显式传递（缺省仍按配置面判，兼容既有调用面） |
+| 「开机自启」在 slot0/子宠页被误禁 | 旧判据 `if config.instance_id` 在 slot0 拿到显式身份（`slot-0`）后把**主宠自己的页面**也禁掉，tooltip 还写「仅主桌宠可设置」→ 指向用户正站着的地方。修法：判据退场，控件在任意宠的页面都可编辑，tooltip 与行说明改为一句话讲清作用域（「影响所有桌宠：系统登录项只有一份。」/行 hint「（影响所有桌宠）」）。`sync_system_autostart` 只在**全局**作用域收敛 OS 登录项（本宠作用域一个全局键都没重置，去写 OS 就是把用户没改过的登录项改掉） |
+| 「一键退出子肥鱼」静默 no-op | 这是**全局**动作，但写者按身份字符串真值回填 target：slot0 的 `slot-0` → `target=0`，而两个消费者都把非 `None` target 当**子槽**去 `_spawned` 里找（主 sprite 不在其中）→ 点了没反应。修法：新增 `settings_slot_config.is_main_identity(instance_id)`（判据 = slot 号，与 `app.py` 的 `slot_id in (None, 0)` 同源），主身份 → `target=None`（全部）、子宠 → 该子槽；按钮的 enable 判据同源（主宠页可用，子宠页置灰 + 指向托盘的真实可达提示） |
+| 死开关退役 | `spawn_inherit_dynamic_island`（「生小肥鱼继承灵动岛」）在设置页可编辑、写主配置，但**唯一行为读点** `slot_manager.seed_slot_config_from_main` 生产 0 调用点，新 spawn 只拷 `PER_PET_SETTING_KEYS`（不含该键），岛本身是进程级单例读主配置 → 开关两态在运行期没有任何差别。整块退役：控件创建、设置行、保存写回、域 claim 四处一并删除；**键本身的清洗/出厂默认保留**（旧键按迁移纪律读入即弃，不新增第三份真值，`Config` 一处未动） |
+| 文案与实现相反 | 「一键退出子肥鱼」行说明写「并删除它们的配置、会话与待办数据」，实现保留（`_remove_spawned_sprite` / `clear_spawned_pets` 只出活跃清单）→ 改为「它们的档案、设置、会话与待办数据全部保留，随时可以再生成」；「播放速率」行写「控制所有桌宠动画的播放速度」，而 `playback_speed` 在 `PER_PET_SETTING_KEYS` 内且不在窗口级集合里 → 改为每宠口径 |
+| 设置进程消费端 | 两个消费者（`overlay_shell._consume_settings_command`、`app._consume_settings_command`）语义**不改**：`target=None` 本就是"全部子肥鱼"。捕获模式下静默无效是**有意行为**（legacy 拓扑没有子宠可退，见 `PR-REPORT-STREAM-CAPTURE-PHASE-A-2026-10-07.md`），本刀未动 |
+
+准出对应：
+
+1. **契约**：删除的键 `spawn_inherit_dynamic_island` 的去向已写明（读入即弃、清洗与
+   出厂默认保留、不再有 UI 与写回）；新增的两个入口是**命令**（本文准入清单明确排除
+   命令类进入设置行，它们与「保存并退出」同区的侧栏按钮）；无新键、无默认值/归属/迁移
+   变更；失败路径不新增（全局 reset 失败仍弹告警且不关窗）。
+2. **TDD**：`tests/test_settings_reset_defaults.py` 新增 3 例（两个作用域都在、全局动作
+   真的重置全局面且不动每宠档案/活跃集合/凭据、本宠动作不吃全局）+ 改造 2 例（OS 收敛
+   只在全局作用域）；`tests/test_settings_subslot_autostart.py` 重写为「任意宠都可编辑
+   + 作用域明示 + 子宠页保存落主配置」；`tests/test_settings_and_resources.py` 新增
+   `target=None`（含 `slot-0` 身份）、子宠页提示可达、行文案不承诺删除三例；
+   `tests/test_settings_pet_tabs.py` 的标签行表随删除同步。先红后绿证据在
+   `.scratch/product-final-fix-product-wiring-20261010/`。
+3. **布局与可访问性**：slot 页侧栏多一个同风格按钮（无新增控件类型、无新增 QSS）；
+   行序只少了被删的那一行；置灰摘除只影响 `setEnabled` 与 tooltip。
+4. **跨平台**：无新平台分支（判据只读身份与配置面）。
+5. **视觉与文档**：本记录即变更记录。
+
+### 2026-10-10 — 第三方灵动岛组件：设置页组件行 + 配置准入的声明源
+
+- **新增的不是新设置项，而是既有项 `island_metrics` 的行集合**：声明清单里有哪些组件，
+  设置页「桌面组件 → 灵动岛指标」就多几行（与内置段行**同层级、同风格、同可见性依赖**：
+  同一个 `SettingRow` 装配、同一个「灵动岛指标 ·」前缀、同一套 island_on × info_on 门）。
+  勾选/保存仍写同一个 `island_metrics` 列表，顺序规则不变（已有且仍勾的按原序在前，
+  新勾的按典范序追尾；典范序 = 内置段 + 组件按清单扫描序）。
+- **准入的真源是声明清单**（`pet/island_extension_host.py` 读出的静态 JSON metadata），
+  **不是运行期注册表**：主进程与独立设置进程读同一份，所以"设置进程保存一次就把用户的
+  组件偏好清掉"这类跨进程分歧不可能发生（准入不看"谁在本进程注册过"）。
+- **行只读静态 metadata**：设置页不 import 任何组件代码（provider），所以组件是"暂缺
+  文件"还是"文件坏了"在设置页上都只是文案差别，不存在执行第三方代码的窗口。
+- **停用 / 暂缺 / 卸载三态**：停用 = 取消勾选（保留声明与偏好、不采样、不撤阈值）；
+  暂缺 = 清单在而 provider 文件不在（**行照旧可勾**，hint 写明"这份偏好会保留，但当前
+  不采样也不在岛上显示"）；卸载 = 删组件目录（行消失、阈值随声明撤回）。
+- **准出对应**：1）契约——无新键、无默认值/归属/迁移变更；组件的 label/hint 来自组件
+  自己的声明（`label` / `source` / `provider`），失败路径不新增。2）TDD——
+  `tests/test_island_extension_chain.py` 覆盖行存在与 label 口径、勾选保存、重启读回、
+  与内置行的先后序、停用不撤阈值、跨进程设置路径只读不执行（独立解释器）；
+  全部先红后绿（隔离副本消融证据在 `_plan` 外的本地 `.scratch/`）。3）布局与可访问性——
+  无新增控件类型、无新增 QSS、无行序变化（组件行追加在内置行之后，无组件时设置页
+  与从前逐像素相同）。4）跨平台——无新平台分支（目录与 JSON 都是标准库）。
+  5）本记录即变更记录。
+
+### 2026-10-10 — 固定身份与唯一配置归属
+
+- 所有拓扑的 `slot-0..128` 设置/运行配置使用 `SlotRoutedConfig`：每宠偏好、位置与朝向只写对应 `config-slot-N.json`，全局功能只写 `config.json`；显式空身份恒为global。raw slot Config整表保存拒绝。
+- slot0迁移先备份、纯快照迁移清洗抽档案、验证既有目标后清源；跨文件非事务，失败可重跑且坏目标不清源。旧dirty global不能把每宠键写回。
+- 本宠reset保位置、身份、active与共享历史；global reset不写任何profile/几何/active，AI密钥保留。profile代次侧车的pending reset阻普通旧写，新reader也不得越过partial；显式reset可恢复。
+- 碰撞world四参数仍全局消费，本批不移键、不改求解。没有新增设置键或第三真值。
+- 当前证据见本地 `.scratch/product-slot0-implementation-20261010/`：作用域/迁移/旧token/reset/三档案恢复/捕获/菜单派发相关用例；真实GUI、全量、性能与最终产品双审尚未进行，不以offscreen代替这些门。
+
 ### 2026-10-09 — 子宠设置页的配置读写路由（架构级死开关修复）
 
 本刀**不新增、不改动、不移除任何设置项**：配置键、默认值、归属、依赖与迁移零改动；
@@ -96,7 +238,7 @@ recovery
 | 分流范围 | 仅 **overlay 拓扑下的 slot 身份**。主宠设置进程（无 `--instance`）与 legacy 单窗（含捕获模式）原样返回同一个配置对象、行为逐位不变——legacy 里那只宠读的就是自己那份 `config-slot-N.json` 的**全部**键，分流反而会让它的设置失效 |
 | 键集单一来源 | `PER_SLOT_SETTING_KEYS` 从 `overlay_shell.py` 挪进零 Qt 的 `overlay_spawn_state.py`（独立设置进程禁止导入 overlay_shell：会连带素材库/ffmpeg/托盘），壳侧改为引用它；`tests/test_settings_slot_config_route.py` 用 `is` 钉住两侧是同一对象。分流键集 = 该集合 ∪ `{"collision_enabled"}`（它有专属逐宠读点 `read_slot_collision_enabled`，写主配置既改不动这只宠也会改掉别的宠的继承值） |
 | 恢复默认 | `SlotRoutedConfig.reset_to_defaults` 只重置 slot 身份文件，**主配置一个键都不碰**。未闸住时 `Config.reset_to_defaults` 的整表语义会打到所有桌宠共用的主配置上（消融实测：`pet_opacity` 66→100、`voice_chime_enabled` True→False） |
-| 置灰摘除 | 原先因「改了等于没改」置灰的 7 处恢复可用（清单见下）；`settings_widgets.mark_main_pet_only` / `MAIN_PET_ONLY_TOOLTIP` 随之无消费者，整块删除。**仍在置灰**（理由与本问题不同）：开机自启（OS 登录项，`settings_pet_controls`）、直播捕获兼容（拓扑输入 + 捕获模式下 spawn 入口本就拒绝，`tests/test_stream_capture_copy.py` 另钉）、harness 的 desktop 平台项 |
+| 置灰摘除 | 原先因「改了等于没改」置灰的 7 处恢复可用（清单见下）；`settings_widgets.mark_main_pet_only` / `MAIN_PET_ONLY_TOOLTIP` 随之无消费者，整块删除。**仍在置灰**（理由与本问题不同）：开机自启（OS 登录项，`settings_pet_controls`——**2026-10-10 已改**：任意宠可编辑 + 行内明示"影响所有桌宠"，见本文件最上面那条记录）、直播捕获兼容（拓扑输入 + 捕获模式下 spawn 入口本就拒绝，`tests/test_stream_capture_copy.py` 另钉）、harness 的 desktop 平台项 |
 | 窗口级 7 行 | 「（对所有桌宠生效）」标注保留——路由接通后它变成真话 |
 | 不做 | 不改 `PER_SLOT_SETTING_KEYS` 内容、不改 slot 迁移/落种逻辑、不改 `settings.lock` 机制、不改 `collision_enabled` 的专属读点、不给分支加设置项 |
 

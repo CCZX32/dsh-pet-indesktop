@@ -30,6 +30,17 @@ from pet.pet_sprite import PetSprite
 app = QApplication.instance() or QApplication([])
 
 
+def _slot0_config(tmp_path):
+    """生产形态的配置面：slot0 身份经 ``SlotRoutedConfig`` 分流。
+
+    每宠键（``drop_gravity`` 在内）的真值在 ``config-slot-0.json``：裸全局
+    ``Config.set/save`` 只碰全局那份，每宠键出闸即被过滤，改不动任何一只宠。
+    """
+    from pet.settings_slot_config import route_settings_config
+
+    return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+
 def _make_shell(tmp_path, values=None):
     """真实 PetSprite + 真 overlay 的壳（复用既有测试装配，风格同
     tests/test_overlay_sprite_settings.py）。"""
@@ -56,14 +67,14 @@ def _write_config(tmp_path, payload: dict) -> None:
 # ---------------------------------------------------------------- ① 配置键契约
 def test_default_is_off_and_survives_round_trip(tmp_path):
     """默认关闭（现状语义）；set → save → 重载仍为开（reload 白名单覆盖）。"""
-    cfg = Config(base=tmp_path)
+    cfg = _slot0_config(tmp_path)
     assert cfg.get("drop_gravity") is False          # 默认关 = 现状
 
     cfg.set("drop_gravity", True)
-    cfg.save()
+    assert cfg.save() is True
 
-    assert Config(base=tmp_path).get("drop_gravity") is True
-    assert Config(base=tmp_path).data["drop_gravity"] is True
+    assert _slot0_config(tmp_path).get("drop_gravity") is True
+    assert _slot0_config(tmp_path).data["drop_gravity"] is True
 
 
 def test_string_false_is_not_truthy(tmp_path):

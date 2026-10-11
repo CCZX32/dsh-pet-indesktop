@@ -26,126 +26,140 @@ import pytest
 
 from pet.config import Config, APP_DIR_NAME
 from pet import slot_manager as sm
+from pet import catalog
 from pet.chat.session_store import SessionStore
 from pet.chat.models import ChatMessage, ChatSession
+from pet.settings_slot_config import route_settings_config
 
 
 def test_field_default_factory_and_individual_memory(tmp_path):
-    """场景 4：新 slot 首次创建继承主配置（位置/自启除外），之后只保留个体记忆。"""
+    """场景 4（G1 归属口径）：每宠键按**这只宠自己的档案**取值，全局键全宠共用一份。
+
+    旧版"每个 slot 一份完整 config、首次创建从主配置整表落种"随规范 §五 作废：
+    ``config-slot-N.json`` 只存每宠键；全局键（``on_top`` / 开机自启…）仍只有主配置
+    一份真值，任何一只宠都从它读。落种（生成子宠时从 slot0 档案取种）在
+    ``tests/test_overlay_spawn.py`` 与 ``tests/test_single_process_spawn.py`` 覆盖。
+    """
     config_dir = tmp_path / APP_DIR_NAME
     config_dir.mkdir(parents=True, exist_ok=True)
 
     master = Config(base=tmp_path)
-    master.set("character", "shenshen")
-    master.set("playback_speed", 1.5)
-    master.set("click_sound_volume", 0.33)
     master.set("on_top", False)
     master.set("show_dock_icon", False)
     master.set("chat_follow_pet", True)
-    master.set("rx", 0.1)
-    master.set("ry", 0.2)
     master.set("autostart_wanted", True)
-    master.save()
+    assert master.save() is True
 
-    # 新建 slot-1：未保存前直接读取，应继承主配置的非个体设置；
-    # 位置/屏幕与开机自启不复制，避免叠位和副槽自启。
-    slot1 = Config(base=tmp_path, instance_id="slot-1")
-    assert slot1.get("character") == "shenshen"
-    assert slot1.get("playback_speed") == 1.5
-    assert slot1.get("click_sound_volume") == 0.33
+    # 主宠档案（slot0）：每宠键写进它自己的档案
+    slot0 = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+    slot0.set("character", "shenshen")
+    slot0.set("playback_speed", 1.5)
+    slot0.set("click_sound_volume", 0.33)
+    assert slot0.save() is True
+
+    # slot-1 还没落种：每宠键取**同源默认**（不继承主宠当前值——否则"关掉的 slot0
+    # 会继承主宠的新设置"），全局键照旧读主配置那一份
+    slot1 = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
+    assert slot1.get("playback_speed") == 1.0
+    assert slot1.get("click_sound_volume") == 0.7
     assert slot1.get("on_top") is False
     assert slot1.get("show_dock_icon") is False
     assert slot1.get("chat_follow_pet") is True
+    assert slot1.get("autostart_wanted") is True
     assert slot1.get("rx") is None
     assert slot1.get("ry") is None
-    assert slot1.get("autostart_wanted") is False
 
-    # slot-1 修改自身属性并保存（个体记忆）
+    # slot-1 写自己的档案（个体记忆）
     slot1.set("character", "dundun")
     slot1.set("click_sound_volume", 0.55)
-    slot1.save()
+    assert slot1.save() is True
 
-    # 修改主配置后，已有 slot-1 不受影响
-    master.set("character", "master_new")
-    master.set("click_sound_volume", 0.99)
-    master.save()
+    # 之后改主宠档案：已有 slot-1 的每宠键不受影响
+    slot0b = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+    slot0b.set("character", "master_new")
+    slot0b.set("click_sound_volume", 0.99)
+    assert slot0b.save() is True
 
-    slot1_reload = Config(base=tmp_path, instance_id="slot-1")
+    slot1_reload = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
     assert slot1_reload.get("character") == "dundun"
     assert slot1_reload.get("click_sound_volume") == 0.55
 
-    # 新建 slot-2 在首次创建时继承主配置当时的值（最新主配置），之后各自独立
-    slot2 = Config(base=tmp_path, instance_id="slot-2")
-    assert slot2.get("character") == "master_new"
-    assert slot2.get("click_sound_volume") == 0.99
+    # 主宠自己的档案确实跟着改了（不是"谁都没动"）
+    assert route_settings_config(
+        Config(base=tmp_path, instance_id="slot-0")).get("character") == "master_new"
+
+    # 新建 slot-2 仍是同源默认起步（每宠键不跨身份继承），全局键继续共用
+    slot2 = route_settings_config(Config(base=tmp_path, instance_id="slot-2"))
+    assert slot2.get("character") == catalog.DEFAULT_CHARACTER
+    assert slot2.get("playback_speed") == 1.0
+    assert slot2.get("on_top") is False
 
 
 def test_spawn_reuse_keeps_existing_slot_config(tmp_path, monkeypatch):
     """「生小肥鱼」复用已有存档的 slot 时不再顶掉原槽设置（回归：旧版
-    DSH_PET_SPAWN_FRESH 强制重播种会把 slot-N 个体配置覆盖成主配置）。"""
-    master = Config(base=tmp_path)
-    master.set("character", "shenshen")
-    master.set("playback_speed", 2.0)
-    master.set("click_sound_volume", 0.8)
-    master.save()
+    DSH_PET_SPAWN_FRESH 强制重播种会把 slot-N 个体配置覆盖成主配置）。
 
-    old_slot = Config(base=tmp_path, instance_id="slot-1")
+    G1 口径：重用槽的每宠键真值在它自己的档案里，构造侧或环境都没法再"重播种"。
+    """
+    old_slot = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
     old_slot.set("character", "dundun")
     old_slot.set("playback_speed", 0.5)
     old_slot.set("click_sound_volume", 0.2)
-    old_slot.save()
+    assert old_slot.save() is True
 
     # 旧版孵化进程环境可能仍带着 SPAWN_FRESH 标记，须被完全忽略
     monkeypatch.setenv("DSH_PET_SPAWN_FRESH", "1")
-    reused_slot = Config(base=tmp_path, instance_id="slot-1")
+    reused_slot = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
     assert reused_slot.get("character") == "dundun"
     assert reused_slot.get("playback_speed") == 0.5
     assert reused_slot.get("click_sound_volume") == 0.2
 
 
 def test_normal_reopen_keeps_existing_slot_config(tmp_path, monkeypatch):
-    """普通重启/复用 slot 时，已有个体配置不被主配置覆盖。"""
-    master = Config(base=tmp_path)
+    """普通重启/复用 slot 时，已有个体配置不被主宠的当前值覆盖。"""
+    master = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
     master.set("character", "shenshen")
-    master.save()
+    assert master.save() is True
 
-    slot = Config(base=tmp_path, instance_id="slot-1")
+    slot = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
     slot.set("character", "dundun")
-    slot.save()
+    assert slot.save() is True
 
-    reopened = Config(base=tmp_path, instance_id="slot-1")
+    reopened = route_settings_config(Config(base=tmp_path, instance_id="slot-1"))
     assert reopened.get("character") == "dundun"
 
 
 def test_spawn_seed_respects_inherit_size_switch(tmp_path):
-    """生小肥鱼继承大小开关：开启保留主 scale，关闭改用 spawn_scale。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
+    """生小肥鱼落种遵循 ``spawn_inherit_size`` / ``spawn_scale``（G1 口径）。
 
-    # 开启继承：主鱼 1.0，新鱼也应为 1.0
-    master = Config(base=tmp_path)
-    master.set("scale", 1.0)
-    master.set("spawn_inherit_size", True)
-    master.set("spawn_scale", 0.5)
-    master.set("spawn_inherit_dynamic_island", True)
-    island = dict(master.get("dynamic_island"))
-    island["enabled"] = True
-    master.set("dynamic_island", island)
-    master.save()
-    slot_inherit = Config(base=tmp_path, instance_id="slot-1")
-    assert slot_inherit.get("scale") == 1.0
-    assert slot_inherit.get("dynamic_island", {}).get("enabled") is True
+    落种源是 **slot0 的档案**（不是"主配置整表"）：开启继承 → 新槽拿到的 scale 跟
+    slot0 一样；关闭继承 → 用主配置里给"小肥鱼"单独选的 ``spawn_scale``。
+    """
+    import tests.test_overlay_spawn as osp
+    from pet import pet_profiles
 
-    # 关闭继承：主鱼仍是 1.0，但新鱼应使用 spawn_scale=0.5，且灵动岛不开启
-    master.set("spawn_inherit_size", False)
-    master.set("spawn_inherit_dynamic_island", False)
-    master.save()
-    slot_custom = Config(base=tmp_path, instance_id="slot-2")
-    assert slot_custom.get("scale") == 0.5
-    assert slot_custom.get("spawn_inherit_size") is False
-    assert slot_custom.get("spawn_scale") == 0.5
-    assert slot_custom.get("spawn_inherit_dynamic_island") is False
-    assert slot_custom.get("dynamic_island", {}).get("enabled") is False
+    def _spawned_scale(base, values):
+        shell, _made = osp._make_persistent_shell(base, values)
+        try:
+            shell.spawn_pet()
+            child = shell._spawned[0]
+            slot = shell._spawned_slots[child]
+            profile = pet_profiles.read_slot_profile(shell._spawn_config_dir(), slot)
+            return child.scale, float(profile.data["scale"])
+        finally:
+            shell._delete_runtime_marker()
+
+    # 开启继承：slot0 档案 1.0，新鱼也应为 1.0（档案与运行态一致）
+    child_scale, profile_scale = _spawned_scale(tmp_path / "inherit", {
+        "scale": 1.0, "spawn_inherit_size": True, "spawn_scale": 0.5})
+    assert profile_scale == 1.0
+    assert child_scale == 1.0
+
+    # 关闭继承：slot0 仍是 1.0，但新鱼按 spawn_scale=0.5 落种
+    child_scale, profile_scale = _spawned_scale(tmp_path / "custom", {
+        "scale": 1.0, "spawn_inherit_size": False, "spawn_scale": 0.5})
+    assert profile_scale == 0.5
+    assert child_scale == 0.5
 
 
 def test_corrupt_config_backup_unique_timestamp(tmp_path):
@@ -482,13 +496,13 @@ def test_read_live_instances_reclaims_confirmed_dead_pid(tmp_path):
 
 
 def test_app_main_validates_slot_arg():
-    """测试 app.main 校验 --slot 参数范围（0~127）及非法值。"""
+    """测试 app.main 校验 --slot 参数范围（身份空间 0~128）及非法值。"""
     from pet import app as app_mod
 
     # 负数
     assert app_mod.main(["dsh-pet", "--slot", "-1"]) == 1
-    # 超大值
-    assert app_mod.main(["dsh-pet", "--slot", "128"]) == 1
+    # 超大值：上界已按规范 §一 扩到含 128（129 个身份），129 才是非法值
+    assert app_mod.main(["dsh-pet", "--slot", "129"]) == 1
     # 非法字符串
     assert app_mod.main(["dsh-pet", "--slot", "abc"]) == 1
     # 缺少值

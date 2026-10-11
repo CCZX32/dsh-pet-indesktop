@@ -529,6 +529,7 @@ def save_position(host) -> None:
     avail = scr.availableGeometry()
     if avail.width() <= 0 or avail.height() <= 0:
         return
+    geometry = {'facing': host.facing, 'scale': host.scale}
     if not getattr(host, '_awaiting_saved_screen', None):
         # 存"虚拟窗口中心"比例：贴边时窗口被钳在工作区内，实际位置 + 绘制
         # 偏移才是角色的自然位置；偏移为零时与旧算式（窗口中心）逐像素一致。
@@ -536,12 +537,17 @@ def save_position(host) -> None:
         vp = vp_fn() if callable(vp_fn) else None
         cx = (vp.x() if vp is not None else host.x()) + host._w / 2
         cy = (vp.y() if vp is not None else host.y()) + (host._h + getattr(host, "_capture_headroom", 0)) / 2
-        host.cfg.set('rx', (cx - avail.left()) / avail.width())
-        host.cfg.set('ry', (cy - avail.top()) / avail.height())
-        host.cfg.set('screen_name', scr.name())
-    host.cfg.set('facing', host.facing)
-    host.cfg.set('scale', host.scale)
-    host.cfg.save()
+        geometry.update(rx=(cx - avail.left()) / avail.width(),
+                        ry=(cy - avail.top()) / avail.height(), screen_name=scr.name())
+    writer = getattr(host.cfg, 'save_geometry', None)
+    if callable(writer):
+        token = getattr(host, '_profile_generation', None)
+        if token is None or not writer(geometry, token):
+            return
+    else:
+        for key, value in geometry.items():
+            host.cfg.set(key, value)
+        host.cfg.save()
     _marker_fn = getattr(host, '_write_runtime_marker', None)
     if callable(_marker_fn):
         _marker_fn()

@@ -11,9 +11,13 @@
 4. 用户取消 / 落盘失败 = 零副作用（内存与磁盘都不变）；
 5. 重置后关窗不得把旧控件值整表写回（设置窗关闭时会保存全部控件，控件持有的是
    重置前的旧值，不闸住就把刚写的默认值覆盖回去）；
-6. 重置级运行态对齐：位置（rx/ry=None）要立即回默认落位，否则本次退出
-   ``save_position()`` 会把重置前的旧位置写回磁盘、重置被静默抵消；系统登录项
-   单独按新值收敛。
+6. 重置级运行态对齐分**两个作用域**（G1b）：
+   - **主宠页（全局口径）**：位置（rx/ry=None）要立即回默认落位，否则本次退出
+     ``save_position()`` 会把重置前的旧位置写回磁盘、重置被静默抵消；
+   - **子宠页（slot 口径）**：本宠 reset **保留位置**（"回到默认落位"是独立操作，
+     见 ``docs/PRODUCT-NEXT-STEPS-SPEC-2026-10-09.md`` §五），所以它写的是
+     ``CMD_PROFILE_RESET``（偏好/尺寸/角色的运行态同步），**绝不**写会重定位的
+     ``CMD_APPLY_SETTINGS_RESET``；系统登录项单独按新值收敛。
 """
 from __future__ import annotations
 
@@ -284,7 +288,7 @@ def test_reset_button_confirm_applies_defaults_and_skips_stale_writeback(
     """确认后：默认值落盘 + 关窗；关闭路径不得把旧控件值整表写回。"""
     cfg = _dirty_config(tmp_path / "appdata")
     fresh = _fresh_config(tmp_path / "fresh")
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: True)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
 
     dialog = ModernSettingsDialog(cfg, include_ai=False)
     assert getattr(dialog, "_saved_via_button", False) is False
@@ -311,7 +315,7 @@ def test_reset_button_cancel_has_zero_side_effect(qapp, tmp_path: Path, monkeypa
     before_disk = cfg.path.read_text(encoding="utf-8")
     calls = _spy_atomic_replace(monkeypatch)
     calls.clear()
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: False)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: False)
 
     dialog = ModernSettingsDialog(cfg, include_ai=False)
     try:
@@ -335,7 +339,7 @@ def test_reset_button_reports_write_failure_instead_of_closing(
     cfg = _dirty_config(tmp_path / "appdata")
     before_memory = copy.deepcopy(cfg.data)
     before_disk = cfg.path.read_text(encoding="utf-8")
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: True)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
 
     def fail(*_args, **_kwargs):
         raise OSError("disk full")
@@ -363,21 +367,117 @@ def test_reset_confirm_box_copy_states_kept_items_and_irreversibility(qapp, tmp_
     box, confirm = settings_reset_defaults.build_reset_confirm_box(None)
     try:
         text = box.text() + "\n" + box.informativeText()
-        assert "将重置全部设置为默认值" in text
-        assert "不可撤销" in text
+        assert "将重置全局设置为默认值" in text
+        assert "活跃状态及会话历史" in text
         assert "API Key" in text, "保留项必须逐项写明"
         assert "钥匙串" in text, "保留的 keyring 引用要说清楚"
         # 2026-10-07 第一刀：「只装密钥的条目」拗口句改顺，语义不变——
         # 各服务商的密钥仍保留，自定义服务商只保留密钥本身（地址/模型回默认）。
         assert "每个自定义服务商只保留密钥本身" in text, "各服务商密钥仍保留，其余设置回默认"
         assert "地址、模型等其它设置会恢复默认" in text
-        assert "立即回默认落位" in text, "位置立即生效必须写明"
-        assert "开机自启按默认关闭" in text, "系统登录项会被改，必须写明"
-        assert "重启后生效" in text, "重启生效的键必须与控制事实现状一致"
+        assert "角色、尺寸、位置" in text
+        assert "开机自启按默认关闭" in text
         assert confirm.text() == "恢复默认设置"
         assert box.defaultButton() is not confirm, "破坏性操作的默认按钮不得是确认"
     finally:
         box.deleteLater()
+        qapp.processEvents()
+
+
+# ---------------------------------------------------------------- 作用域文案（R08）
+def test_main_page_reset_confirm_copy_is_unchanged(qapp, tmp_path: Path):
+    """主宠页（真设置窗）确认文案逐字等于原口径：这条钉住"主宠页文案一字不动"。"""
+    dialog = ModernSettingsDialog(_fresh_config(tmp_path / "appdata"), include_ai=False)
+    try:
+        box, _confirm = settings_reset_defaults.build_reset_confirm_box(dialog)
+        text = box.text() + "\n" + box.informativeText()
+        assert box.text() == settings_reset_defaults.RESET_HEADLINE
+        assert settings_reset_defaults.RESET_KEPT in text
+        assert settings_reset_defaults.RESET_BODY in text
+        assert "这只桌宠" not in text
+    finally:
+        box.deleteLater()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_slot_page_reset_confirm_copy_states_its_scope(qapp, tmp_path: Path):
+    """子宠页确认文案必须与**实际被重置的范围**一致（R08）。
+
+    子宠页的重置被闸在它自己的 slot 文件上（主配置一个键都不碰），文案若还照抄主宠页
+    那套"形象 / 系统提示词 / 自定义台词与角色别名 / 外观与功能开关统统恢复出厂"，用户
+    就是照着一段不成立的话在做不可撤销的决策。
+    """
+    cfg = Config(base=tmp_path / "appdata", instance_id="slot-1")
+    dialog = ModernSettingsDialog(cfg, include_ai=False)
+    try:
+        assert settings_reset_defaults.reset_scope_is_slot(dialog) is True, (
+            "前提：子宠页的配置面是 SlotRoutedConfig（重置被闸在 slot 文件上）"
+        )
+        box, confirm = settings_reset_defaults.build_reset_confirm_box(dialog)
+        text = box.text() + "\n" + box.informativeText()
+        try:
+            assert "这只桌宠的独立设置" in box.text(), "标题就要说清作用域"
+            assert "只重置这只桌宠自己的那份设置" in text
+            assert "尺寸、速度、音效、气泡与角色" in text, "写明重置哪些面"
+            assert "当前所在位置不变" in text, "位置保留是本宠 reset 的口径（G1b）"
+            assert "语音报时、灵动岛、AI 对话等全局设置" in text, "写明哪些全局设置不受影响"
+            assert "其它桌宠" in text, "别的桌宠不受影响同样要说"
+            # 主宠页的承诺一个字都不许出现在这里：
+            assert "将重置全部设置" not in text
+            assert "系统提示词" not in text, "主页面承诺不得照抄"
+            assert "自定义台词与角色别名" not in text
+            assert "外观与功能开关" not in text
+            assert "开机自启按默认关闭" not in text, "子宠页不碰系统登录项"
+            assert "API Key" not in text, "主配置压根没被碰，不必说密钥保留"
+            # 生效时机：形象类要重启；位置**不**在此重置（不得再写"立即回默认落位"）
+            assert "立即回默认落位" not in text, "本宠 reset 保留位置，旧承诺已作废"
+            assert "重启后生效" in text
+            assert confirm.text() == "恢复默认设置"
+            assert box.defaultButton() is not confirm, "默认按钮仍必须是取消"
+        finally:
+            box.deleteLater()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_slot_page_reset_button_tooltip_matches_scope(qapp, tmp_path: Path):
+    """侧栏按钮的提示文案同域：子宠页不是"把全部设置恢复为出厂默认值"。"""
+    main_dialog = ModernSettingsDialog(_fresh_config(tmp_path / "main"), include_ai=False)
+    slot_cfg = Config(base=tmp_path / "appdata", instance_id="slot-1")
+    slot_dialog = ModernSettingsDialog(slot_cfg, include_ai=False)
+    try:
+        assert main_dialog.reset_defaults_btn.toolTip() == settings_reset_defaults.RESET_TOOLTIP
+        assert slot_dialog.reset_defaults_btn.toolTip() == (
+            settings_reset_defaults.RESET_SLOT_TOOLTIP)
+        assert "独立设置" in slot_dialog.reset_defaults_btn.toolTip()
+    finally:
+        main_dialog.deleteLater()
+        slot_dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_legacy_slot_process_keeps_full_scope_copy(qapp, tmp_path: Path, monkeypatch):
+    """legacy 拓扑下的 ``--slot N`` 进程：实例名同样是 slot-N，但重置动的是**整份**配置。
+
+    ``route_settings_config`` 在那个拓扑下原样返回配置（不分流），所以文案必须仍按
+    "全部设置"说——按实例名判作用域会把子宠页文案挂到这个进程上，恰好重演 R08。
+    """
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
+    cfg = Config(base=tmp_path / "appdata", instance_id="slot-1")
+    dialog = ModernSettingsDialog(cfg, include_ai=False)
+    try:
+        assert cfg.instance_id == "slot-1", "前提：实例名看起来就是子宠身份"
+        assert settings_reset_defaults.reset_scope_is_slot(dialog) is True
+        box, _confirm = settings_reset_defaults.build_reset_confirm_box(dialog)
+        try:
+            assert box.text() == settings_reset_defaults.RESET_SLOT_HEADLINE
+            assert settings_reset_defaults.RESET_SLOT_BODY in box.informativeText()
+        finally:
+            box.deleteLater()
+    finally:
+        dialog.deleteLater()
         qapp.processEvents()
 
 
@@ -499,6 +599,7 @@ def _stub_shell(instance):
     shell.instance = instance
     shell._instances = [instance]
     shell.config = instance.win.cfg
+    shell._apply_external_config_change = lambda: None
     return shell
 
 
@@ -508,26 +609,25 @@ def test_reload_adopts_reset_position_nulls(tmp_path: Path):
     这三个键的消费者（window_placement.restore_position / overlay 落位）本来就把
     None 当"没有位置记忆"，所以它们进 _NULL_ACCEPTING_KEYS 是同一个口径的延伸。
     """
+    from pet import pet_profiles
+    from pet.settings_slot_config import route_settings_config
+
     cfg = _dirty_config(tmp_path / "appdata")
-    cfg.data.update({"rx": 0.42, "ry": 0.42, "screen_name": "primary"})
-    assert cfg.save() is True
-    assert cfg.reset_to_defaults() is True
-    assert cfg.get("rx") is None and cfg.get("screen_name") is None
-
-    # 运行期已有的值（模拟主进程内存里的旧位置）被重置后的磁盘数据覆盖
-    cfg.data["rx"], cfg.data["ry"], cfg.data["screen_name"] = 0.42, 0.42, "primary"
-    cfg.reload()
-
-    assert cfg.get("rx") is None, "显式 null 未被采纳：运行期会一直留着旧位置"
-    assert cfg.get("ry") is None
-    assert cfg.get("screen_name") is None
+    pet_profiles.write_profile_settings(cfg.dir, 0, {"rx": 0.42, "ry": 0.42, "screen_name": "primary"})
+    routed = route_settings_config(Config(base=tmp_path / "appdata", instance_id="slot-0"))
+    assert cfg.reset_to_defaults()
+    assert routed.get("rx") == 0.42
+    pet_profiles.write_profile_settings(cfg.dir, 0, {"rx": None, "ry": None, "screen_name": None})
+    routed.reload()
+    assert routed.get("rx") is None
+    assert routed.get("screen_name") is None
 
 
 def test_reset_asks_parent_window_to_align_runtime(tmp_path: Path, monkeypatch):
     """进程内设置页：重置后直接调窗口上已接线的回调（不走指令通道），并同步系统项。"""
     from pet import autostart as autostart_mod
 
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: True)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
     calls: list[str] = []
     parent = type("_Win", (), {})()
     parent.on_settings_reset = lambda: calls.append("window")
@@ -545,9 +645,14 @@ def test_reset_asks_parent_window_to_align_runtime(tmp_path: Path, monkeypatch):
 
 
 def test_reset_writes_alignment_command_without_parent_window(tmp_path: Path, monkeypatch):
-    """独立设置进程：没有窗口可依附 → 写 D12 指令，由主进程消费后对齐。"""
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: True)
-    cfg = Config(tmp_path / "appdata", instance_id="slot-2")
+    """**全局口径**的独立设置进程：没有窗口可依附 → 写 D12 指令，由主进程消费后重定位。
+
+    这里的宿主配置不是 ``SlotRoutedConfig``（``_Host`` 直接拿一份 ``slot-2`` 的 Config，
+    即 legacy ``--slot N`` 进程的形态）：那种进程重置的就是该文件**全部**键（含位置），
+    "回默认落位"仍然成立，故指令与 target 逐位不变。子宠页（overlay 路由）那一支见下一条。
+    """
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
+    cfg = Config(tmp_path / "appdata", instance_id="")
     host = _Host(cfg)
 
     assert settings_reset_defaults.on_reset_clicked(host) is True
@@ -555,7 +660,68 @@ def test_reset_writes_alignment_command_without_parent_window(tmp_path: Path, mo
     command = cmd_mod.read_command(cfg.dir)
     assert command is not None, "独立设置进程必须写下运行态对齐指令"
     assert command["command"] == cmd_mod.CMD_APPLY_SETTINGS_RESET
-    assert command["target"] == 2, "只对齐这一份配置对应的那只桌宠"
+    assert command["target"] is None, "全局刷新无逐宠搬家目标"
+
+
+def test_slot_scope_reset_writes_profile_reset_not_a_reposition_command(
+        tmp_path: Path, monkeypatch):
+    """**子宠页（slot 作用域）**：reset 保留位置 ⇒ 写 ``CMD_PROFILE_RESET``，不写重定位指令。
+
+    旧行为给子宠页也写 ``CMD_APPLY_SETTINGS_RESET``，而那个指令的语义就是"位置回默认
+    落位"——与"本宠 reset 保留位置"（规范 §五）直接冲突。这里两端一起钉住：档案里的位置
+    原样保留，发出的指令是新的 ``profile_reset``。
+    """
+    from pet import pet_profiles, settings_slot_config
+
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
+    monkeypatch.setenv(cmd_mod.ENV_TOPOLOGY, "overlay")
+    cmd_mod.reset_topology_snapshot()
+    base = tmp_path / "appdata"
+    main = Config(base=base)
+    assert main.save() is True
+    cfg = Config(base=base, instance_id="slot-2")
+    routed = settings_slot_config.route_settings_config(cfg)
+    assert isinstance(routed, settings_slot_config.SlotRoutedConfig), "前提：子宠页走路由"
+    assert pet_profiles.write_profile_settings(
+        cfg.dir, 2, {"scale": 1.5}, user_customized=True).status == "ok"
+    assert pet_profiles.write_profile_geometry(
+        cfg.dir, 2, {"rx": 0.3, "ry": 0.35, "screen_name": "primary"}).status == "ok"
+    host = _Host(routed)
+
+    assert settings_reset_defaults.on_reset_clicked(host) is True
+
+    command = cmd_mod.read_command(cfg.dir)
+    assert command is not None
+    assert command["command"] == cmd_mod.CMD_PROFILE_RESET, (
+        "子宠页不得再发会重定位的 apply_settings_reset")
+    assert command["command"] != cmd_mod.CMD_APPLY_SETTINGS_RESET
+    assert command["target"] == 2
+    profile = pet_profiles.read_slot_profile(cfg.dir, 2)
+    assert (profile.data["rx"], profile.data["ry"]) == (0.3, 0.35), "位置必须保留"
+    assert profile.data["screen_name"] == "primary"
+
+
+def test_profile_reset_command_does_not_reposition_on_the_current_consumer(tmp_path: Path):
+    """过渡期安全：当前消费端**不识别** ``profile_reset`` → 安全地什么都不做。
+
+    这一批不改 ``overlay_shell`` / ``AppShell`` 的指令消费（下一批一起改），而新指令的
+    语义（偏好/尺寸/角色同步、保位置）必须等到消费端就位才生效。在它被识别之前，行为
+    必须是"消费掉、不动作"，**绝不能**被当成旧的 reset 指令去做重定位。
+    """
+    cfg = _dirty_config(tmp_path / "appdata")
+    instance = _stub_instance(
+        cfg, _StubScreen("primary", QRect(0, 0, 1920, 1040)), (400, 400))
+    shell = _stub_shell(instance)
+    calls: list = []
+    shell.apply_settings_reset = lambda instance=None: calls.append(instance)
+    before = (instance.win.x(), instance.win.y())
+    assert cmd_mod.write_command(cfg.dir, cmd_mod.CMD_PROFILE_RESET, target=2) is True
+
+    shell._consume_settings_command()
+
+    assert calls == [], "过渡期不得把新指令当成重置对齐执行"
+    assert (instance.win.x(), instance.win.y()) == before, "桌宠位置不许被动过"
+    assert not cmd_mod.command_path(cfg.dir).exists(), "消费即删（不留给下一轮重放）"
 
 
 def test_apply_settings_reset_repositions_window_without_position_memory(tmp_path: Path):
@@ -571,8 +737,8 @@ def test_apply_settings_reset_repositions_window_without_position_memory(tmp_pat
     assert cfg.reset_to_defaults() is True
     shell.apply_settings_reset(instance)
 
-    assert (instance.win.x(), instance.win.y()) != before, "重置后桌宠必须回默认落位"
-    assert cfg.get("rx") is not None, "对齐顺带落盘：位置记忆就是刚落的默认落位"
+    assert (instance.win.x(), instance.win.y()) == before
+    assert "rx" not in json.loads(cfg.path.read_text(encoding="utf8"))
 
 
 def test_exit_position_save_after_reset_keeps_default_placement(tmp_path: Path):
@@ -594,10 +760,11 @@ def test_exit_position_save_after_reset_keeps_default_placement(tmp_path: Path):
     window_placement.save_position(instance.win)   # ← 退出收口（生产路径）
 
     reloaded = Config(base=tmp_path / "appdata")
-    assert reloaded.get("rx") != pytest.approx(0.42), "退出时把重置前的旧位置写回了磁盘"
-    assert reloaded.get("ry") != pytest.approx(0.42)
-    assert reloaded.get("rx") == pytest.approx(instance.win.cfg.get("rx")), "盘上应与运行态一致"
-    assert reloaded.get("rx") > 0.9, f"默认落位应贴右下角，实际 rx={reloaded.get('rx')}"
+    from pet import pet_profiles
+
+    assert "rx" not in json.loads(reloaded.path.read_text(encoding="utf8"))
+    assert pet_profiles.read_slot_profile(cfg.dir, 0).value("rx") is None
+    assert (instance.win.x(), instance.win.y()) == (int(0.42 * 1920) - 110, int(0.42 * 1040) - 130)
 
 
 def test_settings_reset_command_is_consumed_and_aligns_legacy_window(
@@ -638,8 +805,15 @@ def test_reset_syncs_system_autostart_login_item(tmp_path: Path, monkeypatch):
 
 
 def test_reset_leaves_system_autostart_alone_for_child_pet(tmp_path: Path, monkeypatch):
-    """子宠设置页不碰系统登录项（该控件在子宠页本就禁用，与既有 gating 同口径）。"""
+    """**本宠**作用域的重置不碰系统登录项：它一个全局键都没重置。
+
+    判据是"重置落在哪个配置面"（``reset_scope_is_slot``），不是实例名——旧用例用一份
+    未装箱的 ``Config(instance_id="slot-1")`` 当子宠页，那其实是 legacy ``--slot N``
+    进程的"整表身份"，重置它确实会改到 ``autostart_wanted``。产品形态的子宠设置页是
+    **装箱后**的路由视图，这里按它来钉。
+    """
     from pet import autostart as autostart_mod
+    from pet.settings_slot_config import route_settings_config
 
     calls: list[bool] = []
     monkeypatch.setattr(autostart_mod, "is_enabled", lambda: True)
@@ -647,10 +821,43 @@ def test_reset_leaves_system_autostart_alone_for_child_pet(tmp_path: Path, monke
         autostart_mod, "set_enabled",
         lambda on: (calls.append(bool(on)), True)[1])
 
-    cfg = Config(tmp_path / "appdata", instance_id="slot-1")
-    settings_reset_defaults.sync_system_autostart(_Host(cfg))
+    main = Config(tmp_path / "appdata")
+    assert main.save() is True
+    routed = route_settings_config(Config(base=tmp_path / "appdata", instance_id="slot-1"))
+    assert settings_reset_defaults.reset_scope_is_slot(_Host(routed)) is True, "前提：本宠作用域"
+    settings_reset_defaults.sync_system_autostart(_Host(routed))
 
     assert calls == []
+
+
+def test_global_reset_from_a_slot_page_syncs_system_autostart(tmp_path: Path, monkeypatch):
+    """**全局**作用域从任意宠的页发起都要收敛系统登录项（开机自启是全局键）。
+
+    2026-10-10 终审 A04-b：开机自启控件在 slot0/子宠页都可用（标"影响所有桌宠"），
+    所以从子宠页点的全局 reset 必须把 OS 侧一起收敛——旧代码按"实例名非空"直接 return，
+    那种页面上系统登录项与配置就会长期不一致（配置说关、注册表还开着）。
+    """
+    from pet import autostart as autostart_mod
+    from pet.settings_slot_config import route_settings_config
+
+    calls: list[bool] = []
+    monkeypatch.setattr(autostart_mod, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        autostart_mod, "set_enabled",
+        lambda on: (calls.append(bool(on)), True)[1])
+
+    main = Config(tmp_path / "appdata")
+    main.set("autostart_wanted", True)
+    assert main.save() is True
+    routed = route_settings_config(Config(base=tmp_path / "appdata", instance_id="slot-2"))
+    global_config = settings_reset_defaults.reset_config_for(
+        _Host(routed), settings_reset_defaults.RESET_SCOPE_GLOBAL)
+    assert global_config is not None and global_config.path == main.path
+    assert global_config.reset_to_defaults() is True
+
+    settings_reset_defaults.sync_system_autostart(_Host(routed), config=global_config)
+
+    assert calls == [False], "重置把 autostart_wanted 清成 False → 系统登录项必须关掉"
 
 
 def test_settings_reset_command_aligns_overlay_sprite(tmp_path: Path):
@@ -666,7 +873,7 @@ def test_settings_reset_command_aligns_overlay_sprite(tmp_path: Path):
 
         shell._consume_settings_command()
 
-        assert QPointF(shell.sprite.pos) != moved, "重置后主宠必须回默认落位"
+        assert QPointF(shell.sprite.pos) == moved, "全局reset不搬宠"
         assert not cmd_mod.command_path(shell._config.dir).exists()
     finally:
         shell._teardown_settings_command_watch()
@@ -707,7 +914,8 @@ def test_reset_command_keeps_defaults_on_disk_while_runtime_config_is_stale(tmp_
     assert on_disk.get("stream_capture_mode") is False
     assert on_disk.get("self_talk_enabled") is False
     assert on_disk.get("mouse_through") is False
-    assert on_disk.get("rx") is not None and on_disk.get("rx") > 0.9, "对齐落位仍要落盘"
+    assert "rx" not in json.loads(on_disk.path.read_text(encoding="utf8"))
+    assert (instance.win.x(), instance.win.y()) == (400, 400)
 
 
 def test_overlay_reset_command_reloads_runtime_config_before_alignment(tmp_path: Path):
@@ -736,9 +944,134 @@ def test_overlay_reset_command_reloads_runtime_config_before_alignment(tmp_path:
         assert on_disk.get("no_move") is False
         assert on_disk.get("mouse_through") is False
         assert on_disk.get("self_talk_enabled") is False
-        assert on_disk.get("rx") is not None, "对齐落位仍要落盘"
+        from pet import pet_profiles
+
+        assert "rx" not in json.loads(on_disk.path.read_text(encoding="utf8"))
+        assert pet_profiles.read_slot_profile(on_disk.dir, 0).value("rx") is not None
     finally:
         shell._teardown_settings_command_watch()
         shell._delete_runtime_marker()
         if getattr(shell, "tray", None) is not None:
             shell.tray.hide()
+
+
+# ------------------------------------- 5. 两个作用域两个动作（终审 A04-a）
+# 设置页的所有产品入口都带 `--instance slot-N`（含 slot0）。只留一个"本宠"按钮时，
+# 已经在实现里活着的**全局** reset 在产品 UI 上完全不可达——用户只能手工命令行
+# `--settings` 才够得着。两个动作复用两个既有实现与两份既有文案，不新增设置项。
+
+def _slot_page_dialog(tmp_path: Path):
+    """真设置窗：slot0 页（路由视图），全局侧带脏值。"""
+    from pet import pet_profiles
+    from pet.settings_slot_config import route_settings_config
+
+    base = tmp_path / "appdata"
+    main = Config(base=base)
+    main.set("pet_opacity", 55)
+    main.set("autostart_wanted", True)
+    main.set("self_talk_texts", ["全局台词"])
+    main.set("chat", {
+        "active_provider": "relay",
+        "providers": {"relay": {"name": "中转", "api_key": "sk-live", "base_url": "x"}},
+    })
+    assert main.save() is True
+    assert pet_profiles.write_profile_settings(
+        main.dir, 0, {"scale": 0.8, "playback_speed": 1.5}, user_customized=True).status == "ok"
+    routed = route_settings_config(Config(base=base, instance_id="slot-0"))
+    return ModernSettingsDialog(routed, include_ai=False), main
+
+
+def test_slot_page_exposes_both_reset_scopes_and_global_reaches_global_keys(
+        qapp, tmp_path: Path, monkeypatch):
+    """slot0 页给得出「本宠」与「全局」两个动作，且全局那个真的重置全局面。"""
+    from pet import pet_profiles, settings_slot_config
+
+    dialog, main = _slot_page_dialog(tmp_path)
+    seen: list = []
+
+    def answer_yes(host, scope=None):
+        box, confirm = settings_reset_defaults.build_reset_confirm_box(host, scope)
+        try:
+            seen.append((scope, box.text()))
+            assert box.defaultButton() is not confirm, "破坏性操作的默认钮仍必须是取消"
+        finally:
+            box.deleteLater()
+        return True
+
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", answer_yes)
+    try:
+        assert dialog.reset_defaults_btn.toolTip() == settings_reset_defaults.RESET_SLOT_TOOLTIP
+        global_btn = dialog.reset_global_defaults_btn
+        assert global_btn.toolTip() == settings_reset_defaults.RESET_TOOLTIP
+        assert global_btn.isEnabled() is True
+
+        global_btn.click()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+    assert seen == [(settings_reset_defaults.RESET_SCOPE_GLOBAL,
+                     settings_reset_defaults.RESET_HEADLINE)], (
+        "全局动作必须用全局作用域的确认文案（不能借本宠那套）")
+
+    reloaded = Config(base=tmp_path / "appdata")
+    assert reloaded.get("pet_opacity") == 100, "全局 reset 必须回出厂默认"
+    assert reloaded.get("autostart_wanted") is False
+    assert reloaded.get("self_talk_texts") != ["全局台词"]
+    assert reloaded.data["chat"]["providers"]["relay"]["api_key"] == "", (
+        "保留集：内存里的明文凭据不落盘，但凭据容器（名字 + ref）必须还在")
+    assert "relay" in reloaded.data["chat"]["providers"]
+
+    profile = pet_profiles.read_slot_profile(main.dir, 0)
+    assert profile.value("scale") == 0.8, "全局 reset 不动任何每宠偏好"
+    assert profile.value("playback_speed") == 1.5
+    assert settings_slot_config.is_main_identity("slot-0") is True
+
+
+def test_global_reset_from_a_slot_page_keeps_other_pets_and_the_active_set(
+        qapp, tmp_path: Path, monkeypatch):
+    """全局 reset 的作用域边界：别的宠档案、活跃集合、本宠位置都原样。"""
+    from pet import pet_profiles
+
+    base = tmp_path / "appdata"
+    main = Config(base=base)
+    assert main.save() is True
+    assert pet_profiles.write_profile_settings(
+        main.dir, 1, {"character": "nova", "scale": 1.4}).status == "ok"
+    assert pet_profiles.write_profile_geometry(
+        main.dir, 1, {"rx": 0.5, "ry": 0.6, "screen_name": "primary"}).status == "ok"
+    assert pet_profiles.save_active_set(main.dir, [0, 1]).status == "ok"
+    before_profile = pet_profiles.slot_profile_path(main.dir, 1).read_bytes()
+    before_active = pet_profiles.active_set_path(main.dir).read_bytes()
+
+    from pet.settings_slot_config import route_settings_config
+
+    dialog = ModernSettingsDialog(
+        route_settings_config(Config(base=base, instance_id="slot-1")), include_ai=False)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset",
+                        lambda _parent, _scope=None: True)
+    try:
+        dialog.reset_global_defaults_btn.click()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+    assert pet_profiles.slot_profile_path(main.dir, 1).read_bytes() == before_profile, (
+        "别的宠（含本宠）档案一个字节都不许动")
+    assert pet_profiles.active_set_path(main.dir).read_bytes() == before_active
+
+
+def test_slot_page_per_pet_action_still_touches_only_this_pet(
+        qapp, tmp_path: Path, monkeypatch):
+    """对照：同一个窗口里的「本宠」动作不吃全局面（两个动作各管各的）。"""
+    dialog, main = _slot_page_dialog(tmp_path)
+    before_main = main.path.read_text(encoding="utf-8")
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset",
+                        lambda _parent, _scope=None: True)
+    try:
+        dialog.reset_defaults_btn.click()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+    assert main.path.read_text(encoding="utf-8") == before_main, "本宠 reset 不碰全局配置"

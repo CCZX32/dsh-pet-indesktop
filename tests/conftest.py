@@ -88,6 +88,27 @@ def _no_modal_message_boxes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_modal_save_failure_choice(monkeypatch):
+    """保存失败出口的模态框同样必须"不弹"（同 _no_modal_message_boxes 的理由）。
+
+    ``pet/settings_close_flow`` 的失败框是**自建** QMessageBox + ``exec()``，不在上面
+    那组静态方法桩的覆盖范围内：任何"关窗时保存失败"的用例都会卡在这个模态框上
+    （与旧实现里设置对话框弹模态 warning 卡住 CI 是同一类事故）。
+
+    默认答案 = 继续编辑（等同用户不放弃），对产品行为的影响与改动前逐位一致
+    （改动前保存失败也不关窗）。要断言文案/按钮语义或验证"用户选择放弃"的用例
+    自行 monkeypatch 这个 seam——``tests/test_settings_stale_form_exit.py`` 就是用它
+    取产品真实构造的框。
+    """
+    try:
+        from pet import settings_close_flow
+    except Exception:
+        return
+    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved",
+                        lambda parent, failure: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dsh_profile_write(monkeypatch):
     """禁止测试触发对**真实** ~/.dsh/profiles 的桥接 link 自检。
 

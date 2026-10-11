@@ -76,6 +76,59 @@ Name: "{autodesktop}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"; Task
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppShortName}}"; Flags: nowait postinstall
 
-[UninstallDelete]
-; Defensive: remove any residual runtime dirs (onedir normally leaves none)
-Type: filesandordirs; Name: "{app}\_MEI*"
+; 注：这里刻意没有 [UninstallDelete]。
+; 旧版有一条 `Type: filesandordirs; Name: "{app}\_MEI*"`，是按名字通配删除——
+; `_MEI数字` 是 PyInstaller 的解包目录命名，安装目录里出现的同名目录并不保证是
+; 本产品的（任何以本目录为工作目录启动的 onefile 程序都会在这里解包）。没有归属
+; 证据就不删：本产品自己的 onefile 运行目录由 pet/runtime_cleanup.py 按归属标记
+; 清理（见下方 [Code] 的卸载清理调用）。
+
+[Code]
+{ 卸载清理必须在删除 exe 之前跑：exe 一旦被删，清理实现就没了。
+  usUninstall 是卸载流程里最早的步骤，此处的 Exec 先于文件删除。
+  清理只删本产品 own 的东西（自启项 / Claude hooks / DSH 桥接插件），
+  失败必须留痕：退出码写进卸载日志，交互式卸载还会弹一次提示。
+  注：本 .iss 是 UTF-8 无 BOM（Inno 按 ANSI 读取），因此**字符串字面量只用 ASCII**，
+  中文说明留在注释里；面向用户的详细结果由 Python 侧写进 uninstall-cleanup.log。}
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  CleanupExe: String;
+  WorkDir: String;
+  ResultCode: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    exit;
+  CleanupExe := ExpandConstant('{app}\{#MyAppExeName}');
+  if not FileExists(CleanupExe) then
+  begin
+    Log('dsh-pet uninstall cleanup skipped: executable not found: ' + CleanupExe);
+    exit;
+  end;
+  { 工作目录先取系统临时目录：onefile 形态会用 --runtime-tmpdir 在当前目录解包，
+    指到安装目录会在卸载过程中再造一个解包目录；TEMP 不可用时退回安装目录本身
+    （它一定存在，因为 exe 就在那里）。}
+  WorkDir := ExpandConstant('{%TEMP}');
+  if (WorkDir = '') or (not DirExists(WorkDir)) then
+    WorkDir := ExpandConstant('{app}');
+  if Exec(CleanupExe, '--uninstall-cleanup', WorkDir,
+          SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+      Log('dsh-pet uninstall cleanup finished (exit 0)')
+    else
+    begin
+      Log('dsh-pet uninstall cleanup failed for some steps (exit '
+        + IntToStr(ResultCode) + ')');
+      SuppressibleMsgBox('dsh-pet uninstall cleanup did not fully succeed (exit code '
+        + IntToStr(ResultCode) + '). Autostart, Claude hooks or the DSH bridge plugin'
+        + ' may still be present; see uninstall-cleanup.log in the configuration'
+        + ' directory for details.', mbError, MB_OK, IDOK);
+    end;
+  end
+  else
+  begin
+    Log('dsh-pet uninstall cleanup could not start: ' + SysErrorMessage(ResultCode));
+    SuppressibleMsgBox('Could not run the dsh-pet uninstall cleanup program: '
+      + SysErrorMessage(ResultCode), mbError, MB_OK, IDOK);
+  end;
+end;

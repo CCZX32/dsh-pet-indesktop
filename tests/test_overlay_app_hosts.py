@@ -150,7 +150,7 @@ def test_overlay_switch_character_syncs_open_chat_window(tmp_path):
 
         overlay.switch_character("nova")
 
-        assert shell.config.get("character") == "nova"
+        assert overlay._sprite_config(overlay.sprite).get("character") == "nova"
         assert window.character_id == "nova", "完整聊天窗必须跟着切角色"
         assert window.session.character_id == "nova", "会话也按新角色取"
     finally:
@@ -288,10 +288,10 @@ def test_overlay_promotion_switches_open_chat_window_to_promoted_character(tmp_p
 
         assert overlay.exit_pet(overlay.sprite) is True
 
-        assert overlay.sprite is child
-        assert shell.config.get("character") == "nova", "提升者身份已接管主配置"
-        assert window.character_id == "nova", "提升后聊天窗必须跟提升者的角色"
-        assert window.session.character_id == "nova", "会话按新角色取"
+        assert overlay.sprite is None
+        assert child in overlay._spawned
+        assert window.character_id != "nova", "关闭0不能改变共享会话角色"
+        assert window.session.character_id == window.character_id
     finally:
         _teardown(overlay)
 

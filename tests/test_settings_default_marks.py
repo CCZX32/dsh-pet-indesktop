@@ -12,8 +12,8 @@
    （``click_sound_enabled``）重置后**立即**写盘——落盘时机跟着该行自己的保存语义，
    重置不新增写回路径；
 4. 重置后保存并退出 → 新开的 Config 读回默认值（round trip 不绕开既有写回）；
-5. 子宠页**真正**主桌宠专属的行（写 OS 登录项的开机自启）依旧置灰且**不提供重置
-   入口**（同页的 per-slot 行、以及改由配置路由接管的进程级行都不受影响）；
+5. 子宠页的**全局**行（开机自启，写 OS 登录项）可编辑且行内写明"影响所有桌宠"——
+   判据是"能不能改"，不是"是哪只宠的页面"；同页的 per-slot 行不受影响；
 6. 被依赖开关隐藏的行不显示标记；前置开关重新打开后标记回来（不做可见性记账）；
 7. 没有可比配置默认值的行（逐服务商字段 / 列表成员 / UI 记忆）不显示标记也不报错，
    四类之外的控件类型同样不参与。
@@ -57,7 +57,7 @@ NO_DEFAULT_ROWS = frozenset({
     "provider_name", "api_url", "model", "api_key", "timeout", "max_tokens", "skip_ssl",
     "vision_same", "vision_model", "vision_url", "vision_key",
     # 岛指标行是 island_metrics **列表**的成员，不是标量键
-    "island_network", "island_cpu", "island_mem", "island_gpu",
+    "island_network", "island_cpu", "island_mem", "island_gpu", "island_fps",
     # 台词编辑器的「上次打开的层」是 UI 记忆，不是偏好
     "dialogue_scope",
 })
@@ -101,9 +101,15 @@ def _reveal(dialog, row) -> None:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """真实设置窗（主宠页）+ 它的 Config 与配置目录。"""
+    """真实设置窗（主宠页）+ 它的 Config 与配置目录。
+
+    配置面按生产形态给：slot0 身份经 ``SlotRoutedConfig`` 分流，每宠键（点击音效、
+    气泡方案…）写进 ``config-slot-0.json``，全局键仍进 ``config.json``。
+    """
+    from pet.settings_slot_config import route_settings_config
+
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    cfg = Config(base=tmp_path)
+    cfg = route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
     dialog = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
     dialog.show()
     app.processEvents()
@@ -220,7 +226,8 @@ def test_single_reset_keeps_config_and_disk_untouched(env):
 
     # 前置：先把出厂配置落盘，磁盘断言才有可断的对象（"文件不存在就整段跳过"等于
     # 没断——条件守卫一旦因环境变化不成立，这条验收会静默失效而不是变红）。
-    cfg.save()
+    # 路由视图只在有 pending 时才落盘，故这里直接写主配置那份出厂整表。
+    Config(base=tmp_path).save()
     config_path = cfg.dir / "config.json"
     assert config_path.exists(), "前提：磁盘上已有一份出厂配置"
     on_disk_before = config_path.read_text(encoding="utf-8")
@@ -267,10 +274,10 @@ def test_single_reset_of_an_immediate_save_row_writes_through_at_once(env):
 
     assert row.control.isChecked() is True
     assert row.modified_mark.isHidden()
-    # 重置后立即落盘（不是"保存并退出时才生效"）
+    # 重置后立即落盘（不是"保存并退出时才生效"）：每宠键落在 slot0 档案里
     assert cfg.get("click_sound_enabled") is True
-    config_path = cfg.dir / "config.json"
-    assert json.loads(config_path.read_text(encoding="utf-8"))["click_sound_enabled"] is True
+    slot_path = cfg.path
+    assert json.loads(slot_path.read_text(encoding="utf-8"))["click_sound_enabled"] is True
 
 
 # —— ④ 保存并退出后读回默认 ————————————————————————————————————
@@ -319,32 +326,40 @@ def test_no_chat_build_still_installs_marks(tmp_path, monkeypatch):
 
 # —— ⑤ 子宠页：主宠专属行置灰且不提供重置 ————————————————————————
 
-def test_sub_pet_page_keeps_main_pet_only_rows_locked(tmp_path, monkeypatch):
+def test_sub_pet_page_keeps_autostart_editable_with_its_scope_stated(tmp_path, monkeypatch):
+    """子宠页的开机自启行**可编辑**，且界面自己说清它的全局作用域。
+
+    旧口径把「写 OS 登录项」的行一律按"仅主桌宠可设置"置灰；而 `autostart_wanted` 是
+    **全局键**（系统登录项只有一份），规范 §五要求"任意宠可以编辑全局设置，但界面必须
+    明确说明影响所有桌宠"——所以这里改的是判据与文案，不是把能力交出去。判据见
+    `pet/settings_pet_controls.py`（tooltip / 行 hint）与
+    `docs/SETTINGS-CHANGE-GATES.md` 的 2026-10-10 记录。
+
+    子宠页仍有一类真正置灰的行（直播捕获兼容——重启级拓扑输入、保存写 slot 文件而拓扑
+    判定只读主配置），它的契约在 `tests/test_stream_capture_copy.py` 里单独钉。
+    """
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     cfg = Config(base=tmp_path, instance_id="slot-1")
     dialog = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
     dialog.show()
     app.processEvents()
     try:
-        # 子宠页仍有一类**真正**主桌宠专属的行：开机自启写的是 OS 登录项，与哪只
-        # 桌宠无关（那些"进程级但声明读主配置"的键已改由设置进程的配置路由接管，
-        # 见 pet/settings_slot_config.py，harness 两行随之可编辑）。
-        locked = _row(dialog, "autostart")
-        _reveal(dialog, locked)
-        locked.control.setChecked(True)
-        app.processEvents()
-        # 改得动数据也不行：主桌宠专属的行在子宠页置灰，且不给"改回默认"入口
-        assert locked.control.isEnabled() is False
-        assert not locked.modified_mark.isHidden()
-        assert locked.default_reset_button.isVisible() is False
+        autostart = _row(dialog, "autostart")
+        _reveal(dialog, autostart)
+        assert autostart.control.isEnabled() is True, "任意宠都能编辑全局的开机自启"
+        assert "影响所有桌宠" in autostart.control.toolTip()
+        assert "影响所有桌宠" in autostart.hint_label.text()
 
-        # 同一页的 per-slot 行不受影响（证明闸门只拦进程级行，不是一刀切）
+        autostart.control.setChecked(True)
+        app.processEvents()
+        assert autostart.modified_mark.isVisible(), "改动照旧出标记"
+
+        # 同一页的 per-slot 行不受影响（证明这里改的是这一行的判据，不是一刀切放开）
         per_slot = _row(dialog, "on_top")
         _reveal(dialog, per_slot)
         per_slot.control.setChecked(False)
         app.processEvents()
         assert per_slot.control.isEnabled() is True
-        assert per_slot.default_reset_button.isVisible() is True
     finally:
         dialog.close()
         app.processEvents()

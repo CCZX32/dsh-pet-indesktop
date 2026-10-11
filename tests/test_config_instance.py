@@ -150,15 +150,19 @@ def test_save_retries_transient_share_conflict(tmp_path, monkeypatch):
 
     瞬时共享冲突（MSVCRT ``_wopen`` 共享模式不含 FILE_SHARE_DELETE）必须退避
     重试后成功，而不是让「保存并退出」弹"配置未能写入磁盘"。
+
+    用**全局**键（歌词提前量）当载荷：``rx`` 这类每宠键／位置键的真值在
+    ``config-slot-0.json``，全局整表写会按归属表把它过滤掉，这里断的就是
+    ``Config.save`` 自己的写盘重试。
     """
     config = Config(base=tmp_path)
-    config.set("rx", 0.25)
+    config.set("music_lyric_lead_seconds", 0.25)
     fake, seen = _flaky_replace(config.path, 2)
     monkeypatch.setattr(os, "replace", fake)
 
     assert config.save() is True
     assert seen["n"] == 2                     # 前两次冲突都重试掉了
-    assert json.loads(config.path.read_text(encoding="utf-8"))["rx"] == 0.25
+    assert json.loads(config.path.read_text(encoding="utf-8"))["music_lyric_lead_seconds"] == 0.25
     assert list(config.dir.glob("*.tmp")) == []
 
 

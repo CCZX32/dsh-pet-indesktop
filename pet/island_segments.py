@@ -42,17 +42,25 @@ logger = logging.getLogger(__name__)
 NETWORK = "network"
 CPU = "cpu"
 MEM = "mem"
-#: GPU 段（P3 Slice F1 的能力占位）：**已知 id、恒不可用**——本版本没有数据源。
-#: 它因此是"已注册但不占位"的段：胶囊上一个像素都不画，卡片里写明原因。把它登记
-#: 成已知 id 而不是让它当"未实现的残留 id"，是为了让「这版没有这个能力」与
-#: 「配置里写了个不存在的 id」在 UI 上分得开（前者进卡片原因行，后者是 ``--`` 降级段）。
+#: GPU 段：读数来自 ``pet/gpu_monitor.py``（Windows PDH 的**最忙引擎**占用），由
+#: ``pet/sys_monitor.py`` 的共享采样线程按订阅喂。它如今与其它内置段同规——胶囊上
+#: 一个定宽读数、展开卡片一行详情；平台不支持时按 ``unsupported`` 不占位（卡片仍
+#: 写原因）。把它登记成已知 id 而不是"未实现的残留 id"，是为了让「这台机器没有这个
+#: 能力」与「配置里写了个不存在的 id」在 UI 上分得开（前者进卡片原因行，后者是
+#: ``--`` 降级段）。
 GPU = "gpu"
+#: 游戏帧率段（``island_metrics`` 的 fps 成员，**默认关**）：读数是**游戏的 Present
+#: 帧率**——游戏每秒真正呈现到屏幕上的帧数。三个口径不许混算，也不许互相替代：
+#: ①它不是桌宠动画的帧率（素材 fps / 渲染节拍）；②它不是显卡占用推算出来的；
+#: ③它只对"当前采集目标"成立（目标由 ``game_fps_target_mode`` 决定：跟随前台程序
+#: 或指定程序名），目标切走后的旧读数一律丢弃。采集链路的平台边界是 Windows
+#: （系统级性能事件接口，首次使用可能需要授权）：其他平台上这一段按
+#: ``unsupported`` 不占位，卡片里写原因——"这台机器没有这个能力"与"配置里写了
+#: 个不存在的 id"必须分得开（同 GPU 的登记口径）。
+FPS = "fps"
 #: 内置段 id 全集——它们是**保留字**：第三方段注册同名 id 会与内置段的折叠/卡片
 #: 索引撞车，故注册时直接拒注（见 :func:`register_segment`）。
-BUILTIN_SEGMENT_IDS = frozenset({NETWORK, CPU, MEM, GPU})
-#: GPU 段不可用的原因。**如实**：本版本没接入采集——不许写成"探测过本机，没有
-#: GPU"（那是一次我们没做过的探测，机器的谎话比占位更坏）。
-GPU_UNAVAILABLE_REASON = "本版本未接入 GPU 采集（占位段）"
+BUILTIN_SEGMENT_IDS = frozenset({NETWORK, CPU, MEM, GPU, FPS})
 
 #: 段状态词表（呈现见 :func:`render_compact`）。
 STATE_OK = "ok"
@@ -319,6 +327,41 @@ def render_compact(seg: SegmentSnapshot) -> str | None:
 def alert_thresholds(metric_id: Any) -> tuple[float, float] | None:
     """该指标的 ``(warn, crit)`` 阈值；没声明过阈值的段返回 ``None``（永不告警）。"""
     return ALERT_THRESHOLDS.get(metric_id)
+
+
+def seed_thresholds(segment_id: Any, thresholds: Any) -> tuple[float, float] | None:
+    """把**声明源**（组件清单等宿主侧声明）里的阈值并进告警表，返回归一化后的值。
+
+    为什么需要它：判定链（:func:`alert_severity`）只看这张表，而清单里的组件
+    还没被 ``register_segment`` 注册过（注册是运行期、要看 provider 能不能导入），
+    没有这一步，"声明了阈值却不告警"就成了必然。**注册面的条目优先**：同 id 已经
+    注册过的阈值不被清单覆盖（注册就是这份进程里更强的声明）。
+
+    非法阈值按"这条声明不合法"处理：记一条 warning 并返回 ``None``、**不动表**
+    （宁可这一段不告警，也不让脏值把既有条目改坏）。
+    """
+    if segment_id in _SEGMENTS:
+        return None
+    if thresholds is None:
+        return None
+    try:
+        normalized = _clean_thresholds(str(segment_id), thresholds)
+    except (ValueError, TypeError) as exc:
+        logger.warning("段 %s 的声明阈值非法，未并入告警表：%s", segment_id, exc)
+        return None
+    ALERT_THRESHOLDS[segment_id] = normalized
+    return normalized
+
+
+def drop_thresholds(segment_id: Any) -> bool:
+    """撤掉**声明源**并进告警表的阈值（组件卸载 = 撤声明、撤阈值，不留第二真值）。
+
+    内置段与已注册段的条目不动：前者是产品自己的账，后者归 ``unregister_segment``
+    管（那条路径会一并撤）。返回是否真的撤掉了。
+    """
+    if segment_id in BUILTIN_SEGMENT_IDS or segment_id in _SEGMENTS:
+        return False
+    return ALERT_THRESHOLDS.pop(segment_id, None) is not None
 
 
 def alert_severity(metric_id: Any, value: Any, previous: str = "") -> str:
@@ -617,11 +660,17 @@ def unregister_segment(segment_id: Any) -> bool:
     **同时清空盒宽缓存**：缓存按 ``(id, 字体指纹)`` 记，注销后同名 id 带着新
     ``max_text`` 重新注册时必须重测，否则新声明会拿到旧样本的盒宽。注销是插件
     卸载这条冷路径，整表清缓存比"按 id 精细失效"更简单且不可能漏。
+
+    **超宽告警去重记录也按 id 撤**：那本账按 ``(id, 字体指纹)`` 去重，注销后同名
+    id 用**新**样本重新注册时必须能重新告警一次——不撤的话新声明会继承旧声明的
+    "已经告过了"，超宽这件事就再也不会在日志里出现（卸载重装后静默超标）。
     """
     if _SEGMENTS.pop(segment_id, None) is None:
         return False
     if segment_id not in BUILTIN_SEGMENT_IDS:
         ALERT_THRESHOLDS.pop(segment_id, None)
+    for key in [item for item in _OVERSIZE_WARNED if item[0] == segment_id]:
+        _OVERSIZE_WARNED.discard(key)
     clear_width_cache()
     return True
 
@@ -648,32 +697,43 @@ def clear_segments() -> None:
     clear_width_cache()
 
 
+def judge_oversize(declaration, font_metrics, *, font_key=None) -> bool:
+    """**公开的超宽判决**（含"同一字体只告警一次"的去重）：声明源与注册面共用。
+
+    ``declaration`` 是任何带 ``id`` 与 ``is_oversize`` 的声明——``SegmentDeclaration``
+    或宿主按清单装配的探针声明（``island_extension_host.ComponentDeclaration``）。
+    把判决与告警都收在这里，是为了让"哪些段先被折"的 px 口径**只有一份**：
+    ``oversize_segment_ids``（注册面）与宿主的首批折叠候选（清单面）都走这条。
+    """
+    key = font_metrics_key(font_metrics) if font_key is None else font_key
+    if not declaration.is_oversize(font_metrics, font_key=key):
+        return False
+    if (declaration.id, key) not in _OVERSIZE_WARNED:
+        _OVERSIZE_WARNED.add((declaration.id, key))
+        logger.warning(
+            "第三方段 %s 的声明盒宽 %dpx 超过 %dpx 上限：记入 +N 首批折叠候选名单"
+            "（注册保留，但它会先被折进 chip；超长段自付成本）",
+            declaration.id, declaration.width_px(font_metrics, font_key=key),
+            MAX_SEGMENT_WIDTH_PX,
+        )
+    return True
+
+
 def oversize_segment_ids(font_metrics, *, font_key=None) -> tuple[str, ...]:
     """声明盒宽超过 :data:`MAX_SEGMENT_WIDTH_PX` 的第三方段 id（注册序）。
 
     这是 120px 规则的落地点：超宽段**照样注册**，但进这张"首批折叠候选"名单
-    （长段自付成本），而不是把注册掐死在门口。**宿主尚未消费这张名单**
-    （收缩流水线的"先折候选"接线在 F2，见 docs/ISLAND-SEGMENTS-EXTENSION.md
-    §八 的如实清单）——当前它只是一份查询结果，不是已生效的行为。
+    （长段自付成本），而不是把注册掐死在门口。**宿主已消费这张名单**（F2 起）：
+    宿主按同一份判决（:func:`judge_oversize`，注册面与清单面共用一个实现）把超宽段
+    喂进 ``pet/island_layout.plan_info_row`` 的 ``fold_first_ids``——超宽段因此在收缩
+    流水线里**先于**尾部段被折，哪怕它不在列表尾部；折叠计数、``+N`` chip 与卡片标注
+    也都按"实际折掉的那几段"算（见 ``apply_shrink``）。
 
     判决在这里做而不是注册处，是因为 px 必须**实测**：第三方注册时进程里通常还
     没有字体（本项目的盒宽从来不写死 px）。同一个声明按 ``(id, 字体指纹)`` 只告警
-    一次——判决每次布局都会问，日志不该跟着刷屏。
+    一次——判决每次布局都会问，日志不该跟着刷屏（注销会撤掉该 id 的去重记录，
+    重装后能重新告警一次）。
     """
     key = font_metrics_key(font_metrics) if font_key is None else font_key
-    oversize: list[str] = []
-    for declaration in _SEGMENTS.values():
-        # 走 declaration.width_px（含单位盒的完整口径）——直接用
-        # measure_segment_width 会让长单位（如 Mbps）绕过 120px 判决（R1 评审修复）。
-        width = declaration.width_px(font_metrics, font_key=key)
-        if width <= MAX_SEGMENT_WIDTH_PX:
-            continue
-        oversize.append(declaration.id)
-        if (declaration.id, key) not in _OVERSIZE_WARNED:
-            _OVERSIZE_WARNED.add((declaration.id, key))
-            logger.warning(
-                "第三方段 %s 的声明盒宽 %dpx 超过 %dpx 上限：记入 +N 首批折叠候选名单（宿主尚未消费）"
-                "（注册保留，但它会先被折进 chip；超长段自付成本）",
-                declaration.id, width, MAX_SEGMENT_WIDTH_PX,
-            )
-    return tuple(oversize)
+    return tuple(declaration.id for declaration in _SEGMENTS.values()
+                 if judge_oversize(declaration, font_metrics, font_key=key))

@@ -113,7 +113,9 @@ def test_switch_character_refreshes_bubble_anchor(tmp_path):
     try:
         before = len(follower.bubble.moves)
         shell.switch_character("other-character")
-        assert shell._config.get("character") == "other-character"
+        # "角色"是每宠键：真值在槽档案里（生产里 ``_config`` 是 SlotRoutedConfig
+        # 会路由到它；这里的假配置无路由，直接断言生效的每宠配置）。
+        assert shell._sprite_config(shell.sprite).get("character") == "other-character"
         assert len(follower.bubble.moves) > before, "换角色后必须重定位一次锚点"
     finally:
         shell._delete_runtime_marker()

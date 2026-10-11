@@ -92,17 +92,24 @@ def test_config_persists_auto_hide(tmp_path):
 
 
 def test_config_persists_click_behavior_keys(tmp_path):
-    """点击行为（显示余额/自言自语）与音效开关持久化。"""
-    from pet.config import Config
+    """点击行为（显示余额/自言自语）与音效开关持久化。
 
-    cfg = Config(tmp_path)
+    三键都是**每宠键**：真值在 ``config-slot-0.json``，生产里由 slot0 的路由视图读写。
+    """
+    from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    def slot0():
+        return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+    cfg = slot0()
     assert cfg.get("click_show_balance", False) is False
     cfg.set("click_sound_enabled", False)
     cfg.set("click_show_balance", True)
     cfg.set("click_show_self_talk", True)
-    cfg.save()
+    assert cfg.save() is True
 
-    reloaded = Config(tmp_path)
+    reloaded = slot0()
     assert reloaded.get("click_sound_enabled", True) is False
     assert reloaded.get("click_show_balance", False) is True
     assert reloaded.get("click_show_self_talk", False) is True

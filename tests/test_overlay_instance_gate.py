@@ -359,7 +359,10 @@ def test_main_legacy_topology_also_takes_gate_and_does_not_take_slot_lock(
     assert app_mod.main(["dsh-pet", "--slot", "3"]) == 0
     config_dir = tmp_path / APP_DIR_NAME
     assert started and started[0]["slot_id"] == 3          # 身份照旧按 --slot 选
-    assert os.environ["DSH_PET_INSTANCE"] == "slot-3"
+    # G1 身份口径：``--slot N`` 只作为**实例身份**显式传给 AppShell；进程级
+    # ``DSH_PET_INSTANCE`` 固定空串——它代表"全局配置身份"，不再被 --slot 污染
+    #（否则 ``Config(instance_id=None)`` 会去读 config-slot-N.json，全局与档案重合）。
+    assert os.environ["DSH_PET_INSTANCE"] == ""
     assert not (config_dir / "slots").exists()              # 不抢锁 = 不建 slots/
     assert not list(config_dir.glob("config-slot-*.json"))
     # 门真被抢过（留痕），且正常退出已释放（锁文件不残留）

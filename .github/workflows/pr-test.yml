@@ -7,6 +7,16 @@ on:
   pull_request:
   push:
     branches: [main]
+  # 手动运行（Actions 页面 → Run workflow）：用于三端跨平台对齐——手动指定
+  # source_ref 时三端检出同一棵树。PR 路径不受影响：PR 事件仍检出合并提交
+  # （refs/pull/N/merge），保留「集成后才有红绿判定」的语义。
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: '要验证的 ref/SHA（留空 = 本 workflow 的触发 ref，即默认检出）'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -31,6 +41,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # PR 事件下 github.sha = 合并提交（refs/pull/N/merge），保持「集成后
+          # 才能过门」的语义；手动 dispatch 用 source_ref 指向同一棵树，供三端
+          # 跨平台对齐。留空即回落 github.sha（= 事件默认检出的那个提交）。
+          ref: ${{ github.event.inputs.source_ref || github.sha }}
+
+      # 三端各自记录「这次到底验的是哪棵树」：PR 事件下 checkout HEAD 是合并
+      # 提交，与 PR 分支 tip 不是同一个 SHA——报告里要能对账，不能只靠印象。
+      - name: Record resolved source SHA
+        shell: bash
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          {
+            echo "### ${{ matrix.os }} 解析到的源码版本"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| event | ${{ github.event_name }} |"
+            echo "| workflow ref | ${{ github.ref }} |"
+            echo "| github.sha（PR = 合并提交） | ${{ github.sha }} |"
+            echo "| PR head sha（分支 tip） | ${{ github.event.pull_request.head.sha }} |"
+            echo "| checkout HEAD | $HEAD_SHA |"
+            echo "| checkout HEAD 摘要 | $(git log -1 --format=%s) |"
+            echo ""
+            echo "PR 事件下 checkout HEAD 是合并提交（集成语义），不等于分支 tip；"
+            echo "三端对齐请用手动 dispatch + source_ref 指向同一提交。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # PySide6 在 Linux 上 import 需要系统 EGL/GL 等库（与 build-linux.yml 一致）
       - name: Install system libraries (Linux)
@@ -44,10 +81,40 @@ jobs:
         with:
           python-version: '3.11'
 
+      # bridge 门禁依赖 `node --test`（Node 20 无 glob，清单硬编码在下面）。
+      # 显式固定 Node 版本：runner 预装版本会随时间漂移，门禁口径不能跟着飘。
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # 三端「这一轮到底装了什么」必须留痕：requirements.txt 全是 `>=` 无上限、
+      # 无 lock，三端各自解析最新兼容版；imageio-ffmpeg 每平台是不同的 ffmpeg
+      # 构建，是 webm 族时序 flake 的平台差异源。
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          NODE_VERSION="$(node --version)"
+          python -m pip freeze > "$RUNNER_TEMP/pip-freeze.txt"
+          {
+            echo "### ${{ matrix.os }} 工具链"
+            echo ""
+            echo "- python: $(python --version 2>&1)"
+            echo "- node: $NODE_VERSION"
+            echo ""
+            echo "<details><summary>pip freeze</summary>"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/pip-freeze.txt"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ruff
         run: ruff check pet/ tests/

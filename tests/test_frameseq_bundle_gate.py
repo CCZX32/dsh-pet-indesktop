@@ -5,13 +5,18 @@
 一种缺陷，断言**退出码 + 报错关键词**——门是构建管线的一环，它的契约就是
 「非零退出 + 说清怎么补」。
 
-三类断言：
+四类断言：
 
 1. 判定行为：完整树 0 退出；缺子树 / 缺单段产物 / 世代档陈旧 / meta 损坏
    逐类 1 退出，且报错能指出路径与补法；
 2. 硬约束：零 Qt 零第三方依赖（AST 扫 import）、只读（跑完素材树字节级不变）；
 3. 接线：``build_onedir.ps1`` 的非 GIF 分支在 PyInstaller 起跑前调用本门、
-   非零即中止，GIF 分支跳过（源码文本断言——行为测试看不到「有没有接上」）。
+   非零即中止，GIF 分支跳过；``build_macos.sh`` / ``build_linux.sh`` 同口径
+   （源码文本断言——行为测试看不到「有没有接上」）；
+4. 供给入口（``scripts/prepare_frameseq_bundle.py``，2026-10-11）：先跑本门验证
+   素材是否完整，缺才调 ``tools/convert_frameseq.py``，转完再验一次；**坏缓存
+   不许被盲跳过**（唯一放行依据是验证器的真实退出码）。命令委派用注入的假
+   runner 断言（不真转 106 段 / 28 min），缓存 key 的构件逐条断言可复现。
 
 世代常量与 ``pet/frameseq_provision.py`` 的同源性由 ``TestGenerationHomology``
 从 provision 源码**文本提取**后逐条比对：provision 改档而门内常量没跟，即红。
@@ -27,6 +32,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_frameseq_bundle.py"
@@ -454,3 +461,306 @@ class TestBuildScriptWiring:
         assert _enclosing_gate_block(text).startswith("if (-not $isGif) {")
         call = text.index("check_frameseq_bundle")
         assert text[call - 800:call].count("GIF") >= 1, "注释要说明 GIF 变体为何跳过"
+
+
+# --------------------------------------------------------------------------- 三端 shell 接线
+
+SHELL_SCRIPTS = {
+    "macos": ROOT / "scripts" / "build_macos.sh",
+    "linux": ROOT / "scripts" / "build_linux.sh",
+}
+SHELL_CALL = "scripts/check_frameseq_bundle.py"
+
+
+def _shell_text(name: str) -> str:
+    return SHELL_SCRIPTS[name].read_text(encoding="utf-8")
+
+
+def _shell_gate_block(text: str) -> str:
+    """取 shell 脚本里调用本门的那段 ``if [[ "$needs_frameseq" == "1" ]]; then ... fi``。"""
+    call = text.index(SHELL_CALL)
+    start = text.rindex('if [[ "$needs_frameseq"', 0, call)
+    end = text.index("\nfi\n", call)
+    return text[start:end + 4]
+
+
+class TestShellBuildScriptWiring:
+    """macOS / Linux 的构建脚本本身必须带硬门，不能只在 workflow 里加。
+
+    只在 workflow 里加 = 本地构建、以及任何绕过 workflow 的构建仍然会打出
+    缺帧序列的静默降级包（Windows 的门就装在 ``build_onedir.ps1`` 里）。
+    """
+
+    @pytest.mark.parametrize("name", sorted(SHELL_SCRIPTS))
+    def test_gate_runs_before_pyinstaller(self, name):
+        text = _shell_text(name)
+        assert SHELL_CALL in text
+        assert text.index("check_frameseq_bundle") < text.index("-m PyInstaller")
+
+    @pytest.mark.parametrize("name", sorted(SHELL_SCRIPTS))
+    def test_gate_failure_aborts_build_explicitly(self, name):
+        text = _shell_text(name)
+        block = _shell_gate_block(text)
+        assert "check_frameseq_bundle.py" in block
+        assert "exit 1" in block, "门非零必须显式中止（不靠 set -e 隐式兜底）"
+        assert '"$PYTHON_BIN"' in block, "必须用构建用的解释器跑门（与 PyInstaller 同环境）"
+        assert set(("set -euo pipefail",)).issubset(set(text.splitlines()))
+
+    @pytest.mark.parametrize("name", sorted(SHELL_SCRIPTS))
+    def test_gif_only_variants_skip_gate(self, name):
+        text = _shell_text(name)
+        decision = text[text.index("needs_frameseq=0"):text.index(SHELL_CALL)]
+        assert "gif" in decision and "gif-chat" in decision, "GIF 变体没有 frameseq 这一层"
+        assert "needs_frameseq=1" in decision
+
+    @pytest.mark.parametrize("name", sorted(SHELL_SCRIPTS))
+    def test_gate_is_called_once_and_before_any_variant_build(self, name):
+        text = _shell_text(name)
+        # 一次调用即可覆盖全部变体：门是整树体检（全角色全 clip），与变体无关
+        assert text.count("check_frameseq_bundle.py") == 1
+        assert text.index(SHELL_CALL) < text.index('for variant in "${variant_list[@]}"')
+        assert text.index(SHELL_CALL) < text.index("-m PyInstaller")
+
+
+# --------------------------------------------------------------------------- 素材供给入口
+
+PREPARE_SCRIPT = ROOT / "scripts" / "prepare_frameseq_bundle.py"
+
+
+def _load_prepare():
+    spec = importlib.util.spec_from_file_location("prepare_frameseq_bundle", PREPARE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PREPARE = _load_prepare()
+
+
+class RecordingRunner:
+    """记录真实 argv、按队列返回退出码的假 runner（不执行任何命令、不碰 GUI）。"""
+
+    def __init__(self, *codes: int):
+        self.codes = list(codes)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, cwd=None):
+        self.calls.append(list(argv))
+        code = self.codes.pop(0) if self.codes else 0
+        return subprocess.CompletedProcess(argv, code, stdout="", stderr="")
+
+    @property
+    def steps(self) -> list[str]:
+        return [Path(call[1]).name for call in self.calls]
+
+
+class TestPrepareDelegation:
+    """供给入口的命令委派：先验 → 缺才转 → 再验；坏缓存不盲跳过。
+
+    真转 106 段要 ~28 min，所以委派行为用假 runner 断言：入口的契约是
+    「按真实退出码决定调什么」，这正是注入 runner 能完整覆盖的部分。
+    """
+
+    @staticmethod
+    def _prepare(characters: Path, runner: RecordingRunner, **kwargs):
+        return PREPARE.prepare(characters_dir=characters, character="shenshen",
+                              include="random,events", runner=runner, **kwargs)
+
+    def test_complete_material_skips_conversion(self, tmp_path, capsys):
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "待机呼吸休闲")
+        runner = RecordingRunner(0)
+        assert self._prepare(characters, runner) == 0
+        assert runner.steps == ["check_frameseq_bundle.py"], "素材已完整不许再转"
+        out = capsys.readouterr().out
+        assert "跳过转换" in out
+
+    def test_missing_material_converts_then_revalidates(self, tmp_path):
+        characters = tmp_path / "characters"
+        (characters / "shenshen" / "videos").mkdir(parents=True)
+        runner = RecordingRunner(1, 0, 0)
+        assert self._prepare(characters, runner) == 0
+        assert runner.steps == ["check_frameseq_bundle.py", "convert_frameseq.py",
+                                "check_frameseq_bundle.py"]
+
+    def test_broken_cache_is_not_blindly_skipped(self, tmp_path):
+        # 缓存里是陈旧/半成品产物：验证器判红 → 必须重转 → 再验（再验仍红就判红）
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "写代码", encoder=LEGACY_ENCODER)
+        runner = RecordingRunner(1, 0, 1)
+        assert self._prepare(characters, runner) == 1
+        assert runner.steps == ["check_frameseq_bundle.py", "convert_frameseq.py",
+                                "check_frameseq_bundle.py"]
+
+    def test_converter_failure_stops_with_real_exit_code(self, tmp_path, capsys):
+        characters = tmp_path / "characters"
+        runner = RecordingRunner(1, 7)
+        assert self._prepare(characters, runner) == 7, "必须原样冒泡转换器退出码"
+        assert runner.steps == ["check_frameseq_bundle.py", "convert_frameseq.py"]
+        captured = capsys.readouterr()
+        assert "转换失败" in (captured.out + captured.err)
+
+    def test_force_reconverts_even_when_complete(self, tmp_path):
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "待机呼吸休闲")
+        runner = RecordingRunner(0, 0, 0)
+        assert self._prepare(characters, runner, force=True) == 0
+        assert runner.steps == ["check_frameseq_bundle.py", "convert_frameseq.py",
+                                "check_frameseq_bundle.py"]
+        assert "--force" in runner.calls[1]
+
+    def test_converter_covers_all_folders(self, tmp_path):
+        # 门槛是全树 106 段：只转热集 11 段会让其余 95 段继续判缺
+        characters = tmp_path / "characters"
+        runner = RecordingRunner(1, 0, 0)
+        self._prepare(characters, runner)
+        argv = runner.calls[1]
+        assert argv[1] == PREPARE.CONVERTER_REL
+        assert argv[argv.index("--character") + 1] == "shenshen"
+        assert argv[argv.index("--include") + 1] == "random,events"
+
+    def test_validator_targets_the_same_material_tree(self, tmp_path):
+        characters = tmp_path / "characters"
+        runner = RecordingRunner(1, 0, 0)
+        self._prepare(characters, runner)
+        argv = runner.calls[0]
+        assert argv[1] == PREPARE.VALIDATOR_REL
+        assert argv[argv.index("--characters-dir") + 1] == str(characters)
+
+    def test_both_commands_run_with_one_interpreter(self, tmp_path):
+        characters = tmp_path / "characters"
+        runner = RecordingRunner(1, 0, 0)
+        self._prepare(characters, runner)
+        assert runner.calls[0][0] == runner.calls[1][0] == sys.executable
+
+
+class TestPrepareConstraints:
+    """硬约束：零 Qt 零第三方依赖、不启动 GUI、不写素材树以外的位置。"""
+
+    def test_script_imports_stdlib_only_and_no_qt(self):
+        tree = ast.parse(PREPARE_SCRIPT.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    imported.add("." * node.level + (node.module or ""))
+                elif node.module:
+                    imported.add(node.module.split(".")[0])
+        assert imported, "脚本必须至少导入 argparse/sys"
+        assert imported <= set(sys.stdlib_module_names), f"非标准库依赖: {imported}"
+        assert "pet" not in imported, "供给入口不许 import pet 包（会连带 PySide6 起 GUI）"
+
+    def test_never_touches_user_runtime_or_gui(self, tmp_path):
+        text = PREPARE_SCRIPT.read_text(encoding="utf-8")
+        for forbidden in ("QApplication", "QMessageBox", "uninstall_cleanup",
+                          "APPDATA", "XDG_CONFIG_HOME"):
+            assert forbidden not in text, f"构建期供给不许碰 {forbidden}"
+
+    def test_validate_only_does_not_write_material_tree(self, tmp_path):
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "待机呼吸休闲")
+        before = _snapshot(characters)
+        runner = RecordingRunner(0)   # 假 runner：真实验证器只读，这里断的是入口不写盘
+        PREPARE.prepare(characters_dir=characters, character="shenshen",
+                        include="random,events", runner=runner)
+        assert _snapshot(characters) == before
+
+
+class TestCacheKey:
+    """缓存 key：源文件 hash + 转换器版本 + 编码档 + 平台/依赖版本（缺一即可能命中错缓存）。"""
+
+    @staticmethod
+    def _tree(tmp_path) -> Path:
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "待机呼吸休闲")
+        return characters
+
+    def test_key_is_stable_and_cache_safe(self, tmp_path):
+        characters = self._tree(tmp_path)
+        first = PREPARE.cache_key(characters)
+        assert first == PREPARE.cache_key(characters), "同输入必须同 key（否则缓存永不命中）"
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", first), f"key 只能是安全字符: {first}"
+
+    def test_key_changes_with_source_material(self, tmp_path):
+        characters = self._tree(tmp_path)
+        before = PREPARE.cache_key(characters)
+        _make_clip(characters, "shenshen", "左转奔跑")
+        assert PREPARE.cache_key(characters) != before
+
+    def test_key_changes_with_encoder_grade(self, tmp_path, monkeypatch):
+        characters = self._tree(tmp_path)
+        before = PREPARE.cache_key(characters)
+        monkeypatch.setattr(PREPARE.gate, "ENCODER_DESC", "libwebp lossy q99 (another grade)")
+        assert PREPARE.cache_key(characters) != before, "改档必须换 key（旧档产物会被门判陈旧）"
+
+    def test_key_changes_with_environment(self, tmp_path):
+        characters = self._tree(tmp_path)
+        assert PREPARE.cache_key(characters, env="a") != PREPARE.cache_key(characters, env="b")
+
+    def test_key_ignores_derived_frameseq_files(self, tmp_path):
+        """key 只看源 webm：把派生帧也算进去会让 key 随产物自变（缓存永不命中）。"""
+        characters = self._tree(tmp_path)
+        before = PREPARE.cache_key(characters)
+        derived = next((characters / "shenshen" / "frameseq").rglob("f_*.webp"))
+        derived.write_bytes(b"rewritten derived frame" * 64)
+        assert PREPARE.cache_key(characters) == before
+
+    def test_environment_label_covers_platform_python_and_deps(self):
+        label = PREPARE.environment_label()
+        assert PREPARE.platform_slug() in label
+        major, minor = sys.version_info[:2]
+        assert f"py{major}.{minor}" in label
+        # ffmpeg 每平台是不同的构建（imageio-ffmpeg wheel），webp 编码走 Pillow
+        assert "pillow" in label.lower()
+        assert "imageio-ffmpeg" in label.lower()
+
+    def test_platform_slug_is_filesystem_and_cache_safe(self):
+        slug = PREPARE.platform_slug()
+        assert re.fullmatch(r"[a-z0-9._-]+", slug), slug
+
+    def test_cli_prints_same_key_as_library(self):
+        # 真素材树（assets/characters 已入库，CI 上也在）跑真命令，与库内同源比对
+        characters = ROOT / "assets" / "characters"
+        result = subprocess.run(
+            [sys.executable, str(PREPARE_SCRIPT), "--print-cache-key"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        printed = result.stdout.strip().splitlines()
+        assert len(printed) == 1, printed
+        assert printed[0] == PREPARE.cache_key(characters)
+
+    def test_cli_refuses_foreign_material_root(self, tmp_path):
+        # 转换器只服务仓库内的 assets/characters（无「外部素材根」参数）：指向别处
+        # 必须当场拒绝，否则会出现「验的是 A 树、转的是 B 树」的静默错配
+        result = subprocess.run(
+            [sys.executable, str(PREPARE_SCRIPT), "--characters-dir", str(tmp_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), check=False,
+        )
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "--characters-dir" in result.stderr
+
+
+class TestPrepareRealMaterial:
+    """本机素材完整时跑真命令：验证器放行即不许重转（不重写 379 MiB / 28 min）。"""
+
+    def test_complete_repo_material_validates_without_converting(self):
+        characters = ROOT / "assets" / "characters"
+        if not characters.is_dir():
+            pytest.skip("本机没有 assets/characters 素材树")
+        if not GATE.check_bundle(characters).ok:
+            pytest.skip("本机素材树不完整（干净检出的 CI 必然如此）——本机才有真素材")
+        result = subprocess.run(
+            [sys.executable, str(PREPARE_SCRIPT), "--characters-dir", str(characters),
+             "--character", "shenshen"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "跳过转换" in result.stdout
+        assert "新转" not in result.stdout, "素材已完整时不许启动转换"

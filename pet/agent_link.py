@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import weakref
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
@@ -43,7 +44,11 @@ from . import harness_launcher
 from .click_sound import play_sound, resolve_builtin_sound
 from .agent_event_protocol import parse_agent_event
 from .agent_event_normalizer import normalize_event
-from .dsh_state import DshStateConverger, candidate_ports as _dsh_state_candidate_ports
+from .dsh_state import (
+    DshStateConverger,
+    TurnCompletionTracker,
+    candidate_ports as _dsh_state_candidate_ports,
+)
 from .model_access_tracker import ModelAccessTracker
 from .node_runtime import augmented_path as _augmented_path
 from .node_runtime import global_node_modules_roots
@@ -56,6 +61,27 @@ log = logging.getLogger("dsh-pet-standalone")
 
 _LIVE_AGENT_LINK_MANAGERS: weakref.WeakSet = weakref.WeakSet()
 _LIVE_AGENT_MONITORS: weakref.WeakSet = weakref.WeakSet()
+
+try:  # 运行时依赖（PySide6 恒带 shiboken6）；缺失时按"存活"降级，不改变行为
+    import shiboken6 as _shiboken
+except Exception:  # pragma: no cover - 安装破损时的降级路径
+    _shiboken = None
+
+
+def _cpp_object_alive(obj) -> bool:
+    """该 QObject 的 C++ 属主是否仍然存在（无法判定时按存活处理）。
+
+    worker 线程的 ``signal.emit`` 在 C++ 属主已析构后抛
+    ``RuntimeError: Signal source has been deleted``——这是**真实生命周期边界**
+    的竞态（父链析构正好落在 worker 首轮发射窗口内），不是产品逻辑错误；
+    发射边界据此判定"已失效"，退役本代次而不是把异常冒泡成后台未捕获线程异常。
+    """
+    if _shiboken is None:
+        return True
+    try:
+        return bool(_shiboken.isValid(obj))
+    except Exception:
+        return True
 
 # DSH 桥接事件名（_poll 按名字直通处理的；语义层/状态机未建模也计入），
 # 供「未知事件 → 提醒更新/重装 bridge」识别：事件名在语义层（normalize_event）、
@@ -1173,14 +1199,24 @@ class DirGlobTailer:
         return current != self._last_directory_mtime_ns
 
     def read_new_lines(self) -> list[str]:
+        """读取本轮新增行（无游标的兼容出口）。"""
+        return [line for line, _cursor in self.read_new_lines_with_cursors()]
+
+    def read_new_lines_with_cursors(self) -> list[tuple[str, tuple]]:
+        """读取本轮全部子文件的 (行, 读取游标)；游标语义见 :class:`ByteOffsetTailer`。
+
+        多文件（多 DSH 实例分区写入）下同一个逻辑事件可能由两个写者各写一份：
+        带源 ID 的事件由身份账本去重，无源 ID 的事件按各自文件的游标区分
+        （不同的写者 = 不同的文件身份，不是同一次读取）。
+        """
         # 扫描节流的时钟用 monotonic：它是纯间隔比较，墙上时钟被 NTP/手动改时
         # 不能把「多久没扫描」算歪（后拨会让新一轮扫描迟迟不来）。
         now = time.monotonic()
         self._scan(now)
-        lines: list[str] = []
+        items: list[tuple[str, tuple]] = []
         for tailer in self._tailers.values():
-            lines.extend(tailer.read_new_lines())
-        return lines
+            items.extend(tailer.read_new_lines_with_cursors())
+        return items
 
 
 class ByteOffsetTailer:
@@ -1211,7 +1247,18 @@ class ByteOffsetTailer:
         self._file_id = None
 
     def read_new_lines(self) -> list[str]:
-        """读取文件自上次 offset 以来的全部完整新增行。
+        """读取文件自上次 offset 以来的全部完整新增行（无游标的兼容出口）。"""
+        return [line for line, _cursor in self.read_new_lines_with_cursors()]
+
+    def read_new_lines_with_cursors(self) -> list[tuple[str, tuple]]:
+        """读取新增完整行，每行带上**读取游标** ``(文件路径, 文件身份, 行首字节偏移)``。
+
+        游标是摄入去重所需的**进程内身份**（G2 事件标识）：同一文件、同一文件
+        身份、同一字节位置的字节被第二次投递（写者截断后把同一段内容写回、
+        备份还原、copy-rotate）可据此判定为同一次读取；文件轮转/替换后
+        ``file_id`` 变化，同一路径的 offset=0 **不会**与旧文件的 offset=0 碰撞。
+        **这不是上游给的 ID**，只是我们自己的摄入口径——文档与日志都如实标注，
+        不冒称"上游给了 ID"。
 
         半行处理：若读取末尾不是换行符（行被 chunk 截断或写入方尚未写完），
         未完成部分存入 _partial，下次读取时拼回——绝不把半行当整行解析。
@@ -1257,6 +1304,7 @@ class ByteOffsetTailer:
             return []
 
         bytes_to_read = min(size - self.offset, self.max_chunk_bytes)
+        read_start = self.offset          # 本次读的起点（文件内绝对偏移）
         try:
             with open(self.file_path, "rb") as f:
                 f.seek(self.offset)
@@ -1266,7 +1314,10 @@ class ByteOffsetTailer:
             log.warning("读取 tail 文件失败 %s: %s", self.file_path, exc)
             return []
 
+        partial_len = len(self._partial)
         chunk = self._partial + chunk
+        # chunk 首字节在文件中的绝对偏移：上次遗留的半行正好紧挨在本次读的起点之前
+        chunk_start = read_start - partial_len
 
         # 超长行丢弃模式：上个 chunk 已确认某行超过上限，跳到下一个换行再恢复
         if self._discard_until_newline:
@@ -1274,6 +1325,7 @@ class ByteOffsetTailer:
             if idx == -1:
                 return []
             chunk = chunk[idx + 1:]
+            chunk_start += idx + 1
             self._discard_until_newline = False
 
         if chunk and not chunk.endswith(b"\n"):
@@ -1294,10 +1346,99 @@ class ByteOffsetTailer:
         else:
             self._partial = b""
 
-        # utf-8-sig：兼容 PowerShell Add-Content -Encoding UTF8 在文件首行写入的 BOM
-        text = chunk.decode("utf-8-sig", errors="replace")
-        lines = text.splitlines()
-        return [line.strip() for line in lines if line.strip()]
+        # 按**字节**切行再逐行解码，而不是先整体 decode 再 splitlines()：
+        # 每行的行首字节偏移要准，解码后倒推字节位置会被多字节字符算歪（游标是
+        # 去重身份的一部分，算歪即误判）。utf-8-sig 兼容 PowerShell Add-Content
+        # -Encoding UTF8 在文件首行写入的 BOM（逐行解码时只对首行有实际影响）。
+        result: list[tuple[str, tuple]] = []
+        offset = chunk_start
+        parts = chunk.split(b"\n")
+        last_index = len(parts) - 1
+        for index, raw in enumerate(parts):
+            line_offset = offset
+            offset += len(raw) + 1
+            if index == last_index and not raw:
+                continue                  # 末尾换行切出的空段
+            line = raw.decode("utf-8-sig", errors="replace").strip()
+            if line:
+                result.append((line, (str(self.file_path), file_id, line_offset)))
+        return result
+
+
+# ----------------------------------------------------------------------
+# 事件身份（G2）：同一逻辑事件只允许进入呈现管线一次
+# ----------------------------------------------------------------------
+#: 记录身份的**源 ID** 字段与别名归一（按优先级）。顺序与桥接自己的交互身份
+#: 一致（``integrations/dsh-pet-bridge/index.js`` 的 ``interactionIdentity``：
+#: ``requestId || rpcId || approvalId || callId``），保证两条记录只要桥接认为是
+#: 同一个交互，我们算出来的身份也相同。**这些字段是桥接真实写出的字段**
+#: （逐个核实过），不是我们编造的一套 ID 体系。
+_SOURCE_ID_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("request", ("requestId", "request_id")),
+    ("rpc", ("rpcId", "rpc_id")),
+    ("approval", ("approvalId", "approval_id")),
+    ("call", ("callId", "call_id")),
+)
+
+
+class EventIdentityLedger:
+    """摄入去重账本：同一逻辑事件只允许**一次**进入呈现管线。
+
+    键 = **来源 + 会话 + 事件名 + 源 ID**（有源 ID 时），否则 **代次 + 读取游标**
+    （文件身份 + 行首字节偏移）——见 ``BaseAgentMonitor._record_identity``。
+    它挡的是"同一份源事件被投递了两次"（桥接重发 / 多写者各写一份 / 写者截断后
+    把同一段内容写回被重读），**不是**性能节流：同文本不同事件（不同 ID、不同
+    游标）永远是两条合法事件，所以文本不进键。
+
+    - **有界**：最多 ``max_entries`` 条，超出按插入次序淘汰最老的（FIFO）；
+    - **有 TTL**：条目超过 ``ttl_s`` 即视为过期。上游重投递的合理窗口远小于它；
+      "过期后可能重放" 是本轮明确的诚实边界——账本只在内存、不跨重启持久化，
+      因此**不承诺**崩溃后的 exactly-once，文档与提示文案都不得暗示更强保证。
+    - **关监测即清**：``clear()`` 由监视器在启动/停止时调用（旧代次的账本不得
+      滞留，否则重启后合法的同 ID/同游标事件会被误当成重复而丢掉）。
+    - **线程安全**：写入来自监视器 worker，清理来自主线程（``apply_config`` /
+      ``shutdown`` → ``begin_stop``），两侧用一把短锁互斥。
+    """
+
+    __slots__ = ("_items", "_lock", "max_entries", "ttl_s")
+
+    def __init__(self, max_entries: int = 512, ttl_s: float = 900.0) -> None:
+        self._items: dict[tuple, float] = {}
+        # 账本由监视器 worker 线程写、主线程清（apply_config/shutdown → begin_stop），
+        # 两侧必须互斥：`next(iter(...))` 与 `clear()` 竞态会抛 StopIteration，
+        # 把一条合法记录当成"处理失败"丢掉。
+        self._lock = threading.Lock()
+        self.max_entries = max(1, int(max_entries))
+        self.ttl_s = float(ttl_s)
+
+    def note(self, key: tuple) -> bool:
+        """记录该身份；返回 True 表示**之前已经见过**（重复投递，应整条跳过）。"""
+        now = time.monotonic()
+        with self._lock:
+            seen = self._items.get(key)
+            if seen is not None and (now - seen) < self.ttl_s:
+                return True
+            self._purge(now)
+            self._items[key] = now
+            while len(self._items) > self.max_entries:
+                self._items.pop(next(iter(self._items)), None)
+            return False
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def _purge(self, now: float) -> None:
+        """按插入次序清理过期条目（dict 保序 ≈ 时间序，从最老端起删）。"""
+        while self._items:
+            key = next(iter(self._items))
+            if (now - self._items[key]) < self.ttl_s:
+                return
+            self._items.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -1313,6 +1454,15 @@ class AgentEvent:
 
 class BaseAgentMonitor(QObject):
     """Agent 监视器抽象基类。"""
+
+    #: 摄入去重账本的容量与 TTL（G2）。512 条实测 ≈ 126 KB（tracemalloc，键是 5 元
+    #: 短字符串）；单条记录的新增成本实测 ≈ 1.5 µs（身份 1.1–1.3 µs + 账本 0.4 µs），
+    #: 相对于本拍 tail 的 stat+read 可忽略。TTL 900s 远大于所有呈现节流窗口
+    #: （音效冷却默认 2s、完成确认 800ms、过程汇报同文案 60s），因此"跨冷却的重复
+    #: 投递"仍在账本内被拒；超过 TTL 的重复（或长会话里被 FIFO 挤出的条目，即最近
+    #: 512 条记录之外）可能重放——这是有界账本的诚实边界，不承诺更强保证。
+    _EVENT_LEDGER_MAX = 512
+    _EVENT_LEDGER_TTL_S = 900.0
 
     state_changed = Signal(str, str)  # (agent_key, state)
     activity = Signal(str, str)       # (agent_key, 工具名) —— 过程汇报用，仅事件带工具名时发
@@ -1364,6 +1514,10 @@ class BaseAgentMonitor(QObject):
         self._outbox: list[tuple] = []
         self._outbox_lock = threading.Lock()
         self._OUTBOX_CAP = 500
+        # 摄入去重账本（G2 事件标识）：同一逻辑事件只允许进入呈现管线一次。
+        # 每监视器一份（来源 + 会话进键），只活在内存里、随监视器启停清空。
+        self._event_ledger = EventIdentityLedger(
+            max_entries=self._EVENT_LEDGER_MAX, ttl_s=self._EVENT_LEDGER_TTL_S)
         # QObject 的 destroyed 槽在 PySide6 下不可靠地调用 bound method；
         # 连接无 receiver 的 callable，避免窗口销毁后遗留 daemon worker。
         self._destroyed_conn = self.destroyed.connect(
@@ -1371,6 +1525,8 @@ class BaseAgentMonitor(QObject):
         )
         self._destroy_guard_ran = False
         self._destroy_guard_lock = threading.Lock()
+        # 发射失效（C++ 属主已析构）只留一次 debug，避免销毁期间刷屏
+        self._signal_loss_logged = False
 
     def is_running(self) -> bool:
         return self._running and not self._paused
@@ -1385,6 +1541,7 @@ class BaseAgentMonitor(QObject):
             )
         with self._destroy_guard_lock:
             self._destroy_guard_ran = False
+        self._signal_loss_logged = False
         self._worker_stop.set()
         self._worker_stop = threading.Event()
         self._gen += 1
@@ -1394,6 +1551,9 @@ class BaseAgentMonitor(QObject):
         if self._mkdir_on_start:
             self.events_dir.mkdir(parents=True, exist_ok=True)
         self._tailer.reset()
+        # 新代次 = 新的摄入账本：旧代次的身份（尤其是无源 ID 的游标）不得跨重启
+        # 存活，否则重启后合法的同 ID/同游标事件会被误当重复丢掉。
+        self._event_ledger.clear()
         gen = self._gen
         self._worker = threading.Thread(
             target=self._work_loop, args=(gen,), daemon=True,
@@ -1410,6 +1570,9 @@ class BaseAgentMonitor(QObject):
         self._paused = False
         with self._outbox_lock:
             self._outbox.clear()
+        # 关监测即清账本（规范 §三：缓存与队列必须有界、关监测清理）：通道不再
+        # 摄入事件，账本没有任何存在理由；下次启动空账本等价于全新摄入。
+        self._event_ledger.clear()
         self._worker_stop.set()
 
     def finish_stop(self, deadline: float | None = None) -> None:
@@ -1454,7 +1617,7 @@ class BaseAgentMonitor(QObject):
                 pending = list(self._outbox)
                 self._outbox.clear()
             for signal, args in pending:
-                signal.emit(*args)
+                self._emit_signal(signal, args)
 
     @staticmethod
     def _destroyed_guard(mon: "BaseAgentMonitor") -> None:
@@ -1508,8 +1671,8 @@ class BaseAgentMonitor(QObject):
                    event_signal, event_args: tuple, *, state: str | None) -> None:
         """Emit legacy + generation-aware signals as one pause-buffered unit."""
         if not (self._paused and self._running):
-            legacy_signal.emit(*legacy_args)
-            event_signal.emit(*event_args)
+            self._emit_signal(legacy_signal, legacy_args)
+            self._emit_signal(event_signal, event_args)
             return
         with self._outbox_lock:
             if state is not None:
@@ -1540,7 +1703,44 @@ class BaseAgentMonitor(QObject):
                             return
                 self._outbox.append((signal, args))
             return
-        signal.emit(*args)
+        self._emit_signal(signal, args)
+
+    def _retire_on_signal_loss(self) -> None:
+        """信号源已随 C++ 属主析构：作废本代次、停止发射（一次 debug 留痕）。
+
+        真实生命周期边界上的竞态（父链析构正好落在 worker 首轮 ``_worker_started``
+        的发射窗口内）会让 ``signal.emit`` 抛 ``RuntimeError: Signal source has
+        been deleted``；冒泡出去就是后台未捕获线程异常（pytest 记的
+        ``PytestUnhandledThreadExceptionWarning``）。这里按"发射已失效"收口：
+        停代 + 让 worker 自行退出，**只处理这一种情况**，其它异常照旧上抛。
+        """
+        self._emit_gen = -1
+        self._running = False
+        self._paused = False
+        with self._outbox_lock:
+            self._outbox.clear()
+        self._worker_stop.set()
+        if not self._signal_loss_logged:
+            self._signal_loss_logged = True
+            log.debug("Agent 监视器 [%s] 信号源已失效，停止本代次发射", self.agent_key)
+
+    def _emit_signal(self, signal, args: tuple) -> bool:
+        """真实发射一次；返回是否发出（信号源已失效 = False，不抛）。
+
+        RuntimeError 只吞「C++ 属主已析构」那一种（由 ``shiboken6.isValid``
+        判定）；属主仍有效时的 RuntimeError 原样上抛，不把真实缺陷静默化。
+        """
+        if not _cpp_object_alive(self):
+            self._retire_on_signal_loss()
+            return False
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            if _cpp_object_alive(self):
+                raise
+            self._retire_on_signal_loss()
+            return False
+        return True
 
     _POLL_INTERVAL_S = 1.5
     _STOP_JOIN_TIMEOUT_S = 2.0
@@ -1559,11 +1759,15 @@ class BaseAgentMonitor(QObject):
     def _worker_started(self) -> None:
         """供具体监视器在 worker 线程初始化其独占状态。"""
 
-    def _on_parsed_record(self, data: dict) -> None:
+    def _on_parsed_record(self, data: dict, cursor: tuple | None = None) -> None:
         """子类挂钩：每条解析后的桥接/transcript 记录（worker 线程内调用）。
 
         单读方语义：记录只在本类 ``_poll`` 里解析一次，信号分派与该钩子
         （DshMonitor 用它喂 dsh_state 收敛器）是同一份解析结果的两个消费者。
+
+        ``cursor`` 是这条记录的摄入游标 ``(文件, 文件身份, 行首偏移)``——它同时
+        是**「这是回填之后真正读到的 live 字节」的证明**（历史记录在读之前就被
+        回填跳到末尾，永远不会出现在这里），live 事件身份需要它做兜底。
         """
 
     def _emit_unified_event(self, data: dict) -> None:
@@ -1571,14 +1775,56 @@ class BaseAgentMonitor(QObject):
             event = parse_agent_event(data, source_hint=self.agent_key, agent_name_hint=self.agent_key)
             normalized = normalize_event(event)
             if normalized is not None:
-                self.normalized_event.emit(normalized)
+                self._emit_signal(self.normalized_event, (normalized,))
         except Exception:
             log.debug("统一 AgentEvent 解析失败", exc_info=True)
 
+    def _record_identity(self, data: dict, cursor: tuple | None) -> tuple | None:
+        """该记录的**逻辑事件身份**（摄入去重账本的键）。返回 None = 无法给出身份。
+
+        规范 §三「去重优先级 = 源 ID 优先」：
+
+        - **有源 ID**（requestId / rpcId / approvalId / callId，都是桥接真实写出的
+          字段）→ ``(来源, 会话, 事件名, ID 类型, ID 值)``。事件名进键是必须的：
+          ``tool/call`` 与 ``tool/result`` 共用同一个 callId，它们是**两条**逻辑
+          事件；会话进键是因为同一 rpcId 可能被畸形/并发传输跨会话复用。
+        - **无源 ID**（``AgentStatus``/``turn/*`` 这类只有 sessionId 的记录）→
+          ``(来源, 代次, 读取游标)``：游标 = 文件身份 + 行首字节偏移。这是我们
+          自己的摄入口径（**不是**上游给的 ID，也不拿文本 hash 造 ID）：同一份
+          字节被读了第二次才算重复；文件轮转（file_id 变化）与新代次都不会与
+          旧游标碰撞，因此**不会**阻掉合法的下一轮同文本/同状态事件。
+        """
+        session = str(data.get("sessionId") or data.get("session_id") or "")
+        event = str(data.get("event") or data.get("type") or "")
+        for kind, names in _SOURCE_ID_FIELDS:
+            for name in names:
+                value = data.get(name)
+                if value not in (None, ""):
+                    return (self.agent_key, session, event, kind, str(value))
+        if cursor is None:
+            return None
+        file_key = str(cursor[0])
+        return (self.agent_key, self._gen, "cursor", file_key, cursor[1], int(cursor[2]))
+
+    def _is_duplicate_delivery(self, data: dict, cursor: tuple | None) -> bool:
+        """同一逻辑事件是否**已经摄入过**（重复投递 → 整条跳过）。
+
+        闸门放在摄入边界（记录刚解析出来的地方）而不是散在各消费点：一条记录
+        会同时喂多条通道（语义层 ``normalized_event``、原始记录 ``raw_record``、
+        状态 ``state_event``、工具 ``activity``、审批/问题等直通信号），在边界上
+        挡一次即"一次事件多通道不双响"；放到消费点就变成每个消费点各挡一次。
+        """
+        key = self._record_identity(data, cursor)
+        if key is None:
+            return False
+        if self._event_ledger.note(key):
+            log.debug("重复源事件已拒（%s）: %s", key[2], str(data)[:200])
+            return True
+        return False
+
     def _poll(self, gen: int | None = None) -> None:
         emit_gen = self._emit_gen if gen is None else gen
-        lines = self._tailer.read_new_lines()
-        for line in lines:
+        for line, cursor in self._tailer.read_new_lines_with_cursors():
             try:
                 data = json.loads(line)
                 if not isinstance(data, dict):
@@ -1592,6 +1838,10 @@ class BaseAgentMonitor(QObject):
                     flattened = dict(data)
                     flattened.update(nested)
                     data = flattened
+                # 去重闸在展平之后、任何分派之前：身份字段可能来自嵌套 data
+                # （旧版/自定义桥），展平后与消费端看到的是同一份记录。
+                if self._is_duplicate_delivery(data, cursor):
+                    continue
                 ev = str(data.get("event", ""))
                 st = str(data.get("state", ""))
                 tool = str(data.get("tool", "") or "").strip()
@@ -1606,14 +1856,14 @@ class BaseAgentMonitor(QObject):
                         semantic_record["schema"] = envelope_schema
                     normalized = normalize_event(parse_agent_event(semantic_record, source_hint=self.agent_key, agent_name_hint=self.agent_key))
                     if normalized is not None:
-                        self.normalized_event.emit(normalized)
+                        self._emit_signal(self.normalized_event, (normalized,))
                 except Exception:
                     normalized = None  # 解析失败视为语义层未识别，防止上一行残留值污染
                     log.debug("统一 AgentEvent 解析失败", exc_info=True)
                 # 原始记录转发（兼容旧消费者）
                 self._emit(self.raw_record, (self.agent_key, data))
                 # 单读方第二消费者：同一份解析记录喂状态收敛器（仅 DshMonitor 实装）
-                self._on_parsed_record(data)
+                self._on_parsed_record(data, cursor)
                 # 审批请求提醒：一次性事件，收到即发信号（不进入状态机，
                 # 因为 DSH 等审批时 agent 仍在 running，状态还是 working）。
                 # 只收桥接后的 UI 事件 approval/request 与兼容旧名
@@ -1708,6 +1958,14 @@ class DshMonitor(BaseAgentMonitor):
     # 过滤在收敛器内完成；减法后桥接不再落明文 text，实参恒为 ""）。
     dsh_user_message = Signal(str, str)
 
+    # live 回合成功收尾（桥接 turn/end，不带源 ID）→ (agent_key, payload)：
+    # payload = {identity, sessionId, step, source_event, gen}。身份由
+    # ``dsh_state.TurnCompletionTracker`` 从**这条 live 记录**推出（session +
+    # step + 全局单调起点 token），不经过收敛状态：中途挂载 / 聚合 idle 基线
+    # 先到 / 收敛器已停在 SUCCESS / 关开联动残留终态四种来向都拿不到
+    # busy→success 边沿，但记录本身已经说明「这一回合结束了」。
+    dsh_turn_completed = Signal(str, object)
+
     _ONLINE_PROBE_EVERY_N_POLLS = 2  # 1.5s × 2 = 3s，对齐旧 DshStateTracker 探活节拍
 
     def __init__(self, agent_key: str, config_dir: Path, parent=None) -> None:
@@ -1725,6 +1983,8 @@ class DshMonitor(BaseAgentMonitor):
         self._link_check_started = False
         # 状态收敛器（纯逻辑）：8 态收敛 + 审批/问题锁存
         self._converger = DshStateConverger()
+        # live 回合收尾身份追踪（纯逻辑）：重启清会话表，保留单调 token 防身份重用
+        self._turn_tracker = TurnCompletionTracker()
         # None = 未探测过；False 时收敛器不消费事件（离线态优先）
         self._online: bool | None = None
         self._probe_tick = 0
@@ -1732,6 +1992,7 @@ class DshMonitor(BaseAgentMonitor):
     # ------------------------------------------------------------ 单读方：探活 + 收敛
     def start(self) -> bool:
         self._converger.reset()
+        self._turn_tracker.reset()
         self._online = None
         self._probe_tick = 0
         return super().start()
@@ -1764,10 +2025,27 @@ class DshMonitor(BaseAgentMonitor):
         self._online = online
         self._emit_converged(self._converger.set_online(online))
 
-    def _on_parsed_record(self, data: dict) -> None:
+    def _on_parsed_record(self, data: dict, cursor: tuple | None = None) -> None:
         if self._online is False:
             return  # DSH 离线时不消费事件（离线态优先）
         self._emit_converged(self._converger.handle_record(data))
+        # live 回合收尾身份**在收敛器之后**推（投递顺序 = 发出顺序）：完整观测到
+        # 一个回合时先让既有的 busy→success 边沿排定确认，本通道再看到 pending 就
+        # 不动它；收敛器看不到的四种来向（中途挂载 / 聚合 idle 基线先到 / 已停在
+        # SUCCESS 的同状态收尾 / 关开联动残留终态）由本通道收口——它认得这条 live
+        # 记录本身，不需要任何状态前置。
+        identity = self._turn_tracker.observe(data, cursor)
+        if identity is not None:
+            self._emit(self.dsh_turn_completed, (
+                self.agent_key,
+                {
+                    "identity": identity,
+                    "sessionId": str(data.get("sessionId") or data.get("session_id") or ""),
+                    "step": str(data.get("step") or ""),
+                    "source_event": str(data.get("event") or ""),
+                    "gen": self._emit_gen,
+                },
+            ))
 
     def _emit_converged(self, outputs: list) -> None:
         for item in outputs:
@@ -2452,7 +2730,15 @@ class CustomAgentMonitor(BaseAgentMonitor):
 
 
 def other_instances_use_agent(config, agent_key: str) -> bool:
-    """Return whether another local variant still uses a global Agent integration."""
+    """另一个本地安装点（变体/独立实例）是否也开着该全局 Agent 联动。
+
+    "其他实例" = 别的变体目录的配置，或本变体目录里按 ``--instance <id>`` 隔离出来的
+    旧式独立实例配置。**不含本变体自己的 ``config-slot-N.json``**：那是固定身份的每宠
+    档案（``pet_profiles`` §五，全局键不落档案），历史「整表落种」复制进去的
+    ``agent_link`` 只是一份旧快照——按它判定会让卸载被本变体自己残留的档案挡住，
+    hooks/桥接插件清不掉。别的变体目录、旧共享目录、旧式非 slot 实例照旧保护
+    （hooks/桥接插件是跨变体共享的全局状态）。
+    """
     config_dir = Path(config.dir)
     seen: set[Path] = set()
     candidates: list[Path] = []
@@ -2462,11 +2748,18 @@ def other_instances_use_agent(config, agent_key: str) -> bool:
         candidates.extend(config_dir.parent.glob("dsh-pet-standalone*/config*.json"))
     except OSError:
         pass
+    # 档案名判据的单一来源在 pet_profiles；这里延迟导入——本函数只在卸载清理 /
+    # 关掉联动时各调一次，为一条常量正则把它拉进 agent_link 的模块导入图不划算
+    # （agent_link 在启动路径上）。
+    from .pet_profiles import _SLOT_PROFILE_RE
+
     for path in candidates:
         if path in seen:
             continue
         seen.add(path)
         if config.path and path == config.path:
+            continue
+        if path.parent == config_dir and _SLOT_PROFILE_RE.match(path.name):
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -2521,6 +2814,26 @@ class AgentLinkManager(QObject):
     #: 取 256（同项目其它小缓存同量级：sound_winmm 池 8、webm_clip 首帧共享表
     #: 20000），FIFO 淘汰最老条目。
     _SESSION_CACHE_MAX = 256
+    #: pending 阻塞交互表的**硬容量**（规范 §三「缓存与队列必须有界」的另一半）：
+    #: 显示队列 ``window_alerts.ALERT_QUEUE_LIMIT`` = 64 只是呈现层，本地真值表
+    #: 同样必须有界（每条都带全文/问题载荷）。取 256 = 4× 显示队列上限：远大于
+    #: 任何真实并发审批/问题数，同时把"长会话 + 多会话 + 异常桥"的洪泛挡在内存外。
+    _PENDING_INTERACTION_MAX = 256
+    #: 阻塞型交互在**本地**的优先级（0 = 最高，与显示队列同口径）：审批 / 问题 /
+    #: Cordis 请求都是"用户卡在这里等回答"的关键状态，一律最高——容量裁决因此
+    #: 退化为"淘汰最旧的一条"；"拒收更低优先级的新条目"分支留给未来真出现
+    #: 更低优先级的交互类型时复用同一政策（今天不编造这种类型）。
+    _PENDING_INTERACTION_PRIORITY = 0
+    #: **无身份**降级提示（没有任何 rpcId/approvalId/requestId/callId，因此不可能
+    #: 与任何收尾帧配对）的存活上限：这类条目没有任何上游回收路径，只能靠 TTL
+    #: 收口。带身份的审批/问题是**长待批**的关键状态，**不适用 TTL**（规范
+    #: 「不能随意删除关键状态」），只受 `_PENDING_INTERACTION_MAX` 约束。
+    _PENDING_INTERACTION_HINT_TTL_S = 900.0
+    #: 未交付常驻交互的补投节拍（毫秒）：新请求没交付时 1s 一拍，等不到呈现目标
+    #: 则退避到上限；交付完或表空即停（稳态零唤醒），见
+    #: ``_ensure_pending_redeliver_timer``。
+    _PENDING_REDELIVER_INTERVAL_MS = 1000
+    _PENDING_REDELIVER_MAX_MS = 5000
     _ACTIVITY_MIN_INTERVAL = 10.0    # 同 Agent 过程气泡最小间隔
     _ACTIVITY_GLOBAL_MIN = 8.0       # 全局最小间隔（多 Agent 并发防刷屏）
     _ACTIVITY_SAME_LABEL = 60.0      # 同一工具文案 60s 内不重复
@@ -2529,6 +2842,7 @@ class AgentLinkManager(QObject):
     _DONE_CONFIRM_MS = 800   # busy→idle 稳定确认窗口（过滤 working→idle→working 抖动）
     _DONE_COOLDOWN_S = 5.0   # 同 Agent 完成气泡最小间隔（最后一道保险）
     _UNKNOWN_BRIDGE_REMIND_COOLDOWN_S = 600.0  # 未知桥接事件提醒：同 agent 10 分钟内最多一次
+    _DSH_TURN_ID_MEMORY = 64  # live 回合收尾身份记忆（每 Agent 有界，防长跑增长）
 
     def __init__(self, window: Any, config: Any, *, min_interval: float = 2.0,
                  clock: Callable[[], float] = time.time) -> None:
@@ -2552,6 +2866,13 @@ class AgentLinkManager(QObject):
         # 不能用 _last_applied 做完成判定——节流会丢掉紧跟其后的 idle，导致完成通知丢失。
         self._last_raw: dict[str, str] = {}
         self._done_pending: dict[str, QTimer] = {}   # agent → 稳定确认定时器
+        # agent → 该确认的来源："success"（回合真实成功）或 "edge"（busy→idle 等边沿）。
+        # DSH 中止回合只撤 edge 来源的确认，不误撤另一会话真实完成排下的 success 确认。
+        self._done_cause: dict[str, str] = {}
+        # DSH 中止回合注入 idle 时为 True：跳过 _on_agent_state 的「该 agent 全部交互」
+        # 兜底清理——中止的 turn/end 已由 _on_interaction_lifecycle 按会话定向清理，
+        # 全量清会误撤其它会话仍在等待的审批/问题气泡。
+        self._idle_clear_scoped = False
         self._done_cooldown: dict[str, float] = {}   # agent → 上次完成气泡时刻
         self._unknown_bridge_reminded_at: dict[str, float] = {}  # agent → 上次未知桥接事件提醒时刻
         self._saw_alert: set[str] = set()            # busy 周期内出现过 attention/error 的 Agent
@@ -2578,14 +2899,21 @@ class AgentLinkManager(QObject):
         self._model_access_tracker = ModelAccessTracker()
         # 待处理阻塞型交互：interaction_id → {"agent_key", "kind": "approval"|"question",
         # "text": str, "tool"?: str, "questions"?: list, "rpc_id"?, "approval_id"?,
-        # "session_id"?, "alert_id"}。审批 / 用户问题都是「阻塞 Agent 等待用户输入」的
-        # 交互，统一处理：气泡「一直挂到 resolved」。
-        # interaction_id 优先用 rpcId（同一审批/问题的稳定标识），无 rpcId 时用
-        # agent+kind+本地序号（降级提示路径）——**同一 agent 的多个审批各自独立
-        # 存储**，不再以 agent_key 为键互相覆盖；resolved 按 rpcId 精确匹配关闭，
-        # 绝不错关闭其他并发的审批。
+        # "session_id"?, "alert_id", "delivered", "_ts_mono"}。审批 / 用户问题都是
+        # 「阻塞 Agent 等待用户输入」的交互，统一处理：气泡「一直挂到 resolved」。
+        # interaction_id = **来源 + kind + 会话 + 身份命名空间/值**（见
+        # ``_interaction_key``），无身份时用 agent+kind+本地序号（降级提示路径）——
+        # **同一 agent 的多个审批各自独立存储**，不再以 agent_key 为键互相覆盖；
+        # resolved 按「来源 + 会话 + 身份」唯一候选精确匹配关闭
+        # （见 ``_resolve_matching_interaction``），绝不错关闭其他并发/其他会话/
+        # 其他 agent 的审批。
+        # 本表是**有界**的（`_PENDING_INTERACTION_MAX`）：显示队列（64）只是呈现层，
+        # 本地真值表同样必须有界，见 ``_admit_pending_interaction``。
         self._pending_interactions: dict[str, dict] = {}
         self._interaction_seq = 0  # 无 rpcId 的降级提示交互本地序号
+        self._pending_interaction_overflow_count = 0  # 超限处置计数（可诊断）
+        # 未交付常驻交互的补投表（惰性创建；无未交付条目时不存在/不跑）
+        self._pending_redeliver_timer: QTimer | None = None
 
         self.monitors: dict[str, BaseAgentMonitor] = {
             "dsh": DshMonitor("dsh", self.config_dir, self),
@@ -2636,6 +2964,11 @@ class AgentLinkManager(QObject):
         # 并把 thinking/attention 注入既有呈现管线、offline 时收尾阻塞交互。
         self.monitors["dsh"].dsh_state_changed.connect(self._on_dsh_converged_state)
         self.monitors["dsh"].dsh_user_message.connect(self._on_dsh_converged_user_message)
+        # live 回合收尾（真实记录身份）：DSH 完成提醒的判据——不依赖呈现管线里
+        # 上一个状态是 busy/idle/None/success（见 _on_dsh_turn_completed）。
+        self.monitors["dsh"].dsh_turn_completed.connect(self._on_dsh_turn_completed)
+        # 每 Agent 有界记忆：同一回合的收尾身份只排定一次完成确认
+        self._dsh_turn_ids: dict[str, deque] = {}
         # 模型访问失败提醒缓存：session_key → { "count": int, "_ts": float, "_first_ts": float, "_dismissed": bool }
         self._model_access_cache: dict[str, dict] = {}
         self._model_access_timers: dict[str, QTimer] = {}   # session_key → 自动收起定时器
@@ -2665,22 +2998,18 @@ class AgentLinkManager(QObject):
             self._model_access_retry_counts.pop((event.source, event.session_id), None)
         if not isinstance(event, InteractionResolvedEvent):
             return
-        candidates = []
-        for iid, item in self._pending_interactions.items():
-            if item.get("kind") != event.kind or item.get("agent_key") != event.source:
-                continue
-            if event.session_id and str(item.get("session_id") or "") != event.session_id:
-                continue
-            identities = (event.request_id, event.rpc_id, event.approval_id, event.call_id)
-            item_ids = (str(item.get("request_id") or ""), str(item.get("rpc_id") or ""), str(item.get("approval_id") or ""), str(item.get("call_id") or ""))
-            if any(value and value == candidate for value in identities for candidate in item_ids):
-                candidates.append(iid)
-        if len(candidates) == 1:
-            self._resolve_interaction(candidates[0])
-        elif len(candidates) > 1:
-            self._resolve_interaction(candidates[0])
-        else:
-            log.debug("interaction/resolved unmatched source=%s session=%s", event.source, event.session_id)
+        matched = self._resolve_matching_interaction(
+            kind=event.kind, agent_key=event.source, session_id=event.session_id,
+            identities={
+                "request_id": str(event.request_id or ""),
+                "rpc_id": str(event.rpc_id or ""),
+                "approval_id": str(event.approval_id or ""),
+                "call_id": str(event.call_id or ""),
+            },
+        )
+        if matched is None:
+            log.debug("interaction/resolved unmatched source=%s session=%s",
+                      event.source, event.session_id)
 
     def apply_config(self) -> None:
         """根据配置启停各个 Agent 监视器。
@@ -2699,6 +3028,10 @@ class AgentLinkManager(QObject):
         for key, monitor in self.monitors.items():
             should_run = bool(agent_cfg.get(key, False))
             if should_run and not monitor._running:
+                # 换代次：上一代留给这个 Agent 的呈现簿记（在飞确认 / 硬失败标记 /
+                # 原始状态 / 收尾身份）不得延续——否则「关掉再开启联动」后新代第一次
+                # 真实收尾会被上一代的标记吞掉（L02），旧确认也可能以新代身份到期。
+                self._retire_agent_presentation(key)
                 monitor.start()
                 if isinstance(monitor, DshMonitor):
                     # 启动自检（后台、每实例一次）：重新打包/换构建目录后，profile 里
@@ -2706,6 +3039,10 @@ class AgentLinkManager(QObject):
                     monitor.schedule_link_refresh_check()
             elif not should_run and monitor._running:
                 monitor.stop()
+                # 停即退役本 Agent 的呈现簿记：用户关掉联动之后，这一代排定的完成
+                # 确认不得再弹（L01），硬失败/原始状态也不得留给下一代（L02）。
+                # 只清本 Agent——别的 Agent 的确认与状态原样保留。
+                self._retire_agent_presentation(key)
                 if key == "dsh":
                     # 通道关闭语义（6.1sol 终审）：监视器停了之后，锁存在呈现侧的
                     # 状态（待确认环/错误点/工作点）再没有人会来改——必须随通道
@@ -2877,9 +3214,14 @@ class AgentLinkManager(QObject):
         self._sound_last_event.clear()
 
     def resume(self) -> None:
-        """桌宠恢复显示时恢复活动的监视器。"""
+        """桌宠恢复显示时恢复活动的监视器，并补投隐藏期间未能交付的常驻交互。
+
+        补投是"隐藏期到达的审批/问题在恢复后仍能看到"的唯一恢复路径（显示 owner
+        的队列在不可见宿主上收不到条目，只靠 owner 自己的恢复钩子无从知道）。
+        """
         for mon in self.monitors.values():
             mon.resume()
+        self.redeliver_pending_interactions()
 
     def shutdown(self) -> None:
         """窗口销毁/角色切换时停止所有 monitor worker，且作废安装回调。"""
@@ -2899,6 +3241,7 @@ class AgentLinkManager(QObject):
         # 停掉 manager 自带的全部单发定时器（完成确认/模型访问失败收起/LLM 错误收起）：
         # 下方会把 Python 持有的 manager 过继给 QApplication，对象将存活到进程
         # 退出——若不停表，滞留定时器会在后续无关时刻触发槽函数。
+        self._stop_pending_redeliver_timer()
         for timer_dict in (self._done_pending, self._model_access_timers, self._llm_error_timers):
             for timer in timer_dict.values():
                 try:
@@ -2906,6 +3249,7 @@ class AgentLinkManager(QObject):
                 except RuntimeError:
                     pass
             timer_dict.clear()
+        self._done_cause.clear()
         # parent=None（测试桩/多窗代理）时 C++ 对象是 Python 持有的：wrapper 经
         # 信号连接/闭包成环，只能等循环 GC——而 GC 可能在任意线程（含 monitor
         # worker 线程）触发，跨线程删除带 QTimer 子对象/信号连接的 QObject 会
@@ -2983,6 +3327,8 @@ class AgentLinkManager(QObject):
         - success：回合成功结束（桥接 turn/end）同样对 legacy 基线不可见，由本
           分支注入管线；完成气泡/done 音效由 ``_on_agent_state`` 的
           busy→success 边沿调度（800ms 确认 + 冷却），本方法不直接弹；
+        - idle（来源 turn/end）：用户中止的回合——注入 idle 回待机，只撤 edge 来源
+          的完成确认，交互气泡按会话定向清理（不全量清）；
         - waiting_approval：审批把 Agent 卡在等用户输入——计入「需要看一眼」
           （完成后不误报成功），并弹通用 attention 纯提示气泡（busy 中也必须
           提示，不走 ``_on_agent_state`` 的「busy 后不弹 attention」分支）。
@@ -3013,6 +3359,21 @@ class AgentLinkManager(QObject):
             # 此前没有这条分支，success 进不了管线——完成提醒永不触发（issue #234）。
             self.notify_dsh_state("success")
             return
+        if to_state == "idle" and source_event == "turn/end":
+            # 用户中止的回合（turn/end 携带 reasonKind=aborted，收敛器落 IDLE）：
+            # 呈现侧必须回待机——否则 _last_raw 停在 thinking，桌宠一直索取忙碌动画、
+            # 识屏也一直把 DSH 当忙。但 busy→idle 边沿会排定完成确认，中止不是完成，
+            # 注入后立即撤掉本轮确认（含旧 AgentStatus idle 先到时排下的那一个）。
+            # 例外：待定确认来源是 success（另一会话刚真实完成、确认窗未到期）——
+            # 那个确认属于真实完成，不能被中止撤掉（按来源判，重复中止也不误撤）。
+            self._idle_clear_scoped = True
+            try:
+                self.notify_dsh_state("idle")
+            finally:
+                self._idle_clear_scoped = False
+            if self._done_cause.get("dsh") != "success":
+                self._cancel_done_check("dsh")
+            return
         if to_state == "waiting_approval":
             self._saw_alert.add("dsh")
             if source_event in ("cordis/request-run", "approval/request"):
@@ -3028,7 +3389,7 @@ class AgentLinkManager(QObject):
 
         桥接在 turn/end 判定 ``reason.kind === "error"`` 后先写一条
         ``execution/failed``、**随后仍无条件**把同一条 turn/end 作为状态事件转发
-        （桥端 STATE_EVENT_TYPES），收敛器把一切 turn/end 收敛为 success——收敛器
+        （桥端 STATE_EVENT_TYPES），收敛器把非中止的 turn/end 收敛为 success——收敛器
         语义不改（八态是它的契约），但呈现在岛上的那一格必须说真话：原样转发会让
         岛走 ``set_dsh_state("success")`` → ``_arm_dot_done`` 点亮绿点 4s 并把状态
         文案写成「刚完成」，与同一拍弹出的失败提醒自相矛盾。
@@ -3052,13 +3413,61 @@ class AgentLinkManager(QObject):
         self.dsh_user_message.emit(session_id, text)
         self.notify_dsh_state("thinking")
 
+    def _on_dsh_turn_completed(self, agent_key: str, payload: Any) -> None:
+        """live 回合成功收尾（桥接 ``turn/end``）→ 排定完成确认。
+
+        **判据是这条 live 记录的身份，不是呈现管线里上一个状态**（身份构造见
+        ``dsh_state.TurnCompletionTracker``）。此前的判据是 ``_on_agent_state`` 的
+        ``busy→success`` 边沿，它漏掉了所有「上一个状态不是 busy」的真实来向：
+
+        - 中途挂载：``DirGlobTailer`` 回填跳过整段历史，管线从没见过该 Agent
+          （prev=None）；
+        - 聚合基线先到：桥接的 ``AgentStatus{idle}`` 与 session/event 是两条通道，
+          idle 可能先落地（prev="idle"，且来向不是 busy，busy→idle 也不排定）；
+        - 收敛器已停在 SUCCESS：新会话/新桥文件的收尾是同状态重复，edge-trigger
+          的收敛器零产出，呈现侧根本没有 success 可注入；
+        - 关开联动：``_last_raw`` 不随监视器生命周期清空，残留的是上一轮的终态。
+
+        四种来向这一个入口全收；判据换成 live 事件身份后不再逐条补状态特判。
+
+        三道既有闸原样保留：
+        - **身份去重**：同一回合约投递只排定一次（多文件各写一份、重复帧）；
+        - **硬失败闸**：``execution/failed`` 已按 agent 打 ``_saw_error``，失败回合
+          的收尾不出成功口径（桥接先写失败记录再转发 turn/end，顺序保证已置位）；
+        - **800ms 确认 + 5s 冷却 + ``_fire_done``**：复用既有链路，零新增定时器。
+        ``_last_raw`` 只写本 Agent 的终态，不触碰其它 Agent 的状态与确认键。
+        """
+        if self._shutdown:
+            return
+        mon = self.monitors.get("dsh")
+        if mon is None or not mon._running:
+            return  # 迟到/孤儿信号：监视器已停（同 _on_dsh_converged_state 的隔离口径）
+        payload = payload if isinstance(payload, dict) else {}
+        if not self._gen_current(agent_key, int(payload.get("gen") or 0)):
+            return  # 旧代次的队列信号不得惊动用户
+        identity = payload.get("identity")
+        if identity is not None:
+            seen = self._dsh_turn_ids.get(agent_key)
+            if seen is None:
+                seen = self._dsh_turn_ids[agent_key] = deque(maxlen=self._DSH_TURN_ID_MEMORY)
+            if identity in seen:
+                return  # 同一回合的重复投递：只排定一次
+            seen.append(identity)
+        if agent_key in self._saw_error:
+            return  # 硬失败回合：失败提醒已经收口，不得再报成功
+        self._last_raw[agent_key] = "success"
+        if agent_key not in self._done_pending:
+            self._schedule_done_check(agent_key, cause="success")
+        else:
+            self._done_cause[agent_key] = "success"
+
     def _on_agent_state(self, agent_key: str, state: str, gen: int = 0) -> None:
         """接收 Agent 状态变更并调度桌宠动作/气泡（带去抖与节流）。"""
         if not self._gen_current(agent_key, gen):
             return
         # 兜底：该 agent 已回待机（任务结束）但审批/问题还没收到 resolved → 交互必然失效。
         # 放在可见性判断之前：窗口隐藏期间也要清 pending，避免恢复显示时挂出陈旧气泡。
-        if state in ("idle", "sleeping"):
+        if state in ("idle", "sleeping") and not self._idle_clear_scoped:
             # 改为按交互 id 遍历清理（同一 agent 可能有多个并发审批/问题）
             for iid in [i for i, v in self._pending_interactions.items()
                         if v.get("agent_key") == agent_key]:
@@ -3126,14 +3535,21 @@ class AgentLinkManager(QObject):
             # 与 busy→idle 同一条完成确认（800ms + 冷却 + _fire_done），
             # 零新增定时器。success 只存在于这条原始状态流（_last_raw），
             # 不进 VALID_STATES——那是所有监视器共用的归一入口。
+            #
+            # 分工：本边沿覆盖「完整观测到一个回合」这一条路径（发出顺序上先于
+            # live 身份通道排定，见 DshMonitor._on_parsed_record）；上一个状态不是
+            # busy 的四种真实来向（中途挂载 prev=None、聚合基线 idle 先到、收敛器
+            # 已停在 SUCCESS 的同状态收尾、关开联动残留终态）在这里全都看不到，
+            # 由 ``_on_dsh_turn_completed`` 的 live 事件身份收口——不要再往这条
+            # 条件里补状态特判。
             # 例外：本 busy 周期出现过硬失败（execution/failed）——失败提醒已经
             # 收口，紧跟的这条 turn/end 不得再排定完成确认。桥接判定失败后先写
-            # execution/failed，随后仍无条件转发 turn/end，收敛器把一切 turn/end
+            # execution/failed，随后仍无条件转发 turn/end，收敛器把非中止的 turn/end
             # 收敛为 success；不拦就是失败回合弹「已完成本轮任务」+ done 音效
             # （误报成功），且那 800ms 还会占掉完成冷却、吃掉下一回合的真实完成
             # 提醒。标记在下一个 busy 入口清除，下一回合照常恢复。
             if agent_key not in self._saw_error:
-                self._schedule_done_check(agent_key)
+                self._schedule_done_check(agent_key, cause="success")
 
         # 去抖：同一 Agent 连续相同状态只生效第一次
         last = self._last_applied.get(agent_key)
@@ -3503,8 +3919,18 @@ class AgentLinkManager(QObject):
         self._register_interaction(agent_key, kind="cordis", text=f"{name} 请求运行：{purpose}", request_id=request_id, session_id=fields.get("agentId") or fields.get("sessionId"))
 
     def _on_cordis_resolved(self, agent_key: str, payload: dict) -> None:
+        """cordis 请求结束：与审批/问题同一份收尾摄入（来源 + 会话 + 同字段身份）。
+
+        登记端把关联身份存在 ``request_id``（``requestId``）；这里同样只按 request_id
+        匹配，不再与 rpcId 互通。来源由调用方给（信号带 agent_key）：旧实现在这一层
+        把 agent_key 顶替成"会话键"传下去，来源当场丢失，于是 dsh 的收尾会把别的
+        来源的同 requestId 交互当成唯一候选一起关掉。"""
         payload = payload if isinstance(payload, dict) else {}
-        self._close_interaction_by_id("cordis", str(payload.get("requestId") or ""), "", str(payload.get("agentId") or payload.get("sessionId") or agent_key))
+        self._resolve_matching_interaction(
+            kind="cordis", agent_key=agent_key,
+            session_id=str(payload.get("agentId") or payload.get("sessionId") or ""),
+            identities={"request_id": str(payload.get("requestId") or "")},
+        )
 
     def _on_question_request(self, agent_key: str, payload: dict) -> None:
         """用户问题（ask_user_question）阻塞交互：与审批同待遇的常驻纯提示气泡
@@ -3594,13 +4020,238 @@ class AgentLinkManager(QObject):
             return text
         return f"{text}（请到 DSH 界面输入文本回答）"
 
-    def _interaction_key(self, agent_key: str, kind: str, rpc_id) -> str:
-        """生成稳定交互 id：有 rpcId 用 rpcId（同一审批/问题的稳定标识），
-        无 rpcId（旧路径降级提示）用 agent+kind+本地序号保证唯一。"""
-        if rpc_id:
-            return f"{kind}:{rpc_id}"
+    @staticmethod
+    def _identity_key_part(value) -> str:
+        """键分量转义：自由文本里的分隔符不得与拼接结构撞车。
+
+        键对身份必须是**单射**（不同身份绝不共享一个键）：值里出现 ``:`` 时如果不
+        转义，``(rpc_id="x:y", 会话为空)`` 与 ``(rpc_id="x", 会话="y")`` 会拼出同一个
+        键。转义是纯函数、可逆，无哈希、无时间、无文本近似。
+        """
+        return str(value).replace("\\", "\\\\").replace(":", "\\:")
+
+    def _interaction_key(self, agent_key: str, kind: str, extra: dict, session_id: str) -> str:
+        """生成稳定且**不碰撞**的交互 id：来源 + kind + 会话 + 身份命名空间/值。
+
+        键必须**先**把完整身份写进去，收尾匹配才有事实可用：只按 ``kind:rpcId``
+        存，第二个来源登记同一 rpcId 就撞键，撞了再补一个会话后缀也只是把覆盖推迟
+        到第三条（三来源同 id 最后只剩两条，匹配前身份已经丢了）。这正是规范
+        「去重键 = 来源 + 会话 + 逻辑事件标识」（``docs/PRODUCT-NEXT-STEPS-SPEC-
+        2026-10-09.md`` §三）在内存真值表上的落地。
+
+        身份字段取 ``_INTERACTION_ID_FIELDS`` 里第一个非空值，字段名一起进键：
+        ``rpcId="x"`` 与 ``approvalId="x"`` 是两条不同命名空间的交互，不许共键。
+        无身份的降级提示仍用 agent+kind+本地序号——这类条目不可能被任何收尾帧回收，
+        靠 TTL 收口。
+        """
+        for field in self._INTERACTION_ID_FIELDS:
+            value = extra.get(field)
+            if value:
+                parts = [kind, self._identity_key_part(agent_key), field,
+                         self._identity_key_part(value)]
+                if session_id:
+                    parts.append(self._identity_key_part(session_id))
+                return ":".join(parts)
         self._interaction_seq += 1
-        return f"{kind}:{agent_key}:hint{self._interaction_seq}"
+        return f"{kind}:{self._identity_key_part(agent_key)}:hint{self._interaction_seq}"
+
+    #: 交互身份的字段（与源 ID 同序）：同一条交互的重投递必须是**就地更新**，
+    #: 收尾帧的匹配也只看这几个字段（同名不同字段不算同一条，见 _resolve_matching_interaction）。
+    _INTERACTION_ID_FIELDS = ("request_id", "rpc_id", "approval_id", "call_id")
+
+    @staticmethod
+    def _session_matches(item: dict, session_id: str) -> bool:
+        """会话是否相容：任一侧为空 = 未知（旧桥/自定义桥可能不带 sessionId）。
+
+        "未知"不与"不同会话"混为一谈：把未知当不同会话会让缺 sessionId 的旧帧
+        永远配不上、留下关不掉的常驻提醒；把"不同"当未知则会误关别的会话。
+        兼容建立的"可能匹配"由调用方按**唯一候选**收敛（见
+        :meth:`_resolve_matching_interaction`）：相容 ≠ 可以任取一条。
+        """
+        item_session = str(item.get("session_id") or "")
+        if not session_id or not item_session:
+            return True
+        return item_session == session_id
+
+    def _interaction_matches(self, item: dict, *, kind: str, agent_key: str,
+                             session_id: str, identities: dict[str, str]) -> bool:
+        """一条 pending 是否就是这条收尾帧指向的交互（**唯一**匹配实现）。
+
+        判据（缺一不可）：
+        - ``kind`` 相同（审批与问题各自独立，callId 也不跨 kind 复用）；
+        - **来源**相同（同一 id 可能在多个 agent 上出现，旧通道此前不查来源）；
+        - **会话**一致或未知（见 :meth:`_session_matches`）；
+        - **身份同字段同值**：rpcId 只与 rpcId 比、approvalId 只与 approvalId 比
+          ——不同命名空间的同值字符串不是同一条交互。
+        """
+        if item.get("kind") != kind or item.get("agent_key") != agent_key:
+            return False
+        if not self._session_matches(item, session_id):
+            return False
+        for field, value in identities.items():
+            if value and str(item.get(field) or "") == str(value):
+                return True
+        return False
+
+    def _matching_interaction_ids(self, *, kind: str, agent_key: str,
+                                  session_id: str, identities: dict[str, str]) -> list[str]:
+        """这条收尾帧的全部候选（按表内次序），只做匹配、不动任何一条。"""
+        return [iid for iid, item in self._pending_interactions.items()
+                if self._interaction_matches(item, kind=kind, agent_key=agent_key,
+                                             session_id=session_id, identities=identities)]
+
+    @staticmethod
+    def _log_ambiguous_resolution(*, kind: str, origin: str,
+                                  identities: dict[str, str], candidates: list[str]) -> None:
+        """多候选歧义必须明确留痕：说清"什么都没做"，不批准、不拒绝、不删本地真值。
+
+        ``origin`` 由调用方给（各通道能提供的事实不同：语义/直通通道有来源+会话，
+        compat 通道只有 sessionKey），日志只报事实，不假装知道得更多。
+        """
+        log.warning(
+            "交互收尾帧有 %s 条候选、归属不明：不动任何一条（不批准、不拒绝、不删）"
+            " kind=%s %s identity=%s candidates=%s",
+            len(candidates), kind, origin,
+            {key: value for key, value in identities.items() if value},
+            [str(iid)[:80] for iid in candidates[:4]],
+        )
+
+    def _resolve_matching_interaction(self, *, kind: str, agent_key: str,
+                                      session_id: str, identities: dict[str, str]) -> str | None:
+        """按「来源 + 会话 + 身份」关闭**唯一**匹配的那条 pending（无匹配/多候选返回 None）。
+
+        **唯一收尾摄入**：语义层（``_on_normalized_event``）与旧直通通道
+        （``_on_approval_resolved`` / ``_on_question_resolved``）都走这里。同一条
+        记录会同时喂两条通道，第一条按 id 精准删掉自己那条后，第二条因同样的
+        「来源 + 会话 + 身份」约束**找不到候选**——结构性 no-op，不需要任何
+        "同一记录只处理一次"的文本/时间去重花招。
+
+        **多候选 = 不动**（这是上面那条"结构性 no-op"成立的前提）：旧帧缺 sessionId
+        时会话是未知，两个会话可能各有一条同 rpcId 的 pending；任取一条都可能删掉
+        用户还在等的那条，而且删掉第一条之后，第二条通道会看到"新的唯一候选"把
+        另一条也删掉（一条记录关两条）。所以候选不止一条时一律不动，只留 warning；
+        唯一候选仍按旧帧兼容关闭（缺 session 的旧桥不许把提醒变成关不掉的常驻），
+        其余交给 lifecycle/离线收口。
+        """
+        candidates = self._matching_interaction_ids(kind=kind, agent_key=agent_key,
+                                                    session_id=session_id,
+                                                    identities=identities)
+        if len(candidates) == 1:
+            self._resolve_interaction(candidates[0])
+            return candidates[0]
+        if candidates:
+            self._log_ambiguous_resolution(
+                kind=kind,
+                origin=f"source={agent_key} session={session_id or '<unknown>'}",
+                identities=identities, candidates=candidates)
+        return None
+
+    def _resolve_identity_less_interaction(self, kind: str, agent_key: str,
+                                           session_id: str) -> str | None:
+        """无任何身份的旧帧兜底：该来源+会话下**只有一条**无 rpcId 的 pending 时才关。
+
+        多条候选 = 无法判断是哪条，一律不动（宁可留着让 lifecycle/离线收口，
+        也不误关用户还在等的提醒）。
+        """
+        candidates = [iid for iid, item in self._pending_interactions.items()
+                      if item.get("kind") == kind
+                      and item.get("agent_key") == agent_key
+                      and not item.get("rpc_id")
+                      and self._session_matches(item, session_id)]
+        if len(candidates) == 1:
+            self._resolve_interaction(candidates[0])
+            return candidates[0]
+        return None
+
+    def _existing_interaction_for(self, agent_key: str, kind: str, extra: dict,
+                                  session_id: str) -> str | None:
+        """找同一逻辑交互已有的 interaction_id（没有则 None）。
+
+        判据是"**任一**稳定身份字段相等 + 会话一致"：审批/问题记录在不同桥接
+        版本里带的身份字段不同（有的带 rpcId、有的只有 approvalId/callId），
+        而它们指的是同一条交互。会话不一致时不认（同一 rpcId 被跨会话复用）。
+        """
+        for iid, item in self._pending_interactions.items():
+            if item.get("kind") != kind or item.get("agent_key") != agent_key:
+                continue
+            if session_id and str(item.get("session_id") or "") not in ("", session_id):
+                continue
+            for field in self._INTERACTION_ID_FIELDS:
+                value = extra.get(field)
+                if value and str(item.get(field) or "") == str(value):
+                    return iid
+        return None
+
+    @staticmethod
+    def _pending_priority(item: dict) -> int:
+        """该条 pending 交互的本地优先级（0 = 最高，与显示队列同口径）。"""
+        return int(item.get("priority", AgentLinkManager._PENDING_INTERACTION_PRIORITY))
+
+    def _note_pending_overflow(self, action: str, victim: str, dropped: dict | None = None) -> None:
+        """超限处置留痕：计数 + warning（含来源类型/alertId，便于事后定位）。"""
+        self._pending_interaction_overflow_count += 1
+        log.warning(
+            "pending 交互表已满(%s)：%s kind=%s alertId=%s agent=%s overflowCount=%s",
+            self._PENDING_INTERACTION_MAX, action,
+            (dropped or {}).get("kind", ""), (dropped or {}).get("alert_id", ""),
+            (dropped or {}).get("agent_key", ""), self._pending_interaction_overflow_count,
+        )
+
+    def _admit_pending_interaction(self) -> bool:
+        """pending 真值表的**有界入表裁决**（唯一实现，政策与显示队列同构）。
+
+        - 未满：直接进表。
+        - 满且新条目优先级**低于**表内最低优先级 → 拒收新条目（不挤掉别人），
+          留 warning + 计数。（当前所有交互类型都是优先级 0 的关键状态，这条
+          分支只在未来真出现更低优先级的交互类型时生效，不编造类型去用它。）
+        - 否则 → 淘汰**最低优先级里最旧**的一条腾位，同样留痕，并在显示 owner 上
+          按同一 alert_id 清理（否则那条提醒永远等不到 resolved，成为死提醒）。
+
+        **淘汰只影响本地呈现**：不批准、不拒绝、不写回上游——被淘汰的请求在 DSH
+        侧仍然是待处理状态，用户可以在任何 DSH 界面回答它（参考
+        ``docs/DSH-REQUEST-EVENT-CATALOG.md`` 的「Bounded local surfacing」）。
+        """
+        if len(self._pending_interactions) < self._PENDING_INTERACTION_MAX:
+            return True
+        worst = max(self._pending_priority(item)
+                    for item in self._pending_interactions.values())
+        if self._PENDING_INTERACTION_PRIORITY > worst:
+            self._note_pending_overflow("reject", "")
+            return False
+        victim = None
+        for iid, item in self._pending_interactions.items():
+            if self._pending_priority(item) != worst:
+                continue
+            if victim is None or float(item.get("_ts_mono", 0.0)) < float(
+                    self._pending_interactions[victim].get("_ts_mono", 0.0)):
+                victim = iid
+        if victim is None:
+            return False
+        self._note_pending_overflow("evict", victim, self._pending_interactions[victim])
+        self._resolve_interaction(victim)
+        return True
+
+    def _prune_pending_interactions(self, now: float | None = None) -> int:
+        """TTL 收口（在登记路径上触发）：只清理**无身份**的降级提示，返回清理条数。
+
+        带身份的审批/问题是长待批的关键状态——DSH 可能几十分钟后才回收尾帧，
+        时间到就删本地真值等于把用户还在等的提醒吞掉（规范「不能随意删除关键
+        状态但内存上限必须」）。这类条目的界是 ``_PENDING_INTERACTION_MAX``；
+        TTL 只适用于没有任何身份、因此不可能被任何收尾帧回收的降级提示。
+        """
+        moment = time.monotonic() if now is None else float(now)
+        stale = []
+        for iid, item in self._pending_interactions.items():
+            if any(str(item.get(field) or "") for field in self._INTERACTION_ID_FIELDS):
+                continue
+            if moment - float(item.get("_ts_mono", moment)) < self._PENDING_INTERACTION_HINT_TTL_S:
+                continue
+            stale.append(iid)
+        for iid in stale:
+            self._resolve_interaction(iid)
+        if stale:
+            log.debug("无身份降级提示已按 TTL 收口：%s", stale)
+        return len(stale)
 
     def _register_interaction(self, agent_key: str, *, kind: str, text: str, **extra) -> str | None:
         """统一登记一条阻塞型交互：进 pending + 打 alert 标记 + 挂常驻气泡。
@@ -3610,98 +4261,96 @@ class AgentLinkManager(QObject):
         - **同一 agent 的多个审批/问题各自独立存储**（按 interaction_id），
           不再以 agent_key 为键互相覆盖——resolved 按 id 精确绑定，
           绝不错关闭其他并发的审批。
+        - **键按完整身份构造**（来源 + kind + 会话 + 身份命名空间/值，见
+          ``_interaction_key``）：撞键不再靠"补一个会话后缀"救场（那只是把覆盖
+          推迟到第三条），不同来源/会话/命名空间的交互各有自己的键。
+        - **同一逻辑交互的重投递就地更新**（G2）：重复登记会让同一审批/问题占两份
+          pending，而 resolved 帧只关得掉其中一份——另一份变成关不掉的常驻提醒
+          （还多弹一次正文）。身份由 rpcId/approvalId/requestId/callId + 会话给出，
+          复用原 alert_id 让窗口按 id 合并（同一提醒最多一份可见）。
         """
-        iid = self._interaction_key(agent_key, kind, extra.get("rpc_id"))
-        rpc_id = extra.get("rpc_id")
-        # A DSH rpcId is normally globally unique, but isolate malformed or
-        # concurrent transports that reuse it across sessions.
-        if iid in self._pending_interactions and rpc_id:
-            iid = f"{iid}:{str(extra.get('session_id') or '')}"
+        session_id = str(extra.get("session_id") or "")
+        existing_iid = self._existing_interaction_for(agent_key, kind, extra, session_id)
+        if existing_iid is not None:
+            iid = existing_iid
+        else:
+            self._prune_pending_interactions()
+            if not self._admit_pending_interaction():
+                return None
+            iid = self._interaction_key(agent_key, kind, extra, session_id)
         alert_id = f"interaction:{iid}"
         self._pending_interactions[iid] = {
             "kind": kind, "text": text, "alert_id": alert_id,
-            "agent_key": agent_key, **extra,
+            "agent_key": agent_key,
+            "priority": self._PENDING_INTERACTION_PRIORITY,
+            "_ts_mono": time.monotonic(),
+            **extra,
         }
         # 交互打断算"需要主人看一眼"：任务完成后不误说"干完活啦"
         self._saw_alert.add(agent_key)
         # 常驻气泡：不自动消失，等 resolved / 离线 / 空闲再收尾
-        self._show_interaction_bubble(iid)
+        if not self._show_interaction_bubble(iid):
+            # 这次没交到呈现目标手里（隐藏/无宠）：保活补投表并回到快拍，
+            # 等目标回来按同一 interaction_id 补投（新请求优先快速看到）。
+            self._ensure_pending_redeliver_timer(reset=True)
         return iid
+
+    @staticmethod
+    def _resolved_identities(payload: dict) -> dict[str, str]:
+        """收尾帧载荷 → pending 条目的身份字段（字段名归一，值原样保留）。"""
+        return {
+            "request_id": str(payload.get("requestId") or payload.get("request_id") or ""),
+            "rpc_id": str(payload.get("rpcId") or payload.get("rpc_id") or ""),
+            "approval_id": str(payload.get("approvalId") or payload.get("approval_id") or ""),
+            "call_id": str(payload.get("callId") or payload.get("call_id") or ""),
+        }
 
     def _on_approval_resolved(self, agent_key: str, payload: dict | None = None) -> None:
         """审批结束（approval/resolved 帧带 rpcId/approvalId，或旧路径
-        approval/decided 无 id）：按 id 精确关闭对应交互记录。
+        approval/decided 无 id）：按「来源 + 会话 + 身份」精确关闭对应交互记录。
 
-        并发多个审批时，带 id 的 resolved 帧只关闭自己那一条。**带 id 但
-        未匹配到任何 pending 的帧是陈旧的已解决帧**——绝不能回退去关闭
-        其他 pending 审批。
-        兜底仅用于无任何 id 的旧路径 approval/decided（单 pending 时关闭）。"""
+        与语义层（``_on_normalized_event``）共用 ``_resolve_matching_interaction``：
+        同一条记录同时喂两条通道时，第一条删掉自己那条之后第二条结构化地找不到
+        候选（同样的来源/会话/身份约束），不需要"同记录只处理一次"的临时去重。
+
+        并发多个审批时，带 id 的 resolved 帧只关闭自己那一条；**带 id 但未匹配到
+        任何 pending 的帧是陈旧的已解决帧**——绝不回退去关闭其他 pending 审批，
+        也不会跨会话（同一 rpcId 被跨会话复用时 A 的收尾帧只关 A）或跨 agent。
+        **缺 sessionId 的旧帧匹配到多条候选时同样一个都不关**（归属未知不许任取
+        一条，而且那条记录的第二通道会接着关下一条），只留 warning。
+        兜底仅用于无任何 id 的旧路径 approval/decided（该来源+会话下唯一一条
+        无 rpcId 的纯提示）。"""
         payload = payload if isinstance(payload, dict) else {}
-        call_id = payload.get("callId")
-        if call_id:
-            call_id = str(call_id)
-            for iid, item in self._pending_interactions.items():
-                if (item.get("kind") == "approval"
-                        and str(item.get("call_id") or "") == call_id):
-                    self._resolve_interaction(iid)
-                    return
-            return  # 带 callId 但未匹配：陈旧已解决帧，不动其他审批
-        rpc_id = payload.get("rpcId")
-        approval_id = payload.get("approvalId")
-        if rpc_id:
-            for iid, item in self._pending_interactions.items():
-                if item.get("kind") == "approval" and item.get("rpc_id") == rpc_id:
-                    self._resolve_interaction(iid)
-                    return
-            return  # 带 id 但未匹配：陈旧已解决帧，不动其他审批
-        if approval_id:
-            for iid, item in self._pending_interactions.items():
-                if item.get("kind") == "approval" and item.get("approval_id") == approval_id:
-                    self._resolve_interaction(iid)
-                    return
-            return  # 同上：带 approvalId 未匹配即陈旧帧，不兜底
-        # 无 id 的旧路径 approval/decided：只对「无 rpc_id 的纯提示」兜底关闭。
-        # 带 rpc_id 的审批由同 id 的 approval/resolved 帧精确关闭——若这里
-        # 对它们兜底，DSH 回发的 A 的 decided（无 id）会把还在等待的 B 误关
-        # （表现为第二个弹窗延迟 0.5~1s 后自动消失）。
-        candidates = [iid for iid, item in self._pending_interactions.items()
-                      if item.get("kind") == "approval" and item.get("agent_key") == agent_key
-                      and not item.get("rpc_id")]
-        if len(candidates) == 1:
-            self._resolve_interaction(candidates[0])
+        identities = self._resolved_identities(payload)
+        session_id = str(payload.get("sessionId") or payload.get("session_id") or "")
+        matched = self._resolve_matching_interaction(kind="approval", agent_key=agent_key,
+                                                     session_id=session_id,
+                                                     identities=identities)
+        if matched is not None:
+            return
+        if not any(identities.values()):
+            # 无 id 的旧路径 approval/decided：只对「无 rpc_id 的纯提示」兜底关闭。
+            # 带 rpc_id 的审批由同 id 的 approval/resolved 帧精确关闭——若这里
+            # 对它们兜底，DSH 回发的 A 的 decided（无 id）会把还在等待的 B 误关
+            # （表现为第二个弹窗延迟 0.5~1s 后自动消失）。
+            self._resolve_identity_less_interaction("approval", agent_key, session_id)
 
     def _on_question_resolved(self, agent_key: str, payload: dict | None = None) -> None:
-        """问题结束（question/resolved）：按 rpcId/callId 精确关闭对应交互记录。
+        """问题结束（question/resolved）：与审批同一份匹配实现。
 
-        与审批同理：带 id 的 resolved 帧只关闭自己那一条；带 id 但未匹配的
-        帧是陈旧已解决帧，绝不回退关闭其他 pending 问题；兜底（无 id 的旧
-        路径）仅对无 rpc_id 的纯提示问题生效。"""
+        带 id 的 resolved 帧只关闭自己那一条；未匹配的带 id 帧是陈旧的已解决帧，
+        绝不回退关闭其他 pending 问题，也不跨会话/跨 agent 误关；缺 sessionId 的
+        旧帧匹配到多条候选时一个都不关（见 ``_resolve_matching_interaction``）；
+        兜底（无 id 的旧路径）仅对无 rpc_id 的纯提示问题生效。"""
         payload = payload if isinstance(payload, dict) else {}
-        call_id = payload.get("callId")
-        if call_id:
-            call_id = str(call_id)
-            session_id = str(payload.get("sessionId") or "")
-            for iid, item in self._pending_interactions.items():
-                if (item.get("kind") == "question"
-                        and str(item.get("call_id") or "") == call_id
-                        and (not session_id or str(item.get("session_id") or "") == session_id)):
-                    self._resolve_interaction(iid)
-                    return
-            return  # 带 callId 但未匹配：陈旧已解决帧，不动其他问题
-        rpc_id = payload.get("rpcId")
-        if rpc_id:
-            session_id = str(payload.get("sessionId") or "")
-            for iid, item in self._pending_interactions.items():
-                if (item.get("kind") == "question" and str(item.get("rpc_id") or "") == str(rpc_id)
-                        and (not session_id or str(item.get("session_id") or "") == session_id)):
-                    self._resolve_interaction(iid)
-                    return
-            return  # 带 id 但未匹配：陈旧已解决帧，不动其他问题
-        candidates = [iid for iid, item in self._pending_interactions.items()
-                      if item.get("kind") == "question" and item.get("agent_key") == agent_key
-                      and not item.get("rpc_id")]
-        if len(candidates) == 1:
-            self._resolve_interaction(candidates[0])
+        identities = self._resolved_identities(payload)
+        session_id = str(payload.get("sessionId") or payload.get("session_id") or "")
+        if self._resolve_matching_interaction(kind="question", agent_key=agent_key,
+                                              session_id=session_id,
+                                              identities=identities) is not None:
+            return
+        if not any(identities.values()):
+            self._resolve_identity_less_interaction("question", agent_key, session_id)
 
     def _resolve_interaction(self, interaction_id: str) -> None:
         """阻塞型交互结束：按 interaction_id 精确清掉该条记录，并让提醒队列自然推进。
@@ -3712,6 +4361,9 @@ class AgentLinkManager(QObject):
         item = self._pending_interactions.pop(interaction_id, None)
         if item is None:
             return
+        if not self._pending_interactions:
+            # 表空 = 没有待补投的交互：补投表立即停（稳态零唤醒）
+            self._stop_pending_redeliver_timer()
         alert_id = item.get("alert_id", "")
         if alert_id and hasattr(self.win, "resolve_alert"):
             self.win.resolve_alert(alert_id)
@@ -3732,6 +4384,7 @@ class AgentLinkManager(QObject):
         if not self._pending_interactions and not getattr(self.win, "_sticky_bubble_active", False):
             return
         self._pending_interactions.clear()
+        self._stop_pending_redeliver_timer()
         if hasattr(self.win, "clear_alerts"):
             self.win.clear_alerts()
         elif hasattr(self.win, "hide_bubble"):
@@ -3741,15 +4394,44 @@ class AgentLinkManager(QObject):
         """兼容别名：等价 dismiss_all_interactions。"""
         self.dismiss_all_interactions()
 
-    def _show_interaction_bubble(self, interaction_id: str) -> None:
+    def _presentation_ready(self) -> bool:
+        """现在是否**有可承接的呈现目标**（与显示 owner 的门禁同口径）。
+
+        多窗代理报 ``has_presentation_target()``（至少一个可见窗）；单窗宿主读
+        自己的 ``isVisible()``。没有可见目标时 ``window_alerts`` 在不可见宿主上
+        不排队，这条提醒实际上不了屏——恢复重投据此判断"要不要补投"。
+        """
+        probe = getattr(self.win, "has_presentation_target", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception:
+                log.debug("呈现目标探测失败", exc_info=True)
+                return False
+        probe = getattr(self.win, "isVisible", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception:
+                return True
+        return True
+
+    def _show_interaction_bubble(self, interaction_id: str) -> bool:
         """把某条 pending 阻塞交互以 sticky 气泡挂上（纯提示，无按钮）。
 
         走提醒消息队列（show_alert）：审批/问题入队后一次只展示一个，
         队列非空时其他弹窗不覆盖；resolved 时经 resolve_alert 弹下一条。
-        以 interaction_id 精确定位，保证并发审批各自的气泡互不干扰。"""
+        以 interaction_id 精确定位，保证并发审批各自的气泡互不干扰。
+
+        返回**本次是否交给了可承接的呈现目标**（有可见窗）；该结果记进条目的
+        ``delivered``：隐藏/无宠期间到达的请求在显示 owner 侧上不了屏，但真值一直
+        在 pending 表里，恢复可见时由 :meth:`redeliver_pending_interactions` 按同一
+        interaction_id 补投（窗口按 alert_id 就地合并，最多一份可见正文）。"""
         pending = self._pending_interactions.get(interaction_id)
         if not pending:
-            return
+            return False
+        delivered = self._presentation_ready()
+        pending["delivered"] = delivered
         if not hasattr(self.win, "show_alert"):
             if hasattr(self.win, "show_bubble"):
                 # 旧桩/无 show_alert 的窗口：退化为普通气泡，绝不因签名差异崩溃
@@ -3757,11 +4439,75 @@ class AgentLinkManager(QObject):
                     self.win.show_bubble(pending["text"], sticky=True)
                 except TypeError:
                     self.win.show_bubble(pending["text"])
+        else:
+            self._show_alert_compat(
+                pending["text"], subtitle="", sticky=True,
+                alert_id=pending.get("alert_id", ""), priority=0,
+                alert_type=pending.get("kind", "approval"),
+            )
+        # 没交出去 → 保活低频重投表，等呈现目标回来（有目标时零唤醒）。
+        if not delivered:
+            self._ensure_pending_redeliver_timer()
+        return delivered
+
+    def _pending_undelivered(self) -> list[str]:
+        """还没交到呈现目标手里的 pending 交互 id（有界表内的一次线性扫描）。"""
+        return [iid for iid, item in self._pending_interactions.items()
+                if not item.get("delivered")]
+
+    def redeliver_pending_interactions(self) -> int:
+        """补投隐藏/无宠期间**没能交付**的常驻交互（恢复可见时调用）。
+
+        隐藏期到达的审批/问题：pending 真值一直在本表（有界），但显示 owner 在
+        不可见宿主上不排队，owner 的 current/queue 可能为空——只看 owner 队列的
+        恢复路径永远等不到这条提醒（既不是"显示过又隐藏"，也没有再次推送）。
+        恢复可见时按同一 interaction_id 补投一次：显示 owner 按 alert_id 就地合并
+        （同一提醒最多一份可见正文），已交付过的条目不重复投递。
+        """
+        waiting = self._pending_undelivered()
+        if not waiting or not self._presentation_ready():
+            return 0
+        redelivered = 0
+        for iid in waiting:
+            if self._show_interaction_bubble(iid):
+                redelivered += 1
+        if redelivered:
+            log.debug("恢复显示补投阻塞交互：%s 条", redelivered)
+        return redelivered
+
+    def _ensure_pending_redeliver_timer(self, *, reset: bool = False) -> None:
+        """保活一个**有界、自停**的补投表：只在"有请求没交出去"期间跑。
+
+        恢复路径不能只靠"窗口显示"这一个调用点（全隐藏后重新生成宠物、逐只
+        恢复显示等路径不经过 ``resume()``），所以给一个兜底节拍：新请求没交出去时
+        1s 一拍；一直等不到呈现目标则指数退避到 ``_PENDING_REDELIVER_MAX_MS``
+        （有界唤醒，不空转 1Hz）；交付完或表空立刻停表（稳态零唤醒）。
+        """
+        timer = self._pending_redeliver_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(self._PENDING_REDELIVER_INTERVAL_MS)
+            timer.timeout.connect(self._on_pending_redeliver_tick)
+            self._pending_redeliver_timer = timer
+        elif reset and timer.interval() != self._PENDING_REDELIVER_INTERVAL_MS:
+            timer.setInterval(self._PENDING_REDELIVER_INTERVAL_MS)
+        if not timer.isActive():
+            timer.start()
+
+    def _stop_pending_redeliver_timer(self) -> None:
+        timer = self._pending_redeliver_timer
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+    def _on_pending_redeliver_tick(self) -> None:
+        if not self._pending_undelivered():
+            self._stop_pending_redeliver_timer()
             return
-        self._show_alert_compat(
-            pending["text"], subtitle="", sticky=True,
-            alert_id=pending.get("alert_id", ""), priority=0, alert_type=pending.get("kind", "approval"),
-        )
+        if self.redeliver_pending_interactions():
+            return
+        timer = self._pending_redeliver_timer
+        if timer is not None:
+            timer.setInterval(min(timer.interval() * 2, self._PENDING_REDELIVER_MAX_MS))
 
     def _show_alert_compat(self, text: str, **kwargs) -> None:
         """Use enriched alert metadata while remaining compatible with test/old windows."""
@@ -3790,16 +4536,63 @@ class AgentLinkManager(QObject):
             if self._pending_interactions[iid].get("agent_key") == agent_key:
                 self._show_interaction_bubble(iid)
 
-    def _schedule_done_check(self, agent_key: str) -> None:
+    def _monitor_generation(self, agent_key: str) -> int | None:
+        """该 Agent 当前监测代次；监视器不存在或已停时返回 None（不做代次闸）。"""
+        mon = self.monitors.get(agent_key)
+        if mon is None or not mon._running:
+            return None
+        return int(mon._emit_gen)
+
+    def _retire_agent_presentation(self, agent_key: str) -> None:
+        """退役一个 Agent 的**本代呈现簿记**（监测停止 / 换代次时调用）。
+
+        这是「启停边界」上的统一出口，替掉散落在各分支里的逐字段清理。清的是
+        「这一监测代对用户下过的结论」，**不是**远程会话状态：不发任何取消/控制帧，
+        不动其它 Agent，也不碰待审批/待回答的常驻交互（那由 link-disabled 的既有
+        offline 复位管线负责）。
+
+        - ``_done_pending``：在飞的 800ms 完成确认必须取消——否则用户关掉联动之后
+          仍会弹「已完成本轮任务」（L01）；
+        - ``_saw_error`` / ``_saw_alert`` / ``_error_after_done``：上一代的硬失败 /
+          需注意标记不得延续——否则新代中途接上的新回合成功收尾被整个吞掉（L02）；
+        - ``_last_raw`` / ``_last_applied``：新代从「没见过任何状态」开始（否则新代
+          第一帧会拿上一代的终态当 prev 做边沿判定）；
+        - ``_dsh_turn_ids``：上一代的收尾身份记忆（tracker 的全局起点计数故意不
+          回收，这里同样清身份表，保证新代该提醒就提醒）；
+        - ``_done_cooldown`` / ``_sound_last_event``：完成气泡/音效的去重与冷却属于
+          **一次连续观测内**的保险；换代次后上一代的弹泡不该再压住新代的第一次真实
+          收尾（``_sound_last_at`` 是跨 Agent 的全局冷却，不动）。
+        """
         self._cancel_done_check(agent_key)
+        self._saw_error.discard(agent_key)
+        self._saw_alert.discard(agent_key)
+        self._error_after_done.discard(agent_key)
+        self._last_raw.pop(agent_key, None)
+        self._last_applied.pop(agent_key, None)
+        self._dsh_turn_ids.pop(agent_key, None)
+        self._done_cooldown.pop(agent_key, None)
+        self._sound_last_event.pop(agent_key, None)
+
+    def _schedule_done_check(self, agent_key: str, cause: str = "edge") -> None:
+        """排定 800ms 完成确认；**回调绑定创建时的监测代次**。
+
+        关掉再立刻开启联动时，旧代的定时器若还能回调，就会以新代的身份弹一次早已
+        不成立的完成提醒（L01）。绑定代次后，``_fire_done`` 到期时再核一次当前代次，
+        任何「停过机器/换代次」的旧确认都作废；监视器本来就没在跑（测试/白盒路径）
+        时绑定 None，不做代次闸。
+        """
+        self._cancel_done_check(agent_key)
+        gen = self._monitor_generation(agent_key)
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.setInterval(self._DONE_CONFIRM_MS)
-        timer.timeout.connect(lambda k=agent_key: self._fire_done(k))
+        timer.timeout.connect(lambda k=agent_key, g=gen: self._fire_done(k, g))
         self._done_pending[agent_key] = timer
+        self._done_cause[agent_key] = cause
         timer.start()
 
     def _cancel_done_check(self, agent_key: str) -> None:
+        self._done_cause.pop(agent_key, None)
         timer = self._done_pending.pop(agent_key, None)
         if timer is not None:
             timer.stop()
@@ -3829,15 +4622,24 @@ class AgentLinkManager(QObject):
         self._error_after_done.add(agent_key)
         self._cancel_done_check(agent_key)
 
-    def _fire_done(self, agent_key: str) -> None:
-        """800ms 稳定确认到期：期间回忙则不算完成；配置/冷却在弹出前再查。"""
+    def _fire_done(self, agent_key: str, gen: int | None = None) -> None:
+        """800ms 稳定确认到期：期间回忙则不算完成；配置/冷却在弹出前再查。
+
+        ``gen`` 是这条确认**排定时**绑定的监测代次（``_schedule_done_check`` 传入，
+        白盒/直接调用为 None）。到期时核一次当前代次：不匹配说明这一代已经被停过或
+        换过（关闭联动 / monitor stop→start），该确认不再成立——先回收定时器再退出，
+        不出声不弹泡。
+        """
         # 定时器自己到期：取消路径（_cancel_done_check）已 stop + deleteLater，
         # 这条路径同样必须回收——否则每轮留一个已停表 QObject 在 manager 子对象表里
         # （长跑进程按回合数线性增长）。
         timer = self._done_pending.pop(agent_key, None)
+        self._done_cause.pop(agent_key, None)
         if timer is not None:
             timer.stop()
             timer.deleteLater()
+        if gen is not None and not self._gen_current(agent_key, gen):
+            return  # 旧代次的确认：监视器已停或已换代，作废（关掉联动后不得再提醒）
         # 隐藏中：不切动画不出声，气泡改道灵动岛反馈面（岛反馈面可用时；
         # pause_agent_link_for_hide 让监视器隐藏期保持运行，本兜底必须感知，
         # 否则 done 气泡在隐藏期被静默吞掉）。
@@ -4371,28 +5173,42 @@ class AgentLinkManager(QObject):
         action 类型：
         - approval_decided / approval_resolved：审批已决定
         - question_resolved：用户已回答问题
-        """
+
+        **与语义层同一份摄入**：这条记录同时喂 ``normalized_event`` 与这个旧通道，
+        所以这里必须走同一个 ``_resolve_matching_interaction``（来源 + 会话 + 同字段
+        身份）——旧实现把来源丢掉、还把 rpcId 与 requestId、approvalId 与 callId 当
+        互通匹配，于是语义层刚关掉本来源那条之后，这里会把**别的来源**的同 id 交互
+        当成唯一候选一起关掉（astra 复现：dsh 的 user_action 关掉 claude 的审批）。
+
+        记录不带任何 id 时退化为 ``_resolve_identity_less_interaction``（该来源唯一
+        一条无身份提示才关），与 ``_on_approval_resolved`` 的旧路径兜底同口径。"""
         if not hasattr(self.win, "isVisible") or not self.win.isVisible():
             return
         if not isinstance(record, dict):
             return
 
         action = str(record.get("action") or "")
-        session_key = str(record.get("sessionId") or agent_key)
-
-        # 按 action 类型关闭对应交互弹窗
-        if action == "approval_decided":
-            approval_id = str(record.get("approvalId") or "")
-            rpc_id = str(record.get("rpcId") or "")
-            self._close_interaction_by_id("approval", rpc_id, approval_id, session_key)
-        elif action == "approval_resolved":
-            approval_id = str(record.get("approvalId") or "")
-            rpc_id = str(record.get("rpcId") or "")
-            self._close_interaction_by_id("approval", rpc_id, approval_id, session_key)
+        kind = ""
+        if action in ("approval_decided", "approval_resolved"):
+            kind = "approval"
         elif action == "question_resolved":
-            call_id = str(record.get("callId") or "")
-            rpc_id = str(record.get("rpcId") or "")
-            self._close_interaction_by_id("question", rpc_id, call_id, session_key)
+            kind = "question"
+        if not kind:
+            return
+        # 会话未知就如实留空（旧实现用 agent_key 顶替会话，把来源和会话混成一个键）。
+        session_id = str(record.get("sessionId") or record.get("session_id") or "")
+        identities = {
+            "request_id": str(record.get("requestId") or ""),
+            "rpc_id": str(record.get("rpcId") or ""),
+            "approval_id": str(record.get("approvalId") or ""),
+            "call_id": str(record.get("callId") or ""),
+        }
+        if self._resolve_matching_interaction(kind=kind, agent_key=agent_key,
+                                              session_id=session_id,
+                                              identities=identities) is not None:
+            return
+        if not any(identities.values()):
+            self._resolve_identity_less_interaction(kind, agent_key, session_id)
 
     def _on_unknown_bridge_event(self, agent_key: str, record: dict) -> None:
         """DSH 桥接写出的未知事件 → 提醒用户更新/重装 bridge。
@@ -4418,27 +5234,6 @@ class AgentLinkManager(QObject):
             event=event,
         )
         self.win.show_bubble(text, duration_ms=6000)
-
-    def _close_interaction_by_id(self, kind: str, rpc_id: str, id_: str, session_key: str) -> None:
-        """按 kind + identity + session 精确关闭交互弹窗。"""
-        for iid, item in self._pending_interactions.items():
-            if item.get("kind") != kind:
-                continue
-            item_session = str(item.get("session_id") or "")
-            if session_key and item_session and item_session != session_key:
-                continue
-            if rpc_id and (item.get("rpc_id") == rpc_id or item.get("request_id") == rpc_id):
-                self._resolve_interaction(iid)
-                return
-            if id_ and (item.get("approval_id") == id_ or item.get("call_id") == id_):
-                self._resolve_interaction(iid)
-                return
-        if kind not in ("approval", "question"):
-            return
-        for iid, item in self._pending_interactions.items():
-            if item.get("kind") == kind and item.get("agent_key") == session_key and not item.get("rpc_id"):
-                self._resolve_interaction(iid)
-                return
 
     def get_session_display_name(self, session_id: str) -> str:
         """解析会话的人类可读展示名（「projectName · sessionName」组合串）。
@@ -4515,7 +5310,7 @@ class AgentLinkManager(QObject):
         本方法同时是本回合硬失败的**打标点**（GUI 侧、按 agent；execution/failed
         到 AgentLinkManager 只有这一条既有分发链路）：桥接在 turn/end 判定
         reason.kind === "error" 后先写 execution/failed，随后仍无条件转发同一条
-        turn/end，收敛器把一切 turn/end 收敛为 success——不打标就是失败回合照样
+        turn/end，收敛器把非中止的 turn/end 收敛为 success——不打标就是失败回合照样
         排定完成确认、800ms 后弹「已完成本轮任务」并播 done 音效（误报成功）。
         两个标记与 error 周期（``_on_agent_state`` 的 busy→error 分支）同款：
         ``_saw_error`` 掐掉 done 音效、``_saw_alert`` 把收尾文案切离「已完成」

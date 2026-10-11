@@ -202,6 +202,14 @@ function noteTurnToolResult(sessionKey, ok, errorCode, errorMessage) {
   noteStatsToolResult(_turnStats(sessionKey), ok, errorCode, errorMessage);
 }
 
+// turn/end 的终止原因 kind（completed / error / aborted / blocked / max-tokens）。
+// 只取短枚举字符串，非字符串或缺失返回空串（不写字段）。
+function turnEndReasonKind(event) {
+  const reason = event && event.data && event.data.reason;
+  const kind = reason && typeof reason.kind === "string" ? reason.kind.trim() : "";
+  return kind.length <= 32 ? kind : "";
+}
+
 // turn/end 时的硬失败判定（纯函数，供 Node 回归测试直接驱动）：
 // 只认 DSH 的 reason.kind === "error"（本轮真的出错终止）；completed /
 // aborted / blocked / max-tokens / reason 缺失 → 一律不写 execution/failed。
@@ -476,9 +484,12 @@ function sessionIdOf(session, event) {
   return "session:unknown";
 }
 
-function writeStateEvent(type, step, sessionId, agentName = "") {
+function writeStateEvent(type, step, sessionId, agentName = "", reasonKind = "") {
   const extra = { event: type };
   if (step !== undefined && step !== null) extra.step = step;
+  // turn/end 携带终止原因（只落 kind，不落错误正文）：桌宠据此让用户中止的回合
+  // 静默收尾，不报「完成」。字段缺失 = 旧桥接，桌宠保持原行为。
+  if (reasonKind) extra.reasonKind = reasonKind;
   if (sessionId) extra.sessionId = sessionId;
   if (agentName) extra.agentName = agentName;
   writeRecord(extra);
@@ -1028,7 +1039,8 @@ export function apply(ctx) {
       //    转发时携带 step（step/start、turn/start 等）：行为模式检测已删，step
       //    只剩事件序号用途（桌宠活动气泡模板 {step}）。
       if (STATE_EVENT_TYPES.has(type)) {
-      writeStateEvent(type, stepOf(event), sessionId, agentName);
+      writeStateEvent(type, stepOf(event), sessionId, agentName,
+        type === "turn/end" ? turnEndReasonKind(event) : "");
       // 用户介入信号：approval/decided 或 thread_rolled_back 等用户主动干预事件
       // → 向桌宠发送 user_action 事件，关闭对应弹窗
       if (type === "approval/decided") {
@@ -1060,6 +1072,7 @@ export const __retryTest = {
 export const __hardFailureTest = {
   threshold: RETRY_EXHAUSTED_THRESHOLD,
   decideTurnEnd: decideTurnEndFailure,
+  turnEndReasonKind,
   resetTurnStats,
   noteRetry: noteStatsRetry,
   recovery: noteStatsRecovery,

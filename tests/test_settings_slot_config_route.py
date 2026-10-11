@@ -84,10 +84,11 @@ def test_child_save_routes_global_keys_to_main_config(tmp_path, app):
     assert on_disk["pet_opacity"] == 35, "窗口级键必须落主配置"
     assert on_disk["edge_probe_enabled"] is True, "拖拽探头必须落主配置"
     assert on_disk["voice_chime_enabled"] is True, "语音报时必须落主配置"
-    assert on_disk["scale"] == 0.5, "per-slot 键不得改动主配置"
+    assert "scale" not in on_disk
+    assert _read_json(_slot_path(main.dir, 0))["scale"] == 0.5
 
     slot_on_disk = _read_json(_slot_path(main.dir))
-    assert slot_on_disk["pet_opacity"] != 35, "非 per-slot 键一个字节都不该进 slot 文件"
+    assert slot_on_disk.get("pet_opacity") != 35, "非 per-slot 键一个字节都不该进 slot 文件"
     assert slot_on_disk.get("edge_probe_enabled") is not True
     assert slot_on_disk.get("voice_chime_enabled") is not True
 
@@ -114,8 +115,9 @@ def test_child_save_keeps_per_slot_keys_in_the_slot_file(tmp_path, app):
     assert slot_on_disk["user_customized"] is True, "用户在自己的设置页保存过 ⇒ 置位落种旗标"
 
     on_disk = _read_json(main.path)
-    assert on_disk["scale"] == 0.5, "per-slot 键不得污染主配置"
-    assert on_disk["self_talk_enabled"] is False
+    assert "scale" not in on_disk
+    assert "self_talk_enabled" not in on_disk
+    assert _read_json(_slot_path(main.dir, 0))["self_talk_enabled"] is False
 
 
 # ------------------------------------------------------------ 2. 初值路由
@@ -129,9 +131,8 @@ def test_child_page_initial_values_come_from_main_config(tmp_path, app):
     # 先用主配置落种，再把 slot 文件改成**陈旧快照**（主配置改过、slot 文件没跟上，
     # 正是"上一次落种时的样子"）：子宠页以前读的就是这一份。
     Config(base=tmp_path, instance_id="slot-1")
-    assert spawn_state.write_slot_setting(main.dir, 1, "pet_opacity", 40) is True
-    assert spawn_state.write_slot_setting(main.dir, 1, "voice_chime_enabled", False) is True
-    assert spawn_state.write_slot_setting(main.dir, 1, "scale", 0.85) is True
+    _slot_path(main.dir).write_text(json.dumps({"version": 4, "pet_opacity": 40,
+        "voice_chime_enabled": False, "scale": 0.85}), encoding="utf8")
     cfg = Config(base=tmp_path, instance_id="slot-1")
 
     dialog = _dialog(cfg)
@@ -150,24 +151,30 @@ def test_child_page_initial_values_come_from_main_config(tmp_path, app):
 
 # ------------------------------------------------------------ 3. 恢复默认收口
 def test_child_reset_touches_slot_file_only(tmp_path, app, monkeypatch):
-    """子宠页「恢复默认设置」：只重置 slot 文件，主配置一个键都不碰。
+    """子宠页「恢复默认设置」：只重置这只宠的档案，主配置一个键都不碰。
 
     未闸住时走到了 ``Config.reset_to_defaults`` 的整表语义，而路由后那份"整表"
     是**所有桌宠共用**的主配置——点一次就把主宠与其它子宠的设置一起抹掉。
+
+    G1b 起落盘走 ``pet_profiles.reset_slot_profile``：**保留位置**（``rx/ry/screen_name``，
+    "回到默认落位"是独立操作）、偏好键从档案里**移除**（读侧落回同源默认）、
+    ``user_customized`` 是本地旗标而非偏好值，原样保留。
     """
-    from pet import settings_reset_defaults
+    from pet import pet_profiles, settings_reset_defaults
 
     main = Config(base=tmp_path)
     main.set("pet_opacity", 66)
     main.set("voice_chime_enabled", True)
     assert main.save() is True
     cfg = Config(base=tmp_path, instance_id="slot-1")
-    assert spawn_state.write_slot_setting(
-        main.dir, 1, "scale", 1.0, user_customized=True) is True
-    assert spawn_state.write_slot_setting(main.dir, 1, "self_talk_enabled", True) is True
+    assert pet_profiles.write_profile_settings(
+        main.dir, 1, {"scale": 1.0, "self_talk_enabled": True},
+        user_customized=True).status == "ok"
+    assert pet_profiles.write_profile_geometry(
+        main.dir, 1, {"rx": 0.2, "ry": 0.7, "screen_name": "primary"}).status == "ok"
     before_main = _read_json(main.path)
 
-    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent: True)
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", lambda _parent, _scope=None: True)
     dialog = _dialog(cfg)
     try:
         assert settings_reset_defaults.on_reset_clicked(dialog) is True
@@ -176,9 +183,75 @@ def test_child_reset_touches_slot_file_only(tmp_path, app, monkeypatch):
 
     assert _read_json(main.path) == before_main, "子宠页恢复默认不得动主配置"
     slot_on_disk = _read_json(_slot_path(main.dir))
-    assert slot_on_disk["scale"] == pytest.approx(DEFAULT_SCALE), "per-slot 键归位"
-    assert slot_on_disk["self_talk_enabled"] is False
-    assert slot_on_disk["user_customized"] is False
+    assert "scale" not in slot_on_disk, "偏好键从档案移除（读侧回同源默认）"
+    assert "self_talk_enabled" not in slot_on_disk
+    assert slot_on_disk["user_customized"] is True, "本地旗标不是偏好值：原样保留"
+    assert (slot_on_disk["rx"], slot_on_disk["ry"]) == (0.2, 0.7), "位置必须保留"
+    assert slot_on_disk["screen_name"] == "primary"
+    profile = pet_profiles.read_slot_profile(main.dir, 1)
+    assert profile.value("scale") == pytest.approx(DEFAULT_SCALE), "读侧回同源默认"
+    assert profile.value("self_talk_enabled") is pet_profiles.same_source_default(
+        "self_talk_enabled")
+
+
+def test_child_reset_confirm_copy_promise_equals_actual_scope(tmp_path, app, monkeypatch):
+    """R08：确认框承诺的作用域 = 点下去真会变的范围（两边钉在一条用例里）。
+
+    文案若照抄主宠页那套（"形象、系统提示词、自定义台词与角色别名、外观与功能开关
+    都会恢复出厂"），而它们在子宠页上走主配置、重置时一个字节都不动——用户就是照着
+    一段不成立的话在做不可撤销的决策。这条用例同时取**真确认框**与**真落盘结果**：
+    文案说"只重置这只桌宠自己的那份设置（位置保留）"，盘上也确实只有这只的档案变了。
+    """
+    from pet import pet_profiles, settings_reset_defaults
+
+    main = Config(base=tmp_path)
+    main.set("voice_chime_enabled", True)          # 全局键：文案承诺"不受影响"
+    main.set("self_talk_texts", ["全局台词"])
+    assert main.save() is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+    assert pet_profiles.write_profile_settings(
+        main.dir, 1, {"self_talk_texts": ["这只的台词"]}).status == "ok"
+    assert pet_profiles.write_profile_geometry(
+        main.dir, 1, {"rx": 0.3, "ry": 0.6}).status == "ok"
+    before_main = _read_json(main.path)
+
+    seen: list = []
+
+    def answer_yes(host, scope=None) -> bool:
+        """替掉 exec，但确认框本身走**产品真实构造**（文案/按钮/默认钮都是真的）。
+
+        ``scope`` 是产品这次点的那个作用域（本宠 / 全局）：确认框必须按它出文案，
+        所以替身也要把它透传——只转发 host 会把"点了全局动作却看到本宠文案"这类
+        错配藏起来。
+        """
+        box, confirm = settings_reset_defaults.build_reset_confirm_box(host, scope)
+        try:
+            seen.append((box.text(), box.informativeText()))
+            assert box.defaultButton() is not confirm, "默认钮必须仍是取消"
+        finally:
+            box.deleteLater()
+        return True
+
+    monkeypatch.setattr(settings_reset_defaults, "confirm_reset", answer_yes)
+    dialog = _dialog(cfg)
+    try:
+        assert settings_reset_defaults.on_reset_clicked(dialog) is True
+    finally:
+        dialog.deleteLater()
+
+    assert len(seen) == 1, "前提：子宠页确实弹了确认框"
+    copy = "\n".join(seen[0])
+    assert "只重置这只桌宠自己的那份设置" in copy
+    assert "语音报时、灵动岛、AI 对话等全局设置" in copy
+    assert "当前所在位置不变" in copy, "位置保留也是承诺的一部分（G1b）"
+    assert "将重置全部设置" not in copy, "主宠页承诺不得出现在子宠页"
+
+    assert _read_json(main.path) == before_main, "文案承诺的「全局不受影响」必须成立"
+    slot_on_disk = _read_json(_slot_path(main.dir))
+    assert "self_talk_texts" not in slot_on_disk, "偏好键从档案移除"
+    profile = pet_profiles.read_slot_profile(main.dir, 1)
+    assert profile.value("self_talk_texts") == DEFAULT_SELF_TALK_TEXTS, "这只的台词归默认"
+    assert (slot_on_disk["rx"], slot_on_disk["ry"]) == (0.3, 0.6), "位置保留"
 
 
 # ------------------------------------------------------------ 4. 并发纪律
@@ -360,6 +433,13 @@ def test_harness_controls_are_editable_on_the_child_page(tmp_path, app):
         assert dialog.harness_autostart_check.isEnabled() is True
         assert dialog.harness_launch_target_select.isEnabled() is True
         assert dialog.harness_autostart_check.toolTip() != "仅主桌宠可设置"
+        from pet.settings_widgets import SettingRow
+        for name in ("harness_autostart", "harness_launch_target"):
+            row = dialog.findChild(SettingRow, f"settingRow_{name}")
+            assert row is not None
+            hint = row.hint_label.text()
+            assert "仅主桌宠" not in hint
+            assert "影响所有桌宠" in hint
 
         dialog.harness_autostart_check.setChecked(True)
         dialog.harness_launch_target_select.setCurrentData("service")
@@ -386,7 +466,7 @@ def test_legacy_topology_slot_config_is_not_routed(tmp_path, monkeypatch):
 
     monkeypatch.setenv(cmd_mod.ENV_TOPOLOGY, "legacy")
     cfg = Config(base=tmp_path, instance_id="slot-1")
-    assert settings_slot_config.route_settings_config(cfg) is cfg
+    assert isinstance(settings_slot_config.route_settings_config(cfg), settings_slot_config.SlotRoutedConfig)
 
 
 def test_non_slot_instance_is_not_routed(tmp_path):
@@ -419,8 +499,9 @@ def test_slot_compat_launch_main_config_is_that_process_main(tmp_path, monkeypat
     assert routed is not cfg, "该进程仍是 overlay 拓扑下的 slot 身份，照常分流"
     routed.set("pet_opacity", 42)
     assert routed.save() is True
-    assert _read_json(cfg.path)["pet_opacity"] == 42, \
-        "窗口级键落进该进程自己的身份文件（= 运行期读源）"
+    assert _read_json(routed._main.path)["pet_opacity"] == 42
+    assert routed._main.path.name == "config.json"
+    assert not cfg.path.exists()
 
 
 def test_routed_keys_cover_the_runtime_per_slot_read_surface(tmp_path):
@@ -477,8 +558,7 @@ def test_parent_overlay_topology_routes_child_page_despite_disk_capture_mode(
     routed.set("pet_opacity", 33)
     assert routed.save() is True
     assert _read_json(main.path)["pet_opacity"] == 33, "非 per-slot 键落主配置（真生效）"
-    assert _read_json(_slot_path(main.dir)).get("pet_opacity") != 33, \
-        "一个字节都不许落 slot 文件"
+    assert not _slot_path(main.dir).exists(), "全局保存不创建宠档案"
 
 
 def test_parent_legacy_topology_does_not_route_even_when_disk_says_overlay(
@@ -498,11 +578,11 @@ def test_parent_legacy_topology_does_not_route_even_when_disk_says_overlay(
     monkeypatch.setenv(cmd_mod.ENV_PARENT_TOPOLOGY, "legacy")
 
     cfg = Config(base=tmp_path, instance_id="slot-1")
-    assert settings_slot_config.route_settings_config(cfg) is cfg
+    assert settings_slot_config.route_settings_config(cfg) is not cfg
 
     # 父进程陈述与 dev 逃生门同时在场且互相矛盾：父进程运行中拓扑优先
     monkeypatch.setenv(cmd_mod.ENV_TOPOLOGY, "overlay")
-    assert settings_slot_config.route_settings_config(cfg) is cfg
+    assert settings_slot_config.route_settings_config(cfg) is not cfg
 
 
 def test_missing_parent_topology_env_falls_back_to_existing_verdict(
@@ -518,9 +598,99 @@ def test_missing_parent_topology_env_falls_back_to_existing_verdict(
     monkeypatch.delenv(cmd_mod.ENV_PARENT_TOPOLOGY, raising=False)
 
     cfg = Config(base=tmp_path, instance_id="slot-1")
-    assert settings_slot_config.route_settings_config(cfg) is cfg, \
+    assert settings_slot_config.route_settings_config(cfg) is not cfg, \
         "缺父进程陈述时照旧按磁盘快照判（勾了没重启 = 那个进程就是 legacy）"
 
     monkeypatch.setenv(cmd_mod.ENV_PARENT_TOPOLOGY, "overlay")
     assert settings_slot_config.route_settings_config(cfg) is not cfg, \
         "同一份磁盘配置，父进程陈述 overlay 就分流"
+
+
+# ------------------------------------------------------------ 11. 坏档案（G1b 接线后）
+@pytest.mark.parametrize("payload", [
+    b'{ "scale": 1.0, broken',                      # 非法 JSON
+    b'{"scale": 1.0, "note": "\xff\xfe bad"}',      # 非法 UTF-8（不许抛 UnicodeDecodeError）
+])
+def test_corrupt_slot_file_keeps_the_dialog_usable_and_is_never_overwritten(
+        tmp_path, app, payload):
+    """坏档案：设置窗照旧能开（读侧同源默认），保存如实失败且**一个字节都不覆盖**。
+
+    档案是手改/半截 JSON 的一手数据。旧实现把它当空 dict 读、再按这份"空"整表重写——
+    用户手改坏的文件被静默销毁成只剩这次保存的那几个键，而 ``save()`` 还报成功。
+    """
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    cfg = Config(base=tmp_path, instance_id="slot-1")   # 落种出 slot 文件
+    path = _slot_path(main.dir)
+    path.write_bytes(payload)
+    before = path.read_bytes()
+
+    dialog = _dialog(cfg, standalone=True)
+    try:
+        assert float(dialog.scale_combo.currentData()) == pytest.approx(DEFAULT_SCALE), (
+            "坏档案必须按同源默认渲染，而不是把设置窗构造拖垮")
+        assert dialog._write_config() is False, "坏档案不得被当成空档案整表覆盖"
+    finally:
+        dialog.deleteLater()
+
+    assert path.read_bytes() == before, "坏档案一个字节都不许动"
+
+
+# ------------------------------------------------------------ 12. 表单编辑代次（防回归契约）
+def test_form_edit_generation_is_pinned_against_an_external_reset(tmp_path, app):
+    """R5：表单打开后外部推进该槽代次 → 旧控件值**不许**以新代次落盘。
+
+    旧实现的链条：``_write_config`` 开头 ``config.reload()`` → 路由视图作废档案快照
+    （此刻 ``_pending_slot`` 还空着）→ 保存时 ``_slot_values()`` 重新取快照，拿到的是
+    **外部 reset 之后**的新代次 → 表单里的旧控件值带着这个新代次写回，通过代次门，
+    外部 reset 被静默抹掉（triage 实测 ``reset_undone=true``）。
+
+    注：今天没有**活的**触发路径——唯一 reset 写者就是这个自关窗的设置页本身，而
+    ``settings.lock`` 拦住第二个设置窗。所以这是一条**契约/防回归**测试，不是线上缺陷
+    复现：契约是"表单的编辑代次在打开时就钉住，reload 洗不掉它"。
+    """
+    from pet import pet_profiles
+
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    assert pet_profiles.write_profile_settings(
+        main.dir, 1, {"scale": 0.8, "playback_speed": 1.5},
+        user_customized=True).status == "ok"
+    cfg = Config(base=tmp_path, instance_id="slot-1")
+    dialog = _dialog(cfg)
+    try:
+        assert float(dialog.scale_combo.currentData()) == pytest.approx(0.8)
+
+        # 外部写者（真实 API）：reset 该槽 → 代次推进、偏好回同源默认
+        snapshot = pet_profiles.read_slot_snapshot(main.dir, 1)
+        assert snapshot.status == "ok"
+        assert pet_profiles.reset_slot_profile(
+            main.dir, 1, generation=snapshot.generation).status == "ok"
+
+        assert dialog._write_config() is False, (
+            "表单里的旧控件值拿到了新代次：外部 reset 会被静默抹掉")
+        profile = pet_profiles.read_slot_profile(main.dir, 1)
+        assert profile.value("scale") == pytest.approx(DEFAULT_SCALE), "外部 reset 的结果必须存活"
+        assert profile.value("playback_speed") == 1.0
+        assert float(dialog.scale_combo.currentData()) == pytest.approx(0.8), (
+            "被拒时草稿必须留在表单里（不清 pending、不静默丢用户改动）")
+    finally:
+        dialog.deleteLater()
+
+
+def test_form_edit_generation_still_allows_the_normal_save_path(tmp_path, app):
+    """对照：没有外部代次推进时，同一条保存路径照常成功（钉住的是代次，不是"总拒绝"）。"""
+    from pet import pet_profiles
+
+    main = Config(base=tmp_path)
+    assert main.save() is True
+    assert pet_profiles.write_profile_settings(
+        main.dir, 1, {"scale": 0.8}, user_customized=True).status == "ok"
+    dialog = _dialog(Config(base=tmp_path, instance_id="slot-1"))
+    try:
+        dialog.pet_opacity_spin.setValue(40)
+        assert dialog._write_config() is True
+    finally:
+        dialog.deleteLater()
+
+    assert pet_profiles.read_slot_profile(main.dir, 1).value("scale") == pytest.approx(0.8)

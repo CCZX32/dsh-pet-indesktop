@@ -67,6 +67,9 @@ _ROW_WHITELIST: dict[str, frozenset[str]] = {
     "island_cpu": frozenset({"CPU"}),
     "island_mem": frozenset({"CPU"}),
     "island_gpu": frozenset({"GPU"}),
+    # 游戏帧率段：FPS 就是这一段在用户侧的名字（同 CPU / GPU 的口径），也是用户搜索
+    # 这一行时打的词；hint 里的「Present FPS」正是在点明读数口径，不能改写掉。
+    "island_fps": frozenset({"FPS"}),
     # 「AI 回复到达」是对话功能在用户侧的通用说法。
     "dynamic_island_hidden_chat": frozenset({"AI"}),
     "dynamic_island_event_effects": frozenset({"AI"}),
@@ -156,6 +159,42 @@ def test_whitelist_has_no_stale_entries(tmp_path, monkeypatch):
                 stale.append(f"{key}: {unused}")
         assert not stale, (
             "白名单条目已失效（文案改过或行删了，请同步收紧白名单）：\n" + "\n".join(stale)
+        )
+    finally:
+        dialog.close()
+
+
+#: 「逐宠」行文案不许出现的范围词：这些键一只一份（``PER_PET_KEYS``），
+#: 承诺"所有桌宠"就是把每宠设置说成全局。
+#:
+#: 为什么要有这条机制：F06（2026-10-10 终审）抓到「播放速率」行写着
+#: 「控制**所有**桌宠动画的播放速度」，而 ``playback_speed`` 从 B7b 起就是每宠键
+#: （右键菜单的速率也只改被点的那一只）——修复报告当时称"已改"，交付字节里却没改。
+#: 手工核一遍文案会漏、会疲劳；键集与文案的这层对应关系必须由机器盯着。
+GLOBAL_SCOPE_WORDS = ("所有桌宠", "全部桌宠", "所有宠物")
+
+
+def test_per_pet_rows_never_promise_a_global_scope(tmp_path, monkeypatch):
+    """逐宠键的行文案不许说"所有桌宠"（范围真值 = ``PER_PET_KEYS``）。"""
+    from pet import pet_profiles
+
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        offenders = []
+        scanned = 0
+        for row in dialog.findChildren(SettingRow):
+            key = row.objectName()[len("settingRow_"):]
+            if key not in pet_profiles.PER_PET_KEYS:
+                continue
+            scanned += 1
+            claimed = [word for word in GLOBAL_SCOPE_WORDS
+                       if word in f"{row.label.text()}\n{row.hint_label.text()}"]
+            if claimed:
+                offenders.append(f"{key}: {claimed} | {row.hint_label.text()}")
+        assert scanned >= 5, "逐宠行没扫到（键集或行名变了），本用例会假绿"
+        assert not offenders, (
+            "逐宠键的行文案承诺了全局范围（改成「这只桌宠」，或把键真的做成全局）：\n"
+            + "\n".join(offenders)
         )
     finally:
         dialog.close()

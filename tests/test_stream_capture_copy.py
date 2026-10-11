@@ -30,8 +30,9 @@ from tests.test_overlay_dead_switches import _make_shell
 
 app = QApplication.instance() or QApplication([])
 
-LEGACY_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
-RESTART_HINT = LEGACY_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+LEGACY_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
+RESTART_HINT = (LEGACY_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+                "（影响所有桌宠）")
 
 
 def _build_dialog(tmp_path, monkeypatch, *, topology: str | None = None,
@@ -54,8 +55,12 @@ def _build_dialog(tmp_path, monkeypatch, *, topology: str | None = None,
         monkeypatch.setenv("PET_RENDER_TOPOLOGY", topology)
     config = Config(base=tmp_path, instance_id=instance_id) if instance_id else Config(tmp_path)
     if capture is not None:
-        config.set("stream_capture_mode", capture)
-        assert config.save()
+        # ``stream_capture_mode`` 是**全局**键（规范 §五「捕获模式与 OS 开机自启」）：
+        # 拓扑门只读主配置，子宠页的 slot 文件里没有它、也不许有它（裸 slot
+        # ``Config.save`` 会被归属表拒绝）。主宠页的 ``config`` 本身就是主配置。
+        main_config = config if not instance_id else Config(base=tmp_path)
+        main_config.set("stream_capture_mode", capture)
+        assert main_config.save()
     main_path = tmp_path / APP_DIR_NAME / "config.json"
     monkeypatch.setattr(cmd_mod, "topology_config_path", lambda: main_path)
     cmd_mod.reset_topology_snapshot()
@@ -126,44 +131,56 @@ def test_stream_capture_check_is_never_greyed_out(tmp_path, monkeypatch):
             cmd_mod.reset_topology_snapshot()
 
 
-def test_stream_capture_check_disabled_on_child_page(tmp_path, monkeypatch):
-    """审查修复 1：子宠页该行置灰 + 说明「仅主桌宠可设置」，点击无效。
+def test_stream_capture_check_editable_on_child_page(tmp_path, monkeypatch):
+    """F03：子宠页同样可编辑这个**全局**键，点击生效并落**主** config.json。
 
-    子宠页保存写的是 ``config-slot-N.json``（modern_settings_dialog 的保存回写），
-    而拓扑判定只读主配置 ⇒ 这一行在子宠页点什么都不会生效。子宠页也不再可能靠
-    运行期多开落地（捕获模式下 spawn 入口已拒绝），故一律归主宠页。
+    旧实现按 ``config.instance_id`` 置灰 + tooltip「仅主桌宠可设置」，理由写的是
+    "子宠页保存只写 config-slot-N.json、拓扑判定只读主配置"——那条理由已被
+    ``SlotRoutedConfig`` 的全局路由推翻：非每宠键一律落主配置。而正常 UI 入口
+    **只有** slot 身份（``--instance slot-0``/``slot-N``），按"身份非空"判会把
+    slot0 自己的页面也拒掉，连已经在捕获模式里的用户都关不掉它（2026-10-10 终审 F03）。
+    规范 §五：任意宠可以编辑全局设置，界面说清影响所有桌宠即可。
     """
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
 
     from pet import overlay_settings_command as cmd_mod
+    from pet.config import APP_DIR_NAME
 
     dialog = _build_dialog(tmp_path, monkeypatch, topology="overlay",
                            instance_id="slot-1", capture=False)
     try:
         check = dialog.stream_capture_check
         assert check is not None, "Windows 设置页必须有直播捕获兼容行"
-        assert check.isEnabled() is False
-        assert check.toolTip() == "仅主桌宠可设置"
+        assert check.isEnabled() is True, "子宠页的全局键必须可编辑（不再是死权限）"
+        assert check.toolTip() != "仅主桌宠可设置"
 
         dialog.show()
         app.processEvents()
         QTest.mouseClick(check, Qt.MouseButton.LeftButton)
         app.processEvents()
-        assert check.isChecked() is False, "置灰控件必须点不动"
-        # 保存链路的写回只写该页自己那份配置：slot 配置里的值不参与拓扑判定
-        assert dialog.config.get("stream_capture_mode") is False
+        assert check.isChecked() is True, "可点就必须真的点得动"
+
+        # 真实路由：值进**主** config.json，slot 文件里不出现这个键（不留第三真值）
+        assert dialog._write_config() is True
+        assert dialog.config.get("stream_capture_mode") is True
+        main_disk = json.loads(
+            (tmp_path / APP_DIR_NAME / "config.json").read_text(encoding="utf-8"))
+        assert main_disk["stream_capture_mode"] is True, "拓扑门读的就是这一份"
+        slot_disk = json.loads(
+            (tmp_path / APP_DIR_NAME / "config-slot-1.json").read_text(encoding="utf-8"))
+        assert "stream_capture_mode" not in slot_disk
     finally:
         _close(dialog)
         cmd_mod.reset_topology_snapshot()
 
 
-def test_stream_capture_child_row_also_disabled_in_legacy(tmp_path, monkeypatch):
-    """legacy（捕获模式重启后的形态）下子宠页同样归主宠页：那时根本不存在子窗。"""
+def test_stream_capture_child_row_is_editable_in_legacy(tmp_path, monkeypatch):
+    """legacy 下同一条路由成立：全局键写主配置，不因拓扑退回"只归主宠页"。"""
     dialog = _build_dialog(tmp_path, monkeypatch, topology="legacy",
                            instance_id="slot-1")
     try:
-        assert dialog.stream_capture_check.isEnabled() is False
+        assert dialog.stream_capture_check.isEnabled() is True
     finally:
         _close(dialog)
 

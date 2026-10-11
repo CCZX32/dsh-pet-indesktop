@@ -57,10 +57,29 @@ flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real
 title-bearing window OBS can enumerate (the window capability follows the main
-config even for `--slot N` windows), spawned pets stay collapsed and manual
-spawning is refused (the active-slot list is left untouched, so they return when
-the switch is turned off). `PetWindow` is kept permanently for the capture-mode
-(streaming) surface and single-pet legacy runs — **fix crashes there only**.
+config), only active slot0 has a capture window. Restoring slot0 is allowed;
+extra pets are refused without modifying the stored child active identities.
+`--slot N` selects an existing active identity, never creates a second instance
+or activates an empty slot. `PetWindow` remains the capture/legacy surface; use
+`SlotRoutedConfig` for its profile/global ownership rather than a second truth.
+
+Pet identities are fixed 0..128. Profiles live only in `config-slot-N.json`,
+global settings in `config.json`, and active membership in versioned
+`overlay-active-pets.json`. Closing a pet preserves its profile and services,
+never promotes another pet or quits the app. Application exit preserves active
+membership. Profile writes/reset share the directory lock and profile generation;
+raw slot `Config.save` is intentionally refused. A corrupt `config-slot-0.json`
+degrades that slot only: it stays empty (kept out of the in-memory active set),
+its file is never touched, and the diagnosis names its path — every other
+non-ok `migrate_slot0_profile` status still aborts startup, because those mean
+the global config or the migration itself is untrustworthy. Active membership is
+written only by explicit user generate/close, and those writes back up a corrupt
+`overlay-active-pets.json` before replacing it (`on_broken="backup-overwrite"`)
+and report a failure visibly; startup and exit never rewrite it. Reset and
+autostart are global-scope settings reachable from every pet's settings page:
+the sidebar exposes per-pet and global reset as two separate actions, and
+`autostart_wanted` is editable everywhere with its "affects all pets" scope
+stated in the row.
 
 The multi-process multi-pet layer (cross-process collision IPC, slot file locks,
 instance launcher, child-pet taskkill cleanup, runtime-marker live consumers) was
@@ -181,6 +200,22 @@ exact breakpoint there; see `docs/agents/handoff.md`.
   (`session_watcher`, `match_shutdown`, `AppShell._on_session_end`).
 - Read `docs/ONEDIR_PACKAGING.md` when changing PyInstaller specs, bundled
   resources, or platform build scripts.
+- Read `docs/ONEDIR_PACKAGING.md` §「随包分发的第三方二进制」and
+  `docs/PR-REPORT-GAME-FPS-2026-10-11.md` when touching the game-FPS chain
+  (`pet/game_fps.py`, `pet/fps_monitor.py`, `pet/island_fps.py`), the bundled
+  PresentMon backend under `resources/presentmon/` (Windows-only, x64-only,
+  digests gated by `scripts/verify_presentmon.py` at build time; never installed
+  as an MSI/service), or the `fps` member of `island_metrics` and the two
+  process-level `game_fps_*` keys. Real frame readings are **not** verified on
+  this machine: capture runs with **plain user permissions only** — the pet never
+  self-elevates and runs no resident elevated helper. The only elevation is the
+  user-clicked, one-time settings button (`pet/fps_permission.py`) that adds the
+  current account (token SID) to Performance Log Users via one UAC prompt; it
+  takes effect after re-logon. Until then, where the user is not in that
+  group the segment shows the raw `access denied` reason
+  from the capture backend and keeps no value (never a fake `0`). No ETW session
+  or real frame reading has ever been exercised here — do not cite any measured
+  FPS as verified.
 - Read `docs/STABLE_BUILDS.md` when changing release/build workflows.
 - Read `docs/CONTEXT-MENU-RESEARCH-AND-REFACTOR-2026-08-25.md` when changing
   context-menu structure, styling, interaction, or platform behavior.

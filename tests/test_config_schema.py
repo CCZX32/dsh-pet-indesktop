@@ -79,6 +79,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "facing",
         "ffmpeg_recycle_minutes",
         "first_frame_cache_max_mb",
+        "game_fps_process",
+        "game_fps_target_mode",
         "golden_spin_direct",
         "golden_spin_on_click",
         "harness_autostart",
@@ -192,6 +194,8 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # （mem_skip_foreground/mem_min_size_mb）、动画菜单 1（anim_menu_stay_open）。
 # 后实测（2026-10-07 夜间整合后复测）：白名单字面量 139 + 特例 5 = 144。
 # 2026-10-07 P1 Slice C 加灵动岛指标 1（island_metrics，列表序=优先级），白名单 140。
+# 2026-10-11 加游戏帧率 2（game_fps_target_mode 枚举 / game_fps_process 纯 exe 名，
+# 都是**全局**键：岛与采集链路读主配置），白名单 142。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

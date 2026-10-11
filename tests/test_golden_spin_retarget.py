@@ -136,3 +136,74 @@ def test_retarget_after_finish_starts_clean_session(tmp_path):
         assert b.throw_rotation == 0.0 and a.throw_rotation == 0.0
     finally:
         shell._delete_runtime_marker()
+
+
+# ------------------------------------------------ 目标悬空：旋转中的宠被退出（WP11c 相邻缺口）
+def test_exit_spinning_child_settles_target(tmp_path):
+    """旋转中的子宠被退出：目标结清——不再往一只已移除的 sprite 写角。
+
+    WP11c 只结清了"换目标"这一支；"目标被退出"是相邻缺口：控制器是全壳共享的、
+    还活着，宿主每拍仍按 ``_golden_spin_target`` 往已移除的那只写角，一直写到下一次
+    换目标为止（那些写角落在用户看不见的对象上，但状态一直挂着）。
+    """
+    shell, main, child = _make_two_pet_shell(tmp_path)
+    try:
+        shell.trigger_golden_spin(child)
+        spin = shell._golden_spin
+        _advance(spin, GOLDEN_SPIN_DURATION_MS / 2)
+        assert child.throw_rotation < 0.0, "前提：这只已经转到中途"
+
+        assert shell.exit_pet(child) is True
+
+        assert shell._golden_spin_target is None, "目标必须结清（不再是这只死 sprite）"
+        assert not spin.active and spin.queued_turns == 0, "共享会话回到空闲（停表 + 清圈数）"
+        assert child.throw_rotation == 0.0, "结清时先回正"
+        assert child not in shell.overlay.sprites
+        assert main.throw_rotation == 0.0, "没参与回旋的那只从头到尾不动"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_exit_spinning_main_pet_settles_target(tmp_path):
+    """旋转中的主宠被退出（提升首只子宠）：同样结清——旧主从此永久离开窗面。"""
+    shell, main, child = _make_two_pet_shell(tmp_path)
+    try:
+        shell.trigger_golden_spin(main)
+        spin = shell._golden_spin
+        _advance(spin, GOLDEN_SPIN_DURATION_MS / 2)
+        assert main.throw_rotation < 0.0, "前提：主宠已经转到中途"
+
+        assert shell.exit_pet(main) is True
+
+        assert shell.sprite is None
+        assert child in shell._spawned, "子宠身份不提升"
+        assert shell._golden_spin_target is None
+        assert not spin.active
+        assert main.throw_rotation == 0.0
+        assert main not in shell.overlay.sprites
+        assert child.throw_rotation == 0.0, "提升者不接力旋转（下一次触发从自然角起转）"
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_exit_non_target_pet_keeps_spin_running(tmp_path):
+    """退出**非**目标的宠：回旋照旧（目标不变、会话不停、角度继续写给它）。"""
+    shell, main, target = _make_two_pet_shell(tmp_path)
+    try:
+        shell.spawn_pet()
+        other = shell._spawned[-1]
+        shell.trigger_golden_spin(target)
+        spin = shell._golden_spin
+        _advance(spin, GOLDEN_SPIN_DURATION_MS / 3)
+        mid = target.throw_rotation
+        assert mid < 0.0
+
+        assert shell.exit_pet(other) is True
+
+        assert shell._golden_spin_target is target, "目标不变"
+        assert spin.active, "退掉非目标不得打断回旋"
+        _advance(spin, GOLDEN_SPIN_DURATION_MS * 0.5)
+        assert target.throw_rotation < mid, "角度继续写给目标"
+        assert main.throw_rotation == 0.0
+    finally:
+        shell._delete_runtime_marker()

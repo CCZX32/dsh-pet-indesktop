@@ -2790,14 +2790,16 @@ class TestApprovalStickyBubble:
         pending_before = mgr.pending_interactions_for("dsh")
         assert len(pending_before) == 2, f"应有 2 条 pending 交互，实际 {len(pending_before)}"
         pending_keys = set(pending_before)
-        assert "approval:rpc-a" in pending_keys and "approval:rpc-b" in pending_keys
+        assert pending_keys == {"approval:dsh:rpc_id:rpc-a:s-1",
+                                "approval:dsh:rpc_id:rpc-b:s-1"}, \
+            f"键 = 来源 + kind + 会话 + 身份命名空间/值：{pending_keys}"
 
         # 解决 A（DSH 侧完成审批 → resolved 帧到达）
         mgr._on_approval_resolved("dsh", {"rpcId": "rpc-a", "approvalId": "ap-a"})
         remaining = mgr.pending_interactions_for("dsh")
         assert len(remaining) == 1, "解决 A 后应只剩 B"
-        assert "approval:rpc-b" in remaining, "B 仍应处于 pending 状态"
-        item_b = remaining["approval:rpc-b"]
+        assert "approval:dsh:rpc_id:rpc-b:s-1" in remaining, "B 仍应处于 pending 状态"
+        item_b = remaining["approval:dsh:rpc_id:rpc-b:s-1"]
         assert item_b["tool"] == "pwsh"
         assert item_b["approval_id"] == "ap-b"
 
@@ -2891,16 +2893,17 @@ class TestApprovalStickyBubble:
         mgr._on_approval_request(
             "dsh", {"tool": "bash", "rpcId": "rpc-B", "approvalId": "ap-B", "sessionId": "s-1"}
         )
-        assert set(mgr.pending_interactions_for("dsh")) == {"approval:rpc-A", "approval:rpc-B"}
+        assert set(mgr.pending_interactions_for("dsh")) == {
+            "approval:dsh:rpc_id:rpc-A:s-1", "approval:dsh:rpc_id:rpc-B:s-1"}
 
         # A 的 resolved 到达：只关 A
         mgr._on_approval_resolved("dsh", {"rpcId": "rpc-A", "approvalId": "ap-A", "outcome": "allowed-once"})
-        assert set(mgr.pending_interactions_for("dsh")) == {"approval:rpc-B"}
+        assert set(mgr.pending_interactions_for("dsh")) == {"approval:dsh:rpc_id:rpc-B:s-1"}
 
         # 陈旧的 A resolved 重发 + 无 id 的 decided：都不得误关 B
         mgr._on_approval_resolved("dsh", {"rpcId": "rpc-A", "approvalId": "ap-A", "outcome": "allowed-once"})
         mgr._on_approval_resolved("dsh", {})
-        assert set(mgr.pending_interactions_for("dsh")) == {"approval:rpc-B"},             "A 的陈旧 resolved/decided 不得误关 B"
+        assert set(mgr.pending_interactions_for("dsh")) == {"approval:dsh:rpc_id:rpc-B:s-1"},             "A 的陈旧 resolved/decided 不得误关 B"
 
         # B 的 resolved 正常收尾
         mgr._on_approval_resolved("dsh", {"rpcId": "rpc-B", "approvalId": "ap-B"})
@@ -2919,7 +2922,7 @@ class TestApprovalStickyBubble:
         for session, rpc in (("s1", "r1"), ("s2", "r2")):
             mgr._on_question_request("dsh", {"questions": self.QUESTIONS, "rpcId": rpc, "sessionId": session})
         mgr._on_question_resolved("dsh", {"rpcId": "r1", "sessionId": "s1"})
-        assert set(mgr.pending_interactions_for("dsh")) == {"question:r2"}
+        assert set(mgr.pending_interactions_for("dsh")) == {"question:dsh:rpc_id:r2:s2"}
 
 
 # ============================================================================
@@ -3159,7 +3162,7 @@ class TestInteractionIdentityGate:
         mgr._on_approval_request("dsh", {"tool": "pwsh", "rpcId": "rpc-b", "approvalId": "ap-b", "sessionId": "s-2"})
         mgr._on_interaction_lifecycle("dsh", {"event": "turn/end", "sessionId": "s-1"})
         remaining = mgr.pending_interactions_for("dsh")
-        assert set(remaining) == {"approval:rpc-b"}
+        assert set(remaining) == {"approval:dsh:rpc_id:rpc-b:s-2"}
 
     def test_agent_idle_clears_pending_via_lifecycle(self, tmp_path):
         """AgentStatus idle 兜底清理：同现有 _on_agent_state idle 语义。"""
@@ -4121,6 +4124,105 @@ class TestDshTurnEndSuccessCompletion:
             assert converged == [("working", "success")], "岛侧转发（绿点）不得被新分支吃掉"
             assert mgr._last_raw.get("dsh") == "success", "success 必须到达呈现管线"
             assert "dsh" in mgr._done_pending, "success 必须调度完成确认"
+        finally:
+            mgr.shutdown()
+
+    def test_aborted_turn_returns_to_idle_without_done(self, tmp_path, monkeypatch):
+        """用户中止回合（收敛 idle，来源 turn/end）：回待机、不再算忙、不出完成提醒。
+
+        删掉 ``_on_dsh_converged_state`` 的 idle 分支本用例必须红：``_last_raw`` 会
+        停在 thinking（桌宠一直播忙碌动画、识屏一直把 DSH 当忙）。
+        """
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "thinking")
+            bubbles.clear()
+            sounds.clear()
+            mgr._on_dsh_converged_state("thinking", "idle", "turn/end")
+            assert mgr._last_raw.get("dsh") == "idle", "中止后必须回待机，不得停在忙碌"
+            assert mgr._last_raw.get("dsh") not in mgr._BUSY_STATES
+            assert "dsh" not in mgr._done_pending, "中止不是完成：不得排定完成确认"
+            assert "done.wav" not in sounds
+            assert all("已完成本轮任务" not in b for b in bubbles), bubbles
+        finally:
+            mgr.shutdown()
+
+    def test_real_bridge_aborted_turn_returns_idle_without_done(self, tmp_path, monkeypatch):
+        """端到端：真实中止记录经真 DshMonitor._poll / 真收敛器 → 回待机、不出完成。
+
+        覆盖两种到达顺序：中止 turn/end 直接到达；以及旧 AgentStatus idle 基线
+        先到（已排下完成确认）后再到中止 turn/end——后者必须撤掉那个确认。
+        """
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        mon = mgr.monitors["dsh"]
+        bridge_dir = mon.events_dir
+        try:
+            mon._probe_online()
+            self._write(bridge_dir,
+                        {"event": "turn/start", "sessionId": "s-1"},
+                        {"event": "tool/call", "sessionId": "s-1", "tool": "bash"})
+            mon._poll()
+            assert mgr._last_raw.get("dsh") in mgr._BUSY_STATES
+            bubbles.clear()
+            sounds.clear()
+            self._write(bridge_dir, {"event": "turn/end", "sessionId": "s-1",
+                                     "reasonKind": "aborted"})
+            mon._poll()
+            app.processEvents()
+            assert mgr._last_raw.get("dsh") == "idle", mgr._last_raw
+            assert "dsh" not in mgr._done_pending, "中止不得排定完成确认"
+            # 第二轮：AgentStatus idle 基线先到，再到中止 turn/end
+            self._write(bridge_dir,
+                        {"event": "turn/start", "sessionId": "s-1"},
+                        {"event": "tool/call", "sessionId": "s-1", "tool": "bash"})
+            mon._poll()
+            app.processEvents()
+            mgr.notify_dsh_state("working")
+            mgr.notify_dsh_state("idle")          # 旧基线：busy→idle 排定确认
+            assert "dsh" in mgr._done_pending
+            self._write(bridge_dir, {"event": "AgentStatus", "state": "idle"},
+                        {"event": "turn/end", "sessionId": "s-1", "reasonKind": "aborted"})
+            mon._poll()
+            app.processEvents()
+            assert "dsh" not in mgr._done_pending, "中止必须撤掉基线排下的确认"
+            assert not self._wait_until(app, lambda: any("已完成本轮任务" in b for b in bubbles),
+                                        timeout=1.2), bubbles
+        finally:
+            mgr.shutdown()
+        assert "done.wav" not in sounds, sounds
+
+    def test_repeated_abort_keeps_other_session_success_confirm(self, tmp_path, monkeypatch):
+        """另一会话真实完成排下的确认（来源 success）不得被中止撤掉——重复中止也不行。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "thinking")
+            mgr._on_agent_state("dsh", "success")      # 真实完成 → 排定 success 确认
+            assert mgr._done_cause.get("dsh") == "success"
+            mgr._on_dsh_converged_state("success", "idle", "turn/end")
+            mgr._on_dsh_converged_state("idle", "idle", "turn/end")   # 重复中止
+            assert "dsh" in mgr._done_pending, "真实完成的确认不得被中止撤掉"
+            assert mgr._last_raw.get("dsh") == "idle"
+        finally:
+            mgr.shutdown()
+
+    def test_abort_does_not_clear_other_session_interactions(self, tmp_path, monkeypatch):
+        """会话 A 中止注入 idle 不得全量清掉会话 B 仍在等待的审批/问题气泡；
+        A 自己的交互由 _on_interaction_lifecycle 按会话定向清理。"""
+        mgr, bubbles, sounds, clock, app = self._make_mgr(tmp_path, monkeypatch)
+        try:
+            mgr._on_agent_state("dsh", "thinking")
+            for sid in ("A", "B"):
+                mgr._pending_interactions[f"q-{sid}"] = {
+                    "kind": "question", "text": sid, "alert_id": "",
+                    "agent_key": "dsh", "session_id": sid, "_ts_mono": 0.0}
+            mgr._on_dsh_converged_state("thinking", "idle", "turn/end")
+            assert set(mgr._pending_interactions) >= {"q-A", "q-B"}
+            assert mgr._idle_clear_scoped is False
+            mgr._on_interaction_lifecycle("dsh", {"event": "turn/end", "sessionId": "A",
+                                                  "reasonKind": "aborted"})
+            assert "q-A" not in mgr._pending_interactions
+            assert "q-B" in mgr._pending_interactions, "B 的等待气泡不得被 A 的中止撤掉"
         finally:
             mgr.shutdown()
 

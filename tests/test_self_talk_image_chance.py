@@ -72,19 +72,23 @@ def test_image_chance_reads_config_with_safe_fallback():
 
 
 def test_config_default_clamps_and_persists(tmp_path):
-    """默认 30%、越界钳位到 0~100、能落盘回读。"""
+    """默认 30%、越界钳位到 0~100、能落盘回读（每宠键：真值在 slot0 档案）。"""
     from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
 
-    cfg = Config(base=tmp_path)
+    def slot0():
+        return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+    cfg = slot0()
     assert cfg.get("self_talk_image_chance") == 30
 
     cfg.set("self_talk_image_chance", 0)
-    cfg.save()
-    assert Config(base=tmp_path).get("self_talk_image_chance") == 0
+    assert cfg.save() is True
+    assert slot0().get("self_talk_image_chance") == 0
 
     cfg.set("self_talk_image_chance", 999)
-    cfg.save()
-    assert Config(base=tmp_path).get("self_talk_image_chance") == 100
+    assert cfg.save() is True
+    assert slot0().get("self_talk_image_chance") == 100
 
 
 def test_settings_page_row_round_trip(tmp_path):
@@ -93,9 +97,13 @@ def test_settings_page_row_round_trip(tmp_path):
 
     import pet.modern_settings_dialog as settings_mod
     from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    def slot0():
+        return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
 
     QApplication.instance() or QApplication([])
-    cfg = Config(base=tmp_path)
+    cfg = slot0()
     dialog = settings_mod.ModernSettingsDialog(cfg, include_ai=False)
     try:
         row = dialog.findChild(settings_mod.SettingRow, "settingRow_self_talk_image_chance")
@@ -109,4 +117,4 @@ def test_settings_page_row_round_trip(tmp_path):
     finally:
         dialog.deleteLater()
 
-    assert Config(base=tmp_path).get("self_talk_image_chance") == 0
+    assert slot0().get("self_talk_image_chance") == 0

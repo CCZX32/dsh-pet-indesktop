@@ -280,7 +280,7 @@ def test_stream_capture_mode_boots_legacy_single_window(tmp_path, monkeypatch):
         tmp_path, monkeypatch, topology=None, win=_StubWin(),
         prepare=_prepare, ui_create=lambda cid: ui_created.append(cid))
     try:
-        assert ui_created, "捕获模式必须走 legacy 建窗分支（PetWindow 才可被 OBS 枚举）"
+        assert ui_created == [], "slot0不活跃不得创建捕获窗"
         assert getattr(shell, "_overlay_shell", None) is None, "捕获模式不得建 overlay 壳"
         assert len(shell._instances) == 1, "多宠必须收拢为主宠物"
         # 清单本身不删：关掉捕获模式再重启，小肥鱼应当回来
@@ -335,14 +335,12 @@ def test_capture_mode_refuses_manual_spawn(tmp_path, monkeypatch):
 
 def test_overlay_topology_still_spawns_on_menu_action(tmp_path, monkeypatch):
     """对照：默认 overlay 拓扑下同一回调照常生小肥鱼（证明上一条不是空转）。"""
-    from pet.app import AppShell
 
     monkeypatch.setattr(overlay_shell_mod, "OverlayShell", _StubOverlayShell)
     win = _RecorderWin()
     shell = _start_shell(tmp_path, monkeypatch, topology="overlay", win=win)
     spawned: list[int] = []
-    monkeypatch.setattr(AppShell, "spawn_in_process_window",
-                        lambda self, index=1: spawned.append(index))
+    shell._overlay_shell.spawn_pet = lambda: spawned.append(1)
     shell.instance._wire_window(win)
     win.on_spawn_pet()
     assert spawned == [1]

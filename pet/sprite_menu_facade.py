@@ -26,15 +26,13 @@
 
 4.2c D13：菜单作用对象 = 右键命中的那一只（``sprite`` 参数）。设置入口按它
 自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」接
-``OverlayShell.exit_pet(sprite)``——主宠退出时由壳负责提升列表首只子宠。
-UX 防护：「退出这只」作用主宠时先弹确认框（不可逆：旧主宠没有 slot 存档，
-提升会覆盖它的位置与设置；无子宠则退整个应用），子宠保持一键直退。
+``OverlayShell.exit_pet(sprite)``；主子同样保档案、留空、可恢复，不提升不quit。
 
 批 B2：作用对象口径对齐旧版一窗一宠（菜单以 ``pet=self`` 建造，每条都作用
 本窗那一只）——读（勾选态/素材清单）与写（动画/速率/大小/拖动物理/回角落/
 黄金回旋/隐藏/看屏幕）一律取 ``self.sprite``，不再混用 ``self._shell.sprite``。
 批 B7b：逐只设置的持久化与读取都按该 sprite 自己的配置走——``cfg`` 是它的
-配置视图（子宠 = ``config-slot-N.json``，缺键回退主配置），``_persist_sprite_setting``
+配置视图（子宠 = ``config-slot-N.json``，缺键取同源默认），``_persist_sprite_setting``
 写它自己的那份（主宠仍写主配置），「切换角色」也只切被点的那一只。
 """
 from __future__ import annotations
@@ -59,7 +57,6 @@ from .context_menus.shared import (
     animation_icon_cache_entry,
     animation_icon_cache_hit,
     animation_icon_cache_key,
-    confirm_destructive_action,
 )
 
 log = logging.getLogger(__name__)
@@ -110,9 +107,9 @@ class SpriteMenuFacade:
     @property
     def _is_main_sprite(self) -> bool:
         """菜单作用对象是否主宠（决定逐只设置写不写主配置）。"""
-        return self.sprite is self._shell.sprite
+        return self.sprite is not None and self.sprite is self._shell.sprite
 
-    def _persist_sprite_setting(self, key: str, value) -> None:
+    def _persist_sprite_setting(self, key: str, value) -> bool:
         """逐只设置的持久化口径（旧"写本窗自己那份 config"）。
 
         主宠 → 主配置（``Config.set`` + ``save``）；子宠 → 它自己的
@@ -121,13 +118,11 @@ class SpriteMenuFacade:
         的尺寸/速率/物理改脏，见审计 C1/C2）。
         """
         persist = getattr(self._shell, "persist_sprite_setting", None)
-        if callable(persist):
-            persist(self.sprite, key, value)
-            return
-        # 兜底（旧壳/测试替身无该面）：只主宠写主配置，子宠静默不落盘。
-        if self._is_main_sprite:
-            self.cfg.set(key, value)
-            self._save()
+        ok = bool(persist(self.sprite, key, value)) if callable(persist) else False
+        if not ok:
+            log.warning("overlay: 菜单设置保存失败 (%s)，运行态未应用", key)
+            self._bubble("设置保存失败，未应用这次改动，请稍后重试", 6000)
+        return ok
 
     # ---------------------------------------------------------------- 基础属性
     @property
@@ -360,35 +355,53 @@ class SpriteMenuFacade:
         return lambda: fn(sprite)
 
     # ---------------------------------------------------------------- 进程级服务（AppShell）
+    def _service_host(self):
+        """手动服务结果（余额 / 天气）的宿主：**发起 sprite 的代次呈现器**。
+
+        结果归被点的那一只（旧版一窗一宠天然如此），且请求在飞时把这一只关掉之后，
+        迟到结果只取消呈现——不再冒到别宠头上（2026-10-10 终审 A10；点击余额路径
+        ``overlay_shell:2449`` 早就用 ``_sprite_host(target)`` 收口了，菜单旁路漏了）。
+        拿不到壳的呈现器面（legacy 窗口宿主 / 测试替身）时回退壳本身：那是历史口径，
+        至少保证"结果有地方落"。
+        """
+        maker = getattr(self._shell, "sprite_presenter", None)
+        if callable(maker):
+            try:
+                host = maker(self.sprite)
+            except Exception:
+                log.debug("overlay: 取 sprite 服务呈现器失败", exc_info=True)
+            else:
+                if host is not None:
+                    return host
+        return self._shell
+
     @property
     def on_show_balance(self):
         """「DeepSeek 余额」：``AppShell.show_balance``（app._wire_window 注入的
-        同一个方法）；父窗传**壳**——与 overlay 点击路径（``overlay_shell:1225``
-        的 ``handler(self)``）同口径，壳具备 ``cfg`` / ``show_bubble`` /
-        ``request_link_anim`` 全套宿主面。传 ``shell.overlay``（OverlayWindow）
-        会让 ``_show_balance_payload`` 在 ``win.show_bubble`` 上 AttributeError。
+        同一个方法）；父窗传**发起 sprite 的呈现器**（呈现代次收口，见
+        :meth:`_service_host`）。壳本身也是合法宿主（``cfg`` / ``show_bubble`` /
+        ``request_link_anim`` 全套面），故壳不可用时不会出现 AttributeError。
         """
         if not self._chat_enabled():
             return None
         fn = _first_callable(self._hosts(), ("show_balance",))
         if fn is None:
             return None
-        shell = self._shell
-        return lambda *_ignored: fn(shell)
+        host = self._service_host()
+        return lambda *_ignored: fn(host)
 
     @property
     def on_show_weather(self):
-        """「查看天气」：``AppShell.show_weather``；父窗同样传**壳**。
+        """「查看天气」：``AppShell.show_weather``；父窗同样是发起 sprite 的呈现器。
 
         与 ``on_show_balance`` 的差别只有一条：**不**受聊天能力门控——天气取的是
-        独立外部数据源，没有聊天/DSL 变体也不该消失。气泡归主宠（与 overlay 点击
-        路径同口径：壳的 ``show_bubble`` 作用于主 sprite）。
+        独立外部数据源，没有聊天/DSL 变体也不该消失。
         """
         fn = _first_callable(self._hosts(), ("show_weather",))
         if fn is None:
             return None
-        shell = self._shell
-        return lambda *_ignored: fn(shell)
+        host = self._service_host()
+        return lambda *_ignored: fn(host)
 
     @property
     def on_check_update(self):
@@ -449,27 +462,35 @@ class SpriteMenuFacade:
         """以指定移动素材触发一次移动（window.py trigger_move 语义）。"""
         return self._shell.behavior.play_move_once(self.sprite, name)
 
-    def set_playback_speed(self, value: float) -> None:
+    def set_playback_speed(self, value: float) -> bool:
+        value = float(value)
+        if not self._persist_sprite_setting("playback_speed", value):
+            return False
         sprite = self.sprite
-        sprite.playback_speed = float(value)
-        clip = getattr(sprite, "_clip", None)
-        setter = getattr(clip, "set_playback_speed", None)
-        if callable(setter):
-            setter(float(value))
-        self._persist_sprite_setting("playback_speed", float(value))
+        if sprite.playback_speed != value:
+            sprite.playback_speed = value
+            setter = getattr(getattr(sprite, "_clip", None), "set_playback_speed", None)
+            if callable(setter):
+                setter(value)
+        return True
 
     # ---------------------------------------------------------------- 窗口能力
-    def change_scale(self, scale: float) -> None:
-        self.sprite.scale = float(scale)
-        self._persist_sprite_setting("scale", float(scale))
-        # 可见气泡随新缩放重排（旧 window.py:1000-1004 bubble.reflow）
-        hook = getattr(self._shell, "on_sprite_scale_changed", None)
-        if callable(hook):
-            hook(self.sprite)
+    def change_scale(self, scale: float) -> bool:
+        scale = float(scale)
+        if not self._persist_sprite_setting("scale", scale):
+            return False
+        if self.sprite.scale != scale:
+            self.sprite.scale = scale
+            hook = getattr(self._shell, "on_sprite_scale_changed", None)
+            if callable(hook):
+                hook(self.sprite)
+        return True
 
-    def set_drag_physics(self, on: bool) -> None:
+    def set_drag_physics(self, on: bool) -> bool:
+        if not self._persist_sprite_setting("drag_physics", bool(on)):
+            return False
         self.sprite.drag_physics = bool(on)
-        self._persist_sprite_setting("drag_physics", bool(on))
+        return True
 
     def set_no_move(self, on: bool) -> None:
         self._shell.behavior.no_move = bool(on)
@@ -492,8 +513,8 @@ class SpriteMenuFacade:
 
         子宠走逐只显隐（``set_sprite_visible``，托盘逐只菜单「显示这只」可恢复，
         且其它宠不受影响）。主宠保持整窗语义（``set_pet_visible``）：主宠即宿主
-        合成窗，逐只隐藏主宠会留下空的可交互窗，且没有子宠时托盘不挂逐只子菜单
-        （``_refresh_tray_menu`` 的 ``if self._spawned:``），主宠无处恢复。
+        合成窗，藏它一只等于整窗没有内容可画——那条路顶层「显示 / 隐藏」已经按
+        整窗语义给过（``_refresh_tray_menu`` 的逐只「显示这只」也只在 ≥2 只时挂）。
         """
         sprite = self.sprite
         if sprite is None or sprite is self._shell.sprite:
@@ -561,41 +582,10 @@ class SpriteMenuFacade:
             opener(self.sprite)
 
     def on_exit_pet(self) -> None:
-        """「退出这只」：退掉菜单作用对象（主宠退出则提升列表首只子宠为主）。
-
-        作用对象是**主宠**时必须先确认——主宠退出不可逆：有子宠时旧主宠没有自己的
-        slot 存档，提升者的几何/设置直接覆盖它的（取不回来）；无子宠时等同退出整个
-        应用。这正是仓库惯例里"破坏性动作带确认框"的一类（dsh 重启/停止同款），
-        且默认按钮 = 取消（菜单里它与「设置」「退出」相邻，回车/连点不该不可逆）。
-
-        子宠退出**不**弹框：它有 ``config-slot-N.json`` 存档，且是用户逐只点选的明
-        确操作，一键直退（保留原有语义）。
-
-        macOS：菜单项已 ``close_on_trigger``（回调延迟到菜单关闭后执行），模态框不
-        会撞上 AppKit 原生菜单跟踪会话——见 ``shared.confirm_destructive_action``。
-        """
+        """关闭被点宠物，档案保留；主子同样不确认，退出应用另有入口。"""
         sprite = self.sprite
-        if self._is_main_sprite and not self._confirm_exit_main_pet():
-            return
-        self._shell.exit_pet(sprite)
-
-    def _confirm_exit_main_pet(self) -> bool:
-        """主宠退出的确认框（返回是否确认）：文案按"有没有会被提升的子宠"分两支。
-
-        子宠名取壳的只读 seam ``promote_target_name``（有子宠必非空，命名口径见
-        那边）——本层不新造命名系统，也不自己摸活跃清单。
-        """
-        promoted = ""
-        namer = getattr(self._shell, "promote_target_name", None)
-        if callable(namer):
-            promoted = str(namer() or "")
-        if promoted:
-            body = f"退出主宠将把「{promoted}」提升为主宠，原主宠的位置与设置不保留。"
-        else:
-            body = "退出主宠将退出整个应用。"
-        return confirm_destructive_action(
-            self, title="退出主宠", text="确认退出主宠？", informative=body,
-            confirm_label="确认退出主宠")
+        if sprite is not None:
+            self._shell.exit_pet(sprite)
 
     def close(self) -> None:
         self._shell.app.quit()

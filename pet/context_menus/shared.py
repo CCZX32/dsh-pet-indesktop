@@ -98,11 +98,41 @@ def animation_icon_cache_drop_library(cache: dict, library) -> int:
     return removed
 
 
+class _AnimationIconFailure:
+    """解码失败的收口载荷（动画名 + 异常本体），与成功的 QImage 共用同一个 ready 信号。
+
+    壳里不装异常以外的状态：worker 线程只产出这份载荷，一切对宿主的访问
+    （写 QAction、写日志、续泵）都留在 GUI 线程的 applier 里。
+    """
+
+    __slots__ = ("animation_name", "error")
+
+    def __init__(self, animation_name: str, error: BaseException) -> None:
+        self.animation_name = animation_name
+        self.error = error
+
+
 class _AnimationIconSignals(QObject):
     ready = Signal(object)
 
 
 class _AnimationIconWorker(QRunnable):
+    """解码一个动画缩略图；**成功与失败都必须在任务边界收口成一次 ready 发射**。
+
+    为什么失败不能留给 Qt 去打印：``run`` 里逃出去的异常由 shiboken 打印
+    ``Error calling Python override of QRunnable::run():`` 后吞掉，本对象既不发射信号，
+    也没人摘掉 ``submenu._animation_icon_workers`` 里的在岗记录；而泵（见
+    ``_populate_animation_category.pump``）按"在岗 worker < 2"放行 —— 两只失败就把队列
+    **永久卡死**，同一菜单里排在后面的图标再也不会解码，且失败原因只剩一行被 pytest
+    捕获走的 shiboken 输出。所以这里把一般异常（``Exception``；``KeyboardInterrupt`` /
+    ``SystemExit`` 属 ``BaseException``，照旧穿透）转成失败载荷照常发射，收口路径与成功
+    完全一致，只差"不上图标"。
+
+    归属：C++ 侧由 ``QThreadPool.start`` 接管（默认 autoDelete，run 返回后删掉）；
+    Python 壳由 ``submenu._animation_icon_workers`` 记账（泵按它数在岗）。宿主先销毁时
+    没有消费者，结果丢弃即可，不放宽菜单树的释放路径。
+    """
+
     def __init__(self, loader, animation_name: str):
         super().__init__()
         self.loader = loader
@@ -110,7 +140,21 @@ class _AnimationIconWorker(QRunnable):
         self.signals = _AnimationIconSignals()
 
     def run(self) -> None:
-        self.signals.ready.emit(self.loader(self.animation_name))
+        payload = None
+        try:
+            payload = self.loader(self.animation_name)
+        except Exception as exc:
+            payload = _AnimationIconFailure(self.animation_name, exc)
+        signals = self.signals
+        if shiboken6.isValid(signals) is False:
+            # 信号源已销毁（宿主先一步收口）：没有消费者，结果丢弃。不碰任何宿主对象，
+            # 保证 worker 线程永不写已删的 Qt 对象。
+            return
+        try:
+            signals.ready.emit(payload)
+        except RuntimeError:
+            # 发射这一瞬间信号源被销毁（与菜单树释放的窗口竞态）：同上，无消费者。
+            pass
 
 
 class _AnimationIconApplier(QObject):
@@ -119,6 +163,10 @@ class _AnimationIconApplier(QObject):
     挂在 submenu 下随菜单生命周期存在；worker 线程只负责解码，
     ready 信号经 Qt 自动队列投递到本对象（GUI 线程），避免跨线程
     操作 QMenu/QAction（Qt 未定义行为，可致偶发崩溃/图标错乱）。
+
+    成功与失败走**同一条**收口：手里是 QImage 还是失败载荷，都要摘掉本 worker 的在岗
+    记录并续泵（漏掉任何一条，队列就卡在两只失败上）；失败只多一步有原因的日志，
+    代价是"这一项保持占位图标"，其余图标照常继续。
     """
 
     def __init__(self, submenu, action, worker, pump, parent=None):
@@ -128,22 +176,45 @@ class _AnimationIconApplier(QObject):
         self._worker = worker
         self._pump = pump
 
+    def _report_failure(self, submenu, failure: _AnimationIconFailure) -> None:
+        """有原因、且不按图标刷屏：同一菜单里第一条记 warning，其余降到 debug。"""
+        reason = f"{type(failure.error).__name__}: {failure.error}"
+        if getattr(submenu, "_animation_icon_failure_logged", False):
+            log.debug(
+                "菜单动画缩略图解码失败（同类已记过）：动画=%s（%s）",
+                failure.animation_name, reason,
+            )
+            return
+        submenu._animation_icon_failure_logged = True
+        log.warning(
+            "菜单动画缩略图解码失败：动画=%s（%s）；本菜单内后续失败只记 debug",
+            failure.animation_name, reason, exc_info=failure.error,
+        )
+
     @Slot(object)
-    def on_ready(self, image) -> None:
+    def on_ready(self, result) -> None:
         submenu = self._submenu
         if shiboken6.isValid(submenu) is False:
             return
-        if self._worker in submenu._animation_icon_workers:
-            submenu._animation_icon_workers.remove(self._worker)
+        workers = getattr(submenu, "_animation_icon_workers", None)
+        if workers:
+            # 按身份摘（不是 ==）：此刻 worker 的 C++ 侧多已被 QThreadPool 自动删除，
+            # 只剩 Python 壳，身份比较不碰已删对象。
+            for index, item in enumerate(workers):
+                if item is self._worker:
+                    del workers[index]
+                    break
+        if isinstance(result, _AnimationIconFailure):
+            self._report_failure(submenu, result)
         # setIcon() invalidates QMenu's action geometry. Doing
         # that dozens of times on a visible, scrollable menu
         # corrupts its scroll layout and blocks hover events.
-        if (
+        elif (
             not submenu.isVisible()
-            and image is not None
-            and not image.isNull()
+            and result is not None
+            and not result.isNull()
         ):
-            self._action.setIcon(fitted_pet_pixmap_icon(submenu, QPixmap.fromImage(image)))
+            self._action.setIcon(fitted_pet_pixmap_icon(submenu, QPixmap.fromImage(result)))
             submenu.update()
         pump = self._pump
         if callable(pump):
