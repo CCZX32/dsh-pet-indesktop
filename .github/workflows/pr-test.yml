@@ -133,8 +133,90 @@ jobs:
           node --test tests/test_bridge_hardfailure.js tests/test_bridge_interaction_dedup.js tests/test_bridge_manifest.js tests/test_bridge_question_callid.js tests/test_bridge_retry.js tests/test_bridge_root_control.js tests/test_bridge_user_action_guard.js
           node integrations/dsh-pet-bridge/verify_import.mjs
 
+      # 捕获方式按 OS 分流（2026-10-12）：Linux 主套件加 --capture=tee-sys，
+      # Windows/macOS 保持默认 fd 捕获 + -q。默认 fd 捕获把 fd 1/2 重定向到临时文件，
+      # 于是**直接写 fd 的原生输出**（glibc 的 abort 文本、Qt 默认消息处理器、pytest
+      # faulthandler 插件在 pytest_configure 里 os.dup 的那份 fd 2 转储）全落进临时
+      # 文件；进程被原生信号杀死时那份临时文件从不进日志——这正是 Linux 连续两轮
+      # abort 日志里一行原生栈都没有的原因（取证见 .scratch/ci243/
+      # WIN-LINUX-NATIVE-CRASH-FINDINGS-2026-10-11.md §3.4/§7.2b）。
+      # tee-sys 只替换 sys.stdout/stderr（tee 把同一份写回真流）**不碰 fd**，原生输出
+      # 直接进 CI 日志；Python 层输出照旧被捕获，capsys/capsysbinary 夹具自己起
+      # SysCapture、语义不变（本仓无 capfd 用例，也没有进程内读 stdin 的用例：
+      # sys.stdin 只出现在子进程脚本里）。
+      # 只给 Linux 加这一口：按 OS 条件内联拼出**同一条命令**，不复制出第二个主套件
+      # 步骤——主套件单跑就是 13-15 分钟（round3 实测 mac 13:10 / Windows 15:18）。
       - name: Pytest (main suite)
-        run: python -m pytest -q --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py
+        run: python -m pytest -q ${{ runner.os == 'Linux' && '--capture=tee-sys' || '' }} --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py
+
+      # Linux 主套件失败后的**受限前缀**重跑（诊断，不是覆盖）：只跑收集序前缀
+      # test_agent_cost → test_config_schema（44 个文件；本机 3.11 + offscreen 同口径
+      # 实测 948 passed / 7 skipped / 2:27 全绿）。第三轮那次 abort 就落在该前缀的最后
+      # 一个文件里（tests/test_config_schema.py::
+      # test_reload_whitelist_snapshot_matches_current，面包屑只有 [call] 没有
+      # [teardown]），-vv 会把崩溃点印成日志最后一行。
+      # 限在前缀内是为了有界：Linux runner 跑到该前缀末位实测 91-104 s（round2/round3
+      # 从 pytest 启动到 abort 的时间戳），最慢一轮整 job（Windows 17.6 min）加这
+      # ~2.5 min 仍在 30 min 预算内。注意 round2 那次 abort 落在更靠后的
+      # test_desktop_pet_features（前缀之外 10 个文件）——那种落点由主套件的 tee-sys
+      # 原生日志取证，本步刻意不随崩点漂移扩大。
+      # 红绿不变：主套件步骤自己的退出码决定 job 结果，本步无 continue-on-error、
+      # 也不用 `||` 兜底。条件按 GitHub 语义用 failure()（= 之前任一步骤失败）：
+      # ruff/bridge 门在 Linux 上失败时也会多跑这 ~2.5 min，判红仍由那一步决定。
+      # 独立 DSPET_TEST_DIAG_DIR：诊断重跑若没复现崩溃，不许把主套件那份面包屑
+      # （「死在谁、哪个阶段」的唯一记录）覆盖成一份跑完通过的前缀记录。
+      # 清单显式写出：改名/删除当场 exit 4 报错，不会静默缩水，也不会因 glob 落空
+      # 退化成跑全量。新增测试文件落在该前缀内时同步此清单。
+      - name: Pytest (Linux prefix diagnostics after main-suite failure)
+        if: failure() && runner.os == 'Linux'
+        env:
+          DSPET_TEST_DIAG_DIR: ${{ runner.temp }}/dspet-pytest-diag-linux-prefix
+        run: >-
+          python -m pytest --capture=tee-sys -vv
+          tests/test_agent_cost.py
+          tests/test_agent_event_protocol.py
+          tests/test_agent_link.py
+          tests/test_agent_link_dep_specs.py
+          tests/test_agent_link_subtraction.py
+          tests/test_agent_link_threads.py
+          tests/test_agent_settings_hot_reload.py
+          tests/test_alert_queue.py
+          tests/test_animation_icon_worker_lifecycle.py
+          tests/test_animation_menu_close_and_group.py
+          tests/test_animation_prewarm_phase2.py
+          tests/test_animation_thumbnail_cache.py
+          tests/test_api_provider_list.py
+          tests/test_app_lazy_imports.py
+          tests/test_app_startup_fallback.py
+          tests/test_architecture.py
+          tests/test_autostart.py
+          tests/test_background_service_gates.py
+          tests/test_balance.py
+          tests/test_bubble_subtitle_budget.py
+          tests/test_bubble_text_scale.py
+          tests/test_bundle_encoding_check.py
+          tests/test_bundle_slim.py
+          tests/test_chat_attachments.py
+          tests/test_chat_safe_emit.py
+          tests/test_chat_service.py
+          tests/test_chat_shared_behavior.py
+          tests/test_chat_subsystem.py
+          tests/test_chat_themes.py
+          tests/test_child_bubble_quick_chat.py
+          tests/test_ci_workflows.py
+          tests/test_cleanup_mei_cache_cli.py
+          tests/test_click_self_talk_speech.py
+          tests/test_click_sound.py
+          tests/test_click_talk_dialog.py
+          tests/test_clip_current_image.py
+          tests/test_clip_restart_paths.py
+          tests/test_collision.py
+          tests/test_collision_debounce_timebase.py
+          tests/test_config_concurrent_save.py
+          tests/test_config_instance.py
+          tests/test_config_key_migration.py
+          tests/test_config_reload_null.py
+          tests/test_config_schema.py
 
       # webm 生命周期族（reader/ffmpeg 进程 teardown 竞态）在 macOS CI 上
       # 偶发段错误（exit 139，栈在 reader 线程 + imageio LogCatcher）。
