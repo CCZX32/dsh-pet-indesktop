@@ -164,6 +164,8 @@ from .persona_template import (
     CONDITIONAL_PARAMETERS,
     PARAMETERS,
 )
+from . import settings_ai_domain
+from . import settings_automation_domain
 from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
@@ -1891,76 +1893,16 @@ class ModernSettingsDialog(QDialog):
             if section.rows and all(row.isHidden() for row in section.rows):
                 section.setVisible(False)
 
-        ai_sections = None
-        if self.ai_page is not None:
-            balance_rows = claim_prefix("balance_")
-            appearance_rows = claim(
-                "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
-            )
-            ai_sections = page_content(
-                [
-                    ("API 列表", claim("provider_list")),
-                    (
-                        "模型与连接",
-                        claim(
-                            "provider_name",
-                            "api_url",
-                            "model",
-                            "api_key",
-                            "system_prompt",
-                            "connection_test",
-                        ),
-                    ),
-                    (
-                        "深度思考与联网",
-                        claim(
-                            "thinking_mode",
-                            "reasoning_effort",
-                            "web_search_enabled",
-                            "web_search_engine",
-                            "web_search_key",
-                            "web_search_max_results",
-                            "web_search_fetch_pages",
-                        ),
-                    ),
-                    ("系统通知", claim("system_notifications_enabled")),
-                    (
-                        "视觉能力",
-                        claim(
-                            "vision_same",
-                            "vision_model",
-                            "vision_url",
-                            "vision_key",
-                        ),
-                    ),
-                    (
-                        "生成参数（高级）",
-                        claim(
-                            "timeout",
-                            "temperature",
-                            "max_tokens",
-                            "skip_ssl",
-                        ),
-                        True,
-                    ),
-                    ("对话窗口", appearance_rows),
-                    ("余额与服务状态", balance_rows),
-                ]
-            )
-            ai_sections.setObjectName("settingsDomain_ai")
-            # Keep the control owner alive for save/dependency behavior, but
-            # visible rows now belong directly to the shared domain layout.
-            self.ai_page.setParent(self)
-            self.ai_page.hide()
+        # 「AI 与对话」域：整段行构造在本模块构建（settings_ai_domain，行数预算原因）。
+        ai_sections = settings_ai_domain.build_ai_domain(
+            self, claim, claim_prefix, page_content)
+        # 「自动化与联动」域：整段行构造在本模块构建（settings_automation_domain，
+        # 行数预算原因；「主动识屏」四组与两个折叠框都在那边）。
+        automation = settings_automation_domain.build_automation_domain(
+            self, claim, claim_prefix, page_content, claimed)
 
-        # 「主动识屏」「语音报时」「节日提醒」的旧页分区在域装配时被压平成单张卡片，这里按行键重组（行键以代码实际为准，顺序同旧页）。
-        proactive_sections = [
-            ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_preset")),
-            ("主动识屏 · 什么时候看", claim("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
-            ("主动识屏 · 看哪些软件", claim("proactive_whitelist", "proactive_whitelist_add", "proactive_memory_clear")),
-            ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
-                                       "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
-        ]
+        # 「语音报时」「节日提醒」的旧页分区在域装配时被压平成单张卡片，这里按行键
+        # 重组（行键以代码实际为准，顺序同旧页）。
         voice_sections = [
             ("语音报时 · 何时报", claim("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times")),
             ("语音报时 · 用什么声音", claim("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume")),
@@ -1973,54 +1915,6 @@ class ModernSettingsDialog(QDialog):
             ("节日提醒 · 时间", claim("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times")),
             ("节日提醒 · 文案", claim("festival_reminder_show_quote", "festival_custom_quotes_cn", "festival_custom_quotes_west", "festival_preview")),
         ]
-        dialogue_rows = claim_prefix("dialogue_")
-        # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
-        # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
-        # （见 _search_settings）。全局风格控件（表达风格/专属文案对象/模板 JSON）
-        # 不是事件文案，单独放「文案风格与模板」小节。
-        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", self)
-        phrase_edit_keys = set(self.dialogue_phrase_edits)
-        phrase_rows = [row for row in dialogue_rows
-                       if row.objectName()[len("settingRow_dialogue_"):] in phrase_edit_keys]
-        ungated_dialogue_rows = [row for row in dialogue_rows
-                                 if row.objectName()[len("settingRow_dialogue_"):] not in phrase_edit_keys]
-        if phrase_rows:
-            phrases_box.add_group("事件气泡文案", phrase_rows)
-        phrases_box.set_expanded(False)
-        self.dialogue_phrases_box = phrases_box
-        # 「Agent 联动」折叠框只装「提示音效」子组（默认折叠）；「消费统计」已独立成
-        # 一级分组留在框外（见本域 sections 表）。用现成的 CollapsibleGroup.add_group。
-        agent_box = CollapsibleGroup("Agent 联动", self)
-        agent_cost_rows = [
-            SettingRow("agent_cost", "显示本轮消费",
-                       "Agent 每轮结束时查询一次余额，与开始时的余额相减得出本轮消费。"
-                       "仅 DeepSeek 提供余额接口；余额精度为分，不足 ¥0.01 的消耗测不出。",
-                       self.agent_cost_check),
-        ]
-        agent_box.add_group("提示音效", claim_prefix("agent_sound_"))
-        # 默认折叠：6 行提示音效不该首屏铺开；消费统计是独立一级分组，留在框外。
-        agent_box.set_expanded(False)
-        self.agent_link_box = agent_box
-        # 这些行已被上面的折叠框认领，必须登记，否则会再落进「待分类」。
-        claimed.update(agent_cost_rows)
-        claimed.update(claim_prefix("agent_sound_"))
-        # dialogue_* 里的全局风格控件（表达风格、专属文案对象、弹窗文案模板 JSON）
-        # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
-        # leftovers），若不显式放回本域就会从设置页里彻底消失。
-        # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
-        automation = page_content(
-            [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
-                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
-                ("免打扰", settings_quiet.build_quiet_rows(self)),
-                *proactive_sections,
-                ("消费统计", agent_cost_rows),
-                agent_box,
-                ("文案风格与模板", ungated_dialogue_rows),
-                phrases_box,
-            ]
-        )
-
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
         # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、

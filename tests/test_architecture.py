@@ -252,7 +252,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-09 上调到 2501（bug 狩猎修复批，两批叠加）：即时音效开关的 reload 防陈旧
 # 快照守卫（+7，B04）+ 子宠页读写路由的配置入口一行与 harness 置灰摘除（+3，F2）。
 # 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2501
+# 2026-10-13 下调到 2395（DLC 融合 S1a：域页构建器外提，−106）：把「AI 与对话」与
+# 「自动化与联动」两个域的整段行构造搬进 pet/settings_ai_domain.py 与
+# pet/settings_automation_domain.py（对话框各留一行调用，行键/组序/objectName 一字未改），
+# 为后续「扩展管理」新域腾空间。实测 2395，纯搬移无行为变更。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2395
 
 
 def _read(name: str) -> str:
