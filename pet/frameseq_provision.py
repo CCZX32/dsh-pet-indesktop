@@ -1181,10 +1181,15 @@ def ffmpeg_exe() -> str | None:
 
 
 def _creation_flags() -> int:
-    """Windows：ffmpeg 低于正常优先级（POSIX 忽略，返回 0）。"""
+    """Windows：ffmpeg 低于正常优先级 + 不建控制台窗口（POSIX 忽略，返回 0）。
+
+    打包产物是 --windowed（无控制台），派生 ffmpeg.exe 这类控制台程序不带
+    CREATE_NO_WINDOW 时系统会新建可见的命令行窗口，首跑供给期间反复闪窗。
+    """
     if os.name != "nt":
         return 0
-    return int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+    return (int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0)))
 
 
 def _ffmpeg_argv(exe: str, webm: Path, tmp_dir: Path) -> list[str]:
