@@ -31,6 +31,7 @@ INDEX.md 以 main 为准重新登记五份新报告。
 | F6 | `started` 在 `send()` 返回前同步发出 → `_started` 的 id 过滤恒命中，停止按钮永不进忙态（100% 必现） | 现代/经典聊天窗改为先生成 request id 再传入 `send(request_id=...)`；快捷气泡改 QueuedConnection（鸭子类型替身约束，见遗留） |
 | X3 | 打字机排空期关聊天窗：回复永不落库 + 重开卡忙碌态 | `closeEvent` 先走完成落库路径再 `_reset()`；真流式中关窗的取消路径不变（有护栏测试） |
 | 岛墙（用户实机报告） | 关掉岛碰撞 → 宠在岛下方进入边缘探头 → 再开碰撞，墙注册到探头宠身上把它挤出姿态（气泡随之错位）；且停靠细条会注册出直径 44 的怪圆墙 | `island_bridge.sync_geometry` 补回旧 `_wall_active` 两条豁免（停靠细条未悬停探出/几何动画中不设墙）；`sprite_collision.tick` 对 `probe_active` 的 sprite 与静态成员的 pair 进 ignored_pairs（宠-宠不豁免），探头收回后自动恢复 |
+| CI-AV | Windows hosted runner（3.11.9 toolcache + PySide6 6.12.0）单进程整跑反复 access violation（崩点漂移三处，main 同环境亦红） | `scripts/ci_shards.py`：收集序四等分、四个独立 pytest 进程（堆状态不跨片积累）；Linux/macOS 保持单进程整跑；`test_ci_workflows.TestWindowsShardRunner` 三条守卫钉住步骤形状与忽略清单同源 |
 | X4 | 多 DSH 修复缺真实桥数据验证 | 见「三、实机」节——真实桥日志统计已作为 X1 证据；两个真实例实机跑仍未做（诚实登记） |
 
 另外两笔小的：FPS 权限文案「注销并重新登录后生效」→「注销或重启电脑后生效」（4 处）；
@@ -67,6 +68,8 @@ INDEX.md 以 main 为准重新登记五份新报告。
 | `pet/settings_network.py` | +2/−2 | FPS 权限文案「注销或重启电脑后生效」 |
 | `pet/fps_permission.py` | +2/−2 | 同上（授权结果两条消息） |
 | `pet/modern_settings_dialog.py` | +12/−0 | #251：AI 页分组挂接 |
+| `scripts/ci_shards.py` | +89/−0 | 新文件：CI 分片执行器（收集序四等分 + 独立进程 + 收集失败即报错） |
+| `.github/workflows/pr-test.yml` | +13/−1 | Windows 主套件走分片步骤；Linux/macOS 不变 |
 | `pet/file_interpret.py` | +2/−0 | #251：识图链路的 activity 透传 |
 | `docs/INDEX.md` | +5/−0 | 以 main 为准恢复全部登记 + 五份新报告入场 |
 
@@ -76,6 +79,9 @@ INDEX.md 以 main 为准重新登记五份新报告。
 mid_attach_done（+74：镜像真链路 + error 两链）、frameseq_clip（+208：退役协议 4 新 2 更新）、
 music_lyric（+141：迟到采样守卫 + 重进音乐模式）、chat_subsystem（+237：F6 忙态 3 条 + X3 排空关窗 2 条 +
 markdown 共存适配）、agent_link（+124：代次闸 3 条）、quick_chat（切角色断言适配 #250 时间前缀）等。
+`test_ci_workflows.py` 新增 TestWindowsShardRunner 三条守卫；`test_chat_subsystem.py` /
+`test_island_fps_integration.py` / `test_fps_monitor.py` / `test_dsh_mid_attach_done.py` 五处
+慢 runner 竞态加固（裸断言改泵等待、预算放宽——macOS/Windows CI 实测翻车点）。
 `test_chat_markdown.py`（+70）、`test_chat_thinking_web_search.py`（+511）、`test_chat_time_awareness.py`（+106）、
 `test_frameseq_no_console.py`（+26）为被集成 PR 自带。岛墙修复：`test_island_bridge.py` +2 条（细条/动画不设墙）、
 `test_sprite_collision.py` +2 条（探头豁免 + 非探头对照）、`test_island_bridge_velocity.py` 松手断言适配
