@@ -2053,10 +2053,9 @@ class ChatWindow(QDialog):
         避免递归，也避免切换后才保存导致旧回复写进新会话。"""
         self._typewriter_timer.stop()
         pending_finish = self._pending_finish_text
-        pending_output = self._pending_output
         self._pending_finish_text = None
         self._pending_output = ""
-        
+
         # 只提交模型已完成的回复；尚未 finish 的半截流式输出不当作完整回复落库
         if pending_finish is None:
             return
