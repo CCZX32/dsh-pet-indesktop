@@ -180,6 +180,7 @@ class QuickChatBubble(QFrame):
         self.open_chat_btn.clicked.connect(self._open_full_chat)
         self.service.started.connect(self._started)
         self.service.delta.connect(self._delta)
+        self.service.activity.connect(self._activity)
         self.service.finished.connect(self._finished)
         self.service.error.connect(self._error)
         self.service.stopped.connect(self._stopped)
@@ -364,6 +365,11 @@ class QuickChatBubble(QFrame):
         if request_id != self._active_request_id:
             return
         self.hint_label.setText("生成中…")
+
+    def _activity(self, request_id: str, kind: str, text: str) -> None:
+        if request_id != self._active_request_id or self._reply_full:
+            return
+        self.hint_label.setText("深度思考中…" if kind == "reasoning" else str(text).strip()[:30])
 
     def _delta(self, request_id: str, text: str) -> None:
         if request_id != self._active_request_id:
