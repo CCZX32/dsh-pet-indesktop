@@ -21,7 +21,7 @@
 在本地求值，三端逐行跑同一张真值表（见 `TestArtifactUploadBoundary`）。同一套求值
 （`_eval_expression`）在 2026-10-12 批里扩到 `runner.os` 与 `failure()`/`success()`：
 主套件命令的 `${{ runner.os == 'Linux' && ... || '' }}` 按三个 OS 逐腿展开求值，
-诊断重跑步骤的 `if:` 也按 (runner.os, 之前是否失败) 跑真值表
+诊断重跑步骤的 `if:` 也按 (runner.os, 之前是否失败, 主套件自身是否红) 跑真值表
 （见 `TestPrTestCaptureAndFailureDiagnostics`）。
 
 **范围**：只断言工作流文件的结构契约，不执行任何 CI、不联网、不碰远端。
@@ -131,15 +131,18 @@ def _eval_expression(
     inputs: dict | None = None,
     runner_os: str = "",
     failed: bool = False,
+    main_suite_failed: bool = False,
 ):
     """按 GitHub 表达式语义求值一条表达式，返回**求值结果本身**（不强制布尔）。
 
-    只实现本仓库工作流用到的子集（``github.*`` / ``runner.os`` 属性、``&&``/``||``/
-    ``==``、``startsWith``、``failure()``/``success()``/``always()``、``true``/``false``/
-    ``null`` 字面量）；工作流若改用别的东西，这里会以 NameError 炸出来而不是静默放行。
-    **不联网、不执行任何 CI**——纯本地表达式求值。
+    只实现本仓库工作流用到的子集（``github.*`` / ``runner.os`` / ``steps.<id>.outcome``
+    属性、``&&``/``||``/``==``、``startsWith``、``failure()``/``success()``/``always()``、
+    ``true``/``false``/``null`` 字面量）；工作流若改用别的东西，这里会以 NameError
+    炸出来而不是静默放行。**不联网、不执行任何 CI**——纯本地表达式求值。
 
     ``failed`` 是 ``failure()`` 的本地替身（GitHub 语义：之前任一步骤失败）。
+    ``main_suite_failed`` 是 ``steps.main_suite.outcome`` 的本地替身（本仓库只用到
+    主套件这一个 step id：诊断重跑要确认「红的正是主套件」，而不是 ruff/bridge 门）。
     """
     source = expression.strip()
     assert "${{" not in source, f"此处按 GitHub 原生表达式求值，不应带 ${{{{ }}}}：{source}"
@@ -154,6 +157,10 @@ def _eval_expression(
         "github": context,
         # runner_os 留空 = 取空上下文（等价 null），与 GitHub 未设置时的取空语义一致
         "runner": _GithubContext({"os": runner_os or None}),
+        # 只暴露主套件一个 id：outcome 是该步原始结果（不受 continue-on-error 影响）
+        "steps": _GithubContext({
+            "main_suite": {"outcome": "failure" if main_suite_failed else "success"},
+        }),
         "failure": lambda: failed,
         "success": lambda: not failed,
         "always": lambda: True,
@@ -319,20 +326,37 @@ class TestPrTestCaptureAndFailureDiagnostics:
 
     def test_prefix_diagnostics_condition_is_linux_failure_only(self):
         condition = _if_condition(_step_block(_text(PR_TEST), self.PREFIX_DIAGNOSTICS))
+        # 必须**显式**带状态函数：GitHub 在 `if:` 里没有 failure()/success()/always()
+        # 时隐式套一层 success()，前序步骤一红本步就被跳过——诊断恰恰要在红时跑。
+        assert condition.startswith("failure()"), (
+            f"条件必须以 failure() 开头（缺了会被 GitHub 隐式 success() 跳过）：{condition}"
+        )
         truth_table = [
-            # (runner.os, 之前有步骤失败, 期望本步是否运行)
-            ("Linux", True, True),
-            ("Linux", False, False),
-            ("Windows", True, False),
-            ("macOS", True, False),
+            # (runner.os, 之前有步骤失败, 主套件自己是否红, 期望本步是否运行)
+            ("Linux", True, True, True),
+            ("Linux", False, False, False),
+            # ruff/bridge 门在 Linux 上红、主套件没红：不再白跑这 ~2.5 min 前缀
+            ("Linux", True, False, False),
+            ("Windows", True, True, False),
+            ("macOS", True, True, False),
         ]
-        for runner_os, failed, expected in truth_table:
+        for runner_os, failed, main_suite_failed, expected in truth_table:
             actual = _eval_if(condition, event_name="pull_request", ref="refs/heads/main",
-                              runner_os=runner_os, failed=failed)
+                              runner_os=runner_os, failed=failed,
+                              main_suite_failed=main_suite_failed)
             assert actual is expected, (
-                f"runner.os={runner_os} failed={failed} → 运行={actual}，期望 {expected}；"
-                f"条件原文：{condition}"
+                f"runner.os={runner_os} failed={failed} main_suite_failed={main_suite_failed}"
+                f" → 运行={actual}，期望 {expected}；条件原文：{condition}"
             )
+
+    def test_prefix_diagnostics_condition_reads_main_suite_step_outcome(self):
+        # 条件里引用的 step id 必须真的挂在主套件那一步上：id 写错/被改掉时
+        # GitHub 求值成 null，条件是恒假——诊断步骤会静默永不运行（比红更难发现）。
+        main_suite = _step_block(_text(PR_TEST), self.MAIN_SUITE)
+        assert "id: main_suite" in main_suite, "主套件步骤必须带 id: main_suite"
+        assert "steps.main_suite.outcome" in _if_condition(
+            _step_block(_text(PR_TEST), self.PREFIX_DIAGNOSTICS)
+        )
 
     def test_prefix_diagnostics_covers_agent_cost_to_config_schema_range(self):
         step = _step_block(_text(PR_TEST), self.PREFIX_DIAGNOSTICS)
@@ -373,6 +397,11 @@ class TestPrTestCaptureAndFailureDiagnostics:
         step = _step_block(_text(PR_TEST), "Pytest crash diagnostics")
         assert _if_condition(step) == "failure()"
         assert "tail -n 30" in step, "只回读末尾，不整篇进日志"
+        # 两个诊断目录都要回读：主套件那份 + Linux 受限前缀重跑那份（前缀步骤红时
+        # 才有）。只读一份就会漏掉另一半现场——前缀重跑跑完通过时，主套件那份
+        # 仍记录着「死在谁、哪个阶段」，反过来也一样。
+        for name in ("dspet-pytest-diag", "dspet-pytest-diag-linux-prefix"):
+            assert name in step, f"回读步骤必须覆盖 {name}"
 
 
 # ----------------------------------------------------------------- build 共用

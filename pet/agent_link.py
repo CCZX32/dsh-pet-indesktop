@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import json
 import logging
@@ -29,7 +30,7 @@ import sys
 import threading
 import time
 import weakref
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
@@ -45,9 +46,13 @@ from .click_sound import play_sound, resolve_builtin_sound
 from .agent_event_protocol import parse_agent_event
 from .agent_event_normalizer import normalize_event
 from .dsh_state import (
+    SCOPE_REGISTRY_MAX,
+    DshState,
     DshStateConverger,
     TurnCompletionTracker,
     candidate_ports as _dsh_state_candidate_ports,
+    fold_writer_states,
+    map_event_to_state,
 )
 from .model_access_tracker import ModelAccessTracker
 from .node_runtime import augmented_path as _augmented_path
@@ -1022,27 +1027,171 @@ _BRIDGE_STALE_CLEANUP_LIMIT = 8
 _BRIDGE_INSTANCE_FILE_RE = re.compile(r"^dsh-(\d+)\.jsonl$")
 
 
+#: 探活的错误分类口径（**只分类，绝不提权**）：
+#: - Win ``OpenProcess`` 失败时 ``ERROR_INVALID_PARAMETER(87)`` = 没有这个 pid → 确定已死
+#:   （同 ``slot_manager.pid_alive`` 的既有判定口径）；``ERROR_ACCESS_DENIED(5)`` =
+#:   进程存在但探不动（受保护进程 / 别的用户 / 更高完整性级别 / 更早的会话）→ **判不了**；
+#: - POSIX ``os.kill(pid, 0)`` 只有 ``ESRCH`` 才证明"没有这个 pid"；``EPERM``/``EACCES``
+#:   说明进程存在但无权发信号 → 同样判不了。
+#: 判不了就报判不了：把它判死会撤掉**活着**的写者的忙态与待处理交互（用户还在等的
+#: 气泡消失）。为此不申请任何更高权限（不改令牌、不加 SeDebugPrivilege）。
+_WIN_ERROR_ACCESS_DENIED = 5
+_WIN_ERROR_INVALID_PARAMETER = 87
+_WIN_STILL_ACTIVE = 259
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _os_kill_signal_0(pid: int) -> None:
+    """POSIX 探活的 OS 边界（单独成函数 = 单测可分别注入 ESRCH / EPERM）。"""
+    os.kill(pid, 0)
+
+
+def _win32_kernel32():
+    """Windows 探活的 OS 边界（单独成函数 = 单测可在任何平台注入假 kernel32）。"""
+    import ctypes
+    return ctypes.windll.kernel32
+
+
+def _probe_writer_pid_posix(pid: int) -> bool | None:
+    """POSIX 三态探活：只有 ``ESRCH``（没有这个 pid）与超出 pid 范围算确定已死。"""
+    try:
+        _os_kill_signal_0(int(pid))
+        return True
+    except OverflowError:
+        # 超出 pid_t 表示范围的 pid 抛的不是 OSError：这样的 pid 不可能存在。
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        # EPERM/EACCES（进程存在但无权探它）与任何未知 errno：判不了，绝不判死。
+        log.debug("桥文件写者探活不可判定 pid=%s errno=%s", pid, exc.errno)
+        return None
+
+
+def _probe_writer_pid_windows(pid: int) -> bool | None:
+    """Windows 三态探活：只有"没有这个 pid"与"退出码已不是 STILL_ACTIVE"算确定已死。"""
+    import ctypes
+
+    kernel32 = _win32_kernel32()
+    try:
+        # 最小必要权限（只查、不改）：权限越大越容易在受保护进程上被拒绝。
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    except OverflowError:
+        # 超出 Win32 进程 ID 表示范围的 pid（ctypes 按 c_int 转换时溢出）：不可能存在。
+        return False
+    if not handle:
+        err = int(kernel32.GetLastError())
+        if err == _WIN_ERROR_INVALID_PARAMETER:
+            return False        # 没有这个 pid：确定已死
+        if err == _WIN_ERROR_ACCESS_DENIED:
+            # 进程**存在**但我们查不了它（受保护进程/别的用户/更高完整性级别/更早的
+            # 会话）：判不了存活之外的任何事。绝不为此提权（口径见上方常量注释）。
+            log.debug("桥文件写者探活不可判定（拒绝访问）pid=%s", pid)
+            return None
+        # 其余错误码同样判不了。
+        log.debug("桥文件写者探活不可判定 pid=%s winerr=%s", pid, err)
+        return None
+    try:
+        # 句柄打得开 ≠ 进程还活着：进程被 TerminateProcess、父进程还握着句柄时，
+        # 进程对象不销毁、OpenProcess 一路成功——只有退出码仍是 STILL_ACTIVE 才算活。
+        # 退出码是 DWORD：Windows 上 C ``long`` 就是 32 位（``wintypes.DWORD`` 即
+        # ``c_ulong``），这里直接用 c_ulong，省掉只在 Windows 存在的 ``ctypes.wintypes``
+        # 导入（本函数的注入式单测要在 Linux/macOS 上跑）。
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            # 句柄在手却读不到退出码：异常情况，判不了存活，也不判死。
+            log.debug("桥文件写者退出码读取失败 pid=%s", pid)
+            return None
+        return code.value == _WIN_STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _bridge_writer_alive(pid: int) -> bool | None:
     """桥文件写者（``dsh-<pid>.jsonl``）是否还活着。
 
-    True = 存活；False = 确定已死；**None = 判定失败**（平台探活不可用/异常），
-    调用方按保守处理——不清理、照常轮询。复用 ``slot_manager.pid_alive``
-    （Windows 走 OpenProcess + GetExitCodeProcess 的 STILL_ACTIVE 口径，其余
-    平台 ``kill(pid, 0)``），不另造一套探活。
+    True = 存活；False = **确定**已死；**None = 判定失败**（权限拒绝/平台探活异常），
+    调用方按保守处理——不清理、不退役、照常轮询。
+
+    为什么本模块自守这份三态、而不是复用 ``slot_manager.pid_alive``：后者的布尔语义
+    被多处消费（本批**不动它**），而它的 bool 把"权限拒绝"与"没有这个 pid"压成同一个
+    False。多实例场景下那是一次**误判死亡**：探不动活着的写者 → 撤掉它的忙态与待处理
+    交互。分类细则见 :func:`_probe_writer_pid_windows` / :func:`_probe_writer_pid_posix`；
+    陈旧文件清理（:meth:`DirGlobTailer._cleanup_stale_dead_writers`）与活跃写者探活
+    （:meth:`DshMonitor._maybe_probe_dead_writers`）共用这一处判定。
     """
     if pid <= 0:
         return None
     try:
-        from .slot_manager import pid_alive
-        return bool(pid_alive(pid))
-    except OverflowError:
-        # posix 侧 os.kill 对超出 pid_t 表示范围的 pid 抛 OverflowError（非
-        # OSError，穿透 pid_alive 的 OSError 捕获）：这样的 pid 不可能存在，
-        # 判定为已死，与 Windows（OpenProcess 失败 → False）口径对齐。
-        return False
+        if sys.platform == "win32":
+            return _probe_writer_pid_windows(pid)
+        return _probe_writer_pid_posix(pid)
     except Exception:
         log.debug("桥文件写者探活失败 pid=%s", pid, exc_info=True)
         return None
+
+
+# ----------------------------------------------------------------------
+# 桥写者归属（多 DSH 实例分区）
+# ----------------------------------------------------------------------
+#: 桥接插件在唯一写盘出口（index.js ``writeRecord``）盖的**信封**字段：本次插件
+#: 启动生成的 UUID。它是插件自己的信封，不是 DSH 字段——桌宠也不拿它冒充上游协议。
+_BRIDGE_INSTANCE_FIELD = "inst"
+#: 摄入侧把推出来的写者归属写回记录用的**内部标注**键（下划线前缀 = 我们自己的
+#: 摄入标注，不进任何持久化、不进对话模板）。生命周期记录与 typed state 都靠它按
+#: 写者过滤；缺失（直调/非摄入路径）时下游按"不知道归属"保守处理。
+_BRIDGE_OWNER_KEY = "_scope"
+
+
+def record_owner(record: dict, cursor: tuple | None = None) -> str | None:
+    """这条桥接记录属于哪个写者（多 DSH 实例分区）；给不出归属时返回 None。
+
+    - **新桥**（有插件 boot UUID ``inst``）→ ``inst:<uuid>``；
+    - **旧桥**（无 ``inst``）→ ``file:<路径>:<文件身份>``，文件身份取摄入游标里的
+      那个（Win: ino+ctime_ns / POSIX: dev+ino）。**不单用 pid**：pid 会被系统
+      复用，同一路径、同一 pid 重启后的新写者是另一个写者；同一路径被轮转/替换
+      （bridge 超限 rename）后文件身份也变——这正是游标里那个身份存在的理由；
+    - 两者都没有（无游标：直调、非 tail 路径）→ None，调用方按"归属未知"处理。
+    """
+    if isinstance(record, dict):
+        inst = str(record.get(_BRIDGE_INSTANCE_FIELD) or "").strip()
+        if inst:
+            return f"inst:{inst}"
+    if cursor is None:
+        return None
+    try:
+        path_key = str(cursor[0])
+        file_id = cursor[1]
+    except (IndexError, TypeError):
+        return None
+    return f"file:{path_key}:{file_id}"
+
+
+def _evict_inactive_owner_files(owner_files: OrderedDict[str, str], active: set[str],
+                                *, max_entries: int) -> list[str]:
+    """把「写者 → 最近一次写盘文件」映射压回容量内，返回被淘汰的 owner（纯函数）。
+
+    **只淘汰非活跃写者，从最老的开始**。为什么不能按插入次序 FIFO 直接淘汰最老的
+    （旧实现）：这张表是活跃写者存活探活的**唯一** pid 来源
+    （:meth:`DshMonitor._maybe_probe_dead_writers` 的候选必须"写者还在表里"），而
+    插件每重载一次就是一个新 boot UUID = 一个新写者（被收敛器拒接状态分片的写者照样
+    在这里登记映射）。FIFO 会把**正忙 / 正等用户输入**的写者的映射挤掉：那条写者的
+    进程死掉后没有 pid 可探，忙态与待处理交互永远留在桌宠里（永远忙、气泡撤不掉）。
+
+    淘汰是可逆的：被淘汰的写者下次写盘会重新登记。全部条目都活跃时**不淘汰**——
+    宁可让表暂时超容量，也不丢活跃写者的探活线索；活跃写者数被收敛器的 scope 注册表
+    上界钉死（``dsh_state.SCOPE_REGISTRY_MAX``），所以表的实际上界是
+    ``max(max_entries, 活跃写者数)``。
+    """
+    evicted: list[str] = []
+    if len(owner_files) <= max_entries:
+        return evicted
+    for key in [k for k in owner_files if k not in active]:
+        if len(owner_files) <= max_entries:
+            break
+        owner_files.pop(key, None)
+        evicted.append(key)
+    return evicted
 
 
 class DirGlobTailer:
@@ -1066,6 +1215,8 @@ class DirGlobTailer:
         self._last_directory_mtime_ns: int | None = None
         self._tailers: dict[str, ByteOffsetTailer] = {}
         self._initial_backfill_done: bool = False
+        # 本拍被确认「写者已死且已清理」的文件路径（消费者据此退役对应写者 scope）
+        self._confirmed_dead: set[str] = set()
 
     @property
     def _initial_backfill_done(self) -> bool:
@@ -1088,6 +1239,18 @@ class DirGlobTailer:
         for t in self._tailers.values():
             t.reset()
         self._tailers.clear()
+        self._confirmed_dead.clear()
+
+    def take_confirmed_dead(self) -> set[str]:
+        """取出并清空「已被确认写者已死」的文件路径集合（退役 scope 用）。
+
+        确认口径沿用 :meth:`_cleanup_stale_dead_writers` 的保守三连（超龄 + 文件名
+        带 pid + 探活明确返回 False）；判定不了存活的**不进**这个集合——宁可让一个
+        死写者的状态多留一拍，也不误退役活写者的 scope。
+        """
+        dead = self._confirmed_dead
+        self._confirmed_dead = set()
+        return dead
 
     def _scan(self, now: float) -> None:
         # F-PERF P3：scan_interval 此前只存不用——每拍全量枚举（最多 64 文件，
@@ -1150,6 +1313,11 @@ class DirGlobTailer:
                 entries.append((mtime_ns, entry.name, entry.path))
         entries.sort(key=lambda item: item[0])  # 升序：最旧在前（清理从最旧端起）
         dead = self._cleanup_stale_dead_writers(entries)
+        if dead:
+            # 交接给消费者（DshMonitor）：这些文件的写者已被确认死亡，归属它们的
+            # 状态/锁存与常驻交互都要退役。只记录已确认的那部分，不在这里做消费
+            # 侧的事（Tailer 不懂状态机）。
+            self._confirmed_dead |= dead
         live = [path for _mtime_ns, _name, path in entries if path not in dead]
         live.reverse()                          # 翻回 mtime 倒序（活跃优先）
         return [Path(path) for path in live[: self.max_files]]
@@ -1249,6 +1417,11 @@ class ByteOffsetTailer:
     def read_new_lines(self) -> list[str]:
         """读取文件自上次 offset 以来的全部完整新增行（无游标的兼容出口）。"""
         return [line for line, _cursor in self.read_new_lines_with_cursors()]
+
+    def take_confirmed_dead(self) -> set[str]:
+        """单文件 tail 没有"写者已死"的判定（那是 ``DirGlobTailer`` 的分区清理
+        才有的事）：恒返回空集，让消费方可以无差别调用。"""
+        return set()
 
     def read_new_lines_with_cursors(self) -> list[tuple[str, tuple]]:
         """读取新增完整行，每行带上**读取游标** ``(文件路径, 文件身份, 行首字节偏移)``。
@@ -1450,6 +1623,9 @@ class AgentEvent:
     gen: int = 0
     state: str = ""
     tool: str = ""
+    #: 写者归属（多 DSH 实例分区；见 :func:`record_owner`）。"" = 该记录没有写者
+    #: 归属（无主桶，旧桥/非摄入路径），消费侧按"无主条目"处理，不是通配。
+    owner: str = ""
 
 
 class BaseAgentMonitor(QObject):
@@ -1653,8 +1829,8 @@ class BaseAgentMonitor(QObject):
         if worker.is_alive():
             log.warning("Agent 监视器 [%s] 销毁兜底 worker 退出超时", agent_key)
 
-    def _emit_state(self, state: str, gen: int) -> None:
-        event = AgentEvent(self.agent_key, "state", gen=gen, state=state)
+    def _emit_state(self, state: str, gen: int, owner: str = "") -> None:
+        event = AgentEvent(self.agent_key, "state", gen=gen, state=state, owner=owner)
         self._emit_pair(
             self.state_changed, (self.agent_key, state),
             self.state_event, (event,), state=state,
@@ -1822,6 +1998,32 @@ class BaseAgentMonitor(QObject):
             return True
         return False
 
+    def _record_owner(self, data: dict, cursor: tuple | None) -> str | None:
+        """这条记录的写者归属（多实例分区）；基类给不出（返回 None，不标注）。
+
+        只有知道归属的监视器（``DshMonitor``：桥记录带插件 boot UUID 或可用摄入
+        游标推出文件身份）才返回字符串——返回 None 表示"这不是一个带写者归属的
+        记录"，摄入侧不给它盖标注，下游按"无主"处理。
+        """
+        return None
+
+    def _stamp_record_owner(self, data: dict, cursor: tuple | None) -> str:
+        """在记录上盖写者归属标注（摄入口径），返回该归属（"" = 无主桶）。"""
+        owner = self._record_owner(data, cursor)
+        if owner is None:
+            return ""
+        data[_BRIDGE_OWNER_KEY] = owner
+        return owner
+
+    def _on_duplicate_record(self, data: dict) -> None:
+        """钩子：被摄入账本判为**重复投递**而整条跳过的记录（worker 线程内调用）。
+
+        默认无操作。需要"去重但不丢归属"的监视器在这里补登记（``DshMonitor``：
+        同一逻辑事件被两个写者各写一份时，第二条整条跳过是对的——正文/音效不得
+        双响——但它证明**第二个写者也在等同一条交互**，归属必须并进同一条目，
+        否则第一个写者一回待机就把用户还在等的那个气泡撤掉）。
+        """
+
     def _poll(self, gen: int | None = None) -> None:
         emit_gen = self._emit_gen if gen is None else gen
         for line, cursor in self._tailer.read_new_lines_with_cursors():
@@ -1838,9 +2040,14 @@ class BaseAgentMonitor(QObject):
                     flattened = dict(data)
                     flattened.update(nested)
                     data = flattened
+                # 写者归属在展平之后盖（摄入侧权威，载荷里的同名字段顶不掉它），
+                # 且在去重判定之前——重复投递也要能报出"这条是谁写的"（见
+                # ``_on_duplicate_record``）。
+                owner = self._stamp_record_owner(data, cursor)
                 # 去重闸在展平之后、任何分派之前：身份字段可能来自嵌套 data
                 # （旧版/自定义桥），展平后与消费端看到的是同一份记录。
                 if self._is_duplicate_delivery(data, cursor):
+                    self._on_duplicate_record(data)
                     continue
                 ev = str(data.get("event", ""))
                 st = str(data.get("state", ""))
@@ -1922,7 +2129,7 @@ class BaseAgentMonitor(QObject):
                 normalized = normalize_event_state(ev, st)
                 if not normalized:
                     continue  # 不认识的事件类型：忽略，不误报为 working
-                self._emit_state(normalized, emit_gen)
+                self._emit_state(normalized, emit_gen, owner)
             except Exception:
                 log.debug("桥接记录处理失败，跳过该行", exc_info=True)
 
@@ -1966,7 +2173,33 @@ class DshMonitor(BaseAgentMonitor):
     # busy→success 边沿，但记录本身已经说明「这一回合结束了」。
     dsh_turn_completed = Signal(str, object)
 
+    # live 回合**起点**（收敛器映射为思考态的记录：turn/start / user/message /
+    # AgentStatus thinking）→ (agent_key, payload)：payload = {owner, sessionId,
+    # step, gen}。聚合状态通道（``dsh_state_changed``）不带写者归属，"哪个写者开了
+    # 新回合"在那里判不出来——消费侧的完成确认必须按归属裁决（见
+    # ``AgentLinkManager._on_dsh_turn_started``），所以按原记录的身份补一条通道。
+    dsh_turn_started = Signal(str, object)
+
+    #: 写者被确认死亡（陈旧文件清理或低频存活探活确认）→ (owner, gen)。
+    #: 消费侧据此只撤归属它的常驻交互与呈现簿记，**不报完成**：写者消失不是回合
+    #: 收尾，弹「已完成本轮任务」是假消息。
+    dsh_scope_retired = Signal(str, int)
+    #: 重复投递（摄入账本已拒）的写者归属补登 → (agent_key, record)。
+    #: 去重契约不变（正文/音效仍只响一次），这里只把"另一个写者也在等这条交互"
+    #: 的事实并进同一 pending 条目，防止先回待机的那个写者撤掉它。
+    bridge_owner_attested = Signal(str, object)
+
     _ONLINE_PROBE_EVERY_N_POLLS = 2  # 1.5s × 2 = 3s，对齐旧 DshStateTracker 探活节拍
+    #: 写者 → 最近一次写盘文件的映射表容量（存活探活时反查 pid；容量按**非活跃**条目
+    #: 计——忙/等待中的写者映射永不淘汰，见 :func:`_evict_inactive_owner_files`）。
+    #: 活跃写者数被收敛器 scope 注册表上界（``dsh_state.SCOPE_REGISTRY_MAX`` = 32，
+    #: 加无主桶）钉死，远小于本容量，所以"全表都是活跃写者"只可能是注册表上界被上调。
+    _OWNER_FILE_MAX = 64
+    #: 活跃写者存活探活的低频节拍：1.5s × 40 ≈ 60s 一次。写者死掉后最长一分钟回正，
+    #: 又不至于把进程探活（每次 3 次系统调用）摊到每拍。
+    _DEAD_WRITER_PROBE_EVERY_N_POLLS = 40
+    #: 单轮最多探活几个写者（与陈旧文件清理同口径：不砸盘、不每拍全量体检）。
+    _DEAD_WRITER_PROBE_LIMIT = 8
 
     def __init__(self, agent_key: str, config_dir: Path, parent=None) -> None:
         super().__init__(agent_key, config_dir, parent)
@@ -1981,21 +2214,74 @@ class DshMonitor(BaseAgentMonitor):
         self._tailer = DirGlobTailer(self.events_dir, pattern="dsh*.jsonl")
         # 启动自检只做一次（每实例）：pnpm 解析可能数十秒，绝不能重复触发
         self._link_check_started = False
-        # 状态收敛器（纯逻辑）：8 态收敛 + 审批/问题锁存
+        # 状态收敛器（纯逻辑）：8 态收敛 + 审批/问题锁存（**按写者分片**，见
+        # dsh_state.DshStateConverger：多 DSH 实例各自独立锁存，折叠成单出口）
         self._converger = DshStateConverger()
-        # live 回合收尾身份追踪（纯逻辑）：重启清会话表，保留单调 token 防身份重用
+        # live 回合收尾身份追踪（纯逻辑）：**全写者共享一张会话表**——同一 sessionId
+        # 就是同一条会话，即使被两个实例镜像各写一份；按写者分表会让同一回合的两份
+        # turn/end 算出两个身份，消费侧去重失效（同一回合提醒两次）。
         self._turn_tracker = TurnCompletionTracker()
+        # 写者 → 最近一次写盘文件（确认写者死亡时反查 pid；有界 FIFO）
+        self._owner_files: OrderedDict[str, str] = OrderedDict()
         # None = 未探测过；False 时收敛器不消费事件（离线态优先）
         self._online: bool | None = None
         self._probe_tick = 0
+        # 活跃写者的低频存活探活节拍（见 _maybe_probe_dead_writers）
+        self._dead_probe_tick = 0
+        # 探活窗口的轮转游标：单轮有界（≤8）但**不许固定前缀**——否则排在窗口外的
+        # 写者永远探不到（见 _maybe_probe_dead_writers）。
+        self._dead_probe_cursor = 0
 
     # ------------------------------------------------------------ 单读方：探活 + 收敛
     def start(self) -> bool:
         self._converger.reset()
+        # 新代次 = 新的写者表；收尾会话表随代次清空（全局计数不回收，见其文档）。
         self._turn_tracker.reset()
+        self._owner_files.clear()
         self._online = None
         self._probe_tick = 0
+        self._dead_probe_tick = 0
+        self._dead_probe_cursor = 0
         return super().start()
+
+    def begin_stop(self) -> None:
+        # 关监测即复位探活窗口：下一代次（start）从候选集头部重新开始计时，
+        # 不让上一代次的游标位置影响新写者表的轮转次序。
+        self._dead_probe_cursor = 0
+        super().begin_stop()
+
+    def _record_owner(self, data: dict, cursor: tuple | None) -> str | None:
+        """桥记录的写者归属；顺手记下"该写者最近写的是哪个文件"。
+
+        归属先经收敛器准入（``admit_owner``：注册表有界、满时先在界内回收安静写者、
+        挤不出才拒接状态分片）——摄入标注、状态分片、交互归属三处用的是**同一个**
+        key，不会出现"状态拒接了、交互却按另一个 key 记"的错位。拒接只影响状态
+        分片，标注照旧按写者自己（绝不并入别人的桶）。
+
+        这里**不产拒接诊断**：同一条记录随后还会在 ``handle_record`` 里再准入一次
+        （那才是真正要建状态分片的那次），诊断统一由那次给出，否则一条记录两条
+        告警（历史缺陷，见 ``DshStateConverger.note_rejected_owner``）。
+        """
+        owner = record_owner(data, cursor)
+        if owner is None:
+            return None
+        key, _admitted = self._converger.admit_owner(owner)
+        if cursor is not None:
+            path_key = str(cursor[0])
+            self._owner_files[key] = path_key
+            self._owner_files.move_to_end(key)
+            if len(self._owner_files) > self._OWNER_FILE_MAX:
+                self._trim_owner_files()
+        return key
+
+    def _trim_owner_files(self) -> None:
+        """映射超容量时淘汰**非活跃**写者（见 :func:`_evict_inactive_owner_files`）。"""
+        evicted = _evict_inactive_owner_files(
+            self._owner_files, set(self._converger.owners_needing_liveness()),
+            max_entries=self._OWNER_FILE_MAX)
+        if evicted:
+            log.debug("写者文件映射超容量(%s)，淘汰非活跃写者 %s 条（活跃写者的映射一律保留）",
+                      self._OWNER_FILE_MAX, len(evicted))
 
     def _worker_started(self) -> None:
         # 首轮立即探活，让 offline/idle 基线尽早落下（旧跟踪器 start() 同款语义）
@@ -2007,8 +2293,86 @@ class DshMonitor(BaseAgentMonitor):
             self._probe_tick = 0
             self._probe_online()
         super()._poll(gen)
+        # 死写者退役（24h 陈旧文件清理路径）：只撤它自己的状态与常驻交互，绝不报完成。
+        self._retire_dead_writer_scopes(self._tailer.take_confirmed_dead())
+        # 活跃写者的存活探活（低频率）：进程死了但状态还停在"忙/等待"的那些，必须
+        # 撤掉，否则桌宠永远忙。见 _maybe_probe_dead_writers。
+        self._maybe_probe_dead_writers()
         # 锁存超时兜底：DSH 漏发 approval/decided / question/resolved 时强制回 working
         self._emit_converged(self._converger.tick())
+
+    def _retire_dead_writer_scopes(self, dead: set[str]) -> None:
+        if not dead:
+            return
+        for owner in [o for o, path in self._owner_files.items() if path in dead]:
+            self._retire_owner(owner, reason="桥文件写者已确认死亡")
+
+    def _retire_owner(self, owner: str, *, reason: str) -> None:
+        """退役一个写者：撤它的状态分片与交互归属，**不报完成**。"""
+        self._owner_files.pop(owner, None)
+        self._emit_converged(self._converger.retire_scope(owner))
+        log.info("%s，退役其状态与交互归属: %s", reason, owner[:120])
+        self._emit(self.dsh_scope_retired, (owner, self._emit_gen))
+
+    def _maybe_probe_dead_writers(self) -> None:
+        """低频存活探活：只探"还在忙/还在等"的写者，只认**明确已死**。
+
+        为什么必须有（绕过 24h 清理路径）：陈旧文件清理只处理超龄 24h 且文件名带
+        pid 的**死文件**，而写者进程死掉的那一刻它的状态还留在桌宠里——「永远忙」
+        「永远在等审批」要等到 24 小时后才可能被清掉。这条探活用同一个 pid 探活
+        口径（``_bridge_writer_alive``）但只针对**当前有 busy/pending 的已知写者**，
+        而且是低频（``_DEAD_WRITER_PROBE_EVERY_N_POLLS`` 拍一次，单轮最多
+        ``_DEAD_WRITER_PROBE_LIMIT`` 个，每个 3 次系统调用）。
+
+        窗口**轮转**、不取固定前缀：候选来自注册表的登记次序（最久登记的在前），
+        固定取前 8 个时，只要有 8 个"活着但状态卡在忙/等待"的写者长期占住前 8 位
+        （插件重载 = 同进程新 boot UUID，上一代的忙态留在桌宠里，pid 却仍活着），
+        排在第 9 位及以后的**真死写者**就永远排不进窗口，忙态再也回收不了——桌宠
+        永远忙。游标按"本轮取走的个数"前进并回卷，候选集不变时 ⌈n/8⌉ 轮内必然
+        覆盖全部（注册表上界 32 → 最坏 4 轮，约 4 分钟）；候选集变化（退役/新写者）
+        时游标按取模归位，只会更快覆盖，不会饿死某一个。复位点：``start`` /
+        ``begin_stop`` / 探到整体离线（写者镜像表被清空时）。
+
+        三条硬边界：
+        - 只认 ``False``（明确已死）才退役；``None``（**权限拒绝**：Win
+          ERROR_ACCESS_DENIED / POSIX EPERM，或平台探活不了）与 ``True`` 一律不动
+          ——探不动活着的写者时宁可多留一拍，也不误撤活写者（撤了就撤掉用户还在
+          等的交互）。判不了一律 ``None``，见 :func:`_bridge_writer_alive`；
+        - **绝不按文件静默/时间**退役（没有 mtime 判定、没有 TTL）：文件静默可能
+          只是这个实例这一会儿没干活，合法在途的 pending 不会被时间撤掉；
+        - 退役按**写者归属**（boot 身份）而不是 pid：同一个 pid 重启后的新写者
+          是另一个 owner，不会被误伤。
+
+        候选要求"写者在 ``_owner_files`` 里"（才有 pid 可探），所以映射表**不许**淘汰
+        还在忙/在等的写者——见 :func:`_evict_inactive_owner_files`。
+        """
+        self._dead_probe_tick += 1
+        if self._dead_probe_tick < self._DEAD_WRITER_PROBE_EVERY_N_POLLS:
+            return
+        self._dead_probe_tick = 0
+        candidates = [o for o in self._converger.owners_needing_liveness()
+                      if o and o in self._owner_files]
+        window, self._dead_probe_cursor = self._rotated_probe_window(candidates)
+        for owner in window:
+            match = _BRIDGE_INSTANCE_FILE_RE.match(Path(self._owner_files[owner]).name)
+            if match is None:
+                continue  # 旧版单实例 dsh.jsonl：无 pid 线索，不探活
+            if _bridge_writer_alive(int(match.group(1))) is False:
+                self._retire_owner(owner, reason="桥写者进程已确认死亡（存活探活）")
+
+    def _rotated_probe_window(self, candidates: list[str]) -> tuple[list[str], int]:
+        """本轮的探活窗口（≤ ``_DEAD_WRITER_PROBE_LIMIT`` 个）与推进后的游标。
+
+        只读：返回窗口与新游标，不动监视器状态。只有"候选数 > 窗口容量"时才轮转：
+        装得下就全探（没有窗口外的写者，也就没有饿死问题）。
+        """
+        total = len(candidates)
+        if total <= self._DEAD_WRITER_PROBE_LIMIT:
+            return candidates, 0
+        start = self._dead_probe_cursor % total
+        window = [candidates[(start + i) % total]
+                  for i in range(self._DEAD_WRITER_PROBE_LIMIT)]
+        return window, (start + self._DEAD_WRITER_PROBE_LIMIT) % total
 
     def _probe_online(self) -> None:
         """worker 线程内同步端口探活（关着的端口 Windows 回环可能等 ~250ms，
@@ -2023,29 +2387,66 @@ class DshMonitor(BaseAgentMonitor):
             log.exception("DSH 在线探测异常")
             online = False
         self._online = online
+        if not online:
+            # DSH 整体离线：写者文件镜像随实例一起作废。留着它，新 DSH 重启后的
+            # 存活探活会拿旧路径去探（探活对象错了），也可能把新写者判成旧写者。
+            self._owner_files.clear()
+            # 镜像表没了，上一代次的轮转位置也就没有意义（游标只对当前候选集有效）
+            self._dead_probe_cursor = 0
         self._emit_converged(self._converger.set_online(online))
 
     def _on_parsed_record(self, data: dict, cursor: tuple | None = None) -> None:
         if self._online is False:
             return  # DSH 离线时不消费事件（离线态优先）
-        self._emit_converged(self._converger.handle_record(data))
+        owner = str(data.get(_BRIDGE_OWNER_KEY) or "")
+        if self._turn_tracker.is_duplicate_start(data, owner):
+            # 镜像重投递的回合起点（另一个写者写了同一条 (会话, step) 起点）：既不
+            # 重新发号，也不推进收敛状态机——让这份副本把折叠态重新推回"忙"，收尾
+            # 时就会再报一次完成（同一回合提醒两次）。
+            return
+        if map_event_to_state(data) is DshState.THINKING:
+            # 本写者回到思考态 = 它开了新回合（turn/start / user/message / 聚合基线
+            # thinking）。带写者归属发一条：消费侧据此作废**这个写者**上一轮的待定
+            # 完成确认（别的写者的确认原样到期），并把这份"忙"记到它的分片上。
+            self._emit(self.dsh_turn_started, (
+                self.agent_key,
+                {
+                    "owner": owner,
+                    "sessionId": str(data.get("sessionId") or data.get("session_id") or ""),
+                    "step": str(data.get("step") or ""),
+                    "gen": self._emit_gen,
+                },
+            ))
+        self._emit_converged(self._converger.handle_record(data, owner=owner))
         # live 回合收尾身份**在收敛器之后**推（投递顺序 = 发出顺序）：完整观测到
         # 一个回合时先让既有的 busy→success 边沿排定确认，本通道再看到 pending 就
         # 不动它；收敛器看不到的四种来向（中途挂载 / 聚合 idle 基线先到 / 已停在
         # SUCCESS 的同状态收尾 / 关开联动残留终态）由本通道收口——它认得这条 live
         # 记录本身，不需要任何状态前置。
-        identity = self._turn_tracker.observe(data, cursor)
+        identity = self._turn_tracker.observe(data, cursor, owner)
         if identity is not None:
             self._emit(self.dsh_turn_completed, (
                 self.agent_key,
                 {
                     "identity": identity,
+                    "owner": owner,
                     "sessionId": str(data.get("sessionId") or data.get("session_id") or ""),
                     "step": str(data.get("step") or ""),
                     "source_event": str(data.get("event") or ""),
                     "gen": self._emit_gen,
                 },
             ))
+
+    def _on_duplicate_record(self, data: dict) -> None:
+        """重复投递整条跳过，但把它的写者归属报上去（多实例归属补登）。
+
+        去重契约不变：正文/提示音仍然只响一次。补登的只是"这条逻辑事件还有另一个
+        写者在写"这一事实——消费侧把它并进同一个待处理交互的归属集合，先回待机的
+        那个写者因此撤不掉用户还在等的那条交互。
+        """
+        if self.agent_key != "dsh":
+            return
+        self._emit(self.bridge_owner_attested, (self.agent_key, data))
 
     def _emit_converged(self, outputs: list) -> None:
         for item in outputs:
@@ -2819,6 +3220,12 @@ class AgentLinkManager(QObject):
     #: 同样必须有界（每条都带全文/问题载荷）。取 256 = 4× 显示队列上限：远大于
     #: 任何真实并发审批/问题数，同时把"长会话 + 多会话 + 异常桥"的洪泛挡在内存外。
     _PENDING_INTERACTION_MAX = 256
+    #: **单条** pending 交互的归属集合上限（写者身份数上界 = 收敛器 scope 注册表
+    #: 容量）。外层 256 条 pending 的容量不能证明这个嵌套集合有界：同一条合法在途
+    #: 请求可被多个写者反复投递（插件每重载一次就是新的 boot 身份），只加不减就是
+    #: 一条随投递次数线性增长的内存。满时只锁存 ``owners_overflow``，收口随之收紧
+    #: （见 :meth:`_merge_pending_owner` / :meth:`_release_owner`）。
+    _PENDING_OWNERS_MAX = SCOPE_REGISTRY_MAX
     #: 阻塞型交互在**本地**的优先级（0 = 最高，与显示队列同口径）：审批 / 问题 /
     #: Cordis 请求都是"用户卡在这里等回答"的关键状态，一律最高——容量裁决因此
     #: 退化为"淘汰最旧的一条"；"拒收更低优先级的新条目"分支留给未来真出现
@@ -2865,10 +3272,20 @@ class AgentLinkManager(QObject):
         # 原始状态流（不受去抖/节流影响）：用于 busy→idle 完成检测。
         # 不能用 _last_applied 做完成判定——节流会丢掉紧跟其后的 idle，导致完成通知丢失。
         self._last_raw: dict[str, str] = {}
+        # 原始状态流的**写者分片**：(agent, owner) → (state, 写入序号)。多 DSH 实例
+        # 并行时每个实例各自写自己的 AgentStatus 基线，一个实例回待机不能把另一个
+        # 实例的忙判成待机（那会弹假完成、把动画/识屏判据一起切回待机）。_last_raw
+        # 存的是这些分片**折叠后**的值（见 _on_agent_state），呈现层只读折叠值。
+        # 有界 FIFO；启用/停用联动时随 _retire_agent_presentation 整片清掉。
+        self._owner_raw: dict[tuple[str, str], tuple[str, int]] = {}
+        self._owner_seq = 0
         self._done_pending: dict[str, QTimer] = {}   # agent → 稳定确认定时器
         # agent → 该确认的来源："success"（回合真实成功）或 "edge"（busy→idle 等边沿）。
         # DSH 中止回合只撤 edge 来源的确认，不误撤另一会话真实完成排下的 success 确认。
         self._done_cause: dict[str, str] = {}
+        # agent → 排这条完成确认时当事人（写者归属）。到期判据只看它自己的状态：
+        # A 完成、B 还在忙时既不能吞掉 A 的提醒，也不能为了成全 A 把整体判成待机。
+        self._done_owner: dict[str, str] = {}
         # DSH 中止回合注入 idle 时为 True：跳过 _on_agent_state 的「该 agent 全部交互」
         # 兜底清理——中止的 turn/end 已由 _on_interaction_lifecycle 按会话定向清理，
         # 全量清会误撤其它会话仍在等待的审批/问题气泡。
@@ -2877,6 +3294,11 @@ class AgentLinkManager(QObject):
         self._unknown_bridge_reminded_at: dict[str, float] = {}  # agent → 上次未知桥接事件提醒时刻
         self._saw_alert: set[str] = set()            # busy 周期内出现过 attention/error 的 Agent
         self._saw_error: set[str] = set()            # busy 周期内真正出现过 error 的 Agent
+        # 写者级「本轮出现过 error / 需要看一眼」标记（(agent, owner) → 写入序号）：
+        # agent 级集合是聚合值，多实例下 A 的失败会把 B 的成功收尾打成失败口径。裁决见
+        # _writer_marked（具名写者只认自己那份，无归属来源才回落 agent 级）。
+        self._owner_error_marks: dict[tuple[str, str], int] = {}
+        self._owner_alert_marks: dict[tuple[str, str], int] = {}
         # 收尾后爆雷（success/idle 已声明回合结束后，确认窗内才到的 error）：
         # 这些 agent 的 _saw_error 不得跨下一个忙入口存活——那个忙入口是新回合，
         # 不是「error→working 的同周期重试」（见 _abort_done_check_on_error）。
@@ -2967,6 +3389,13 @@ class AgentLinkManager(QObject):
         # live 回合收尾（真实记录身份）：DSH 完成提醒的判据——不依赖呈现管线里
         # 上一个状态是 busy/idle/None/success（见 _on_dsh_turn_completed）。
         self.monitors["dsh"].dsh_turn_completed.connect(self._on_dsh_turn_completed)
+        # live 回合起点（同一份原记录的身份通道）：作废**本写者**待定的完成确认，
+        # 并把这份忙记到它的分片上（聚合通道丢归属，见 _on_dsh_turn_started）。
+        self.monitors["dsh"].dsh_turn_started.connect(self._on_dsh_turn_started)
+        # 写者退役（桥文件写者已确认死亡）：只撤归属它的常驻交互与簿记，不报完成。
+        self.monitors["dsh"].dsh_scope_retired.connect(self._on_dsh_scope_retired)
+        # 重复投递的写者归属补登（去重不改：正文/音效仍只响一次，只补归属）。
+        self.monitors["dsh"].bridge_owner_attested.connect(self._on_bridge_owner_attested)
         # 每 Agent 有界记忆：同一回合的收尾身份只排定一次完成确认
         self._dsh_turn_ids: dict[str, deque] = {}
         # 模型访问失败提醒缓存：session_key → { "count": int, "_ts": float, "_first_ts": float, "_dismissed": bool }
@@ -3290,7 +3719,7 @@ class AgentLinkManager(QObject):
         return mon is not None and gen == mon._emit_gen
 
     def _on_agent_state_event(self, event: AgentEvent) -> None:
-        self._on_agent_state(event.agent, event.state, event.gen)
+        self._on_agent_state(event.agent, event.state, event.gen, owner=event.owner)
 
     def _on_agent_activity_event(self, event: AgentEvent) -> None:
         self._on_agent_activity(event.agent, event.tool, event.gen)
@@ -3348,6 +3777,10 @@ class AgentLinkManager(QObject):
                 return  # 迟到/孤儿信号：监视器已停，见 docstring 的隔离说明
         self.dsh_state_changed.emit(from_state, self._island_state_for(to_state))
         if to_state == "offline":
+            # 写者随 DSH 一起消失：写者分片与原始状态镜像整片作废。不清的话旧实例
+            # 留下的 "working" 会一直压着折叠值——DSH 重启后新写者的 idle 也盖不住
+            # 它，表现为"永远忙"（动画一直忙、any_busy 恒真、空闲 FPS 门禁失效）。
+            self._reset_owner_mirror("dsh")
             self.dismiss_all_interactions()
             return
         if to_state == "thinking":
@@ -3413,6 +3846,32 @@ class AgentLinkManager(QObject):
         self.dsh_user_message.emit(session_id, text)
         self.notify_dsh_state("thinking")
 
+    def _on_dsh_turn_started(self, agent_key: str, payload: Any) -> None:
+        """live 回合起点 → 按写者记账，并作废**这个写者**自己待定的完成确认。
+
+        聚合通道（``dsh_state_changed``）丢掉了写者归属，起点在那里只剩"折叠值回忙"：
+        确认归属的当事人自己的分片没有跟着变（起点不写分片）时，``_fire_done`` 的
+        到期判据会把这份忙整个算在**还在忙的别的写者**头上——A 已开新回合仍弹
+        「已完成本轮任务」（本票修掉的残留）；反过来，别的写者一开新回合就会把 B 的
+        完成确认误撤（忙无归属可查）。所以在原记录这一层补两件事：① 起点落进本写者
+        分片（给折叠忙一个归属）；② 确认属于本写者时立即作废——**只撤自己的**。
+        """
+        if self._shutdown:
+            return
+        mon = self.monitors.get(agent_key)
+        if mon is None or not mon._running:
+            return  # 迟到/孤儿信号：监视器已停（同 _on_dsh_turn_completed 的隔离口径）
+        payload = payload if isinstance(payload, dict) else {}
+        owner = str(payload.get("owner") or "")
+        if not owner or not self._gen_current(agent_key, int(payload.get("gen") or 0)):
+            return
+        # 只记分片、不动 _last_raw：聚合值由同一条记录的收敛注入负责（thinking），
+        # 这里重复写会把 waiting_approval 这类锁存值顶掉。
+        self._owner_seq += 1
+        self._owner_raw[(agent_key, owner)] = ("thinking", self._owner_seq)
+        self._trim_owner_raw()
+        self._cancel_done_check_for_owner(agent_key, owner)
+
     def _on_dsh_turn_completed(self, agent_key: str, payload: Any) -> None:
         """live 回合成功收尾（桥接 ``turn/end``）→ 排定完成确认。
 
@@ -3432,10 +3891,19 @@ class AgentLinkManager(QObject):
 
         三道既有闸原样保留：
         - **身份去重**：同一回合约投递只排定一次（多文件各写一份、重复帧）；
-        - **硬失败闸**：``execution/failed`` 已按 agent 打 ``_saw_error``，失败回合
-          的收尾不出成功口径（桥接先写失败记录再转发 turn/end，顺序保证已置位）；
+        - **硬失败闸**：``execution/failed`` 已打 ``_saw_error``，失败回合的收尾不出
+          成功口径（桥接先写失败记录再转发 turn/end，顺序保证已置位）。判据按
+          **写者归属**读（``_error_marked``）：失败是某一写者本轮的事实，A 实例的
+          失败不得吞掉 B 实例的成功收尾；
         - **800ms 确认 + 5s 冷却 + ``_fire_done``**：复用既有链路，零新增定时器。
-        ``_last_raw`` 只写本 Agent 的终态，不触碰其它 Agent 的状态与确认键。
+
+        **不篡改全局忙闲口径**（多实例）：A 的回合结束是正面信息（确实完成了），
+        该提醒就提醒；但 ``_last_raw`` 是**全写者折叠后**的值，不能被这一条记录
+        直接写成 success——B 还在忙时那会把整体判成"待机"（动画切回待机、
+        ``any_busy()`` 变假、空闲 FPS 门禁被打开）。这里只把**本写者**的分片更新
+        成终态，``_last_raw`` 取折叠结果：单实例下折叠值就是 success（行为不变），
+        多实例下其它写者还在忙就仍是 working。完成上下文按 owner 归属记账，
+        不靠改全局状态。
         """
         if self._shutdown:
             return
@@ -3453,32 +3921,247 @@ class AgentLinkManager(QObject):
             if identity in seen:
                 return  # 同一回合的重复投递：只排定一次
             seen.append(identity)
-        if agent_key in self._saw_error:
-            return  # 硬失败回合：失败提醒已经收口，不得再报成功
-        self._last_raw[agent_key] = "success"
+        owner = str(payload.get("owner") or "")
+        if self._error_marked(agent_key, owner):
+            return  # 硬失败回合：失败提醒已经收口，不得再报成功（按写者归属裁决）
+        if owner:
+            # 只把**本写者**的分片更新成终态；别的写者的分片原样保留（A 的收尾不该
+            # 替还在忙的 B 发言）。
+            self._owner_seq += 1
+            self._owner_raw[(agent_key, owner)] = ("success", self._owner_seq)
+            self._trim_owner_raw()
+        # _last_raw 取折叠值：单写者 = success（与旧行为一致），还有写者忙/等待时
+        # 保持原值（不切待机动画、any_busy 仍为真、空闲 FPS 门禁保持关闭）。
+        self._last_raw[agent_key] = self._folded_raw_state(agent_key) or "success"
         if agent_key not in self._done_pending:
-            self._schedule_done_check(agent_key, cause="success")
+            self._schedule_done_check(agent_key, cause="success", owner=owner)
         else:
             self._done_cause[agent_key] = "success"
+            if owner:
+                self._done_owner[agent_key] = owner
 
-    def _on_agent_state(self, agent_key: str, state: str, gen: int = 0) -> None:
-        """接收 Agent 状态变更并调度桌宠动作/气泡（带去抖与节流）。"""
+    #: 写者分片记账表（``_owner_raw``）的容量：写者数量本身由收敛器的 scope 注册表
+    #: 限死（见 ``dsh_state.SCOPE_REGISTRY_MAX``），这里是第二道有界闸（覆盖多
+    #: agent/多代次叠加的极端情形），超出按插入次序淘汰最老的。
+    _OWNER_RAW_MAX = 128
+
+    def _trim_owner_raw(self) -> None:
+        while len(self._owner_raw) > self._OWNER_RAW_MAX:
+            self._owner_raw.pop(next(iter(self._owner_raw)), None)
+
+    #: 写者级标记表的容量：与 ``_OWNER_RAW_MAX`` 同口径，超出按插入次序淘汰——被淘汰
+    #: 只丢"某写者这一轮的失败口径"（最坏退回 agent 级聚合裁决），不动归属真值。
+    _OWNER_MARK_MAX = 128
+
+    def _mark_owner(self, marks: dict[tuple[str, str], int], agent_key: str,
+                    owner: str, *, on: bool) -> None:
+        """按归属写/清一个写者级标记（``owner`` 为空 = 无归属来源，只走 agent 级）。"""
+        if not owner:
+            return
+        key = (agent_key, owner)
+        if not on:
+            marks.pop(key, None)
+            return
+        self._owner_seq += 1
+        marks[key] = self._owner_seq
+        while len(marks) > self._OWNER_MARK_MAX:
+            marks.pop(next(iter(marks)), None)
+
+    def _drop_owner_marks(self, agent_key: str, owner: str | None = None) -> None:
+        """清掉某个（或该 agent 全部）写者的标记；随写者退役/整代退役调用。"""
+        for marks in (self._owner_error_marks, self._owner_alert_marks):
+            for key in [k for k in marks
+                        if k[0] == agent_key and (owner is None or k[1] == owner)]:
+                marks.pop(key, None)
+
+    def _writer_marked(self, marks: dict[tuple[str, str], int], agent_marks: set[str],
+                       agent_key: str, owner: str) -> bool:
+        """写者级裁决：具名写者只认自己那份标记，其余情况才回落 agent 级聚合值。
+
+        ``owner`` 为空（归属未知的直调路径、收敛器聚合输出）读 agent 级集合，语义不变；
+        具名则只看 ``(agent, owner)``，**但**该 agent 一个归属标记都没有时回落 agent 级
+        ——那说明标记全来自无归属来源，不能因为多实例改造把它们静默丢掉。
+        """
+        if not owner:
+            return agent_key in agent_marks
+        if (agent_key, owner) in marks:
+            return True
+        if agent_key not in agent_marks:
+            return False
+        return not any(key[0] == agent_key for key in marks)
+
+    def _error_marked(self, agent_key: str, owner: str = "") -> bool:
+        """这条收尾/这个写者是否带**硬失败**口径（gate 与收尾音效判据）。"""
+        return self._writer_marked(self._owner_error_marks, self._saw_error, agent_key, owner)
+
+    def _alert_marked(self, agent_key: str, owner: str = "") -> bool:
+        """这个写者的收尾是否要切离"已完成"文案（busy 周期见过 attention/error）。"""
+        return self._writer_marked(self._owner_alert_marks, self._saw_alert, agent_key, owner)
+
+    def _cancel_done_check_for_owner(self, agent_key: str, owner: str) -> None:
+        """回忙撤销待定的完成确认：只有**当事人**回忙才算，别的写者不算。
+
+        B 的 ``AgentStatus working`` 会让折叠值整体变忙，但那个忙不是 A 的当事人事实
+        ——拿折叠值撤确认就是让 B 替 A 取消提醒，而 A 的回合身份已进 ``_dsh_turn_ids``
+        （不会再重排），这条提醒永久丢失。归属未知（``owner`` 为空 = 聚合注入）与无归属
+        确认（``pending_owner`` 为空）照旧撤：那是"分不清当事人"的旧路径。``owner`` 为
+        空的聚合忙值不在这里判归谁——那一刻别的写者的分片可能还没落地，统一留到
+        ``_fire_done`` 到期判（见 :meth:`_other_writer_busy`）。
+        """
+        if agent_key not in self._done_pending:
+            return
+        pending_owner = self._done_owner.get(agent_key, "")
+        if pending_owner and owner != pending_owner:
+            return
+        self._cancel_done_check(agent_key)
+
+    def _other_writer_busy(self, agent_key: str, owner: str) -> bool:
+        """该 Agent 有没有**别的**写者正忙（用于裁决聚合忙值归谁）。
+
+        多实例下折叠值（``_last_raw``）变忙可能来自别的写者；确认归属具名时只有
+        "别的人都不忙"才说明这个忙是当事人自己那一侧（``_fire_done`` 据此作废）。
+        """
+        return any(
+            key == agent_key and writer != owner and state in self._BUSY_STATES
+            for (key, writer), (state, _seq) in self._owner_raw.items()
+        )
+
+    def _folded_raw_state(self, agent_key: str) -> str:
+        """该 Agent 的写者分片折叠成一个呈现态（无分片返回 ""）。
+
+        唯一的折叠实现：``_on_agent_state`` 的入边、``_on_dsh_turn_completed`` 的
+        终态落账、写者退役都走它——三处若各写一遍，迟早出现"某个入口没折叠"的
+        漏网（A 回待机压掉 B 的忙就是这么来的）。
+        """
+        return fold_writer_states(
+            value for (key, _owner), value in self._owner_raw.items() if key == agent_key)
+
+    def _drop_owner_raw(self, agent_key: str, owner: str) -> None:
+        """丢掉一个写者的分片记账，并把折叠结果同步进 ``_last_raw``。
+
+        写者退役（死亡）后它的分片不该继续参与折叠（否则整个 Agent 会永远停在它
+        留下的"忙"上）。这里只更新簿记，**不注入呈现管线、不排定完成确认**：写者
+        消失不是回合收尾。
+
+        写者级标记（``_owner_error_marks`` / ``_owner_alert_marks``）**先清**：失败
+        标记可以只由 ``execution/failed`` 打上（不建分片），那种写者同样要随退役把
+        标记带走，不然会一直留到 agent 整代退役或标记表 FIFO 淘汰才消失。
+        """
+        self._drop_owner_marks(agent_key, owner)
+        if self._owner_raw.pop((agent_key, owner), None) is None:
+            return
+        folded = self._folded_raw_state(agent_key)
+        if folded:
+            self._last_raw[agent_key] = folded
+        else:
+            self._last_raw.pop(agent_key, None)
+
+    def _reset_owner_mirror(self, agent_key: str) -> None:
+        """清掉该 Agent 的全部写者分片与原始状态镜像（DSH 整体离线时调用）。
+
+        写者随 DSH 一起消失，分片留着就是"永远忙"：新 DSH 重启是新写者，它的
+        idle 会让折叠值继续被旧分片的 working 压住（``any_busy()`` 恒真、动画
+        一直忙）。整片清掉 = 下一代从"没见过状态"开始，与 ``_retire_agent_presentation``
+        对其它簿记的口径一致。
+        """
+        for key in [k for k in self._owner_raw if k[0] == agent_key]:
+            self._owner_raw.pop(key, None)
+        self._drop_owner_marks(agent_key)
+        self._last_raw.pop(agent_key, None)
+        self._last_applied.pop(agent_key, None)
+
+    @staticmethod
+    def _record_writer_owner(record: dict) -> str | None:
+        """记录上的写者归属标注（摄入侧盖的 ``_scope``）；没有标注返回 None。
+
+        与 :meth:`_release_owner` 的 None/"" 口径配对：``None`` = 归属未知
+        （直调/非 ingest 路径，走通配旧行为）；``""`` = 旧无 owner 生产桶（只与
+        同样无归属的条目互认，不得替具名写者做决定）。
+        """
+        if not isinstance(record, dict):
+            return None
+        return record.get(_BRIDGE_OWNER_KEY)
+
+    def _release_owner(self, interaction_id: str, owner: str | None,
+                       *, trusted: bool = False, session: str = "") -> bool:
+        """把某个写者从一条待处理交互的归属集合里撤掉；True = 该条已无归属，应关闭。
+
+        - ``owner is None``（**归属未知**的通配口径：直调、非摄入路径的旧行为）→
+          直接判定该条应关闭；
+        - ``owner == ""``（**旧无 owner 生产桶**：记录没有写者归属）→ 只清同样没
+          有归属的条目，**不得**清掉具名写者的条目（分不清归属就不许替它做决定）；
+        - 具名写者 → 只有当它确实在该条目的归属集合里才撤；撤完集合非空则**保留**
+          （另一个写者也在等这条交互，先回待机的那个不能替它撤）。
+
+        归属集合 overflow 锁存后（见 :meth:`_merge_pending_owner`）判据收紧成"**可
+        指认的来源身份 + 同一条会话**"：那条的旧归属本来就没记全，"我记到的都走了"
+        或"某个别 owner 的回合结束了"都不构成收口证据——一个别 owner 的结束帧一声
+        清掉整条，等于把还有人在等的提醒一起撤了。未知来源（无归属标注）的 idle /
+        死亡退役 / 结束帧一律不收，只由 ``resolved``（准确 rpc/call 身份）收口。
+        """
+        item = self._pending_interactions.get(interaction_id)
+        if item is None:
+            return False
+        if item.get("owners_overflow"):
+            if not trusted or not owner:
+                return False
+            if str(owner) not in (item.get("owners") or set()):
+                return False
+            return bool(session) and session == str(item.get("session_id") or "")
+        if owner is None:
+            return True
+        owners = item.get("owners")
+        if not owners:
+            return owner == ""
+        if owner not in owners:
+            return False
+        owners.discard(owner)
+        return not owners
+
+    def _clear_owned_interactions(self, agent_key: str, owner: str | None,
+                                  session: str = "", *, trusted: bool = False) -> int:
+        """按写者归属收口该 agent 的待处理交互，返回关闭条数。
+
+        ``session`` 非空时只清「会话相同或会话未知」的条目（旧行为：会话不匹配的
+        条目保留）。归属裁决全部走 :meth:`_release_owner`——这是"别写者的 idle /
+        别的实例的 turn/end 不得撤掉这一写者还在等的交互"的唯一落地点。
+        """
+        closed = 0
+        for iid in [i for i, v in self._pending_interactions.items()
+                    if v.get("agent_key") == agent_key
+                    and (not session or not v.get("session_id") or v.get("session_id") == session)]:
+            if self._release_owner(iid, owner, trusted=trusted, session=session):
+                self._resolve_interaction(iid)
+                closed += 1
+        return closed
+
+    def _on_agent_state(self, agent_key: str, state: str, gen: int = 0,
+                        owner: str | None = None) -> None:
+        """接收 Agent 状态变更并调度桌宠动作/气泡（带去抖与节流）。
+
+        ``owner`` 是状态的写者归属（多 DSH 实例分区）：给了归属就按**写者分片**
+        记账并折叠（见 :func:`dsh_state.fold_writer_states`），呈现层只读折叠值；
+        ``None`` = 归属未知（直调/收敛器的聚合输出），沿用旧的整条覆盖口径。
+        """
         if not self._gen_current(agent_key, gen):
             return
+        # 这一写者更新前的分片值（清标记的"同周期重试"判据要用它，必须在下面写分片之前取）
+        prev_owner = self._owner_raw.get((agent_key, owner), ("", 0))[0] if owner is not None else ""
+        if owner is not None:
+            # 写者分片记账 + 折叠：一个实例回待机时，另一个实例还在忙就**不**让整体
+            # 变待机。不做这一步的话，A 的 idle 会把 _last_raw 写成 idle → busy→idle
+            # 边沿排定完成确认（假完成）并把动画切回待机。
+            self._owner_seq += 1
+            self._owner_raw[(agent_key, owner)] = (state, self._owner_seq)
+            self._trim_owner_raw()
+            folded = self._folded_raw_state(agent_key)
+            if folded:
+                state = folded
         # 兜底：该 agent 已回待机（任务结束）但审批/问题还没收到 resolved → 交互必然失效。
         # 放在可见性判断之前：窗口隐藏期间也要清 pending，避免恢复显示时挂出陈旧气泡。
         if state in ("idle", "sleeping") and not self._idle_clear_scoped:
-            # 改为按交互 id 遍历清理（同一 agent 可能有多个并发审批/问题）
-            for iid in [i for i, v in self._pending_interactions.items()
-                        if v.get("agent_key") == agent_key]:
-                item = self._pending_interactions.pop(iid, None)
-                if item is None:
-                    continue
-                alert_id = item.get("alert_id", "")
-                if alert_id and hasattr(self.win, "resolve_alert"):
-                    self.win.resolve_alert(alert_id)
-                elif hasattr(self.win, "hide_bubble"):
-                    self.win.hide_bubble()
+            # 按交互 id 遍历清理（同一 agent 可能有多个并发审批/问题），归属按写者裁决
+            self._clear_owned_interactions(agent_key, owner)
 
         # 桌宠隐藏：动画/声音不呈现，但状态簿记（_last_raw / 成本 / 完成确认
         # 调度）照常推进——岛反馈面可用时气泡经 _show_link_bubble 改道灵动岛
@@ -3503,33 +4186,40 @@ class AgentLinkManager(QObject):
             if not hidden:
                 self._emit_sound("error", agent_key)
         if state in self._BUSY_STATES:
-            self._cancel_done_check(agent_key)
+            # 回忙撤销只对**当事人**生效：B 的忙不得替 A 撤掉 A 的完成确认
+            self._cancel_done_check_for_owner(agent_key, owner or "")
             self._saw_alert.discard(agent_key)
+            self._mark_owner(self._owner_alert_marks, agent_key, owner or "", on=False)
             # _saw_error 跨 error→working 存活是为「error 后同周期重试」留的
             # （重试后收尾仍按失败口径）；但收尾后爆雷的 error 之后不是重试而是
             # **新回合**，标记必须随新回合清除，否则下一回合的成功收尾被整个
             # 吃掉（既无成功气泡也无失败口径）。见 _abort_done_check_on_error。
+            # 写者级标记用同款判据、各自的分片（prev_owner），互不代清。
             if prev_raw != "error" or agent_key in self._error_after_done:
                 self._saw_error.discard(agent_key)
+            if prev_owner != "error" or agent_key in self._error_after_done:
+                self._mark_owner(self._owner_error_marks, agent_key, owner or "", on=False)
             self._error_after_done.discard(agent_key)
         elif state in ("attention", "error") and prev_raw in self._BUSY_STATES:
             self._saw_alert.add(agent_key)
+            self._mark_owner(self._owner_alert_marks, agent_key, owner or "", on=True)
             if state == "error":
                 self._saw_error.add(agent_key)
+                self._mark_owner(self._owner_error_marks, agent_key, owner or "", on=True)
             # Claude 的回合结束信号是 Stop→attention 而非 idle：busy 后的
             # attention/error 同样进入完成确认（800ms 内回忙则取消——例如
             # SubagentStop 后主 Agent 继续干活、工具报错后重试）。
-            self._schedule_done_check(agent_key)
+            self._schedule_done_check(agent_key, owner=owner or "")
         elif state == "error":
             # 收尾后爆雷：prev_raw 已不是 busy——收尾边沿（success/idle/attention）
             # 已经声明本轮结束，确认窗内到达的 error 必须取消 pending 的完成确认
             # 并按失败口径打标。上一条 elif 已经吃掉「来向是 busy」的 error
             # （那里的确认由 error 自己排定），所以到这里的一定是收尾之后才爆的雷。
-            self._abort_done_check_on_error(agent_key)
+            self._abort_done_check_on_error(agent_key, owner or "")
         elif state in ("idle", "sleeping") and prev_raw in self._BUSY_STATES:
             # working/thinking → idle：疑似任务完成，800ms 稳定确认
             # （过滤 working→idle→working 抖动；确认期间回忙则取消）
-            self._schedule_done_check(agent_key)
+            self._schedule_done_check(agent_key, owner=owner or "")
         elif state == "success" and prev_raw in self._BUSY_STATES:
             # DSH 回合成功结束（收敛器 success，见 _on_dsh_converged_state）：
             # 与 busy→idle 同一条完成确认（800ms + 冷却 + _fire_done），
@@ -3548,8 +4238,10 @@ class AgentLinkManager(QObject):
             # 收敛为 success；不拦就是失败回合弹「已完成本轮任务」+ done 音效
             # （误报成功），且那 800ms 还会占掉完成冷却、吃掉下一回合的真实完成
             # 提醒。标记在下一个 busy 入口清除，下一回合照常恢复。
-            if agent_key not in self._saw_error:
-                self._schedule_done_check(agent_key, cause="success")
+            # 判据按**写者归属**：失败是某一写者本轮的回合事实，只挡它自己那条
+            # 收尾——A 实例的失败不得吞掉 B 实例的成功（见 _error_marked）。
+            if not self._error_marked(agent_key, owner or ""):
+                self._schedule_done_check(agent_key, cause="success", owner=owner or "")
 
         # 去抖：同一 Agent 连续相同状态只生效第一次
         last = self._last_applied.get(agent_key)
@@ -3887,6 +4579,7 @@ class AgentLinkManager(QObject):
                                   agent_key=agent_key, name=name, **conditional)
         self._register_interaction(
             agent_key, kind="approval", text=text, tool=tool,
+            owner=self._record_writer_owner(payload),
             rpc_id=payload.get("rpcId"),
             approval_id=payload.get("approvalId"),
             request_id=payload.get("requestId"),
@@ -3916,7 +4609,10 @@ class AgentLinkManager(QObject):
             return
         name = str(fields.get("name") or "Cordis 插件")
         purpose = str(fields.get("purpose") or "需要你的确认")
-        self._register_interaction(agent_key, kind="cordis", text=f"{name} 请求运行：{purpose}", request_id=request_id, session_id=fields.get("agentId") or fields.get("sessionId"))
+        self._register_interaction(agent_key, kind="cordis", text=f"{name} 请求运行：{purpose}",
+                                   owner=self._record_writer_owner(record),
+                                   request_id=request_id,
+                                   session_id=fields.get("agentId") or fields.get("sessionId"))
 
     def _on_cordis_resolved(self, agent_key: str, payload: dict) -> None:
         """cordis 请求结束：与审批/问题同一份收尾摄入（来源 + 会话 + 同字段身份）。
@@ -3956,6 +4652,7 @@ class AgentLinkManager(QObject):
                                                                  prefix=prefix,
                                                                  conditional=conditional),
             questions=questions,
+            owner=self._record_writer_owner(payload),
             rpc_id=payload.get("rpcId"),
             call_id=payload.get("callId"),
             session_id=session_id,
@@ -4197,6 +4894,28 @@ class AgentLinkManager(QObject):
             (dropped or {}).get("agent_key", ""), self._pending_interaction_overflow_count,
         )
 
+    def _merge_pending_owner(self, owners: set[str], overflow: bool,
+                             owner: str) -> tuple[set[str], bool]:
+        """把一个写者并进某条 pending 的归属集合，**有界**（返回新集合与新锁存位）。
+
+        - 已在集合里：原样返回；未满：并入；
+        - 已满：**不并入、也不丢任何已有归属**，只把 ``overflow`` 锁存为 True。
+          满员说明"谁还在等"本地已经记不全，收口判据随之收紧（见
+          :meth:`_release_owner`）。绝不按 FIFO 丢旧 owner（丢了就等于允许后来的 idle
+          把别人还在等的交互整个撤掉），也绝不并进"无主桶"。
+        """
+        if owner in owners:
+            return owners, overflow
+        if len(owners) >= self._PENDING_OWNERS_MAX:
+            if not overflow:
+                log.warning(
+                    "pending 交互归属集合已达上限(%s)：后续写者归属只锁存 overflow "
+                    "标记，不再并入（已有归属一律保留，收口收紧到可信来源身份）",
+                    self._PENDING_OWNERS_MAX)
+            return owners, True
+        owners.add(owner)
+        return owners, overflow
+
     def _admit_pending_interaction(self) -> bool:
         """pending 真值表的**有界入表裁决**（唯一实现，政策与显示队列同构）。
 
@@ -4253,7 +4972,8 @@ class AgentLinkManager(QObject):
             log.debug("无身份降级提示已按 TTL 收口：%s", stale)
         return len(stale)
 
-    def _register_interaction(self, agent_key: str, *, kind: str, text: str, **extra) -> str | None:
+    def _register_interaction(self, agent_key: str, *, kind: str, text: str,
+                              owner: str | None = None, **extra) -> str | None:
         """统一登记一条阻塞型交互：进 pending + 打 alert 标记 + 挂常驻气泡。
 
         返回该交互的稳定 interaction_id（resolve 按它精确定位）。
@@ -4268,26 +4988,47 @@ class AgentLinkManager(QObject):
           pending，而 resolved 帧只关得掉其中一份——另一份变成关不掉的常驻提醒
           （还多弹一次正文）。身份由 rpcId/approvalId/requestId/callId + 会话给出，
           复用原 alert_id 让窗口按 id 合并（同一提醒最多一份可见）。
+        - ``owner`` 是**写者归属集合**的起始值（记录上的摄入标注，见
+          :func:`record_owner`）。多实例下同一条交互可能被两个写者各写一份（去重后
+          只留一份正文），归属集合记全了才不会出现"先回待机的那个写者把另一个实例
+          还在等的交互撤掉"（见 :meth:`_release_owner`）。``None`` = 归属未知
+          （直调/非摄入路径）：集合为空，只被"归属未知"的清理口径收走。
+        - **归属集合只累积、绝不整字典重置**（M3）：重登记（摄入账本 512 条 FIFO
+          淘汰或 900s TTL 过期后的重投、插件重载后同请求再投）此前先往旧条目加
+          owner、紧接着用整个新字典覆盖，把已累计的归属一次性丢掉——长等待经过
+          账本淘汰后，B 的 idle 又能把 A 还在等的交互整个撤掉。这里改为读出旧集合、
+          把本写者并进去，alert 身份与 owner 集合都沿用原来那份。
         """
         session_id = str(extra.get("session_id") or "")
         existing_iid = self._existing_interaction_for(agent_key, kind, extra, session_id)
         if existing_iid is not None:
             iid = existing_iid
+            previous = self._pending_interactions.get(iid) or {}
         else:
             self._prune_pending_interactions()
             if not self._admit_pending_interaction():
                 return None
             iid = self._interaction_key(agent_key, kind, extra, session_id)
-        alert_id = f"interaction:{iid}"
+            previous = {}
+        owners = set(previous.get("owners") or ())
+        overflow = bool(previous.get("owners_overflow"))
+        if owner is not None:
+            owners, overflow = self._merge_pending_owner(owners, overflow, str(owner))
+        # 稳定 alert 身份：同一逻辑交互的提醒只能有一份可见（窗口按 alert_id 合并）
+        alert_id = str(previous.get("alert_id") or "") or f"interaction:{iid}"
         self._pending_interactions[iid] = {
             "kind": kind, "text": text, "alert_id": alert_id,
             "agent_key": agent_key,
             "priority": self._PENDING_INTERACTION_PRIORITY,
+            "owners": owners,
+            "owners_overflow": overflow,
             "_ts_mono": time.monotonic(),
             **extra,
         }
-        # 交互打断算"需要主人看一眼"：任务完成后不误说"干完活啦"
+        # 交互打断算"需要主人看一眼"：任务完成后不误说"干完活啦"（同一事实按归属
+        # 也记一份：具名写者的收尾按自己那份裁决，见 _writer_marked）
         self._saw_alert.add(agent_key)
+        self._mark_owner(self._owner_alert_marks, agent_key, owner or "", on=True)
         # 常驻气泡：不自动消失，等 resolved / 离线 / 空闲再收尾
         if not self._show_interaction_bubble(iid):
             # 这次没交到呈现目标手里（隐藏/无宠）：保活补投表并回到快拍，
@@ -4557,11 +5298,16 @@ class AgentLinkManager(QObject):
           需注意标记不得延续——否则新代中途接上的新回合成功收尾被整个吞掉（L02）；
         - ``_last_raw`` / ``_last_applied``：新代从「没见过任何状态」开始（否则新代
           第一帧会拿上一代的终态当 prev 做边沿判定）；
+        - ``_owner_raw``（本 Agent 的分片记账）：同理——上一代的写者分片留着会让新代
+          第一帧的折叠值直接继承旧代（且这些写者已随通道关闭消失）；
         - ``_dsh_turn_ids``：上一代的收尾身份记忆（tracker 的全局起点计数故意不
           回收，这里同样清身份表，保证新代该提醒就提醒）；
         - ``_done_cooldown`` / ``_sound_last_event``：完成气泡/音效的去重与冷却属于
           **一次连续观测内**的保险；换代次后上一代的弹泡不该再压住新代的第一次真实
-          收尾（``_sound_last_at`` 是跨 Agent 的全局冷却，不动）。
+          收尾（``_sound_last_at`` 是跨 Agent 的全局冷却，不动）；
+        - ``_owner_error_marks`` / ``_owner_alert_marks``（本 Agent 的写者级标记）：
+          同理——上一代写者的失败/需注意口径不得延续到新代（标记清空后按 agent 级
+          集合裁决，语义与改造前一致）。
         """
         self._cancel_done_check(agent_key)
         self._saw_error.discard(agent_key)
@@ -4569,17 +5315,26 @@ class AgentLinkManager(QObject):
         self._error_after_done.discard(agent_key)
         self._last_raw.pop(agent_key, None)
         self._last_applied.pop(agent_key, None)
+        for key in [k for k in self._owner_raw if k[0] == agent_key]:
+            self._owner_raw.pop(key, None)
+        self._drop_owner_marks(agent_key)
         self._dsh_turn_ids.pop(agent_key, None)
         self._done_cooldown.pop(agent_key, None)
         self._sound_last_event.pop(agent_key, None)
 
-    def _schedule_done_check(self, agent_key: str, cause: str = "edge") -> None:
+    def _schedule_done_check(self, agent_key: str, cause: str = "edge",
+                             owner: str = "") -> None:
         """排定 800ms 完成确认；**回调绑定创建时的监测代次**。
 
         关掉再立刻开启联动时，旧代的定时器若还能回调，就会以新代的身份弹一次早已
         不成立的完成提醒（L01）。绑定代次后，``_fire_done`` 到期时再核一次当前代次，
         任何「停过机器/换代次」的旧确认都作废；监视器本来就没在跑（测试/白盒路径）
         时绑定 None，不做代次闸。
+
+        ``owner`` 是这条完成的写者归属：到期判据（"这期间回忙了吗"）看**这一写者**
+        的状态，而不是全写者折叠后的全局值——A 完成、B 还在忙时，A 的完成提醒必须
+        照常出，不能因为"整体还忙"把 A 的完成静默吞掉；反过来也不能把整体改成待机
+        来成全它（见 ``_fire_done``）。
         """
         self._cancel_done_check(agent_key)
         gen = self._monitor_generation(agent_key)
@@ -4589,16 +5344,18 @@ class AgentLinkManager(QObject):
         timer.timeout.connect(lambda k=agent_key, g=gen: self._fire_done(k, g))
         self._done_pending[agent_key] = timer
         self._done_cause[agent_key] = cause
+        self._done_owner[agent_key] = str(owner or "")
         timer.start()
 
     def _cancel_done_check(self, agent_key: str) -> None:
         self._done_cause.pop(agent_key, None)
+        self._done_owner.pop(agent_key, None)
         timer = self._done_pending.pop(agent_key, None)
         if timer is not None:
             timer.stop()
             timer.deleteLater()
 
-    def _abort_done_check_on_error(self, agent_key: str) -> None:
+    def _abort_done_check_on_error(self, agent_key: str, owner: str = "") -> None:
         """收尾后爆雷：error 落在完成确认窗内 → 取消确认并按失败口径打标。
 
         能走到这里的前提是该 agent 已有 pending 的完成确认——收尾边沿（busy→success /
@@ -4614,13 +5371,18 @@ class AgentLinkManager(QObject):
         （API 级错误同样语义，且收敛器的 ERROR 不注入呈现管线——那条路径上这是唯一
         的闸）。没有 pending 确认时是 no-op：确认窗外的 error 由既有分支处理，
         本方法不改那条路径的行为。
+
+        ``owner`` 是这条 error 的写者归属：撤销与打标都按它裁决——B 实例的 error
+        不得取消 A 实例待定的完成确认，也不得把 A 的收尾打成失败口径。
         """
         if agent_key not in self._done_pending:
             return
         self._saw_error.add(agent_key)
         self._saw_alert.add(agent_key)
+        self._mark_owner(self._owner_error_marks, agent_key, owner, on=True)
+        self._mark_owner(self._owner_alert_marks, agent_key, owner, on=True)
         self._error_after_done.add(agent_key)
-        self._cancel_done_check(agent_key)
+        self._cancel_done_check_for_owner(agent_key, owner)
 
     def _fire_done(self, agent_key: str, gen: int | None = None) -> None:
         """800ms 稳定确认到期：期间回忙则不算完成；配置/冷却在弹出前再查。
@@ -4635,6 +5397,7 @@ class AgentLinkManager(QObject):
         # （长跑进程按回合数线性增长）。
         timer = self._done_pending.pop(agent_key, None)
         self._done_cause.pop(agent_key, None)
+        owner = self._done_owner.pop(agent_key, "")
         if timer is not None:
             timer.stop()
             timer.deleteLater()
@@ -4644,13 +5407,28 @@ class AgentLinkManager(QObject):
         # pause_agent_link_for_hide 让监视器隐藏期保持运行，本兜底必须感知，
         # 否则 done 气泡在隐藏期被静默吞掉）。
         hidden = not hasattr(self.win, "isVisible") or not self.win.isVisible()
-        if self._last_raw.get(agent_key) in self._BUSY_STATES:
+        # **完成上下文按 owner**：有归属时只看这一写者自己的原始状态（它才是"这一条
+        # 完成"的当事人），全局折叠值只作兜底。A 完成、B 还在忙时全局值是 working，
+        # 用全局值判"这期间回忙了吗"会把 A 的完成提醒静默吞掉。
+        context_state = self._owner_raw.get((agent_key, owner), ("", 0))[0] if owner else ""
+        if not context_state:
+            context_state = self._last_raw.get(agent_key)
+        # 归属具名的聚合忙值：**别的写者能解释**才忽略（B 在忙与本条完成无关，照常
+        # 提醒）；没有别的写者能解释的忙归当事人自己（起点记录已被
+        # ``_on_dsh_turn_started`` 落成分片，剩下的是不带归属的忙注入，如 tool/call）
+        # → 与"期间回忙"同等作废，别拿无人认领的忙弹完成。
+        if (owner and self._last_raw.get(agent_key) in self._BUSY_STATES
+                and not self._other_writer_busy(agent_key, owner)):
+            return
+        if context_state in self._BUSY_STATES:
             return
         # 防线：到期时该 agent 的**当前**原始状态已是 error（收尾后爆雷时打标路径
         # 万一漏了，或者将来新增的 error 落点忘了打标）→ 一律不许成功口径。
         # 这不会打断 Claude 的 error 周期收尾：那条路径上 _saw_error/_saw_alert 已
         # 经打上（busy→error 分支），走的就是下面的非成功分支。
-        dirty = agent_key in self._saw_error or self._last_raw.get(agent_key) == "error"
+        # 失败/需注意两个标记按**归属**读：A 实例的失败不许把 B 实例的收尾打成
+        # 失败口径（掐掉 done 音效、文案变成"自己看一眼"）。
+        dirty = self._error_marked(agent_key, owner) or context_state == "error"
         if not hidden and not dirty:
             self._emit_sound("done", agent_key)
         now = self._clock()
@@ -4659,12 +5437,13 @@ class AgentLinkManager(QObject):
             return
         self._done_cooldown[agent_key] = now
         name = self.agent_names.get(agent_key, agent_key)
-        if agent_key in self._saw_alert or self._last_raw.get(agent_key) == "error":
+        if self._alert_marked(agent_key, owner) or context_state == "error":
             # busy 期间出现过 attention/error：不暗示"成功完成"
             text = self._dialogue("done.attention", f"{name} 那边停了，结果怎么样要主人自己看一眼哦", agent_key=agent_key, name=name)
         else:
             text = self._dialogue("done.success", f"{name} 干完活啦，去看看成果吧～", agent_key=agent_key, name=name)
         self._saw_alert.discard(agent_key)
+        self._mark_owner(self._owner_alert_marks, agent_key, owner, on=False)
         if hidden:
             # 隐藏中：不切待机动画；气泡改道灵动岛反馈面（_show_link_bubble
             # 内置改道；岛反馈面不可用时丢弃）。消费统计按 abort 收口（原隐藏
@@ -4675,11 +5454,13 @@ class AgentLinkManager(QObject):
             self._cost.abort(agent_key)
             return
         # 恢复待机动画：Claude 回合结束没有 idle 事件，不靠这步会一直停在干活动作。
-        # 仅当没有其他 Agent 仍在忙时恢复（避免 A 完成顶掉 B 的工作动画）。
+        # 仅当**没有任何写者、任何 Agent 仍在忙**时恢复（避免 A 完成顶掉 B 的工作
+        # 动画；多实例下同一 agent 的其它写者同理——全局折叠值仍忙就不回待机）。
         # 必须走 request_link_idle（它会清 _link_anim_current 并尊重一次性动作），
         # 不能裸 _switch——否则残留的 link 状态会把以后的普通同名动作劫持进联动链。
-        if not any(k != agent_key and s in self._BUSY_STATES
-                   for k, s in self._last_raw.items()):
+        if (self._last_raw.get(agent_key) not in self._BUSY_STATES
+                and not any(k != agent_key and s in self._BUSY_STATES
+                            for k, s in self._last_raw.items())):
             if hasattr(self.win, "request_link_idle"):
                 self.win.request_link_idle()
             elif hasattr(self.win, "switch_clip") and getattr(self.win, "idles", None):
@@ -4872,7 +5653,20 @@ class AgentLinkManager(QObject):
     }
 
     def _on_interaction_lifecycle(self, agent_key: str, record: dict) -> None:
-        """会话/turn 结束或 Agent 停止时，清掉对应会话/agent 的 pending 阻塞交互。"""
+        """会话/turn 结束或 Agent 停止时，清掉对应会话/agent 的 pending 阻塞交互。
+
+        **按写者过滤**（多 DSH 实例）：记录上的摄入标注（``_scope``）说了这条结束
+        帧属于哪个实例，就只有那个实例的交互被撤——A 实例的 ``turn/end`` / 待机
+        基线不得撤掉 B 实例还在等的审批/问题。没有标注（直调/非摄入路径）时保持
+        旧口径（按会话匹配，无会话则清该 agent 全部），既有调用点行为不变。
+
+        **会话结束帧是"可信来源身份"**（``trusted``）：``turn/end`` / ``task_complete``
+        / ``execution/failed`` / ``thread_rolled_back`` 是"这个会话/回合结束了"的
+        客观收尾；``AgentStatus idle/sleeping`` 只是"这个写者这会儿不干活"，不是
+        收尾声明。区别只在归属集合 overflow 锁存后生效（见 :meth:`_release_owner`）：
+        锁存条目只有"**已记录的当事人** + **同一条会话**"才放行，别 owner 或缺会话的
+        结束帧都不许一声清掉还有人在等的那条。
+        """
         if not isinstance(record, dict):
             return
         event = str(record.get("event") or "")
@@ -4881,10 +5675,79 @@ class AgentLinkManager(QObject):
                  (event == "AgentStatus" and str(record.get("state") or "") in {"idle", "sleeping"}))
         if not ended:
             return
-        for iid in [i for i, v in self._pending_interactions.items()
-                    if v.get("agent_key") == agent_key
-                    and (not session or not v.get("session_id") or v.get("session_id") == session)]:
-            self._resolve_interaction(iid)
+        self._clear_owned_interactions(agent_key, self._record_writer_owner(record),
+                                       session=session,
+                                       trusted=event in self._INTERACTION_END_EVENTS)
+
+    def _on_dsh_scope_retired(self, owner: str, gen: int = 0) -> None:
+        """桥写者被确认死亡：只撤归属它自己的常驻交互与状态簿记，**不报完成**。
+
+        写者消失不是回合收尾：这里既不注入呈现状态、也不排定/触发完成确认，所以
+        死掉的实例不会弹「已完成本轮任务」+ done 音效。别的写者还在等的交互原样
+        保留（归属集合裁决，见 :meth:`_release_owner`）。
+        """
+        if not self._gen_current("dsh", int(gen or 0)):
+            return  # 旧代次的队列信号不得动新一代的交互归属
+        owner = str(owner or "")
+        self._drop_owner_raw("dsh", owner)
+        self._clear_owned_interactions("dsh", owner)
+
+    @staticmethod
+    def _interaction_kind_for(record: dict) -> str:
+        """请求类记录 → 交互 kind（不是请求记录返回 ""，调用方直接跳过）。"""
+        event = str((record or {}).get("event") or "")
+        if event in ("approval/request", "approval/requested"):
+            return "approval"
+        if event == "question/requested":
+            return "question"
+        if event == "cordis/request-run":
+            return "cordis"
+        return ""
+
+    @staticmethod
+    def _interaction_identity_fields(record: dict) -> dict:
+        """记录 → pending 条目的身份字段（与登记端同名，供就地匹配）。"""
+        return {
+            "request_id": record.get("requestId") or record.get("request_id"),
+            "rpc_id": record.get("rpcId") or record.get("rpc_id"),
+            "approval_id": record.get("approvalId") or record.get("approval_id"),
+            "call_id": record.get("callId") or record.get("call_id"),
+        }
+
+    def _on_bridge_owner_attested(self, agent_key: str, record: dict) -> None:
+        """重复投递的写者归属补登（去重不去归属）。
+
+        同一条逻辑交互被两个实例各写一份时，第二条整条跳过是对的（正文/提示音不
+        得双响，见摄入账本），但它证明第二个写者也在等同一条交互——把这个写者并进
+        同一条目的归属集合，第一个写者回待机时就不会把用户还在等的气泡撤掉。
+        这里只动归属，不重弹正文、不重发信号。
+
+        归属集合**有界**（``_PENDING_OWNERS_MAX``）：写者可能反复重载插件/重投
+        同一条在途请求，只加不减就是一条随投递次数线性增长的内存；满时锁存
+        ``owners_overflow``，既不丢已有归属也不并进别人的桶（见
+        :meth:`_merge_pending_owner`）。
+        """
+        if not isinstance(record, dict):
+            return
+        owner = self._record_writer_owner(record)
+        if owner is None:
+            return
+        kind = self._interaction_kind_for(record)
+        if not kind:
+            return
+        session_id = str(record.get("sessionId") or record.get("session_id") or "")
+        extra = self._interaction_identity_fields(record)
+        if not any(extra.values()):
+            return  # 无身份：无从配对，别赌一条
+        iid = self._existing_interaction_for(agent_key, kind, extra, session_id)
+        item = self._pending_interactions.get(iid) if iid is not None else None
+        if item is None:
+            return
+        owners, overflow = self._merge_pending_owner(
+            set(item.get("owners") or ()), bool(item.get("owners_overflow")), str(owner))
+        item["owners"] = owners
+        item["owners_overflow"] = overflow
+        log.debug("重复投递的写者归属已并进同一交互：owner=%s kind=%s", str(owner)[:60], kind)
 
     # ------------------------------------------------------------------
     # 会话元数据缓存与显示名称解析
@@ -5091,9 +5954,11 @@ class AgentLinkManager(QObject):
         （``_on_dsh_converged_state`` 只注入 thinking/success），所以成功收尾之后
         到来的 llm_error 只有这里能取消 pending 的完成确认。放在可见性/冷却早退
         之前：错误是本回合的客观事实，与提醒是否呈现无关（隐藏期改道灵动岛、
-        冷却期都不能因此误报成功）。
+        冷却期都不能因此误报成功）。归属同样按记录上的摄入标注（``_record_writer_owner``）：
+        撤确认与打标都只对**这条错误自己的写者**生效。
         """
-        self._abort_done_check_on_error(agent_key)
+        self._abort_done_check_on_error(
+            agent_key, self._record_writer_owner(record if isinstance(record, dict) else {}))
         if not hasattr(self.win, "isVisible") or not self.win.isVisible():
             return
         if not isinstance(record, dict):
@@ -5317,6 +6182,9 @@ class AgentLinkManager(QObject):
         口径——失败回合的完成确认不止 success 边沿一条（桥接的 AgentStatus 聚合
         基线与 session/event 是两条通道，idle 可能先于 execution/failed 落地，
         busy→idle 会先排定确认；那条路径没有 success 边沿可拦，只能靠文案标记）。
+        两个标记同时按**写者归属**记一份（``_owner_error_marks`` / ``_owner_alert_marks``，
+        归属取记录上的摄入标注）：失败是某一写者本轮的回合事实，A 实例的失败不得
+        掐掉 B 实例成功收尾的音效与文案（见 ``_writer_marked``）。
         打标放在最前，先于可见性/模型访问抑制的早退：失败是本回合的客观事实，
         与提醒是否呈现无关（隐藏期改道灵动岛、抑制期都不能因此误报成功）。
 
@@ -5325,8 +6193,11 @@ class AgentLinkManager(QObject):
         就违背「审批、报错照常提醒」的规格。隐藏态走灵动岛改道，那条改道要求
         ``not buttons and not bubble_blocked``，本提醒本就无按钮、非 sticky，不受影响。
         """
+        owner = self._record_writer_owner(payload if isinstance(payload, dict) else {})
         self._saw_error.add(agent_key)
         self._saw_alert.add(agent_key)
+        self._mark_owner(self._owner_error_marks, agent_key, owner or "", on=True)
+        self._mark_owner(self._owner_alert_marks, agent_key, owner or "", on=True)
         if not hasattr(self.win, "isVisible") or not self.win.isVisible():
             return
         payload = payload if isinstance(payload, dict) else {}

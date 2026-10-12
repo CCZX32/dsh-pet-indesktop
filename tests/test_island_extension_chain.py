@@ -30,7 +30,8 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEventLoop, QRect, QTimer
+from PySide6 import QtCore
+from PySide6.QtCore import QEventLoop, QRect, QTime, QTimer
 from PySide6.QtWidgets import QApplication, QLabel
 
 import pet.dynamic_island as island_mod
@@ -323,6 +324,61 @@ def _real_ext_island(config, monkeypatch, *, interval: float = 0.25) -> _Paintin
     monkeypatch.setattr(island_mod.DynamicIsland, "_make_extension_sampler",
                         lambda self, i: host.ExtensionSampler(interval=interval))
     return _PaintingIsland(config)
+
+
+class _FakeClock:
+    """假 ``QTime``：只有 ``currentTime()`` 一条（产品读表只用这一条，见
+    ``DynamicIsland._primary_segment``）。
+
+    返回真 ``QTime``，所以 ``toString("HH:mm")`` 走的还是产品那条格式化路径；
+    ``tick()`` 把"跳分"变成**确定性事件**——本文件量几何的用例不该被真实时钟
+    跨不跨分界决定红绿。
+    """
+
+    def __init__(self, hour: int, minute: int) -> None:
+        self._now = QTime(hour, minute)
+
+    def currentTime(self) -> QTime:      # noqa: N802 (Qt 命名)
+        return self._now
+
+    def tick(self) -> None:
+        """推一分钟：跳分因此是确定性事件，不赌真实时间过不过分界。"""
+        self._now = self._now.addSecs(60)
+
+
+def _freeze_clock(monkeypatch, hour: int, minute: int) -> _FakeClock:
+    """把产品的读表点钉在 ``hour:minute``（monkeypatch 收尾还原）。
+
+    产品在 ``_primary_segment`` 里**函数内** ``from PySide6.QtCore import QTime``，
+    所以补 ``PySide6.QtCore.QTime`` 这一个模块属性就够：只改那一次读表，别的
+    ``QTime`` 用法拿的是各自模块 import 到的真类。
+    """
+    clock = _FakeClock(hour, minute)
+    monkeypatch.setattr(QtCore, "QTime", clock)
+    return clock
+
+
+def _ext_value_box(island: DynamicIsland, seg_id: str = EXT) -> tuple:
+    """第三方段在内容行里的**值盒落位**（与绘制同一条路径：真字体、真度量）。
+
+    量的是"读数只在盒内伸缩"这句话里的那个盒子：标签 / 数值盒 / 单位盒的缘与宽。
+    """
+    plan = island._row_plan()
+    row = island_layout.apply_shrink(plan, island._compose_info_segments(),
+                                     primary_fm=island._metrics_for("primary"))
+    (placement,) = island_layout.place_info_segments(
+        [seg for seg in row if seg.seg_id == seg_id], start_x=plan.segments_x,
+        primary_fm=island._metrics_for("primary"),
+        value_fm=island._metrics_for("value"),
+        label_fm=island._metrics_for("label"))
+    return (placement.label_x, placement.label_w, placement.box_x, placement.box_w,
+            placement.unit_x, placement.unit_w)
+
+
+def _row_geometry(island: DynamicIsland) -> tuple:
+    """一行内容的几何事实清单：自然宽（行计划）+ 窗口 size/pos + 第三方值盒落位。"""
+    return (island._row_plan().width, island.size().width(), island.size().height(),
+            island.pos().x(), island.pos().y(), _ext_value_box(island))
 
 
 def _card_value_label(island: DynamicIsland, seg_id: str) -> QLabel:
@@ -860,9 +916,16 @@ def test_extension_reading_change_repaints_the_capsule_on_its_own(tmp_path, monk
     ``_ext_samples`` 却一个像素都不刷新（要等 30s 心跳、鼠标或动画偶然救场）。本用例
     只跑真事件循环（provider → 真采样线程 → 真 QTimer 表 → 真 paintEvent）：读数没变
     → 一次都不重绘；读数变了 → 胶囊按采样节奏自己重绘；读数再长也不撑宽窗口。
+
+    时钟必须钉住：``_width_key`` 按设计含主信息**现文案**（现文案超声明样本时要加宽，
+    见 ``DynamicIsland._plan_inputs`` 的末位说明），而时钟的样本是 ``88:88``——跳分
+    只让键变、不让几何变。跨分界的两次采样之间比对这个键，红了也不是"读数把窗口撑
+    宽了"，所以这里用假表把场景钉在 09:20；跳分本身由
+    ``test_clock_minute_tick_changes_the_text_but_no_geometry`` 单量。
     """
     directory = _write_component(_clean_state, provider=PROVIDER_READS_A_FILE)
     (directory / "value.txt").write_text("74", encoding="utf-8")
+    _freeze_clock(monkeypatch, 9, 20)
     island = _real_ext_island(_config(tmp_path, metrics=[EXT]), monkeypatch)
     try:
         island.show()
@@ -898,6 +961,47 @@ def test_extension_reading_change_repaints_the_capsule_on_its_own(tmp_path, monk
         assert island.frames[-1].toImage() != baseline.toImage()
         assert (island._width_key(), island.size(), island.pos()) == (width_key, size, pos), \
             "长读数把窗口撑宽了"
+    finally:
+        island.close()
+
+
+def test_clock_minute_tick_changes_the_text_but_no_geometry(tmp_path, monkeypatch,
+                                                            _clean_state):
+    """主信息时钟跳分：现文案与宽度白名单键跟着变，窗口几何与第三方值盒一动不动。
+
+    为什么单列一条：``_width_key`` 含主信息**现文案**（现文案超声明样本时要加宽，见
+    ``DynamicIsland._plan_inputs`` 的末位说明），跳分**必然**让这个键变——上一刻与
+    下一刻的键直接比，哪怕窗口一个像素都没动也会不等。时钟的样本是 ``88:88``，恒宽
+    于任何 ``HH:mm``，所以真正该守的是几何：行计划的自然宽、窗口 size/pos、第三方段
+    的值盒落位。跳分在这里是确定性事件（假表手工推一分钟），心跳那一路（``_refresh``
+    → ``_update_size``）也照跑一遍：重算归重算，几何必须落回同一个值。
+    """
+    directory = _write_component(_clean_state, provider=PROVIDER_READS_A_FILE)
+    (directory / "value.txt").write_text("74", encoding="utf-8")
+    clock = _freeze_clock(monkeypatch, 9, 20)
+    island = _real_ext_island(_config(tmp_path, metrics=[EXT]), monkeypatch)
+    try:
+        island.show()
+        assert _pump_until(lambda: _seg(island, EXT).text == "74", timeout=15.0), \
+            "第一拍没在预算内到宿主"
+        _settle(island)
+        assert _seg(island, "primary").text == "09:20"
+        key_before, geometry_before = island._width_key(), _row_geometry(island)
+
+        island.reset_frames()
+        clock.tick()                     # 09:20 → 09:21
+        island.update()                  # 时钟变后的下一笔绘制（真 paintEvent 落地）
+        assert _wait_paint(island) >= 1, "跳分后的那一笔重绘没落地"
+        assert _seg(island, "primary").text == "09:21", "假表没换到 09:21，这条用例就没在量跳分"
+        assert island._width_key() != key_before, \
+            "现文案在宽度白名单键里（产品的既定契约）——所以跨分界比对 _width_key 不是几何断言"
+        assert _row_geometry(island) == geometry_before, "跳分推了窗口/值盒几何"
+        assert island.geometry_updates == 0, "跳分那一笔重绘顺手重算了窗口几何"
+
+        island._refresh()                # 心跳那一路：真重算一次几何
+        assert _wait_paint(island) >= 1, "心跳那一笔重绘没落地"
+        assert island.geometry_updates >= 1, "心跳没重算几何？那这条用例量错了通道"
+        assert _row_geometry(island) == geometry_before, "心跳重算后几何没落回原值"
     finally:
         island.close()
 

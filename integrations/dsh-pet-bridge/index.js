@@ -475,6 +475,17 @@ function stepOf(event) {
   return null;
 }
 
+// 透传该事件所属**回合**的原始 turn 号（字面就是 event.data.turn；同一回合被多个写者
+// 各写一份时取值相同）：桌宠侧（pet/dsh_state.py::TurnCompletionTracker）用它把整封镜像
+// 信封（两个写者各写一份 user/message + turn/start + turn/end）绑到同一个完成身份上，
+// 同一回合绝不提醒两次。只做透传：取不到就整字段不写（旧桥接 / 无 turn 的事件保持
+// 原行为）。
+function sourceTurnOf(event) {
+  const data = (event && event.data) || {};
+  if (data && data.turn !== undefined && data.turn !== null) return String(data.turn);
+  return "";
+}
+
 function sessionIdOf(session, event) {
   if (session && session.id) return String(session.id);
   const data = (event && event.data) || {};
@@ -484,12 +495,15 @@ function sessionIdOf(session, event) {
   return "session:unknown";
 }
 
-function writeStateEvent(type, step, sessionId, agentName = "", reasonKind = "") {
+function writeStateEvent(type, step, sessionId, agentName = "", reasonKind = "", sourceTurn = "") {
   const extra = { event: type };
   if (step !== undefined && step !== null) extra.step = step;
   // turn/end 携带终止原因（只落 kind，不落错误正文）：桌宠据此让用户中止的回合
   // 静默收尾，不报「完成」。字段缺失 = 旧桥接，桌宠保持原行为。
   if (reasonKind) extra.reasonKind = reasonKind;
+  // 该事件所属回合的原始 turn 号（见 sourceTurnOf）：桌宠据此把同一回合的各写者副本
+  // 绑到一个完成身份上。取不到就不写——旧桥/无 turn 的事件行为不变。
+  if (sourceTurn) extra.sourceTurn = sourceTurn;
   if (sessionId) extra.sessionId = sessionId;
   if (agentName) extra.agentName = agentName;
   writeRecord(extra);
@@ -581,6 +595,12 @@ function resolveQuestion(callId, sessionId) {
 // 同一文件的数据行交织；consumers 读取全部 dsh-*.jsonl。
 const INSTANCE_FILE = `dsh-${process.pid}.jsonl`;
 
+// 本插件「这次启动」的实例标识（信封字段，**不是** DSH 字段）。多 DSH 实例并行时
+// 桌宠靠它把各实例的状态/交互分开：pid 会被系统复用（同一 pid 重启、同一路径被
+// 轮转重建都不是同一个写者），单看 pid 不足以判定归属；本 UUID 每次插件加载重新
+// 生成，只在这一代写者内稳定。由插件自己盖（调用方传入同名字段一律被覆盖）。
+const BOOT_ID = randomUUID();
+
 const FLUSH_DELAY_MS = 80; // 事件合批窗口：80ms 内的记录合并成一次写盘
 let writeQueue = [];
 let flushTimer = null;
@@ -607,21 +627,25 @@ function flushPending() {
   }
 }
 
+function encodeRecord(extra) {
+  // 从 sessionMetaCache 补充字面上的 projectName / sessionName。
+  // sessionName 不再借用 label，避免下游把工具标签与会话名混淆。
+  const sid = extra.sessionId;
+  if (sid) {
+    const meta = sessionMetaCache.get(sid);
+    if (meta) {
+      if (meta.projectName) extra.projectName = meta.projectName;
+      if (meta.sessionName) extra.sessionName = meta.sessionName;
+    }
+  }
+  // inst 放在 ...extra **之后**：写者归属由插件自己盖，调用方（含旧版载荷形状）
+  // 传入同名字段不得顶掉它——顶掉就等于把归属交给事件内容，多实例隔离当场失效。
+  return JSON.stringify({ ts: Date.now() / 1000, agent: "dsh", event: "AgentStatus", ...extra, inst: BOOT_ID }) + "\n";
+}
+
 function writeRecord(extra) {
   try {
-    // 从 sessionMetaCache 补充字面上的 projectName / sessionName。
-    // sessionName 不再借用 label，避免下游把工具标签与会话名混淆。
-    const sid = extra.sessionId;
-    if (sid) {
-      const meta = sessionMetaCache.get(sid);
-      if (meta) {
-        if (meta.projectName) extra.projectName = meta.projectName;
-        if (meta.sessionName) extra.sessionName = meta.sessionName;
-      }
-    }
-    writeQueue.push(
-      JSON.stringify({ ts: Date.now() / 1000, agent: "dsh", event: "AgentStatus", ...extra }) + "\n",
-    );
+    writeQueue.push(encodeRecord(extra));
     if (flushTimer === null) {
       flushTimer = setTimeout(flushPending, FLUSH_DELAY_MS);
       if (flushTimer.unref) flushTimer.unref(); // 不阻止 DSH 进程退出
@@ -820,12 +844,14 @@ export function apply(ctx) {
         // 「对话开始」触发，不被注入记录污染（dsh_state 收敛器据此过滤）。
         // 脱敏：消息正文不落盘，只写事件名 + 身份字段。
         const src = (data && data.source && data.source.kind) || "";
+        const sourceTurn = sourceTurnOf(event);
         writeRecord({
           event: "user/message",
           agentName,
           step: stepOf(event),
           sessionId,
           ...(src ? { sourceKind: src } : {}),
+          ...(sourceTurn ? { sourceTurn } : {}),
         });
       }
 
@@ -866,7 +892,8 @@ export function apply(ctx) {
           }
         }
         // 模型回复正文不落盘（脱敏）：assistant/message 只作状态事件
-        writeStateEvent("assistant/message", stepOf(event), sessionId);
+        writeStateEvent("assistant/message", stepOf(event), sessionId, "", "",
+          sourceTurnOf(event));
         // 模型成功产出 = 重试已恢复 → 连续重试计数归零（见上方硬失败判定规则）
         noteTurnRecovery(sessionKeyOf(_session, event));
       }
@@ -1040,7 +1067,7 @@ export function apply(ctx) {
       //    只剩事件序号用途（桌宠活动气泡模板 {step}）。
       if (STATE_EVENT_TYPES.has(type)) {
       writeStateEvent(type, stepOf(event), sessionId, agentName,
-        type === "turn/end" ? turnEndReasonKind(event) : "");
+        type === "turn/end" ? turnEndReasonKind(event) : "", sourceTurnOf(event));
       // 用户介入信号：approval/decided 或 thread_rolled_back 等用户主动干预事件
       // → 向桌宠发送 user_action 事件，关闭对应弹窗
       if (type === "approval/decided") {
@@ -1083,4 +1110,16 @@ export const __questionTest = {
   pendingQuestionCallIds,
   registerQuestionCall,
   forgetQuestionCall,
+};
+// 多实例写者归属（inst 信封字段）与回合号（sourceTurn）的契约测试入口：
+// 纯编码 / 纯状态事件写入 + 写队列窥视，不落盘。
+export const __instanceTest = {
+  bootId: BOOT_ID,
+  instanceFile: INSTANCE_FILE,
+  encodeRecord,
+  writeRecord,
+  writeStateEvent,
+  sourceTurnOf,
+  queued: () => writeQueue.slice(),
+  resetQueue: () => { writeQueue.length = 0; },
 };

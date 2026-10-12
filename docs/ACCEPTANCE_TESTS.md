@@ -30,6 +30,7 @@ python -m pytest -q `
 
 Bridge 验收采用真实插件源码上的 Node contract 测试，并结合桌宠端真实事件解析/状态处理测试：
 
+- `tests/test_bridge_instance_scope.js`：写者归属（`inst` 信封字段）不得被事件内容顶掉、不进嵌套载荷、真的随写入行落队（多 DSH 实例隔离的身份来源）；
 - `tests/test_bridge_root_control.js`：已删机制（控制队列/mux 中继）不得复活的静态闸 + 退役测试出口不再导出；
 - `tests/test_bridge_interaction_dedup.js`：问题写盘去重键的会话隔离（callId 复合键）；
 - `tests/test_bridge_question_callid.js`：question 写盘的 callId 身份管理（会话隔离复合键、register/forget 幂等）；
@@ -43,7 +44,7 @@ Bridge 验收采用真实插件源码上的 Node contract 测试，并结合桌�
 
 ```powershell
 node --check integrations/dsh-pet-bridge/index.js
-node --test tests/test_bridge_hardfailure.js tests/test_bridge_interaction_dedup.js tests/test_bridge_manifest.js tests/test_bridge_question_callid.js tests/test_bridge_retry.js tests/test_bridge_root_control.js tests/test_bridge_user_action_guard.js
+node --test tests/test_bridge_hardfailure.js tests/test_bridge_instance_scope.js tests/test_bridge_interaction_dedup.js tests/test_bridge_manifest.js tests/test_bridge_question_callid.js tests/test_bridge_retry.js tests/test_bridge_root_control.js tests/test_bridge_user_action_guard.js
 node integrations/dsh-pet-bridge/verify_import.mjs
 $env:QT_QPA_PLATFORM = "offscreen"
 python -m pytest -q tests/test_agent_link.py tests/test_dsh_state.py

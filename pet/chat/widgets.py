@@ -2207,6 +2207,14 @@ class ChatWindow(QDialog):
             QTimer.singleShot(0, self, self._update_bubble_widths)
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 窗口是复用的（关闭=隐藏）：每次从菜单/灵动岛打开都回到最新一条回复，
+        # 而不是停在上次关闭时的位置（#191 后半，吸收自上游 PR #248）。
+        # 系统自发的 show（如从最小化还原）保留阅读位置。
+        if not event.spontaneous():
+            self._bottom(always=True)
+
     def closeEvent(self, event) -> None:
         """关闭=隐藏并复用窗口：停止生成、解除桌宠位置监听，避免泄漏。"""
         self._typewriter_timer.stop()
