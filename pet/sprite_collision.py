@@ -306,7 +306,7 @@ class SpriteCollisionWorld:
                 impulse_cap=self.impulse_cap,
                 max_separation_iterations=self.max_separation_iterations,
                 swept_collisions=swept,
-                ignored_pairs=self._ignored_pet_pairs(disabled_ids, sprite_by_id),
+                ignored_pairs=self._ignored_pairs(disabled_ids, sprite_by_id),
             )
             self._apply_results(results, sprite_by_id, combined)
         # 静态成员支撑落定（"落在岛上"= 落地）：不依赖 dt，只看这一 tick 的
@@ -510,6 +510,32 @@ class SpriteCollisionWorld:
                 if hit[0]:
                     swept[f"{a.runtime_id}|{b.runtime_id}"] = hit
         return swept
+
+    def _ignored_pairs(self, disabled_ids: set,
+                       sprite_by_id: Dict[str, object]) -> "set | None":
+        """本 tick 不结算的 pair 总表 = 宠-宠禁用 pair ∪ 探头×静态成员 pair。
+
+        探头豁免：边缘探头姿态（``probe_active``，身体按设计探出屏幕边缘）的
+        sprite 不与静态成员（灵动岛墙）结算。探头位置是有意的屏外姿态，岛墙
+        注册/显示恰好压在它身上时，求解器的位置分离+冲量会把它从探头姿态里
+        挤出来（姿态、钳制放宽与气泡锚点全部错位）——「关掉岛碰撞→探头→再开」
+        就踩这条路。探头结束（姿态收回屏内）后下一 tick 自动恢复结算。
+        宠-宠 pair 不豁免：探头中的宠仍是别的宠的合法碰撞对象。
+        """
+        ignored = self._ignored_pet_pairs(disabled_ids, sprite_by_id)
+        if not self._static_members:
+            return ignored
+        probe_ids = [mid for mid, sprite in sprite_by_id.items()
+                     if getattr(sprite, "probe_active", False)]
+        if not probe_ids:
+            return ignored
+        extra = set()
+        for probe_id in probe_ids:
+            for static_id in self._static_members:
+                # pair 键口径与求解器内部一致：runtime_id 字符串序拼接
+                extra.add(f"{probe_id}|{static_id}" if probe_id < static_id
+                          else f"{static_id}|{probe_id}")
+        return (ignored | extra) if ignored else extra
 
     def _ignored_pet_pairs(self, disabled_ids: set,
                            sprite_by_id: Dict[str, object]) -> "set | None":

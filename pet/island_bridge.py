@@ -692,10 +692,24 @@ class IslandWindowBridge:
         return self._core.update_geometry(left, top, width, height)
 
     def sync_geometry(self) -> None:
-        """按岛当前可见性/几何刷新注册（无参回调与事件过滤共用入口）。"""
+        """按岛当前可见性/几何刷新注册（无参回调与事件过滤共用入口）。
+
+        不设墙的两类状态（对齐旧 ``island_collision._wall_active``，缺了它们
+        停靠细条会按 16×64 注册出直径 44 的怪圆墙、动画中间帧会推挤旁边的
+        探头宠）：停靠细条且未悬停探出（stadium 水平轴假设不成立）；几何
+        动画进行中（``_geo_to`` 非 None，展开/停靠/归位的中间帧不代表落点）。
+        两类状态结束后岛的 Move/Resize/回调会再次触发本方法，按最终几何复墙。
+        """
         try:
             if not self._island.isVisible():
                 self._core.set_visible(False)
+                return
+            if getattr(self._island, "_mode", "") == "docked" \
+                    and not getattr(self._island, "_hover_peek", False):
+                self._core.set_visible(False)  # 细条态不设墙
+                return
+            if getattr(self._island, "_geo_to", None) is not None:
+                self._core.set_visible(False)  # 几何动画中不设墙
                 return
             self._core.set_visible(True)
             left, top, width, height = _local_geometry(
