@@ -8,6 +8,8 @@ tests/test_agent_link_subtraction.py 的单读方/审批收敛测试族。
 """
 from __future__ import annotations
 
+import pytest
+
 from pet import dsh_state
 from pet.dsh_state import (
     APPROVAL_LATCH_TIMEOUT_S,
@@ -15,6 +17,7 @@ from pet.dsh_state import (
     DshStateConverger,
     TurnCompletionTracker,
     candidate_ports,
+    map_event_to_state,
 )
 
 
@@ -356,14 +359,16 @@ def test_candidate_ports_include_desktop_host():
 #
 # 身份 = (session_id, step, token)：
 # - session_id / step：桥接真实写出的字段（桥缺 step 时回退 ``turn:<n>``）；
-# - token：**全局单调 generation**，每条 live 起点标记（turn/start / user/message）
-#   递增一次后记到该会话名下。全局计数是硬要求，不是实现细节：消费侧按身份去重，
-#   token 一旦复用就会被当成「同一回合的重复投递」而吞掉新回合。「每会话自增 +
+# - token：**全局单调 generation**，每个新回合递增一次。带回合号的记录按
+#   ``(会话, 回合号) → token`` 绑定表定身份（同一回合的镜像副本落回同一个 token），
+#   旧桥（无回合号）按会话表定身份。全局计数是硬要求，不是实现细节：消费侧按身份
+#   去重，token 一旦复用就会被当成「同一回合的重复投递」而吞掉新回合。「每会话自增 +
 #   只加容量」的朴素修法在会话被挤出后正好撞身份，对照实现见
 #   .scratch/product-dsh-tracker-bound-20261011/probe_naive_lru_collision.py。
 #
-# 会话表有界（``dsh_state.TURN_TOKEN_MEMORY``），且只由 live 起点写入：只见过
-# 收尾的会话（中途挂载）token 恒为 0、不落表——身份靠 session + step 逐条唯一。
+# 两张表都有界（``dsh_state.TURN_TOKEN_MEMORY`` / ``TURN_BINDING_MEMORY``），会话表
+# 只由 live 起点/本会话消息写入：只见过收尾的会话（中途挂载）token 恒为 0、不落表
+# ——身份靠 session + step 逐条唯一。
 
 
 def test_turn_completion_identity_from_turn_end():
@@ -843,7 +848,7 @@ def test_mirrored_turn_start_and_end_share_one_identity():
     e1 = human.observe({"event": "turn/end", "sessionId": "s6", "step": "5"})
     human.observe({"event": "user/message", "sessionId": "s6"})   # 真人再问一轮
     e2 = human.observe({"event": "turn/end", "sessionId": "s6", "step": "5"})
-    assert e1 != e2, "user/message 永远是新的回合入口，必须重新发号"
+    assert e1 != e2, "旧桥（本会话没有回合号记忆）下真人消息仍是新的回合入口"
 
 
 def test_retire_scope_withdraws_only_that_writer_and_never_reports_success():
@@ -866,33 +871,141 @@ def test_retire_scope_withdraws_only_that_writer_and_never_reports_success():
     assert conv.retire_scope("inst:never-seen") == [], "未登记的写者退役是零产出的 no-op"
 
 
-# ---- 多写者镜像信封的回合号绑定（桥接透传 sourceTurn，M2）----
+# ---- 多写者镜像信封的回合号绑定（X1 + F2）----
 #
-# 整封镜像信封（user/message + turn/start + turn/end 被两个写者各写一份）里，旧判据
-# 只对 turn/start 做镜像识别，**user/message 永远重新发号**——它进的是全写者共享的
-# 会话表，第二条 user/message 一发号，同一回合的两份收尾就落在两个 token 上，算出
-# 两个身份，消费侧的身份去重失效（用户看到两次完成提醒）。
+# 镜像信封 = user/message + turn/start + turn/end 被两个写者各写一份。回合号
+# （``sourceTurn`` = DSH ``event.data.turn``）**只有 turn/start / turn/end 带**：
+# 真实 ``UserMessage`` 是 ``{id, role, content, source}``，没有 turn 字段，所以桥接
+# 写出的 user/message 既不带 step 也不带 sourceTurn，而且每回合有多条（真人 1 条 +
+# agent.inject() 注入的上下文若干条）。
 #
-# 修法是桥接透传 DSH 的 ``event.data.turn``（``sourceTurn``）：两侧都带回合号时，
-# 相等 = 同一回合（镜像副本，绑到已有身份），不等 = 另一个回合（照常发新号，即使来自
-# 别的实例/写者——「别的写者写的 user/message 一律算镜像」会吞掉在另一实例上继续的
-# 真实回合）。任一缺失 → 逐条退回原判据（旧桥 / 无 turn 的事件行为不变）。
+# 于是身份判据分两层：
+# - **回合号绑定**（带 sourceTurn 的记录）：``(sessionId, sourceTurn) → token`` 有界
+#   绑定表。回合号相同 = 同一回合的另一份副本（镜像/迟到重投），不发新号；回合号不同
+#   = 另一个回合（照常发新号，即使来自别的实例——「别的写者写的一律算镜像」会吞掉在
+#   另一实例上继续的真实回合）。迟到的旧回合既不得重新发号（否则同一回合两个完成
+#   身份 = 重复提醒），也不得把会话表里"当前回合"的记录顶回去（否则新回合的收尾会
+#   退回旧 token = 新回合被当成重复投递吞掉）。
+# - **旧桥兼容**（无回合号）：user/message 不再覆盖会话表已有的 step / owner /
+#   sourceTurn，只在没有回合号记忆时才是新的回合入口；镜像判定退回
+#   「(会话, step) + 两个 inst: 写者归属不同」，空 step 不参与比对。
+
+
+def _real_turn_records(session, turn, *,
+                       injections=("agent-instructions", "skill-catalog", "skill-invocation")):
+    """一个回合的**真实形状**记录：真人消息 + 注入上下文 + turn/start + turn/end。"""
+    step = "turn:%s" % (turn,)
+    records = [{"event": "user/message", "sessionId": session, "sourceKind": "user"}]
+    records += [{"event": "user/message", "sessionId": session, "sourceKind": kind}
+                for kind in injections]
+    records.append({"event": "turn/start", "sessionId": session, "step": step,
+                    "sourceTurn": str(turn)})
+    records.append({"event": "turn/end", "sessionId": session, "step": step,
+                    "sourceTurn": str(turn)})
+    return records
+
+
+def _completion_identities(tracker, records, owner):
+    return [identity for identity in
+            (tracker.observe(dict(record), None, owner) for record in records)
+            if identity is not None]
 
 
 def test_source_turn_binds_mirrored_user_message_to_one_identity():
-    """两侧回合号相同 → 整封镜像信封（含 user/message）落在同一个完成身份上。"""
-    envelope = (
-        {"event": "user/message", "sessionId": "s", "step": "turn:1", "sourceTurn": "1"},
-        {"event": "turn/start", "sessionId": "s", "step": "turn:1", "sourceTurn": "1"},
-        {"event": "turn/end", "sessionId": "s", "step": "turn:1", "sourceTurn": "1"},
-    )
+    """整封真实形状的镜像信封（含多条 user/message）落在同一个完成身份上。"""
+    envelope = _real_turn_records("s", 1)
     tracker = TurnCompletionTracker()
-    assert [tracker.observe(dict(r), None, "inst:writer-a") for r in envelope] == \
-        [None, None, ("turn-end", "s", "turn:1", 1)]
+    first = _completion_identities(tracker, envelope, "inst:writer-a")
+    assert len(first) == 1 and first[0][:3] == ("turn-end", "s", "turn:1")
 
-    mirrored = [tracker.observe(dict(r), None, "inst:writer-b") for r in envelope]
-    assert mirrored[:2] == [None, None], "镜像起点（含 user/message）不得重新发号"
-    assert mirrored[2] == ("turn-end", "s", "turn:1", 1), "镜像收尾必须落在同一身份上"
+    mirrored = _completion_identities(tracker, envelope, "inst:writer-b")
+    assert mirrored == first, "镜像收尾必须落在同一身份上（镜像起点不得重新发号）"
+    assert [tracker.observe(dict(r), None, "inst:writer-a") for r in envelope[:-1]] == \
+        [None] * (len(envelope) - 1), "同一回合的重复起点一律零产出"
+
+
+def test_real_shaped_user_message_never_overwrites_the_recorded_turn():
+    """user/message（真实形状，无 step / sourceTurn）只刷新 LRU，不覆盖已有记录。
+
+    它既不重新发号（发号会让镜像副本把同一回合的 token 顶到新值上 → 同一回合两个
+    完成身份 → 重复提醒），也不把会话表里的 step / owner / sourceTurn 写坏（写坏会让
+    后续真实起点的镜像判据失去比对基准）。
+    """
+    tracker = TurnCompletionTracker()
+    tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:7",
+                     "sourceTurn": "7"}, None, "inst:a")
+    before = tuple(tracker._tokens["s"])
+    for kind in ("user", "plugin", "agent-instructions", "skill-catalog", "skill-invocation"):
+        tracker.observe({"event": "user/message", "sessionId": "s", "sourceKind": kind},
+                        None, "inst:a")
+    assert tuple(tracker._tokens["s"]) == before, \
+        "user/message 不得改写会话表里已记录的 (token, step, owner, sourceTurn)"
+    assert list(tracker._tokens) == ["s"], "至多刷新 LRU，不得为它新建行"
+
+
+def test_real_shaped_mirrored_user_message_is_a_duplicate_start():
+    """真实形状的镜像 user/message 必须被认成重复起点（否则收敛器会被它推回忙）。
+
+    判定只用「两个写者都是插件 boot UUID 且归属不同」——真实 user/message 不带 step，
+    空 step 不参与比对；没有可用的写者身份时绝不猜。
+    """
+    tracker = TurnCompletionTracker()
+    tracker.observe({"event": "user/message", "sessionId": "s", "sourceKind": "user"},
+                    None, "inst:a")
+    tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:7",
+                     "sourceTurn": "7"}, None, "inst:a")
+    duplicate = {"event": "user/message", "sessionId": "s", "sourceKind": "user"}
+    assert tracker.is_duplicate_start(dict(duplicate), "inst:a") is False, \
+        "同一写者自己的 user/message 不是镜像"
+    assert tracker.is_duplicate_start(dict(duplicate), "inst:b") is True, \
+        "另一个实例写的同一条真人消息是镜像副本"
+    assert tracker.is_duplicate_start(dict(duplicate), "") is False, \
+        "写者身份不行（无 inst:）时不做镜像判定"
+
+
+def test_redelivered_old_turn_does_not_steal_the_current_turn_identity():
+    """F2 实测序列：A:start7→A:end7→A:start8→B:start7→B:end7→A:end8。
+
+    修复前 turn7 拿到两个不同的完成身份（A 的收尾 token1、B 的收尾 token3），用户被
+    提醒两次；turn8 的收尾还退回旧 token。
+    """
+    tracker = TurnCompletionTracker()
+
+    def start(turn, owner):
+        return tracker.observe({"event": "turn/start", "sessionId": "s",
+                                "step": "turn:%s" % turn, "sourceTurn": str(turn)}, None, owner)
+
+    def end(turn, owner):
+        return tracker.observe({"event": "turn/end", "sessionId": "s",
+                                "step": "turn:%s" % turn, "sourceTurn": str(turn)}, None, owner)
+
+    start(7, "inst:a")
+    seven = end(7, "inst:a")
+    start(8, "inst:a")
+    start(7, "inst:b")
+    seven_again = end(7, "inst:b")
+    eight = end(8, "inst:a")
+
+    assert seven == seven_again, "同一回合（turn7）的镜像收尾必须落在同一身份上"
+    assert seven[:3] == ("turn-end", "s", "turn:7")
+    assert eight != seven and eight[:3] == ("turn-end", "s", "turn:8"), \
+        "turn8 必须有自己的身份（旧回合重投不得推进当前回合状态）"
+
+
+def test_older_turn_first_seen_late_does_not_roll_back_current_turn():
+    """旧回合**首次**被读到（起点曾被回填跳过）时：给它稳定身份，但不回退当前回合。"""
+    tracker = TurnCompletionTracker()
+    tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:8",
+                     "sourceTurn": "8"}, None, "inst:a")
+    eight = tracker.observe({"event": "turn/end", "sessionId": "s", "step": "turn:8",
+                             "sourceTurn": "8"}, None, "inst:a")
+    tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:7",
+                     "sourceTurn": "7"}, None, "inst:b")
+    seven = tracker.observe({"event": "turn/end", "sessionId": "s", "step": "turn:7",
+                             "sourceTurn": "7"}, None, "inst:b")
+    assert seven != eight
+    assert tracker.observe({"event": "turn/end", "sessionId": "s", "step": "turn:8"}) == eight, \
+        "当前回合仍是 turn8：无回合号的旧式收尾不得退回旧回合的 token"
 
 
 def test_source_turn_difference_is_a_legit_new_turn_on_another_writer():
@@ -930,14 +1043,127 @@ def test_source_turn_rule_falls_back_when_either_side_lacks_it():
     assert legacy.is_duplicate_start(
         {"event": "turn/start", "sessionId": "s2", "step": "turn:1", "sourceTurn": "9"},
         "inst:b") is True, "缺一侧时原判据照旧生效（回合号不参与）"
+    # user/message 现在同样是镜像判定的对象（真实形状不带 step → 空 step 不参与比对，
+    # 剩下的判据就是「另一个 inst: 写者在写同一条会话」）。旧实现直接放过它，于是镜像
+    # 副本的起点把同一回合的 token 顶掉 → 同一回合两个完成身份。
     assert legacy.is_duplicate_start(
         {"event": "user/message", "sessionId": "s2", "step": "turn:1", "sourceTurn": "9"},
-        "inst:b") is False, "user/message 仍不是镜像判定的对象（原行为）"
+        "inst:b") is True
+    assert legacy.is_duplicate_start(
+        {"event": "user/message", "sessionId": "s2", "sourceKind": "user"},
+        "inst:b") is True, "真实形状（无 step）落在同一条镜像判据上"
 
-    # ③ 已跟踪的带回合号、入来的不带：同样退回原判据（旧桥写来的记录不得被吞）
+    # ③ 已跟踪的带回合号、入来的不带：user/message 不发号、不覆盖已绑定的回合身份
     mixed = TurnCompletionTracker()
-    mixed.observe({"event": "user/message", "sessionId": "s3", "step": "5", "sourceTurn": "5"})
-    one = mixed.observe({"event": "turn/end", "sessionId": "s3", "step": "5", "sourceTurn": "5"})
-    mixed.observe({"event": "user/message", "sessionId": "s3", "step": "5"})
-    assert mixed.observe({"event": "turn/end", "sessionId": "s3", "step": "5"}) != one, \
-        "旧桥的 user/message 没有回合号 → 「永远是新的回合入口」不变"
+    mixed.observe({"event": "turn/start", "sessionId": "s3", "step": "turn:5",
+                   "sourceTurn": "5"}, None, "inst:a")
+    one = mixed.observe({"event": "turn/end", "sessionId": "s3", "step": "turn:5",
+                         "sourceTurn": "5"}, None, "inst:a")
+    mixed.observe({"event": "user/message", "sessionId": "s3", "sourceKind": "user"},
+                  None, "inst:a")
+    assert mixed.observe({"event": "turn/end", "sessionId": "s3", "step": "turn:5",
+                          "sourceTurn": "5"}, None, "inst:a") == one, \
+        "真实 user/message 不带回合号 → 不得把同回合的重投递算成新回合"
+    # 下一回合由**它自己的回合号**发号（不靠 user/message）
+    mixed.observe({"event": "turn/start", "sessionId": "s3", "step": "turn:6",
+                   "sourceTurn": "6"}, None, "inst:a")
+    assert mixed.observe({"event": "turn/end", "sessionId": "s3", "step": "turn:6",
+                          "sourceTurn": "6"}, None, "inst:a") != one
+
+
+def test_real_envelope_successive_turns_stay_distinct_on_every_writer():
+    """真实形状下连续两回合各提醒一次：镜像副本不得把下一回合吞成重复投递。"""
+    tracker = TurnCompletionTracker()
+    seven = _completion_identities(tracker, _real_turn_records("s", 7), "inst:a")
+    eight = _completion_identities(tracker, _real_turn_records("s", 8), "inst:a")
+    assert len(seven) == 1 and len(eight) == 1
+    assert seven != eight, "同一会话的下一回合必须有不同身份"
+    assert seven[0][:3] == ("turn-end", "s", "turn:7")
+    assert eight[0][:3] == ("turn-end", "s", "turn:8")
+    assert _completion_identities(tracker, _real_turn_records("s", 8), "inst:b") == eight, \
+        "同回合的镜像收尾仍绑在同一身份上"
+
+
+def test_turn_binding_table_is_bounded():
+    """(会话, 回合号) 绑定表有界：换成千上万个回合不得把内存撑成无界。"""
+    tracker = TurnCompletionTracker()
+    for i in range(dsh_state.TURN_BINDING_MEMORY + 64):
+        tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:%d" % i,
+                         "sourceTurn": str(i)}, None, "inst:a")
+    assert len(tracker._turn_tokens) <= dsh_state.TURN_BINDING_MEMORY, \
+        f"绑定表必须有界：{len(tracker._turn_tokens)} 条"
+    assert ("s", str(dsh_state.TURN_BINDING_MEMORY + 63)) in tracker._turn_tokens, \
+        "最近的回合必须在表内"
+
+
+# ---- 注入上下文的白名单（X2）----
+
+def test_injected_user_message_kinds_are_not_human_input():
+    """只有 sourceKind ∈ ('user', '') 算真人输入；其余注入 kind 整体忽略。
+
+    agent.inject() 注入的上下文（plugin / agent-instructions / skill-catalog /
+    skill-invocation …）每轮 4-5 条，若按真人消息处理，「对话开始」触发会被注入
+    文案污染（同 tick 批量应用 + 边沿去重 → 时触时不触）。
+    """
+    from pet.dsh_state import is_human_user_message
+
+    for kind in ("plugin", "agent-instructions", "skill-catalog", "skill-invocation"):
+        assert is_human_user_message({"event": "user/message", "sourceKind": kind}) is False
+    assert is_human_user_message({"event": "user/message", "sourceKind": "user"}) is True
+    assert is_human_user_message({"event": "user/message"}) is True, "旧桥不写 sourceKind"
+
+
+@pytest.mark.parametrize("kind", ["plugin", "agent-instructions", "skill-catalog",
+                                  "skill-invocation"])
+def test_injected_user_message_kinds_do_not_start_a_conversation(kind):
+    conv = DshStateConverger()
+    conv.set_online(True)                                            # idle 基线
+    out = _feed(conv, {"event": "user/message", "sourceKind": kind,
+                       "text": "<system-reminder> 技能目录……", "sessionId": "s1"})
+    assert [item for item in out if item[0] == "user_message"] == []
+    assert conv.current_state is DshState.IDLE, "注入上下文不得进状态机"
+
+
+# ---- 失败回合的收尾（F4）----
+
+def test_error_turn_end_maps_to_error_terminal():
+    """``reasonKind=error`` 的 turn/end 落错误终态，与 aborted（静默回待机）区分。"""
+    assert map_event_to_state({"event": "turn/end", "reasonKind": "error"}) is DshState.ERROR
+    assert map_event_to_state({"event": "turn/end", "reasonKind": "aborted"}) is DshState.IDLE
+    assert map_event_to_state({"event": "turn/end", "reasonKind": "completed"}) is DshState.SUCCESS
+    assert map_event_to_state({"event": "turn/end"}) is DshState.SUCCESS, "旧桥：无 reasonKind"
+
+
+def test_error_turn_end_never_converges_to_success():
+    """失败回合不得收敛 success（桥端重试<4 或有工具成功时不写 execution/failed）。
+
+    此前只有 execution/failed 会打抑制标记，重试中断或"有工具成功"的错误回合拿不到
+    任何标记，于是 turn/end 一路收敛 success → 绿点 + done 音效 + 「干完活啦」。
+    """
+    conv = DshStateConverger()
+    conv.set_online(True)
+    out = _feed(conv, {"event": "user/message", "sourceKind": "user", "sessionId": "s"},
+                {"event": "turn/end", "sessionId": "s", "reasonKind": "error"})
+    assert "success" not in _states(out), out
+    assert conv.current_state is DshState.ERROR
+
+
+def test_error_turn_end_yields_no_completion_identity():
+    tracker = TurnCompletionTracker()
+    tracker.observe({"event": "turn/start", "sessionId": "s", "step": "turn:1",
+                     "sourceTurn": "1"}, None, "inst:a")
+    assert tracker.observe({"event": "turn/end", "sessionId": "s", "step": "turn:1",
+                            "sourceTurn": "1", "reasonKind": "error"}, None, "inst:a") is None
+
+
+def test_error_turn_end_produces_sourced_edge_and_clears_latches():
+    """F4 呈现链：error 回合的 turn/end 必须带 source 产出（消费侧据此注入 error），
+    并解除本写者的审批/问题锁存——否则锁存闸会把这条收尾吞掉，岛一直等待。"""
+    conv = DshStateConverger()
+    conv.handle_record({"event": "turn/start", "sessionId": "s"})
+    conv.handle_record({"event": "approval/request", "sessionId": "s"})
+    out = conv.handle_record({"event": "turn/end", "sessionId": "s", "reasonKind": "error"})
+    assert conv.current_state is DshState.ERROR
+    assert out and out[-1][2:] == ("error", "turn/end"), out
+    # 锁存已解除：后续新回合起点照常推进（不被旧锁存吞掉）
+    assert conv.handle_record({"event": "tool/call", "sessionId": "s", "tool": "bash"})

@@ -50,10 +50,10 @@ def test_switch_character_moves_session_and_prompt_to_new_character(tmp_path):
         assert bubble.session.character_id == "nova"
         assert bubble.session.system_prompt == bubble.prompt_builder.effective_system_prompt(
             bubble.settings, "nova")
-        # prompt 链路跟着新角色走
+        # prompt 链路跟着新角色走（#250 起 system 末尾会附加时间信息，比对前缀）
         messages = bubble.prompt_builder.build_messages(
             bubble.settings, bubble.character_id, [], "在吗")
-        assert messages[0]["content"] == bubble.session.system_prompt
+        assert messages[0]["content"].startswith(bubble.session.system_prompt)
     finally:
         bubble.close()
         app.processEvents()

@@ -415,7 +415,7 @@ def test_message_bubble_thinking_panel_collapses_when_answer_starts():
     assert bubble.thinking_body.isVisible()
     # 复制按钮只复制正文
     bubble.set_content("回答")
-    assert bubble.body.text() == "回答"
+    assert bubble.content == "回答"
     bubble.close()
 
 
@@ -499,7 +499,7 @@ def test_thinking_panel_survives_reopening_the_conversation(tmp_path):
     reopened = ChatWindow(Config(tmp_path), "shenshen")
     app.processEvents()
     bubble = [b for b in reopened.findChildren(MessageBubble) if b.role == "assistant"][-1]
-    assert bubble.body.text() == "晴天"
+    assert bubble.content == "晴天"
     assert not bubble.thinking_toggle.isHidden()
     assert not bubble.thinking_toggle.isChecked()  # 回显时收起
     assert "已联网搜索并深度思考" in bubble.thinking_toggle.text()

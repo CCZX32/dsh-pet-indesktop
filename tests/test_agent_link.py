@@ -5025,8 +5025,9 @@ class TestDshLateQueuedSignalsAreIsolated:
             assert mgr.monitors["dsh"]._running
 
             # worker 已 emit waiting_approval（排在 Qt 队列里），GUI 还没泵到
-            QTimer.singleShot(0, lambda: mgr.monitors["dsh"].dsh_state_changed.emit(
-                "idle", "waiting_approval", "worker/late"))
+            mon = mgr.monitors["dsh"]
+            QTimer.singleShot(0, lambda: mon.dsh_state_changed.emit(
+                "idle", "waiting_approval", "worker/late", mon._emit_gen))
             # 用户此刻关闭联动：stop + 同步 offline 复位（先入队）
             cfg.set("agent_link", {"dsh": False})
             mgr.apply_config()
@@ -5061,6 +5062,127 @@ class TestDshLateQueuedSignalsAreIsolated:
             app.processEvents()
             mgr._on_dsh_converged_state("working", "offline", "probe/lost")
             assert states == ["offline"]
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------- F3：信号代次加固
+    @staticmethod
+    def _linked_manager(tmp_path):
+        """真实监视器在跑的管理器（代次语义只有真启停才测得出来）。"""
+        app = QApplication.instance() or QApplication([])
+        cfg = Config(base=tmp_path)
+
+        class Win:
+            def show_bubble(self, text, duration_ms=3000):
+                pass
+
+            def isVisible(self):
+                return True
+
+        mgr = AgentLinkManager(Win(), cfg)
+        cfg.set("agent_link", {"dsh": True})
+        mgr.apply_config()
+        app.processEvents()
+        assert mgr.monitors["dsh"]._running
+        return app, cfg, mgr
+
+    @staticmethod
+    def _emit_queued(signal, args, timeout: float = 5.0) -> None:
+        """在 worker 线程里发一次收敛信号（生产口径：threading.Thread + 队列投递）。
+
+        只保证「emit 已返回」——主线程在此期间不泵事件（Event 同步，不靠 sleep
+        猜时序），信号因此确定停在 Qt 队列里。
+        """
+        emitted = threading.Event()
+
+        def run():
+            signal.emit(*args)
+            emitted.set()
+
+        worker = threading.Thread(target=run, daemon=True, name="test-queued-emit")
+        worker.start()
+        assert emitted.wait(timeout), "worker 未能发出收敛信号"
+        worker.join(timeout)
+
+    def test_state_signal_of_the_previous_generation_is_dropped_after_restart(
+            self, tmp_path):
+        """F3：停 → 启之间同栈排队的旧代次状态信号必须被丢弃。
+
+        旧口径只查 ``monitor._running``——重开联动后新代次已经在跑，上一代次排在
+        Qt 队列里的 waiting_approval/error 照常过闸，把新代锁回陈旧状态。
+        """
+        app, cfg, mgr = self._linked_manager(tmp_path)
+        try:
+            mon = mgr.monitors["dsh"]
+            states = []
+            mgr.dsh_state_changed.connect(lambda _f, to_s: states.append(to_s))
+            gen_old = mon._emit_gen
+            self._emit_queued(mon.dsh_state_changed,
+                              ("idle", "waiting_approval", "worker/late", gen_old))
+            # 队列里已有旧代次信号（主线程没泵过事件）：关联动停监视器，再打开
+            cfg.set("agent_link", {"dsh": False})
+            mgr.apply_config()
+            cfg.set("agent_link", {"dsh": True})
+            mgr.apply_config()
+            app.processEvents()
+            assert mon._running and mon._emit_gen != gen_old, "重开必须是新代次"
+            assert "waiting_approval" not in states, (
+                f"上一代次的排队信号过闸了：{states}")
+            # 闸门不误伤：当前代次的信号照常到达
+            self._emit_queued(mon.dsh_state_changed,
+                              ("idle", "working", "tool/call", mon._emit_gen))
+            app.processEvents()
+            assert "working" in states, f"当前代次信号被代次闸误伤：{states}"
+        finally:
+            mgr.shutdown()
+
+    def test_user_message_of_the_previous_generation_is_dropped_after_restart(
+            self, tmp_path, monkeypatch):
+        """F3：停 → 启之间同栈排队的旧代次真人消息必须被丢弃。"""
+        app, cfg, mgr = self._linked_manager(tmp_path)
+        try:
+            mon = mgr.monitors["dsh"]
+            forwarded = []
+            notified = []
+            mgr.dsh_user_message.connect(lambda sid, text: forwarded.append((sid, text)))
+            monkeypatch.setattr(mgr, "notify_dsh_state",
+                                lambda state: notified.append(state))
+            gen_old = mon._emit_gen
+            self._emit_queued(mon.dsh_user_message, ("s-old", "", gen_old))
+            cfg.set("agent_link", {"dsh": False})
+            mgr.apply_config()
+            cfg.set("agent_link", {"dsh": True})
+            mgr.apply_config()
+            app.processEvents()
+            assert mon._running and mon._emit_gen != gen_old, "重开必须是新代次"
+            assert forwarded == [], f"上一代次的 user_message 过闸了：{forwarded}"
+            assert notified == [], "旧代次消息不得注入思考态"
+            # 闸门不误伤：当前代次的真人消息照常外转 + 注入思考态
+            self._emit_queued(mon.dsh_user_message, ("s-new", "", mon._emit_gen))
+            app.processEvents()
+            assert forwarded == [("s-new", "")], forwarded
+            assert notified == ["thinking"], notified
+        finally:
+            mgr.shutdown()
+
+    def test_queued_user_message_after_disable_is_not_forwarded(self, tmp_path, monkeypatch):
+        """F3：停机后未重开时，迟到的 user_message 也不得外转。"""
+        app, cfg, mgr = self._linked_manager(tmp_path)
+        try:
+            mon = mgr.monitors["dsh"]
+            forwarded = []
+            notified = []
+            mgr.dsh_user_message.connect(lambda sid, text: forwarded.append((sid, text)))
+            monkeypatch.setattr(mgr, "notify_dsh_state",
+                                lambda state: notified.append(state))
+            self._emit_queued(mon.dsh_user_message, ("s1", "", mon._emit_gen))
+            cfg.set("agent_link", {"dsh": False})
+            mgr.apply_config()
+            app.processEvents()
+            app.processEvents()
+            assert not mon._running
+            assert forwarded == [], f"停机后 user_message 仍外转：{forwarded}"
+            assert notified == [], "停机后不得注入思考态"
         finally:
             mgr.shutdown()
 

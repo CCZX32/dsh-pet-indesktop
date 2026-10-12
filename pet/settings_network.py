@@ -127,7 +127,7 @@ _FPS_FOLLOW_KEYS = ("game_fps_target_mode", "game_fps_process", "game_fps_permis
 _FPS_PERMISSION_BUTTON = "授予采集权限…"
 _FPS_PERMISSION_TEXT = {
     fps_permission.STATUS_ACTIVE: "已具备采集权限",
-    fps_permission.STATUS_PENDING: "已授权，注销并重新登录后生效",
+    fps_permission.STATUS_PENDING: "已授权，注销或重启电脑后生效",
     fps_permission.STATUS_MISSING: _FPS_PERMISSION_BUTTON,
     fps_permission.STATUS_UNSUPPORTED: "无法判定权限，点此尝试授权…",
 }
@@ -401,7 +401,7 @@ def _fps_permission_rows(dialog) -> list[SettingRow]:
             "帧率采集权限",
             "Windows 只允许管理员或「Performance Log Users」组成员读取游戏的呈现事件。"
             "点按钮会弹出一次系统的管理员授权窗口，把当前账户加入该组——桌宠本身仍以普通"
-            "权限运行，不装服务、不常驻提权进程。加入后需要注销并重新登录才生效；"
+            "权限运行，不装服务、不常驻提权进程。加入后，注销或重启电脑才生效；"
             "要撤销，在「计算机管理 · 本地用户和组」里把自己移出该组即可。",
             button,
         )

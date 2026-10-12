@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal, QTimer
@@ -931,7 +932,11 @@ class ChatWindow(QDialog):
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
         messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text)
-        self._active_request_id = self.service.send(messages, config)
+        # 与 widgets.py 同款：id 必须先落本窗在途状态再 send（`started` 在
+        # send() 内同步发出，晚赋值会让 `_started` 的 id 过滤恒命中）。
+        request_id = uuid.uuid4().hex
+        self._active_request_id = request_id
+        self.service.send(messages, config, request_id=request_id)
         self._bottom()
 
     def _focus_chat(self) -> None:

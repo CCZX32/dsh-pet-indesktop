@@ -76,7 +76,7 @@ class QuickChatBubble(QFrame):
         self.character_id = str(config.get("character", "shenshen"))
         self.settings = config.chat_settings()
         self.prompt_builder = PromptBuilder(Path(__file__).resolve().parent.parent / "assets" / "characters")
-        self.store = SessionStore(config.dir, getattr(config, "instance_id", ""))
+        self.store = SessionStore(config.dir, "" if str(getattr(config, "instance_id", "")) == "slot-0" else str(getattr(config, "instance_id", "")))
         self.session = self._get_session()
         self.service = ChatService(parent=self)
         self._active_request_id: str | None = None
@@ -178,7 +178,11 @@ class QuickChatBubble(QFrame):
         self.prev_btn.clicked.connect(lambda: self._show_page(self._page - 1))
         self.next_btn.clicked.connect(lambda: self._show_page(self._page + 1))
         self.open_chat_btn.clicked.connect(self._open_full_chat)
-        self.service.started.connect(self._started)
+        # started 在 send() 内**同步**发出，而 _active_request_id 是 send() 的
+        # 返回值——直连会让 _started 的 id 过滤恒命中（气泡提示永远停在
+        # 「思考中…」）。排队一拍：emit 先于 worker.start() 投递，事件按
+        # FIFO 处理，本槽必在首个 delta 之前跑到，此刻 id 已落位。
+        self.service.started.connect(self._started, Qt.ConnectionType.QueuedConnection)
         self.service.delta.connect(self._delta)
         self.service.activity.connect(self._activity)
         self.service.finished.connect(self._finished)
@@ -230,6 +234,44 @@ class QuickChatBubble(QFrame):
     def refresh_session(self) -> None:
         """从磁盘重取最近会话（公开 seam；角色切换后外部刷新用，替代私访 _get_session）。"""
         self.session = self._get_session()
+
+    def switch_character(self, character_id: str) -> None:
+        """切角色同步 seam（B07）：先作废在途请求，再换身份 + 按新角色重取会话。
+
+        气泡的角色是构造期一次性快照（``character_id`` 决定会话目录与系统提示，
+        见 ``_get_session`` / ``_send`` 的 ``build_messages``）；主宠切角色后不同步
+        这里，气泡会一直用旧角色的会话与人格提示。空身份/同角色不动作（避免无谓
+        重建会话，丢掉正在续聊的那一条）。
+
+        作废在途请求是先决条件：``_finished`` / ``_delta`` / ``_error`` / ``_stopped``
+        一律按 ``_active_request_id`` 认领信号，换会话时不清它，旧角色那次请求的完成
+        信号到达时 ID 仍然匹配，回答就被 append 进**新**角色的 session（对照完整聊天窗
+        ``chat/widgets.py::switch_character`` 的同款闸门）。
+        """
+        new_id = str(character_id or "")
+        if not new_id or new_id == self.character_id:
+            return
+        self._invalidate_in_flight_request()
+        self.character_id = new_id
+        self.refresh_session()
+
+    def _invalidate_in_flight_request(self) -> None:
+        """作废在途请求：清 ID 闸 + 停掉 worker + 撤掉它的显示残留。
+
+        清 ID 后旧请求的完成/增量/错误/停止信号全部按 ID 失配静默丢弃（既不落库也不
+        上屏）；停 worker 只是别让它在后台白跑完再被丢弃。已上屏的半截回答属于**旧角色**
+        的回答，换身份后不该留在新角色的气泡里，故与完整聊天窗换角色一致地复位显示。
+        """
+        if self._active_request_id is None:
+            return
+        self._active_request_id = None
+        self.service.stop()
+        self._set_reply_text("")
+        self._page = 0
+        self._pages = []
+        self.page_widget.setVisible(False)
+        self._render_reply()
+        self.hint_label.setText("")
 
     def _new_session(self):
         session = self.store.create(
@@ -359,6 +401,7 @@ class QuickChatBubble(QFrame):
         messages = self.prompt_builder.build_messages(
             self.settings, self.character_id, self.session.messages[:-1], text
         )
+        self._request_pet_window = self.pet_window
         self._active_request_id = self.service.send(messages, config)
 
     def _started(self, request_id: str) -> None:
@@ -371,8 +414,13 @@ class QuickChatBubble(QFrame):
             return
         self.hint_label.setText("深度思考中…" if kind == "reasoning" else str(text).strip()[:30])
 
+    def _request_presentation_valid(self) -> bool:
+        target = getattr(self, "_request_pet_window", self.pet_window)
+        valid = getattr(target, "presentation_valid", None)
+        return target is self.pet_window and (not callable(valid) or bool(valid()))
+
     def _delta(self, request_id: str, text: str) -> None:
-        if request_id != self._active_request_id:
+        if request_id != self._active_request_id or not self._request_presentation_valid():
             return
         self._set_reply_text(self._reply_full + str(text))
         self._render_reply()
@@ -390,7 +438,10 @@ class QuickChatBubble(QFrame):
             self.session = synced
         self._active_request_id = None
         self.hint_label.setText("")
-        self._render_reply()
+        if self._request_presentation_valid():
+            self._render_reply()
+        else:
+            self.hide()
 
     def _error(self, request_id: str, text: str) -> None:
         if request_id != self._active_request_id:
@@ -405,6 +456,15 @@ class QuickChatBubble(QFrame):
             return
         self._active_request_id = None
         self.hint_label.setText("已停止")
+
+    def request_in_flight(self) -> bool:
+        """是否有自己发出的、尚未到终态的请求在途。
+
+        预览式改写（``show_reply``/``show_feedback``）会把 ``_active_request_id``
+        清成 None，此后真实完成回调按 request_id 匹配全部**静默返回**（回答既不
+        上屏也不落库）。所以任何"接管气泡显示"的外部入口都必须先问这一句。
+        """
+        return self._active_request_id is not None or self.service.busy
 
     # ------------------------------------------------------------ 显示
     def _set_reply_text(self, full_text: str) -> None:

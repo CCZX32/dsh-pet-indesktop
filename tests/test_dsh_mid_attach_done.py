@@ -492,6 +492,27 @@ def test_mid_attach_hard_failure_never_claims_success(tmp_path, monkeypatch):
     assert "done.wav" not in rig.sounds, rig.sounds
 
 
+def test_error_turn_end_injects_error_into_presentation(tmp_path, monkeypatch):
+    """F4 呈现侧：error 收尾必须注入呈现管线——桌宠撤忙碌动画（_last_raw 落 error）、
+    按失败口径收尾，而不是停在 thinking 直到下一回合。"""
+    rig = _make_rig(tmp_path, monkeypatch)
+    mon, mgr = rig.mon, rig.mgr
+    try:
+        _write(rig.bridge, "dsh.jsonl", *_IN_FLIGHT_HISTORY)
+        mon._probe_online()
+        mon._poll()
+        _pump(rig.app, 0.2)
+        _write(rig.bridge, "dsh.jsonl",
+               {"event": "tool/result", "sessionId": "s-1", "tool": "bash", "ok": True},
+               {"event": "turn/end", "sessionId": "s-1", "step": "turn:7",
+                "sourceTurn": "7", "reasonKind": "error"})
+        mon._poll()
+        _pump(rig.app, 0.2)
+        assert mgr._last_raw.get("dsh") == "error", mgr._last_raw
+    finally:
+        mgr.shutdown()
+
+
 def test_mid_attach_success_while_other_agent_busy(tmp_path, monkeypatch):
     """多 Agent 并行：dsh 中途挂载收尾时 claude 仍在忙——提醒照出、动画不互顶。"""
     rig = _make_rig(tmp_path, monkeypatch)
@@ -712,21 +733,31 @@ def test_same_turn_end_written_to_two_files_notifies_once(tmp_path, monkeypatch)
     assert rig.sounds.count("done.wav") == 1, rig.sounds
 
 
-def test_mirrored_envelope_with_user_message_notifies_once(tmp_path, monkeypatch):
-    """M2：两个写者各写**一整封镜像信封**（含 user/message）→ 只提醒一次。
+# 回合信封的**真实形状**：真实 DSH 的 ``UserMessage`` 是 ``{id, role, content, source}``
+# ——没有 ``turn`` 字段（真实桥日志 213 条 user/message 全部无 step/turn），因此桥接
+# 写出的 user/message 既不带 step、也不带 sourceTurn，而且每回合有多条（真人 1 条 +
+# agent.inject() 注入的若干条上下文）。回合号只有 turn/start / turn/end 带。
+_REAL_ENVELOPE = (
+    {"event": "user/message", "sessionId": "s-1", "sourceKind": "user"},
+    {"event": "user/message", "sessionId": "s-1", "sourceKind": "agent-instructions"},
+    {"event": "user/message", "sessionId": "s-1", "sourceKind": "skill-catalog"},
+    {"event": "user/message", "sessionId": "s-1", "sourceKind": "skill-invocation"},
+    {"event": "turn/start", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+    {"event": "turn/end", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+)
 
-    旧行为：镜像判定只认 ``turn/start``，``user/message`` 永远重新发号——它进的是全
-    写者共享的会话表，第二条 user/message 一发号，同一回合的两份收尾就落在两个 token
-    上、算出两个身份，消费侧身份去重失效，第二次完成提醒照弹。桥接透传 ``sourceTurn``
-    后两侧回合号相同 → 镜像副本绑到同一个身份（身份构造见 dsh_state）。
+
+def test_mirrored_envelope_with_user_message_notifies_once(tmp_path, monkeypatch):
+    """X1：两个写者各写**一整封真实形状的镜像信封** → 只提醒一次。
+
+    旧判据假定 user/message 带 ``sourceTurn``（按回合号绑身份），真实记录不带——于是
+    每条 user/message 都重新发号：第二个写者的信封一进来，同一回合的 token 就被顶到
+    新值上，两份 turn/end 算出两个身份，消费侧身份去重失效。本用例的 A 信封 → 越过
+    完成冷却 → B 信封序列正是复发路径：第二次完成提醒照弹（本用例红）。
     """
     rig = _make_rig(tmp_path, monkeypatch)
     mon, mgr = rig.mon, rig.mgr
-    envelope = (
-        {"event": "user/message", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
-        {"event": "turn/start", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
-        {"event": "turn/end", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
-    )
+    envelope = _REAL_ENVELOPE
     try:
         mon._probe_online()
         (rig.bridge / "dsh-11.jsonl").touch()
@@ -739,6 +770,7 @@ def test_mirrored_envelope_with_user_message_notifies_once(tmp_path, monkeypatch
         mon._poll()
         assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles)), rig.bubbles
         _pump(rig.app, 0.3)
+        assert len(_succeeded(rig.bubbles)) == 1, rig.bubbles
         rig.clock[0] += 10.0                    # 越过完成冷却：真排定的第二次确认会弹
 
         _write(rig.bridge, "dsh-22.jsonl", *[{**r, "inst": "bootB"} for r in envelope])
@@ -748,6 +780,38 @@ def test_mirrored_envelope_with_user_message_notifies_once(tmp_path, monkeypatch
         mgr.shutdown()
     assert len(_succeeded(rig.bubbles)) == 1, rig.bubbles
     assert rig.sounds.count("done.wav") == 1, rig.sounds
+
+
+def test_error_turn_end_never_notifies_success(tmp_path, monkeypatch):
+    """F4：``reasonKind=error`` 的回合收尾不得报成功（无完成气泡、无 done 音效）。
+
+    桥端只在「重试耗尽」或「本轮工具失败且无成功」时写 execution/failed；重试 <4 或
+    本轮有工具成功时**不写任何抑制标记**，此前这种失败回合照样按 turn/end → success
+    收敛，绿点 + done 音效 + 「干完活啦」一起冒出来。
+    """
+    rig = _make_rig(tmp_path, monkeypatch)
+    mon, mgr = rig.mon, rig.mgr
+    converged: list[tuple[str, str]] = []
+    mgr.dsh_state_changed.connect(lambda _f, to_state: converged.append(to_state))
+    try:
+        _write(rig.bridge, "dsh.jsonl", *_IN_FLIGHT_HISTORY)
+        mon._probe_online()
+        mon._poll()
+        _write(rig.bridge, "dsh.jsonl",
+               {"event": "tool/result", "sessionId": "s-1", "tool": "bash", "ok": True},
+               {"event": "turn/end", "sessionId": "s-1", "step": "turn:7",
+                "sourceTurn": "7", "reasonKind": "error"})
+        mon._poll()
+        assert mon._converger.current_state is DshState.ERROR, \
+            "reasonKind=error 的收尾必须落错误终态，不得收敛 success"
+        assert "error" in converged, f"错误终态必须转发到灵动岛：{converged}"
+        assert "success" not in converged, converged
+        assert "dsh" not in mgr._done_pending, "错误回合不得排定完成确认"
+        _pump(rig.app, 1.2)                     # 超过 800ms 确认窗
+    finally:
+        mgr.shutdown()
+    assert _succeeded(rig.bubbles) == [], rig.bubbles
+    assert "done.wav" not in rig.sounds, rig.sounds
 
 
 def test_next_turn_on_another_writer_with_new_source_turn_notifies_again(

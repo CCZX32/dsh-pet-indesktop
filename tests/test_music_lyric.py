@@ -357,7 +357,7 @@ def test_lead_does_not_show_line_far_in_future():
 # ---------------------------------------------------------------- 常驻标题 + 歌词
 
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Qt
 
 
 class _FakeWin(QObject):
@@ -1746,6 +1746,146 @@ def test_resample_after_disable_enable_is_processed(qapp, monkeypatch):
         ctrl.sync_enabled(True)       # 重新开启：新采样（第 2 次调用）立即返回
         assert _pump_until(lambda: fetched), "关闭再开启后新采样不得被误丢"
     finally:
+        ctrl.shutdown()
+
+
+class _IndexedGatedSampler:
+    """按调用序号分别卡放的 SMTC 采样替身（只替换 OS 边界）。
+
+    第 N 次调用先置 ``started[N]`` 再等 ``release[N]``，于是测试能精确摆出
+    「旧那一拍还卡在 WinRT 里、关闭重开后新的一拍已经派发」那一刻；超出
+    ``playbacks`` 长度的调用复用最后一格（已放行则立即返回）。
+    """
+
+    def __init__(self, playbacks) -> None:
+        import threading
+
+        self.playbacks = list(playbacks)
+        self.calls = 0
+        self.started = [threading.Event() for _ in self.playbacks]
+        self.release = [threading.Event() for _ in self.playbacks]
+
+    def __call__(self, tracked_app_id=None, **kwargs):
+        index = min(self.calls, len(self.playbacks) - 1)
+        self.calls += 1
+        self.started[index].set()
+        self.release[index].wait(timeout=30)
+        return self.playbacks[index]
+
+
+class _PlaybackReadySpy(QObject):
+    """记录 ``_playback_ready`` 到达主线程几次：**队列投递的顺序证据**。
+
+    产品回调在 ``MusicLyricController.__init__`` 里先连，本替身后连；同一次发射
+    按连接顺序各投一个事件，事件队列 FIFO，因此「spy 见到第 N 次」意味着产品
+    回调已经处理过第 N 次——这正是断言「迟到结果什么也没做」所需的时序证据。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def on_ready(self, *_args) -> None:
+        self.count += 1
+
+
+def test_stale_sample_after_disable_enable_does_not_clear_busy_gate(qapp, monkeypatch):
+    """关闭+重开后，关闭前那一拍的迟到结果必须被丢弃，且不得清掉忙门（F5）。
+
+    旧实现把「本拍代次」记在**可变单槽** ``_dispatch_generation`` 里：``_reset()``
+    只递增 ``_generation``、不回写这个槽，于是关闭后立刻重开时，``sync_enabled(True)``
+    同步调用的 ``_on_tick`` 把该槽覆盖成新代次。关闭前派发、此刻才回来的旧采样
+    读到的是**新**代次 → 被当成本代结果接受，并顺手清掉忙门：重开后派发的那一拍
+    还在 WinRT 里飞着，忙门却已经打开，"同一时刻只允许一拍在途"就此破裂（两拍
+    并发回来会乱序推进状态）。
+    """
+    from pet import now_playing
+    from pet.music_lyric_controller import MusicLyricController, NOW_SINGING_TEMPLATE
+
+    stale = _playback(None, title="旧歌", artist="旧手")   # 关闭前那一拍的结果
+    fresh = _playback(None, title="新歌", artist="新手")   # 重开后那一拍的结果
+    fresh_title = NOW_SINGING_TEMPLATE.format(title="新歌")
+    sampler = _IndexedGatedSampler([stale, fresh])
+    monkeypatch.setattr(now_playing, "get_now_playing", sampler)
+
+    win = _FakeWinVisible()
+    ctrl = MusicLyricController(win)
+    fetched: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: fetched.append(a))
+    spy = _PlaybackReadySpy()
+    ctrl._playback_ready.connect(spy.on_ready, Qt.ConnectionType.QueuedConnection)
+    try:
+        ctrl.sync_enabled(True)                 # 派发第 1 拍（旧代）→ 卡在 SMTC 里
+        assert sampler.started[0].wait(timeout=10), "前提：第 1 拍已进入 SMTC 调用"
+
+        ctrl.sync_enabled(False)                # 关闭：_reset() 递增代次
+        ctrl.sync_enabled(True)                 # 立刻重开：同步 _on_tick 派发第 2 拍
+        assert ctrl._sampling is True, "前提：第 2 拍已派发（worker 还卡在第 1 拍里）"
+
+        sampler.release[0].set()                # 旧那一拍迟到返回
+        assert _pump_until(lambda: spy.count >= 1), "迟到采样未回到主线程"
+        assert ctrl._sampling is True, (
+            "上一代的迟到结果清掉了忙门：此刻第 2 拍还在 SMTC 里飞，"
+            "忙门却已打开，一拍在途的约束失效"
+        )
+        assert win.shown == [], "上一代的迟到结果不得把旧歌名顶上屏"
+        assert fetched == [], "上一代的迟到结果不得重新派发取词"
+
+        sampler.release[1].set()                # 第 2 拍（本代）照常处理
+        assert _pump_until(lambda: fresh_title in [t for _, t in win.shown]), (
+            "重开后的本代采样被令牌守卫误杀"
+        )
+        assert {t for _, t in win.shown} == {fresh_title}, (
+            "只有本代那一拍能上屏；出现别的标题说明上一代的结果也被认了"
+        )
+        assert ctrl._current_key == ("新歌", "新手")
+        assert all(a[0] == ("新歌", "新手") for a in fetched), fetched
+    finally:
+        sampler.release[0].set()
+        sampler.release[1].set()
+        ctrl.shutdown()
+
+
+def test_music_mode_reentry_after_inflight_sample_keeps_sampling(qapp, monkeypatch):
+    """退出音乐模式再进入：在途那一拍不得把忙门留下永久闭着（F5 配套）。
+
+    「退出音乐模式」（``set_music_mode_enabled(False)``）只停表 + ``_reset()``，
+    **不停采样线程**；那一拍的结果回来时在途令牌已被作废 → 令牌守卫直接丢弃。
+    丢弃路径不清忙门（忙门属于"在途派发"，这一拍已被作废），所以作废方必须自己
+    结清：否则忙门卡在 True，而这是唯一会来的结果（表已停），用户再进音乐模式时
+    ``_on_tick`` 每拍都在第一道闸门返回、唤醒口也再没人置位——歌词直到重启都不
+    再更新。
+    """
+    from pet import now_playing
+    from pet.music_lyric_controller import MusicLyricController
+
+    sampler = _IndexedGatedSampler([_playback(None, title="歌", artist="手")])
+    monkeypatch.setattr(now_playing, "get_now_playing", sampler)
+
+    win = _FakeWinVisible()
+    ctrl = MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    spy = _PlaybackReadySpy()
+    ctrl._playback_ready.connect(spy.on_ready, Qt.ConnectionType.QueuedConnection)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.started[0].wait(timeout=10), "前提：采样已进入 SMTC 调用"
+
+        ctrl.set_music_mode_enabled(False)
+        assert ctrl._sampling is False, "退出音乐模式必须结清在途那一拍的忙门"
+
+        sampler.release[0].set()                # 那一拍迟到返回
+        assert _pump_until(lambda: spy.count >= 1), "迟到采样未回到主线程"
+        assert ctrl._sampling is False, "被作废的那一拍不得再把忙门拨回在途"
+        assert win.shown == [], "退出音乐模式后迟到的采样不得把歌名顶上屏"
+
+        ctrl.set_music_mode_enabled(True)       # 再进音乐模式
+        assert _pump_until(lambda: sampler.calls >= 2), (
+            "再进音乐模式后采样必须恢复；卡住说明忙门被留下一拍而永远闭着，"
+            "_on_tick 每拍都在第一道闸门返回"
+        )
+    finally:
+        sampler.release[0].set()
         ctrl.shutdown()
 
 

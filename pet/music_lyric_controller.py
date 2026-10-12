@@ -300,10 +300,10 @@ class MusicLyricController(QObject):
     # 后台取词完成：(曲目标识, 歌词行列表或 None)
     _lyrics_ready = Signal(object, object)
 
-    # 后台 SMTC 采样完成：Playback 或 None。
+    # 后台 SMTC 采样完成：(Playback 或 None, 本拍的请求令牌)。
     # 采样必须离开主线程——get_now_playing() 内部走 asyncio.run() 调 WinRT，
     # 一旦该调用不返回就会**永久阻塞 Qt 主线程**（窗口未响应）。
-    _playback_ready = Signal(object)
+    _playback_ready = Signal(object, object)
 
     # 类级默认：单测直接驱动 _on_lyrics_ready 时未走过 _start_track，
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
@@ -317,13 +317,14 @@ class MusicLyricController(QObject):
     _paused_total: float = 0.0
     _paused_since: float | None = None
 
-    # 采样**代次**：每次 _reset() 递增（=关闭歌词 / 退出音乐模式 / shutdown）。
-    # 在途采样带着派发时的代次回来，代次不符即为上一代的迟到结果，一律丢弃。
-    # 类级默认 0 供单测直接驱动 _on_playback_ready（没有派发过，两值相等=放行）。
-    _generation: int = 0
-    # 最近一次派发的采样所属代次（主线程写、主线程读；同一时刻只允许一拍在途，
-    # 由 _sampling 标志保证，所以单个槽位就够）。
-    _dispatch_generation: int = 0
+    # 采样**请求令牌**：每次派发自增，令牌随结果信号一起回来。回调只认与当前
+    # 在途令牌一致的结果；`None` = 没有在途派发（也供单测直接驱动
+    # _on_playback_ready 用——不带令牌 = 没有派发过 = 两值相等 = 放行）。
+    _inflight_token: int | None = None
+    # worker 下一次采样要带的令牌（派发时与 _inflight_token 同时写入）。**只由
+    # 主线程写、worker 读一次**，读侧不清零：清零是"读改写"，会与紧随其后的新
+    # 派发抢，把新令牌抹掉——那一拍就再也没有结果回来，忙门永久卡死。
+    _pending_token: int | None = None
 
     def __init__(self, window: Any) -> None:
         super().__init__(window)
@@ -335,6 +336,10 @@ class MusicLyricController(QObject):
 
         # 采样在途标志：后台线程还在跑就不再派发新的，避免堆积。
         self._sampling: bool = False
+        # 令牌来源（只增不减，跨代次唯一）：见 _on_tick / _reset。
+        self._request_seq: int = 0
+        self._inflight_token: int | None = None
+        self._pending_token: int | None = None
         # 常驻采样线程（懒启动）：见 _sample_loop 说明为何不每拍新建。
         self._sample_thread: threading.Thread | None = None
         self._sample_wake = threading.Event()
@@ -430,8 +435,9 @@ class MusicLyricController(QObject):
         ``wake.wait()`` 上（歌词再也不更新，直到重启应用）。所以关闭必须在这里把
         这拍未消费的派发按**结果回调的同一口径**（只复位 ``_sampling``）结清。
 
-        在途那一拍若稍后真的回来了，不必在这里额外作废：``_reset()`` 紧随其后递增
-        代次，``_on_playback_ready`` 的代次守卫会把它当上一代丢弃。
+        在途那一拍若稍后真的回来了，不必在这里额外作废：紧随其后的 ``_reset()``
+        会把在途令牌作废（``_inflight_token = None``），``_on_playback_ready``
+        的令牌守卫会把它丢掉。
         """
         self._sample_stop.set()
         self._sample_wake.set()
@@ -502,10 +508,22 @@ class MusicLyricController(QObject):
 
     def _reset(self) -> None:
         self._tracker.reset()
-        # 代次递增放在**最前**：复位之后到达的在途采样必须被识别成上一代。
+        # 作废在途那一拍放在**最前**：复位之后到达的采样必须被认成上一拍。
         # 所有关闭路径（sync_enabled(False) / set_music_mode_enabled(False) /
-        # shutdown）都经这里，代次变化即等价于"当前不再启用"。
-        self._generation += 1
+        # shutdown）都经这里，作废即等价于"当前不再启用"。
+        #
+        # 令牌作废本身不够，还得把忙门结清：`_on_playback_ready` 只认当前在途的
+        # 令牌，被作废那一拍的结果回来时不会再清忙门（它不属于任何在途派发）。
+        # 而"退出音乐模式"这条路径只停表、不停采样线程（`set_music_mode_enabled`
+        # 不叫 `_stop_sample_thread`），忙门若卡在 True，用户再进音乐模式时
+        # `_on_tick` 会在第一道闸门返回、唤醒口也再没人置位——歌词这条链路
+        # 直到重启应用都不会再更新。
+        #
+        # 令牌随结果回来（派发时捕获），所以**关闭后立刻重开**时，关闭前那一拍
+        # 回来带的仍是旧令牌，不会像"回调读可变单槽"那样读到新派发的令牌而被
+        # 当成本代结果接受。
+        self._inflight_token = None
+        self._sampling = False
         self._current_key = None
         self._no_lyric_until.clear()
         self._loading.clear()
@@ -636,8 +654,12 @@ class MusicLyricController(QObject):
         if self._sampling or self._sample_thread is None:
             return  # 上一拍还没回来 / 线程未起：跳过，避免堆积
         self._sampling = True
-        # 记下本拍所属代次（回调侧据此判"是不是关闭/复位之后才回来的"）。
-        self._dispatch_generation = self._generation
+        # 本拍的**请求令牌**：派发时捕获、随结果一起回来（worker 在真正开始采样
+        # 前读走），是两个不可变值，不是"回调再去读的可变槽"。回调侧据此判
+        # "是不是关闭/复位之后才回来的"（见 _on_playback_ready）。
+        self._request_seq += 1
+        self._pending_token = self._request_seq
+        self._inflight_token = self._request_seq
         self._sample_wake.set()
 
     def _browser_media_enabled(self) -> bool:
@@ -696,12 +718,17 @@ class MusicLyricController(QObject):
         线程等于每秒多一个 apartment，正是 pet/music_detect.py 记录过的
         「句柄累积可能导致崩溃」（那里为此只初始化一次 COM 对象）。
         常驻线程只初始化一次，且即使 WinRT 调用卡住也只影响本线程。
+
+        **令牌在开始采样前读走**（不是回调时再读）：慢查询期间主线程可能已经
+        复位并派发下一拍，读晚了就会把这一拍的结果贴上新令牌——那正是"旧结果
+        被当本代"的根因。读一次不清零：清零是读改写，会与紧随其后的新派发抢。
         """
         while not self._sample_stop.is_set():
             self._sample_wake.wait()
             self._sample_wake.clear()
             if self._sample_stop.is_set():
                 break
+            token = self._pending_token
             try:
                 playback = now_playing.get_now_playing(
                     self._tracked_app_id,
@@ -712,7 +739,7 @@ class MusicLyricController(QObject):
             except Exception:
                 playback = None
             try:
-                self._playback_ready.emit(playback)
+                self._playback_ready.emit(playback, token)
             except RuntimeError:
                 break  # 对象已销毁
 
@@ -739,15 +766,25 @@ class MusicLyricController(QObject):
         self._sample_thread = thread
         thread.start()
 
-    def _on_playback_ready(self, playback) -> None:
-        """采样回到主线程：在这里做原有的状态推进。"""
-        self._sampling = False
-        # 代次守卫：关闭歌词（_reset 递增代次）之后才回来的采样不得再推进任何
-        # 状态。此时 _current_key 已被清空，放行等于把"关掉歌词前那一拍"当成
-        # 新歌——重新取词 + 歌词上屏，用户明明关了歌词。shutdown 同理（同一个
-        # _reset）。flag 照常在上一行清掉，否则采样永久停摆。
-        if self._dispatch_generation != self._generation:
+    def _on_playback_ready(self, playback, token=None) -> None:
+        """采样回到主线程：只处理**当前在途那一拍**的结果，然后推进状态。
+
+        ``token`` 是派发时捕获、随结果一起回来的请求令牌（不带 = 单测直接驱动，
+        没有派发过，``_inflight_token`` 也是 ``None``，两值相等即放行）。
+
+        令牌守卫：关闭歌词（``_reset()`` 作废在途令牌）之后才回来的采样不得再
+        推进任何状态。此时 ``_current_key`` 已被清空，放行等于把"关掉歌词前那一
+        拍"当成新歌——重新取词 + 歌词上屏，用户明明关了歌词。shutdown 同理
+        （同一个 ``_reset``）。
+
+        **不匹配时连忙门都不清**：忙门属于新的在途派发（关闭后立刻重开时，
+        ``sync_enabled(True)`` 已同步派发下一拍），被上一代清掉就等于允许两拍
+        结果并发推进状态。被作废那一拍的忙门由作废方（``_reset``）结清。
+        """
+        if token != self._inflight_token:
             return
+        self._inflight_token = None
+        self._sampling = False
         if not getattr(self.win, "isVisible", lambda: False)():
             return
         if playback is None:

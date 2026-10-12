@@ -2157,13 +2157,17 @@ class DshMonitor(BaseAgentMonitor):
     PLUGIN_NAME = "@dsh-pet/bridge"
 
     # 收敛器输出（worker 线程 emit，队列投递回主线程）：
-    # dsh_state_changed(from_state, to_state, source_event)；from_state 为 ""
+    # dsh_state_changed(from_state, to_state, source_event, gen)；from_state 为 ""
     # 表示首个状态；source_event 为触发事件的桥接事件名（探活基线为 ""），
-    # 供管理器做同源气泡去重（cordis/approval 有专属常驻气泡，不再弹通用提醒）。
-    dsh_state_changed = Signal(str, str, str)
-    # 真人用户消息 → (session_id, text)：对话开始的稳定触发点（sourceKind
-    # 过滤在收敛器内完成；减法后桥接不再落明文 text，实参恒为 ""）。
-    dsh_user_message = Signal(str, str)
+    # 供管理器做同源气泡去重（cordis/approval 有专属常驻气泡，不再弹通用提醒）；
+    # gen 是**发出时的代次**（``_emit_gen``）——已入队的信号撤销不掉，消费侧
+    # 靠它丢弃「停 → 启」之间同栈排队的上一代次信号（见
+    # ``AgentLinkManager._dsh_convergence_current``）。
+    dsh_state_changed = Signal(str, str, str, int)
+    # 真人用户消息 → (session_id, text, gen)：对话开始的稳定触发点（sourceKind
+    # 过滤在收敛器内完成；减法后桥接不再落明文 text，实参恒为 ""）；gen 口径
+    # 同 ``dsh_state_changed``（停机后未重开时不得外转）。
+    dsh_user_message = Signal(str, str, int)
 
     # live 回合成功收尾（桥接 turn/end，不带源 ID）→ (agent_key, payload)：
     # payload = {identity, sessionId, step, source_event, gen}。身份由
@@ -2449,11 +2453,14 @@ class DshMonitor(BaseAgentMonitor):
         self._emit(self.bridge_owner_attested, (self.agent_key, data))
 
     def _emit_converged(self, outputs: list) -> None:
+        # 代次随信号一起投递（取发出这一刻的 _emit_gen）：消费侧的收敛闸靠它
+        # 区分"本代次的信号"与"上一代次停在队列里的信号"。
         for item in outputs:
             if item[0] == "state":
-                self._emit(self.dsh_state_changed, (item[1], item[2], item[3]))
+                self._emit(self.dsh_state_changed,
+                           (item[1], item[2], item[3], self._emit_gen))
             elif item[0] == "user_message":
-                self._emit(self.dsh_user_message, (item[1], item[2]))
+                self._emit(self.dsh_user_message, (item[1], item[2], self._emit_gen))
 
 
     @staticmethod
@@ -3190,7 +3197,9 @@ class AgentLinkManager(QObject):
 
     install_finished = Signal(str, bool, str, int)  # (agent_key, ok, message, install_token)
     # DSH 收敛器输出（转发自 DshMonitor，供 AppShell 驱动灵动岛/收尾）：
-    # (from_state, to_state)；from_state 为 "" 表示首个状态
+    # (from_state, to_state)；from_state 为 "" 表示首个状态。监视器侧的队列投递
+    # 代次已在 ``_on_dsh_converged_state`` / ``_on_dsh_converged_user_message``
+    # 边界校验完毕，这里出去的都是当前代次的事件，不再带 gen。
     dsh_state_changed = Signal(str, str)
     # DSH 真人用户消息（session_id, text）；减法后桥接不落明文，text 恒为 ""
     dsh_user_message = Signal(str, str)
@@ -3718,6 +3727,24 @@ class AgentLinkManager(QObject):
         mon = self.monitors.get(agent_key)
         return mon is not None and gen == mon._emit_gen
 
+    def _dsh_convergence_current(self, gen: int | None) -> bool:
+        """DSH 收敛信号闸：监视器在跑**且**信号代次仍当前才放行。
+
+        worker 线程发出的收敛信号走 Qt 队列投递，监视器停止时已入队的旧信号
+        撤销不掉（B1：只查 ``_running`` 就够）。但「停 → 启」之间同栈排队的
+        信号更危险：新代次已经在跑，``_running`` 闸放它过去——上一代次的
+        waiting_approval/error 于是把新代锁回陈旧状态，user_message 还会凭空
+        外转一条真人消息（F3）。所以收敛信号统一携带发出时的代次，这里逐条
+        对代次（``_gen_current``，同 :meth:`_on_dsh_turn_started` 的既有口径）。
+
+        ``gen is None`` = 不经队列的同步直调（``link-disabled`` 人工复位与
+        测试）：按当前代次处理，闸门退化为既有的 ``_running`` 检查。
+        """
+        mon = self.monitors.get("dsh")
+        if mon is None or not mon._running:
+            return False  # 迟到/孤儿信号：监视器已停（含停机后未重开）
+        return gen is None or self._gen_current("dsh", gen)
+
     def _on_agent_state_event(self, event: AgentEvent) -> None:
         self._on_agent_state(event.agent, event.state, event.gen, owner=event.owner)
 
@@ -3740,14 +3767,17 @@ class AgentLinkManager(QObject):
         self._on_agent_state("dsh", state, mon._emit_gen)
 
     def _on_dsh_converged_state(self, from_state: str, to_state: str,
-                                source_event: str = "") -> None:
+                                source_event: str = "", gen: int | None = None) -> None:
         """订阅 DSH 收敛状态变化（单读方收敛器 → 呈现管线 + AppShell 转发）。
 
-        **迟到信号隔离（astra 保底 B1）**：worker 发出的收敛信号走 Qt 队列投递，
-        监视器停止时已入队的旧信号撤销不掉——若不拦，「关闭联动 → 同步发
-        offline 复位 → 泵队列 → 旧 waiting_approval/error 到达」会把呈现侧重新
-        锁回陈旧状态。监视器不在跑时只放行人工复位（link-disabled），其余一律
-        丢弃；DSH 真离线（offline）发生时监视器仍在跑，不受此闸影响。
+        **迟到信号隔离（astra 保底 B1 + F3 代次加固）**：worker 发出的收敛信号走
+        Qt 队列投递，监视器停止时已入队的旧信号撤销不掉——若不拦，「关闭联动 →
+        同步发 offline 复位 → 泵队列 → 旧 waiting_approval/error 到达」会把呈现侧
+        重新锁回陈旧状态；「停 → 启」之间同栈排队的上一代次信号连 ``_running``
+        都拦不住（新代次已在跑），同样会把新代锁回陈旧态。监视器不在跑时只放行
+        人工复位（link-disabled），其余一律丢弃；信号代次不是当前代次的一律丢弃
+        （``gen`` 口径见 :meth:`_dsh_convergence_current`）。DSH 真离线（offline）
+        发生时监视器仍在跑且代次当前，不受此闸影响。
 
         - 转发给 AppShell（灵动岛 set_agent_active / offline 收尾）；
         - thinking：legacy AgentStatus 基线只有 working/idle，thinking 由收敛器
@@ -3767,14 +3797,15 @@ class AgentLinkManager(QObject):
         - waiting_question 只更新状态（岛指示/动画），不弹通用气泡——
           常驻问题气泡已由 ``_on_question_request`` 呈现（同事件双弹回归）。
 
-        **转发给岛的状态要过真实性翻译**（见 :meth:`_island_state_for`）：硬失败
-        回合的 turn/end 在收敛器里仍是 success，但对用户而言是失败——原样转发会让
-        岛亮绿点 + 卡片「刚完成」，与同屏的失败提醒自相矛盾。
+        **转发给岛的状态要过真实性翻译**（见 :meth:`_island_state_for`）：失败回合
+        的 turn/end 在收敛器里已直接落 ERROR（F4），``_island_state_for`` 只兜
+        「写了 execution/failed 但 reasonKind 缺失」的残留形状，不让岛亮绿点 +
+        卡片「刚完成」与同屏的失败提醒自相矛盾。
         """
-        if source_event != "link-disabled":
-            mon = self.monitors.get("dsh")
-            if mon is None or not mon._running:
-                return  # 迟到/孤儿信号：监视器已停，见 docstring 的隔离说明
+        # link-disabled 是同步直调的人工复位（apply_config 停监视器后立刻发），
+        # 不走队列、也没有代次概念，照旧不受闸门约束。
+        if source_event != "link-disabled" and not self._dsh_convergence_current(gen):
+            return  # 迟到/孤儿/上一代次的排队信号，见 docstring 的隔离说明
         self.dsh_state_changed.emit(from_state, self._island_state_for(to_state))
         if to_state == "offline":
             # 写者随 DSH 一起消失：写者分片与原始状态镜像整片作废。不清的话旧实例
@@ -3791,6 +3822,13 @@ class AgentLinkManager(QObject):
             # 由 busy→success 边沿的完成确认（800ms + 冷却）出气泡/音效。
             # 此前没有这条分支，success 进不了管线——完成提醒永不触发（issue #234）。
             self.notify_dsh_state("success")
+            return
+        if to_state == "error":
+            # 失败回合的收尾（F4：turn/end reasonKind=error 收敛为 ERROR，不再误报
+            # success）。呈现管线对 busy→error 边沿已有完整口径（error 音效 +
+            # 失败打标 + 收尾检查，见 _on_agent_state）；不注入的话 _last_raw 停在
+            # thinking，桌宠一直索取忙碌动画、岛停在思考态直到下一回合。
+            self.notify_dsh_state("error")
             return
         if to_state == "idle" and source_event == "turn/end":
             # 用户中止的回合（turn/end 携带 reasonKind=aborted，收敛器落 IDLE）：
@@ -3820,10 +3858,10 @@ class AgentLinkManager(QObject):
     def _island_state_for(self, to_state: str) -> str:
         """收敛态 → 灵动岛状态：把「硬失败回合的假 success」翻译成 error。
 
-        桥接在 turn/end 判定 ``reason.kind === "error"`` 后先写一条
-        ``execution/failed``、**随后仍无条件**把同一条 turn/end 作为状态事件转发
-        （桥端 STATE_EVENT_TYPES），收敛器把非中止的 turn/end 收敛为 success——收敛器
-        语义不改（八态是它的契约），但呈现在岛上的那一格必须说真话：原样转发会让
+        主路径已在收敛器侧分流（F4）：``reasonKind=error`` 的 turn/end 直接收敛为
+        ERROR，不再经过 success。本翻译是兜底：桥端写了 ``execution/failed``、但
+        turn/end 的 ``reasonKind`` 缺失或非 error 的残留形状下，收敛器仍会产出
+        success——呈现在岛上的那一格必须说真话：原样转发会让
         岛走 ``set_dsh_state("success")`` → ``_arm_dot_done`` 点亮绿点 4s 并把状态
         文案写成「刚完成」，与同一拍弹出的失败提醒自相矛盾。
 
@@ -3837,12 +3875,21 @@ class AgentLinkManager(QObject):
             return "error"
         return to_state
 
-    def _on_dsh_converged_user_message(self, session_id: str, text: str) -> None:
+    def _on_dsh_converged_user_message(self, session_id: str, text: str,
+                                       gen: int | None = None) -> None:
         """真人消息 = 对话开始：与状态边沿竞态解耦的稳定触发点。
 
         sourceKind 过滤已在收敛器完成——只有真人输入（含旧版桥接记录无字段的
         兼容）到这里；agent.inject() 注入上下文不会到这里。
+
+        **与状态信号同一道闸**（:meth:`_dsh_convergence_current`）：这条也是队列
+        投递的收敛信号，此前连 ``_running`` 都不查——停机后未重开时，队列里迟到
+        的旧消息照样外转给 AppShell，凭空触发一次「对话开始」；「停 → 启」之间
+        排队的上一代次消息同理。思考态注入（``notify_dsh_state``）自带监视器
+        ``_running`` + 代次检查，闸门在这里是为了**外转那一句**本身。
         """
+        if not self._dsh_convergence_current(gen):
+            return  # 迟到/孤儿/上一代次的排队信号，见 _dsh_convergence_current
         self.dsh_user_message.emit(session_id, text)
         self.notify_dsh_state("thinking")
 

@@ -5,6 +5,8 @@ import json
 import logging
 import mimetypes
 import re
+import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .geometry import best_position_near_pet
+from .markdown_view import markdown_to_html
 from .models import ChatMessage
 from .pet_link import PetChatLink
 from .prompt import PromptBuilder, load_character_manifest
@@ -376,7 +379,10 @@ class MessageBubble(QFrame):
         self.setProperty("state", self.state)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding if role == "assistant" else QSizePolicy.Policy.Maximum,
-            QSizePolicy.Policy.Minimum,
+            # 纵向必须可收缩（Preferred）：Minimum 会把 sizeHint 当最小高度，而折行文本的
+            # sizeHint 是按非实际宽度估的（偏高），QScrollArea 取整条时间线最小高度撑大内容，
+            # 最新消息下方留出大片空白（#191）。可收缩后布局按 heightForWidth 取真实高度。
+            QSizePolicy.Policy.Preferred,
         )
 
         root = QHBoxLayout(self)
@@ -443,7 +449,19 @@ class MessageBubble(QFrame):
         self.body.setObjectName("bubble-body")
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.body.setText(content)
+        # AI 回复按 Markdown 渲染（链接可点、可选中复制）；用户消息保持纯文本
+        if role == "assistant":
+            self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            self.body.setOpenExternalLinks(True)
+        self._raw_text = ""
+        self._markdown = False
+        self._render_cost_ms = 0.0
+        # 流式输出时 Markdown 重排的节流：长回答单次渲染+排版可达 20ms 以上（6000 字实测
+        # 20.6ms），超过打字机 18ms 一拍就会卡；渲染变慢时合并到定时器里做。
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_body)
+        self.set_content(content)
         self.body.setMinimumWidth(360 if role == "assistant" else 120)
         surface_layout.addWidget(self.body)
         panel.addWidget(self.surface)
@@ -455,7 +473,7 @@ class MessageBubble(QFrame):
         tools.setSpacing(2)
         self.copy_button = _chat_tool_button(self.tools, "message-copy-button", "copy", "复制")
         self.copy_button.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.body.text())
+            lambda: QApplication.clipboard().setText(self._raw_text)
         )
         tools.addWidget(self.copy_button)
         if role == "user":
@@ -484,8 +502,31 @@ class MessageBubble(QFrame):
         if role == "user":
             root.setDirection(QHBoxLayout.Direction.RightToLeft)
 
-    def set_content(self, text: str) -> None:
-        self.body.setText(str(text))
+    @property
+    def content(self) -> str:
+        """原始文本（Markdown 源码）；复制按钮与外部读取都用它，而不是渲染后的 HTML。"""
+        return self._raw_text
+
+    def set_content(self, text: str, *, markdown: bool | None = None) -> None:
+        self._raw_text = str(text)
+        self._markdown = (self.role == "assistant") if markdown is None else bool(markdown)
+        if self._markdown and getattr(self, "state", "normal") == "streaming" and self._render_cost_ms > 8.0:
+            if not self._render_timer.isActive():
+                self._render_timer.start(int(min(250.0, max(50.0, self._render_cost_ms * 4))))
+            return
+        self._render_body()
+
+    def _render_body(self) -> None:
+        self._render_timer.stop()
+        if self._markdown and self._raw_text:
+            started = time.perf_counter()
+            self.body.setTextFormat(Qt.TextFormat.RichText)
+            self.body.setText(markdown_to_html(self._raw_text))
+            self.body.heightForWidth(max(1, self.body.width()))
+            self._render_cost_ms = (time.perf_counter() - started) * 1000.0
+        else:
+            self.body.setTextFormat(Qt.TextFormat.PlainText)
+            self.body.setText(self._raw_text)
 
     # ---- 思考 / 联网过程 ----
     @property
@@ -567,6 +608,8 @@ class MessageBubble(QFrame):
         if state == getattr(self, "state", None):
             return
         self.state = state
+        if self._render_timer.isActive():  # 离开流式状态：立刻渲染最终内容，不等节流
+            self._render_body()
         self.setProperty("state", state)
         self.surface.setProperty("state", state)
         is_error = state == "error"
@@ -1970,7 +2013,13 @@ class ChatWindow(QDialog):
         if image_payloads:
             messages[-1]["content"] = [{"type": "text", "text": text}, *image_payloads]
         self._last_user_payload = messages[-1].get("content") if image_payloads else None
-        self._active_request_id = self.service.send(messages, config)
+        # request id 必须先落到本窗在途状态再 send：`started` 是在 send() 内
+        # **同步**发出的，若沿用 `_active_request_id = send(...)` 的写法，
+        # `_started` 拿到的 id 与此刻的 _active_request_id 必然不等，首行过滤
+        # 恒命中 → 不进忙态、按钮不变停止、桌宠不切思考态。
+        request_id = uuid.uuid4().hex
+        self._active_request_id = request_id
+        self.service.send(messages, config, request_id=request_id)
         self._bottom()
 
     def _focus_chat(self) -> None:
@@ -2127,7 +2176,7 @@ class ChatWindow(QDialog):
         self._pending_finish_text = None
         if self._bubble:
             self._bubble.finish_thinking()
-            self._bubble.set_content("请求失败：" + str(text))
+            self._bubble.set_content("请求失败：" + str(text), markdown=False)
             self._bubble.set_state("error")
         self._reset()
         self.pet_link.error(text)
@@ -2335,8 +2384,21 @@ class ChatWindow(QDialog):
             QTimer.singleShot(0, self, self._update_bubble_widths)
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 窗口是复用的（关闭=隐藏）：每次从菜单/灵动岛打开都回到最新一条回复，
+        # 而不是停在上次关闭时的位置。系统自发的 show（如从最小化还原）保留阅读位置。
+        if not event.spontaneous():
+            self._bottom(always=True)
+
     def closeEvent(self, event) -> None:
-        """关闭=隐藏并复用窗口：停止生成、解除桌宠位置监听，避免泄漏。"""
+        """关闭=隐藏并复用窗口：收尾本轮回复、停止生成、解除桌宠位置监听，避免泄漏。"""
+        # 模型已完成、打字机仍在排空时关窗：worker 已回收，service.stop() 既
+        # 不取消任何东西也不会补发 stopped 信号，而定时器一停 _pending_finish_text
+        # 就再没有落库机会——回复丢失、重开后按钮仍卡在「停止」。故先按完成路径
+        # 落库并复位（_complete_finished 内含 _reset），再走原有关窗流程。
+        if self._pending_finish_text is not None:
+            self._complete_finished(self._pending_finish_text)
         self._typewriter_timer.stop()
         self.service.stop()
         self.set_pet_window(None)

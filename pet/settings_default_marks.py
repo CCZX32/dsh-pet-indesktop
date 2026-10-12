@@ -110,6 +110,11 @@ _ROW_DEFAULT_PATHS: dict[str, str | tuple[str, float]] = {
     # 常规
     "autostart": "autostart_wanted",
     "stream_capture": "stream_capture_mode",
+    # AI 对话·联网搜索（全局 web_search 设置；默认值快照由 _config_default_data 注入）
+    "web_search_enabled": "chat.web_search.enabled",
+    "web_search_engine": "chat.web_search.engine",
+    "web_search_max_results": "chat.web_search.max_results",
+    "web_search_fetch_pages": "chat.web_search.fetch_pages",
     # macOS 专属行（darwin 分支才构造）：行键与配置键不同名，必须显式登记
     "dock_icon": "show_dock_icon",
 }
