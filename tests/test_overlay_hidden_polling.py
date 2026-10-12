@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 import os
+import sys
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -86,10 +87,12 @@ def _isolate_visibility_gate():
         gate._visible.add(widget)
 
 # ---------------------------------------------------------------- 穿透轮询表
-# 逐像素穿透控制器（WindowsPerPixelInputController）仅在 Windows 由 showEvent
-# 创建（overlay_window.showEvent 的 win32 门；posix 的 QRegion setMask 穿透是
-# spec 开放问题 Q1，尚未实现），下面三条穿透轮询用例仅 Windows 可跑。
-@pytest.mark.skipif(os.name != "nt", reason="逐像素穿透控制器仅 Windows 创建")
+# 逐像素穿透控制器由 showEvent 按平台创建（Windows → platform_win 的
+# WindowsPerPixelInputController，非 Windows → platform_passthrough 的
+# QtPerPixelInputController）。下面三条穿透轮询用例的替身打的是 Windows 控制器
+# 的模块级入口（platform_win.QCursor / _set_windows_click_through），故仅 Windows
+# 可跑；非 Windows 的同形用例见 tests/test_platform_passthrough.py。
+@pytest.mark.skipif(os.name != "nt", reason="本组用例的替身打的是 Windows 控制器入口")
 def test_hide_stops_through_polling_and_show_resumes():
     overlay = _overlay()
     try:
@@ -104,7 +107,7 @@ def test_hide_stops_through_polling_and_show_resumes():
         overlay.close()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="逐像素穿透控制器仅 Windows 创建")
+@pytest.mark.skipif(os.name != "nt", reason="本组用例的替身打的是 Windows 控制器入口")
 def test_hidden_overlay_polls_nothing(monkeypatch):
     """隐藏 0.4s 内 0 次 refresh；可见窗口跑同一时长必须真在轮询（对照）。"""
     cursor = _CountingCursor(QPoint(-500, -500))
@@ -124,7 +127,7 @@ def test_hidden_overlay_polls_nothing(monkeypatch):
         overlay.close()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="逐像素穿透控制器仅 Windows 创建")
+@pytest.mark.skipif(os.name != "nt", reason="本组用例的替身打的是 Windows 控制器入口")
 def test_show_refreshes_through_state_immediately(monkeypatch):
     """显示后立即刷新一次：穿透态与当前命中口径一致，不留吞点击窗口。"""
     clicks = _CountingClickThrough()
@@ -212,15 +215,28 @@ def test_tray_hide_and_screen_migration_stay_paired(tmp_path):
         assert shell._watcher._cursor_timer.isActive()
 
         old = shell.overlay
+        old_ctl = old._input_controller          # 迁移前捕获：旧 overlay 自己的控制器
         shell._migrate_to_screen(app.primaryScreen())
         assert shell.overlay is not old, "前提：迁移确实重建了 overlay"
         assert overlay_peripherals.visible_overlay_count() == base + 1, (
             "旧 overlay 必须从闸门里摘掉（hide/close 成对）")
         assert shell._watcher._cursor_timer.isActive()
-        if os.name == "nt":
-            # 逐像素穿透轮询仅 Windows 创建（posix 穿透未实现，见文件头注释）
-            ctl = shell.overlay._input_controller
-            assert ctl is not None and ctl._timer.isActive(), "新 overlay 必须重新轮询"
+        # 逐像素穿透轮询由 showEvent 按平台创建（见文件头注释），两个平台都要钉：
+        # 新 overlay 必须重新有控制器并在轮询，旧 overlay 的控制器必须已停表——
+        # 迁移是「旧窗 close + 新窗 show」的配对路径，漏任一半都会留下空转的轮询表。
+        ctl = shell.overlay._input_controller
+        assert ctl is not None and ctl._timer.isActive(), "新 overlay 必须重新轮询"
+        assert old_ctl is not None and not old_ctl._timer.isActive(), (
+            "旧 overlay 的控制器必须已停表")
+        # 平台判据用 ``sys.platform``——与产品分派（overlay_window.showEvent 的
+        # win32 门）同一个键，避免测试用了另一个键而给出错误期望。
+        if sys.platform == "win32":
+            from pet.platform_win import WindowsPerPixelInputController
+            assert isinstance(ctl, WindowsPerPixelInputController)
+        else:
+            from pet.platform_passthrough import QtPerPixelInputController
+            assert isinstance(ctl, QtPerPixelInputController), (
+                "posix 由 Qt 控制器接管穿透（此前 posix 无任何穿透落点）")
     finally:
         shell.stop()
         shell._delete_runtime_marker()

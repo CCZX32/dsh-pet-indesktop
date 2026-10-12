@@ -275,7 +275,7 @@ unknown_bridge_event = Signal(str, object)
 ```text
 LifecycleEvent, ToolCallEvent, ToolResultEvent, ReasoningEvent,
 EvidenceEvent, ActionEvent, RetryEvent, ErrorEvent, ApprovalEvent,
-QuestionEvent, UserActionEvent, InteractionResolvedEvent, ControlResultEvent
+QuestionEvent, UserActionEvent, InteractionResolvedEvent
 ```
 
 公共字段为 `source`、`agent_name`、`session_id`、`step`、`data`。
@@ -286,33 +286,47 @@ QuestionEvent, UserActionEvent, InteractionResolvedEvent, ControlResultEvent
 kind, request_id, rpc_id, approval_id, call_id, outcome
 ```
 
-`ControlResultEvent` 还包含：`request_id`、`operation`、`ok`、`phase`。
-
 语义事件当前只有 `AgentLinkManager._on_normalized_event` 一个消费方（`normalized_event`
 信号直连）：它只用 `RetryEvent` 维护模型访问失败连续计数、用
 `InteractionResolvedEvent` 做交互 resolved 兜底清理，其余 dataclass 属于分类契约，
 暂无消费者。原先预留的 `AgentEventRuntime` 分发层自引入起零消费方，已在 PR57 移除。
 
+`ControlResultEvent` 已随 mux 中继与控制队列的删除一并退役（仓库内 `*.py` / `*.js`
+都没有生产者，消费者也不识别它）。旧桥若仍写 `control-result`、
+`bridge/control-result` 或 `watchdog/control-result`，会落 `agent_link` 的
+`unknown_bridge_event` 提醒路径——这是退役事件的预期口径（提醒更新 bridge），
+不再单独为它保留语义分支。
+
 ## AgentLinkManager 交互接口
 
-阻塞交互按 `interaction_id -> item` 保存。Item 可能包含：
+阻塞交互按 `interaction_id -> item` 保存（**有界**：`_PENDING_INTERACTION_MAX` = 256 条，
+满了淘汰最低优先级里最旧的一条并留 warning + 计数；淘汰只影响本地呈现，不写回上游）。
+Item 可能包含：
 
 ```text
 kind, text, agent_key, interactive, rpc_id?, approval_id?, call_id?,
-session_id?, questions?, alert_id
+session_id?, questions?, alert_id, priority, delivered, _ts_mono
 ```
+
+`delivered` = 这条交互是否真的交给了可承接的呈现目标（有可见窗）；为假时它只活在
+本表里，由 `redeliver_pending_interactions()` 在呈现目标回来后按同一 `interaction_id`
+补投（显示 owner 按 `alert_id` 就地合并，最多一份可见）。`_ts_mono` 只用于无身份
+降级提示的 TTL 收口，带身份的审批/问题是长待批状态，不适用 TTL。
 
 当前管理接口：
 
 ```python
 pending_interactions_for(agent_key: str) -> dict[str, dict]
+redeliver_pending_interactions() -> int
 dismiss_all_interactions() -> None
 dismiss_all_approvals() -> None  # 兼容别名
 ```
 
 请求入口是 `_on_approval_request()`、`_on_question_request()`；完成入口是
 `_on_approval_resolved()`、`_on_question_resolved()`、`_on_normalized_event()` 和
-`_resolve_interaction()`。
+`_resolve_interaction()`。收尾匹配的唯一实现是 `_resolve_matching_interaction()`
+（来源 + 会话 + **同字段**身份），四条入口共用它：同一条记录喂两条通道时，第二条
+结构性 no-op。
 
 按钮点击后异步 POST `/api/respond`：审批使用 `allowed-once` 或 `rejected`；问题使用
 `answer.answers[].selected`。本地交互先移除，随后等待 DSH resolved 事件确认。

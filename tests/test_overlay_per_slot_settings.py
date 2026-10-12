@@ -148,8 +148,7 @@ def test_slot_scale_and_playback_survive_main_refresh(tmp_path):
         _notify(shell)
         assert child.scale == pytest.approx(1.5)
 
-        cfg.set("scale", 0.3)
-        cfg.set("playback_speed", 3.0)
+        _write_slot(cfg, 0, scale=0.3, playback_speed=3.0)
         shell.refresh_settings()
         assert shell.sprite.scale == pytest.approx(0.3)
         assert shell.sprite.playback_speed == pytest.approx(3.0)
@@ -159,8 +158,8 @@ def test_slot_scale_and_playback_survive_main_refresh(tmp_path):
         toggle._teardown(shell)
 
 
-def test_slot_missing_or_broken_falls_back_to_main(tmp_path):
-    """缺文件 → 继承主配置；损坏/非对象 → 逐键回默认，且不碰主配置。"""
+def test_slot_missing_or_broken_uses_defaults_not_main(tmp_path):
+    """缺文件/缺键取同源默认；坏档案不覆盖、不碰主配置。"""
     shell, cfg = toggle._make_slot_shell(tmp_path, playback_speed=1.0,
                                          drag_physics=False)
     try:
@@ -169,7 +168,7 @@ def test_slot_missing_or_broken_falls_back_to_main(tmp_path):
         slot_path = cfg.dir / "config-slot-1.json"
         main_bytes = (cfg.dir / "config.json").read_bytes()
 
-        # 缺文件 → 继承主配置（旧"缺文件按主配置落种"语义）
+        # 缺文件 → 同源默认，不从主宠持续继承
         slot_path.unlink()
         _notify(shell)
         assert child.playback_speed == 1.0 and child.drag_physics is False
@@ -181,12 +180,12 @@ def test_slot_missing_or_broken_falls_back_to_main(tmp_path):
         assert child.drag_physics is False
         assert (cfg.dir / "config.json").read_bytes() == main_bytes
 
-        # 缺键（老存档）→ 回退主配置当前值
-        cfg.set("playback_speed", 2.0)
+        # 缺键（老存档）→ 同源默认，不继承主宠当前值
+        _write_slot(cfg, 0, playback_speed=2.0)
         shell.refresh_settings()
         slot_path.write_text('{"version": 4}', encoding="utf-8")
         _notify(shell)
-        assert child.playback_speed == 2.0
+        assert child.playback_speed == 1.0
         assert main.playback_speed == 2.0
     finally:
         toggle._teardown(shell)
@@ -335,10 +334,12 @@ def test_balance_bubble_uses_clicked_sprite_host(tmp_path, monkeypatch):
         assert shell._bubble_followers[child].bubble._raw_text == "余额：¥1"
 
         # 主宠开同一开关后点击 → 仍传壳本身（主宠行为不变）
-        cfg.set("click_show_balance", True)
+        _write_slot(cfg, 0, click_show_balance=True)
         shell.refresh_settings()
         shell._on_sprite_click(main, "")
-        assert hosts[1] is shell
+        assert hosts[1]._sprite is main
+        shell.exit_pet(main)
+        assert hosts[1].show_bubble("late reply") is False
     finally:
         toggle._teardown(shell)
 
@@ -514,9 +515,8 @@ def test_facade_persists_child_settings_to_its_slot(tmp_path):
         assert slot["drag_physics"] is True
         assert slot.get("user_customized") is True   # 旧契约：用户主动设置过
 
-        # 主宠菜单照旧写主配置
         SpriteMenuFacade(shell, main).change_scale(0.8)
-        assert shell._config.get("scale") == pytest.approx(0.8)
+        assert _slot_file(cfg, 0)["scale"] == pytest.approx(0.8)
     finally:
         toggle._teardown(shell)
 
@@ -562,12 +562,11 @@ def test_promotion_adopts_child_bubble_and_keeps_its_settings(tmp_path):
 
         assert shell.exit_pet(shell.sprite) is True
 
-        assert shell.sprite is child
-        assert shell._bubble_follower is follower      # 接管，不另建
-        assert child not in shell._bubble_followers
-        assert child not in shell._self_talk_hosts
-        assert child.playback_speed == pytest.approx(0.5)   # 提升后不被主配置刷掉
-        assert shell._config.get("playback_speed") == pytest.approx(0.5)
+        assert shell.sprite is None
+        assert shell._bubble_followers[child] is follower
+        assert child in shell._self_talk_hosts
+        assert child.playback_speed == pytest.approx(0.5)
+        assert shell._spawned_slots[child] == 1
     finally:
         toggle._teardown(shell)
 

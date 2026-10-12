@@ -3,6 +3,8 @@
 窗口不透明度，以及托盘菜单复选状态与设置同步。"""
 from __future__ import annotations
 
+import time
+
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QFocusEvent, QKeyEvent, QMouseEvent, QPixmap
@@ -20,6 +22,20 @@ NAMES = [
     catalog.DRAG,
     "写代码",
 ]
+
+
+def _wait_for_dispatch(predicate, timeout: float = 3.0) -> bool:
+    """轮询等托盘条目的延后回调执行（``add_tray_action`` 的语义是「晚一个事件
+    循环且要等菜单真关」，同步断言必须改成轮询；预算与
+    ``test_tray_settings_deferred_dispatch._wait_until`` 同口径）。"""
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 def test_slingshot_geometry_stays_inside_window_for_all_pull_directions():
@@ -176,22 +192,39 @@ def _right_release(pos: QPointF, global_pos: QPointF) -> QMouseEvent:
 class _BigScreen:
     """拖拽/锁位语义测试需要"无边界"环境：offscreen 默认屏只有 800×600，
     合成事件坐标贴近其边缘时会触发贴边钳位与绘制补偿（该语义由
-    tests/test_edge_reachability.py 专门锁定，不在此重复）。"""
+    tests/test_edge_reachability.py 专门锁定，不在此重复）。
+
+    尺寸理由见 ``tests/test_drag_move_coalescing.py`` 的同类假屏：窗口初始位置按
+    运行机真实屏幕算，假屏只放大到 1920×1200 时真实桌面上的目标会被贴边钳位
+    （本机实测 ``test_shift_drag_requires_shift`` 等用例必红）。
+    """
 
     def name(self):
         return "big"
 
     def availableGeometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def geometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def devicePixelRatio(self):
         return 1.0
 
 
 _BIG_SCREEN = _BigScreen()
+
+
+@pytest.fixture(autouse=True)
+def _single_screen_desktop(monkeypatch):
+    """关掉「多屏活动区域」快照（理由见 test_drag_move_coalescing 同名 fixture）：
+    本文件用假屏造无边界环境，而 #186 的多屏快照走 ``QGuiApplication.screens()``
+    绕过假屏、把窗口钳到真实桌面，导致「按住 SHIFT 应可拖动」这类断言在带缩放/
+    多显示器桌面上必红。
+    """
+    from pet import window_placement
+
+    monkeypatch.setattr(window_placement, "desktop_area", lambda: None)
 
 
 def _make_win(app, tmp_path, **overrides):
@@ -381,17 +414,23 @@ def test_tray_menu_syncs_mouse_through_from_config(tmp_path):
     menu = tray.contextMenu()
     action = next(a for a in menu.actions() if a.text() == "鼠标穿透")
     assert action.isChecked() is False
-    # 设置对话框里改了鼠标穿透 → config 变化 → 托盘菜单弹出前同步
+    # 设置对话框里改了鼠标穿透 → config 变化 → 托盘菜单弹出前同步勾选态
+    #（同步只改看相：副作用挂 triggered，程序化 setChecked 不再误触发它）
     config.set("mouse_through", True)
     menu.aboutToShow.emit()
     assert action.isChecked() is True
-    # 反向：托盘里点掉 → config 落盘
-    action.setChecked(False)
-    assert config.get("mouse_through") is False
-    # “回到右下角”应路由到该窗的 go_default_corner
+    assert config.get("mouse_through") is True, "弹出前同步不得反过来写配置"
+    # 反向：托盘里点掉 → config 落盘。托盘条目是「菜单关闭后派发」
+    #（原生菜单跟踪会话里改窗面/冒泡会被 AppKit 抑制），故点击后要轮询等它执行。
+    action.trigger()
+    assert action.isChecked() is False, "勾选态即时翻转"
+    assert _wait_for_dispatch(lambda: config.get("mouse_through") is False), \
+        "菜单关闭后必须把鼠标穿透落盘"
+    # “回到右下角”应路由到该窗的 go_default_corner（同样菜单关闭后派发）
     home = next(a for a in menu.actions() if a.text() == "回到右下角")
     home.trigger()
-    assert win.corner_calls == 1
+    assert _wait_for_dispatch(lambda: win.corner_calls == 1), \
+        "菜单关闭后必须路由到该窗的 go_default_corner"
     tray.hide()
     app.processEvents()
 

@@ -55,6 +55,7 @@
         {"type": "action", "id": "harness", "visible": true},
         {"type": "action", "id": "deepseek_web", "visible": true},
         {"type": "action", "id": "check_update", "visible": true},
+        {"type": "action", "id": "network_info", "visible": true},
         {"type": "action", "id": "github_project", "visible": true},
         {"type": "action", "id": "quark_download", "visible": true}
       ]
@@ -62,6 +63,10 @@
     {"type": "action", "id": "agent_link", "visible": true, "section": "tools"},
     {"type": "action", "id": "proactive_screen", "visible": true, "section": "tools"},
     {"type": "action", "id": "todo_panel", "visible": true, "section": "tools"},
+    {"type": "action", "id": "quiet_mode", "visible": true, "section": "tools"},
+    {"type": "action", "id": "memory_trim", "visible": true, "section": "tools"},
+    {"type": "action", "id": "weather", "visible": true, "section": "tools"},
+    {"type": "action", "id": "weather_cities", "visible": true, "section": "tools"},
     {"type": "action", "id": "voice_chime_now", "visible": false, "section": "tools"},
     {"type": "action", "id": "voice_chime_toggle", "visible": false, "section": "tools"},
     {"type": "action", "id": "festival_now", "visible": false, "section": "tools"},

@@ -103,20 +103,25 @@ def test_breath_bubble_reference_canvas_scales():
 
 # ------------------------------------------------------------ 配置
 def test_config_clamps_bubble_text_scale(tmp_path: Path):
+    """钳位仍由配置读端负责；真值在 slot0 档案（每宠键，规范 §五）。"""
     from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
 
-    config = Config(tmp_path)
+    def slot0():
+        return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+    config = slot0()
     assert config.get("bubble_text_scale") == 100
     config.set("bubble_text_scale", 180)
-    config.save()
-    assert Config(tmp_path).get("bubble_text_scale") == 180
+    assert config.save() is True
+    assert slot0().get("bubble_text_scale") == 180
 
     config.set("bubble_text_scale", 9999)
-    config.save()
-    assert Config(tmp_path).get("bubble_text_scale") == 300
+    assert config.save() is True
+    assert slot0().get("bubble_text_scale") == 300
     config.set("bubble_text_scale", 1)
-    config.save()
-    assert Config(tmp_path).get("bubble_text_scale") == 50
+    assert config.save() is True
+    assert slot0().get("bubble_text_scale") == 50
     config.set("bubble_text_scale", "abc")
     config.save()
     assert Config(tmp_path).get("bubble_text_scale") == 100

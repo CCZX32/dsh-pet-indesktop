@@ -19,11 +19,166 @@ from collections import deque
 from PySide6.QtCore import QTimer
 
 from . import catalog
+from . import quiet_mode
 from . import window_placement
 
 # 确认"音乐真的停了"所需的持续静音时长（秒）。歌曲的前奏/间奏/轻声段会让
 # 音频峰值瞬时跌到阈值下，太小会导致唱歌状态反复退出。
 MUSIC_SING_GRACE_SECONDS = 6.0
+
+_log = logging.getLogger("dsh-pet-standalone")
+
+#: 待处理提醒条数上限（另有 1 条 current 展示位）。**有界是硬要求**：审批/提问这类
+#: 关键项同样在此限内——本地提示队列不是远程许可，丢弃只影响本地呈现（见
+#: ``docs/DSH-REQUEST-EVENT-CATALOG.md``「本地提示有界」一节）。
+ALERT_QUEUE_LIMIT = 64
+
+#: 非 sticky 提醒未给 ``duration_ms`` 时的展示时长（pump 与迁移重挂同一口径）。
+DEFAULT_ALERT_DURATION_MS = 6000
+
+
+def alert_bubble(host):
+    """当前提醒**实际承载**的那只气泡（壳上会随承载宠迁移）。
+
+    ``OverlayShell._alert_bubble`` = 真正在展示 current 的气泡，它可能不是"当前
+    动态目标"（提醒挂在子宠上、主位已回来时不抢回，见 ``overlay_shell.
+    _sync_alert_copy``）。legacy ``PetWindow`` 没有这一面，退回 ``_speech_bubble``
+    ——单窗下两者本就是同一只。
+    """
+    bubble = getattr(host, "_alert_bubble", None)
+    if bubble is None:
+        bubble = getattr(host, "_speech_bubble", None)
+    return bubble
+
+
+def _anchor_for(host, bubble):
+    """气泡的锚点矩形：按**该气泡所属的那只宠**算。
+
+    壳提供 ``bubble_anchor_rect_for``（提醒可迁移到子宠，锚点按当前目标算会让
+    子宠物气泡跑到主位头顶）；legacy 宿主恒为 ``bubble_anchor_rect(host)``。
+    """
+    provider = getattr(host, "bubble_anchor_rect_for", None)
+    if callable(provider):
+        try:
+            rect = provider(bubble)
+        except Exception:
+            rect = None
+        if rect is not None:
+            return rect
+    return window_placement.bubble_anchor_rect(host)
+
+
+def _dismiss_bubble(bubble) -> None:
+    """收起一只气泡；已随它那只宠销毁（C++ 侧没了）时静默跳过。"""
+    if bubble is None:
+        return
+    try:
+        bubble.dismiss()
+    except RuntimeError:
+        return
+
+
+def _show_item_on(host, bubble, item) -> bool:
+    """在某只气泡上按 item 的语义呈现（sticky → 不限时 + 按钮；限时 → 原时长）。"""
+    if bubble is None:
+        return False
+    anchor = _anchor_for(host, bubble)
+    try:
+        if item.get("sticky"):
+            _remember_sticky(host, item)
+            bubble.show_text(
+                item["text"], anchor, 0,
+                pet_scale=host.scale, subtitle=item.get("subtitle", ""),
+                sticky=True, buttons=item.get("buttons"),
+            )
+        else:
+            bubble.show_text(
+                item["text"], anchor,
+                item.get("duration_ms") or DEFAULT_ALERT_DURATION_MS,
+                pet_scale=host.scale, subtitle=item.get("subtitle", ""),
+            )
+    except RuntimeError:
+        return False
+    return True
+
+
+def _show_on_target(host, item) -> bool:
+    """在**当前目标**气泡上展示一条提醒（新条目/推进下一条）。"""
+    return _show_item_on(host, getattr(host, "_speech_bubble", None), item)
+
+
+def _remember_sticky(host, item) -> None:
+    """记下粘滞提醒的正文/副标题/按钮（legacy 恢复链与 hidden 恢复读这三个字段）。"""
+    host._sticky_bubble_active = True
+    host._sticky_text = item["text"]
+    host._sticky_subtitle = item.get("subtitle", "")
+    host._sticky_buttons = item.get("buttons")
+
+
+def _reshow_on_carrier(host, item) -> bool:
+    """在**承载气泡**上按原语义重挂 current（粘滞恢复 / 抑制解除 / 同 ID 升级）。
+
+    与 :func:`_show_on_target` 的差别只在落点：这条提醒已经在某只宠上呈现过，
+    重挂必须回到那一只（主位回归不抢回）。
+    """
+    return _show_item_on(host, alert_bubble(host), item)
+
+
+def _worst_priority(queue) -> int:
+    return max(int(queued.get("priority", 3)) for queued in queue)
+
+
+def _evict_worst_oldest(host, item) -> bool:
+    """淘汰最低优先级里最旧的一条腾位（并留 warning）。"""
+    queue = host._alert_queue
+    worst = _worst_priority(queue)
+    for index, queued in enumerate(queue):
+        if int(queued.get("priority", 3)) == worst:
+            size = len(queue)
+            del queue[index]
+            _note_overflow(host, "evict", item, size, dropped=queued)
+            return True
+    return False
+
+
+def _admit_to_queue(host, item) -> bool:
+    """有界入队裁决：队列满时保高优先级，并留下可诊断的 warning。
+
+    满队列的两种处置（本函数是唯一实现，调用方不得各写一份）：
+    - 新条目比队列里**最低**优先级还低 → **拒收新条**（不挤掉别人）；
+    - 否则 → **淘汰最低优先级里最旧的一条**腾位（同优先级时保新不保旧）。
+
+    ``host._alert_overflow_count`` 是可诊断计数（宿主拿不到就只记日志）；
+    绝不因为"队列满"去弹汇总气泡或新增设置项。
+    """
+    queue = host._alert_queue
+    if len(queue) < ALERT_QUEUE_LIMIT:
+        return True
+    if int(item["priority"]) > _worst_priority(queue):
+        _note_overflow(host, "reject", item, len(queue))
+        return False
+    return _evict_worst_oldest(host, item)
+
+
+def _enforce_queue_bound(host) -> None:
+    """把待处理队列压回上限（抢占把旧 current 塞回队首时可能短暂超限）。"""
+    while len(host._alert_queue) > ALERT_QUEUE_LIMIT:
+        if not _evict_worst_oldest(host, host._alert_queue[0]):
+            return
+
+
+def _note_overflow(host, action: str, item, size: int, dropped=None) -> None:
+    """队列满的处置留痕：计数 + warning（含来源类型/优先级/ID，便于事后定位）。"""
+    try:
+        host._alert_overflow_count = int(getattr(host, "_alert_overflow_count", 0)) + 1
+        count = host._alert_overflow_count
+    except Exception:
+        count = -1
+    _log.warning(
+        "提醒队列已满(%s)：%s priority=%s alertType=%s alertId=%s droppedId=%s overflowCount=%s",
+        ALERT_QUEUE_LIMIT, action, item.get("priority"), item.get("alertType"),
+        item.get("id"), (dropped or {}).get("id", ""), count,
+    )
 
 def alert_survives_suppression(alert_type: str, *, sticky: bool, buttons, priority: int) -> bool:
     """Settings only suppress ordinary presentation; stateful events survive."""
@@ -47,11 +202,83 @@ def bubble_blocked(host, sprite=None) -> bool:
     ``sprite=None`` = host 的默认宠（壳 = 主 sprite）。调用方一律走这个函数，
     绝不各写一份 ``getattr(host, "_bubble_suppressed")``——那样飞行期就漏出
     气泡来（B1 的缺口正是这六处各写各的守卫）。
+
+    **免打扰不在这里**：自言自语（含点击回应台词）也走本门禁，而它属于交互
+    应答，免打扰期间必须照常冒（issue #208 规格）。普通提醒/气泡请改读
+    :func:`quiet_blocked`。
     """
     checker = getattr(host, "_bubble_blocked", None)
     if callable(checker):
         return bool(checker(sprite))
     return bool(getattr(host, "_bubble_suppressed", False))
+
+
+def quiet_blocked(host) -> bool:
+    """免打扰（手动 **或** 全屏等效）是否拦下**普通**提醒/气泡。
+
+    全应用唯一判据是 ``quiet_mode.QuietState.suppression_active()``；本函数只
+    负责取 host 的配置（``quiet_also_on_fullscreen``，默认开）并转发。
+
+    **穿透类不读它**（issue #208 规格）：审批/提问/错误等状态类事件走
+    ``alert_survives_suppression``；自言自语/点击台词走 ``bubble_blocked``；
+    联动状态气泡走 ``show_bubble`` 直发——三类都不经这道门，压了会出事故。
+    """
+    state = quiet_mode.shared_quiet_state()
+    getter = getattr(getattr(host, "cfg", None), "get", None)
+    also_on_fullscreen = quiet_mode.DEFAULT_QUIET_ALSO_ON_FULLSCREEN
+    if callable(getter):
+        try:
+            also_on_fullscreen = bool(
+                getter("quiet_also_on_fullscreen", also_on_fullscreen)
+            )
+        except Exception:
+            pass
+    return state.suppression_active(also_on_fullscreen=also_on_fullscreen)
+
+
+def defer_quiet(text: str) -> None:
+    """把被免打扰拦下的普通提醒记入暂存队列（上限 20，溢出丢最旧）。"""
+    quiet_mode.shared_quiet_state().remember(text)
+
+
+def report_quiet_summary(host, items) -> bool:
+    """免打扰结束后用一条气泡汇报「免打扰期间有 N 条提醒」。
+
+    走 ``show_alert``（``alert_type="lifecycle"`` 属穿透类，不会被本模块的任何
+    门禁拦下）而不是 ``show_bubble``：结束那一刻最常见的情形是"正挂着一条审批
+    气泡"，直发气泡会被让路丢弃，走提醒队列才保证送达。宿主没有提醒队列面
+    （overlay 的 SpriteMenuFacade）时回退直发气泡——**这条回退也必须自证上屏**：
+    overlay 的气泡面在不可见/飞行期/正挂提醒时是当场丢弃的，无条件报成功会让
+    调用方把暂存排空而用户什么都没看到（本批自己立的交付确认制）。
+
+    返回是否确实交付出去了（空暂存 = 无需打扰用户，返回 False）。
+    """
+    texts = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not texts:
+        return False
+    latest = texts[-1]
+    if len(latest) > quiet_mode.QUIET_TEXT_LIMIT:
+        latest = latest[: quiet_mode.QUIET_TEXT_LIMIT] + "…"
+    if len(texts) == 1:
+        text = f"免打扰期间有 1 条提醒：{latest}"
+    else:
+        text = f"免打扰期间有 {len(texts)} 条提醒，最近一条：{latest}"
+    alert = getattr(host, "show_alert", None)
+    if callable(alert):
+        alert(
+            text,
+            duration_ms=quiet_mode.QUIET_SUMMARY_MS,
+            sticky=False,
+            alert_type="lifecycle",
+            priority=3,
+        )
+        return True
+    bubble = getattr(host, "show_bubble", None)
+    if callable(bubble):
+        # 取真实投递结果：False = 没上屏，调用方不得 ack（轮询表会重试）。
+        # 有 show_alert 的宿主（PetWindow / MultiWindowProxy）不走这一支。
+        return bool(bubble(text, duration_ms=quiet_mode.QUIET_SUMMARY_MS))
+    return False
 
 
 def sprite_in_flight(host, sprite=None) -> bool:
@@ -72,9 +299,14 @@ def set_bubble_suppressed(host, suppressed: bool) -> None:
     """设置窗口打开期间暂停气泡显示；True 时立即隐藏当前气泡。"""
     host._bubble_suppressed = bool(suppressed)
     if host._bubble_suppressed:
-        bubble = getattr(host, "_speech_bubble", None)
+        # 收的是**提醒实际承载**的那只气泡（提醒可能挂在子宠上；legacy 单窗下
+        # 与 `_speech_bubble` 同一只）。
+        bubble = alert_bubble(host)
         if bubble is not None:
-            bubble.hide()
+            try:
+                bubble.hide()
+            except RuntimeError:  # 气泡已随它那只宠销毁
+                pass
     else:
         restore_after_suppression(host)
 
@@ -89,32 +321,27 @@ def restore_after_suppression(host) -> None:
 
     入口再判一次门禁：抑制刚解除但另一路仍然挡着（典型 = 鱼还在飞：设置页在
     飞行中途开关）时不破门，留给那一路自己的结束后恢复。
+
+    壳（提醒承载宠可迁移、限时提醒按剩余 TTL）把「重挂 current」整段交给自己的
+    单一漏斗 ``_sync_alert_copy``：这里按当前目标重挂会把已经迁移到子宠的提醒
+    拉回主位（"主位恢复不抢回"被破），也会把限时提醒的 TTL 重置成整段。恢复路径
+    要的是"副本还在但不可见 → 补挂回来"，故走 ``_resume_alert_copy``（force）。
     """
     if bubble_blocked(host):
         return
     current = getattr(host, "_alert_current", None)
+    resume = getattr(host, "_resume_alert_copy", None)
+    if current is not None and callable(resume):
+        resume()
+        return
     if current is not None and alert_survives_suppression(
             current.get("alertType", ""), sticky=bool(current.get("sticky")),
             buttons=current.get("buttons"), priority=int(current.get("priority", 3))):
-        bubble = getattr(host, "_speech_bubble", None)
-        if current.get("sticky"):
-            if bubble is not None:
-                bubble.show_text(
-                    current["text"], window_placement.bubble_anchor_rect(host), 0,
-                    pet_scale=host.scale, subtitle=current.get("subtitle", ""),
-                    sticky=True, buttons=current.get("buttons"),
-                )
-        elif bubble is not None:
-            # 存活但非 sticky 的 current（task_complete/turn/balance 等）：
-            # 抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
-            # _alert_current 永不清除，pump_alerts 永久 early-return，
-            # 后续提醒全部被吞（队列死锁）。按原时长重挂，超时后走正常
-            # hidden → 清除 → 推进闭环。
-            bubble.show_text(
-                current["text"], window_placement.bubble_anchor_rect(host),
-                current.get("duration_ms") or 6000,
-                pet_scale=host.scale, subtitle=current.get("subtitle", ""),
-            )
+        # 存活（含非 sticky 的 task_complete/turn/balance 等）→ 按原语义重挂到它
+        # 自己的承载气泡上：抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
+        # ``_alert_current`` 永不清除，``pump_alerts`` 永久 early-return，后续
+        # 提醒全部被吞（队列死锁）。超时后走正常 hidden → 清除 → 推进闭环。
+        _reshow_on_carrier(host, current)
     elif current is None:
         pump = getattr(host, "_pump_alerts", None)
         if callable(pump):
@@ -155,6 +382,16 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
                sticky: bool = True, alert_id: str = "", priority: int = 3,
                alert_type: str = "watchdog", metadata: dict | None = None) -> None:
     """提醒消息队列：需要用户注意的提醒统一入队，一次只展示一个。"""
+    if quiet_blocked(host) and not alert_survives_suppression(
+            alert_type, sticky=sticky, buttons=buttons, priority=priority):
+        # 免打扰（含全屏等效）期间的**普通**提醒不冒：进暂存队列，免打扰结束
+        # （到时/提前/退出全屏）后统一汇报。
+        #
+        # 这一段刻意放在 isVisible 判定**之前**：全屏避让会把桌宠藏起来，若先走
+        # 「不可见」分支，普通提醒会被改道/丢弃，暂存队列就永远收不到东西——
+        # 而"全屏时攒着、退出后一次性告知"正是 quiet_also_on_fullscreen 的价值。
+        defer_quiet(text)
+        return
     if not host.isVisible():
         # 桌宠隐藏：非交互提醒（无按钮）改道灵动岛反馈面；交互气泡与
         # 设置页抑制期维持原丢弃行为。
@@ -198,11 +435,9 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
             host._sticky_subtitle = item["subtitle"]
             host._sticky_buttons = item["buttons"]
             if item["sticky"]:
-                host._speech_bubble.show_text(
-                    item["text"], window_placement.bubble_anchor_rect(host), 0,
-                    pet_scale=host.scale, subtitle=item["subtitle"],
-                    sticky=True, buttons=item["buttons"],
-                )
+                # 就地升级当前那份副本：落点 = **承载气泡**（提醒可能挂在子宠上，
+                # 按当前目标升级会在主位那边多出一份、子宠那份变孤儿）。
+                _reshow_on_carrier(host, item)
             return
         # 同 id 在排队：移除旧条目，由新条目接管
         host._alert_queue = deque(
@@ -215,7 +450,7 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
         old = current
         host._alert_current = None
         host._sticky_bubble_active = False
-        host._speech_bubble.dismiss()
+        _dismiss_bubble(alert_bubble(host))
         item["preemptedAlertId"] = old.get("id", "")
         logging.getLogger("dsh-pet-standalone").info(
             "alert preempted alertType=%s priority=%s alertId=%s by=%s",
@@ -223,6 +458,14 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
         )
         if old.get("sticky") and int(old.get("priority", 3)) >= 2:
             host._alert_queue.appendleft(old)
+            _enforce_queue_bound(host)
+    if not _admit_to_queue(host, item):
+        if host._alert_current is None:
+            # 抢占刚把旧 current 拿下来，这条又被拒收：屏幕不能空着——立刻推进
+            # 队首（被抢占的那条按原语义回到屏上），否则 current 为 None 而队列
+            # 有货，后面所有提醒都要等下一次 show_alert 才有机会上屏。
+            host._pump_alerts()
+        return
     host._alert_queue.append(item)
     host._alert_queue = deque(sorted(
         host._alert_queue, key=lambda queued: int(queued.get("priority", 3))
@@ -234,7 +477,8 @@ def resolve_alert(host, alert_id: str) -> None:
     """按 alert_id 关闭某条提醒：若正在展示则收起并弹下一条，若在队列中则移除。
 
     供 AgentLinkManager 在审批/问题 resolved 时精确定位，避免多 agent 并发
-    审批时 hide_bubble 误关他人的提醒。"""
+    审批时 hide_bubble 误关他人的提醒。收起的是**实际承载**那条提醒的气泡
+    （提醒可能已随承载宠迁移到别的宠上），不是"当前目标"的空气泡。"""
     if not alert_id:
         return
     cur = host._alert_current
@@ -245,7 +489,7 @@ def resolve_alert(host, alert_id: str) -> None:
         host._sticky_subtitle = ""
         host._sticky_buttons = None
         host._alert_current = None
-        host._speech_bubble.dismiss()
+        _dismiss_bubble(alert_bubble(host))
         host._pump_alerts()
         return
     # 在队列中：移除该条（不打断当前展示）
@@ -255,31 +499,32 @@ def resolve_alert(host, alert_id: str) -> None:
 
 
 def pump_alerts(host) -> None:
-    """若当前无提醒展示且队列非空，弹出队首展示。"""
+    """若当前无提醒展示且队列非空，弹出队首展示（落点 = 当前目标）。"""
     if host._alert_current is not None:
         return
     if not host._alert_queue:
         return
+    if quiet_blocked(host):
+        # 免打扰开始**之前**已入队的普通提醒：一并转存暂存队列，否则它们会在
+        # 免打扰期间照旧冒出来（而且恰好是"刚开免打扰就冒一条"的观感）。
+        # 穿透类（审批/提问/生命周期）留在队列里照常推进。
+        while host._alert_queue and not alert_survives_suppression(
+            host._alert_queue[0].get("alertType", ""),
+            sticky=bool(host._alert_queue[0].get("sticky")),
+            buttons=host._alert_queue[0].get("buttons"),
+            priority=int(host._alert_queue[0].get("priority", 3)),
+        ):
+            defer_quiet(host._alert_queue.popleft().get("text", ""))
+        if not host._alert_queue:
+            return
     if not host.isVisible() or bubble_blocked(host):
         return
     item = host._alert_queue.popleft()
+    if not _show_on_target(host, item):
+        # 目标气泡不可用（跟随器建失败/已随宠销毁）：条目留着，不静默吞掉。
+        host._alert_queue.appendleft(item)
+        return
     host._alert_current = item
-    if item.get("sticky"):
-        host._sticky_bubble_active = True
-        host._sticky_text = item["text"]
-        host._sticky_subtitle = item.get("subtitle", "")
-        host._sticky_buttons = item.get("buttons")
-        host._speech_bubble.show_text(
-            item["text"], window_placement.bubble_anchor_rect(host), 0,
-            pet_scale=host.scale, subtitle=item.get("subtitle", ""),
-            sticky=True, buttons=item.get("buttons"),
-        )
-    else:
-        duration_ms = item.get("duration_ms") or 6000
-        host._speech_bubble.show_text(
-            item["text"], window_placement.bubble_anchor_rect(host), duration_ms,
-            pet_scale=host.scale, subtitle=item.get("subtitle", ""),
-        )
 
 
 def clear_alerts(host) -> None:
@@ -290,7 +535,7 @@ def clear_alerts(host) -> None:
     host._sticky_text = ""
     host._sticky_subtitle = ""
     host._sticky_buttons = None
-    host._speech_bubble.dismiss()
+    _dismiss_bubble(alert_bubble(host))
 
 
 def hide_bubble(host) -> None:
@@ -302,7 +547,7 @@ def hide_bubble(host) -> None:
     host._sticky_subtitle = ""
     host._sticky_buttons = None
     host._alert_current = None
-    host._speech_bubble.dismiss()
+    _dismiss_bubble(alert_bubble(host))
     host._pump_alerts()
 
 
@@ -325,11 +570,7 @@ def on_speech_bubble_hidden(host) -> None:
             if abs(now - getattr(host, "_last_sticky_restore", 0.0)) < 0.3:
                 return
             host._last_sticky_restore = now
-            host._speech_bubble.show_text(
-                cur["text"], window_placement.bubble_anchor_rect(host), 0,
-                pet_scale=host.scale, subtitle=cur.get("subtitle", ""),
-                sticky=True, buttons=cur.get("buttons"),
-            )
+            _reshow_on_carrier(host, cur)
         else:
             # 限时提醒（硬失败/卡住）：展示结束，弹出下一条
             host._alert_current = None
@@ -337,11 +578,17 @@ def on_speech_bubble_hidden(host) -> None:
         return
     # 旧路径兼容：sticky 审批气泡（不经队列）被盖掉后恢复
     if host._sticky_bubble_active and host._sticky_text:
-        host._speech_bubble.show_text(
-            host._sticky_text, window_placement.bubble_anchor_rect(host), 0,
-            pet_scale=host.scale, subtitle=host._sticky_subtitle, sticky=True,
-            buttons=host._sticky_buttons,
-        )
+        bubble = alert_bubble(host)
+        if bubble is None:
+            return
+        try:
+            bubble.show_text(
+                host._sticky_text, _anchor_for(host, bubble), 0,
+                pet_scale=host.scale, subtitle=host._sticky_subtitle, sticky=True,
+                buttons=host._sticky_buttons,
+            )
+        except RuntimeError:
+            return
 
 
 def read_self_talk_texts(value) -> list[str]:

@@ -63,13 +63,6 @@ class InteractionResolvedEvent(SemanticEvent):
     call_id: str = ""
     outcome: str = ""
 
-@dataclass(frozen=True)
-class ControlResultEvent(SemanticEvent):
-    request_id: str = ""
-    operation: str = ""
-    ok: bool = False
-    phase: str = ""
-
 _LIFECYCLE = {"agent/status", "AgentStatus", "session/created", "session/disposed", "turn/start", "turn/end", "step/start", "step/end", "task_started", "task_complete", "thread_rolled_back"}
 _EXPLORATION = {"read", "grep", "glob", "search", "web_search", "web_search_begin", "exec_command_begin"}
 _ACTION = {"edit", "write", "patch", "shell", "pwsh", "bash", "pytest", "npm test", "playwright", "run"}
@@ -81,6 +74,22 @@ _EVENT_ALIASES = {"agentstatus": "agent/status"}
 
 def _data(ev: AgentEvent) -> dict[str, Any]:
     return ev.data
+
+def _resolved_ids(ev: AgentEvent, data: dict[str, Any]) -> dict[str, str]:
+    """收尾事件的配对身份：**顶层身份字段优先回退到信封**。
+
+    ``AgentEvent.from_record`` 把顶层 callId/requestId 移出 data、存进信封
+    (``ev.call_id`` / ``ev.request_id``)，而桥接的收尾帧（writeInteractionResolved
+    与 resolveQuestion）正是把身份写在顶层的——只读 ``data.get("callId")`` 会恒得
+    空串，callId 配对的收尾在语义层永远配不上（``_on_normalized_event`` 按身份
+    字符串相等关闭交互）。
+    """
+    return {
+        "request_id": str(data.get("requestId") or ev.request_id or ""),
+        "rpc_id": str(data.get("rpcId") or ""),
+        "approval_id": str(data.get("approvalId") or ""),
+        "call_id": str(data.get("callId") or ev.call_id or ""),
+    }
 
 def normalize_event(record: AgentEvent | dict, *, source_hint: str = "", agent_name_hint: str = "") -> SemanticEvent | None:
     ev = record if isinstance(record, AgentEvent) else parse_agent_event(record, source_hint=source_hint, agent_name_hint=agent_name_hint)
@@ -108,20 +117,22 @@ def normalize_event(record: AgentEvent | dict, *, source_hint: str = "", agent_n
         return RetryEvent(**common, code=str(failure.get("code") or data.get("errorCode") or ""), message=str(failure.get("message") or data.get("errorMessage") or "")[:300], retry=data.get("retry"))
     if lower in {"agent/request-error", "execution/failed", "llm_error", "error"}:
         return ErrorEvent(**common, code=str(data.get("errorCode") or data.get("code") or ""), message=str(data.get("errorMessage") or "")[:300])
-    if lower.startswith("approval/"): return ApprovalEvent(**common, status=lower.split("/", 1)[1])
-    if lower.startswith("question/"): return QuestionEvent(**common, status=lower.split("/", 1)[1])
-    if lower == "interaction/resolved":
-        return InteractionResolvedEvent(**common, kind=str(data.get("kind") or ""), request_id=str(data.get("requestId") or ev.request_id or ""), rpc_id=str(data.get("rpcId") or ""), approval_id=str(data.get("approvalId") or ""), call_id=str(data.get("callId") or ""), outcome=str(data.get("outcome") or ""))
+    # 具体收尾判定必须排在 approval/* 、question/* 前缀匹配**之前**：
+    # approval/decided、approval/resolved、question/resolved 是收尾帧，被前缀
+    # 分支吃掉（ApprovalEvent/QuestionEvent(status=...)）会让语义层的交互收尾
+    # （``_on_normalized_event`` 按身份配对关闭）对这三种旧名全程失效。
     if lower in {"approval/decided", "approval/resolved", "question/resolved"}:
         kind = "question" if lower == "question/resolved" else "approval"
         outcome = str(data.get("outcome") or data.get("decision") or ("answered" if kind == "question" else "approved"))
-        return InteractionResolvedEvent(**common, kind=kind, request_id=str(data.get("requestId") or ev.request_id or ""), rpc_id=str(data.get("rpcId") or ""), approval_id=str(data.get("approvalId") or ""), call_id=str(data.get("callId") or ""), outcome=outcome)
+        return InteractionResolvedEvent(**common, kind=kind, **_resolved_ids(ev, data), outcome=outcome)
+    if lower == "interaction/resolved":
+        return InteractionResolvedEvent(**common, kind=str(data.get("kind") or ""), **_resolved_ids(ev, data), outcome=str(data.get("outcome") or ""))
+    if lower.startswith("approval/"): return ApprovalEvent(**common, status=lower.split("/", 1)[1])
+    if lower.startswith("question/"): return QuestionEvent(**common, status=lower.split("/", 1)[1])
     if lower == "user_action":
         action = str(data.get("action") or "")
         if "resolved" in action or "decided" in action:
             kind = "question" if "question" in action else "approval"
-            return InteractionResolvedEvent(**common, kind=kind, request_id=str(data.get("requestId") or ev.request_id or ""), rpc_id=str(data.get("rpcId") or ""), approval_id=str(data.get("approvalId") or ""), call_id=str(data.get("callId") or ""), outcome=str(data.get("outcome") or data.get("decision") or ""))
+            return InteractionResolvedEvent(**common, kind=kind, **_resolved_ids(ev, data), outcome=str(data.get("outcome") or data.get("decision") or ""))
         return UserActionEvent(**common, action=action)
-    if lower in {"control-result", "bridge/control-result", "watchdog/control-result"}:
-        return ControlResultEvent(**common, request_id=ev.request_id or str(data.get("requestId") or ""), operation=str(data.get("operation") or ""), ok=bool(data.get("ok", False)), phase=str(data.get("phase") or ""))
     return None

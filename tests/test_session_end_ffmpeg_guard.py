@@ -48,6 +48,23 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def _wait_until(pred, timeout: float = 10.0) -> bool:
+    """有界等待（同 tests/test_agent_link_threads.py 的 wait_until 惯例）。
+
+    reader 是 ``clip.start()`` 之后在**新线程**里跑起来的，紧接 start() 的断言
+    只是赌子线程先被调度：给 reader 线程注入 300ms 启动延迟后
+    ``spy.read_frames_calls`` 仍是空列表（实测必红）；``_ensure_meta`` 的探测
+    同样被踢给 daemon 线程异步完成。轮询等待只在「真的没发生」时才失败——慢
+    runner 上不再抛硬币（PR-MERGE-LESSONS：poll state with a wide budget）。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def _reset_session_ending():
     """会话结束 latch 是进程级：任一用例置位后必须复位，否则后续用例静默不起 reader。"""
@@ -182,15 +199,15 @@ def test_control_group_spawns_normally_without_session_end(tmp_path, monkeypatch
     assert webm_clip_mod.session_ending() is False
 
     assert clip.start() is True
-    assert spy.read_frames_calls, "正常运行期必须照常拉起 reader（对照组）"
+    assert _wait_until(lambda: bool(spy.read_frames_calls)), (
+        "正常运行期必须照常拉起 reader（对照组）"
+    )
     clip._ensure_meta()
     # 主线程 _ensure_meta 走「GUI 线程不跑 ffprobe」闸：探测被踢给 daemon
-    # 线程异步完成。轮询等待而不是赌线程调度——慢 runner（2 核 CI）上
-    # 固定时序是抛硬币（PR-MERGE-LESSONS：poll state with a wide budget）。
-    deadline = time.monotonic() + 10.0
-    while not spy.count_calls and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert spy.count_calls, "正常运行期元数据探测照常（对照组）"
+    # 线程异步完成，同样只能等待、不能赌调度。
+    assert _wait_until(lambda: bool(spy.count_calls)), (
+        "正常运行期元数据探测照常（对照组）"
+    )
     clip.cleanup()
 
 
@@ -706,3 +723,49 @@ def test_ffmpeg_exe_probe_is_gated():
             f"webm_clip.py:{i + 1}: exe 探测缺少 session_ending() 门"
         )
     assert call_sites == 1, f"get_ffmpeg_exe 调用点数量异常：{call_sites}"
+
+
+def test_normal_quit_survives_a_missing_chat_module(app, tmp_path):
+    """no-chat 打包变体（excludes=['pet.chat']）的正常退出不许提前炸。
+
+    ``_on_about_to_quit`` 以前在方法体第一行就 ``from .chat import session_store``。
+    那个模块在纯桌宠版里被排除，于是**正常退出**（托盘退出/最后窗口关闭）第一步就
+    ModuleNotFoundError——它发生在 ``_mark_session_ending`` / ``_quitting`` 之前，
+    位置回写、共享子系统停表、ffmpeg reader 收尾全部被跳过（2026-10-10 终审附加项）。
+
+    这里用 ``sys.modules[...] = None`` 模拟"模块不存在"（不新建打包变体）：导入系统
+    对 None 条目直接抛 ImportError，与真实缺失同一条路径。**必须同时毒 ``pet.chat``
+    本身**——只毒 ``pet.chat.session_store`` 不够：``from .chat import session_store``
+    会先在已导入的 ``pet.chat`` 上取同名属性，而测试进程里它早被别处导入过（打包变体里
+    连 ``pet.chat`` 都不存在，那才是真实入口）。
+    """
+    import sys
+
+    from pet.app import AppShell
+
+    lib = _RecordingLibrary()
+    win = _FakeWindow(lib=lib)
+    shell = _shell_with_window(app, tmp_path, win)
+    calls: list[str] = []
+    shell._shared.stop_all = lambda: calls.append("shared")
+    shell._decode_hub.stop_all = lambda: calls.append("decode-hub")
+    poisoned = ("pet.chat", "pet.chat.session_store")
+    saved = {name: sys.modules.get(name) for name in poisoned}
+    try:
+        for name in poisoned:
+            sys.modules[name] = None            # 等价于"这个模块不存在"
+        try:
+            shell._on_about_to_quit()
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        assert shell._plain_about_to_quit is True, "退出兜底标记必须已置"
+        assert shell._quitting is True, "退出标记必须已置（在途 worker 靠它收口）"
+        assert calls == ["shared", "decode-hub"], (
+            "缺 chat 模块不许把退出收口截断在半路")
+    finally:
+        AppShell._shutdown_live_for_tests()

@@ -846,6 +846,18 @@ class ModernSelect(QAbstractButton):
     def currentText(self) -> str:  # noqa: N802
         return self._items[self._index][0] if 0 <= self._index < len(self._items) else ""
 
+    def suggestedWidth(self) -> int:  # noqa: N802
+        """装得下最长项文案所需的控件宽度。
+
+        自绘文本区不带省略号（``paintEvent`` 直接 ``drawText`` 到
+        ``width() - 34``：左内缩 10 + 右侧 24 留给 chevron），宽度不够就**裁字**。
+        调用方加长下拉文案时用本方法取宽度，别再手算固定值。"""
+        widest = max(
+            (self.fontMetrics().horizontalAdvance(text) for text, _ in self._items),
+            default=0,
+        )
+        return widest + 34
+
     def popupStyleSheet(self) -> str:  # noqa: N802
         return settings_popup_stylesheet(self)
 
@@ -936,12 +948,36 @@ class SettingRow(QFrame):
             control.setAccessibleName(title)
         if hint and not control.accessibleDescription():
             control.setAccessibleDescription(hint)
+        # 「已修改」标记 + 单项「改回默认」入口（设置页第三刀）。默认态两者都收起，行的
+        # 呈现与改动前逐位一致；样式全部复用既有令牌（标记走 settingHint 的小字、按钮走
+        # 通用 QPushButton），不新增 QSS 面。谁点亮由对话框判定，本类只负责呈现。
+        self.modified_mark = QLabel("· 已修改", self)
+        self.modified_mark.setObjectName("settingHint")
+        self.modified_mark.hide()
+        self.default_reset_button = QPushButton("改回默认", self)
+        self.default_reset_button.setObjectName("settingDefaultReset")
+        self.default_reset_button.setAutoDefault(False)
+        self.default_reset_button.setDefault(False)
+        self.default_reset_button.setToolTip(
+            "把这一项改回默认值。保存时机跟这一项自己的语义一致：即时生效的开关会立刻"
+            "写入配置，其余项随设置窗关闭保存。"
+        )
+        # 一页里有几十个同名按钮，读屏必须能说清是改哪一项（Tab 到才听得懂）
+        self.default_reset_button.setAccessibleName(f"把「{title}」改回默认值")
+        self.default_reset_button.hide()
+        mark_line = QHBoxLayout()
+        mark_line.setContentsMargins(0, 0, 0, 0)
+        mark_line.setSpacing(8)
+        mark_line.addWidget(self.modified_mark)
+        mark_line.addWidget(self.default_reset_button)
+        mark_line.addStretch(1)
         if stacked:
             row = QVBoxLayout(self)
             row.setContentsMargins(16, 10, 16, 10)
             row.setSpacing(0)
             row.addWidget(label)
             row.addWidget(hint_label)
+            row.addLayout(mark_line)
             row.addSpacing(7)
             row.addWidget(control)
             self._responsive_layout = None
@@ -955,6 +991,7 @@ class SettingRow(QFrame):
             copy.setSpacing(2)
             copy.addWidget(label)
             copy.addWidget(hint_label)
+            copy.addLayout(mark_line)
             copy.addStretch(1)
             row.addLayout(copy, 1)
             row.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -963,6 +1000,24 @@ class SettingRow(QFrame):
         self.label = label
         self.hint_label = hint_label
         self.control = control
+
+    def set_default_state(self, default_text: str | None, *, can_reset: bool) -> None:
+        """切换本行的「已修改」呈现；``default_text=None`` 表示当前值就是默认值。
+
+        基线 hint 取「当前文本去掉上一次追加的默认值行」，而不是构造时那份原文：
+        别的入口会往 hint 尾部追加说明（子宠页的范围说明见
+        ``settings_pet_controls._apply_window_scope_rows``），写死原文会把它们抹掉。
+        每次刷新都重取基线，外部改写与这里的增删就不会互相踩。
+        依赖隐藏不做可见性记账：标记与按钮各自 ``setVisible``，父行不可见时它们自然
+        不呈现，父行重新显示后标记跟着回来（依赖行"改过没有"这件事一直记着）。
+        """
+        modified = default_text is not None
+        base_hint = self.hint_label.text().split("默认：", 1)[0].rstrip("\n")
+        self.hint_label.setText(
+            base_hint if not modified else f"{base_hint}\n默认：{default_text}"
+        )
+        self.modified_mark.setVisible(modified)
+        self.default_reset_button.setVisible(modified and can_reset)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1191,8 +1246,18 @@ class SettingsDisclosureHeader(QPushButton):
     def _sync_chevron(self, expanded: bool) -> None:
         self.chevron.setText("⌄" if expanded else "›")
 
+def _section_description_label(text: str, parent: QWidget) -> QLabel:
+    """组标题下的一句人话（``sectionDescription``）：文案在调用方，这里只管呈现。"""
+    label = QLabel(str(text), parent)
+    label.setObjectName("sectionDescription")
+    label.setWordWrap(True)
+    label.setVisible(bool(text))
+    return label
+
+
 class SettingsSection(QWidget):
-    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False):
+    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False,
+                 description: str = ""):
         super().__init__(parent)
         self.advanced = advanced
         self.rows = list(rows)
@@ -1207,11 +1272,19 @@ class SettingsSection(QWidget):
             label = QLabel(title, self)
             label.setObjectName("sectionTitle")
             layout.addWidget(label)
+        # 描述是标题的兄弟而不是卡片的一部分：高级组收起时它照常看得见（否则
+        # 「这里是什么」要先展开才知道）。空串＝整条收起，与改动前逐位一致。
+        self.description_label = _section_description_label(description, self)
+        layout.addWidget(self.description_label)
         self.card = SettingsCard(rows, self)
         layout.addWidget(self.card)
         if self.toggle is not None:
             self.card.setVisible(False)
             self.toggle.toggled.connect(self._set_expanded)
+
+    def set_description(self, text: str) -> None:
+        self.description_label.setText(str(text))
+        self.description_label.setVisible(bool(text))
 
     def refresh_dependency_visibility(self) -> None:
         """Hide a section when every row is suppressed by a parent setting."""
@@ -1235,7 +1308,7 @@ class CollapsibleGroup(QWidget):
     既有视觉令牌与分隔线行为。
     """
 
-    def __init__(self, title: str, parent=None, *, expanded: bool = False):
+    def __init__(self, title: str, parent=None, *, expanded: bool = False, description: str = ""):
         super().__init__(parent)
         self.setObjectName("collapsibleGroup")
         layout = QVBoxLayout(self)
@@ -1243,6 +1316,9 @@ class CollapsibleGroup(QWidget):
         layout.setSpacing(7)
         self.toggle = SettingsDisclosureHeader(title, self)
         layout.addWidget(self.toggle)
+        # 与 SettingsSection 同口径：描述常驻在折叠头下面，收起时也看得见。
+        self.description_label = _section_description_label(description, self)
+        layout.addWidget(self.description_label)
         self.body = QWidget(self)
         self.body.setObjectName("collapsibleGroupBody")
         self.body_layout = QVBoxLayout(self.body)
@@ -1261,6 +1337,10 @@ class CollapsibleGroup(QWidget):
         self.groups.append(section)
         self.body_layout.addWidget(section)
         return section
+
+    def set_description(self, text: str) -> None:
+        self.description_label.setText(str(text))
+        self.description_label.setVisible(bool(text))
 
     def set_expanded(self, expanded: bool) -> None:
         self.toggle.setChecked(bool(expanded))
@@ -1293,6 +1373,9 @@ class _CurrentPageStack(QStackedWidget):
 
 class SettingsTabContainer(QWidget):
     """Keyboard-accessible in-page tabs for peer tasks within one domain."""
+
+    #: 当前标签变了（键，不是下标）：页内跳转条按当前标签重建自己要列的区。
+    currentKeyChanged = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1354,6 +1437,7 @@ class SettingsTabContainer(QWidget):
         self.stack.updateGeometry()
         self.stack.currentWidget().updateGeometry()
         self.updateGeometry()
+        self.currentKeyChanged.emit(self.currentKey())
 
     def setCurrentKey(self, key: str) -> None:  # noqa: N802
         if key in self._keys:
@@ -1392,6 +1476,7 @@ def _line_edit(text: str = "", *, password: bool = False, width: int = 240) -> Q
     if password:
         edit.setEchoMode(QLineEdit.EchoMode.Password)
     return edit
+
 
 class QuickLaunchItemRow(QWidget):
     """Two-line quick-launch row; the owning list keeps selection and drag."""

@@ -140,6 +140,10 @@ class PetSprite(QObject):
         self._squash_progress: float | None = None
         # 拖动物理开关（菜单「拖动物理」）：False 时松手原地放下（不抛掷）
         self.drag_physics = True
+        # 静止放手下落（config drop_gravity，#219）：True 时低速松手不再原地
+        # 停在半空，而是零初速进抛掷物理（重力落地）。默认关 = 旧行为；
+        # 集成层 `_sync_sprite_settings` 按设置写入。
+        self.drop_gravity = False
         # 见模块顶部 INTERACTION_* 常量：跨模块协调协议的唯一权威字段
         self.interaction_state = INTERACTION_NORMAL
         # 逐只显隐（M14 / PHASE4_DESIGN 4.1b）：False = 不绘制、不命中、不进
@@ -407,6 +411,25 @@ class PetSprite(QObject):
         if relaxed is not None:
             return relaxed
         return self._bounds
+
+    def _at_ground(self) -> bool:
+        """是否已贴住活动区地面（松手语义用，容差同 ``physics.is_at_rest``）。
+
+        地面 = 身体框下缘贴 bounds 下缘的那个 y，即 ``set_pos`` 钳制域的**最深
+        下界**——直接问钳制函数本身（传 +inf 让 ``_clamp_axis`` 返回它的 upper，
+        含小屏兜底），不另抄一份几何式。与抛掷物理的地板线同源：壳对 sprite 与
+        ``ThrowPhysicsController`` 喂同一个 bounds，``_sprite_bounds`` 的 bottom
+        就是这条线。无 bounds（未挂活动区）时返回 False——宁可进抛掷链，也不假
+        定"已经落地"。
+        """
+        domain = self._clamp_domain()
+        if domain is None:
+            return False
+        body = self._body_local_rect()
+        ground = self._clamp_axis(
+            math.inf, domain.top(), domain.top() + domain.height(),
+            body.y(), body.height())
+        return self.pos.y() >= ground - 1.0
 
     def set_pos(self, pos: QPointF) -> None:
         """唯一位置写入口：写入前按 body_box 钳制（D3）。
@@ -1083,6 +1106,11 @@ class PetSprite(QObject):
         抛掷物理控制器接管；低于死区 = 原地放下，velocity 归零回
         "normal"（行为控制器随后接管）。松手位置不入轨迹——否则
         estimate 的 RELEASE_STALE_SEC「停顿即静止放下」判定失效。
+
+        ``drop_gravity``（#219）打开时低速这一支改为**零初速**进 "thrown"，
+        由现成的重力链自然落地（不再停在半空）——唯一例外是已经贴地：那一
+        路走原地放下的老路（详见下方注释）。开关关 = 本方法行为与历史逐字
+        相同。
         """
         if not self._dragging:
             return
@@ -1097,7 +1125,14 @@ class PetSprite(QObject):
             rvx, rvy = 0.0, 0.0  # 拖动物理关：原地放下（window.py 同语义）
         if math.hypot(rvx, rvy) < physics_mod.DEAD_ZONE_SPEED:
             self.velocity = QPointF(0, 0)
-            self.interaction_state = INTERACTION_NORMAL
+            if self.drop_gravity and not self._at_ground():
+                # 静止放手下落：零初速交给抛掷物理，重力负责落地
+                self.interaction_state = INTERACTION_THROWN
+            else:
+                # 贴地松手不进抛掷接管：零初速 + 贴地时物理会在首个 8ms 子步
+                # 就判回静止（vy 只到 g·dt≈11px/s，远低于落地截止），白付一次
+                # 悬空 clip 绑定 + 整池落地预热提交（实测 3 tick 0.48→2.00ms）。
+                self.interaction_state = INTERACTION_NORMAL
         else:
             self.velocity = QPointF(rvx, rvy)
             self.interaction_state = INTERACTION_THROWN

@@ -743,8 +743,8 @@ def test_single_modern_menu_routes_to_selected_chat_dispatcher():
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="legacy", character="shenshen", on_top=False)
-        on_open_chat_settings = on_open_legacy_settings = on_open_modern_settings = None
+        cfg = Config(character="shenshen", on_top=False)
+        on_open_chat_settings = on_open_modern_settings = None
         idles = turns = moves = clicks = acts = []
         playback_speed = scale = 1.0
         drag_physics = no_move = False
@@ -752,7 +752,6 @@ def test_single_modern_menu_routes_to_selected_chat_dispatcher():
         def __init__(self):
             self.calls = []
             self.on_open_chat = lambda: self.calls.append("selected")
-            self.on_open_modern_chat = lambda: self.calls.append("unexpected")
 
         def __getattr__(self, _name):
             return lambda *_args, **_kwargs: None
@@ -1213,6 +1212,62 @@ def test_assistant_message_expands_to_available_timeline_width(tmp_path: Path):
     assert bubble.width() >= available - 8
     window.close()
     app.processEvents()
+
+
+def _trailing_blank_below_last_message(window) -> int:
+    """末条消息行底边到时间线内容区底边之间的空白（已扣掉布局下边距）。"""
+    layout = window.message_host_layout
+    bottom_margin = layout.contentsMargins().bottom()
+    last_bottom = None
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item.layout() is not None:
+            last_bottom = item.geometry().bottom()
+    if last_bottom is None:
+        return window.timeline_host.height()
+    return (window.timeline_host.height() - bottom_margin) - last_bottom - 1
+
+
+def test_modern_chat_trailing_blank_does_not_grow_with_message_count(tmp_path: Path):
+    """#191：助手气泡纵向策略 Minimum 把偏大的 sizeHint 当行最小高，累计出的差额
+    全部落到时间线末尾唯一的 Expanding 垫上，表现为「末条消息下方空白随轮数单调
+    增长」。内容比视口高时空白只应随轮数下降（内容变高），绝不会回升；因此断言
+    每次加消息后的空白都不比上一次多出一档布局 spacing（24px）以上。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    samples = [
+        "你好呀，今天想聊点什么？",
+        "我最近在做一个桌宠项目，用 PySide6 写的，窗口是无边框的，"
+        "结果聊天窗口在对话变多之后底部会出现越来越大的空白，不知道是什么原因。",
+        "这条是短回复。",
+        "从现象看，空白出现在最后一条消息气泡的下方，而且轮数越多空白越大；"
+        "如果每个气泡后面都追加了一个多余的空行或 margin，累积起来就会正好是这个效果。",
+    ]
+
+    blanks = []
+    for count in (5, 10, 20):
+        window = ChatWindow(Config(tmp_path / f"n{count}"), "shenshen")
+        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        window.resize(695, 661)
+        window.show()
+        for _ in range(40):
+            app.processEvents()
+        for index in range(count):
+            window._add("user" if index % 2 == 0 else "assistant", samples[index % len(samples)])
+            for _ in range(25):
+                app.processEvents()
+        for _ in range(80):
+            app.processEvents()
+        blanks.append(_trailing_blank_below_last_message(window))
+        window.close()
+        app.processEvents()
+
+    growth = [after - before for before, after in zip(blanks, blanks[1:])]
+    assert max(growth) <= 24, (blanks, growth)
 
 
 def test_status_and_model_are_in_header_not_sidebar(tmp_path: Path):
@@ -2089,8 +2144,11 @@ def test_pet_animation_and_self_talk_defaults_are_persisted(tmp_path: Path):
     cfg.save()
     loaded = Config(tmp_path)
     assert loaded.get("animation_gap_seconds") == 2.5
-    assert loaded.get("self_talk_enabled") is True
-    assert loaded.get("self_talk_texts") == ["one", "two"]
+    from pet.settings_slot_config import route_settings_config
+
+    profile = route_settings_config(Config(tmp_path, instance_id="slot-0"))
+    assert profile.get("self_talk_enabled") is True
+    assert profile.get("self_talk_texts") == ["one", "two"]
 
 
 def test_reference_animation_materials_are_folder_classified():

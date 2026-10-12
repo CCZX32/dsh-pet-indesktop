@@ -19,7 +19,6 @@ def _qapp():
 class _Config:
     def __init__(self):
         self.values = {
-            "context_menu_template": "modern",
             "context_menu_layout": None,
             "context_menu_appearance": {"theme": "light"},
             "character": "shenshen",
@@ -38,9 +37,8 @@ class _Config:
 
 
 class _Pet:
-    def __init__(self, template="modern"):
+    def __init__(self):
         self.cfg = _Config()
-        self.cfg.values["context_menu_template"] = template
         self.on_open_chat = lambda self: None
         self.on_look_screen = lambda self: None
         self.on_show_balance = lambda self, parent=None: None
@@ -77,7 +75,7 @@ def _find_action(menu, text):
 def test_modern_menu_has_golden_spin_and_edge_probe_in_pet_controls():
     app = _qapp()
     menu = QMenu()
-    pet = _Pet(template="modern")
+    pet = _Pet()
     populate_context_menu(menu, pet)
     controls = next(action.menu() for action in menu.actions() if action.text() == "桌宠控制")
     golden = _find_action(controls, "黄金回旋")
@@ -86,21 +84,6 @@ def test_modern_menu_has_golden_spin_and_edge_probe_in_pet_controls():
     assert not edge.isChecked()
     golden.trigger()
     assert pet.golden_spins == 1
-    edge.setChecked(True)
-    assert pet.edge_toggles == [True]
-    menu.close()
-    app.processEvents()
-
-
-def test_legacy_menu_has_golden_spin_and_edge_probe():
-    app = _qapp()
-    menu = QMenu()
-    pet = _Pet(template="legacy")
-    populate_context_menu(menu, pet)
-    assert _find_action(menu, "黄金回旋") is not None
-    edge = _find_action(menu, "边缘探头")
-    assert edge.isCheckable()
-    assert not edge.isChecked()
     edge.setChecked(True)
     assert pet.edge_toggles == [True]
     menu.close()

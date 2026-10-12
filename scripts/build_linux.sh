@@ -43,6 +43,28 @@ FCITX5_PLUGIN="$FCITX5_PLUGIN_DIR/libfcitx5platforminputcontextplugin.so"
 "$ROOT/scripts/build_pyside6_fcitx_plugin.sh" "$PYTHON_BIN" "$FCITX5_PLUGIN"
 
 IFS=',' read -ra variant_list <<< "$VARIANTS"
+
+# 素材硬门（2026-10-11，与 Windows 的 build_onedir.ps1 同口径）：帧序列产物
+# assets/characters/<角色>/frameseq/ 是刻意不入库的派生产物（.gitignore），而
+# --add-data 对非 GIF 变体整树拷贝 assets/characters——素材在就进包、缺了也不
+# 报错，于是缺帧序列的包会被静默打出来（用户长期看到未转换素材）。这里在
+# PyInstaller 起跑前验证每个 clip 都有当前世代的帧序列产物，非零即中止。
+# GIF 变体跳过本门：它打包 assets/characters_gif（convert_to_gif.py 直出），
+# 素材树里没有也没有 frameseq 这一层，本门不适用。
+needs_frameseq=0
+for requested in "${variant_list[@]}"; do
+    case "$requested" in
+        gif|gif-chat) ;;
+        *) needs_frameseq=1 ;;
+    esac
+done
+if [[ "$needs_frameseq" == "1" ]]; then
+    if ! "$PYTHON_BIN" scripts/check_frameseq_bundle.py; then
+        echo "[frameseq] 帧序列素材不完整，拒绝出包（补法见上面的 stderr）" >&2
+        exit 1
+    fi
+fi
+
 for variant in "${variant_list[@]}"; do
     case "$variant" in
         webm-chat)  entry="packaging/pet_entry.py";            assets="assets/characters";       excludes="" ;;

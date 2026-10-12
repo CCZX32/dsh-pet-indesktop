@@ -30,6 +30,12 @@ assets/characters/*/frameseq/
 # Windows 安装包图标（本地生成，入库保证克隆后可构建）
 !assets/icon.ico
 
+# 随包分发的第三方二进制（刻意入库，不是误入的构建产物）：
+# resources/presentmon/ 里的独立控制台程序是游戏帧率段的数据源，上游没有 PyPI 包，
+# 不入库则干净克隆与 CI 构建拿不到它（打包门会因此中止，见
+# scripts/verify_presentmon.py）。来源、版本、sha256 与 MIT 许可文本见
+# THIRD_PARTY_NOTICES.md 第 6 节；这里的目录本身不被任何规则忽略，此段是说明而非白名单。
+
 # PyInstaller 构建产物
 build/
 dist/

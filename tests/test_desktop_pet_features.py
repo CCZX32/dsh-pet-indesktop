@@ -6,6 +6,18 @@ import sys
 from pathlib import Path
 
 
+def _slot0_config(tmp_path):
+    """生产形态的配置面：slot0 身份经 ``SlotRoutedConfig`` 分流。
+
+    每宠键（自言自语族、气泡样式、尺寸…）的真值在 ``config-slot-0.json``：
+    裸全局 ``Config.set/save`` 出闸时会过滤掉它们，改不动任何一只宠。
+    """
+    from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+
 def test_speech_bubble_never_accepts_focus():
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
@@ -256,7 +268,15 @@ def test_standard_bubble_images_keep_retina_device_pixel_density(tmp_path, monke
     image = tmp_path / "retina.png"
     Image.new("RGB", (600, 600), "blue").save(image)
     bubble = PetSpeechBubble(style_id="paper_left")
-    monkeypatch.setattr(bubble, "devicePixelRatioF", lambda: 2.0)
+    # 打在**类**上，不打在实例上：monkeypatch 对实例属性记下的旧值是本类的
+    # bound method，undo() 会把它写回 ``bubble.__dict__``，形成
+    # ``bubble -> __dict__ -> bound method -> bubble`` 的自环 ⇒ 引用计数永远归不了
+    # 零，Python 包装只能等周期性 GC 回收，C++ 侧 QWidget 也就落到任意时点销毁
+    # （实测落在别的用例的 import 里，属于 conftest 记的「Garbage-collecting /
+    # no Python frame」原生崩溃家族；本用例的顶层窗口清扫因此看不到它，收口失效）。
+    # ``devicePixelRatioF`` 来自 QWidget、不在 ``PetSpeechBubble.__dict__`` 里，
+    # 类级补丁的旧值是 NOTSET，undo() 走 delattr，不留自环。
+    monkeypatch.setattr(PetSpeechBubble, "devicePixelRatioF", lambda self: 2.0)
     assert bubble.show_image(image, QRect(420, 460, 220, 260), 5000)
     app.processEvents()
     bubble.grab()
@@ -265,6 +285,8 @@ def test_standard_bubble_images_keep_retina_device_pixel_density(tmp_path, monke
     assert bubble._standard_image_rect.toRect() == bubble.label.geometry()
     bubble.close()
     app.processEvents()
+    # 类级补丁不应给实例留下方法覆盖，避免 undo 恢复 bound method 形成自环。
+    assert "devicePixelRatioF" not in bubble.__dict__
 
 
 def test_all_bubble_presets_use_soft_layered_shadows():
@@ -391,12 +413,12 @@ def test_self_talk_images_and_duration_are_normalized_and_scheduled_after_hide(t
     Image.new("RGB", (20, 10), "blue").save(image_dir / "one.png")
     (image_dir / "ignore.txt").write_text("not an image", encoding="utf-8")
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_duration_seconds") == DEFAULT_SELF_TALK_DURATION_SECONDS
     config.set("self_talk_duration_seconds", 7.5)
     config.set("self_talk_image_dir", str(image_dir))
-    config.save()
-    loaded = Config(tmp_path)
+    assert config.save() is True
+    loaded = _slot0_config(tmp_path)
     assert loaded.get("self_talk_duration_seconds") == 7.5
     assert loaded.get("self_talk_image_dir") == str(image_dir)
     assert list_self_talk_images(str(image_dir)) == [image_dir / "one.png"]
@@ -426,19 +448,19 @@ def test_self_talk_image_scale_config_and_bubble_size(tmp_path):
     image_dir.mkdir()
     Image.new("RGB", (20, 10), "blue").save(image_dir / "one.png")
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_image_scale") == 100  # 默认
     config.set("self_talk_image_scale", 250)
-    config.save()
-    loaded = Config(tmp_path)
+    assert config.save() is True
+    loaded = _slot0_config(tmp_path)
     assert loaded.get("self_talk_image_scale") == 250
     # 钳位：越界/非数值
     config.set("self_talk_image_scale", 9999)
-    config.save()
-    assert Config(tmp_path).get("self_talk_image_scale") == 300
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 300
     config.set("self_talk_image_scale", "abc")
-    config.save()
-    assert Config(tmp_path).get("self_talk_image_scale") == 100
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 100
 
     from PySide6.QtCore import QRect
     from PySide6.QtWidgets import QApplication
@@ -575,13 +597,16 @@ def test_speech_bubble_tail_is_one_surface_and_shadow_has_no_graphics_effect():
 def test_self_talk_bubble_style_is_normalized_and_persisted(tmp_path):
     from pet.config import Config
 
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("self_talk_bubble_style") == "classic_top"
     config.set("self_talk_bubble_style", "glass_right")
-    config.save()
-    assert Config(tmp_path).get("self_talk_bubble_style") == "glass_right"
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_bubble_style") == "glass_right"
     config.set("self_talk_bubble_style", "unknown")
-    assert config.get("self_talk_bubble_style") == "classic_top"
+    # 脏值在**落盘后的读端**被归一（路由视图对未保存的草稿按原样回显，清洗发生在
+    # 同源默认那条读规则上——唯一清洗实现仍是 Config 的每宠快照规范化）。
+    assert config.save() is True
+    assert _slot0_config(tmp_path).get("self_talk_bubble_style") == "classic_top"
 
 
 def test_icon_composition_ignores_low_alpha_noise_and_fills_canvas():
@@ -707,42 +732,48 @@ def test_modern_pet_context_menu_has_spawn_action_with_avatar_icon(monkeypatch):
     app.processEvents()
 
 
-def test_context_menu_defaults_to_modern_and_keeps_migration_metadata(tmp_path):
-    from pet.config import Config
-    from pet.context_menu import load_menu_template
+def test_context_menu_has_no_template_switch_entry(tmp_path):
+    """模板切换入口随旧版菜单一起退役（2026-10-08）。
 
-    config = Config(tmp_path)
-    assert config.get("context_menu_template") == "modern"
-    legacy = load_menu_template("legacy")
-    modern = load_menu_template("modern")
-    assert legacy["switch_to"] == "modern"
-    assert modern["switch_to"] == "legacy"
-    assert legacy["switch_label"] == "切换到新版菜单"
-    assert modern["switch_label"] == "切换回旧版菜单"
-    assert [group["id"] for group in modern["groups"]] == [
-        "interaction",
-        "playback",
-        "functions",
-        "tools",
-        "settings",
-        "template",
-        "exit",
-    ]
+    旧版菜单是**被删除**的，不是被隐藏的：即使配置里残留了已退役的模板键，
+    右键出来的仍是现代树，且树里不再有任何「切换到…菜单」入口。旧版布局的
+    源码级防复活断言在 ``tests/test_architecture.py``（退役符号全树零命中）。
+    """
+    from PySide6.QtWidgets import QApplication, QMenu
 
+    from pet.context_menu import populate_context_menu
 
-def test_context_menu_runtime_only_dispatches_modern_layout():
-    legacy_source = Path("pet/context_menus/legacy.py").read_text(encoding="utf-8")
-    modern_source = Path("pet/context_menus/modern.py").read_text(encoding="utf-8")
-    dispatcher_source = Path("pet/context_menu.py").read_text(encoding="utf-8")
+    class Config:
+        def __init__(self):
+            self.values = {"context_menu_template": "legacy", "character": "shenshen"}
 
-    assert "build_legacy_menu" in legacy_source
-    assert "build_modern_menu" not in legacy_source
-    assert "build_modern_menu" in modern_source
-    assert "build_legacy_menu" not in modern_source
-    # 分发器按 context_menu_template 配置选择两套模板（不再硬编码 modern）
-    assert "build_legacy_menu" in dispatcher_source
-    assert "build_modern_menu" in dispatcher_source
-    assert "context_menu_template" in dispatcher_source
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+    class Pet:
+        on_open_chat = on_open_chat_settings = None
+        on_open_modern_settings = None
+        on_spawn_pet = None
+        idles = turns = moves = clicks = acts = []
+        playback_speed = scale = 1.0
+        drag_physics = no_move = False
+
+        def __init__(self):
+            self.cfg = Config()
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    app = QApplication.instance() or QApplication([])
+    menu = QMenu()
+    populate_context_menu(menu, Pet())
+    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+    assert menu.objectName() == "modernContextMenu"
+    assert "切换到新版菜单" not in labels
+    assert "切换回旧版菜单" not in labels
+    assert "桌宠控制" in labels and "工具与帮助" in labels
+    menu.close()
+    app.processEvents()
 
 
 def test_pet_avatar_menu_icon_fills_native_slot_and_stays_centered(monkeypatch):
@@ -805,7 +836,6 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
             self.values = {
                 "character": "shenshen",
                 "on_top": True,
-                "context_menu_template": "modern",
             }
 
         def get(self, key, default=None):
@@ -823,7 +853,6 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
         on_show_balance = lambda self, parent=None: None
         on_check_update = lambda self, parent=None: None
         on_open_chat_settings = lambda self: None
-        on_open_legacy_settings = lambda self: None
         on_open_modern_settings = lambda self: None
         on_spawn_pet = lambda self: None
         idles = ["待机"]
@@ -843,9 +872,6 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
             pixmap = QPixmap(size, size)
             pixmap.fill()
             return pixmap
-
-        def set_context_menu_template(self, template_id):
-            self.cfg.set("context_menu_template", template_id)
 
         def __getattr__(self, name):
             return lambda *args, **kwargs: None
@@ -880,6 +906,10 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("主动识屏")  # 仅 Windows + 有聊天能力时显示
     expected_labels.append("待办提醒")  # 待办管理面板入口（所有平台）
+    expected_labels.append("免打扰")    # 免打扰入口（#208，四档时长子菜单）
+    if sys.platform == "win32":
+        expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
+    expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -916,7 +946,6 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
     class FakeConfig:
         def get(self, key, default=None):
             return {
-                "context_menu_template": "modern",
                 "character": "shenshen",
                 "context_menu_appearance": {"theme": "light"},
             }.get(key, default)
@@ -925,7 +954,6 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
         cfg = FakeConfig()
         on_open_chat = None
         on_open_chat_settings = None
-        on_open_legacy_settings = None
         on_open_modern_settings = None
         on_spawn_pet = None
         idles = turns = moves = clicks = acts = []
@@ -959,18 +987,14 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
     app.processEvents()
 
 
-def test_context_menu_dispatches_style_by_template(monkeypatch):
+def test_context_menu_always_applies_the_modern_style():
     from PySide6.QtWidgets import QApplication, QMenu, QStyle, QWidget
 
     from pet.context_menu import populate_context_menu
 
     class Config:
-        def __init__(self, template):
-            self.template = template
-
         def get(self, key, default=None):
             return {
-                "context_menu_template": self.template,
                 "character": "shenshen",
                 # 固定浅色主题，避免断言随系统深色模式翻转
                 "context_menu_appearance": {"theme": "light"},
@@ -978,87 +1002,7 @@ def test_context_menu_dispatches_style_by_template(monkeypatch):
 
     class Pet:
         on_open_chat = on_open_chat_settings = None
-        on_open_legacy_settings = on_open_modern_settings = None
-        on_spawn_pet = None
-        idles = turns = moves = clicks = acts = []
-        playback_speed = scale = 1.0
-        drag_physics = no_move = False
-
-        def __init__(self, template):
-            self.cfg = Config(template)
-
-        def __getattr__(self, name):
-            return lambda *args, **kwargs: None
-
-    app = QApplication.instance() or QApplication([])
-    legacy_menu = QMenu()
-    modern_menu = QMenu()
-    populate_context_menu(legacy_menu, Pet("legacy"))
-    populate_context_menu(modern_menu, Pet("modern"))
-    # legacy 模板走 legacy 样式（无 modern 外观），modern 模板走 modern 样式
-    assert legacy_menu.objectName() != "modernContextMenu"
-    assert legacy_menu.styleSheet() == ""
-    assert modern_menu.objectName() == "modernContextMenu"
-    # The modern menu follows the compact macOS project-menu reference: a
-    # white hairline surface, small system text, outline icons and subtle rules
-    # between semantic groups.
-    assert "background-color: rgba(255, 255, 255, 240)" in modern_menu.styleSheet()
-    assert "border: none" in modern_menu.styleSheet()
-    hairline = modern_menu.findChild(QWidget, "modernHairlineBorder")
-    assert hairline is not None
-    assert hairline.property("physicalPixelWidth") == 1
-    assert "border-radius: 12px" in modern_menu.styleSheet()
-    assert "font-size: 13px" in modern_menu.styleSheet()
-    assert "icon-size: 18px" in modern_menu.styleSheet()
-    assert "background-color: #eeeeee" in modern_menu.styleSheet()
-    assert "min-height: 18px" in modern_menu.styleSheet()
-    assert "padding: 3px 29px 3px 13px" in modern_menu.styleSheet()
-    assert "margin-right: 10px" in modern_menu.styleSheet()
-    assert "QMenu::separator" in modern_menu.styleSheet()
-    separator_rule = modern_menu.styleSheet().split("QMenu::separator", 1)[1]
-    assert "height: 1px" in separator_rule
-    assert "background: #e5e5e5" in separator_rule
-    assert Path("pet/context_menus/menu_styles/common.py").is_file()
-    assert Path("pet/context_menus/menu_styles/legacy.py").is_file()
-    assert Path("pet/context_menus/menu_styles/modern.py").is_file()
-    for menu in (legacy_menu, modern_menu):
-        assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuPopupDelay, None, menu) == 60
-        assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuSloppyCloseTimeout, None, menu) == 120
-        assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuSloppySelectOtherActions, None, menu) == 1
-        assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuUniDirection, None, menu) == 0
-        menu.close()
-    app.processEvents()
-
-
-def test_context_menu_invalid_template_falls_back_to_modern_uniformly():
-    """非法/缺失模板 id：load_menu_template 与 populate_context_menu 统一回退 modern。
-
-    历史分歧：load_menu_template 曾把非法值回退 legacy、populate_context_menu 回退
-    modern——同一非法配置在两个入口结果不同。现在统一走 normalize_template_id，
-    非法值一律落到现行默认模板 modern。
-    """
-    from PySide6.QtWidgets import QApplication, QMenu
-    from pet.context_menu import load_menu_template, normalize_template_id, populate_context_menu
-
-    # normalize 是唯一的回退决策点
-    assert normalize_template_id("modern") == "modern"
-    assert normalize_template_id("legacy") == "legacy"
-    assert normalize_template_id("MODERN") == "modern"
-    assert normalize_template_id(None) == "modern"
-    assert normalize_template_id("") == "modern"
-    assert normalize_template_id("bogus") == "modern"
-    # 两个入口对同一非法值给出同一结果：modern 模板
-    assert load_menu_template("bogus")["id"] == "modern"
-    assert load_menu_template(None)["id"] == "modern"
-    assert load_menu_template("")["id"] == "modern"
-
-    class Config:
-        def get(self, key, default=None):
-            return "bogus" if key == "context_menu_template" else default
-
-    class Pet:
-        on_open_chat = on_open_chat_settings = None
-        on_open_legacy_settings = on_open_modern_settings = None
+        on_open_modern_settings = None
         on_spawn_pet = None
         idles = turns = moves = clicks = acts = []
         playback_speed = scale = 1.0
@@ -1073,42 +1017,56 @@ def test_context_menu_invalid_template_falls_back_to_modern_uniformly():
     app = QApplication.instance() or QApplication([])
     menu = QMenu()
     populate_context_menu(menu, Pet())
-    # 非法配置下分发器也走 modern（现行默认模板）
     assert menu.objectName() == "modernContextMenu"
+    # The modern menu follows the compact macOS project-menu reference: a
+    # white hairline surface, small system text, outline icons and subtle rules
+    # between semantic groups.
+    assert "background-color: rgba(255, 255, 255, 240)" in menu.styleSheet()
+    assert "border: none" in menu.styleSheet()
+    hairline = menu.findChild(QWidget, "modernHairlineBorder")
+    assert hairline is not None
+    assert hairline.property("physicalPixelWidth") == 1
+    assert "border-radius: 12px" in menu.styleSheet()
+    assert "font-size: 13px" in menu.styleSheet()
+    assert "icon-size: 18px" in menu.styleSheet()
+    assert "background-color: #eeeeee" in menu.styleSheet()
+    assert "min-height: 18px" in menu.styleSheet()
+    assert "padding: 3px 29px 3px 13px" in menu.styleSheet()
+    assert "margin-right: 10px" in menu.styleSheet()
+    assert "QMenu::separator" in menu.styleSheet()
+    separator_rule = menu.styleSheet().split("QMenu::separator", 1)[1]
+    assert "height: 1px" in separator_rule
+    assert "background: #e5e5e5" in separator_rule
+    assert Path("pet/context_menus/menu_styles/common.py").is_file()
+    assert Path("pet/context_menus/menu_styles/modern.py").is_file()
+    assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuPopupDelay, None, menu) == 60
+    assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuSloppyCloseTimeout, None, menu) == 120
+    assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuSloppySelectOtherActions, None, menu) == 1
+    assert menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuUniDirection, None, menu) == 0
     menu.close()
     app.processEvents()
 
-    # PetWindow.set_context_menu_template 是第三个入口（历史旁路：非法值曾回退 legacy，
-    # 与 normalize 分歧）。现在同样走 normalize_template_id，持久化值与 normalize 结果一致。
-    from pet.window import PetWindow
 
-    class RecorderConfig:
-        def __init__(self):
-            self.values = {}
+def test_submenu_inherits_the_modern_style_from_its_parent():
+    """子菜单样式继承：父菜单没打上 ``menuStyle`` 属性时也必须落现代样式。
 
-        def set(self, key, value):
-            self.values[key] = value
+    回归背景：``inherit_menu_style`` 原先按 ``menuStyle`` 分支，取不到属性时
+    默认值指向已退役的旧版样式——任何"父菜单属性还没设上"的子菜单会静默掉
+    样式，露出原生外观（旧版样式已删除，默认值只能指向现代）。
+    """
+    from PySide6.QtWidgets import QApplication, QMenu
 
-        def save(self):
-            return None
+    from pet.context_menus.menu_styles.common import inherit_menu_style
 
-    class PetWindowStub:
-        def __init__(self):
-            self.cfg = RecorderConfig()
-
-    def persisted_template(raw):
-        stub = PetWindowStub()
-        PetWindow.set_context_menu_template(stub, raw)
-        return stub.cfg.values["context_menu_template"]
-
-    for raw in (None, "bad", "LEGACY", "legacy", "modern"):
-        assert persisted_template(raw) == normalize_template_id(raw)
-    # 非法值 None/bad 落到现行默认模板 modern；合法值 legacy/modern 原样保留
-    # （'LEGACY' 是 'legacy' 的大小写变体，normalize 折叠为合法值 'legacy'）
-    assert persisted_template(None) == "modern"
-    assert persisted_template("bad") == "modern"
-    assert persisted_template("legacy") == "legacy"
-    assert persisted_template("modern") == "modern"
+    app = QApplication.instance() or QApplication([])
+    parent = QMenu()          # 刻意不设 menuStyle 属性（默认值路径）
+    submenu = QMenu(parent)
+    inherit_menu_style(parent, submenu)
+    assert submenu.property("menuStyle") == "modern"
+    assert submenu.objectName() == "modernContextMenu"
+    assert submenu.styleSheet() != "", "子菜单必须套上现代样式（不能露原生外观）"
+    parent.close()
+    app.processEvents()
 
 
 def test_modern_menu_icons_are_crisp_outline_glyphs(monkeypatch):
@@ -1187,7 +1145,7 @@ def test_modern_menu_starts_with_ojingjing_entry_and_uses_pet_avatar(monkeypatch
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="modern", character="shenshen", on_top=False)
+        cfg = Config(character="shenshen", on_top=False)
         on_open_chat = on_open_modern_settings = None
         idles = turns = moves = clicks = acts = []
         playback_speed = scale = 1.0
@@ -1397,9 +1355,16 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
         "应用启动", "窗口与系统", "动画与移动", "点击反馈", "自言自语",
         "显示", "菜单外观", "对话窗口", "已配置应用", "内容与布局",
         "模型与连接", "视觉能力",
-        # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒
-        "语音报时", "节日提醒",
+        # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒。
+        # 2026-10-08「按区直找」后两页各自拆回同类小分组（组名带页名前缀）。
+        "语音报时 · 何时报", "语音报时 · 用什么声音", "语音报时 · 说什么",
+        "节日提醒 · 开关", "节日提醒 · 时间", "节日提醒 · 文案",
     }.issubset(set(section_titles))
+    if hasattr(dialog, "pro_enabled_check"):
+        # 「自动化与联动」的「主动识屏」不再是一张压平的大卡（同上）。
+        # 这几组只在 Windows 构造（settings_pet_controls 的平台闸门）。
+        assert {"主动识屏 · 开关与节奏", "主动识屏 · 什么时候看", "主动识屏 · 看哪些软件",
+                }.issubset(set(section_titles))
     advanced_titles = [
         button.text()
         for button in dialog.findChildren(
@@ -1924,7 +1889,6 @@ def test_modern_menu_adds_quick_launch_submenu_and_uses_saved_appearance(monkeyp
 
     class Config:
         values = {
-            "context_menu_template": "modern",
             "character": "shenshen",
             "on_top": True,
             "context_menu_appearance": {"theme": "dark", "density": "spacious", "corner_radius": 16},
@@ -1997,95 +1961,62 @@ def test_modern_settings_search_locates_rows_and_return_does_not_close(tmp_path,
     app.processEvents()
 
 
-def test_legacy_config_value_dispatches_legacy_layout(monkeypatch):
-    from PySide6.QtGui import QPixmap
+def test_wired_petwindow_offers_settings_entry(tmp_path):
+    """正式装配：真实 PetWindow + 真实 ``_wire_window`` 的「桌宠设置」入口可触发。
+
+    真实装配：真实 ``PetWindow``（素材库用既有测试替身）+ **真实**
+    ``pet.app.PetInstance._wire_window``（宿主只补该方法读到的面）；建菜单后触发
+    设置项，断言落到 ``_wire_window`` 注入的那条现代设置回调。
+    """
     from PySide6.QtWidgets import QApplication, QMenu
 
-    import pet.window as window_mod
-
-    class Config:
-        def get(self, key, default=None):
-            return {"context_menu_template": "legacy", "character": "shenshen"}.get(key, default)
-
-    class Pet:
-        cfg = Config()
-        on_open_chat = on_open_chat_settings = on_open_legacy_settings = None
-        on_open_modern_settings = None
-        on_spawn_pet = lambda self: None
-        idles = turns = moves = clicks = acts = []
-        playback_speed = scale = 1.0
-        drag_physics = no_move = False
-
-        @staticmethod
-        def icon_pixmap(size=64):
-            pixmap = QPixmap(size, size)
-            pixmap.fill()
-            return pixmap
-
-        def __getattr__(self, name):
-            return lambda *args, **kwargs: None
-
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(window_mod.autostart_mod, "is_enabled", lambda: False)
-    monkeypatch.setattr(window_mod.catalog, "list_available_characters", lambda: ["shenshen"])
-    menu = QMenu()
-    window_mod._populate_context_menu(menu, Pet())
-    labels = [action.text() for action in menu.actions() if not action.isSeparator()]
-    # legacy 布局：无图标、无现代专属入口（看看屏幕/更新与帮助/生小肥鱼层级不同）
-    # Pet 无 on_open_chat，属于纯桌宠版：不显示 DeepSeek Harness 子菜单，保留网页版
-    assert labels.index("生小肥鱼") == labels.index("开机自启") + 1
-    assert "DeepSeek Harness" not in labels
-    assert "停止服务" not in labels
-    assert "打开网页版 DeepSeek" in labels
-    assert menu.styleSheet() == ""
-    icon_actions = [action.text() for action in menu.actions() if not action.icon().isNull()]
-    assert icon_actions == []
-    assert "看看屏幕" not in labels
-    assert "更新与帮助" not in labels
-    assert "切换角色" in labels
-    assert "窗口置顶" in labels
-    menu.close()
-    app.processEvents()
-
-
-def test_legacy_config_value_uses_legacy_settings_callback(monkeypatch):
-    from PySide6.QtGui import QPixmap
-    from PySide6.QtWidgets import QApplication, QMenu
-
+    import pet.app as app_mod
     from pet.context_menu import populate_context_menu
+    from pet.config import Config
 
-    class Config:
-        def get(self, key, default=None):
-            return {"context_menu_template": "legacy", "character": "shenshen"}.get(key, default)
+    import tests.test_context_menu_lifecycle as lc
 
-    class Pet:
-        cfg = Config()
-        on_open_chat = None
-        on_open_chat_settings = None
-        on_open_legacy_settings = None
-        on_open_modern_settings = None
-        on_spawn_pet = None
-        idles = turns = moves = clicks = acts = []
-        playback_speed = scale = 1.0
-        drag_physics = no_move = False
+    class _Shell:  # AppShell 经 self.shell 路由的进程级方法（本用例不触发）
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
 
-        def __init__(self):
-            self.opened = []
-            self.on_open_legacy_settings = lambda: self.opened.append("legacy")
-            self.on_open_modern_settings = lambda: self.opened.append("modern")
+    class _Host:  # _wire_window 的最小宿主：只补它读到的属性
+        enable_chat = True
+
+        def __init__(self, config):
+            self.config = config
+            self.shell = _Shell()
+            self.opened: list[str] = []
+
+        def _slot_wrap(self, fn):
+            return fn
+
+        def open_modern_settings(self):
+            self.opened.append("modern")
 
         def __getattr__(self, name):
             return lambda *args, **kwargs: None
 
     app = QApplication.instance() or QApplication([])
-    pet = Pet()
-    menu = QMenu()
-    populate_context_menu(menu, pet)
-    # legacy 模板的「桌宠设置」走旧版设置回调（不再是现代设置）
-    next(action for action in menu.actions() if action.text() == "桌宠设置").trigger()
-    assert pet.opened == ["legacy"]
-    menu.close()
-    app.processEvents()
+    config = Config(base=tmp_path)
+    config.save()
+    win = lc.PetWindow(lc.FakeLibrary(), config)
+    host = _Host(config)
+    app_mod.PetInstance._wire_window(host, win)
+    try:
+        menu = QMenu()
+        populate_context_menu(menu, win)
+        entries = [a for a in menu.actions() if a.text() == "桌宠设置"]
+        assert len(entries) == 1, (
+            f"「桌宠设置」入口应恰有一条，实际 {len(entries)} 条")
+        assert entries[0].isEnabled()
+        entries[0].trigger()
+        assert host.opened == ["modern"], "设置入口未落到窗口的现代设置回调"
+        menu.close()
+        app.processEvents()
+    finally:
+        win.close()
+        app.processEvents()
 
 
 def test_runtime_pet_icon_crops_transparent_canvas_before_scaling():
@@ -2139,7 +2070,7 @@ def test_modern_animation_leaf_icons_are_loaded_only_when_category_opens(monkeyp
             return super().get(key, default)
 
     class Pet:
-        cfg = Config(context_menu_template="modern", character="shenshen", on_top=False)
+        cfg = Config(character="shenshen", on_top=False)
         on_open_chat = on_open_modern_settings = on_spawn_pet = None
         idles = ["idle-a"]
         turns = ["turn-a"]
@@ -2645,31 +2576,19 @@ def test_easter_egg_hover_surface_stays_dark_in_the_dark_menu_theme():
     app.processEvents()
 
 
-def test_template_switch_requests_immediate_menu_reopen():
-    from PySide6.QtWidgets import QApplication, QMenu
+def test_modern_menu_exposes_no_template_switch_action():
+    """旧版菜单与它的「切换到…菜单」入口一起退役：注册表里不再有该动作。
 
-    from pet.context_menus.shared import add_template_switch
+    原位重开的通用能力（`reopen_context_menu`）由
+    ``tests/test_sprite_menu_parity.py::test_open_full_menu_at_rebuilds_menu_at_position``
+    覆盖，这里只钉"模板切换项不得复活"。
+    """
+    from pet.context_menus.registry import ACTION_LABELS, MENU_ACTIONS
 
-    class Pet:
-        def __init__(self):
-            self.template = None
-            self.reopened = None
-
-        def set_context_menu_template(self, template):
-            self.template = template
-
-        def reopen_context_menu(self, menu):
-            self.reopened = menu
-
-    app = QApplication.instance() or QApplication([])
-    menu = QMenu()
-    pet = Pet()
-    action = add_template_switch(menu, pet, "切换到新版菜单", "modern")
-    action.trigger()
-    assert pet.template == "modern"
-    assert pet.reopened is menu
-    menu.close()
-    app.processEvents()
+    assert "switch_template" not in MENU_ACTIONS.ids
+    assert "switch_template" not in ACTION_LABELS
+    assert "切换到新版菜单" not in ACTION_LABELS.values()
+    assert "切换回旧版菜单" not in ACTION_LABELS.values()
 
 
 def test_color_picker_uses_stable_painted_swatch_instead_of_border_hack():
@@ -2902,6 +2821,7 @@ def test_dsh_converged_state_wiring_drives_thinking(tmp_path, monkeypatch):
     owner = AppShell(QApplication.instance(), Config(tmp_path))
     manager = owner._shared.agent_link
     monitor = manager.monitors["dsh"]
+    monitor._running = True  # 仿真活体监视器（迟到信号隔离闸只放活在跑的信号）
 
     notified: list[str] = []
     dismissed: list[bool] = []
@@ -3003,7 +2923,11 @@ def test_image_directory_picker_opens_right_drawer_with_three_column_masonry(tmp
     from pet.modern_settings_dialog import ImagePreviewDrawer, ResourcePathPicker
 
     short = tmp_path / "01-one.png"
-    long = tmp_path / ("02-" + "very-long-image-name-" * 8 + ".jpg")
+    # 名字要够长（卡片文本按宽度截断显示、tooltip 显示全名），但不能长到触发
+    # Windows MAX_PATH：tmp_path 本身已有 ~90 字符，*8 的重复拼出 262 字符的
+    # 绝对路径，在未开启长路径支持（LongPathsEnabled=0）的 Windows 上
+    # Image.save() 直接 FileNotFoundError。*3 仍是长名字，够验证截断与 tooltip。
+    long = tmp_path / ("02-" + "very-long-image-name-" * 3 + ".jpg")
     Image.new("RGB", (40, 80), "red").save(short)
     Image.new("RGB", (100, 40), "blue").save(long)
     Image.new("RGB", (80, 80), "green").save(tmp_path / "03-square.png")
@@ -3127,12 +3051,12 @@ def test_modern_settings_reject_saves_config(tmp_path):
     from pet.config import Config
 
     app = QApplication.instance() or QApplication([])
-    cfg = Config(tmp_path)
+    cfg = _slot0_config(tmp_path)
     dlg = settings_mod.ModernSettingsDialog(cfg, include_ai=False)
     dlg.self_talk_image_scale_spin.setValue(180)
     dlg.reject()
     app.processEvents()
-    assert Config(tmp_path).get("self_talk_image_scale") == 180
+    assert _slot0_config(tmp_path).get("self_talk_image_scale") == 180
 
 
 def test_settings_image_directories_use_preview_but_audio_folders_do_not(tmp_path, monkeypatch):

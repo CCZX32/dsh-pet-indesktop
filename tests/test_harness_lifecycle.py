@@ -470,21 +470,28 @@ def test_harness_submenu_wires_three_lifecycle_actions(tmp_path, monkeypatch):
 def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
     """纯桌宠（无 on_open_chat）版本连 DeepSeek Harness 子菜单都不显示。
 
-    门禁在 pet/context_menus/legacy.py：``on_open_chat`` 为空时不调 add_harness。
-    这里用带门禁的 legacy 构建器 + 一个最小替身验证——替身只提供门禁判定需要
-    的属性，其它属性缺失时构建器会在门禁**之后**才用到它，不影响结论。
+    门禁有两层，缺一层就有版本漏出 Harness 入口：
+    ① 注册表 ``harness`` 的可用性 = ``on_open_chat`` 回调存在（菜单树直接过滤掉）；
+    ② 共享建造器 ``add_harness`` 自身也带同一道门（任何直调它的入口都安全）。
+    这里两层都验：替身只提供门禁判定需要的属性。
     """
-    import inspect
-
     from PySide6.QtWidgets import QApplication, QMenu
 
-    app = QApplication.instance() or QApplication([])
-    import pet.context_menus.legacy as legacy_mod
+    from pet.context_menus.registry import MENU_ACTIONS
 
-    source = inspect.getsource(legacy_mod.build_legacy_menu)
-    gate_at = source.index("on_open_chat")
-    harness_at = source.index("add_harness")
-    assert gate_at < harness_at, "门禁必须包住 add_harness（纯桌宠版不得出现 Harness 入口）"
+    app = QApplication.instance() or QApplication([])
+
+    class _LitePet:          # 纯桌宠：没有 on_open_chat
+        cfg: dict = {}
+
+    class _FullPet:
+        cfg: dict = {}
+
+        def on_open_chat(self):
+            return None
+
+    assert "harness" not in MENU_ACTIONS.available_ids(_LitePet())
+    assert "harness" in MENU_ACTIONS.available_ids(_FullPet())
 
     # 子菜单的顶层标题（旧的平级项「启动 DeepSeek Harness」已不存在）：
     # 轻量替身也验证四个入口都在子菜单内、不会绕过门禁漏成平级项。

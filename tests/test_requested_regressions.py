@@ -5,6 +5,18 @@ import pytest
 from datetime import datetime, timezone
 
 
+def _slot0_config(tmp_path):
+    """生产形态的配置面：slot0 身份经 ``SlotRoutedConfig`` 分流。
+
+    每宠键（气泡文字大小、气泡方案…）的真值在 ``config-slot-0.json``：裸全局
+    ``Config.set/save`` 出闸时会过滤掉它们，改不动任何一只宠。
+    """
+    from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+
 def test_modern_message_card_opacity_is_configurable_and_persisted(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
@@ -70,7 +82,7 @@ def test_bubble_text_scale_row_persists(tmp_path, monkeypatch):
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     assert config.get("bubble_text_scale") == 100
 
     dialog = settings_mod.ModernSettingsDialog(config, include_ai=True)
@@ -86,7 +98,7 @@ def test_bubble_text_scale_row_persists(tmp_path, monkeypatch):
     finally:
         dialog.close()
         app.processEvents()
-    assert Config(tmp_path).get("bubble_text_scale") == 180
+    assert _slot0_config(tmp_path).get("bubble_text_scale") == 180
 
 
 def test_harness_autostart_toggle_persisted(tmp_path, monkeypatch):
@@ -232,6 +244,130 @@ def test_harness_target_desktop_selectable_on_supported_platform(tmp_path, monke
     select.setCurrentData("desktop")
     assert dialog._write_config() is True
     assert Config(tmp_path).get("harness_launch_target") == "desktop"
+    dialog.close()
+    app.processEvents()
+
+
+def test_harness_target_offers_service_item_and_auto_says_headless(tmp_path, monkeypatch):
+    """自启目标：新增「仅 dsh 服务」项；auto 措辞改成「仅服务，不开界面」。
+
+    语义收紧（2026-10，产品口径）：自启的本意只是把 dsh 服务拉起来——不开浏览器、
+    不开桌面端界面；要界面必须自己选 web / 桌面端。旧措辞「自动（桌面端优先）」
+    描述的是被撤掉的旧语义（装上桌面端就拐 desktop），留着就是骗用户。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(settings_mod.harness_mod, "DESKTOP_SUPPORTED", True)
+
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    select = dialog.harness_launch_target_select
+
+    assert select.itemText(0) == "自动（仅服务，不开界面）", "auto 项不得再写「桌面端优先」"
+    assert select.currentData() == "auto", "默认仍是 auto"
+    service_idx = select.findData("service")
+    assert service_idx == 1, "「仅 dsh 服务」排在 auto 之后"
+    assert select.itemText(service_idx) == "仅 dsh 服务（不开界面）"
+    assert not select.isItemDisabled(service_idx)
+    # web / desktop 两项不动
+    assert select.itemText(select.findData("web")) == "dsh web 界面"
+    assert select.itemText(select.findData("desktop")) == "桌面端界面"
+
+    row = dialog.findChild(settings_mod.SettingRow, "settingRow_harness_launch_target")
+    hint = row.hint_label.text()
+    # 2026-10-07 第一刀：定稿把重复表述「（不开浏览器、不开桌面端界面）」收敛成
+    # 「不打开界面」，语义断言不变（auto = 只起服务、不进界面）。
+    assert "自动" in hint and "不打开界面" in hint, "说明里必须写清 auto = 只起服务不进界面"
+
+    select.setCurrentData("service")
+    assert dialog._write_config() is True
+    assert Config(tmp_path).get("harness_launch_target") == "service", "service 必须能落盘"
+    dialog.close()
+    app.processEvents()
+
+
+def test_harness_target_hint_helper_keeps_both_platform_copies_verbatim():
+    """自启目标说明的逐字文案住在 ``settings_pet_controls.harness_target_hint``。
+
+    搬迁原因（2026-10-10）：``modern_settings_dialog`` 撞了行数预算，两句纯文案
+    选择挪到 ``settings_pet_controls``（``stream_capture_hint`` 同一先例）。两支
+    共用首句与末句，差别只在桌面端能不能自动拉起——本用例逐字钉住，搬迁不许
+    顺手改字（改字会同时骗过「暂不支持」的存在性断言）。
+    """
+    from pet.settings_pet_controls import (
+        HARNESS_TARGET_HINT_DESKTOP,
+        HARNESS_TARGET_HINT_UNSUPPORTED,
+        harness_target_hint,
+    )
+
+    assert harness_target_hint(True) == HARNESS_TARGET_HINT_DESKTOP
+    assert harness_target_hint(False) == HARNESS_TARGET_HINT_UNSUPPORTED
+    for hint in (HARNESS_TARGET_HINT_DESKTOP, HARNESS_TARGET_HINT_UNSUPPORTED):
+        assert hint.startswith(
+            "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+        ), "auto / service = 只起服务不进界面，这句两平台一字不差"
+        assert "右键菜单的手动启动不受此设置影响。" in hint
+        # 规范 §五：全局键必须写明作用域（本轮已修的「影响所有桌宠」不许回退）。
+        assert "此设置影响所有桌宠。" in hint
+    assert "也可以显式选择打开 web 界面或桌面端。" in HARNESS_TARGET_HINT_DESKTOP
+    assert "暂不支持" not in HARNESS_TARGET_HINT_DESKTOP, "支持平台上不许出现「暂不支持」"
+    assert "本平台暂不支持自动拉起桌面端（本版本仅 Windows）" in HARNESS_TARGET_HINT_UNSUPPORTED
+    assert "想在自启时进界面只能显式选「dsh web 界面」。" in HARNESS_TARGET_HINT_UNSUPPORTED
+    assert "也可以显式选择打开 web 界面或桌面端。" not in HARNESS_TARGET_HINT_UNSUPPORTED
+
+
+@pytest.mark.parametrize("desktop_available", [True, False])
+def test_harness_target_row_hint_is_the_helper_output(tmp_path, monkeypatch, desktop_available):
+    """调用路径：真实设置页那一行的 hint 必须等于 helper 对应分支的逐字文案。
+
+    只测 helper 会漏掉「接线断了」（搬迁后 dialog 忘了调用它）；只测行会漏掉
+    另一分支。此处两个平台能力都钉一遍，取行文本时剥掉可能被追加的「默认：」小字。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+    from pet.settings_pet_controls import harness_target_hint
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(settings_mod.harness_mod, "DESKTOP_SUPPORTED", desktop_available)
+
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    try:
+        row = dialog.findChild(settings_mod.SettingRow, "settingRow_harness_launch_target")
+        assert row is not None, "自启目标行必须在"
+        rendered = row.hint_label.text().split("默认：", 1)[0].rstrip("\n")
+        assert rendered == harness_target_hint(desktop_available)
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_harness_target_select_width_fits_its_longest_item(tmp_path, monkeypatch):
+    """下拉宽度必须装得下最长项文案——自绘文本区没有省略号，窄了直接裁字。
+
+    回归（本轮）：控件宽度写死 190px，文本区只有 ``190-34=156px``，而新增的
+    「仅 dsh 服务（不开界面）」在默认字体下要 182px → 用户看到的是被截断的半句话。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    select = dialog.harness_launch_target_select
+
+    assert select.width() >= select.suggestedWidth(), (
+        f"控件宽 {select.width()}px 装不下最长项（需 {select.suggestedWidth()}px）"
+    )
     dialog.close()
     app.processEvents()
 
@@ -926,10 +1062,10 @@ def test_build_scripts_bundle_menu_templates_and_chat_styles():
         assert "menu_templates" in text, f"{name} 必须打包 pet/menu_templates"
         assert "legacy_styles.qss" in text, f"{name} 必须打包 legacy_styles.qss"
         assert "modern_styles.qss" in text, f"{name} 必须打包 modern_styles.qss"
-    # 兜底：模板 JSON 缺失时 load_menu_template 必须回退内置模板而非抛异常
-    import pet.context_menu as context_menu_mod
-    assert context_menu_mod.load_menu_template("modern")["id"] == "modern"
-    assert context_menu_mod.load_menu_template("legacy")["id"] == "legacy"
+    # 兜底：默认菜单布局 JSON 必须能按资源方式读出来（右键菜单的唯一布局来源；
+    # 旧版菜单退役后 pet/menu_templates 下只剩它）
+    from pet.menu_layout import load_default_menu_layout
+    assert load_default_menu_layout()["layout_id"] == "modern-default-v1"
 
 
 def test_store_fun_asset_keeps_bundled_paths_relative(tmp_path):
@@ -1049,6 +1185,52 @@ def test_modern_settings_save_writes_autostart_wanted(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_menu_autostart_persists_wanted_flag(tmp_path, monkeypatch):
+    """右键菜单的「开机自启」必须记录 autostart_wanted（启动自检提醒依赖它）。
+
+    注册表（registry 的 autostart 项）、设置页与托盘都写这个键；共享建造器被
+    直调时漏传 pet 就会只写系统登录项、不写配置——``pet/app.py`` 的自检
+    （``autostart_wanted`` 为真但系统项被安全软件清掉 → 提醒用户重新启用）
+    因此永远看不到用户勾过。
+
+    真 QMenu + 真 Config + 真 PetWindow 建菜单，只把系统登录项边界（autostart
+    模块）打桩；断言配置落盘，而不只是内存里的 Config 对象。
+    """
+    import json
+
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    import pet.context_menus.shared as shared_mod
+    import tests.test_context_menu_lifecycle as lc
+    from pet.config import Config
+    from pet.context_menu import populate_context_menu
+
+    app = QApplication.instance() or QApplication([])
+    applied: list[bool] = []
+    monkeypatch.setattr(shared_mod.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(shared_mod.autostart_mod, "set_enabled",
+                        lambda enabled: applied.append(bool(enabled)) or True)
+    config = Config(base=tmp_path)
+    config.save()
+    assert config.get("autostart_wanted") is False
+    win = lc.PetWindow(lc.FakeLibrary(), config)
+    menu = QMenu()
+    try:
+        populate_context_menu(menu, win)
+        action = next(a for action in menu.actions()
+                      if action.menu() is not None
+                      for a in action.menu().actions() if a.text() == "开机自启")
+        action.setChecked(True)
+        assert applied == [True], "系统登录项照常写入"
+        assert config.get("autostart_wanted") is True
+        persisted = json.loads((config.dir / "config.json").read_text(encoding="utf-8"))
+        assert persisted["autostart_wanted"] is True, "必须落盘（自检读的是盘上的值）"
+    finally:
+        menu.close()
+        win.close()
+        app.processEvents()
+
+
 def test_modern_provisional_config_falls_back_to_keyring(tmp_path, monkeypatch):
     """测试连接未填 Key 时必须回退系统钥匙串，否则默认场景误报 401。"""
     from PySide6.QtWidgets import QApplication
@@ -1071,6 +1253,32 @@ def test_modern_provisional_config_falls_back_to_keyring(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def _answer_save_failure(monkeypatch, seen: list, *, discard: bool = False) -> None:
+    """替掉保存失败框的 ``exec``，但框本体走**产品真实构造**（文案/按钮都是真的）。
+
+    只有"用户点了哪个按钮"这一处可注入：``settings_close_flow.confirm_discard_unsaved``
+    （conftest 里默认桩成"继续编辑"，这里换成取真框并读回文案的替身）。
+
+    ``seen`` 里也收了一份标题，但**断言不许只看标题**：macOS 的 QMessageBox 走系统原生
+    对话框，``windowTitle()`` 在那边恒为空（仓库既有结论与同族修法见
+    ``tests/test_harness_lifecycle.py::test_confirm_dialog_text_names_pid_and_port``）。
+    承载"用户看得见什么"的是 ``text`` / ``info``——标题只在 Windows/Linux 上读得到。
+    """
+    from pet import settings_close_flow
+
+    def answer(parent, failure):
+        box, _keep, discard_button = settings_close_flow.build_save_failure_box(parent, failure)
+        try:
+            seen.append({"failure": failure, "title": box.windowTitle(),
+                         "text": box.text(), "info": box.informativeText(),
+                         "discard": discard_button})
+        finally:
+            box.deleteLater()
+        return discard
+
+    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved", answer)
+
+
 def test_modern_settings_close_autosaves(tmp_path, monkeypatch):
     """直接关闭（X）新版设置也必须落盘，不能只靠「保存并退出」。
 
@@ -1083,7 +1291,7 @@ def test_modern_settings_close_autosaves(tmp_path, monkeypatch):
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    config = Config(tmp_path)
+    config = _slot0_config(tmp_path)
     dialog = settings_mod.ModernSettingsDialog(config, include_ai=True)
     dialog.bubble_style_select.setCurrentData("breath_bubble")
     dialog.light_background_picker.edit.setText("#123456")
@@ -1091,9 +1299,86 @@ def test_modern_settings_close_autosaves(tmp_path, monkeypatch):
     app.processEvents()
     assert config.get("self_talk_bubble_style") == "breath_bubble"
     assert config.get("context_menu_appearance", {}).get("light_background") == "#123456"
-    # 重载磁盘验证
-    reloaded = Config(tmp_path)
+    # 重载磁盘验证（气泡方案是每宠键 → 走 slot0 档案；菜单外观是全局键 → 主配置）
+    reloaded = _slot0_config(tmp_path)
     assert reloaded.get("self_talk_bubble_style") == "breath_bubble"
+
+
+def test_modern_settings_escape_keeps_the_dialog_open_when_save_fails(tmp_path, monkeypatch):
+    """保存失败时 Esc 与 X 同契约：默认（继续编辑）不关窗，草稿留在控件里。
+
+    回归背景：``closeEvent``（X）一直有 ``if not self._write_config():
+    event.ignore()``，而 ``reject()``（Esc / 关闭按钮）忽略返回值照常
+    ``super().reject()``——磁盘写不进时按 Esc 会**静默丢草稿**：窗口关了、改动
+    从没落盘，用户以为保存成功了。
+
+    2026-10-10 实机 §4 之后失败提示换了实现：不再是一条 ``QMessageBox.warning``，而是
+    ``pet/settings_close_flow`` 的「继续编辑（默认）/ 放弃未保存的改动并关闭」框——
+    这条用例仍钉同一件事（失败不关窗、草稿还在、用户看得见），多钉一层：默认答案必须是
+    "继续编辑"（误触不丢草稿）。
+    """
+    import shiboken6
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    seen: list = []
+    _answer_save_failure(monkeypatch, seen)
+    config = Config(tmp_path)
+    config.path.mkdir(parents=True, exist_ok=True)   # 目标为目录 → os.replace 必失败
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
+    dialog.bubble_style_select.setCurrentData("breath_bubble")
+    finished: list = []
+    dialog.finished.connect(lambda code: finished.append(int(code)))
+    dialog.show()
+    app.processEvents()
+    try:
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)    # 真实 Esc 键事件
+        app.processEvents()
+
+        # 设置窗带 WA_DeleteOnClose：真被关掉时 C++ 对象当场销毁，isValid 立即可判
+        assert finished == [], "保存失败时 Esc 不得关窗（草稿会丢）"
+        assert shiboken6.isValid(dialog) and dialog.isVisible(), "窗口必须还在"
+        assert dialog.bubble_style_select.currentData() == "breath_bubble", "草稿必须还在"
+        assert seen and "配置未能写入磁盘" in seen[-1]["text"], (
+            "必须给出可见的失败提示（macOS 取不到窗口标题，见本文件 _answer_save_failure 的注释）")
+        assert seen[-1]["discard"].text() == "放弃未保存的改动并关闭", "出口必须可达且写明"
+    finally:
+        config.path.rmdir()                          # 恢复可写，收尾关窗
+        if shiboken6.isValid(dialog):
+            dialog.close()
+        app.processEvents()
+
+
+def test_modern_settings_escape_closes_when_save_succeeds(tmp_path, monkeypatch):
+    """非回归：保存正常时 Esc 照旧关窗，并落盘。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
+    dialog.bubble_style_select.setCurrentData("breath_bubble")
+    finished: list = []
+    dialog.finished.connect(lambda code: finished.append(int(code)))
+    dialog.show()
+    app.processEvents()
+
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+
+    assert finished == [int(QDialog.DialogCode.Rejected)], "保存成功时 Esc 必须关窗"
+    assert config.get("self_talk_bubble_style") == "breath_bubble", "关窗前必须落盘"
 
 
 def test_settings_stylesheet_has_dark_overrides(monkeypatch):
@@ -1229,7 +1514,11 @@ def test_ai_page_warns_when_keyring_unavailable(tmp_path, monkeypatch):
 
 
 def test_modern_settings_save_warns_on_failure(tmp_path, monkeypatch):
-    """保存失败（此处置目标为目录迫使 os.replace 失败）时提示用户+配置路径。"""
+    """保存失败（此处置目标为目录迫使 os.replace 失败）时提示用户 + 配置路径。
+
+    提示形态自 2026-10-10 起是 ``pet/settings_close_flow`` 的失败框（自带「放弃未保存的
+    改动并关闭」出口）；这一条钉的是"失败必须看得见，且看得到路径"。
+    """
     from PySide6.QtWidgets import QApplication
 
     import pet.modern_settings_dialog as settings_mod
@@ -1237,14 +1526,15 @@ def test_modern_settings_save_warns_on_failure(tmp_path, monkeypatch):
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    warnings = []
-    monkeypatch.setattr(settings_mod.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+    seen: list = []
+    _answer_save_failure(monkeypatch, seen)
     config = Config(tmp_path)
     config.path.mkdir(parents=True, exist_ok=True)  # 目标为目录，os.replace 必失败
     dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
     dialog._save()
-    assert any("保存失败" in str(x[1]) for x in warnings)
-    assert any(str(config.path) in str(x[2]) for x in warnings)
+    assert seen, "保存失败必须给用户可见提示"
+    assert "配置未能写入磁盘" in seen[-1]["text"]
+    assert str(config.path) in seen[-1]["info"]
     dialog.close()
     app.processEvents()
 

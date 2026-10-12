@@ -27,6 +27,17 @@ app = QApplication.instance() or QApplication([])
 
 
 # ---------------------------------------------------------------- PetSprite
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    """宽预算轮询等托盘命令落地（托盘条目一律「菜单先关、回调延后」）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 def _make_pet_sprite():
     from pet.pet_sprite import PetSprite
 
@@ -163,7 +174,10 @@ def test_tray_menu_has_per_sprite_visibility_toggle(tmp_path):
         assert shell._sprite_visible(second) is True
 
         action.trigger()                       # 取消勾选 = 隐藏这只
-        assert second.visible is False
+        assert shell._sprite_visible(second) is True, \
+            "菜单还开着，逐只显隐不许内联执行"
+        assert _wait_until(lambda: second.visible is False), \
+            "菜单关闭后必须把这只藏起来"
         assert shell.sprite.visible is True    # 只影响被点的那只
 
         # 弹出前同步：外部改了标志也能反映到勾选态

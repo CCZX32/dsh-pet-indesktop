@@ -126,6 +126,62 @@ def test_collect_interpretable_dedupes_and_skips_dirs(tmp_path):
     assert collected == [a]
 
 
+def test_collect_interpretable_stops_at_file_budget(tmp_path, monkeypatch):
+    """R05：解读询问链复用投喂链的扫描预算（``_ScanBudget``），不再无界扫盘。
+
+    拖进来的一批散装文本原先在这里全部同步 ``is_file()``：投喂侧的测量停下来
+    了，这条链照样把 GUI 线程卡住。
+    """
+    import pet.file_eater as file_eater
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 2)
+    paths = []
+    for i in range(5):
+        p = tmp_path / f"note{i}.txt"
+        p.write_text("x", encoding="utf-8")
+        paths.append(str(p))
+
+    budget = file_eater._ScanBudget()
+    collected = collect_interpretable(paths, budget)
+
+    assert collected == [tmp_path / "note0.txt", tmp_path / "note1.txt"]
+    assert budget.truncated is True
+    assert budget.scanned == 2
+
+
+def test_collect_interpretable_stops_at_time_budget(tmp_path, monkeypatch):
+    """R05：慢盘上的大量文本路径按墙钟截断（口径同投喂链的逐项查钟）。
+
+    12 个文本文件、每次 ``is_file()`` 0.4 秒（预算 2 秒）：第 6 次探测前即越预算
+    （前 5 次累计 2.0s）。
+    """
+    import pathlib
+
+    import pet.file_eater as file_eater
+
+    paths = []
+    for i in range(12):
+        p = tmp_path / f"slow{i:02d}.txt"
+        p.write_text("x", encoding="utf-8")
+        paths.append(str(p))
+
+    ticks = {"t": 0.0}
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", lambda: ticks["t"])
+    real_is_file = pathlib.Path.is_file
+
+    def slow_is_file(self, *args, **kwargs):
+        ticks["t"] += 0.4  # 慢盘：每次探测 0.4 秒
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "is_file", slow_is_file)
+
+    budget = file_eater._ScanBudget()
+    collected = collect_interpretable(paths, budget)
+
+    assert len(collected) == 5, "第 6 个文件探测前（2.0s ≥ 2.0s 预算）必须停手"
+    assert budget.truncated is True
+
+
 def test_extract_text_reads_in_budget_and_marks_truncation(tmp_path):
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
@@ -206,6 +262,58 @@ def test_offer_without_interpretable_files_only_hints(tmp_path):
 
     assert win.alerts == []
     assert any("读不了" in b for b in win.bubbles)
+
+
+def test_offer_marks_truncated_scan_in_alert(tmp_path, monkeypatch):
+    """R05：触预算时询问气泡如实标记「只收了前 N 个」——界面拿得到截断标记。"""
+    import pet.file_eater as file_eater
+
+    _qapp()
+    win = _FakeWin(tmp_path)
+    controller = FileInterpretController(win)
+    paths = []
+    for i in range(8):
+        p = tmp_path / f"many{i:02d}.txt"
+        p.write_text("x", encoding="utf-8")
+        paths.append(str(p))
+
+    monkeypatch.setattr(file_eater, "SCAN_FILE_LIMIT", 3)
+
+    controller.offer(paths)
+
+    assert len(win.alerts) == 1
+    _, kwargs = win.alerts[0]
+    assert "只收了前 3 个" in kwargs["subtitle"]
+    assert [p.name for p in controller._pending] == ["many00.txt", "many01.txt", "many02.txt"]
+
+
+def test_offer_all_items_over_budget_hints_instead_of_unreadable(tmp_path, monkeypatch):
+    """R05：预算在第一个文件前就用尽（注入假钟）时，不许说"这些文件我读不了"。
+
+    真钟下第一个候选必然还在预算内（预算刚从当下算起），所以这里注入"建预算后
+    时间已越界"的假钟，锁住这条文案口径。
+    """
+    import pet.file_eater as file_eater
+
+    _qapp()
+    win = _FakeWin(tmp_path)
+    controller = FileInterpretController(win)
+    note = tmp_path / "note.txt"
+    note.write_text("x", encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def past_deadline_clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1e6
+
+    monkeypatch.setattr(file_eater, "_SCAN_CLOCK", past_deadline_clock)
+
+    controller.offer([str(note)])
+
+    assert win.alerts == []
+    assert not any("读不了" in b for b in win.bubbles)
+    assert any("文件太多" in b for b in win.bubbles)
 
 
 def test_decline_resolves_alert_without_request(tmp_path):

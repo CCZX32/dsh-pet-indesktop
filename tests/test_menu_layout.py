@@ -29,6 +29,10 @@ def test_modern_default_v1_has_compact_root_and_safety_actions():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
+        "memory_trim",
+        "weather",
+        "weather_cities",
         "voice_chime_now",
         "voice_chime_toggle",
         "festival_now",
@@ -332,11 +336,16 @@ def test_missing_user_layout_resolves_versioned_default():
         "harness",
         "deepseek_web",
         "check_update",
+        "network_info",
         "github_project",
         "quark_download",
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
+        "memory_trim",
+        "weather",
+        "weather_cities",
         "voice_chime_now",
         "voice_chime_toggle",
         "festival_now",
@@ -368,6 +377,10 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "quiet_mode",
+        "memory_trim",
+        "weather",
+        "weather_cities",
         "modern_settings",
         "quit",
     ]
@@ -468,7 +481,6 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
 
     class FakeConfig:
         values = {
-            "context_menu_template": "modern",
             "context_menu_layout": None,
             "context_menu_appearance": {"theme": "light"},
             "character": "shenshen",
@@ -534,8 +546,13 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     if sys.platform == "win32":
         expected_root.insert(-2, "主动识屏")
         expected_root.insert(-2, "待办提醒")
+        expected_root.insert(-2, "免打扰")
+        expected_root.insert(-2, "回收内存")
     else:
         expected_root.insert(-2, "待办提醒")
+        expected_root.insert(-2, "免打扰")
+    # 天气两个入口在 tools 段末尾（待办提醒之后、桌宠设置之前）
+    expected_root[-2:-2] = ["查看天气", "天气城市"]
     # 报时/节日四项默认不在菜单上（模板 visible: false，2026-09-19 起）
     assert root == expected_root
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
@@ -549,9 +566,13 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     ]
     if sys.platform == "win32":
         expected_rendered.insert(-3, "主动识屏")
-    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 | 桌宠设置 退出
-    # （报时/节日四项默认 visible: false，不渲染）
+    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 免打扰 [回收内存] 查看天气 天气城市 | 桌宠设置 退出
+    # （报时/节日四项默认 visible: false，不渲染；回收内存仅在 Windows 出现）
     expected_rendered.insert(-3, "待办提醒")
+    expected_rendered.insert(-3, "免打扰")
+    if sys.platform == "win32":
+        expected_rendered.insert(-3, "回收内存")
+    expected_rendered[-3:-3] = ["查看天气", "天气城市"]
     assert rendered == expected_rendered
     pet_controls = next(action.menu() for action in menu.actions() if action.text() == "桌宠控制")
     assert [action.text() for action in pet_controls.actions() if not action.isSeparator()] == [
@@ -573,6 +594,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         "DeepSeek Harness",
         "打开网页版 DeepSeek",
         "检查更新",
+        "网络信息",
         "GitHub 项目页",
     ]
     if sys.platform == "win32":
@@ -1018,7 +1040,7 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
         all_rows = dialog.findChildren(SettingRow)
         chime_rows = [r for r in all_rows if r.objectName().startswith("settingRow_voice_chime_")]
         festival_rows = [r for r in all_rows if r.objectName().startswith("settingRow_festival")]
-        # 语音报时页实测 12 行（基础设置 3 + 语音 7 + 台词/歌词 2）：锁「整组都在、
+        # 语音报时页实测 12 行（3 + 4 + 5）、节日提醒 12 行（5 + 3 + 4）：锁「整组都在、
         # 一个不漏」，行本身不动，只是被域收集机制 reparent 进「语音」域。
         assert len(chime_rows) == 12, "语音报时整组 12 行都必须在「语音」域"
         assert len(festival_rows) == 12, "节日提醒 12 行整体移入「语音」域"
@@ -1032,7 +1054,16 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
             label.text()
             for label in voice_page.findChildren(settings_mod.QLabel, "sectionTitle")
         ]
-        assert section_titles == ["语音报时", "节日提醒"]
+        # 2026-10-08 设置页「按区直找」：两个页各自的旧分区不再被压平成单张卡片，
+        # 各自拆回同类小分组（组名带页名前缀），顺序与旧页一致。
+        assert section_titles == [
+            "语音报时 · 何时报",
+            "语音报时 · 用什么声音",
+            "语音报时 · 说什么",
+            "节日提醒 · 开关",
+            "节日提醒 · 时间",
+            "节日提醒 · 文案",
+        ]
 
         # 音效类三组都不在「语音」域（各自回原功能分组，行本身仍照常存在）。
         for setting_id in (
@@ -1201,8 +1232,13 @@ def test_sound_and_festival_search_jump_to_owning_domains(tmp_path, monkeypatch)
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
     try:
-        # (查询词, 应跳到的域, 命中行是否应可见)：只有「碰撞参数（高级）」里的行
-        # 藏在默认收起的 disclosure 后面（搜索不展开 disclosure），其余行可见。
+        # (查询词, 应跳到的域, 命中行要不要断言可见)：命中后搜索会**先**把命中行
+        # 所在的折叠框 / advanced 组展开、再把页内标签切到它所在的那一页
+        #（``modern_settings_dialog._search_settings``），所以「行藏在默认收起的
+        # 后面」已不是命中行不可见的理由；真正还不可见的只有被前置开关挡住的行，
+        # 那类行搜索状态栏会写明「需先开启「X」」。第三列的 False（碰撞音量）是
+        # 第一刀之前的留痕：当时它在默认收起的「碰撞参数（高级）」后面、搜索也不
+        # 展开，故没给它可见断言；现在它随页内标签一起可见，这一条只是不再断言。
         cases = (
             ("点击音效", "互动", True),
             ("音效音源", "互动", True),
@@ -1264,6 +1300,49 @@ def test_menu_domain_uses_in_page_task_tabs_without_changing_sidebar(tmp_path, m
     assert tabs.currentKey() == "launcher"
     dialog.reject()
     app.processEvents()
+
+
+def test_network_info_entry_status_follows_its_setting(tmp_path, monkeypatch):
+    """入口开关关掉时编排器状态列显示「已停用」（不是「此平台不可用」，也不消失）。
+
+    Runtime Disabled 契约（CONTEXT.md）：开关关掉保留位置、置灰并解释；能力不可用
+    才是另一回事。这里同时钉住"配置态初始状态"与"页面上切换即时生效"两条路径。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet import modern_settings_dialog as settings_mod
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+
+    off_cfg = Config(tmp_path / "off")
+    off_cfg.set("network_info_menu_enabled", False)
+    dialog = ModernSettingsDialog(off_cfg, include_ai=True)
+    try:
+        item = dialog.menu_layout_editor.item_for_action("network_info")
+        assert item is not None, "编排器里必须保留该项（不是从树里消失）"
+        assert item.text(1) == "已停用"
+
+        dialog.network_info_menu_check.setChecked(True)
+        app.processEvents()
+        assert item.text(1) == "已启用"
+    finally:
+        dialog.reject()
+        app.processEvents()
+
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    on_cfg = Config(tmp_path / "on")
+    dialog = ModernSettingsDialog(on_cfg, include_ai=True)
+    try:
+        assert dialog.menu_layout_editor.item_for_action("network_info").text(1) == "已启用"
+        dialog.network_info_menu_check.setChecked(False)
+        app.processEvents()
+        assert dialog.menu_layout_editor.item_for_action("network_info").text(1) == "已停用"
+    finally:
+        dialog.reject()
+        app.processEvents()
 
 
 def test_runtime_toggles_refresh_menu_status_without_rewriting_tree(tmp_path, monkeypatch):
@@ -1366,7 +1445,10 @@ def test_settings_visual_hierarchy_uses_shared_product_tokens(tmp_path, monkeypa
     section_title = dialog.pages.currentWidget().findChild(settings_mod.QLabel, "sectionTitle")
     row = dialog.findChild(SettingRow, "settingRow_autostart")
     assert page_title.font().pixelSize() == 22
-    assert section_title.font().pixelSize() == 13
+    # 2026-10-08 视觉层级调整：组标题 13px → 15px（描述小字 12px 另立一行，见下）。
+    assert section_title.font().pixelSize() == 15
+    description = dialog.pages.currentWidget().findChild(settings_mod.QLabel, "sectionDescription")
+    assert description is not None and description.font().pixelSize() == 12
     assert row.label.font().pixelSize() == 13
     assert row.label.font().weight() == 500
     assert row.hint_label.font().pixelSize() == 12
@@ -1561,6 +1643,9 @@ def test_compact_agent_sound_controls_reflow_inside_their_setting_row(tmp_path, 
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
     dialog.agent_sound_check.setChecked(True)
+    # 2026-10-07 第一刀：Agent 折叠框改默认折叠，折叠态下的子行不参与布局（宽度是陈旧
+    # 值），本用例量的是可见态的行内回流，故先展开（几何断言本身逐字不变）。
+    dialog.agent_link_box.set_expanded(True)
     dialog.resize(720, 760)
     automation_index = next(
         index for index in range(dialog.sidebar.count())
@@ -1618,7 +1703,13 @@ def test_settings_domains_use_semantic_sidebar_icons():
     )
 
 
-def test_settings_menu_page_persists_legacy_compatibility_mode(tmp_path, monkeypatch):
+def test_settings_menu_page_has_no_menu_version_selector(tmp_path, monkeypatch):
+    """「菜单版本（新版 / 旧版）」下拉已随旧版菜单退役：设置页不再有它，
+    保存也不再把已退役的模板键写回配置。
+
+    （旧用例 `test_settings_menu_page_persists_legacy_compatibility_mode` 断言
+    的正是"切到旧版并落盘"，随旧版菜单一起删除。）
+    """
     from PySide6.QtWidgets import QApplication
 
     from pet import modern_settings_dialog as settings_mod
@@ -1627,12 +1718,14 @@ def test_settings_menu_page_persists_legacy_compatibility_mode(tmp_path, monkeyp
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    config = Config(tmp_path)
+    dialog = ModernSettingsDialog(config, include_ai=False)
 
-    dialog.menu_template_select.setCurrentData("legacy")
+    assert not hasattr(dialog, "menu_template_select"), (
+        "菜单版本下拉必须随旧版菜单一起删除（切不回旧版了，留着就是死开关）")
     dialog.save_exit_button.click()
-
-    assert Config(tmp_path).get("context_menu_template") == "legacy"
+    assert "context_menu_template" not in config.data
+    assert "context_menu_template" not in Config(tmp_path).data
     app.processEvents()
 
 
@@ -1801,7 +1894,7 @@ def test_menu_preview_and_runtime_qmenu_share_the_same_layout_structure():
     app = QApplication.instance() or QApplication([])
     editor = MenuLayoutEditor(layout, available_actions=MENU_ACTIONS.ids)
     runtime_menu = QMenu()
-    build_modern_menu(runtime_menu, FakePet(), {})
+    build_modern_menu(runtime_menu, FakePet())
     resolved = resolve_menu_layout(
         layout,
         registered_actions=MENU_ACTIONS.ids,
@@ -2228,16 +2321,29 @@ def test_menu_editor_exposes_future_default_action_for_customization(monkeypatch
 
 def test_settings_rejects_invalid_nested_menu_draft_before_writing(tmp_path, monkeypatch):
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication, QMessageBox, QTreeWidgetItem
+    from PySide6.QtWidgets import QApplication, QTreeWidgetItem
 
     from pet import modern_settings_dialog as settings_mod
+    from pet import settings_close_flow
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
-    warnings = []
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    # 提示形态自 2026-10-10 起统一由关闭闸门给（pet/settings_close_flow）：判据从
+    # QMessageBox.warning 换成**产品真实构造**的失败框里那段话（布局诊断必须出现在
+    # 用户看到的那一段里），出口仍是"继续编辑"与「放弃未保存的改动并关闭」。
+    notices: list = []
+
+    def answer(parent, failure):
+        box, _keep, _discard = settings_close_flow.build_save_failure_box(parent, failure)
+        try:
+            notices.append(box.text())
+        finally:
+            box.deleteLater()
+        return False
+
+    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved", answer)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
     outer = next(
         dialog.menu_layout_editor.tree.topLevelItem(i)
@@ -2253,7 +2359,7 @@ def test_settings_rejects_invalid_nested_menu_draft_before_writing(tmp_path, mon
 
     assert dialog.result() == 0
     assert Config(tmp_path).get("context_menu_layout") is None
-    assert warnings and "菜单布局" in warnings[0]
+    assert notices and "菜单布局" in notices[0]
     dialog.reject()
     app.processEvents()
 # --- Settings menu customization regressions (2026-09-03) ---

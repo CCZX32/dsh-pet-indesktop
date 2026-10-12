@@ -222,6 +222,77 @@ def test_cache_hit_requires_non_empty_file(tmp_path):
     assert svc_mod._cache_hit(tmp_path / "missing.mp3") is False
 
 
+# ============================================================ 缓存原子落盘（ops-F2）
+
+
+def test_worker_publishes_cache_path_atomically(monkeypatch, tmp_path):
+    """合成写临时文件、完成后才原子换名到最终缓存路径。
+
+    ``edge_tts.save`` 边收边写（不是"先写临时再改名"）：上一版 worker 直接写最终
+    路径，进程在合成中途退出（worker 是 daemon，随进程被斩）就留下永久截断的 mp3
+    ——而 ``_cache_hit`` 只看"存在且非空"，于是天天命中它、天天播静音，且再也不重
+    合成。换名之后最终路径上只可能出现完整文件或什么都不出现。
+    """
+    _install_fake_edge_tts(monkeypatch, live_voices=[DEFAULT_VOICE])
+    final = tmp_path / "chime.mp3"
+    during: list[tuple[bool, Path]] = []
+
+    async def save_watching(self, path):
+        target = Path(path)
+        target.write_bytes(_FakeCommunicate.payload)
+        # 合成"进行中"那一刻的事实：最终路径还不存在（所以 _cache_hit 为假）
+        during.append((svc_mod._cache_hit(final), target))
+
+    monkeypatch.setattr(_FakeCommunicate, "save", save_watching)
+
+    results = _run_worker(monkeypatch, tmp_path, DEFAULT_VOICE, ["ok"])
+
+    assert results[0][2] == "", "合成成功"
+    assert len(during) == 1
+    hit_midway, written = during[0]
+    assert hit_midway is False, "完成前最终路径不算缓存命中（半截文件会被当命中播出）"
+    assert written.name.endswith(svc_mod.TEMP_SUFFIX), "写的是同目录临时文件"
+    assert written.parent == tmp_path, "临时文件必须同目录（os.replace 只在同一文件系统内原子）"
+    assert written.name != final.name
+
+    assert svc_mod._cache_hit(final) is True, "换名之后最终路径上才有完整文件"
+    assert final.read_bytes() == _FakeCommunicate.payload
+    assert list(tmp_path.glob(f"*{svc_mod.TEMP_SUFFIX}")) == [], "换名后不留临时文件"
+
+
+def test_worker_exception_after_partial_write_cleans_temp(monkeypatch, tmp_path):
+    """合成中途失败（写到一半）：临时文件清掉，最终路径一次都不出现。
+
+    进程被斩那一路（daemon 线程随退出死掉）留下的临时文件由服务启动清扫兜住
+    （见 ``test_start_sweeps_orphan_temp_files``）；本用例锁的是同一条链上的
+    "失败了不留垃圾"。
+    """
+    _install_fake_edge_tts(monkeypatch, live_voices=[DEFAULT_VOICE])
+
+    async def save_half_then_raise(self, path):
+        Path(path).write_bytes(b"\x00half")
+        raise RuntimeError("NoAudioReceived")
+
+    monkeypatch.setattr(_FakeCommunicate, "save", save_half_then_raise)
+
+    results = _run_worker(monkeypatch, tmp_path, DEFAULT_VOICE, ["ok"])
+
+    assert "NoAudioReceived" in results[0][2]
+    assert svc_mod._cache_hit(tmp_path / "chime.mp3") is False
+    assert list(tmp_path.glob(f"*{svc_mod.TEMP_SUFFIX}")) == [], "半截临时文件必须清掉"
+
+
+def test_worker_empty_audio_leaves_no_temp_file(monkeypatch, tmp_path):
+    """服务端"成功"但没给音频：最终路径与临时文件都不许留下。"""
+    _install_fake_edge_tts(monkeypatch, live_voices=[DEFAULT_VOICE])
+
+    results = _run_worker(monkeypatch, tmp_path, DEFAULT_VOICE, ["empty"])
+
+    assert results[0][2] != ""
+    assert not (tmp_path / "chime.mp3").exists()
+    assert list(tmp_path.glob(f"*{svc_mod.TEMP_SUFFIX}")) == []
+
+
 def test_voice_substitution_notice_is_announced_once(monkeypatch):
     """同一条提示每个进程只弹一次（不刷屏），但每次都写日志。"""
     _install_fake_edge_tts(monkeypatch, live_voices=[DEFAULT_VOICE])

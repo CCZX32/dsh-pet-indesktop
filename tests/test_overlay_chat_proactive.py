@@ -264,7 +264,8 @@ def test_show_bubble_skipped_while_hidden_or_suppressed(tmp_path):
         shell.set_bubble_suppressed(False)
         shell.set_pet_visible(False)
         shell.show_bubble("还是不该出现")
-        assert shell._speech_bubble._raw_text != "还是不该出现"
+        # 隐藏期连泡都不建（旧窗是在已建好的泡上换文案）：没有任何呈现面带着这段文字
+        assert shell._speech_bubble is None, "隐藏期不建气泡"
     finally:
         shell._delete_runtime_marker()
 
@@ -421,9 +422,14 @@ def test_chat_disabled_degrades_quietly(tmp_path):
 
 # ---------------------------------------------------------------- 8. 联动动作面
 def test_link_anim_requests_reach_behavior_controller(tmp_path):
-    """request_link_anim/idle/switch_clip 落在行为控制器（不再是静默 no-op）。"""
+    """request_link_anim/idle/switch_clip 落在行为控制器（不再是静默 no-op）。
+
+    前置：壳可见——联动动作是**自动事件**，落点按规范取"可见的最小槽"
+    （``alert_target_sprite``），隐藏期不给任何呈现场合。
+    """
     shell, _lib = fac._make_shell(tmp_path)
     try:
+        shell.overlay.show()
         shell.request_link_anim("act1")
         assert shell.sprite._clip_name == "act1"
         assert shell.behavior.state_of(shell.sprite) == STATE_ACTS
@@ -457,6 +463,7 @@ def test_link_chain_asks_provider_after_one_shot_ends(tmp_path):
     lib.acts.append("act2")
     lib._clips["act2"] = lib._clips["act1"]
     try:
+        shell.overlay.show()
         shell.set_link_next_provider(lambda: "act2")
         shell.request_link_anim("act1")
         assert shell.sprite._clip_name == "act1"

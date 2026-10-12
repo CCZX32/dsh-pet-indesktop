@@ -1102,6 +1102,9 @@ def _save_meta_file_cache_entry(key: str, frames: int, duration: float) -> None:
 
 try:
     import imageio_ffmpeg
+    from .ffmpeg_hide import install as _install_ffmpeg_hide
+
+    _install_ffmpeg_hide()
 except Exception as exc:  # pragma: no cover - 依赖缺失时无法使用 webm 路线
     imageio_ffmpeg = None
     _IMPORT_ERROR = exc

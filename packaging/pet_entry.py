@@ -19,6 +19,20 @@ exe 时资源管理器默认工作目录就是 exe 所在目录，行为一致�
 
 import sys
 
+from pet.runtime_cleanup import mark_frozen_runtime_dir
+
+# onefile 运行目录的归属标记：本次启动标记自己，下一次启动才敢把这个目录当遗留
+# 清理（没有本产品标记的 `_MEI*` 一律不删，见 pet/runtime_cleanup.py）。onedir
+# 的 _MEIPASS 是安装目录里的 _internal，这里不会写任何东西。
+mark_frozen_runtime_dir()
+
+if "--uninstall-cleanup" in sys.argv:
+    # 卸载清理同样必须在 import pet.app 之前分流：否则参数会当成普通启动
+    #（拉起素材库/ffmpeg/托盘），清理根本不执行。入口只透传退出码。
+    from pet.uninstall_cleanup import main as uninstall_cleanup_main
+
+    sys.exit(uninstall_cleanup_main())
+
 if "--settings" in sys.argv:
     # exe 自启动参数分流：设置页独立进程必须在 import pet.app 之前分流，否则子进程
     # 会把整个桌宠（素材库/ffmpeg/托盘/灵动岛）再拉一份，独立进程省内存的前提就没了。

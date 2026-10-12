@@ -158,13 +158,14 @@ def _make_shell(screen=None, instance=None):
     instance = instance or FakeInstance()
     shell = OverlayShell(
         app, instance, screen=screen,
-        sprite_factory=lambda lib, pos, scale: FakeSprite(lib, pos, scale))
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
     return shell, screen, instance
 
 
 # ---------------------------------------------------------------- env flag 契约
 def test_is_overlay_topology_env_contract(monkeypatch):
     # T5 默认化：默认 overlay；PET_RENDER_TOPOLOGY=legacy 是唯一逃生门
+    # （配置侧输入为空 = 默认 overlay，见下面的隔离用例）
     monkeypatch.delenv("PET_RENDER_TOPOLOGY", raising=False)
     assert is_overlay_topology() is True
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "overlay")
@@ -173,6 +174,31 @@ def test_is_overlay_topology_env_contract(monkeypatch):
     assert is_overlay_topology() is False
     monkeypatch.setenv("PET_RENDER_TOPOLOGY", "")
     assert is_overlay_topology() is True
+
+
+def test_topology_config_input_is_isolated_to_tmp(tmp_path, monkeypatch):
+    """拓扑门的配置输入必须钉在本用例临时目录（审查修复 5）。
+
+    拓扑自 T4 起还读主配置 ``stream_capture_mode``。若测试进程真去读，上面那条
+    「清 env ⇒ 默认 overlay」在**开发机勾过捕获模式**时会假红（判定读到真实
+    ``<APPDATA>/dsh-pet-standalone/config.json``），CI 上却永远绿——断言失去意义。
+    conftest 的 ``_isolate_topology_config`` 夹具把目录解析钉到 ``tmp_path``；
+    本用例锁死这件事（并在同一份路径上写 true 证明读的确实是它）。
+    """
+    from pet import overlay_settings_command as cmd_mod
+
+    monkeypatch.delenv(cmd_mod.ENV_TOPOLOGY, raising=False)
+    path = cmd_mod.topology_config_path()
+    assert str(path).startswith(str(tmp_path)), "门的配置路径必须在本用例临时目录内"
+    assert cmd_mod.is_overlay_topology() is True     # 空目录 = 默认 overlay
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"stream_capture_mode": true}', encoding="utf-8")
+    cmd_mod.reset_topology_snapshot()
+    try:
+        assert cmd_mod.is_overlay_topology() is False, "钉的这份文件必须就是判定输入"
+    finally:
+        cmd_mod.reset_topology_snapshot()
 
 
 # ---------------------------------------------------------------- 构建期：dpr/bounds/右下角
@@ -209,7 +235,9 @@ def test_shell_library_character_fallback():
     instance = MissingLibInstance(FakeConfig({"character": "dlc-gone"}))
     shell, _, _ = _make_shell(instance=instance)
     assert instance.created_character_ids == ["dlc-gone", "shenshen"]
-    assert instance.config.get("character") == "shenshen"
+    # 回退写回的是**这只宠自己的**每宠配置（有 dir 时 = config-slot-0.json），
+    # 不再回写全局配置——"character" 是每宠键，单一真值在档案里。
+    assert shell._sprite_config(shell.sprite).get("character") == "shenshen"
     assert shell.lib is not None
 
 
@@ -663,3 +691,160 @@ def test_shell_attach_island_bridge():
     shell.attach_island(island)
     shell._on_about_to_quit()  # 退出收口（stop 只服务已 start 的壳）
     assert shell.island_bridge is None
+
+
+# ---------------------------------------------------------------- 角色切换：聊天面同步（B07）
+class _ChatSyncInstance(FakeInstance):
+    """记录聊天面角色同步的假实例（完整聊天窗 + 岛对话气泡由它统一转发）。"""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.chat_syncs: list[str] = []
+
+    def sync_chat_character(self, character_id):
+        self.chat_syncs.append(character_id)
+
+
+class _FakeQuickChatBubble:
+    def __init__(self):
+        self.switched: list[str] = []
+
+    def switch_character(self, character_id):
+        self.switched.append(character_id)
+
+
+def test_switch_character_syncs_chat_surfaces():
+    """B07：主宠切角色后聊天面同步新角色（快速气泡 + 完整聊天窗/岛气泡）。
+
+    换库只换了素材；聊天面的角色上下文（会话、头像、系统提示）此前无人更新，
+    切完再开口仍是旧角色。
+    """
+    instance = _ChatSyncInstance()
+    shell, _, _ = _make_shell(instance=instance)
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+
+    shell.switch_character("nova")
+
+    # 主宠的"角色"是**每宠键**：真值是这只宠自己的档案（生产里 ``_config`` 是
+    # SlotRoutedConfig，这里用假配置无 dir，故直接断言生效的每宠配置）。
+    assert shell._sprite_config(shell.sprite).get("character") == "nova"
+    assert bubble.switched == ["nova"]
+    assert instance.chat_syncs == ["nova"]
+
+
+def test_switch_character_without_bubble_sync_seam_is_quiet():
+    """气泡替身没有 ``switch_character``（未创建/降级实现）也不许影响切角色。"""
+    instance = _ChatSyncInstance()
+    shell, _, _ = _make_shell(instance=instance)
+    shell._quick_chat = object()  # 非气泡：无同步面
+
+    shell.switch_character("nova")
+
+    assert shell._sprite_config(shell.sprite).get("character") == "nova"
+    assert instance.chat_syncs == ["nova"]
+
+
+def test_switch_child_character_does_not_touch_chat_surfaces():
+    """子宠换角色**不**同步聊天面：子宠没有自己的聊天身份通道。
+
+    快速对话气泡/完整聊天窗/岛气泡的身份都取主配置（``QuickChatBubble(
+    self._config)``、会话目录按主身份），子宠换角色没有对应身份可同步；这条
+    锁住「不做」的决定，防止未来把主宠的聊天面误改到子宠的角色上。
+    """
+    instance = _ChatSyncInstance()
+    shell = OverlayShell(
+        app, instance,
+        screen=FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040)),
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
+    shell._create_main_library = FakeLibrary
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+    shell.spawn_pet()
+    child = shell._spawned[0]
+
+    shell.switch_character("nova", child)
+
+    assert shell._spawned_libs[child] is not None
+    assert bubble.switched == []
+    assert instance.chat_syncs == []
+
+
+# ------------------------------------------------- 关闭主位：留空、不提升、不退出应用（G1）
+class _Slot0CloseInstance(FakeInstance):
+    """真 Config 的假实例 + 聊天面同步记录（关闭 slot0 要读真 slot 文件）。"""
+
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.chat_syncs: list[str] = []
+
+    def sync_chat_character(self, character_id):
+        self.chat_syncs.append(character_id)
+
+
+def _make_slot0_close_shell(tmp_path, main_character, child_character):
+    """真落盘 Config + 主宠 + 一只**异角色**子宠（子宠角色写在它自己的 slot 里）。
+
+    子宠的角色经 ``switch_character(cid, child)`` 真写进 ``config-slot-1.json``
+    （产品路径，不是测试手搓文件）：关闭主位时**不许**由这份文件接管主身份。
+    """
+    config = Config(base=tmp_path)
+    config.set("character", main_character)
+    config.save()
+    instance = _Slot0CloseInstance(config)
+    shell = OverlayShell(
+        app, instance,
+        screen=FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040)),
+        sprite_factory=lambda lib, pos, scale: _BodySprite(lib, pos, scale))
+    shell.spawn_pet()
+    child = shell._spawned[0]
+    shell.switch_character(child_character, child)
+    assert shell._config.get("character") == main_character, "前提：子宠换角色不动主配置"
+    return shell, instance, child
+
+
+def test_closing_slot0_leaves_it_empty_without_promoting_a_child(tmp_path):
+    """关闭主宠 = slot0 留空，档案保留：子宠**不**接管主身份、不退出应用。
+
+    旧语义（子宠提升为主身份、角色接管进主配置）已废除：身份空间稳定，
+    没有任何路径能把一只宠的身份"接管"成主身份。
+    """
+    shell, instance, child = _make_slot0_close_shell(tmp_path, "shenshen", "nova")
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+
+    assert shell.exit_pet(shell.sprite) is True
+
+    assert shell.sprite is None, "关闭主宠后 slot0 留空，不被子宠接管"
+    assert shell._spawned == [child], "子宠仍在它自己的身份上"
+    assert 0 not in shell._remembered_active, "活跃集合只去掉 slot0"
+    assert 1 in shell._remembered_active, "子宠的活跃身份不受影响"
+    assert bubble.switched == [], "关闭主宠不把聊天面改到子宠的角色上"
+    assert instance.chat_syncs == [], "共享会话的角色不因主位留空而改变"
+
+
+def test_closing_slot0_keeps_its_profile_and_can_be_restored(tmp_path):
+    """关闭主宠可逆：slot0 档案（角色/几何）留在盘上，再生成时按它恢复。
+
+    旧"新旧主同角色仍走同一提升入口"的断言随之废除——不提升就没有"接管后的
+    主配置"可读，这里改为锁住**档案保留 + 可再生成**这条可逆契约。
+    """
+    shell, instance, child = _make_slot0_close_shell(tmp_path, "shenshen", "shenshen")
+    bubble = _FakeQuickChatBubble()
+    shell._quick_chat = bubble
+    from pet import pet_profiles
+
+    config_dir = shell._spawn_config_dir()
+    profile_before = pet_profiles.read_slot_profile(config_dir, 0).data
+
+    assert shell.exit_pet(shell.sprite) is True
+
+    assert shell.sprite is None
+    assert pet_profiles.read_slot_profile(config_dir, 0).data == profile_before, \
+        "关闭主宠不动它的档案"
+    assert shell._config.get("character") == "shenshen", "主配置的角色不被改写"
+
+    shell.spawn_pet()
+    assert shell.sprite is not None, "关闭后可再生成 slot0"
+    assert shell._sprite_config(shell.sprite).get("character") == "shenshen"
+    assert instance.chat_syncs == [], "重生成不重打招呼（没有提升事件）"

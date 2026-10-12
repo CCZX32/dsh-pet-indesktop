@@ -8,9 +8,8 @@ from ..menu_layout import resolve_menu_layout
 from .registry import MENU_ACTIONS
 
 
-def build_modern_menu(menu: QMenu, pet, template: dict) -> None:
+def build_modern_menu(menu: QMenu, pet) -> None:
     """Resolve user/default layout and populate one real Qt menu."""
-    del template
     result = resolve_menu_layout(
         pet.cfg.get("context_menu_layout"),
         registered_actions=MENU_ACTIONS.ids,

@@ -218,7 +218,41 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-06 回调到 2407：该设置行改为 settings_music.browser_media_rows（受
 # 平台条件约束、并入既有的 `] + settings_music.browser_media_rows(self),` 一行），
 # 本文件净 −1 行（保存回写 4 行仍在）。实测 2407。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2407
+# 2026-10-06 仍为 2407（「恢复默认设置」入口，issue #220）：本文件只加接线——
+# import 1 行 + 侧栏按钮构造 3 行 + `_close_after_external_write` 方法 7 行
+# （关窗但跳过整表写回，flag 语义留在对话框内），确认框/重置实现全在
+# pet/settings_reset_defaults.py。实测恰为 2407（= 当前预算，零余量）：本次不再
+# 上调，按文件约定"只随实测校准"；若与其它在飞分支叠加越线，按先例带日期注释校准。
+# 2026-10-07 上调到 2415（夜间整合分支：#220 恢复默认设置 +13、#219 静止放手下落
+# +4、harness 自启 service 目标下拉项与宽度自适应净 +6，三分支同文件叠加）。
+# 实测 2415；按文件约定只随实测校准（拆分仍是待办）。
+# 2026-10-08 回调到 2423（#208+#209+#172 叠加后，#228 歌词批次把「浏览器媒体
+# 会话参与歌词」的 4 行写回搬进 settings_music.save_source_settings 换成 1 行、
+# 并入 foobar2000 歌词两行——净 −3）：免打扰 4 行 / 天气 2 行 / 网络信息 5 行，
+# 实现分别在 pet/settings_quiet.py / settings_weather.py / settings_network.py /
+# settings_music.py。实测 2423；按文件约定只随实测校准（拆分仍是待办）。
+# 2026-10-08 再调到 2426（#172 对齐：菜单入口改运行时置灰——CONTEXT.md 的
+# Runtime Disabled）：编排器状态列随开关显示「已停用」——`_sync_menu_action_states`
+# +2 行（读开关）与开关接线 +1 行。实测 2426。
+# 2026-10-07 上调到 2470（设置页信息架构第一刀，+44）：常规域「启动项（高级）」+
+# 桌宠域「播放器路径与标题格式（高级）」两条高级组装配、桌面组件域把探测间隔拆进
+# 「网络延迟检测（高级）」（含"全行被依赖隐藏的组整组收起"的 3 行）、_search_settings
+# 补 `SettingsSection(advanced=True)` 自动展开分支与「命中行被前置开关隐藏」的说明
+# 助手，另含 harness 自启目标与静止放手下落两处定稿文案（净行数含注释折行）。
+# 2026-10-08 上调到 2495（设置页信息架构第二刀，+17）：桌宠域拆成两个页内标签
+# （显示与音乐 / 动作与碰撞），两个 addTab 的装配骨架 + 任务口径注释；组定义行一字
+# 未改（只是搬到各自标签的 page_content 里）。实测 2487。
+# 2026-10-08 设置页第五刀（按区直找）批 1：恢复被域装配压平的旧页子分区（主动识屏
+# 15 行拆 4 组、语音报时 / 节日提醒各 12 行拆 3 组；行键表 20 行）+「自动化与联动」
+# 顶层改按下表顺序（删掉 15 行 insertWidget 倒插逻辑）+ page_content 支持已构造好的
+# QWidget，实测 2495（= 第二刀的预算值，未上调）。
+# 2026-10-08 上调到 2497（同刀批 2）：页内分区跳转条与组描述的接线——import 1 行 +
+# 域装配末尾 `settings_page_guide.install(self)` 及其注释 2 行；主体（跳转条、流式
+# 布局、SECTION_GUIDE 描述表）全在 pet/settings_page_guide.py，本文件只做接线。
+# 2026-10-09 上调到 2501（bug 狩猎修复批，两批叠加）：即时音效开关的 reload 防陈旧
+# 快照守卫（+7，B04）+ 子宠页读写路由的配置入口一行与 harness 置灰摘除（+3，F2）。
+# 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2501
 
 
 def _read(name: str) -> str:
@@ -232,12 +266,29 @@ def test_pure_logic_modules_do_not_import_qt():
     # 2026-09-23 加入 overlay_settings_command：D12 指令通道的写/读/消费与拓扑门
     # 必须零 Qt——独立设置进程（pet/__main__.py --settings）禁止导入 pet.app/
     # overlay_shell，env 读取的唯一实现只能落在两侧都能 import 的轻模块里。
+    # 2026-10-07 加入 net_monitor：网络信息（issue #172）的采样核心（计数器/
+    # 延迟探测/文案）必须零 Qt——它跑在后台采样线程里，GUI 侧只读快照；
+    # network_info.py 是弹窗的数据层（属地解析/连通性/文案），同样零 Qt。
     for name in (
         "collision.py", "physics.py",
         "festival_calendar.py", "festival_data.py", "festival.py",
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py", "overlay_settings_command.py",
+        # 「回收内存」(#210)：过滤真值表与 ctypes 薄封装必须零 Qt——后台线程里
+        # 跑的就是这一层，单测也在无 Qt 的替身上验（ctypes 全 mock）。
+        "memory_trim.py",
+        "net_monitor.py", "network_info.py",
+        # 2026-10-07 加入 music_title：标题清洗/解析是取词链路的前处理，规则要能
+        # 脱离 Qt 单独跑真值表（误伤防护的用例都是纯字符串）。
+        "music_title.py",
+        # 2026-10-07 加入 island_segments/sys_monitor（灵动岛段契约 P1）：段注册
+        # 契约与 CPU/内存采样核心必须零 Qt——采样跑在后台线程，测宽靠调用方
+        # 注入的 QFontMetrics（依赖注入，本模块不 import PySide6）。
+        # 2026-10-07 加入 island_layout（P1 Slice D2 下沉）：段数据/落位/收缩流水线
+        # 是纯几何，度量对象同样注入——收缩逐级触发/逆序恢复这些规则要能在没有
+        # 窗口、没有真实字体、没有屏幕的替身上直接验，就必须零 Qt。
+        "island_segments.py", "sys_monitor.py", "island_layout.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
@@ -293,6 +344,146 @@ def test_pet_tree_has_zero_retired_layer_imports():
                     offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, (
         "pet/ 内仍有 import 多进程多宠退役层（架构倒退）：\n"
+        + "\n".join(offenders)
+    )
+
+
+# 死面 facade 退役（2026-10-09，bug 狩猎 F4 清理）：config_domains 是「只建不用」
+# 的配置域 facade——五个 ``Config.*_config`` 方法全仓零产品调用方（只有它自己的
+# 测试在用），留着只会让人按假象面改代码踩空。整层删除后按退役层先例守卫：
+# 文件必须不存在，且全 pet/ 树不得再 import——防「死面被静默合回」。
+RETIRED_DEAD_FACADE_MODULES = ("config_domains",)
+
+
+def test_retired_dead_facade_files_are_gone():
+    """死面 facade 机器化守卫：文件必须不存在（防"删了又被合回来"）。"""
+    present = [name for name in RETIRED_DEAD_FACADE_MODULES
+               if (PET_DIR / f"{name}.py").exists()]
+    assert not present, (
+        "死面 facade 文件回潮（2026-10-09 已整层删除）：\n" + "\n".join(present)
+    )
+
+
+def test_pet_tree_has_zero_dead_facade_imports():
+    """死面 facade 机器化守卫：整个 pet/ 树零 import（含函数级延迟 import）。"""
+    offenders = []
+    for path in sorted(PET_DIR.rglob("*.py")):
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue
+            for retired in RETIRED_DEAD_FACADE_MODULES:
+                if re.search(rf"\b{retired}\b", stripped):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "pet/ 内仍有 import 死面 facade（2026-10-09 已整层删除）：\n"
+        + "\n".join(offenders)
+    )
+
+
+# 旧版右键菜单退役层（2026-10-08 全量退役，见
+# docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md）。
+# 守卫分三层，同多进程层先例：
+#   ① 退役文件必须**不存在**（删除刀不许被静默回退）；
+#   ② 整个 pet/ 树不得再 import 退役模块；
+#   ③ 退役符号（旧版建造器 / 旧模板装载 / 模板切换）不得在任何一行重新出现——
+#      包括函数体、字符串与注释：这些符号一旦回潮，就意味着"又有一棵菜单树按
+#      模板分流"，正是本次删掉的东西。
+# 退役配置键另有一条更精确的守卫（test_retired_menu_template_key_confined_to_migration）：
+# 它必须还能被**迁移**引用一次（丢旧值），但不许再被任何消费方读/写。
+RETIRED_LEGACY_MENU_PATHS = (
+    "context_menus/legacy.py",
+    "context_menus/menu_styles/legacy.py",
+    "menu_templates/legacy.json",
+    "menu_templates/modern.json",
+)
+RETIRED_LEGACY_MENU_MODULES = (
+    "context_menus.legacy",
+    "menu_styles.legacy",
+)
+RETIRED_LEGACY_MENU_SYMBOLS = (
+    "build_legacy_menu",
+    "apply_legacy_menu_style",
+    "load_menu_template",
+    "normalize_template_id",
+    "add_template_switch",
+)
+#: 已退役的右键菜单模板键：只允许出现在 config.py 的迁移函数里。
+RETIRED_MENU_TEMPLATE_KEY = "context_menu_template"
+RETIRED_MENU_TEMPLATE_MIGRATION = "pet/config.py::_migrate_menu_template_config"
+
+
+def test_retired_legacy_menu_files_are_gone():
+    """退役的旧版菜单文件必须不存在（防"删了又被合回来"）。"""
+    present = [rel for rel in RETIRED_LEGACY_MENU_PATHS
+               if (PET_DIR / rel).exists()]
+    assert not present, (
+        "旧版右键菜单退役层文件回潮（已全量删除）：\n" + "\n".join(present)
+    )
+
+
+def _function_block(source: str, name: str) -> tuple[int, int, str]:
+    """按缩进切出一个方法体（返回 (起始行号, 结束行号, 文本)）。"""
+    lines = source.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"    def {name}"))
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("    def ") or lines[i].startswith("    @"):
+            end = i
+            break
+    return start, end, "\n".join(lines[start:end])
+
+
+def test_retired_menu_template_key_confined_to_migration():
+    """退役的模板键在 pet/ 里只许存活于迁移函数内（丢旧值的那一处）。
+
+    这是"读入即弃"的机器判据：别处再出现这个键，就等于又有一个消费方读它
+    （配置重新分叉）；迁移函数里出现则是必须的——旧存档得有个地方丢掉它。
+    """
+    config_src = (PET_DIR / "config.py").read_text(encoding="utf-8")
+    _, _, block = _function_block(config_src, "_migrate_menu_template_config")
+    assert RETIRED_MENU_TEMPLATE_KEY in block, (
+        f"{RETIRED_MENU_TEMPLATE_MIGRATION} 必须仍丢弃这个键（旧存档的去向）")
+    outside = [(no, line) for no, line in enumerate(config_src.splitlines(), 1)
+               if RETIRED_MENU_TEMPLATE_KEY in line]
+    block_start, block_end, _ = _function_block(config_src, "_migrate_menu_template_config")
+    offenders = [
+        f"pet/config.py:{no}: 退役键出现在迁移函数之外"
+        for no, _line in outside
+        if not (block_start + 1 <= no <= block_end)
+    ]
+    for path in sorted(PET_DIR.rglob("*.py")):
+        if path.name == "config.py":
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(rf"\b{RETIRED_MENU_TEMPLATE_KEY}\b", line):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "退役的右键菜单模板键回潮（只许在迁移函数里丢旧值）：\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_pet_tree_has_zero_retired_legacy_menu_references():
+    """整个 pet/ 树零退役菜单符号：谁再把旧版建造器/模板装载/模板键写回来，
+    这里就红——比"文件不存在"更严，挡住"换个文件名复活"与"注释里留老路"。"""
+    offenders = []
+    for path in sorted(PET_DIR.rglob("*.py")):
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            for retired in RETIRED_LEGACY_MENU_SYMBOLS:
+                if re.search(rf"\b{retired}\b", line):
+                    offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue
+            for retired in RETIRED_LEGACY_MENU_MODULES:
+                if re.search(rf"\b{re.escape(retired)}\b", stripped):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "pet/ 内仍有旧版右键菜单退役层引用（架构倒退）：\n"
         + "\n".join(offenders)
     )
 

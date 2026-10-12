@@ -9,6 +9,7 @@ QApplication。覆盖：清单原子读写/顺序保持、缺失=首次运行、
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import pytest
@@ -36,7 +37,7 @@ def test_active_list_write_is_atomic(tmp_path):
 
 
 def test_active_list_missing_file_is_first_run(tmp_path):
-    assert ovs.load_active_slots(tmp_path) == []
+    assert ovs.load_active_slots(tmp_path) == [0]
 
 
 @pytest.mark.parametrize("text", [
@@ -44,7 +45,7 @@ def test_active_list_missing_file_is_first_run(tmp_path):
     "[]",
     '"slots"',
     '{"slots": [1, 2]}',                        # 缺首字段 version
-    '{"version": 2, "slots": [1]}',             # 版本不匹配
+    '{"version": 3, "slots": [1]}',             # 版本不匹配
     '{"version": 1, "slots": {"a": 1}}',        # slots 非列表
 ])
 def test_active_list_corrupt_falls_back_to_main_only(tmp_path, text):
@@ -55,33 +56,33 @@ def test_active_list_corrupt_falls_back_to_main_only(tmp_path, text):
 def test_active_list_drops_illegal_entries(tmp_path):
     _write(ovs.active_pets_path(tmp_path),
            json.dumps({"version": 1, "slots": [1, 0, -2, "2", None, 1, "x"]}))
-    assert ovs.load_active_slots(tmp_path) == [1, 2]
+    assert ovs.load_active_slots(tmp_path) == [1, 0, 2]
 
 
 def test_normalize_slots_dedupes_preserving_order():
-    assert ovs.normalize_slots([2, 1, 2, "3", 0, -1, "x"]) == [2, 1, 3]
+    assert ovs.normalize_slots([2, 1, 2, "3", 0, -1, "x"]) == [2, 1, 3, 0]
     assert ovs.normalize_slots(None) == []
 
 
 # ---------------------------------------------------------------- 无锁 slot 分配（D6）
-def test_allocate_slot_is_monotonic_and_never_collides(tmp_path):
-    assert ovs.allocate_slot(tmp_path) == 1
+def test_allocate_slot_restores_smallest_inactive_profile(tmp_path):
+    assert ovs.allocate_slot(tmp_path) == 0
     ovs.write_slot_geometry(tmp_path, 1, {"rx": 0.1, "ry": 0.1})
-    assert ovs.allocate_slot(tmp_path) == 2
+    assert ovs.allocate_slot(tmp_path, active_slots=[0]) == 1
     ovs.write_slot_geometry(tmp_path, 2, {"rx": 0.2, "ry": 0.2})
-    assert ovs.allocate_slot(tmp_path) == 3
+    assert ovs.allocate_slot(tmp_path, active_slots=[0, 1]) == 2
 
 
 def test_allocate_slot_skips_existing_configs_and_active_identities(tmp_path):
     _write(tmp_path / "config-slot-1.json", "{}")
     _write(tmp_path / "config-slot-2.json", "{}")
     # 活跃身份 3 尚未落配置（进程内已占）——同样不得撞
-    assert ovs.allocate_slot(tmp_path, active_slots=[3]) == 4
-    assert ovs.allocate_slot(tmp_path, active_slots=[4]) == 3
+    assert ovs.allocate_slot(tmp_path, active_slots=[0, 3]) == 1
+    assert ovs.allocate_slot(tmp_path, active_slots=[0, 1, 4]) == 2
 
 
 def test_allocate_slot_without_config_dir_uses_active_only():
-    assert ovs.allocate_slot(None, active_slots=[1, 2]) == 3
+    assert ovs.allocate_slot(None, active_slots=[1, 2]) == 0
 
 
 def test_scan_slot_configs_matches_frozen_naming(tmp_path):
@@ -93,11 +94,32 @@ def test_scan_slot_configs_matches_frozen_naming(tmp_path):
     assert ovs.scan_slot_configs(None) == set()
 
 
-def test_allocate_slot_raises_when_exhausted(tmp_path):
+def test_allocate_slot_reuses_smallest_retired_when_history_is_full(tmp_path):
+    """B01：历史身份占满 1..MAX_SCAN_SLOTS 时复用**最小退役身份**，不抛错。
+
+    普通用户反复生/退累计 128 次后目录里全是历史 ``config-slot-N.json``；旧实现
+    直接抛 ``SpawnStateError`` → 「生小肥鱼」永久失效（UI 也只有日志）。
+    """
+    for slot in range(1, ovs.MAX_SCAN_SLOTS + 1):
+        _write(tmp_path / f"config-slot-{slot}.json", "{}")
+    assert ovs.allocate_slot(tmp_path, active_slots=[0]) == 1
+    assert ovs.allocate_slot(tmp_path, active_slots=[0, 1, 2]) == 3
+
+
+def test_allocate_slot_preserves_existing_profiles(tmp_path):
+    for slot in (0, 1, 2, 3):
+        _write(tmp_path / f"config-slot-{slot}.json", '{"scale": 0.8}')
+    before = {p: p.read_bytes() for p in tmp_path.glob('config-slot-*.json')}
+    assert ovs.allocate_slot(tmp_path, max_slots=3) == 0
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+
+def test_allocate_slot_raises_only_when_all_slots_active(tmp_path):
+    """真耗尽 = max_slots 个身份**全在活跃集合**（实际不可能）才抛错。"""
     for slot in (1, 2, 3):
         _write(tmp_path / f"config-slot-{slot}.json", "{}")
     with pytest.raises(ovs.SpawnStateError):
-        ovs.allocate_slot(tmp_path, max_slots=3)
+        ovs.allocate_slot(tmp_path, active_slots=[0, 1, 2, 3], max_slots=3)
 
 
 # ---------------------------------------------------------------- 每身份几何
@@ -128,7 +150,7 @@ def test_slot_geometry_drops_illegal_values(tmp_path):
 
 
 def test_slot_geometry_empty_write_is_rejected(tmp_path):
-    assert ovs.write_slot_geometry(tmp_path, 1, {"rx": None, "facing": "up"}) is False
+    assert ovs.write_slot_geometry(tmp_path, 1, {"rx": "bad", "facing": "up"}) is False
     assert ovs.slot_config_exists(tmp_path, 1) is False
 
 

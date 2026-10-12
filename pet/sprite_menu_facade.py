@@ -1,21 +1,17 @@
 # -*- coding: utf-8 -*-
-"""SpriteMenuFacade：context_menus 建造器的 pet 形适配面（模板感知版）。
+"""SpriteMenuFacade：context_menus 建造器的 pet 形适配面。
 
-context_menus 的两套建造器都以 PetWindow 的方法面为输入：
-``legacy.build_legacy_menu``（扁平旧版布局）与 ``modern.build_modern_menu``
-（Menu Action Model：注册表 + 用户编排 + 图标/分组）。本类把这套面映射到
-OverlayShell + 被点 sprite + 行为控制器，使**两套建造器原样复用**——菜单结构
-只写一次（在 context_menus 里），新旧路径语义逐点一致，overlay 不再自带一份
-会漂移的硬编码布局（模板感知前的缺陷：无论设置里选什么模板都出 legacy 扁平
-布局，且 legacy 清单大半条目缺失）。
+``context_menus.modern.build_modern_menu``（Menu Action Model：注册表 + 用户
+编排 + 图标/分组）以 PetWindow 的方法面为输入；本类把这套面映射到 OverlayShell
++ 被点 sprite + 行为控制器，使**同一个建造器原样复用**——菜单结构只写一次
+（在 context_menus 里），窗口路径与 overlay 路径语义逐点一致，overlay 不再自带
+一份会漂移的硬编码布局。旧版扁平布局及它的模板分发已于 2026-10-08 全量退役
+（见 docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md）。
 
-模板分发与 ``pet/context_menu.py::populate_context_menu`` **同一判定**：
-``Config.context_menu_template`` → ``normalize_template_id`` →
-``load_menu_template`` → legacy 走扁平布局、modern 走注册表；样式安装（响应式
-样式 / 停留交互 / modern 外观与勾选指示）也逐条对齐，避免"设置里显示新版、
-右键出来是旧版"。
+样式安装与 ``pet/context_menu.py::populate_context_menu`` 逐条对齐（现代外观 /
+勾选指示 / 响应式样式 / 停留交互），两条路径出的菜单因此长得一样。
 
-路由表（legacy 窗侧面 → overlay 落点，逐项等价说明见各方法 docstring）：
+路由表（窗口侧方法面 → overlay 落点，逐项等价说明见各方法 docstring）：
 
     cfg/scale/change_scale/playback_speed/set_playback_speed  → 被点 sprite + 各自那份 config
     on_open_chat / on_open_chat_settings                      → PetInstance.open_chat*
@@ -27,17 +23,16 @@ OverlayShell + 被点 sprite + 行为控制器，使**两套建造器原样复�
     trigger_golden_spin / look_at_screen / rename_character   → 壳的 sprite 等价实现（作用被点 sprite）
     install_music_lyric / _music_lyric                        → 壳的音乐（歌词）宿主
     set_edge_probe_enabled                                    → config（探头世界每 tick 热读）
-    set_context_menu_template / reopen_context_menu           → config + 菜单原位重开
 
 4.2c D13：菜单作用对象 = 右键命中的那一只（``sprite`` 参数）。设置入口按它
-自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」直接接
-``OverlayShell.exit_pet(sprite)``——主宠退出时由壳负责提升列表首只子宠。
+自己的 config 身份传 ``--instance``（子肥鱼 = slot-N），「退出这只」接
+``OverlayShell.exit_pet(sprite)``；主子同样保档案、留空、可恢复，不提升不quit。
 
 批 B2：作用对象口径对齐旧版一窗一宠（菜单以 ``pet=self`` 建造，每条都作用
 本窗那一只）——读（勾选态/素材清单）与写（动画/速率/大小/拖动物理/回角落/
 黄金回旋/隐藏/看屏幕）一律取 ``self.sprite``，不再混用 ``self._shell.sprite``。
 批 B7b：逐只设置的持久化与读取都按该 sprite 自己的配置走——``cfg`` 是它的
-配置视图（子宠 = ``config-slot-N.json``，缺键回退主配置），``_persist_sprite_setting``
+配置视图（子宠 = ``config-slot-N.json``，缺键取同源默认），``_persist_sprite_setting``
 写它自己的那份（主宠仍写主配置），「切换角色」也只切被点的那一只。
 """
 from __future__ import annotations
@@ -48,8 +43,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QInputDialog, QMenu
 
 from . import catalog
-from .context_menu import load_menu_template, normalize_template_id
-from .context_menus import build_legacy_menu, build_modern_menu
+from .context_menus import build_modern_menu
 from .context_menus.menu_styles import (
     apply_modern_menu_style,
     install_modern_check_indicators,
@@ -59,6 +53,11 @@ from .context_menus.menu_styles.common import (
     install_stay_open_interaction,
 )
 from .context_menus.shared import add_action as _add_action
+from .context_menus.shared import (
+    animation_icon_cache_entry,
+    animation_icon_cache_hit,
+    animation_icon_cache_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -108,9 +107,9 @@ class SpriteMenuFacade:
     @property
     def _is_main_sprite(self) -> bool:
         """菜单作用对象是否主宠（决定逐只设置写不写主配置）。"""
-        return self.sprite is self._shell.sprite
+        return self.sprite is not None and self.sprite is self._shell.sprite
 
-    def _persist_sprite_setting(self, key: str, value) -> None:
+    def _persist_sprite_setting(self, key: str, value) -> bool:
         """逐只设置的持久化口径（旧"写本窗自己那份 config"）。
 
         主宠 → 主配置（``Config.set`` + ``save``）；子宠 → 它自己的
@@ -119,13 +118,11 @@ class SpriteMenuFacade:
         的尺寸/速率/物理改脏，见审计 C1/C2）。
         """
         persist = getattr(self._shell, "persist_sprite_setting", None)
-        if callable(persist):
-            persist(self.sprite, key, value)
-            return
-        # 兜底（旧壳/测试替身无该面）：只主宠写主配置，子宠静默不落盘。
-        if self._is_main_sprite:
-            self.cfg.set(key, value)
-            self._save()
+        ok = bool(persist(self.sprite, key, value)) if callable(persist) else False
+        if not ok:
+            log.warning("overlay: 菜单设置保存失败 (%s)，运行态未应用", key)
+            self._bubble("设置保存失败，未应用这次改动，请稍后重试", 6000)
+        return ok
 
     # ---------------------------------------------------------------- 基础属性
     @property
@@ -169,18 +166,25 @@ class SpriteMenuFacade:
         if callable(save):
             save()
 
-    def _bubble(self, text: str, duration_ms: int = 3200) -> None:
+    def _bubble(self, text: str, duration_ms: int = 3200) -> bool:
+        """按壳的气泡面冒一条；返回是否真上了屏（拿不到壳的气泡面 = 没上屏）。"""
         show = getattr(self._shell, "show_bubble", None)
-        if callable(show):
-            try:
-                show(text, duration_ms=duration_ms)
-            except Exception:
-                log.debug("overlay: facade 气泡展示失败", exc_info=True)
+        if not callable(show):
+            return False
+        try:
+            return bool(show(text, duration_ms=duration_ms))
+        except Exception:
+            log.debug("overlay: facade 气泡展示失败", exc_info=True)
+            return False
 
     # 共享建造器（harness_launcher / 音乐启动桥）会把本对象当「pet 宿主」用
-    def show_bubble(self, text: str, duration_ms: int = 3200, **_ignored) -> None:
-        """宿主形气泡面（``launch_harness_gui`` / ``_MusicLaunchBridge`` 读它）。"""
-        self._bubble(str(text), duration_ms)
+    def show_bubble(self, text: str, duration_ms: int = 3200, **_ignored) -> bool:
+        """宿主形气泡面（``launch_harness_gui`` / ``_MusicLaunchBridge`` 读它）。
+
+        返回是否真上了屏：免打扰结束的汇报按它确认交付（见
+        ``window_alerts.report_quiet_summary``），丢弃却报成功会把暂存排空。
+        """
+        return self._bubble(str(text), duration_ms)
 
     @property
     def dialog_parent(self):
@@ -207,7 +211,14 @@ class SpriteMenuFacade:
         return QPixmap.fromImage(image)
 
     def _icon_cache(self) -> dict:
-        """动画缩略图缓存挂**壳**上（facade 每次右键重建，缓存必须长寿命）。"""
+        """动画缩略图缓存挂**壳**上（facade 每次右键重建，缓存必须长寿命）。
+
+        键 =（库身份, 动画名）（``shared.animation_icon_cache_key``）：同壳多宠
+        异角色的同名动画各存各的，换库后旧 worker 的迟到写入也落在旧库的键上。
+        值 =（库弱引用, QImage）（``shared.animation_icon_cache_entry``）：键里的
+        ``id()`` 会被回收对象复用，命中时还要按值里的弱引用核对身份
+        （``shared.animation_icon_cache_hit``）。
+        """
         cache = getattr(self._shell, "_menu_icon_cache", None)
         if cache is None:
             cache = {}
@@ -217,22 +228,42 @@ class SpriteMenuFacade:
                 log.debug("overlay: 挂载菜单图标缓存失败", exc_info=True)
         return cache
 
+    def _icon_key(self, name: str, library=None) -> tuple[int, str]:
+        """本 sprite 当前素材库下的缓存键（查询/写入必须同一函数，单一来源在 shared）。"""
+        if library is None:
+            library = getattr(self.sprite, "library", None)
+        return animation_icon_cache_key(library, name)
+
     def animation_icon_cached_image(self, name: str):
-        """只读缓存查询（shared 侧用它决定是否先放占位图标）。"""
-        cached = self._icon_cache().get(name)
+        """只读缓存查询（shared 侧用它决定是否先放占位图标）。
+
+        命中判定走 ``shared.animation_icon_cache_hit``：库身份在键里只是 ``id()``，
+        真正的身份校验在值里的库弱引用上——旧库回收后 id 被新库复用时，这条查询
+        必须报未命中，否则菜单会把上一只宠的缩略图显示在新角色上。
+        """
+        library = getattr(self.sprite, "library", None)
+        cached = animation_icon_cache_hit(
+            self._icon_cache().get(self._icon_key(name, library)), library)
         return QImage(cached) if cached is not None else QImage()
 
     def animation_icon_image(self, name: str):
         """解码一个代表性帧（worker 线程安全：只碰 clip_path + 解码器）。
 
-        窗口版在 PetWindow 上缓存（128 条上限）；sprite 世界的缓存落在壳上，
-        上限与失效口径逐点一致。
+        窗口版在 PetWindow 上缓存（128 条上限）；sprite 世界的缓存落在壳上，上限与
+        失效口径逐点一致。
+
+        库身份在**解码前**取一次并贯穿查询/解码/写入：worker 可能在解码期间被换库
+        （换角色），此时它手里的图仍是旧库的，写入必须落回旧库的键——否则迟到写入会
+        成为新库的缓存命中，菜单显示上一个角色的图。写入连库的**弱引用**一起存
+        （``shared.animation_icon_cache_entry``）：键只是 ``id()``，命中还要核对值里的
+        弱引用仍指向本次查询的这个库，所以 id 复用同样不会误命中。
         """
+        library = getattr(self.sprite, "library", None)
+        key = self._icon_key(name, library)
         cache = self._icon_cache()
-        cached = cache.get(name)
+        cached = animation_icon_cache_hit(cache.get(key), library)
         if cached is not None:
             return QImage(cached)
-        library = getattr(self.sprite, "library", None)
         clip_path = getattr(library, "clip_path", None)
         path = clip_path(name) if callable(clip_path) else None
         if path is None:
@@ -243,7 +274,7 @@ class SpriteMenuFacade:
         if image is not None and not image.isNull():
             if len(cache) >= 128:
                 cache.clear()
-            cache[name] = QImage(image)
+            cache[key] = animation_icon_cache_entry(library, image)
         return image
 
     # ---------------------------------------------------------------- 素材清单（动画分类建造器）
@@ -295,15 +326,6 @@ class SpriteMenuFacade:
         return _first_callable(self._hosts(), ("open_chat_settings",))
 
     @property
-    def on_open_legacy_settings(self):
-        """legacy 布局的旧设置槽：app.py 自 ae6838a 起恒注入 ``None``。
-
-        逐点对齐（否则 overlay 会凭空多出/少掉一个设置入口）；legacy 模板真正
-        可用的设置入口由 ``build_sprite_full_menu`` 追加的「桌宠设置」承担。
-        """
-        return None
-
-    @property
     def on_open_modern_settings(self):
         """「桌宠设置」：``OverlayShell.open_settings_for``（D13 逐 sprite 身份）。
 
@@ -333,21 +355,53 @@ class SpriteMenuFacade:
         return lambda: fn(sprite)
 
     # ---------------------------------------------------------------- 进程级服务（AppShell）
+    def _service_host(self):
+        """手动服务结果（余额 / 天气）的宿主：**发起 sprite 的代次呈现器**。
+
+        结果归被点的那一只（旧版一窗一宠天然如此），且请求在飞时把这一只关掉之后，
+        迟到结果只取消呈现——不再冒到别宠头上（2026-10-10 终审 A10；点击余额路径
+        ``overlay_shell:2449`` 早就用 ``_sprite_host(target)`` 收口了，菜单旁路漏了）。
+        拿不到壳的呈现器面（legacy 窗口宿主 / 测试替身）时回退壳本身：那是历史口径，
+        至少保证"结果有地方落"。
+        """
+        maker = getattr(self._shell, "sprite_presenter", None)
+        if callable(maker):
+            try:
+                host = maker(self.sprite)
+            except Exception:
+                log.debug("overlay: 取 sprite 服务呈现器失败", exc_info=True)
+            else:
+                if host is not None:
+                    return host
+        return self._shell
+
     @property
     def on_show_balance(self):
         """「DeepSeek 余额」：``AppShell.show_balance``（app._wire_window 注入的
-        同一个方法）；父窗传**壳**——与 overlay 点击路径（``overlay_shell:1225``
-        的 ``handler(self)``）同口径，壳具备 ``cfg`` / ``show_bubble`` /
-        ``request_link_anim`` 全套宿主面。传 ``shell.overlay``（OverlayWindow）
-        会让 ``_show_balance_payload`` 在 ``win.show_bubble`` 上 AttributeError。
+        同一个方法）；父窗传**发起 sprite 的呈现器**（呈现代次收口，见
+        :meth:`_service_host`）。壳本身也是合法宿主（``cfg`` / ``show_bubble`` /
+        ``request_link_anim`` 全套面），故壳不可用时不会出现 AttributeError。
         """
         if not self._chat_enabled():
             return None
         fn = _first_callable(self._hosts(), ("show_balance",))
         if fn is None:
             return None
-        shell = self._shell
-        return lambda *_ignored: fn(shell)
+        host = self._service_host()
+        return lambda *_ignored: fn(host)
+
+    @property
+    def on_show_weather(self):
+        """「查看天气」：``AppShell.show_weather``；父窗同样是发起 sprite 的呈现器。
+
+        与 ``on_show_balance`` 的差别只有一条：**不**受聊天能力门控——天气取的是
+        独立外部数据源，没有聊天/DSL 变体也不该消失。
+        """
+        fn = _first_callable(self._hosts(), ("show_weather",))
+        if fn is None:
+            return None
+        host = self._service_host()
+        return lambda *_ignored: fn(host)
 
     @property
     def on_check_update(self):
@@ -368,6 +422,17 @@ class SpriteMenuFacade:
     @property
     def on_open_todo_panel(self):
         return _first_callable(self._hosts(), ("open_todo_panel",))
+
+    @property
+    def on_network_info(self):
+        """「网络信息」：``AppShell.open_network_info``（进程级弹窗，与窗口版同一方法）。
+
+        弹窗按当前网络环境取一次数据，与"哪一只宠被右击"无关，故不绑 sprite——
+        但仍必须在 facade 上存在：注册表的可用性判定要求 ``on_network_info``
+        可调用（``registry._network_info_available``），缺了这个属性 overlay 菜单
+        会静默少一项（tests/test_sprite_menu_parity.py 逐项比对拦得住）。
+        """
+        return _first_callable(self._hosts(), ("open_network_info",))
 
     @property
     def on_voice_chime_now(self):
@@ -397,27 +462,35 @@ class SpriteMenuFacade:
         """以指定移动素材触发一次移动（window.py trigger_move 语义）。"""
         return self._shell.behavior.play_move_once(self.sprite, name)
 
-    def set_playback_speed(self, value: float) -> None:
+    def set_playback_speed(self, value: float) -> bool:
+        value = float(value)
+        if not self._persist_sprite_setting("playback_speed", value):
+            return False
         sprite = self.sprite
-        sprite.playback_speed = float(value)
-        clip = getattr(sprite, "_clip", None)
-        setter = getattr(clip, "set_playback_speed", None)
-        if callable(setter):
-            setter(float(value))
-        self._persist_sprite_setting("playback_speed", float(value))
+        if sprite.playback_speed != value:
+            sprite.playback_speed = value
+            setter = getattr(getattr(sprite, "_clip", None), "set_playback_speed", None)
+            if callable(setter):
+                setter(value)
+        return True
 
     # ---------------------------------------------------------------- 窗口能力
-    def change_scale(self, scale: float) -> None:
-        self.sprite.scale = float(scale)
-        self._persist_sprite_setting("scale", float(scale))
-        # 可见气泡随新缩放重排（旧 window.py:1000-1004 bubble.reflow）
-        hook = getattr(self._shell, "on_sprite_scale_changed", None)
-        if callable(hook):
-            hook(self.sprite)
+    def change_scale(self, scale: float) -> bool:
+        scale = float(scale)
+        if not self._persist_sprite_setting("scale", scale):
+            return False
+        if self.sprite.scale != scale:
+            self.sprite.scale = scale
+            hook = getattr(self._shell, "on_sprite_scale_changed", None)
+            if callable(hook):
+                hook(self.sprite)
+        return True
 
-    def set_drag_physics(self, on: bool) -> None:
+    def set_drag_physics(self, on: bool) -> bool:
+        if not self._persist_sprite_setting("drag_physics", bool(on)):
+            return False
         self.sprite.drag_physics = bool(on)
-        self._persist_sprite_setting("drag_physics", bool(on))
+        return True
 
     def set_no_move(self, on: bool) -> None:
         self._shell.behavior.no_move = bool(on)
@@ -431,17 +504,17 @@ class SpriteMenuFacade:
         self._shell.set_on_top(bool(on))
 
     def go_default_corner(self) -> None:
-        shell = self._shell
-        sprite = self.sprite
-        sprite.set_pos(shell._default_corner_pos(shell._bounds, sprite.rect()))
+        # 收敛到壳的同名方法：那里在落位前取消探头会话（会话残留会让角色斜着
+        # 停在角落、下一次点击被拉直过渡瞬移回旧屏缘）。
+        self._shell._go_default_corner(self.sprite)
 
     def hide(self) -> None:
         """「隐藏桌宠」：只隐藏被点的那一只（旧版一窗一宠 = 隐藏本窗）。
 
         子宠走逐只显隐（``set_sprite_visible``，托盘逐只菜单「显示这只」可恢复，
         且其它宠不受影响）。主宠保持整窗语义（``set_pet_visible``）：主宠即宿主
-        合成窗，逐只隐藏主宠会留下空的可交互窗，且没有子宠时托盘不挂逐只子菜单
-        （``_refresh_tray_menu`` 的 ``if self._spawned:``），主宠无处恢复。
+        合成窗，藏它一只等于整窗没有内容可画——那条路顶层「显示 / 隐藏」已经按
+        整窗语义给过（``_refresh_tray_menu`` 的逐只「显示这只」也只在 ≥2 只时挂）。
         """
         sprite = self.sprite
         if sprite is None or sprite is self._shell.sprite:
@@ -509,8 +582,10 @@ class SpriteMenuFacade:
             opener(self.sprite)
 
     def on_exit_pet(self) -> None:
-        """「退出这只」：退掉菜单作用对象（主宠退出则提升列表首只子宠为主）。"""
-        self._shell.exit_pet(self.sprite)
+        """关闭被点宠物，档案保留；主子同样不确认，退出应用另有入口。"""
+        sprite = self.sprite
+        if sprite is not None:
+            self._shell.exit_pet(sprite)
 
     def close(self) -> None:
         self._shell.app.quit()
@@ -636,15 +711,10 @@ class SpriteMenuFacade:
         installer = getattr(host, "install_music_lyric", None)
         return installer() if callable(installer) else None
 
-    # ---------------------------------------------------------------- 菜单模板
-    def set_context_menu_template(self, template_id: str) -> None:
-        """写配置即生效（口径同 window.py ``set_context_menu_template``）。"""
-        self.cfg.set("context_menu_template", normalize_template_id(template_id))
-        self._save()
-
+    # ---------------------------------------------------------------- 菜单原位重开
     def reopen_context_menu(self, menu) -> None:
-        """切换模板后按原位立即重开（window.py ``reopen_context_menu`` 的
-        overlay 等价物：壳层关旧菜单 + 延迟重开，菜单里选新版马上看到新版）。"""
+        """按原位立即重开右键菜单（window.py ``reopen_context_menu`` 的 overlay
+        等价物：壳层关旧菜单 + 延迟重开）。"""
         window = getattr(self._shell, "overlay", None)
         reopen = getattr(window, "reopen_context_menu", None)
         if callable(reopen) and menu is not None:
@@ -689,66 +759,31 @@ def _move_before_quit(menu: QMenu, action) -> None:
             return
 
 
-def _move_after_label(menu: QMenu, label: str, action) -> bool:
-    """把新增项插到指定条目之后；锚点在当前模板里不存在时返回 False。"""
-    actions = menu.actions()
-    for index, candidate in enumerate(actions):
-        if candidate is action:
-            continue
-        if candidate.text() == label:
-            menu.removeAction(action)
-            following = actions[index + 1] if index + 1 < len(actions) else None
-            if following is not None and following is not action:
-                menu.insertAction(following, action)
-            else:
-                menu.addAction(action)
-            return True
-    return False
-
-
 def build_sprite_full_menu(shell, sprite=None) -> QMenu:
-    """overlay 全量右键菜单：按 ``context_menu_template`` 走 legacy/modern 建造器。
+    """overlay 全量右键菜单：现代建造器（注册表 + 用户编排）原样复用。
 
     ``sprite`` = 被点中的那一条（4.2c D13 由 ``ShellOverlayWindow.contextMenuEvent``
     透传）；动作面里作用于"某一只"的入口（桌宠设置 / 退出这只）按它路由。
 
-    条件显示与 legacy 窗侧逐点一致（聊天门 / win32+聊天门 / 音乐服务门），
+    条件显示与窗口侧逐点一致（聊天门 / win32+聊天门 / 音乐服务门），
     ``tests/test_sprite_menu_parity.py`` 用真实 PetWindow 的同条件菜单树锁死。
+    「隐藏桌宠」不再由本函数补位：它随注册表的 ``hide_pet`` 落在「桌宠控制」
+    子菜单里，与窗口侧同一棵树（补位会变成同名重项）。
     """
     facade = SpriteMenuFacade(shell, sprite)
     cfg = facade.cfg
-    template_id = normalize_template_id(cfg.get("context_menu_template", "modern"))
-    template = load_menu_template(template_id)
     menu = QMenu()
-    if template_id == "legacy":
-        build_legacy_menu(menu, facade, template)
-        install_responsive_menu_style(menu)
-        install_stay_open_interaction(menu)
-        # 旧布局缺的两个入口由这里补（legacy.py 自身没有；删掉就是实机可见的
-        # 功能回退——用户当前菜单里这两项本来就在）：
-        # 1) 桌宠设置：app 把 on_open_legacy_settings 恒注入 None，旧布局没有
-        #    设置入口，不补则切到旧版后无处可开设置；
-        # 2) 隐藏桌宠：overlay 的隐藏语义（set_pet_visible）没有别的菜单入口。
-        settings_action = _add_action(
-            menu, "桌宠设置", None, facade.on_open_modern_settings,
-            close_on_trigger=True)
-        _move_before_quit(menu, settings_action)
-        hide_action = _add_action(
-            menu, "隐藏桌宠", None, facade.hide, close_on_trigger=True)
-        if not _move_after_label(menu, "退出子肥鱼", hide_action):
-            _move_before_quit(menu, hide_action)
-    else:
-        apply_modern_menu_style(
-            menu, cfg.get("context_menu_appearance", {}) or {})
-        build_modern_menu(menu, facade, template)
-        install_modern_check_indicators(menu)
-        install_responsive_menu_style(menu)
-        install_stay_open_interaction(menu)
+    apply_modern_menu_style(
+        menu, cfg.get("context_menu_appearance", {}) or {})
+    build_modern_menu(menu, facade)
+    install_modern_check_indicators(menu)
+    install_responsive_menu_style(menu)
+    install_stay_open_interaction(menu)
     if not facade.music_service_available:
-        # 音乐服务不存在 → 整组隐藏（legacy 建造器无条件注入该组，故在此收口）
+        # 音乐服务宿主不可达 → 整组隐藏（注册表不按宿主能力过滤，在这里收口）
         _drop_music_group(menu)
-    # 「退出这只」只在多宠时出现（legacy parity：单窗不注入该入口，只有 app.quit
-    # 语义的「退出」）——没有子肥鱼时它等价于「退出」，不重复列出
+    # 「退出这只」只在多宠时出现（窗口侧单窗不注入该入口，只有 app.quit 语义的
+    # 「退出」）——没有子肥鱼时它等价于「退出」，不重复列出
     if getattr(shell, "_spawned", None):
         exit_action = _add_action(menu, "退出这只", None, facade.on_exit_pet,
                                   close_on_trigger=True)

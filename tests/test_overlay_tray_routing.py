@@ -3,10 +3,11 @@
 
 覆盖验收口径：
 
-- **托盘聚合**（对齐 legacy 单托盘 + 每窗子菜单的聚合语义）：有子肥鱼时逐只
+- **托盘聚合**（对齐 legacy 单托盘 + 每窗子菜单的聚合语义）：**≥1 只**就有逐只
   子菜单（主肥鱼 / 小肥鱼 [slot-N]）各含「回到右下角」「退出这只」，动作路由到
-  被点的那一只而不是主宠；spawn/退出后菜单自动重建（旧条目不得残留）；
-  单宠时无逐只子菜单（legacy 单窗无「退出这只」的 parity）；托盘不可用时壳照常活；
+  被点的那一只而不是主宠；0 只时不建（没有"这只"可指）；spawn/退出后菜单自动
+  重建（旧条目不得残留）；单宠的关闭入口闭环见
+  `tests/test_single_pet_close_entry.py`；托盘不可用时壳照常活；
 - **D12 指令消费**：主进程按 config 目录 watcher + QTimer 轮询消费「退出子肥鱼」
   指令（含 target slot 只退一只、未知 slot 空操作、消费即删、无 config 目录不装
   watcher、stop/退出收口）；
@@ -39,7 +40,7 @@ from tests.test_overlay_spawn import _make_persistent_shell
 
 app = QApplication.instance() or QApplication([])
 
-MAIN_LABEL = "主肥鱼"
+MAIN_LABEL = "主肥鱼 [slot-0]"
 
 
 # ---------------------------------------------------------------- 探测工具
@@ -103,6 +104,21 @@ def _teardown(shell) -> None:
         shell.tray.hide()
 
 
+def _wait_until(predicate, timeout: float = 3.0) -> bool:
+    """宽预算轮询等托盘命令落地（``shared.run_after_menu_closed`` 的延迟派发）。
+
+    托盘条目一律「菜单先关、回调延到菜单关闭后执行」：触发后必须先证明**没有**
+    内联执行，再用本函数等它真的执行——不赌固定 sleep。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 class _FakeContextEvent:
     def __init__(self, pos):
         self._pos = QPoint(pos)
@@ -123,8 +139,16 @@ class _FakeContextEvent:
 
 
 # ================================================================ 托盘聚合
-def test_tray_single_pet_has_no_per_pet_submenu(tmp_path):
-    """单宠（无子肥鱼）= legacy 单窗 parity：无逐只子菜单、无「退出这只」。"""
+def test_tray_single_pet_has_per_pet_close_entry(tmp_path):
+    """单宠（无子肥鱼）也必须有逐只子菜单，且顶层「退出」保持独立。
+
+    旧口径是"单宠不挂逐只子菜单"（当时的理由是 legacy 单窗没有「退出这只」的
+    parity）。实测发现那等于让单宠用户没有"关闭这只"入口：宠物右键菜单与托盘都
+    够不到，只剩顶层「退出」（= 退出整个应用）——把"关闭宠物"和"退出应用"合成
+    一条路，与规范 §一/§四（关闭 = 该槽留空、档案保留、托盘保留可恢复）冲突。
+    逐只菜单现在随"至少 1 只"出现；0 只时不建（见 test_slot0_lifecycle 与
+    tests/test_single_pet_close_entry.py 的闭环用例）。
+    """
     shell, _ = _make_persistent_shell(tmp_path)
     try:
         menu = _tray_menu(shell)
@@ -132,8 +156,10 @@ def test_tray_single_pet_has_no_per_pet_submenu(tmp_path):
         for expected in ("显示 / 隐藏", "回到右下角", "生小肥鱼", "退出子肥鱼",
                          "桌宠设置", "退出"):
             assert expected in labels, f"托盘缺项 {expected}；实际: {labels}"
-        assert _submenus(menu) == {}, "单宠不该有逐只子菜单"
-        assert "退出这只" not in labels
+        sub = _submenus(menu).get(MAIN_LABEL)
+        assert sub is not None, f"单宠必须有逐只子菜单；实际: {_labels(menu)}"
+        assert {"回到右下角", "退出这只"} <= set(_labels(sub)), _labels(sub)
+        assert "退出这只" not in labels, "关闭这只在逐只子菜单里，不与顶层「退出」并列"
     finally:
         _teardown(shell)
 
@@ -150,7 +176,9 @@ def test_tray_lists_per_pet_submenus_and_routes_exit_this(tmp_path):
             assert {"回到右下角", "退出这只"} <= set(_labels(sub)), label
 
         _action(subs[_child_label(shell, first)], "退出这只").trigger()
-        assert shell._spawned == [second], "只该退掉被点的那一只"
+        assert shell._spawned == [first, second], "菜单还开着，退出动作不许内联执行"
+        assert _wait_until(lambda: shell._spawned == [second]), \
+            "菜单关闭后只该退掉被点的那一只"
         assert first not in shell.overlay.sprites
         assert shell.sprite in shell.overlay.sprites
 
@@ -161,15 +189,112 @@ def test_tray_lists_per_pet_submenus_and_routes_exit_this(tmp_path):
         _teardown(shell)
 
 
-def test_tray_exit_this_on_main_pet_promotes_first_child(tmp_path):
+def test_tray_exit_this_on_main_pet_promotes_first_child(tmp_path, monkeypatch):
+    """确认后照旧提升列表首只子宠为主（闸门只加在取消那一支上）。"""
     shell, _ = _make_persistent_shell(tmp_path)
     try:
         first, second = _spawn_two(shell)
+        dialog = fac._DialogRecorder("确认退出主宠").install(monkeypatch)
         _action(_submenus(_tray_menu(shell))[MAIN_LABEL], "退出这只").trigger()
-        assert shell.sprite is first                      # 列表头提升为主
-        assert shell._spawned == [second]
+        assert shell.sprite is not first, "菜单还开着，退出主宠不许内联执行"
+        assert _wait_until(lambda: shell.sprite is None)
+        assert dialog.opened == 0
+        assert shell._spawned == [first, second]
         subs = _submenus(_tray_menu(shell))
-        assert set(subs) == {MAIN_LABEL, _child_label(shell, second)}
+        assert set(subs) == {_child_label(shell, first), _child_label(shell, second)}
+    finally:
+        _teardown(shell)
+
+
+def test_tray_exit_this_on_main_pet_cancel_keeps_everything(tmp_path, monkeypatch):
+    """托盘主宠「退出这只」点取消：不提升、不退出、活跃清单原样。
+
+    与右键菜单同一条闸（WP12 只补了右键路径，托盘逐只子菜单当时直连
+    ``exit_pet``——主宠退出不可逆，这里钉住托盘这一侧也必须先问）。
+    """
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        first, second = _spawn_two(shell)
+        dialog = fac._DialogRecorder("取消").install(monkeypatch)
+
+        _action(_submenus(_tray_menu(shell))[MAIN_LABEL], "退出这只").trigger()
+
+        assert dialog.opened == 0, "菜单还开着：确认框也不许提前弹"
+        assert _wait_until(lambda: shell.sprite is None)
+        assert dialog.opened == 0
+        assert shell._spawned == [first, second], "取消不得动活跃清单"
+    finally:
+        _teardown(shell)
+
+
+def test_tray_exit_this_on_main_pet_without_children_says_app_quit(
+        tmp_path, monkeypatch):
+    """过期条目（菜单开着时最后一只子宠已退出）：文案说清"退整个应用"，默认钮 = 取消。
+
+    单宠时托盘本就**没有**逐只子菜单（legacy 单窗 parity），所以这一支只可能在
+    "菜单已经弹出、子宠随后退完"的窗口里被点到——这正是闸门按点击那一刻的身份判
+    的意义所在。
+    """
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        first, second = _spawn_two(shell)
+        action = _action(_submenus(_tray_menu(shell))[MAIN_LABEL], "退出这只")
+        for child in (first, second):
+            shell.exit_pet(child)
+        assert shell._spawned == [], "前提：托盘菜单开着时最后一只子宠已退出"
+
+        quits: list = []
+        monkeypatch.setattr(shell.app, "quit", lambda *a, **k: quits.append(1))
+        dialog = fac._DialogRecorder(None).install(monkeypatch)   # None = 没点任何按钮
+
+        action.trigger()
+        assert _wait_until(lambda: shell.sprite is None)
+        assert dialog.opened == 0
+        assert quits == []
+    finally:
+        _teardown(shell)
+
+
+def test_tray_exit_this_on_child_pet_stays_direct(tmp_path, monkeypatch):
+    """子宠托盘退出保持直退：有 slot 存档、是用户逐只点选的明确操作，不该被框挡住。"""
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        first, second = _spawn_two(shell)
+        dialog = fac._DialogRecorder("取消").install(monkeypatch)
+
+        _action(_submenus(_tray_menu(shell))[_child_label(shell, first)],
+                "退出这只").trigger()
+        assert shell._spawned == [first, second], "菜单还开着，退出动作不许内联执行"
+        assert _wait_until(lambda: shell._spawned == [second])
+
+        assert dialog.opened == 0, "子宠退出不该被确认框挡住"
+        assert shell.sprite in shell.overlay.sprites, "主宠不退"
+    finally:
+        _teardown(shell)
+
+
+def test_tray_and_context_menu_exit_confirm_copy_is_identical(tmp_path, monkeypatch):
+    """两侧同一套文案：托盘与右键菜单对同一只主宠弹出的确认框逐字相同。
+
+    文案只有一个落点（facade 的确认闸 + 壳的 ``promote_target_name``）；这条钉住
+    "托盘不另抄一份措辞"，日后改文案两边不会各说各话。
+    """
+    shell, _ = _make_persistent_shell(tmp_path)
+    try:
+        _spawn_two(shell)
+        monkeypatch.setattr(shell._config, "character_display_name",
+                            lambda cid: "小美", raising=False)
+
+        tray = fac._DialogRecorder("取消").install(monkeypatch)
+        _action(_submenus(_tray_menu(shell))[MAIN_LABEL], "退出这只").trigger()
+        assert _wait_until(lambda: shell.sprite is None)
+        assert tray.opened == 0
+        shell.spawn_pet()
+        menu = build_sprite_full_menu(shell, shell.sprite)
+        right_click = fac._DialogRecorder("取消").install(monkeypatch)
+        _action(menu, "退出这只").trigger()
+        assert shell.sprite is None
+        assert right_click.opened == 0
     finally:
         _teardown(shell)
 
@@ -183,7 +308,8 @@ def test_tray_default_corner_targets_clicked_pet(tmp_path):
         expected = shell._default_corner_pos(shell._bounds, first.rect())
         _action(_submenus(_tray_menu(shell))[_child_label(shell, first)],
                 "回到右下角").trigger()
-        assert first.pos == expected
+        assert first.pos != expected, "菜单还开着，归位不许内联执行"
+        assert _wait_until(lambda: first.pos == expected), "菜单关闭后必须归位"
         assert shell.sprite.pos == before, "主宠不该被逐只动作带走"
     finally:
         _teardown(shell)
@@ -192,13 +318,13 @@ def test_tray_default_corner_targets_clicked_pet(tmp_path):
 def test_tray_menu_rebuilt_after_spawn_and_clear(tmp_path):
     shell, _ = _make_persistent_shell(tmp_path)
     try:
-        assert _submenus(_tray_menu(shell)) == {}
+        assert set(_submenus(_tray_menu(shell))) == {MAIN_LABEL}
         shell.spawn_pet()
         first = shell._spawned[0]
         assert set(_submenus(_tray_menu(shell))) == {MAIN_LABEL,
                                                      _child_label(shell, first)}
         shell.clear_spawned_pets()
-        assert _submenus(_tray_menu(shell)) == {}
+        assert set(_submenus(_tray_menu(shell))) == {MAIN_LABEL}
     finally:
         _teardown(shell)
 
@@ -210,15 +336,19 @@ def test_tray_aggregate_entries_and_quit(tmp_path):
         _spawn_two(shell)
         shell.overlay.show()
         _action(_tray_menu(shell), "退出子肥鱼").trigger()
-        assert shell._spawned == []
+        assert shell._spawned != [], "菜单还开着，退出子肥鱼不许内联执行"
+        assert _wait_until(lambda: shell._spawned == []), "菜单关闭后必须清空子肥鱼"
 
         toggle = _action(_tray_menu(shell), "显示 / 隐藏")
         toggle.trigger()
-        assert not shell.overlay.isVisible()
+        assert shell.overlay.isVisible(), "菜单还开着，显隐不许内联执行"
+        assert _wait_until(lambda: not shell.overlay.isVisible()), "菜单关闭后隐藏"
+        toggle = _action(_tray_menu(shell), "显示 / 隐藏")
         toggle.trigger()
-        assert shell.overlay.isVisible()
+        assert _wait_until(lambda: shell.overlay.isVisible()), "菜单关闭后显示"
 
-        # 「退出」必须走当前 app（F5：菜单持有的回调不能是旧对象）
+        # 「退出」必须走当前 app（F5：菜单持有的回调不能是旧对象）；它刻意不延迟
+        # 派发（不是窗面动作，legacy 托盘同为裸 addAction），故触发即生效。
         shell.app = SimpleNamespace(quit=lambda: quit_calls.append(1))
         shell._refresh_tray_menu()
         _action(_tray_menu(shell), "退出").trigger()
@@ -286,21 +416,25 @@ def test_tray_menu_has_mouse_through_and_autostart(tmp_path):
         auto = _action(menu, "开机自启")
         assert auto.isCheckable()
 
-        # 穿透：走壳的用户意愿收编入口（记意愿 + 持久化 + 复合重算）
+        # 穿透：走壳的用户意愿收编入口（记意愿 + 持久化 + 复合重算）——按派发
+        # 契约延到菜单关闭后执行，故触发后先证明没内联、再轮询等落地。
         assert shell._config.get("mouse_through", False) is False
         through.trigger()
-        assert through.isChecked() is True
-        assert shell._config.get("mouse_through") is True
+        assert through.isChecked() is True, "勾选态必须即时翻转"
+        assert shell._config.get("mouse_through", False) is False, \
+            "菜单还开着，穿透开关不许内联落地"
+        assert _wait_until(lambda: shell._config.get("mouse_through") is True)
         assert shell.overlay.mouse_through is True
         through.trigger()
-        assert shell.overlay.mouse_through is False
+        assert _wait_until(lambda: shell.overlay.mouse_through is False)
 
         # 开机自启：转发到实例的 _set_autostart(enabled, 壳)——壳具 show_bubble 宿主面
         calls: list = []
         shell._instance._set_autostart = (
             lambda enabled, win=None: calls.append((enabled, win)) or True)
         auto.trigger()
-        assert len(calls) == 1, "勾选必须真的写系统登录项"
+        assert calls == [], "菜单还开着，系统登录项不许内联写"
+        assert _wait_until(lambda: len(calls) == 1), "勾选必须真的写系统登录项"
         assert calls[0][0] == auto.isChecked()
         assert calls[0][1] is shell, "失败提示的宿主必须是壳（overlay 无 PetWindow）"
     finally:
@@ -340,7 +474,7 @@ def test_command_consume_clears_all_spawned_pets(tmp_path):
         assert shell._spawned == []
         assert shell.overlay.sprites == [shell.sprite]
         assert not cmd.command_path(config_dir).exists()   # 消费即删
-        assert ovs.load_active_slots(config_dir) == []
+        assert ovs.load_active_slots(config_dir) == [0]
     finally:
         _teardown(shell)
 
@@ -354,7 +488,7 @@ def test_command_consume_target_slot_exits_only_that_pet(tmp_path):
                           target=shell._spawned_slots[first])
         shell._consume_settings_command()
         assert shell._spawned == [second]
-        assert ovs.load_active_slots(config_dir) == [shell._spawned_slots[second]]
+        assert ovs.load_active_slots(config_dir) == [0, shell._spawned_slots[second]]
     finally:
         _teardown(shell)
 
@@ -504,7 +638,7 @@ def test_menu_settings_keeps_main_identity(tmp_path):
         menu = build_sprite_full_menu(shell, shell.sprite)
         _action(menu, "桌宠设置").trigger()
         assert [inst.config.instance_id for inst in opened] == [
-            str(shell._config.instance_id or "")]
+            "slot-0"]
     finally:
         _teardown(shell)
 
@@ -517,7 +651,13 @@ def test_tray_settings_entry_uses_main_identity(tmp_path):
             open_settings_process=lambda inst: (opened.append(inst), True)[1])
         _spawn_two(shell)
         _action(_tray_menu(shell), "桌宠设置").trigger()
-        assert [inst.config.instance_id for inst in opened] == [""]
+        # 托盘入口是「菜单先关、回调延后」（shared.run_after_menu_closed）：
+        # 本用例只管身份路由，时序按宽预算轮询等命令落到 open_settings_process。
+        deadline = time.monotonic() + 3
+        while not opened and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert [inst.config.instance_id for inst in opened] == ["slot-0"]
     finally:
         _teardown(shell)
 
@@ -535,7 +675,7 @@ def test_sprite_instance_id_maps_slot_identity(tmp_path):
     shell, _ = _make_persistent_shell(tmp_path)
     try:
         first, second = _spawn_two(shell)
-        main_id = str(shell._config.instance_id or "")
+        main_id = "slot-0"
         assert shell.sprite_instance_id(shell.sprite) == main_id
         assert shell.sprite_instance_id(first) == f"slot-{shell._spawned_slots[first]}"
         assert shell.sprite_instance_id(second) != shell.sprite_instance_id(first)

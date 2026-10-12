@@ -16,6 +16,11 @@
 ``now_playing`` 按会话类型与来源做否决（明确的视频、以及关掉开关后的浏览器
 会话），被否决的会话整条链路都不参与——不显示、不取词、不唱歌。
 
+**标题不等于歌名**：网页标题（B 站是「【4K】周杰伦《晴天》官方MV_哔哩哔哩
+_bilibili」）与 foobar 的窗口标题都不是结构化的歌名/歌手，所以取词前要先过
+``music_title`` 清洗；**只有浏览器会话**走这条路（见 :meth:`_lyric_query`），
+原生播放器给的是 SMTC 的结构化字段，清洗只会误伤。气泡标题仍显示原始标题。
+
 **优先级最低**：歌词气泡必须给告警/审批/交互气泡让路，且不能把自言自语顶掉
 又立刻被顶回来。做法是暂停更新 + ``hold_bubble`` 占位（与自言自语同一个让路机制）。
 
@@ -31,7 +36,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import music_lyric, now_playing
+from . import music_lyric, music_title, now_playing, window_alerts
 
 log = logging.getLogger(__name__)
 
@@ -302,7 +307,23 @@ class MusicLyricController(QObject):
 
     # 类级默认：单测直接驱动 _on_lyrics_ready 时未走过 _start_track，
     # 没有这个默认会 AttributeError（同文件既有约定：回调路径的属性要有默认）。
-    _pending_playback: Any = None
+    _pending_by_key: dict = None
+
+    # 每次取词派发那一拍的暂停累计快照（key → 秒，见 _request_lyrics）。同样是回调
+    # 路径要用的字段，故有类级默认；读侧用 `or {}` 兜住 None（测试替身）。
+    _paused_base_by_key: dict = None
+
+    # 取词在飞期间的暂停记账（见 _note_paused）：同样的道理，回调路径要有默认值。
+    _paused_total: float = 0.0
+    _paused_since: float | None = None
+
+    # 采样**代次**：每次 _reset() 递增（=关闭歌词 / 退出音乐模式 / shutdown）。
+    # 在途采样带着派发时的代次回来，代次不符即为上一代的迟到结果，一律丢弃。
+    # 类级默认 0 供单测直接驱动 _on_playback_ready（没有派发过，两值相等=放行）。
+    _generation: int = 0
+    # 最近一次派发的采样所属代次（主线程写、主线程读；同一时刻只允许一拍在途，
+    # 由 _sampling 标志保证，所以单个槽位就够）。
+    _dispatch_generation: int = 0
 
     def __init__(self, window: Any) -> None:
         super().__init__(window)
@@ -319,11 +340,17 @@ class MusicLyricController(QObject):
         self._sample_wake = threading.Event()
         self._sample_stop = threading.Event()
         self._current_key: tuple[str, str] | None = None
-        # 本次播放已尝试过取词但失败的曲目——避免反复请求同一首无词的歌。
-        self._no_lyric_keys: set[tuple[str, str]] = set()
+        # 取词失败曲目的重试冷却（key → 可再次尝试的时刻）。一次网络故障
+        # 不该把这首歌在本次会话里永久拉黑（歌词族终审应修 3）——冷却到期后
+        # **同曲轮询**（_on_playback_ready 的无歌词分支 → _request_lyrics）会再试
+        # 一次，网络恢复即可自愈；每次失败都刷新冷却，所以最密也是每 5 分钟一次，
+        # 冷却内不反复请求。
+        self._no_lyric_until: dict[tuple[str, str], float] = {}
         self._loading: set[tuple[str, str]] = set()
-        # 是否已经历过一次切歌边界。用于跳过"开启功能时正在播、且播放器不报
-        # 进度"的那首歌——那种情况无从推断进度，显示只会错位。
+        # 是否已经历过一次切歌边界。首首（开启功能时已在播）且播放器不报进度时，
+        # 「第 0 秒」只能当作检测到这首歌的那一刻——位置是猜的，但**照常取词并
+        # 亮出歌名**（跳过等于整段空白），只在那一刻提示一次可用菜单手动对齐。
+        # 提示是一次性的，故本标志同时充当"本次会话只提示一次"的闸门。
         self._primed: bool = False
         # 检测到切歌的时刻。对不上报进度的播放器（网易云），这是唯一可信的
         # 「这首歌从第 0 秒开始」的锚点，必须用它而不是取词完成时刻。
@@ -351,9 +378,18 @@ class MusicLyricController(QObject):
         self._width_locked: bool = False
         self._last_shown: tuple[str, str] | None = None
         self._last_playing: bool | None = None
+        # 取词在飞期间的暂停记账（累计秒 + 当前未完结段的起点）：无真实进度源时
+        # 位置按"检测到切歌的时刻"往下估算，而取词那几秒里 tracker 还没有歌词、
+        # set_paused 冻结不了任何东西——暂停时长必须在控制器这一层单独记，否则
+        # 取词回来时会把它算成播放进度（见 _note_paused）。
+        self._paused_total: float = 0.0
+        self._paused_since: float | None = None
         # 取词对应的那次采样。取词是异步的，结果回来时要靠它换算进度，
         # 所以必须留在实例上（也要有类级默认，便于单测直接驱动回调）。
-        self._pending_playback: Any = None
+        self._pending_by_key: dict = {}
+        # 每次派发那一拍的暂停累计快照（key → 秒）。与 _pending_by_key 同生命周期、
+        # 同样按 key 绑定：有进度分支完成时只扣"派发之后新增"的暂停（见 _on_lyrics_ready）。
+        self._paused_base_by_key: dict = {}
         self._lyrics_ready.connect(self._on_lyrics_ready)
         self._playback_ready.connect(self._on_playback_ready)
 
@@ -378,15 +414,28 @@ class MusicLyricController(QObject):
             self._reset()
 
     def _stop_sample_thread(self) -> None:
-        """停掉采样线程（幂等）。卡在 WinRT 调用时不强杀——daemon 线程
-        随进程退出即可，主线程不受它影响。
+        """停掉采样线程（幂等），并结清那一拍"可能永远不回来"的派发（R02）。
+
+        卡在 WinRT 调用时不强杀——daemon 线程随进程退出即可，主线程不受它影响。
 
         **仍存活的线程保留引用**，不置 None：它可能正卡在 WinRT 里，丢掉引用
         就变成孤儿，之后醒来仍会 emit，与新线程抢 ``_sampling``（同类教训见
         pet/music_detect.py）。已退出的线程才清引用，供下次重建。
+
+        时序（R02）：``_on_tick`` 是**先记** ``_sampling=True`` 再唤醒 worker 的。
+        worker 若在起跑前撞上关闭，就会消费掉唤醒口、在 ``_sample_loop`` 的停止检查
+        处直接 break——**不发任何结果回调**，于是唯一的常规复位点
+        ``_on_playback_ready`` 永不执行，``_sampling`` 卡在 True：重开后每一拍都在
+        ``_on_tick`` 第一道闸门返回，唤醒口也再没人置位，采样线程永远停在
+        ``wake.wait()`` 上（歌词再也不更新，直到重启应用）。所以关闭必须在这里把
+        这拍未消费的派发按**结果回调的同一口径**（只复位 ``_sampling``）结清。
+
+        在途那一拍若稍后真的回来了，不必在这里额外作废：``_reset()`` 紧随其后递增
+        代次，``_on_playback_ready`` 的代次守卫会把它当上一代丢弃。
         """
         self._sample_stop.set()
         self._sample_wake.set()
+        self._sampling = False
         thread = self._sample_thread
         if thread is not None and not thread.is_alive():
             self._sample_thread = None
@@ -453,8 +502,12 @@ class MusicLyricController(QObject):
 
     def _reset(self) -> None:
         self._tracker.reset()
+        # 代次递增放在**最前**：复位之后到达的在途采样必须被识别成上一代。
+        # 所有关闭路径（sync_enabled(False) / set_music_mode_enabled(False) /
+        # shutdown）都经这里，代次变化即等价于"当前不再启用"。
+        self._generation += 1
         self._current_key = None
-        self._no_lyric_keys.clear()
+        self._no_lyric_until.clear()
         self._loading.clear()
         self._primed = False
         self._detected_at = None
@@ -463,6 +516,8 @@ class MusicLyricController(QObject):
         self._last_lyric = ""
         self._last_shown = None
         self._last_playing = None
+        self._paused_total = 0.0
+        self._paused_since = None
         self._lyric_yield_until = 0.0
         self._instrumental = False
         self._hint = ""
@@ -581,6 +636,8 @@ class MusicLyricController(QObject):
         if self._sampling or self._sample_thread is None:
             return  # 上一拍还没回来 / 线程未起：跳过，避免堆积
         self._sampling = True
+        # 记下本拍所属代次（回调侧据此判"是不是关闭/复位之后才回来的"）。
+        self._dispatch_generation = self._generation
         self._sample_wake.set()
 
     def _browser_media_enabled(self) -> bool:
@@ -593,6 +650,44 @@ class MusicLyricController(QObject):
             return bool(self.win.cfg.get("music_browser_media_enabled", False))
         except Exception:
             return False
+
+    def _foobar_lyrics_enabled(self) -> bool:
+        """「foobar2000 歌词」开关（配置缺失/脏值一律按关处理）。
+
+        与上面同规：读配置只在采样线程上做，不另存一份会过期的副本。
+        """
+        try:
+            return bool(self.win.cfg.get("foobar_lyrics_enabled", False))
+        except Exception:
+            return False
+
+    def _foobar_title_format(self) -> str:
+        """foobar 窗口标题格式串（配置缺失/非字符串一律按"自动"处理）。"""
+        try:
+            value = self.win.cfg.get("foobar_title_format", "")
+        except Exception:
+            return ""
+        return value.strip() if isinstance(value, str) else ""
+
+    def _lyric_query(self, title: str, artist: str, playback) -> tuple[str, str]:
+        """取词用的 ``(歌名, 歌手)``——**只有浏览器媒体会话**才先清洗标题。
+
+        原生播放器（网易云 / QQ 音乐 / Spotify 等）走 SMTC 的结构化字段，标题
+        本来就是歌名，清洗只会误伤。浏览器给的是网页标题（B 站是
+        「【4K】周杰伦《晴天》官方MV_哔哩哔哩_bilibili」），直接拿去搜命中率极低
+        ——这正是 issue #228 的 B 站侧。清洗规则与误伤防护见 ``music_title``。
+
+        口径与"浏览器会话参与歌词"开关**同一个**：开关关着时浏览器会话本就整条
+        不进链路，打开才可能走到这里。
+        """
+        try:
+            if not self._browser_media_enabled():
+                return title, artist
+            if not now_playing.is_browser_session(getattr(playback, "app_id", "")):
+                return title, artist
+        except Exception:
+            return title, artist
+        return music_title.clean_web_title(title, artist)
 
     def _sample_loop(self) -> None:
         """**常驻**采样线程：等信号 → 采一次 → 回报，循环直到关闭。
@@ -611,6 +706,8 @@ class MusicLyricController(QObject):
                 playback = now_playing.get_now_playing(
                     self._tracked_app_id,
                     allow_browser=self._browser_media_enabled(),
+                    allow_foobar=self._foobar_lyrics_enabled(),
+                    foobar_title_format=self._foobar_title_format(),
                 )
             except Exception:
                 playback = None
@@ -645,6 +742,12 @@ class MusicLyricController(QObject):
     def _on_playback_ready(self, playback) -> None:
         """采样回到主线程：在这里做原有的状态推进。"""
         self._sampling = False
+        # 代次守卫：关闭歌词（_reset 递增代次）之后才回来的采样不得再推进任何
+        # 状态。此时 _current_key 已被清空，放行等于把"关掉歌词前那一拍"当成
+        # 新歌——重新取词 + 歌词上屏，用户明明关了歌词。shutdown 同理（同一个
+        # _reset）。flag 照常在上一行清掉，否则采样永久停摆。
+        if self._dispatch_generation != self._generation:
+            return
         if not getattr(self.win, "isVisible", lambda: False)():
             return
         if playback is None:
@@ -658,16 +761,31 @@ class MusicLyricController(QObject):
         key = track.key()
         now = time.monotonic()
         # 记住这次跟的是哪个播放器，下一拍带上它去采样（会话选取据此粘住）。
-        self._tracked_app_id = str(getattr(playback, "app_id", "") or "")
+        # **foobar 窗口标题源不占 SMTC 的跟踪位**：那个位是给会话选取用的，塞一个
+        # SMTC 里不存在的 id 只会丢掉"粘住当前播放器"的能力（见
+        # now_playing.is_foobar_source）。
+        app_id = str(getattr(playback, "app_id", "") or "")
+        if not now_playing.is_foobar_source(app_id):
+            self._tracked_app_id = app_id
 
         if not track.playing:
             # 暂停：只冻结进度，**不要** reset——否则恢复播放时同一首歌会被
             # 当成"新歌"重新走一遍跳过逻辑，后半首就再也接不上了。
             self._last_playing = False
-            if key == self._current_key and self._tracker.has_lyrics:
-                self._tracker.set_paused(True, now=now)
+            if key == self._current_key:
+                if self._tracker.has_lyrics:
+                    self._tracker.set_paused(True, now=now)
+                else:
+                    # 取词在飞（tracker 里还没有歌词）：`set_paused` 冻结不了任何东西
+                    # ——位置基准要等歌词到位由 load() 建立，所以这段暂停必须由控制器
+                    # 自己记账。不记的话，取词回来按「now - 检测时刻」估算的播放位置
+                    # 会把暂停的这几秒算进去，歌词当场跳到未来（B05）。
+                    self._note_paused(now)
             return
         self._last_playing = True
+        # 恢复播放这一拍给暂停段封口（与 tracker 自己的 set_paused(False) 同一拍）：
+        # 取词在飞期间的暂停时长到此为止，之后不再增长。
+        self._close_pause_segment(now)
 
         if key != self._current_key:
             self._start_track(key, track.title, track.artist, playback, now)
@@ -682,6 +800,11 @@ class MusicLyricController(QObject):
 
         # 同一首歌：跟着进度走。标题常驻，歌词换行。
         if not self._tracker.has_lyrics:
+            # 取词失败后的同曲重试：冷却到期的判断原先只在 _start_track（切歌路径）
+            # 里，而同曲轮询的曲目 key 不变、永远走不到那条判断——一次网络故障就
+            # 把这首歌在本次会话里永久拉黑，网络恢复也不会自愈。这里按同一个
+            # `_no_lyric_until` 冷却补一次（在途去重与冷却判定都在 _request_lyrics）。
+            self._request_lyrics(key, track.title, track.artist, playback, now)
             # 还在取词：只显示常驻标题，别留空白。
             if self._title_line and not self._bubble_blocked():
                 self._show("", title=self._title_line, force=True)
@@ -700,11 +823,46 @@ class MusicLyricController(QObject):
         # 每拍都重送：一是续期（防气泡先于句子超时消失），二是标题必须一直在。
         self._show(lyric, title=self._title_line, force=True)
 
+    # ------------------------------------------------ 取词在飞期间的暂停记账
+
+    def _note_paused(self, now: float) -> None:
+        """记下一次"采样说此刻暂停"：开一段暂停区间（幂等）。
+
+        只在**取词在飞**（tracker 还没有歌词）时调用——那时 ``LyricTracker.set_paused``
+        冻结不了任何东西（位置基准要等歌词到位才由 ``load()`` 建立）。暂停时长因此
+        由控制器自己记账，取词回来算估算位置时扣掉它。
+        """
+        if getattr(self, "_paused_since", None) is None:
+            self._paused_since = now
+
+    def _close_pause_segment(self, now: float) -> None:
+        """给暂停区间封口（恢复播放那一拍调用）；没有开着的区间时什么都不做。"""
+        since = getattr(self, "_paused_since", None)
+        if since is None:
+            return
+        self._paused_total = getattr(self, "_paused_total", 0.0) + max(0.0, now - since)
+        self._paused_since = None
+
+    def _paused_seconds(self, now: float) -> float:
+        """迄今累计的暂停时长，**含"此刻仍在暂停"的未完结段**。
+
+        未完结段必须算进来：取词回来时用户还按着暂停，那一刻到检测时刻之间的全部
+        时间都不该算进播放进度。
+        """
+        total = getattr(self, "_paused_total", 0.0)
+        since = getattr(self, "_paused_since", None)
+        if since is not None:
+            total += max(0.0, now - since)
+        return total
+
     def _start_track(self, key, title, artist, playback, now: float) -> None:
         """切歌：先亮歌名，再决定是否后台取词。"""
         self._current_key = key
         self._tracker.reset()
         self._last_shown = None
+        # 暂停记账跟着歌走：上一首的暂停时长绝不能算到这一首的进度上。
+        self._paused_total = 0.0
+        self._paused_since = None
         # 记下发现切歌的时刻——这是"这首歌从第 0 秒开始"的锚点。
         # 每首歌都重新记，避免用上一首的旧值把基准带到新歌上。
         self._detected_at = now
@@ -726,20 +884,41 @@ class MusicLyricController(QObject):
 
         # 先亮出歌名：一是给用户即时反馈，二是填上取词那几秒的空窗——
         # 否则切歌后会有 3~5 秒什么都不显示。
+        # 注意这里用**原始** title/artist 显示；取词用的是清洗后的查询词
+        # （见 _lyric_query），两者刻意分开：显示不该被清洗规则改写。
         self._announce(title, artist)
+        self._request_lyrics(key, title, artist, playback, time.monotonic())
 
-        if key in self._no_lyric_keys or key in self._loading:
-            return
+    def _request_lyrics(self, key, title, artist, playback, now: float) -> bool:
+        """按需派发一次后台取词（在途去重 + 失败冷却）。返回是否真的派发了。
 
-        # 取词走后台线程：轮询里绝不发网络请求。
+        两条调用点共用这一份判定：切歌（``_start_track``）与同曲轮询
+        （``_on_playback_ready`` 的无歌词分支）。**同曲轮询这条点不可省**——只留
+        切歌那一条的话，取词失败后曲目 key 不变就永远不再判定冷却，这首歌在本次
+        会话里被永久拉黑（B5）。
+
+        取词走后台线程：轮询里绝不发网络请求。
+        """
+        if key in self._loading or now < self._no_lyric_until.get(key, 0.0):
+            return False
+        query_title, query_artist = self._lyric_query(title, artist, playback)
         self._loading.add(key)
-        self._pending_playback = playback
+        # 采样上下文按**请求键**绑定，不写实例级单一槽（歌词族终审阻塞 1）：
+        # A 取词中快切 B 再切回 A 时，实例槽已被 B 覆盖，A 的结果回来会拿 B 的
+        # position/reported 装载——A 是估算进度、B 是真值时，A 的手动对齐会被
+        # 误判置灰一整首。按 key 绑定后，A 的结果永远只读 A 自己的上下文。
+        self._pending_by_key[key] = playback
+        # 派发这一拍的暂停累计快照：有进度分支的位置窗口从**这次采样**起算，完成时
+        # 只扣这之后新增的暂停。每次派发都刷新——同曲失败重试是一次新派发，窗口也
+        # 跟着挪到新的采样上（旧值留着会把冷却期的暂停扣进新窗口，见 _on_lyrics_ready）。
+        self._paused_base_by_key[key] = self._paused_seconds(now)
         threading.Thread(
             target=self._fetch_worker,
-            args=(key, title, artist),
+            args=(key, query_title, query_artist),
             name="music-lyric-fetch",
             daemon=True,
         ).start()
+        return True
 
     # ------------------------------------------------ 手动对齐（快进 / 中途开始）
 
@@ -913,9 +1092,12 @@ class MusicLyricController(QObject):
         if key != self._current_key:
             return  # 期间已经切歌，丢弃过期结果
         if lyrics is None or (not lyrics.lines and not lyrics.instrumental):
-            # 查不到曲目：不再重试，但**标题继续常驻**——
-            # 用户要的是"歌名长期显示"，查不到也不该让气泡空掉或消失。
-            self._no_lyric_keys.add(key)
+            # 查不到曲目：记 5 分钟冷却（`_no_lyric_until`），冷却到期后由**同曲
+            # 轮询**自动重试一次（`_on_playback_ready` → `_request_lyrics`），
+            # 冷却内不复请求——一次网络故障不会把这首歌在本次会话里永久拉黑。
+            # 无论查不到与否，**标题继续常驻**：用户要的是"歌名长期显示"，查不到
+            # 也不该让气泡空掉或消失。
+            self._no_lyric_until[key] = time.monotonic() + 300.0
             if self._title_line and not self._bubble_blocked():
                 self._show("", title=self._title_line, force=True)
             return
@@ -924,22 +1106,71 @@ class MusicLyricController(QObject):
             return
 
         now = time.monotonic()
-        playback = self._pending_playback
+        playback = self._pending_by_key.pop(key, None)
+        # 本次派发那一拍快照的累计暂停（见 _request_lyrics）。`or {}` 兜住类级默认
+        # None（测试替身直接驱动本回调），拿不到快照时按 0 处理。
+        paused_base = (getattr(self, "_paused_base_by_key", None) or {}).pop(key, None)
         reported = getattr(playback, "position", None) if playback is not None else None
         if reported is not None:
             # 有真实进度（如 QQ 音乐）：从"读到该值的时刻"回推到此刻，
-            # 抵消取词耗时造成的滞后，因此不存在延迟。
-            position = max(0.0, reported + (now - playback.updated_at))
+            # 抵消取词耗时造成的滞后，因此不存在延迟。再扣掉**本次窗口内**已经
+            # 发生的暂停：窗口里面不全是播放时间，不扣的话暂停会被算成进度、歌词
+            # 当场跳到未来（与无进度分支同一条口径：只扣锚点之后的暂停）。
+            #
+            # **必须减去派发基线的增量，而不是整首累计**：`_paused_seconds` 记的是
+            # 整首歌的暂停（只在切歌时复位），而同曲失败重试换了新的采样上下文——
+            # 窗口起点（这次采样）晚于首试与冷却期那些已封口的暂停段。按整首累计
+            # 扣（哪怕按窗口长度封顶）会把这些窗口外的暂停也算进来：30s 冷却暂停撞
+            # 上 5s 窗口会把位置算成 100 而不是 105（歌词退回一整句）。
+            #
+            # 不再需要"按窗口长度封顶"：窗口起点就是基线快照那一刻，之后的暂停段
+            # 必然落在 `[updated_at, now]` 内（派发是播放拍，且派发时刻晚于采样时刻），
+            # 所以 `paused <= elapsed` 本就恒成立；上限只留 `max(0, ...)` 兜脏值。
+            elapsed = max(0.0, now - playback.updated_at)
+            paused = max(0.0, self._paused_seconds(now) - (paused_base or 0.0))
+            position = max(0.0, reported + elapsed - paused)
         else:
             # 无真实进度（如网易云）：基准必须是**检测到切歌的时刻**，而不是
-            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。
+            # 取词完成的时刻——否则取词花掉的几秒会整体变成歌词滞后。再扣掉这一个
+            # 窗口内已经发生的暂停（含"此刻仍在暂停"的未完结段）：暂停不是播放
+            # 时间，算进去歌词会当场跳到未来（B05）。
+            #
+            # 这里**不**减派发基线：本分支的锚点是检测到切歌的时刻（暂停记账在那里
+            # 归零），窗口就是 `[检测, now]`；减去基线会把重试前（首试 + 冷却期）的
+            # 暂停漏扣，位置反而偏大。两个分支共用的口径是"只扣锚点之后的暂停"，
+            # 锚点本身按各自的位置来源取——这是刻意的不同，不是漏改。
             detected = self._detected_at if self._detected_at is not None else now
-            position = max(0.0, now - detected)
-            log.info("歌词按检测时刻对齐: 已过去 %.2fs", position)
+            paused = self._paused_seconds(now)
+            position = max(0.0, now - detected - paused)
+            log.info("歌词按检测时刻对齐: 已过去 %.2fs（其中暂停 %.2fs）",
+                     now - detected, paused)
         # `reported` 必须一起带下去：这里的 position 在无进度时是**估算值**，
         # 不能让它冒充真值，否则「歌词对齐」会被误判为没必要而整组置灰。
         self._tracker.load(list(lyrics.lines), now=now, position=position,
                            reported=reported is not None)
+        # 歌词到位时若「进度估算提示」还占着气泡（首首那 12s），歌词优先——提示是
+        # 一次性引导，歌词是功能本体。用既有 resolve_alert 精确收起那一条，不误伤
+        # 队列里的其它提醒。
+        #
+        # **必须排在 `_bubble_blocked()` 早退之前**：那条提示自己就占着
+        # `_alert_current`，而 `_bubble_blocked()` 把"正挂着提醒"判为让路——早退先
+        # 跑的话这段 resolve 永远不可达（死代码），用户第一首歌 12 秒零帧歌词。
+        current = getattr(self.win, "_alert_current", None)
+        if current is not None and current.get("id") == "music-lyric-estimated":
+            window_alerts.resolve_alert(self.win, "music-lyric-estimated")
+        if self._paused_since is not None:
+            # 取词期间用户按了暂停、到这一拍还没恢复：以**暂停态**装载，且**不立即
+            # 显示**——恢复播放那一拍由 `_on_playback_ready` 的既有 set_paused(False)
+            # 把基准顺延接上，那时按正确位置显示（歌词停在暂停那一刻的那句）。
+            # 冻结这一步不可省：`load()` 会清掉暂停态，不冻的话恢复后基准仍从 load
+            # 的时刻起算，暂停的这几秒又会被算成播放时间。
+            #
+            # **必须排在 `_bubble_blocked()` 早退之前**：冻结时钟记的是"这一段暂停
+            # 有多长"，与"这一刻能不能显示"是两件事——气泡被别的提醒占着时早退，
+            # 冻不上的话暂停时长直接算进播放时间（且恢复那一拍的 set_paused(False)
+            # 落在未暂停的 tracker 上是空操作，基准再也回不来）。
+            self._tracker.set_paused(True, now=now)
+            return
         if self._bubble_blocked():
             return
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。

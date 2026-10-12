@@ -95,7 +95,9 @@ def test_named_screen_lookup_and_config_persistence(tmp_path, monkeypatch):
     config = Config(tmp_path)
     config.set("screen_name", "secondary")
     config.save()
-    assert Config(tmp_path).get("screen_name") == "secondary"
+    from pet.settings_slot_config import route_settings_config
+
+    assert route_settings_config(Config(tmp_path, instance_id="slot-0")).get("screen_name") == "secondary"
 
 
 def test_restore_defers_until_saved_screen_comes_online():

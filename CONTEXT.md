@@ -39,6 +39,17 @@ validated local image with contain/cover rendering; an unreadable local image
 falls back to the Menu Action Model icon.
 _Avoid_: Renamed command, embedded image bytes
 
+**Animation Menu Dismissal**:
+The interaction rule of the animation submenus: triggering a play-once action
+plays it and dismisses the whole menu chain, because the next thing the user
+wants to see is the pet. It governs the play-once animation leaves only —
+toggles, value pickers, and submenu navigation keep their own rules — and the
+`anim_menu_stay_open` preference (default off) restores the stay-open behavior
+for users who chain several actions. The random-action list is grouped by the
+prefix families already present in the animation names, so no level of that
+menu needs scrolling across a whole screen.
+_Avoid_: Sticky menu, per-item dismissal flag
+
 **Capability Unavailable**:
 An action cannot exist on the current platform or build. The Menu Layout Tree
 retains its position for cross-platform editing, while the current runtime may
@@ -76,6 +87,18 @@ A stable sidebar destination organized by user intent. Every persistent setting
 has one owning domain; platform support changes availability, not ownership.
 _Avoid_: Module page, Windows settings page
 
+**Settings Reset**:
+The whole-settings recovery command in the Settings System sidebar. It restores
+every persistent preference to its factory default in one atomic write and keeps
+only the AI provider credentials — every provider's key fields plus, for
+providers outside the default set, a credential-only entry that holds the name
+and the key (`base_url`/`model` return to the default template). It then closes
+the settings window, syncs the system login item to the reset value, and asks
+the running pet to align its runtime position to the new default so the exit-time
+position save cannot write the pre-reset position back. Character and asset
+settings take effect on restart. There is no per-page reset.
+_Avoid_: Per-page reset, credential reset
+
 **Report Gate**:
 The single control for how much of one aggregated event class the pet reports.
 It is a pass probability in `0.00–1.00` (`0.00` silences the class, `1.00`
@@ -91,6 +114,19 @@ bubble-phrase rows of its own event class, so a gate sits next to what it
 controls. It is expanded by default and auto-expands when a search matches a row
 inside it.
 _Avoid_: Hidden advanced panel, per-feature switch list
+
+**Quiet Mode**:
+A process-wide, non-persistent do-not-disturb window covering every pet window
+and sprite at once. It suppresses ordinary reminders and bubbles — the pet
+bubble and the system notification of that same reminder — while self-talk
+(including click responses), link-state bubbles, and every stateful or
+interactive event (approval, question, error, lifecycle, balance) keep
+presenting, because those are answers the user must act on. Suppressed
+reminders are queued with a fixed bound (oldest dropped first) and reported in
+one bubble when quiet ends. A fullscreen application counts as quiet only while
+the persistent `quiet_also_on_fullscreen` preference is on, and it is the same
+fullscreen signal the auto-hide avoidance already uses.
+_Avoid_: Notification mute, global sound mute, per-pet mute
 
 **Session-End Spawn Freeze**:
 The process-wide latch armed when the operating system announces that the

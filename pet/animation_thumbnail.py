@@ -15,6 +15,9 @@ from . import catalog
 
 try:
     import imageio_ffmpeg
+    from .ffmpeg_hide import install as _install_ffmpeg_hide
+
+    _install_ffmpeg_hide()
 except Exception:  # pragma: no cover - optional dependency in GIF-only installs
     imageio_ffmpeg = None
 

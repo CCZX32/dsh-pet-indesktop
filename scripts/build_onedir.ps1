@@ -188,6 +188,35 @@ if (-not $SkipBuild) {
     python scripts\make_icon.py
     if ($LASTEXITCODE -ne 0) { throw "make_icon failed: $LASTEXITCODE" }
 
+    # 素材硬门（2026-10-08）：帧序列产物 assets\characters\<角色>\frameseq\ 是刻意
+    # 不入库的派生产物（.gitignore），只在构建机的素材源里存在。worktree / 新克隆
+    # 天然没有它，而上面 $datas 对非 GIF 变体**整树拷贝** assets\characters——素材
+    # 在就进包、缺了也不报错，于是缺帧序列的包会被静默打出来，用户长期看到未转换
+    # 素材（白边）。这里在 PyInstaller 起跑前验证每个 clip 都有当前世代的帧序列
+    # 产物，非零即中止（脚本自己的中文报错已打到 stderr，含怎么补）。
+    # GIF 变体跳过本门：它打包的是 assets\characters_gif（由 convert_to_gif.py
+    # 从 webm 直出 GIF），素材树里没有也没有 frameseq 这一层，本门不适用。
+    if (-not $isGif) {
+        Write-Host "[frameseq] verifying frame-sequence material completeness..." -ForegroundColor Cyan
+        python scripts\check_frameseq_bundle.py
+        if ($LASTEXITCODE -ne 0) { throw "check_frameseq_bundle failed: $LASTEXITCODE" }
+        Write-Host "[frameseq] frame-sequence material OK" -ForegroundColor Green
+    }
+
+    # 采集后端硬门（2026-10-11）：游戏帧率段的读数是子进程跑官方独立程序拿到的，
+    # 程序本体随 Windows 包分发（resources\presentmon\，见下面的 --add-data）。
+    # 缺件或换版时产品**不崩**——那一段按 unsupported 不占位、卡片写"缺少内置采集
+    # 程序"，于是少打了后端的包在界面上看起来完全正常，只是这个功能永远不出数。
+    # 这里在 PyInstaller 起跑前按 pet\game_fps.py 的单一真相源（文件名 + SHA256）
+    # 再叠一条产品自己没做的架构校验（必须 x86-64：上游 x64 与 ARM64 是两个文件，
+    # 混进 ARM 二进制的话在 ARM 机器上会得到一段永远采不到数的读数），非零即中止。
+    # 非 Windows 平台（build_linux.sh / build_macos.sh）不加载也不捆这个后端：
+    # pet\game_fps.py 在那两个平台上整段按 unsupported 呈现。
+    Write-Host "[presentmon] verifying bundled game-FPS capture backend..." -ForegroundColor Cyan
+    python scripts\verify_presentmon.py
+    if ($LASTEXITCODE -ne 0) { throw "verify_presentmon failed: $LASTEXITCODE" }
+    Write-Host "[presentmon] capture backend OK" -ForegroundColor Green
+
     # DLL 冲突隔离（issue: Qt6Core "procedure not found" / 找不到指定的程序）：
     # conda 的 Library\bin 与 MiKTeX 的 bin\x64 各自携带一套 Qt6/ICU DLL（版本与
     # PySide6 6.11 不匹配）。PyInstaller 的 bindepend 会按 PATH 解析 Qt6Core.dll 的
@@ -235,6 +264,7 @@ if (-not $SkipBuild) {
         --add-data "assets\sounds;assets\sounds" `
         --add-data "assets\chat;assets\chat" `
         --add-data "integrations;integrations" `
+        --add-data "resources\presentmon;resources\presentmon" `
         @excludes `
         $entry
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
@@ -449,6 +479,20 @@ function Wait-SmokeWindow {
     }
     throw "[smoke] $Label running but no window appeared within ${TimeoutSec}s - $NoWindowHint"
 }
+
+# ---------- 采集后端随包校验（游戏帧率，2026-10-11） ----------
+# 上面那条门只证明**源目录**里的后端是校验过的那一个；`--add-data` 只保证"源目录
+# 存在就拷"——源目录缺失时 PyInstaller 一个错都不报，产物里就没有这个后端，而产品
+# 界面看不出来（那一段按 unsupported 不占位）。所以在产物里按**同一份**判据再验一次
+# （文件名 / sha256 / x86-64），缺件、拷坏、被后续步骤删掉都在这里中止。
+# 文件名从 pet\game_fps.py 读，不在本脚本里写第二份字面量（换版本只需改产品常量）。
+$backendName = (& python -c "from pet import game_fps; print(game_fps.BACKEND_EXE_NAME)").Trim()
+if (-not $backendName) { throw "[presentmon] cannot resolve BACKEND_EXE_NAME from pet/game_fps.py" }
+$backendInBundle = Join-Path $appDir ("_internal\resources\presentmon\" + $backendName)
+Write-Host "[presentmon] verifying bundled backend in the built app..." -ForegroundColor Cyan
+python scripts\verify_presentmon.py --path $backendInBundle
+if ($LASTEXITCODE -ne 0) { throw "[presentmon] bundled capture backend missing or corrupt" }
+Write-Host "[presentmon] bundle carries the capture backend + its license" -ForegroundColor Green
 
 # ---------- exe smoke test（启动成功才继续打包） ----------
 # 注意：PyInstaller --windowed 在 import 失败时会弹错误对话框且进程存活，

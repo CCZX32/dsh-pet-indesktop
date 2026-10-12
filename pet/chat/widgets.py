@@ -376,7 +376,12 @@ class MessageBubble(QFrame):
         self.setProperty("state", self.state)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding if role == "assistant" else QSizePolicy.Policy.Maximum,
-            QSizePolicy.Policy.Minimum,
+            # 助手气泡纵向用 Preferred：body 是 wordWrap QLabel，sizeHint() 按启发式
+            # 宽度算、远大于真实换行高度（同宽度实测 75 vs 45）。Minimum 会把这个偏大
+            # 的 sizeHint 当成行最小高，每条助手消息多出的高度累计后被时间线末尾唯一的
+            # Expanding 垫吃掉，即「末条消息下方空白随轮数增长」（#191：同窗口 20 条消息
+            # 实测 150px、5 条 30px，改 Preferred 后两者均为 0）。外观实测无变化。
+            QSizePolicy.Policy.Preferred if role == "assistant" else QSizePolicy.Policy.Minimum,
         )
 
         root = QHBoxLayout(self)
@@ -1676,6 +1681,7 @@ class ChatWindow(QDialog):
         if self.service.busy:
             self._active_request_id = None
             self.service.stop()
+        self._save_pending_if_any()  # V2-H2b：切换前保存旧会话的在途回复
         self.session = self._new_session()
         self._clear_message_rows()
         self._set_empty_state(True)
@@ -1688,6 +1694,7 @@ class ChatWindow(QDialog):
         if self.service.busy:
             self._active_request_id = None
             self.service.stop()
+        self._save_pending_if_any()  # V2-H2b：切换前保存旧会话的在途回复
         session = self.store.load(session_id, self.character_id)
         if session is None:
             self._refresh_sessions()
@@ -1717,11 +1724,12 @@ class ChatWindow(QDialog):
         if current_deleted and self.service.busy:
             self._active_request_id = None
             self.service.stop()
+        if current_deleted:
+            # V2-H2b：删除前取消在途回复，不保存（避免复活已删会话）
+            self._cancel_pending()
         for session in sessions:
             self.store.delete(session)
         if current_deleted:
-            # 幻影消息防护（审查 DS-M6）：删除当前会话前先停打字机并丢弃
-            # 未排空的输出——否则残活的逐字排空会把上轮回复写进新加载的会话
             self._reset()
             remaining = self.store.list(self.character_id)
             self.session = remaining[0] if remaining else self._new_session()
@@ -1737,6 +1745,7 @@ class ChatWindow(QDialog):
         if self.service.busy:
             self._active_request_id = None
             self.service.stop()
+        self._cancel_pending()  # V2-H2b：清空前取消在途回复，不保存
         self.store.clear(self.session)
         self._clear_message_rows()
         self._set_empty_state(True)
@@ -1781,6 +1790,7 @@ class ChatWindow(QDialog):
         if self.service.busy:
             self._active_request_id = None
             self.service.stop()
+        self._save_pending_if_any()  # V2-H2b：切换前保存旧会话的在途回复
         self.character_id = str(character_id)
         self._apply_character_theme()
         self.session = self._get_session()
@@ -2024,6 +2034,7 @@ class ChatWindow(QDialog):
         self._reset()
 
     def _reset(self) -> None:
+        # V2-H2a 修正：只清状态，不持久化；持久化由调用方在切换前完成。
         # 停止打字机并丢弃未排空的输出：模型完成后若仍有 ~1 秒的逐字
         # 排空窗口，此时切换/新建/删除会话或换角色会把这轮回复继续
         # append 并保存进"新"会话（原会话丢回复、新会话多幻影消息）。
@@ -2035,6 +2046,37 @@ class ChatWindow(QDialog):
         self.status_dot.setProperty("state", "ready")
         self.composer.set_busy(False)
         self._refresh_status_style()
+
+    def _save_pending_if_any(self) -> None:
+        """V2-H2b：在切换会话/角色前，将旧会话的在途回复单次持久化。
+        先摘取并清除 pending，再单次持久化到**当前** self.session，
+        避免递归，也避免切换后才保存导致旧回复写进新会话。"""
+        self._typewriter_timer.stop()
+        pending_finish = self._pending_finish_text
+        self._pending_finish_text = None
+        self._pending_output = ""
+
+        # 只提交模型已完成的回复；尚未 finish 的半截流式输出不当作完整回复落库
+        if pending_finish is None:
+            return
+        text = pending_finish
+        
+        if self._bubble:
+            self._bubble.set_content(text)
+            self._bubble.set_state("normal")
+        synced, _absorbed = self.store.append_message(self.session, ChatMessage("assistant", text))
+        if synced is None:
+            self.session.messages.append(ChatMessage("assistant", text))
+            self.store.save(self.session)
+        else:
+            self.session = synced
+        self._refresh_sessions()
+
+    def _cancel_pending(self) -> None:
+        """V2-H2b：取消在途回复但不保存（用于删除/清空场景）。"""
+        self._typewriter_timer.stop()
+        self._pending_output = ""
+        self._pending_finish_text = None
 
     def _refresh_status_style(self) -> None:
         self.status_dot.style().unpolish(self.status_dot)
@@ -2202,8 +2244,17 @@ class ChatWindow(QDialog):
             QTimer.singleShot(0, self, self._update_bubble_widths)
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # 窗口是复用的（关闭=隐藏）：每次从菜单/灵动岛打开都回到最新一条回复，
+        # 而不是停在上次关闭时的位置（#191 后半，吸收自上游 PR #248）。
+        # 系统自发的 show（如从最小化还原）保留阅读位置。
+        if not event.spontaneous():
+            self._bottom(always=True)
+
     def closeEvent(self, event) -> None:
         """关闭=隐藏并复用窗口：停止生成、解除桌宠位置监听，避免泄漏。"""
+        self._save_pending_if_any()  # V2-H2b：关闭前保存在途回复
         self._typewriter_timer.stop()
         self.service.stop()
         self.set_pet_window(None)

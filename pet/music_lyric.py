@@ -427,13 +427,23 @@ def _fetch_from_netease(title: str, artist: str) -> Lyrics | None:
     songs = ((search.get("result") or {}).get("songs")) or []
     song_id = None
     for song in songs:
+        # 歌手字段兼容：接口现在返回 ``ar``（旧字段 ``artists`` 已下线——
+        # 2026-10 实测返回体里没有 ``artists``，读旧字段会让歌手恒为空串、
+        # 本源 100% 静默失效；先 ar 后 artists 向前向后都兼容）。
+        artists_field = song.get("ar") or song.get("artists") or []
         singers = "/".join(
-            str(a.get("name") or "") for a in (song.get("artists") or [])
+            str(a.get("name") or "") for a in artists_field
         )
         if _name_matches(singers, artist):
             song_id = song.get("id")
             break
     if not song_id:
+        if songs:
+            # 「搜得到但无人匹配」是配置/字段问题的信号，不能继续静默——
+            # 上次就是字段改名让本源死了一个月而日志里一条都没有
+            log.warning(
+                "网易云歌词：搜索到 %d 个候选但无人匹配歌手 %r（title=%r）",
+                len(songs), artist, title)
         return None
     payload = _http_get_json(
         f"https://music.163.com/api/song/lyric?id={song_id}&lv=-1&kv=-1&tv=-1",

@@ -1,0 +1,435 @@
+# -*- coding: utf-8 -*-
+"""设置页第四刀（2026-10-08）搜索增强的行为验收：折叠组标题入索引 + 口语别名表。
+
+背景（第一刀遗留）：搜索索引原本只有「行 label + hint + objectName」，所以
+
+- 搜**折叠组标题**（「启动项（高级）」「碰撞参数（高级）」「网络延迟检测（高级）」…）
+  0 命中——组的名字在索引之外；
+- 搜**用户口语**（「网速」「开机启动」「密钥」「壁纸」…）0 命中——行文案用的是另一套词。
+
+口径（主代理裁决）：
+
+1. 组标题命中 ⇒ 该组**全部行**进候选（回车逐行可达），并沿用既有「自动展开折叠 /
+   切页内标签」机制——不许只高亮组标题却不给行；
+2. 口语别名 = 人工策展的小表（不做拼音引擎、不引入依赖），每条别名都要有「真实用户
+   会这么说」的理由；
+3. 搜索状态行/计数语义不变；多源命中的同一行只算一次；空查询行为不变；
+4. 配置键 / 默认值 / 归属 / 依赖语义零改动。
+
+纪律同 ``tests/test_settings_ia_first_cut.py``：断言走真实 ``ModernSettingsDialog``
+这个公开 seam（真实搜索框输入 + 真实回车遍历 + 真实折叠态检查），不调私有方法拼结果。
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+import pet.modern_settings_dialog as settings_mod
+from pet.config import Config
+from pet.modern_settings_dialog import SettingRow, SettingsSection
+from pet.settings_widgets import SettingsTabContainer
+
+app = QApplication.instance() or QApplication([])
+
+#: 桌宠域两个页内标签（第二刀）的键；「碰撞参数（高级）」属于第 2 个标签。
+_TAB_MOTION = "motion_collision"
+
+#: 「碰撞参数（高级）」组内的 5 行（第三刀的口径：音量随物理参数进这一组）。
+_COLLISION_ADVANCED_ROWS = (
+    "settingRow_collision_restitution",
+    "settingRow_collision_friction",
+    "settingRow_collision_mass_scale",
+    "settingRow_collision_impulse_cap",
+    "settingRow_collision_sound_volume",
+)
+
+
+def _dialog(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    return settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+
+
+def _row(dialog, key) -> SettingRow:
+    row = dialog.findChild(SettingRow, f"settingRow_{key}")
+    assert row is not None, f"缺少设置行 {key}"
+    return row
+
+
+def _section_of(dialog, key) -> SettingsSection:
+    """行所属的 ``SettingsSection``（走 widget 祖先链，不用陈旧的 findChildren）。"""
+    parent = _row(dialog, key).parentWidget()
+    while parent is not None and not isinstance(parent, SettingsSection):
+        parent = parent.parentWidget()
+    assert parent is not None, f"{key} 必须落在某个 SettingsSection 内"
+    return parent
+
+
+def _page_of(dialog, domain: str):
+    index = next(i for i in range(dialog.sidebar.count())
+                 if dialog.sidebar.item(i).text() == domain)
+    return dialog.pages.widget(index)
+
+
+def _tabs_of(page):
+    return page if isinstance(page, SettingsTabContainer) else page.findChild(
+        SettingsTabContainer, "settingsTaskTabs")
+
+
+def _current_page(dialog):
+    return dialog.pages.widget(dialog.sidebar.currentRow())
+
+
+def _current_match(dialog) -> SettingRow:
+    matches = dialog._search_matches
+    assert matches, "搜索没有命中任何行"
+    return matches[dialog._search_index]
+
+
+def _matches(dialog, query) -> list:
+    """真实搜索框输入（textChanged），返回**全部**候选行。"""
+    dialog.search_edit.setText("")
+    app.processEvents()
+    dialog.search_edit.setText(query)
+    app.processEvents()
+    return list(dialog._search_matches)
+
+
+def _search(dialog, query, *, presses: int = 0) -> SettingRow:
+    """真实搜索框输入 + 可选回车遍历（eventFilter），返回当前命中行。"""
+    _matches(dialog, query)
+    for _ in range(presses):
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)
+        app.processEvents()
+    return _current_match(dialog)
+
+
+def _keys(rows) -> list:
+    return [row.objectName() for row in rows]
+
+
+# --------------------------------------------------------------- ① 折叠组标题命中
+def test_group_title_query_returns_every_row_of_the_group(tmp_path, monkeypatch):
+    """搜「启动项」：命中「启动项（高级）」组内两行（原本 0 命中），回车逐行可达且可见。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        matches = _matches(dialog, "启动项")
+        assert _keys(matches) == [
+            "settingRow_harness_autostart",
+            "settingRow_harness_launch_target",
+        ], "搜组标题必须把该组全部行纳入候选"
+
+        for presses in range(len(matches)):
+            row = _search(dialog, "启动项", presses=presses)
+            section = _section_of(dialog, row.objectName()[len("settingRow_"):])
+            assert section.advanced is True
+            assert section.toggle.isChecked() is True, "命中折叠组内的行必须自动展开"
+            assert not section.card.isHidden()
+            assert row.isVisibleTo(_current_page(dialog)), "命中的行必须真实可见"
+            assert dialog.sidebar.currentItem().text() == "常规"
+            assert dialog.search_status.text().startswith(f"{presses + 1}/2 · ")
+    finally:
+        dialog.close()
+
+
+def test_collision_group_title_query_switches_to_the_owning_tab(tmp_path, monkeypatch):
+    """搜「碰撞参数」：命中高级组内 5 行、自动切到「动作与碰撞」标签并展开、逐行可达。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        tabs = _tabs_of(_page_of(dialog, "桌宠"))
+        assert tabs is not None and tabs.currentKey() != _TAB_MOTION
+
+        matches = _matches(dialog, "碰撞参数")
+        assert _keys(matches) == list(_COLLISION_ADVANCED_ROWS), (
+            "搜「碰撞参数」= 该高级组全部行，一行不多一行不少"
+        )
+
+        seen = set()
+        for _ in range(len(matches)):
+            row = _current_match(dialog)
+            key = row.objectName()[len("settingRow_"):]
+            seen.add(row.objectName())
+            assert row.objectName() in _COLLISION_ADVANCED_ROWS
+            section = _section_of(dialog, key)
+            assert section.advanced is True and section.toggle.isChecked() is True
+            assert dialog.sidebar.currentItem().text() == "桌宠"
+            assert tabs.currentKey() == _TAB_MOTION, "命中另一标签的行必须自动切标签"
+            assert row.isVisibleTo(_current_page(dialog))
+            QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)
+            app.processEvents()
+        assert seen == set(_COLLISION_ADVANCED_ROWS), "回车遍历要能走到组内每一行"
+    finally:
+        dialog.close()
+
+
+def test_group_title_query_hits_the_row_that_has_no_matching_text(tmp_path, monkeypatch):
+    """搜「网络延迟检测」（只在组名里出现）：命中探测间隔行，并给依赖说明。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        matches = _matches(dialog, "网络延迟检测")
+        assert _keys(matches) == ["settingRow_network_probe_interval"]
+        row = _current_match(dialog)
+        assert row.objectName() == "settingRow_network_probe_interval"
+        # 依赖（网络指标关着）不满足：只给说明，不替用户改配置（第一刀既有语义）
+        assert dialog.search_status.text() == "1/1 · 延迟探测间隔（需先开启「灵动岛指标 · 网络」）"
+        assert dialog.island_network_check.isChecked() is False
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------------- ② 口语别名
+def test_alias_wangsu_lands_on_the_island_network_row(tmp_path, monkeypatch):
+    """别名「网速」：命中灵动岛网络指标行（原本 0 命中）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        matches = _matches(dialog, "网速")
+        assert _keys(matches) == ["settingRow_island_network"]
+        row = _current_match(dialog)
+        assert row.objectName() == "settingRow_island_network"
+        assert dialog.sidebar.currentItem().text() == "桌面组件"
+        assert dialog.search_status.text().startswith("1/1 · 灵动岛指标 · 网络")
+
+        # 依赖满足后同一查询给出可见的行（别名命中的是真实可操作的行，不是死链接）
+        dialog.island_enabled_check.setChecked(True)
+        dialog.island_info_check.setChecked(True)
+        app.processEvents()
+        row = _search(dialog, "网速")
+        assert row.isVisibleTo(_current_page(dialog))
+    finally:
+        dialog.close()
+
+
+def test_alias_matches_inside_a_sentence_and_up_down_stream_terms(tmp_path, monkeypatch):
+    """别名是查询的子串即命中（「怎么看网速」）；「上行 / 下行」指同一行。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        assert _keys(_matches(dialog, "怎么看网速")) == ["settingRow_island_network"]
+        for query in ("上行", "下行"):
+            matches = _matches(dialog, query)
+            assert _keys(matches) == ["settingRow_island_network"], (
+                f"「{query}」必须落在网络指标行且只算一次"
+            )
+    finally:
+        dialog.close()
+
+
+def test_old_title_information_slot_content_reaches_the_content_selector(tmp_path, monkeypatch):
+    """旧标题「信息槽内容」必须命中**内容选择器**那一行，不能只落在显示开关上。
+
+    回归（终审问题 2）：改名后「信息槽」三个字整页只剩「显示中间信息栏」这一行的旧说法
+    被别名兜住，而它原本的标题「信息槽内容」对应的 ``dynamic_island_info_mode`` 反倒
+    不在别名目标里——老用户搜旧标题拿到的是另一个开关，「旧说法仍搜得到」的承诺没兑现。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        keys = _keys(_matches(dialog, "信息槽内容"))
+        assert "settingRow_dynamic_island_info_mode" in keys, (
+            f"搜旧标题「信息槽内容」必须能到内容选择器那一行，实得 {keys}"
+        )
+
+        # 旧词是查询的**子串**即命中（「信息槽内容怎么改」也算），与别名口径一致。
+        assert "settingRow_dynamic_island_info_mode" in _keys(_matches(dialog, "信息槽内容怎么改"))
+
+        # 回车遍历要真能走到那一行，并且落在「桌面组件」域（不是只出现在候选集里）。
+        row = _search(dialog, "信息槽内容", presses=keys.index("settingRow_dynamic_island_info_mode"))
+        assert row.objectName() == "settingRow_dynamic_island_info_mode"
+        assert dialog.sidebar.currentItem().text() == "桌面组件"
+
+        # 「信息槽」这条别名**有意不收**自定义短文本那一行（它从没叫过「信息槽…」，
+        # 自己那句「自定义短文本」本来就能关键词命中）。
+        assert "settingRow_dynamic_island_custom_text" not in keys
+        assert "settingRow_dynamic_island_custom_text" in _keys(_matches(dialog, "自定义短文本"))
+    finally:
+        dialog.close()
+
+
+def test_alias_reset_defaults_and_excluded_terms_are_documented(tmp_path, monkeypatch):
+    """别名表里每条都能命中真实行；「重置」这类没有行落点的词不假装有命中。"""
+    from pet.settings_search import ROW_ALIASES
+
+    assert ROW_ALIASES, "别名表不能是空的"
+    for token, targets in ROW_ALIASES.items():
+        assert token == token.strip().lower(), f"别名「{token}」必须是已规整的小写词"
+        assert targets, f"别名「{token}」没有指向任何行键"
+
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for token, targets in ROW_ALIASES.items():
+            if all(dialog.findChild(SettingRow, f"settingRow_{target}") is None
+                   for target in targets):
+                # 指向的行按平台闸门不存在（如主动识屏整页只在 Windows 构造）：
+                # 本平台搜不到不是别名失效，漏掉哪条由 Windows 那条 CI 腿盯住。
+                continue
+            matches = _matches(dialog, token)
+            keys = _keys(matches)
+            assert keys, f"别名「{token}」没有命中任何行（别名字典 → 行键的指向已失效）"
+            for target in targets:
+                assert f"settingRow_{target}" in keys, (
+                    f"别名「{token}」必须命中 settingRow_{target}"
+                )
+        # 「恢复默认设置…」是侧栏按钮、不是设置行：搜索框给不出行的落点，
+        # 因此这条不做（口径见 pet/settings_search 的模块 docstring）。
+        assert _matches(dialog, "恢复默认") == []
+    finally:
+        dialog.close()
+
+
+def test_collapsible_box_title_query_reaches_the_rows_inside_the_box(tmp_path, monkeypatch):
+    """搜默认折叠框名（「自定义台词」）：框内行也进候选，命中后框自动展开。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        box = dialog.dialogue_phrases_box
+        assert box.is_expanded() is False, "先确认这个折叠框默认是收起的"
+
+        matches = _matches(dialog, "自定义台词")
+        keys = _keys(matches)
+        assert len(set(keys)) == len(keys), f"候选行重复：{keys}"
+        assert any(box.isAncestorOf(row) for row in matches), (
+            "折叠框标题命中必须把框内行纳入候选"
+        )
+
+        for _ in range(len(matches)):
+            row = _current_match(dialog)
+            if box.isAncestorOf(row):
+                assert box.is_expanded() is True, "命中框内的行必须自动展开折叠框"
+                assert row.isVisibleTo(_current_page(dialog))
+                break
+            QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)
+            app.processEvents()
+        else:
+            raise AssertionError("回车遍历没能走到折叠框内的行")
+    finally:
+        dialog.close()
+
+
+def test_group_title_walk_is_memo_independent(tmp_path, monkeypatch):
+    """带缓存与不带缓存算出的组标题逐行一致（缓存只加速、不改语义）。"""
+    from pet.settings_search import fold_group_titles
+
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        memo: dict = {}
+        for row in dialog._search_rows:
+            assert fold_group_titles(row, memo) == fold_group_titles(row), (
+                f"{row.objectName()} 的组标题在带缓存时被算错"
+            )
+        # 折叠组内 / 组外的行各自得到正确的组标题
+        assert fold_group_titles(_row(dialog, "harness_autostart")) == ["启动项（高级）"]
+        assert fold_group_titles(_row(dialog, "autostart")) == []
+    finally:
+        dialog.close()
+
+
+def test_no_chat_build_skips_aliases_whose_rows_are_absent(tmp_path, monkeypatch):
+    """打包变体（excludes=['pet.chat']）：别名目标行不存在时静默跳过，不报错。"""
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    try:
+        assert dialog.ai_page is None
+        # 「密钥」「壁纸」的目标行都在 AI 页里，这个变体里没有落点 → 照常「未找到」
+        assert _matches(dialog, "密钥") == []
+        assert _matches(dialog, "壁纸") == []
+        assert dialog.search_status.text() == "未找到匹配的设置"
+        # 与 AI 页无关的别名和组标题照常命中
+        assert _keys(_matches(dialog, "网速")) == ["settingRow_island_network"]
+        assert _keys(_matches(dialog, "启动项")) == [
+            "settingRow_harness_autostart",
+            "settingRow_harness_launch_target",
+        ]
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------------ ③ 去重与计数
+def test_candidates_from_all_sources_are_deduped(tmp_path, monkeypatch):
+    """组标题命中与关键词命中重叠时同一行只算一次（状态行计数与候选数一致）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        # 「延迟检测」同时命中：探测间隔行（hint 里就写着延迟检测）+ 网络组名 +
+        # 岛网络指标行（hint 里也有「延迟检测每次约 0.16 KB」）
+        matches = _matches(dialog, "延迟检测")
+        keys = _keys(matches)
+        assert len(set(keys)) == len(keys), f"候选行重复了：{keys}"
+        assert keys.count("settingRow_network_probe_interval") == 1
+        assert set(keys) == {"settingRow_island_network", "settingRow_network_probe_interval"}
+        assert dialog.search_status.text().startswith(f"1/{len(keys)} · ")
+
+        # 组标题单独命中（关键词 0 命中）时也只给一行
+        assert _keys(_matches(dialog, "网络延迟检测")) == ["settingRow_network_probe_interval"]
+    finally:
+        dialog.close()
+
+
+def test_alias_hit_is_not_counted_twice_when_the_row_also_matches_by_keyword(
+    tmp_path, monkeypatch
+):
+    """别名目标行同时被关键词命中时，计数不重复（「下行」既是 alias 又是 hint 子串）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query in ("下行", "行速", "速"):
+            matches = _matches(dialog, query)
+            keys = _keys(matches)
+            assert len(set(keys)) == len(keys), f"「{query}」候选行重复：{keys}"
+            if query == "下行":
+                assert keys == ["settingRow_island_network"]
+                assert dialog.search_status.text().startswith("1/1 · ")
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------- ④ 空/无义查询不回归
+def test_unknown_query_still_reports_no_match(tmp_path, monkeypatch):
+    """真正无义的查询仍是「未找到匹配的设置」，且空查询不显示状态行。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query in ("量子纠缠织物", "zzzz-not-a-setting"):
+            assert _matches(dialog, query) == []
+            assert dialog.search_status.text() == "未找到匹配的设置"
+            assert dialog.search_status.isHidden() is False
+
+        dialog.search_edit.setText("   ")
+        app.processEvents()
+        assert dialog._search_matches == [] and dialog._search_index == -1
+        assert dialog.search_status.isHidden() is True, "空查询不该留状态行"
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------------------ ⑤ 既有搜索回归
+def test_existing_keyword_searches_still_reach_their_rows(tmp_path, monkeypatch):
+    """第一刀的既有查询照旧（标题格式 / 探测间隔 / 提示音 回车遍历）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        if sys.platform == "win32":
+            matches = _matches(dialog, "标题格式")
+            keys = _keys(matches)
+            # 关键词命中的标题格式行排在第一位（既有首次命中不变），且组内行一并入候选
+            assert keys[0] == "settingRow_foobar_title_format"
+            assert len(set(keys)) == len(keys)
+            assert "settingRow_music_player_detect" in keys
+            row = _search(dialog, "标题格式")
+            assert row.objectName() == "settingRow_foobar_title_format"
+            assert _section_of(dialog, "foobar_title_format").toggle.isChecked() is True
+            assert row.isVisibleTo(_current_page(dialog))
+
+        row = _search(dialog, "探测间隔")
+        assert row.objectName() == "settingRow_network_probe_interval"
+        assert dialog._search_matches == [row], "该查询不该被组标题/别名放大"
+
+        matches = _matches(dialog, "提示音")
+        assert len(matches) == 5
+        assert all(dialog.agent_link_box.isAncestorOf(item) for item in matches)
+        assert dialog.agent_link_box.is_expanded() is True
+        first = _current_match(dialog)
+        assert first.isVisibleTo(_current_page(dialog))
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("2/")
+        assert dialog.agent_link_box.isAncestorOf(_current_match(dialog))
+    finally:
+        dialog.close()

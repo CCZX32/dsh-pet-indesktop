@@ -65,6 +65,10 @@ def create_music_player_controls(dialog) -> None:
     button.setObjectName("musicPlayerDetectButton")
     button.clicked.connect(lambda: start_detect(dialog))
     dialog.music_player_detect_btn = button
+    # 两个路径键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，右键菜单读 host 配置面、
+    # 由 _SpriteConfig 转发到主配置）：子宠页保存由设置进程的配置路由直写主配置
+    # （pet/settings_slot_config.py），选了就生效——此前按死开关口径把两个选择器与
+    # 「自动检测」按钮一并置灰（搜到的路径填进没人读的控件），现摘除。
 
 
 def build_music_player_rows(dialog) -> list[SettingRow]:
@@ -95,14 +99,14 @@ def build_music_player_rows(dialog) -> list[SettingRow]:
 
 
 def browser_media_supported() -> bool:
-    """「浏览器媒体会话参与歌词」是否在本平台可用——SMTC 是 Windows 专属。"""
+    """「浏览器媒体会话参与歌词」是否在本平台可用——系统媒体控制是 Windows 专属。"""
     return sys.platform == "win32"
 
 
 def browser_media_rows(dialog) -> list[SettingRow]:
     """「浏览器媒体会话参与歌词」设置行（**仅 Windows**）。
 
-    SMTC 是 Windows 专属能力：非 Windows 上这个开关既无效也不该出现
+    系统媒体控制是 Windows 专属能力：非 Windows 上这个开关既无效也不该出现
     （SETTINGS-CHANGE-GATES §4「永久不支持的能力不创建控件」）。控件本体也只在
     Windows 创建（``settings_pet_controls``），所以这里以「控件在不在」为准——
     与 ``cursor_hidden_passthrough`` 的处置一致，不会出现"控件在、行不在"的
@@ -114,6 +118,9 @@ def browser_media_rows(dialog) -> list[SettingRow]:
     check = getattr(dialog, "music_browser_media_check", None)
     if check is None or not browser_media_supported():
         return []
+    # 与 foobar 两键同规（同一 _SOURCE_SWITCHES 组、同一读取形态）：进程级歌词源
+    # 开关，子宠页保存由设置进程的配置路由直写主配置（pet/settings_slot_config.py），
+    # 改了真生效——此前按死开关口径置灰，现摘除。控件本体建在 settings_pet_controls。
     return [
         SettingRow(
             "music_browser_media",
@@ -124,6 +131,66 @@ def browser_media_rows(dialog) -> list[SettingRow]:
             check,
         )
     ]
+
+
+def foobar_lyrics_supported() -> bool:
+    """「foobar2000 歌词」是否在本平台可用——窗口标题源走 Win32 窗口枚举。"""
+    return sys.platform == "win32"
+
+
+def foobar_lyrics_rows(dialog) -> list[SettingRow]:
+    """「foobar2000 歌词」两行（**仅 Windows**，与 browser_media_rows 同规）。
+
+    行文案里必须如实写清三条，否则用户会以为是"功能坏了"：
+
+    1. **推荐路线**是给 foobar 装媒体控制组件（如 foo_mediacontrol）——那条路走现有
+       的系统媒体控制采样（机制见 ``pet/now_playing.py``），比窗口标题可靠得多；
+       本开关是给不想装组件的人用的替代路线。
+    2. 窗口标题分辨不出播放状态：foobar 开着但没在播时，可能仍显示上一首。
+    3. 只在没有其它播放器（系统媒体控制在播会话）时才生效，不会抢走正在听的那首歌。
+    """
+    check = getattr(dialog, "foobar_lyrics_check", None)
+    edit = getattr(dialog, "foobar_title_format_edit", None)
+    if check is None or edit is None or not foobar_lyrics_supported():
+        return []
+    # 两个键都是**进程级**（不在 PER_SLOT_SETTING_KEYS，歌词源解析读主配置）：子宠页
+    # 保存由设置进程的配置路由直写主配置（pet/settings_slot_config.py），改了真生效
+    # ——此前按死开关口径置灰，现摘除（控件本体建在 settings_pet_controls）。
+    return [
+        SettingRow(
+            "foobar_lyrics",
+            "foobar2000 歌词",
+            "foobar2000 默认不会告诉系统正在播什么，所以读不到歌词。本开关通过读取"
+            "播放器窗口标题来获取歌曲信息，只在没有其它播放器在播时生效。更推荐的"
+            "路线：给 foobar 安装「媒体控制插件」（让系统能识别播放信息，可搜索 "
+            "foo_mediacontrol 插件）——装好后不需要打开本开关。局限：窗口标题看不出"
+            "是否正在播放，停止播放后可能仍显示上一首。",
+            check,
+        ),
+        SettingRow(
+            "foobar_title_format",
+            "播放器标题格式（高级）",
+            "通常留空即可。如果歌词经常对不上，把 foobar「显示 → 默认用户界面 → "
+            "窗口标题」里配置的那串格式表达式原样复制到这里（类似 %artist% - %title% "
+            "这样的格式），帮助识别歌名与歌手；匹配不上时仍会自动按原样尝试。",
+            edit,
+            stacked=True,
+        ),
+    ]
+
+
+#: 「音乐关联」里的高级折叠组名——播放器路径与标题格式是**故障恢复入口**（歌词对不上
+#: /换了安装位置时来改），组名必须直说，不藏。
+PLAYER_GROUP_TITLE = "播放器路径与标题格式（高级）"
+#: 非 Windows 上不存在「标题格式」行：组名跟着退化，不留一个提不到的行名。
+PLAYER_GROUP_TITLE_NO_FOOBAR = "播放器路径（高级）"
+
+
+def advanced_group_title(dialog) -> str:
+    """高级折叠组标题：按平台上有没有「标题格式」这一行决定（无该行就不提它）。"""
+    if not foobar_lyrics_supported() or getattr(dialog, "foobar_title_format_edit", None) is None:
+        return PLAYER_GROUP_TITLE_NO_FOOBAR
+    return PLAYER_GROUP_TITLE
 
 
 def save_music_player_settings(dialog) -> None:
@@ -142,6 +209,30 @@ def save_music_player_settings(dialog) -> None:
     if paths != previous:
         # 路径变了：让右键菜单下次拿到确定态（自动搜索的负缓存也要作废）。
         music_players.clear_cache()
+
+
+# 「音乐关联」域里两个**来源开关**的控件名 → 配置键。控件在
+# pet/settings_pet_controls 里按平台条件创建（非 Windows 为 None）。
+_SOURCE_SWITCHES = (
+    ("music_browser_media_check", "music_browser_media_enabled"),
+    ("foobar_lyrics_check", "foobar_lyrics_enabled"),
+)
+
+
+def save_source_settings(dialog) -> None:
+    """写回歌词来源开关与 foobar 窗口标题格式串。
+
+    集中在这里的原因与控件/行同源：``modern_settings_dialog._save`` 的行数预算已无
+    余量，这一组键的写回语义（"控件不存在就整键跳过"，非 Windows 上没有该控件）
+    放进对话框本体只会多出几行重复的 getattr 样板。
+    """
+    for attr, key in _SOURCE_SWITCHES:
+        widget = getattr(dialog, attr, None)
+        if widget is not None:
+            dialog.config.set(key, widget.isChecked())
+    edit = getattr(dialog, "foobar_title_format_edit", None)
+    if edit is not None:
+        dialog.config.set("foobar_title_format", edit.text().strip())
 
 
 def start_detect(dialog, *, warm=None, lookup=None) -> None:

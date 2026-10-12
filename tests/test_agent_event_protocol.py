@@ -519,3 +519,107 @@ def test_content_mapping_keys_keep_the_120_char_trim():
     content = bounded_data({"content": {long_key: "value"}})["content"]
     assert list(content) == ["c" * 120], "内容键的截断行为不得被这次改动带走"
     assert content["c" * 120] == "value"
+
+
+# --------------------------------------------------------------------------
+# 收尾事件的归一化：具体收尾判定必须先于 approval/* 、question/* 前缀匹配
+#
+# 反例（本批实测）：normalize_event 里 `lower.startswith("approval/")` /
+# `question/` 两条前缀分支排在具体收尾判定之前，于是 approval/decided、
+# approval/resolved、question/resolved 被吃掉成 ApprovalEvent(status=...) /
+# QuestionEvent(status=...)，专为它们写的那段 InteractionResolvedEvent 分支
+# 永远到不了——语义层的收尾口径（_on_normalized_event 按身份配对关闭）对
+# 这三种旧名全程失效。
+#
+# 另一半：bridge 的收尾帧把身份写在**顶层**（writeInteractionResolved 写
+# 顶层 callId/rpcId/approvalId/outcome；resolveQuestion 写顶层 callId），而
+# AgentEvent.from_record 把顶层 callId 移出 data 存进 ev.call_id——只读
+# data.get("callId") 的归一化点因此恒得空串，callId 配对的收尾（问题 resolved
+# 帧、旧桥审批帧）在语义层永远配不上。
+# --------------------------------------------------------------------------
+
+
+def test_legacy_resolution_event_names_normalize_to_interaction_resolved():
+    """approval/decided、approval/resolved、question/resolved 归一到收尾事件。"""
+    from pet.agent_event_normalizer import InteractionResolvedEvent, normalize_event
+
+    # approval/decided：桥接 STATE_EVENT_TYPES 直写的最小形态（无身份字段）
+    decided = normalize_event(parse_agent_event(
+        {"ts": 1.0, "source": "dsh", "sessionId": "s-1", "event": "approval/decided"}))
+    assert isinstance(decided, InteractionResolvedEvent), \
+        f"approval/decided 被前缀分支吃掉：{type(decided).__name__}"
+    assert (decided.kind, decided.outcome, decided.session_id) == ("approval", "approved", "s-1")
+
+    # approval/resolved：旧桥/自定义通道的收尾帧（带 rpcId/approvalId）
+    resolved = normalize_event(parse_agent_event(
+        {"ts": 2.0, "source": "dsh", "sessionId": "s-1", "event": "approval/resolved",
+         "rpcId": "rpc-1", "approvalId": "appr-1", "outcome": "rejected"}))
+    assert isinstance(resolved, InteractionResolvedEvent), \
+        f"approval/resolved 被前缀分支吃掉：{type(resolved).__name__}"
+    assert (resolved.kind, resolved.rpc_id, resolved.approval_id, resolved.outcome) == \
+        ("approval", "rpc-1", "appr-1", "rejected")
+
+    # question/resolved：桥接 resolveQuestion 的真实形状（顶层 callId + sessionId）
+    question = normalize_event(parse_agent_event(
+        {"ts": 3.0, "source": "dsh", "sessionId": "s-2", "event": "question/resolved",
+         "callId": "call-q1"}))
+    assert isinstance(question, InteractionResolvedEvent), \
+        f"question/resolved 被前缀分支吃掉：{type(question).__name__}"
+    assert (question.kind, question.call_id, question.session_id) == ("question", "call-q1", "s-2")
+
+
+def test_interaction_resolved_reads_top_level_call_id():
+    """收尾帧的身份在顶层时也必须读到（callId 回退到 AgentEvent.call_id）。
+
+    桥接的 writeInteractionResolved 把 requestId/rpcId/approvalId/callId 都写在
+    顶层；from_record 只把 callId/requestId 移出 data（其余留在 data），所以
+    callId 只能从信封字段回退取到。
+    """
+    from pet.agent_event_normalizer import InteractionResolvedEvent, normalize_event
+
+    event = parse_agent_event({
+        "event": "interaction/resolved", "source": "dsh", "agentName": "dsh",
+        "sessionId": "s-3", "kind": "approval", "requestId": "req-1",
+        "rpcId": "rpc-3", "approvalId": "appr-3", "callId": "call-3",
+        "outcome": "approved",
+    })
+    assert event.call_id == "call-3" and "callId" not in event.data, \
+        "前置：顶层 callId 只落在信封字段上（本用例的成立条件）"
+
+    resolved = normalize_event(event)
+    assert isinstance(resolved, InteractionResolvedEvent)
+    assert resolved.call_id == "call-3", "只读 data['callId'] 会恒得空串（配对失效）"
+    assert (resolved.request_id, resolved.rpc_id, resolved.approval_id) == \
+        ("req-1", "rpc-3", "appr-3")
+
+
+# --------------------------------------------------------------------------
+# 退役事件：control-result（mux 中继与控制队列已删）
+#
+# 语义层曾接受 control-result / bridge/control-result / watchdog/control-result
+# 三形态并产出 ControlResultEvent，但仓库里（*.py 与 *.js）从无生产者，消费端
+# 也只看 RetryEvent / InteractionResolvedEvent 两类，属于零生产者零消费者的
+# 摆设分支。删除后旧桥若仍写这些事件，会落 agent_link 的「未知桥接事件」
+# 提醒路径——这是退役事件的预期口径（提醒用户更新 bridge）。
+# --------------------------------------------------------------------------
+
+RETIRED_CONTROL_EVENTS = ("control-result", "bridge/control-result", "watchdog/control-result")
+
+
+def test_retired_control_result_events_no_longer_produce_semantic_events():
+    """三种 control-result 形态都不再产出语义事件。"""
+    from pet.agent_event_normalizer import normalize_event
+
+    for name in RETIRED_CONTROL_EVENTS:
+        event = normalize_event(parse_agent_event(
+            {"ts": 1.0, "source": "dsh", "event": name, "requestId": "req-1",
+             "operation": "restart", "ok": True, "phase": "done"}))
+        assert event is None, \
+            f"{name} 已退役，不该再有语义事件，实得 {type(event).__name__}"
+
+
+def test_control_result_event_class_stays_removed():
+    """退役的事件类不得回流（无生产者即无契约，留着只会误导消费端）。"""
+    from pet import agent_event_normalizer
+
+    assert not hasattr(agent_event_normalizer, "ControlResultEvent")

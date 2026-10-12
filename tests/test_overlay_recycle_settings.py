@@ -107,18 +107,35 @@ def test_refresh_pushes_to_existing_clip(tmp_path):
 
 
 def test_refresh_updates_every_sprite_library(tmp_path):
-    """多 sprite 各持独立库：刷新时逐只更新（子宠库也要拿到同一用户设置）。"""
+    """多 sprite 各持独立库：刷新时逐只按**各自 slot 档案**更新阈值。
+
+    ``ffmpeg_recycle_minutes`` 是每宠键（规范 §五「唯一归属表」），真值在
+    ``config-slot-N.json``：子宠不再跟随主配置（那是"全局混每宠"的旧契约）。
+    这里手工加进 overlay 的 sprite 按 slot 1 登记身份，逐只取自己的值。
+    """
+    from pet import overlay_spawn_state as ovs
+
     shell, config, lib_main = _make_shell(tmp_path, {"ffmpeg_recycle_minutes": 10})
     lib_sub = RecordingLibrary()
     sub = PetSprite(lib_sub, pos=QPointF(40.0, 40.0), scale=1.0)
     try:
         shell.sprite.bind_clip("idle1")
         shell.overlay.add_sprite(sub)
+        shell._spawned.append(sub)
+        shell._spawned_slots[sub] = 1
+        shell._spawned_libs[sub] = lib_sub
         sub.bind_clip("walk")
         config.set("ffmpeg_recycle_minutes", 7)
         shell.refresh_settings()
         assert lib_main.movie("idle1").recycle_pushes[-1] == 7
-        assert lib_sub.movie("walk").recycle_pushes[-1] == 7
+
+        # 子宠只认它自己的档案：主宠改到 7 不影响它
+        assert lib_sub.movie("walk").recycle_pushes[-1] == 10
+        assert ovs.write_slot_setting(config.dir, 1, "ffmpeg_recycle_minutes", 30,
+                                      user_customized=True)
+        shell.refresh_settings()
+        assert lib_sub.movie("walk").recycle_pushes[-1] == 30
+        assert lib_main.movie("idle1").recycle_pushes[-1] == 7, "子宠的改动不动主宠"
     finally:
         shell._delete_runtime_marker()
 

@@ -386,7 +386,7 @@ def test_spawn_offset_env_wired_to_primary_instance(tmp_path, app, monkeypatch):
     assert shell.instance._spawn_offset == 0  # 无 env 时默认 0
     shell2 = AppShell(QApplication.instance(), Config(tmp_path), enable_chat=True,
                       spawn_offset=5)
-    assert shell2.instance._spawn_offset == 5
+    assert shell2.instance._spawn_offset == 0, "兼容偏移不能移动固定slot0"
 
 
 def test_exit_primary_promotes_primary_window(tmp_path, app, monkeypatch):
@@ -413,11 +413,11 @@ def test_exit_primary_promotes_primary_window(tmp_path, app, monkeypatch):
     shell._on_window_exit_requested(shell.instance)
 
     # 主窗退出后：新列表头（sec）成为主窗，self.instance 更新为存活实例
-    assert len(shell.instances) == 1
-    assert shell.instance is sec
-    assert shell.instance is shell.instances[0]
-    assert shell._instances[0].win is sec_win
-    assert shell.instance.win is sec_win
+    assert len(shell.instances) == 2
+    assert shell.instance is primary
+    assert shell.instance.win is None
+    assert sec.win is sec_win
+    assert sec.slot_id == 1
 
 
 
@@ -473,19 +473,17 @@ def test_exit_window_closes_subwindows(tmp_path, app, monkeypatch):
 
     shell._on_window_exit_requested(shell.instance)
 
-    # 从属窗全部被 close + deleteLater 调度
-    assert set(closed) == {sub_legacy, sub_modern, sub_quick, sub_settings, sub_mod_settings}
-    # 三聊天窗 live session 被保存（P0-2）
-    assert len(saves) == 3
-    # 实例引用被清空（P1-5 防止 writer 复活的关键——窗口被解除持有/复用）
-    assert shell.instance.legacy_chat_window is None
-    assert shell.instance.modern_chat_window is None
-    assert shell.instance.quick_chat is None
-    assert shell.instance.chat_settings_dialog is None
-    assert shell.instance.modern_settings_dialog is None
-    assert shell.instance.chat_window is None
-    # 主窗提升为 sec，未触发 app.quit（第二窗仍在）
-    assert shell.instance is sec
+    # slot0 退出不关共享会话与从属聊天窗（他们由该 instance 继续持有、可恢复）；
+    # 唯一被关的是**进程内设置窗**：收口前的设置页闸门（ops P3-c）必须让它先过一遍
+    # 保存/放弃/继续编辑，否则草稿会随父窗一起无声消失
+    # （见 tests/test_settings_stale_form_exit.py 第 9 节）。
+    assert closed == [sub_mod_settings], "只有设置窗该被闸门关掉"
+    assert saves == []
+    assert shell.instance.legacy_chat_window is sub_legacy
+    assert shell.instance.modern_chat_window is sub_modern
+    assert shell.instance.quick_chat is sub_quick
+    assert shell.instance.win is None
+    assert shell.instance is not sec
 
 
 def test_exit_window_callback_injected_on_every_window(tmp_path, app, monkeypatch):
@@ -603,7 +601,11 @@ def _pump(seconds: float) -> None:
 
 
 def test_spawn_in_process_slot_scan_cap_raises(tmp_path, app, monkeypatch):
-    """D6：slot 身份扫描超过上限抛 SpawnStateError（不许无限循环）。"""
+    """D6：128 个身份**全在活跃集合**时抛 SpawnStateError（不许无限循环）。
+
+    B01 起「目录里全是历史配置」不再等于耗尽（改为复用最小退役身份）；真耗尽
+    只剩「128 个身份同时活跃」这一条，本用例以活跃窗集合模拟该极限。
+    """
     from pet import overlay_spawn_state
 
     shell, _config, _handle = _make_primary_with_slot(tmp_path)
@@ -611,6 +613,8 @@ def test_spawn_in_process_slot_scan_cap_raises(tmp_path, app, monkeypatch):
         overlay_spawn_state, "scan_slot_configs",
         lambda *_a, **_k: set(
             range(1, overlay_spawn_state.MAX_SCAN_SLOTS + 1)))
+    shell._instances = [type("Inst", (), {"slot_id": slot, "win": None})()
+                        for slot in range(0, overlay_spawn_state.MAX_SCAN_SLOTS + 1)]
     with pytest.raises(overlay_spawn_state.SpawnStateError):
         shell.spawn_in_process_window(1)
 
@@ -946,14 +950,13 @@ def test_spawn_in_process_window_routes_through_shared_seed(tmp_path, app, monke
 
     second = shell.spawn_in_process_window(1)
 
-    assert calls, "进程内 spawn 调用点应经共享落种函数"
-    # 共享落种函数收到的是主窗配置根 + 新 slot id
-    assert calls[0][1] == 1
+    assert calls == [], "退役整表落种入口不再使用"
     # spawn 产物 slot 配置存在且落种 mark 默认假
     seed_path = config.dir.parent / APP_DIR_NAME / "config-slot-1.json"
     assert seed_path.exists()
     seeded = json.loads(seed_path.read_text(encoding="utf-8"))
-    assert seeded.get("user_customized") is False
+    assert "pet_opacity" not in seeded
+    assert "character" in seeded
 
     _stop_sessions(second)
     second.win.close()
@@ -1278,3 +1281,39 @@ def test_runtime_marker_written_on_first_show(tmp_path, app):
     data = json.loads(marker.read_text(encoding="utf-8"))
     assert data["pid"] == os.getpid()
     win.close()
+
+
+def test_open_quick_chat_routes_to_overlay_shell_when_win_none(tmp_path, app, monkeypatch):
+    """overlay 拓扑（``win`` 恒 None、不建 PetWindow）：快速对话必须改走 overlay
+    壳的 sprite 锚定路径——锚到隐藏/不存在的 PetWindow 等于点了没反应（岛卡片
+    「聊天」与托盘「快速对话（气泡）」共用本缝，2026-10-08 实机发现的回归）。"""
+    shell, config, _handle = _make_primary_with_slot(tmp_path)
+    inst = PetInstance(shell, config, enable_chat=True, slot_id=None)
+    inst.win = None  # overlay 拓扑恒为 None（不建 PetWindow）
+    monkeypatch.setattr(shell, "_aggregate_pet_visible", lambda: True)
+
+    calls = []
+
+    class _FakeOverlay:
+        def open_quick_chat(self, sprite=None):
+            calls.append(sprite)
+            return True
+
+    shell._overlay_shell = _FakeOverlay()
+    inst.open_quick_chat()
+    deadline = time.time() + 2.0
+    while not calls and time.time() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    assert calls == [None], "win=None 时必须路由到 overlay 壳（sprite=None = 主宠）"
+
+
+def test_open_quick_chat_win_none_without_overlay_is_quiet_noop(tmp_path, app, monkeypatch):
+    """反面：win=None 且没有 overlay 壳（异常中间态）——安静不炸，不抛异常。"""
+    shell, config, _handle = _make_primary_with_slot(tmp_path)
+    inst = PetInstance(shell, config, enable_chat=True, slot_id=None)
+    inst.win = None
+    monkeypatch.setattr(shell, "_aggregate_pet_visible", lambda: True)
+    shell._overlay_shell = None
+    inst.open_quick_chat()  # 不抛即过
+    QApplication.processEvents()

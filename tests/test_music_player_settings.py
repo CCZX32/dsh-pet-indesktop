@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from pet import music_players, settings_music
+from pet.settings_widgets import ToggleSwitch, _line_edit
 
 pytest.importorskip("PySide6")
 
@@ -264,3 +265,212 @@ def test_browser_media_widget_is_windows_only(monkeypatch, tmp_path):
     dialog._save()
     dialog.reject()
     app.processEvents()
+
+
+# ------------------------------------------------------------------ #228
+#
+# foobar2000 歌词（窗口标题源）。平台闸门与 browser_media 同规：控件与设置行都只在
+# Windows 创建，非 Windows 连控件都不建（免得出现"控件在、行不在"的游离开关）。
+
+
+def test_foobar_lyrics_rows_are_absent_on_non_windows(monkeypatch):
+    """非 Windows 平台：即使控件存在，两行也不出现（平台闸门优先）。"""
+    import sys
+
+    from pet.settings_widgets import ToggleSwitch
+
+    _qapp()
+    host = type(
+        "H",
+        (),
+        {
+            "foobar_lyrics_check": ToggleSwitch(),
+            "foobar_title_format_edit": _line_edit(""),
+        },
+    )()
+
+    for platform in ("linux", "darwin"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert settings_music.foobar_lyrics_supported() is False
+        assert settings_music.foobar_lyrics_rows(host) == []
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert settings_music.foobar_lyrics_supported() is True
+    rows = settings_music.foobar_lyrics_rows(host)
+    assert [row.objectName() for row in rows] == [
+        "settingRow_foobar_lyrics",
+        "settingRow_foobar_title_format",
+    ]
+
+
+def test_foobar_lyrics_rows_are_absent_when_widgets_missing():
+    """控件没建（非 Windows 的实际形态）时行也不建——不留孤儿行。"""
+    _qapp()
+    host = type("H", (), {"foobar_lyrics_check": None, "foobar_title_format_edit": None})()
+    assert settings_music.foobar_lyrics_rows(host) == []
+
+
+def test_foobar_lyrics_widgets_are_windows_only(monkeypatch, tmp_path):
+    """控件本体同样只在 Windows 创建；缺控件时保存路径安全跳过。"""
+    import sys
+
+    from pet import settings_pet_controls
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_pet_controls.sys, "platform", "linux")
+    dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    assert dialog.foobar_lyrics_check is None, "非 Windows 不该建这个控件"
+    assert dialog.foobar_title_format_edit is None
+    dialog._save()
+    dialog.reject()
+    app.processEvents()
+
+
+def test_save_source_settings_writes_both_switches_and_format(tmp_path):
+    """保存：两个来源开关与格式串一起写回，格式串去掉首尾空白。"""
+    from pet.config import Config
+
+    _qapp()
+    cfg = Config(tmp_path)
+    host = type(
+        "H",
+        (),
+        {
+            "config": cfg,
+            "music_browser_media_check": ToggleSwitch(),
+            "foobar_lyrics_check": ToggleSwitch(),
+            "foobar_title_format_edit": _line_edit("  %artist% - %title%  "),
+        },
+    )()
+    host.music_browser_media_check.setChecked(True)
+    host.foobar_lyrics_check.setChecked(True)
+
+    settings_music.save_source_settings(host)
+
+    assert cfg.get("music_browser_media_enabled") is True
+    assert cfg.get("foobar_lyrics_enabled") is True
+    assert cfg.get("foobar_title_format") == "%artist% - %title%"
+
+
+def test_save_source_settings_skips_missing_widgets(tmp_path):
+    """控件不存在（非 Windows）时**整键跳过**：不许把它写成 False 覆盖用户配置。"""
+    from pet.config import Config
+
+    _qapp()
+    cfg = Config(tmp_path)
+    cfg.set("foobar_lyrics_enabled", True)
+    host = type(
+        "H",
+        (),
+        {
+            "config": cfg,
+            "music_browser_media_check": None,
+            "foobar_lyrics_check": None,
+            "foobar_title_format_edit": None,
+        },
+    )()
+
+    settings_music.save_source_settings(host)
+
+    assert cfg.get("foobar_lyrics_enabled") is True, "缺控件不该把开关写成 False"
+
+
+def test_foobar_controls_are_editable_on_the_child_page(monkeypatch, tmp_path):
+    """子宠页：foobar 两键可编辑，保存落**主配置**（歌词源解析读的就是它）。
+
+    这两个键不在 ``PER_SLOT_SETTING_KEYS`` 里（子宠页曾经置灰：写了 slot 文件、
+    运行期读主配置 = 死开关）。独立设置进程现在按 key 分流到主配置，故恢复可用。
+    """
+    import json
+
+    from pet import settings_music
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_music.sys, "platform", "win32")   # 两键仅在 Windows 建
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        assert master.foobar_lyrics_check is not None, "用例前置：Windows 下应建出控件"
+        for control in (master.foobar_lyrics_check, master.foobar_title_format_edit,
+                        child.foobar_lyrics_check, child.foobar_title_format_edit):
+            assert control is not None
+            assert control.isEnabled() is True
+            assert control.toolTip() != "仅主桌宠可设置"
+
+        child.foobar_lyrics_check.setChecked(True)
+        child.foobar_title_format_edit.setText("%artist% - %title%")
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["foobar_lyrics_enabled"] is True, "子宠页改的键必须真正生效"
+        assert on_disk["foobar_title_format"] == "%artist% - %title%"
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+
+
+def test_browser_media_control_is_editable_on_the_child_page(monkeypatch, tmp_path):
+    """子宠页：「浏览器媒体会话参与歌词」与 foobar 同组同规——可编辑 + 落主配置。"""
+    import json
+
+    from pet import settings_music
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_music.sys, "platform", "win32")   # 控件仅在 Windows 建
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        assert master.music_browser_media_check is not None, "用例前置：Windows 下应建出控件"
+        assert master.music_browser_media_check.isEnabled() is True
+        assert child.music_browser_media_check.isEnabled() is True
+        assert child.music_browser_media_check.toolTip() != "仅主桌宠可设置"
+
+        child.music_browser_media_check.setChecked(True)
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["music_browser_media_enabled"] is True
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+
+
+def test_music_player_pickers_are_editable_on_the_child_page(tmp_path):
+    """子宠页：播放器路径两键与「自动检测」可编辑，保存落主配置（右键菜单读它）。"""
+    import json
+
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    master = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    child = ModernSettingsDialog(Config(base=tmp_path, instance_id="slot-1"),
+                                 include_ai=False)
+    try:
+        for picker in _pickers(master) + _pickers(child):
+            assert picker.isEnabled() is True
+            assert picker.toolTip() != "仅主桌宠可设置"
+        assert master.music_player_detect_btn.isEnabled() is True
+        assert child.music_player_detect_btn.isEnabled() is True
+
+        _pickers(child)[0].setText(r"D:\CloudMusic\cloudmusic.exe")
+        assert child._write_config() is True
+        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        assert on_disk["music_player_paths"] == {
+            "netease": r"D:\CloudMusic\cloudmusic.exe"
+        }
+    finally:
+        for dialog in (master, child):
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()

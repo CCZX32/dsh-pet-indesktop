@@ -88,6 +88,27 @@ def _no_modal_message_boxes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_modal_save_failure_choice(monkeypatch):
+    """保存失败出口的模态框同样必须"不弹"（同 _no_modal_message_boxes 的理由）。
+
+    ``pet/settings_close_flow`` 的失败框是**自建** QMessageBox + ``exec()``，不在上面
+    那组静态方法桩的覆盖范围内：任何"关窗时保存失败"的用例都会卡在这个模态框上
+    （与旧实现里设置对话框弹模态 warning 卡住 CI 是同一类事故）。
+
+    默认答案 = 继续编辑（等同用户不放弃），对产品行为的影响与改动前逐位一致
+    （改动前保存失败也不关窗）。要断言文案/按钮语义或验证"用户选择放弃"的用例
+    自行 monkeypatch 这个 seam——``tests/test_settings_stale_form_exit.py`` 就是用它
+    取产品真实构造的框。
+    """
+    try:
+        from pet import settings_close_flow
+    except Exception:
+        return
+    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved",
+                        lambda parent, failure: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dsh_profile_write(monkeypatch):
     """禁止测试触发对**真实** ~/.dsh/profiles 的桥接 link 自检。
 
@@ -104,6 +125,31 @@ def _no_real_dsh_profile_write(monkeypatch):
     monkeypatch.setattr(
         DshMonitor, "_spawn_link_check", staticmethod(lambda target: None),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_topology_config(tmp_path, monkeypatch):
+    """拓扑判定的**配置输入**每测隔离到临时目录（T4 Phase A）。
+
+    渲染拓扑自 T4 起会读主配置 ``stream_capture_mode``（``overlay_settings_command``
+    的 ``_default_base()/APP_DIR_NAME/config.json``）。测试进程若真去读，结果就
+    取决于跑测试这台机器上的用户配置：开发机勾过捕获模式 ⇒ 所有"默认 overlay"
+    的断言在这种机器上变红，而 CI 上永远绿——测试失去意义。故把目录解析这一层
+    钉到 ``tmp_path``（空目录 ⇒ 配置缺失 ⇒ 默认 overlay），并清掉快照缓存。
+
+    钉的是 ``overlay_settings_command`` 复用的那个 seam（``pet.config._default_base``
+    经本模块的模块级绑定），所以用例仍可自行覆盖：测试体内再
+    ``monkeypatch.setattr(cmd, "_default_base", ...)`` 或直接替换
+    ``cmd.topology_config_path``（后打的补丁生效）。
+    """
+    try:
+        from pet import overlay_settings_command as cmd_mod
+    except Exception:
+        return
+    monkeypatch.setattr(cmd_mod, "_default_base", lambda: tmp_path)
+    cmd_mod.reset_topology_snapshot()
+    yield
+    cmd_mod.reset_topology_snapshot()
 
 
 @pytest.fixture(autouse=True)
@@ -143,6 +189,49 @@ def _clear_click_sound_pool():
         pass
 
 
+def drop_stale_chime_quiet_listeners() -> None:
+    """摘掉共享免打扰表里残留的 ``VoiceChimeService`` 回调（用既有 ``remove_listener``）。
+
+    唯一实现：全局 autouse fixture ``_no_stale_chime_quiet_listeners`` 用的就是它；
+    要自证收口效果的用例直接调这一条（``test_voice_chime_service`` /
+    ``test_overlay_app_hosts``），不在测试里各写一份。
+
+    按身份摘（``__func__`` 命中本模块的 ``_on_quiet_state_changed``）：不碰别人的订阅，
+    也不改 ``quiet_mode`` 状态机——``reset_shared_quiet_state()`` 只复位状态，监听表归
+    订阅方管（产品侧 ``stop()`` 才摘），所以残留只能在测试边界上由收口手段清。
+    """
+    try:
+        from pet import quiet_mode
+        from pet.voice_chime_service import VoiceChimeService
+    except Exception:
+        return
+    try:
+        state = quiet_mode.shared_quiet_state()
+        target = VoiceChimeService._on_quiet_state_changed
+        for callback in list(state._listeners):
+            if getattr(callback, "__func__", None) is target:
+                state.remove_listener(callback)
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _no_stale_chime_quiet_listeners():
+    """用例边界上摘掉"构造即挂"留下的免打扰回调（共享表是**进程级**的）。
+
+    ``VoiceChimeService`` 构造就注册 ``quiet_mode`` 监听（复审 #6：手动报时/试听通道
+    从不 ``start()``，也必须在免打扰开启时被切），而大量用例构造后从不 ``stop()``
+    （只测一拍内的行为）。回调对空闲服务是无害 no-op，但进程级共享订阅表会随用例数
+    线性增长、并持有服务与它的播放器不放；``reset_shared_quiet_state()`` 只复位状态、
+    不动监听表。这条防线因此必须全局面：它此前只长在 ``test_voice_chime_service.py``
+    里，模块级 autouse 不跨文件，``test_overlay_app_hosts.py`` 那种"构造完就不管"的
+    域照旧给共享表添残留。
+    """
+    drop_stale_chime_quiet_listeners()
+    yield
+    drop_stale_chime_quiet_listeners()
+
+
 @pytest.fixture(autouse=True)
 def _no_filesystem_player_scan(monkeypatch):
     """音乐播放器路径扫描（#140 的启动/菜单预热）绝不允许在测试里真实发生。
@@ -169,6 +258,13 @@ def _close_qt_top_level_widgets():
     try:
         from pet import mem_debug as _mem_debug_mod
         _mem_debug_mod._reset_for_tests()
+    except Exception:
+        pass
+    # 免打扰是**进程级单例**（issue #208）：某个用例开启后不复位，后续用例会
+    # 凭空进入"普通提醒被拦下"的状态，失败点离真因很远。
+    try:
+        from pet.quiet_mode import reset_shared_quiet_state
+        reset_shared_quiet_state()
     except Exception:
         pass
     # webm_clip 的「会话结束」闸门是进程级 latch（issue #111）：测试里置位后
@@ -237,14 +333,17 @@ def _close_qt_top_level_widgets():
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app is not None:
+            _diag_sweep_reset()
             for widget in list(app.topLevelWidgets()):
                 try:
                     if not shiboken6.isValid(widget):
                         continue  # C++ 侧已销毁的半死窗口：跳过
+                    _diag_sweep(widget, 'pre')  # 只读取证：见 _diag_sweep（默认不写）
                     widget.deleteLater()
                     # 接收者定向：只处理这一个对象的 DeferredDelete，不触碰共享队列里
                     # 其他对象的删除任务与排队事件。
                     QCoreApplication.sendPostedEvents(widget, QEvent.Type.DeferredDelete)
+                    _diag_sweep(widget, 'post')
                 except RuntimeError:
                     pass
     except Exception:
@@ -318,3 +417,148 @@ def _close_webm_readers_at_session_end():
         _webm_clip_mod._reset_session_ending_for_tests()
     except Exception:
         pass
+
+
+# ------------------------------------------- 原生崩溃取证位（CI 诊断，非门禁）
+#
+# 原生崩溃杀掉整个 pytest 进程后，`-q` 的失败详情与进度点都还在缓冲里：既不知道
+# "死在哪一例哪一阶段"，也看不到"崩之前已经红了哪些用例"。不碰 pytest 自己的
+# faulthandler、不装信号处理器（faulthandler.register 对 SIGSEGV/SIGABRT 这类致命
+# 信号直接 RuntimeError 拒绝，见 CPython Modules/faulthandler.c 的 check_signum）。
+# 开关：DSPET_TEST_DIAG_DIR=<目录>；GH Actions 自动落 $RUNNER_TEMP/dspet-pytest-diag/；
+# 未开启时两个钩子第一行返回、清扫 fixture 里的取证行也不写：不建文件、不写一行。
+_diag_crumb = None
+# 清扫 fixture 的逐对象取证（见 _diag_sweep）：本轮已写行数 + 每轮上限。
+_diag_sweep_n = 0
+_DIAG_SWEEP_LINES = 12
+# Py_None 引用计数采样（见 _diag_none_sample）：只落行计数 + 上一例取值，无线程。
+_DIAG_NONEREF_LINES = 10
+_DIAG_NONEREF_DROP = 5000
+_diag_none_seen = 0
+_diag_none_last = None
+_diag_none_lines = 0
+
+
+def _diag_open():
+    import os
+    import tempfile
+    base = os.environ.get('DSPET_TEST_DIAG_DIR', '').strip()
+    if not base and os.environ.get('GITHUB_ACTIONS') == 'true':
+        base = os.path.join(os.environ.get('RUNNER_TEMP') or tempfile.gettempdir(),
+                            'dspet-pytest-diag')
+    if not base:
+        return None
+    try:
+        os.makedirs(base, exist_ok=True)
+        return open(os.path.join(base, 'pytest-breadcrumb.txt'), 'w',
+                    encoding='utf-8', buffering=1)
+    except OSError:
+        return None
+
+
+def _diag_note(line):
+    """落一行取证。诊断写入失败不得改变测试结果。"""
+    if _diag_crumb is None:
+        return
+    try:
+        _diag_crumb.write(line + '\n')
+    except (OSError, ValueError):
+        pass
+
+
+def _diag_none_sample(nodeid):
+    """逐测试采样一次 Py_None 引用计数，只在诊断开关打开时被调用（**无线程**）。
+
+    ``none_dealloc`` 只在 None 的 ob_refcnt 掉到 0 时触发，且只可能出现在 CPython
+    ≤3.11（3.12 起 None 是 immortal，同类引用计数损坏被静默——见报告 §5：那是掩盖，
+    不是修复）。落行规则：
+
+    * 第一条（基线）必落；
+    * 之后每 100 例落一条（看趋势）；
+    * 或相对**上一例**下降 ≥ ``_DIAG_NONEREF_DROP`` 立即落一条（逐测试下降，直接
+      指名是哪个测试干的）；
+    * 总行数只对基线与每 100 例的周期行封顶 ``_DIAG_NONEREF_LINES``；下降行**不受**
+      封顶——它是唯一能指名肇事测试的行，被封顶挡掉 = 把诊断本来要的信号自己扔掉。
+    * 落下的每一行都走**双通道**：crumb 照旧，另写一份到 ``sys.__stderr__``（workflow
+      只 ``tail -n 30`` 面包屑，几行历史样本必被尾窗丢掉；stderr 不受该窗口限制）。
+    """
+    global _diag_none_seen, _diag_none_last, _diag_none_lines
+    value = sys.getrefcount(None)
+    _diag_none_seen += 1
+    drop = None if _diag_none_last is None else _diag_none_last - value
+    _diag_none_last = value
+    spike = drop is not None and drop >= _DIAG_NONEREF_DROP
+    if not (spike or drop is None or _diag_none_seen % 100 == 0):
+        return
+    if not spike and _diag_none_lines >= _DIAG_NONEREF_LINES:
+        return
+    _diag_none_lines += 1
+    delta = '' if drop is None else f' d={-drop:+d}'
+    line = f'[none-refcount] {value}{delta} #{_diag_none_seen} {nodeid}'
+    _diag_note(line)
+    if _diag_crumb is not None and sys.__stderr__ is not None:
+        try:
+            print(line, file=sys.__stderr__, flush=True)
+        except (OSError, ValueError):
+            pass
+
+
+def _diag_sweep_reset():
+    global _diag_sweep_n
+    _diag_sweep_n = 0
+
+
+def _diag_sweep(widget, phase):
+    """清扫每个顶层窗口的**前/后**各写一行 ``[qt-sweep/{phase}] 类名(objName)``。
+
+    只在取证开关打开时写，且每轮最多 ``_DIAG_SWEEP_LINES`` 行（workflow 只
+    ``tail -n 30`` 面包屑，不封顶会被大户用例挤掉真崩点）。收口只在"包装还活着"时
+    生效：包装若被别处强引用（典型：``monkeypatch.setattr`` 打在 QWidget *实例*上，
+    undo 把旧值 bound method 写回实例字典形成自环），C++ 会先在这里被删掉而包装继续
+    活着——这两行就是用来区分"清扫删掉了什么"和"删完还剩什么"的。
+    """
+    global _diag_sweep_n
+    if _diag_crumb is None or _diag_sweep_n >= _DIAG_SWEEP_LINES:
+        return
+    _diag_sweep_n += 1
+    try:
+        try:
+            name = repr(widget.objectName())
+        except RuntimeError:
+            name = '<C++ 已删>'
+        _diag_note(f'[qt-sweep/{phase}] {type(widget).__name__}({name})')
+    except Exception:
+        pass
+
+
+def pytest_configure(config):
+    global _diag_crumb
+    _diag_crumb = _diag_open()
+
+
+def pytest_runtest_logstart(nodeid, location):
+    if _diag_crumb is not None:
+        try:
+            _diag_crumb.write(f'[start] {nodeid}\n')
+        except (OSError, ValueError):
+            pass  # 诊断写入失败不得改变测试结果。
+
+
+def pytest_runtest_logreport(report):
+    if _diag_crumb is None:
+        return
+    # 阶段结束即落盘（buffering=1 逐行 flush）：最后一行记录最后完成的阶段。
+    try:
+        _diag_crumb.write(f'[{report.when}] {report.nodeid}\n')
+        if report.failed and report.longrepr is not None and sys.__stderr__ is not None:
+            # 失败详情默认攒到会话末尾才打（进程被原生杀死就全丢）：改成立刻回显。
+            print(f'[diag-fail/{report.when}] {report.nodeid}\n{report.longrepr}',
+                  file=sys.__stderr__, flush=True)
+    except (OSError, ValueError):
+        pass  # 磁盘满或输出关闭时，保留 pytest 本身的判定和报告。
+    if report.when == 'teardown':
+        # 一例结束采一次 Py_None 计数（threading 0，落行规则见 _diag_none_sample）。
+        try:
+            _diag_none_sample(report.nodeid)
+        except Exception:
+            pass  # 取证绝不能让用例变红

@@ -688,6 +688,32 @@ def test_missing_audio_channel_degrades_to_bubble_only(tmp_path):
     assert len(app.win.bubbles) == 1
 
 
+def test_quiet_mode_defers_festival_bubble(tmp_path):
+    """免打扰期间节日提醒的气泡照旧进暂存队列（非回归：语音静音不改气泡语义）。
+
+    语音的静音判定在音频通道内（同一道闸，`quiet_blocked` 是唯一判据）；
+    本用例只钉住本服务这一半——被拦下的提醒必须攒住，而不是丢掉。
+    """
+    from pet import quiet_mode
+
+    service, app = _service(_cfg_with(tmp_path, festival_reminder_speak=True))
+    service.apply_config()
+    quiet_mode.shared_quiet_state().start(15)
+
+    service.remind_now()
+
+    assert app.win.bubbles == [], "免打扰期间不上屏"
+    assert quiet_mode.shared_quiet_state().pending_count() == 1
+
+
+def test_speak_hint_mentions_quiet_mode(tmp_path):
+    """设置页说明同步：语音播报行必须写明免打扰期间不出声。"""
+    page = _page(tmp_path)
+
+    hint = page.speak_check.accessibleDescription()
+    assert "免打扰" in hint, f"节日语音播报的说明没提免打扰：{hint!r}"
+
+
 # ---------------------------------------------------------------- 设置页「立即试听」
 def _page(tmp_path):
     from PySide6.QtWidgets import QApplication

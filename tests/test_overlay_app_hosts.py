@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QLockFile
@@ -131,6 +133,169 @@ def test_classic_chat_dispatcher_opens_with_overlay_host(tmp_path):
         _teardown(overlay)
 
 
+# ---------------------------------------------------------------- A1b 切角色同步聊天面（B07）
+def test_overlay_switch_character_syncs_open_chat_window(tmp_path):
+    """B07：overlay 主宠切角色后，已开着的完整聊天窗必须跟着换角色。
+
+    捕获模式的 ``PetInstance.switch_character`` 一直带这条同步（对齐
+    app.py:664-668），overlay 走的是 ``OverlayShell.switch_character``——缺的
+    正是它，切完角色再开口仍是旧角色的会话/头像/系统提示。
+    """
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        overlay.overlay.show()
+        overlay.open_full_chat()
+        window = inst.modern_chat_window
+        assert window is not None and window.character_id != "nova"
+
+        overlay.switch_character("nova")
+
+        assert overlay._sprite_config(overlay.sprite).get("character") == "nova"
+        assert window.character_id == "nova", "完整聊天窗必须跟着切角色"
+        assert window.session.character_id == "nova", "会话也按新角色取"
+    finally:
+        _teardown(overlay)
+
+
+def test_overlay_switch_character_syncs_island_chat_bubble(tmp_path):
+    """B07：岛对话气泡（桌宠隐藏时的对话面）同样是聊天面，跟着切角色。"""
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        class _Bubble:
+            def __init__(self):
+                self.switched: list[str] = []
+
+            def switch_character(self, character_id):
+                self.switched.append(character_id)
+
+        bubble = _Bubble()
+        shell.island_chat = bubble
+
+        overlay.switch_character("nova")
+
+        assert bubble.switched == ["nova"]
+    finally:
+        _teardown(overlay)
+
+
+# ---------------------------------------------------------------- R03 捕获模式：快速/岛气泡同步
+class _CaptureWin:
+    """捕获模式（legacy 单窗）的窗口替身：只提供热切换要用的两面。"""
+
+    def __init__(self, config) -> None:
+        self.cfg = config
+        self.agent_link_manager = None
+        self.detach_calls = 0
+
+    def detach_decode_sessions(self) -> None:
+        self.detach_calls += 1
+
+
+class _RecordingChatSurface:
+    """记录 ``set_pet_window`` / ``switch_character`` 的聊天面替身。"""
+
+    def __init__(self) -> None:
+        self.pet_windows: list = []
+        self.switched: list[str] = []
+
+    def set_pet_window(self, window) -> None:
+        self.pet_windows.append(window)
+
+    def switch_character(self, character_id) -> None:
+        self.switched.append(character_id)
+
+
+def _make_capture_app(tmp_path, monkeypatch):
+    """真 AppShell + 真 PetInstance + 捕获模式窗替身（窗口构造是素材库边界，用替身）。"""
+    config = Config(base=tmp_path)
+    config.save()
+    shell = AppShell(app, config)
+    inst = _HostInstance(shell, config)
+    shell.instance = inst
+    shell._instances = [inst]
+    inst.win = _CaptureWin(config)
+
+    def fake_build_window(self, character_id, lib=None, build_tray=True):
+        win = _CaptureWin(self.config)
+        self.win = win
+        return win
+
+    monkeypatch.setattr(app_mod.PetInstance, "_build_window", fake_build_window)
+    return shell, inst
+
+
+def test_capture_mode_switch_character_syncs_quick_and_island_bubbles(
+        tmp_path, monkeypatch):
+    """R03-B：捕获模式切角色，快速对话气泡与岛对话气泡必须一并同步。
+
+    ``PetInstance.switch_character`` 此前只同步完整聊天窗（legacy/modern），
+    快速气泡（``_show_quick_chat`` 复用时只刷 settings/session，身份仍是构造期
+    快照，按旧 ``character_id`` 取会话）与岛气泡（桌宠隐藏时的对话面）留在旧
+    角色上——切完在这两面开口还是旧角色的会话与系统提示。
+    """
+    shell, inst = _make_capture_app(tmp_path, monkeypatch)
+    old_win = inst.win
+    quick = _RecordingChatSurface()
+    inst.quick_chat = quick
+    island = _RecordingChatSurface()
+    shell.island_chat = island
+    legacy = _RecordingChatSurface()
+    modern = _RecordingChatSurface()
+    inst.legacy_chat_window = legacy
+    inst.modern_chat_window = modern
+
+    inst.switch_character("nova")
+
+    assert old_win.detach_calls == 1, "前提：走的是真热切换链路（旧窗解码会话已收尾）"
+    assert shell.config.get("character") == "nova"
+    for window in (legacy, modern):
+        assert window.pet_windows == [inst.win], "热切换后聊天窗要指回新窗"
+        assert window.switched == ["nova"]
+    assert quick.switched == ["nova"], "快速对话气泡必须跟着切角色"
+    assert island.switched == ["nova"], "岛对话气泡必须跟着切角色"
+
+
+def test_capture_mode_switch_character_without_bubbles_is_quiet(
+        tmp_path, monkeypatch):
+    """未创建的气泡（``quick_chat``/``island_chat`` 恒 None）不许掀掉切角色。"""
+    shell, inst = _make_capture_app(tmp_path, monkeypatch)
+    assert inst.quick_chat is None and shell.island_chat is None
+    legacy = _RecordingChatSurface()
+    inst.legacy_chat_window = legacy
+
+    inst.switch_character("nova")
+
+    assert shell.config.get("character") == "nova"
+    assert legacy.switched == ["nova"]
+
+
+def test_overlay_promotion_switches_open_chat_window_to_promoted_character(tmp_path):
+    """R03-A 端到端：主宠退出提升子宠后，已开着的聊天窗与它取的会话换成提升者的。
+
+    走真 AppShell + 真 PetInstance + 真聊天窗（``switch_character`` 真换
+    ``character_id`` 并按新角色重取会话），只把素材库与窗口构造换成替身。
+    """
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        overlay.overlay.show()
+        overlay.spawn_pet()
+        child = overlay._spawned[0]
+        # 子宠换角色（产品路径：写它自己的 slot 配置，主配置一字不动）
+        overlay.switch_character("nova", child)
+        overlay.open_full_chat()
+        window = inst.modern_chat_window
+        assert window is not None and window.character_id != "nova"
+
+        assert overlay.exit_pet(overlay.sprite) is True
+
+        assert overlay.sprite is None
+        assert child in overlay._spawned
+        assert window.character_id != "nova", "关闭0不能改变共享会话角色"
+        assert window.session.character_id == window.character_id
+    finally:
+        _teardown(overlay)
+
+
 # ---------------------------------------------------------------- A2 提醒落气泡
 def _bubble_text(overlay) -> str:
     bubble = overlay._speech_bubble
@@ -172,6 +337,59 @@ def test_voice_chime_and_festival_bubble_on_overlay_host(tmp_path):
         assert shell._toast_windows == [], "落了气泡就不该再弹系统通知"
     finally:
         _teardown(overlay)
+
+
+# ---------------------------------------------------------------- P3 免打扰监听表隔离
+
+
+# 上一条用例是否真的制造过残留（供紧邻的边界体检用例判断"这次有没有东西可查"）。
+_LEAK_PROBE: dict = {}
+
+
+def _chime_quiet_listeners() -> list:
+    """共享免打扰表里属于 ``VoiceChimeService`` 的模块回调（按身份认，不碰别人的订阅）。"""
+    from pet import quiet_mode
+
+    target = VoiceChimeService._on_quiet_state_changed
+    return [callback for callback in list(quiet_mode.shared_quiet_state()._listeners)
+            if getattr(callback, "__func__", None) is target]
+
+
+def test_chime_construction_without_stop_leaves_quiet_listener(tmp_path, request):
+    """P3：构造即挂的免打扰监听确实会在**进程级共享表**里留一条。
+
+    本文件此前正是这样漏的：``test_voice_chime_and_festival_bubble_on_overlay_host``
+    构造 ``VoiceChimeService`` 却从不 ``stop()``（只测一拍内的气泡落点），而清理
+    fixture 只长在 ``tests/test_voice_chime_service.py`` 里——模块级 autouse 不跨文件，
+    而 ``reset_shared_quiet_state()`` 只复位状态、**不动监听表**（订阅表是订阅方的
+    责任）。于是别的域照样漏一条持着服务与播放器的回调进共享表。
+
+    这里同时锁定收口手段的**位置**：必须是 conftest 提供给所有测试文件的那一条
+    （本文件自己的 fixture 修不了"别的域也漏"这件事）。
+    """
+    shell, inst, overlay = _make_overlay_app(tmp_path)
+    try:
+        chime = VoiceChimeService(shell)     # 构造即挂；本用例刻意不 stop()
+        chime.apply_config()
+
+        assert len(_chime_quiet_listeners()) == 1, "前提：构造确实往共享表挂了一条"
+        # 残留**故意留着**：下一条用例的边界体检靠它才有东西可查
+        _LEAK_PROBE["constructed"] = True
+        assert "_no_stale_chime_quiet_listeners" in request.fixturenames, \
+            "收口 fixture 必须由 conftest 全局面提供（只长在某个测试文件里等于别的域照旧漏）"
+    finally:
+        _teardown(overlay)
+
+
+def test_shared_quiet_table_is_clean_at_this_boundary():
+    """P3 边界体检：上一条用例留下的残留必须已被用例边界摘掉。
+
+    断言的是**边界收口**（上一条造残留 → 本条开头表干净），不是"表永远为空"：
+    单独跑本用例（``-k``）时前面没有制造残留的用例，跳过而不是空过。
+    """
+    if not _LEAK_PROBE.get("constructed"):
+        pytest.skip("单独/乱序运行时没有上一条用例制造的残留可查（边界断言针对测试序列）")
+    assert _chime_quiet_listeners() == [], "上一个用例的残留必须已被边界收口摘掉"
 
 
 class _NoThread:

@@ -152,7 +152,7 @@ class VoiceChimeSettingsPage(QWidget):
             SettingsSection(
                 "基础设置",
                 [
-                    SettingRow("voice_chime_enabled", "启用语音报时", "开启后按下方调度规则定时语音报时，并附台词/歌词（每天整套换新，日内按序取不同条目）。", self.enabled_check),
+                    SettingRow("voice_chime_enabled", "启用语音报时", "开启后按下方调度规则定时语音报时，并附台词/歌词（每天整套换新，日内按序取不同条目）。免打扰（含全屏看视频）期间不出声，气泡照旧攒着，退出后统一汇报。", self.enabled_check),
                     SettingRow("voice_chime_schedule", "报时频率", "整点 / 每30分钟 / 每15分钟 / 每5分钟 / 每分钟 / 自定义时间点。", self.schedule_select),
                     SettingRow("voice_chime_custom_times", "自定义时间点", "仅「自定义时间点」模式生效；HH:MM 逗号分隔，如 08:30, 12:00。", self.custom_edit),
                 ],

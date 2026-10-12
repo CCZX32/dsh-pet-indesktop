@@ -126,17 +126,37 @@ class CapLibrary:
 
 
 class CapConfig:
+    """假配置面 = 生产里的 ``instance.config``（overlay 拓扑下即 SlotRoutedConfig）。
+
+    每宠键的**真值在槽档案里**（规范 §五「唯一归属表」）：构造与 ``set`` 都把每宠键
+    写进 ``config-slot-0.json``，全局键留在内存里。旧版把每宠键只塞进这个内存字典、
+    由壳体回读的做法随契约作废——那样档案永远为空，读端只好回落默认值。
+    """
+
     def __init__(self, tmp_path: Path, values=None):
         self._values = dict(values or {})
         self.dir = tmp_path
         self.instance_id = ""
         self.saved = 0
+        self._write_slot_values(self._values)
+
+    def _write_slot_values(self, values) -> None:
+        from pet import pet_profiles
+
+        per_pet = {key: value for key, value in values.items()
+                   if key in pet_profiles.PER_PET_KEYS}
+        if not per_pet:
+            return
+        result = pet_profiles.write_profile_settings(self.dir, 0, per_pet)
+        if not result.ok:  # 假配置自己写不进去 = 测试前提没成立，别让用例默默跑在默认值上
+            raise AssertionError(f"CapConfig 每宠键落档失败：{result}")
 
     def get(self, key, default=None):
         return self._values.get(key, default)
 
     def set(self, key, value):
         self._values[key] = value
+        self._write_slot_values({key: value})
 
     def save(self):
         self.saved += 1

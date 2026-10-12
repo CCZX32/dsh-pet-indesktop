@@ -27,16 +27,24 @@ from tests.test_window_pause import FakeLibrary
 class _BigScreen:
     """合帧/跟手语义测试需要"无边界"环境：offscreen 默认屏只有 800×600，
     本文件的合成事件坐标贴近其边缘时会触发贴边钳位与绘制补偿（该语义由
-    tests/test_edge_reachability.py 专门锁定，不在此重复）。"""
+    tests/test_edge_reachability.py 专门锁定，不在此重复）。
+
+    尺寸必须显著大于被测目标：窗口初始位置是 **PetWindow 构造时按运行机真实
+    屏幕**算出来的（假屏在构造之后才装上），真实桌面上初始位置偏右下时，合帧
+    目标会超出 1920×1200 而被正常贴边钳位——实测本机 2560×1440 上虚拟位置被
+    钳成 (1611, 941)、期望 (2527, 1333)，6 条用例全红（CI 的 offscreen 屏小，
+    初始位置也小，所以 CI 绿）。取 4096×3072 后所有被测目标都落在边界内，
+    钳位不再参与本文件的判定。
+    """
 
     def name(self):
         return "big"
 
     def availableGeometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def geometry(self):
-        return QRect(0, 0, 1920, 1200)
+        return QRect(0, 0, 4096, 3072)
 
     def devicePixelRatio(self):
         return 1.0
@@ -48,6 +56,20 @@ _BIG_SCREEN = _BigScreen()
 @pytest.fixture
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _single_screen_desktop(monkeypatch):
+    """关掉「多屏活动区域」快照：本文件用假屏造无边界环境，而拖拽开始时取的
+    ``window_placement.desktop_area()``（#186 的多屏快照）走
+    ``QGuiApplication.screens()`` —— **绕过**本文件的假屏，于是在多显示器/带
+    缩放的真实桌面上，合成出来的目标位置会被钳到真实桌面边界、断言必红
+    （实测：注入 2×1920×1080 的多屏快照后本文件 6 条全红）。多屏钳位语义由
+    ``tests/test_edge_reachability.py`` 专门锁定，不在此重复。
+    """
+    from pet import window_placement
+
+    monkeypatch.setattr(window_placement, "desktop_area", lambda: None)
 
 
 def _press(pos: QPointF, global_pos: QPointF,

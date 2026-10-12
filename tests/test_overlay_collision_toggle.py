@@ -78,6 +78,11 @@ def _teardown(shell):
     overlay = getattr(shell, "overlay", None)
     if overlay is not None:
         overlay.close()
+    # 排空延迟音效回调：sprite_sound._submit 用 QTimer.singleShot(0, ...) 把播放
+    # 推迟到下一轮事件循环，不排空会漏进下一条用例的 play_sound 打桩里（音量 0.7
+    # 的碰撞音被记成别人的点击音）。调两次：回调执行本身也可能再投递事件。
+    QApplication.processEvents()
+    QApplication.processEvents()
 
 
 def test_refresh_settings_applies_main_collision_switch(tmp_path):
@@ -198,10 +203,12 @@ def _write_slot(parent, slot, **values):
     """按设置进程的写法改 ``config-slot-N.json``（真 Config + 真落盘）。"""
     from pet.config import Config
 
-    cfg = Config(base=parent, instance_id=f"slot-{slot}")
+    from pet.settings_slot_config import route_settings_config
+
+    cfg = route_settings_config(Config(base=parent, instance_id=f"slot-{slot}"))
     for key, value in values.items():
         cfg.set(key, value)
-    cfg.save()
+    assert cfg.save()
 
 
 def _notify_slot_saved(shell):
@@ -213,10 +220,12 @@ def _save_main(parent, shell, **values):
     """模拟主配置被外部（设置进程/主进程保存）改写：落盘 → reload → 应用。"""
     from pet.config import Config
 
-    other = Config(base=parent)
+    from pet.settings_slot_config import route_settings_config
+
+    other = route_settings_config(Config(base=parent, instance_id="slot-0"))
     for key, value in values.items():
         other.set(key, value)
-    other.save()
+    assert other.save()
     shell._config.reload()
     shell.refresh_settings()
 
@@ -341,7 +350,7 @@ def test_main_switch_change_keeps_child_own_values(tmp_path):
 
 
 def test_child_missing_or_broken_config_falls_back_and_never_touches_main(tmp_path):
-    """子宠缺文件 → 继承主配置；缺键/损坏 → 缺省 true；且不碰主配置/别宠。"""
+    """子宠缺文件/键取同源默认；坏档案不覆盖；不碰主配置或别宠。"""
     shell, cfg = _make_slot_shell(tmp_path, collision_enabled=False)
     try:
         shell.spawn_pet()
@@ -365,10 +374,11 @@ def test_child_missing_or_broken_config_falls_back_and_never_touches_main(tmp_pa
         slot_b.write_text("{oops", encoding="utf-8")
         _notify_slot_saved(shell)
         assert _flags(shell) == [False, True, True]
-        # A 的文件被删 → 继承主配置（旧"缺文件按主配置落种"语义）
+        # 档案缺失按同源默认 true，不持续继承主宠 false（固定身份规范 §五）。
         slot_a.unlink()
         _notify_slot_saved(shell)
-        assert _flags(shell) == [False, False, True]
+        assert _flags(shell) == [False, True, True]
+        assert not slot_a.exists()  # 读侧不能暗中重新落种。
         assert (cfg.dir / "config.json").read_bytes() == main_bytes
     finally:
         _teardown(shell)
@@ -395,9 +405,9 @@ def test_restore_and_promotion_keep_per_slot_switch(tmp_path):
 
         # 主宠退出 → 提升 slot-1（它自己的配置是 false）
         assert restored._exit_main_pet() is True
-        assert restored.sprite.collision_enabled is False
-        assert cfg2.get("collision_enabled") is False       # 提升者值落到主配置
-        assert _flags(restored) == [False, True]   # 新主(提升者)false、剩余子宠不变
+        assert restored.sprite is None
+        assert _flags(restored) == [False, True]
+        assert [restored._spawned_slots[s] for s in restored._spawned] == [1, 2]
     finally:
         _teardown(restored)
 

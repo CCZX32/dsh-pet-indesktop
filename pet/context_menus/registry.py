@@ -11,10 +11,18 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QWidgetAction
 
 from ..config import DEFAULT_MENU_EASTER_EGG
+from ..weather_menu import (
+    WEATHER_DISABLED_REASON,
+    add_show_weather,
+    add_weather_cities,
+    weather_menu_enabled,
+)
 from .fun_entry import add_ojingjing_entry
 from .icons import custom_file_menu_icon, vector_menu_icon
 from .quick_launch import add_quick_launch_menu, configured_quick_apps
 from .shared import (
+    MUSIC_ALIGN_DISABLED_REASON,
+    NETWORK_INFO_DISABLED_REASON,
     QUARK_PAN_URL,
     REPO_URL,
     add_action,
@@ -29,6 +37,7 @@ from .shared import (
     add_harness,
     add_hide_pet,
     add_look_screen,
+    add_memory_trim,
     add_agent_cost,
     add_music_lyric_align,
     add_music_next,
@@ -40,10 +49,13 @@ from .shared import (
     add_no_move,
     add_on_top,
     add_proactive_menu,
+    add_quiet_mode_menu,
     add_quit,
     add_return_corner,
     add_spawn_pet,
     add_submenu,
+    add_network_info,
+    network_info_menu_enabled,
     build_animation_categories,
     build_character_menu,
     build_size_menu,
@@ -66,10 +78,14 @@ ACTION_LABELS = {
     "music_lyric_align": "歌词对齐",
     "agent_cost": "显示本轮消费",
     "quick_launch": "快捷启动", "balance": "DeepSeek 余额",
+    "memory_trim": "回收内存",
     "harness": "启动 DeepSeek Harness", "deepseek_web": "打开网页版 DeepSeek",
     "check_update": "检查更新", "github_project": "GitHub 项目页",
     "quark_download": "夸克网盘下载", "agent_link": "Agent 联动",
     "proactive_screen": "主动识屏", "todo_panel": "待办提醒",
+    "quiet_mode": "免打扰",
+    "weather": "查看天气", "weather_cities": "天气城市",
+    "network_info": "网络信息",
     "modern_settings": "桌宠设置", "quit": "退出",
 }
 
@@ -91,9 +107,13 @@ ACTION_ICONS = {
     "music": "play", "music_pause": "pause", "music_open_netease": "play",
     "music_open_qqmusic": "play", "music_lyric_align": "play",
     "quick_launch": "application", "balance": "balance", "harness": "harness",
+    "memory_trim": "clear",
     "deepseek_web": "web", "check_update": "update", "github_project": "web",
     "quark_download": "download", "agent_link": "automation",
     "proactive_screen": "screen", "todo_panel": "todo",
+    "quiet_mode": "pause",
+    "weather": "weather", "weather_cities": "weather",
+    "network_info": "web",
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
     "festival_now": "todo", "festival_toggle": "todo",
@@ -131,20 +151,34 @@ def _music_lyric_configured(pet) -> bool:
     return bool(pet.cfg.get("music_lyric_enabled", False))
 
 
-def _music_align_ready(pet) -> bool:
-    """「歌词对齐」是否可用：只有位置靠本地时钟估算时才有意义。
+def _memory_trim_available(_pet) -> bool:
+    """「回收内存」只对 Windows 显示：其它平台没有 EmptyWorkingSet。
 
-    播放器报了真实进度（Chrome / QQ 音乐）时位置本来就跟着快进走，手动对齐
-    只会跟真值打架；还没有歌词可对齐时同理。**必须 isinstance 校验**——宿主
-    可能用 ``__getattr__`` 兜底返回任意对象（测试替身就这么干），只判 None 会
-    把无关对象当成控制器（同 ``shared._music_controller`` 的教训）。
+    判定走 ``pet/memory_trim.py::is_supported``（与执行层同一判据），不另写一份
+    ``sys.platform`` 比较——菜单给不给看和执行能不能跑必须是同一个真相。
     """
-    from ..music_lyric_controller import MusicLyricController
+    from .. import memory_trim
 
-    controller = getattr(pet, "_music_lyric", None)
-    if not isinstance(controller, MusicLyricController):
-        return False
-    return bool(controller.align_available())
+    return memory_trim.is_supported()
+
+
+# 「查看天气 / 天气城市」的判据与原因文案收在共享建造器模块（`weather_menu`），
+# 这里只做转发：开关真值只有一份，注册表的 enabled 与建造器写的 tooltip 同源。
+# （历史背景：旧版扁平菜单曾直调建造器绕过注册表，门只写在注册表上就会漏；
+# 旧版菜单已于 2026-10-08 退役，但"判定收在建造器里"的口径保持不动。）
+_WEATHER_DISABLED_REASON = WEATHER_DISABLED_REASON
+_weather_enabled = weather_menu_enabled
+
+
+def _music_align_ready(pet) -> bool:
+    """「歌词对齐」判据的转发（实现与原因文案在 ``shared.music_align_ready``）。
+
+    门收在共享建造器里（本函数转发的 ``shared.music_align_ready``）：
+    "能对齐"的判定与置灰必须同源，否则会出现"入口在、点了没反应"的死项。
+    """
+    from .shared import music_align_ready
+
+    return music_align_ready(pet)
 
 
 def _build_chat(menu, pet):
@@ -187,6 +221,16 @@ def _flag_toggle_spec(key: str, on_label: str, off_label: str, icon: str,
         )
 
     return _build
+
+
+def _network_info_enabled(pet) -> bool:
+    """「网络信息」入口的运行时启用态：设置里开着才可用（默认开）。
+
+    **只影响 enabled，不影响 available**：关掉开关时入口保留布局位置、渲染成
+    "灰掉 + 说明"（CONTEXT.md 的 Runtime Disabled），不把节点从菜单树里过滤掉——
+    过滤只用于"能力不可用"，本例里就是回调缺失（纯桌宠变体）。
+    """
+    return network_info_menu_enabled(pet)
 
 
 _build_voice_chime_toggle = _flag_toggle_spec(
@@ -269,10 +313,13 @@ class MenuActionRegistry:
                 add_music_lyric_align,
                 _music_lyric_configured,
                 enabled=_music_align_ready,
-                disabled_reason="当前不需要手动对齐（播放器会上报进度，或还没有歌词）",
+                disabled_reason=MUSIC_ALIGN_DISABLED_REASON,
             ),
             "music_open_netease": MenuActionSpec(add_music_open_netease),
             "music_open_qqmusic": MenuActionSpec(add_music_open_qqmusic),
+            # 平台门在 menu_layout 的 available_actions 过滤里生效（非 Windows
+            # 整条不出现）；builder 自身也有同一道门，legacy 扁平布局直接调它。
+            "memory_trim": MenuActionSpec(add_memory_trim, _memory_trim_available),
             "golden_spin": MenuActionSpec(
                 add_golden_spin,
                 _callback_available("trigger_golden_spin"),
@@ -294,6 +341,9 @@ class MenuActionRegistry:
                 add_proactive_menu,
                 lambda pet: sys.platform == "win32" and callable(getattr(pet, "on_open_chat", None)),
             ),
+            # 免打扰：进程级状态，任何宿主（PetWindow / SpriteMenuFacade）都可用，
+            # 不做能力判定——菜单里永远给得出入口，用户不必先找开关。
+            "quiet_mode": MenuActionSpec(add_quiet_mode_menu),
             "modern_settings": MenuActionSpec(
                 _build_settings, _callback_available("on_open_modern_settings")
             ),
@@ -311,6 +361,26 @@ class MenuActionRegistry:
             ),
             "festival_toggle": MenuActionSpec(
                 _build_festival_toggle, _callback_available("on_toggle_festival")
+            ),
+            # 天气：回调缺失 = 能力不可用（隐藏）；开关关掉 = 运行时置灰、位置保留
+            # （CONTEXT.md 的 Capability Unavailable / Runtime Disabled 口径）。
+            "weather": MenuActionSpec(
+                add_show_weather,
+                _callback_available("on_show_weather"),
+                enabled=_weather_enabled,
+                disabled_reason=_WEATHER_DISABLED_REASON,
+            ),
+            "weather_cities": MenuActionSpec(
+                add_weather_cities,
+                _callback_available("on_show_weather"),
+                enabled=_weather_enabled,
+                disabled_reason=_WEATHER_DISABLED_REASON,
+            ),
+            "network_info": MenuActionSpec(
+                add_network_info,
+                _callback_available("on_network_info"),
+                enabled=_network_info_enabled,
+                disabled_reason=NETWORK_INFO_DISABLED_REASON,
             ),
             "quit": MenuActionSpec(add_quit),
         }

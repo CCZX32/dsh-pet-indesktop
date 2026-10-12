@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-"""检查或清理 PyInstaller onefile 遗留的 _MEI* 临时目录。
+"""检查或清理本产品 PyInstaller onefile 遗留的 _MEI* 临时目录。
 
-默认是预览模式；只有明确传入 --delete 才会删除超过年龄阈值的目录。
+**归属是删除的前提**：只有带本产品归属标记（``pet.runtime_cleanup.OWNER_MARKER_NAME``）
+的运行目录才会成为候选；没有标记的 ``_MEI*`` 目录（别的 PyInstaller 应用的解包目录、
+本产品修复前留下的旧目录）一律保留，既不列出也不删除——目录名与年龄只是筛选条件。
+默认是预览模式；只有明确传入 --delete 才会删除超过年龄阈值的候选目录。
 """
 from __future__ import annotations
 
@@ -26,13 +29,23 @@ if str(ROOT) not in sys.path:
 
 from pet.runtime_cleanup import (  # noqa: E402
     DEFAULT_STALE_AGE_SECONDS,
+    OWNER_MARKER_NAME,
     cleanup_stale_runtime_dirs,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="检查或清理 PyInstaller onefile 遗留的 _MEI* 临时目录。"
+        description=(
+            "检查或清理本产品自己打过归属标记的 PyInstaller onefile 遗留 "
+            "_MEI* 临时目录（别人应用的解包目录不在清理范围内）。"
+        ),
+        epilog=(
+            f"删除前提是归属标记（本产品写在自己运行目录里的 {OWNER_MARKER_NAME}）："
+            "只有带该标记的 _MEI* 目录才会成为候选。没有标记的 _MEI* 目录"
+            "（别的 PyInstaller 应用的解包目录、本产品修复前留下的旧目录）一律保留，"
+            "既不列出也不删除。"
+        ),
     )
     parser.add_argument(
         "--temp-dir",
@@ -55,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--delete",
         action="store_true",
-        help="真正删除候选目录；不传此参数时只预览。",
+        help="真正删除候选目录（只删带本产品归属标记的候选）；不传此参数时只预览。",
     )
     return parser
 

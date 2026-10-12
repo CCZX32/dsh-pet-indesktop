@@ -97,6 +97,8 @@ from .menu_layout import (
     merge_default_menu_actions,
     resolve_menu_layout,
 )
+from . import settings_close_flow
+from .settings_slot_config import route_settings_config
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 from .update_settings import UpdatePage
 
@@ -162,10 +164,17 @@ from .persona_template import (
     CONDITIONAL_PARAMETERS,
     PARAMETERS,
 )
+from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
+from . import settings_network
+from . import settings_page_guide
+from . import settings_weather
 from . import settings_pet_controls
+from . import settings_quiet
+from . import settings_reset_defaults
+from . import settings_search
 
 
 # 语言配置页只展示用户能理解的事件名称；内部 key 仍用于保存和渲染。
@@ -231,6 +240,12 @@ DIALOGUE_PARAMS = {
 # 与 persona_template.PARAMETERS 保持同一真相源：调用点注入什么，这里就宣称什么。
 DIALOGUE_KEY_PARAMS = dict(PARAMETERS)
 
+# 搜索命中「被前置开关藏起来」的行时，指向必须先去打开的那一项（依赖不满足绝不
+# 自动改配置）。只登记会成为搜索目标的隐藏行；新加依赖时按需补一行。
+_SEARCH_HIDDEN_PREREQUISITES = {
+    "network_probe_interval": "island_network",
+}
+
 
 def dialogue_params_hint(key: str) -> str:
     """「可用参数」提示文案：区分保证注入与条件注入（仅上游记录提供时可用）。"""
@@ -250,7 +265,14 @@ class ModernSettingsDialog(QDialog):
     def __init__(self, config, parent=None, *, include_ai: bool = True,
                  standalone: bool = False, initial_page: str | None = None):
         super().__init__(parent)
-        self.config = config
+        # 子宠设置页：非 per-slot 键直读**主**配置（而不是 slot 文件里的无效快照），
+        # 保存时按同一分流写回。不适用（主身份 / legacy 拓扑）时原样返回，
+        # 见 pet/settings_slot_config.py 的模块 docstring。
+        config = route_settings_config(config)
+        # 每张表单一份**独立编辑视图**（草稿 + 编辑代次基线各自一份，运行期那份保持只读）：
+        # 复用运行期那份会让"旧表单钉住的代次"跨窗存活，重开设置永远存不进去。
+        opener = getattr(config, "new_form_view", None)
+        self.config = config = opener() if callable(opener) else config
         self.include_ai = bool(include_ai)
         # standalone=True：本对话框跑在独立设置进程（python -m pet --settings）里，
         # 没有桌宠窗口/AppShell 可依附。只影响下面几处显式分支，默认 False 时
@@ -310,6 +332,9 @@ class ModernSettingsDialog(QDialog):
         self.sidebar.setIconSize(QSize(18, 18))
         self.sidebar.setSpacing(2)
         sidebar_layout.addWidget(self.sidebar, 1)
+        # 全局兜底入口（命令而非偏好项，故放侧栏底部）：实现全在
+        # pet/settings_reset_defaults.py（本文件有行数预算），这里只做接线。
+        settings_reset_defaults.create_reset_button(self, sidebar_layout)
         self.version_footer = QLabel(f"版本 v{__version__}", sidebar_pane)
         self.version_footer.setObjectName("settingsVersion")
         self.version_footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -331,22 +356,26 @@ class ModernSettingsDialog(QDialog):
         self.harness_autostart_check = ToggleSwitch(self)
         self._harness_autostart_initial = bool(self.config.get("harness_autostart", False))
         self.harness_autostart_check.setChecked(self._harness_autostart_initial)
-        # 自启目标下拉（2026-10 双目标）：auto=检测到桌面端优先桌面端、否则 web；
+        # 自启目标下拉（2026-10 双目标；2026-10 语义收紧）：auto 与 service 都是
+        # 「只拉起 dsh 服务」（不开浏览器、不开界面），web/desktop 才是显式要界面；
         # 只作用于「随桌宠启动」，菜单的两个启动入口是显式选择（不受本项影响）。
         # 桌面端探测/自动拉起本轮只支持 Windows，唯一口径是
         # harness_launcher.DESKTOP_SUPPORTED（不在设置页另写一份平台判定）。
         # 不支持的平台上该项**保留但置灰**（能力暂不可用 ≠ 永久不支持，见
         # docs/SETTINGS-CHANGE-GATES.md §4「暂不可用的能力保留并解释原因」），
-        # 并保证 desktop 绝不会被写回：显示与保存两处都回落 auto（该平台上
-        # auto 解析就是 web），存量配置里的 desktop 因此不会变成无声死选项。
+        # 并保证 desktop 绝不会被写回：显示与保存两处都回落 auto（auto 与平台
+        # 无关，解析就是 service），存量配置里的 desktop 因此不会变成无声死选项。
         self._harness_desktop_available = bool(harness_mod.DESKTOP_SUPPORTED)
         self.harness_launch_target_select = ModernSelect(self, width=190)
-        self.harness_launch_target_select.addItem(
-            "自动（桌面端优先）" if self._harness_desktop_available else "自动（dsh web 界面）",
-            "auto",
-        )
+        self.harness_launch_target_select.addItem("自动（仅服务，不开界面）", "auto")
+        self.harness_launch_target_select.addItem("仅 dsh 服务（不开界面）", "service")
         self.harness_launch_target_select.addItem("dsh web 界面", "web")
         self.harness_launch_target_select.addItem("桌面端界面", "desktop")
+        # 自绘文本区不带省略号：控件宽度按**最长项文案**算，不写死固定值
+        # （「仅 dsh 服务（不开界面）」在默认字体下要 216px，写死 190 会把尾部裁掉）。
+        self.harness_launch_target_select.setFixedWidth(
+            max(190, self.harness_launch_target_select.suggestedWidth())
+        )
         if not self._harness_desktop_available:
             self.harness_launch_target_select.setItemDisabled(
                 self.harness_launch_target_select.findData("desktop"), True
@@ -359,11 +388,10 @@ class ModernSettingsDialog(QDialog):
             target = "auto"
         idx = self.harness_launch_target_select.findData(target)
         self.harness_launch_target_select.setCurrentIndex(max(0, idx))
-        if self.config.instance_id:
-            self.harness_autostart_check.setEnabled(False)
-            self.harness_autostart_check.setToolTip("仅主桌宠可设置")
-            self.harness_launch_target_select.setEnabled(False)
-            self.harness_launch_target_select.setToolTip("仅主桌宠可设置")
+        # 子宠页曾经在这里置灰（"仅主桌宠可设置"）：当时子宠页保存写的是
+        # config-slot-N.json，而这两个键运行期只读主配置，改了等于没改。
+        # 独立设置进程现在按 key 分流（非 per-slot 键直写主配置，见
+        # pet/settings_slot_config.py），子宠页改的这两个键真生效，置灰随之摘除。
 
         # 灵动岛控件构建保留在对话框本体，便于上游直接修改后上传。
         island_cfg = self.config.get("dynamic_island", {})
@@ -461,21 +489,13 @@ class ModernSettingsDialog(QDialog):
         general_layout = QVBoxLayout(general_content)
         general_layout.setContentsMargins(0, 0, 0, 0)
         general_layout.setSpacing(18)
-        autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（仅主桌宠可设置）"
+        autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（影响所有桌宠）"
         # 「自启目标」的说明随平台变：桌面端项在非 Windows 上置灰，文案必须
-        # 说清原因（不能留着「自动 = 检测到桌面端就起桌面端」这种本平台做不到的话）。
-        if self._harness_desktop_available:
-            harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：自动 = 检测到桌面端安装则起桌面端、否则起 dsh web。"
-                "右键菜单/托盘的「启动 dsh web 界面」「启动桌面端界面」是你点哪项就起哪项，"
-                "不受本项影响；「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
-            )
-        else:
-            harness_target_hint = (
-                "只决定「随桌宠启动」拉起哪一个：本平台暂不支持自动拉起桌面端（本版本仅 Windows），"
-                "所以「桌面端界面」置灰、自动 = 起 dsh web；右键菜单里的「启动桌面端界面」会如实提示不支持、"
-                "不会静默改开网页。「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
-            )
+        # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。逐字文案
+        # 落在 settings_pet_controls.harness_target_hint（同行数预算约定）。
+        harness_target_hint = settings_pet_controls.harness_target_hint(
+            self._harness_desktop_available
+        )
         launch_rows = [
             SettingRow("autostart", "开机自启", autostart_desc, self.autostart_check),
             SettingRow(
@@ -485,7 +505,7 @@ class ModernSettingsDialog(QDialog):
                 "本项要同时开着 DSH 联动才会自启——联动关着时 dsh web 没有消费者，拉起只是白占一个进程。"
                 "关闭本项后不再自动拉起；已经跑起来的 dsh web 不因此退出，例外是刚在拉起探测期间关掉本项——"
                 "那一次刚拉起的实例会被立刻收掉。稳态下要等桌宠退出或关闭 DSH 联动时才收口。"
-                "桌面端是你自己的应用，桌宠退出或关闭本项都不会结束它。仅主桌宠生效。",
+                "桌面端是你自己的应用，桌宠退出或关闭本项都不会结束它。此设置影响所有桌宠。",
                 self.harness_autostart_check,
             ),
             SettingRow(
@@ -531,7 +551,7 @@ class ModernSettingsDialog(QDialog):
                     "后台服务",
                     [
                         SettingRow("balance_refresh", "余额自动刷新", "设置后台刷新间隔；0 分钟表示关闭。", self.balance_refresh_spin),
-                        SettingRow("balance_tier_mode", "峰谷提示文案", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
+                        SettingRow("balance_tier_mode", "高峰 / 空闲时段提示", "选择 DeepSeek 高峰/空闲提示的显示风格。", self.balance_tier_mode_select),
                         SettingRow(
                             "balance_tier_peak", "高峰自定义文本", "仅“自定义”模式生效；留空回退默认“高峰”。", self.balance_tier_peak_edit, stacked=True
                         ),
@@ -562,9 +582,9 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_enabled", "启用灵动岛", "显示独立胶囊小窗；桌宠隐藏后仍可常驻。", self.island_enabled_check),
                     SettingRow("dynamic_island_icon", "显示图标", "在胶囊左侧显示角色图标。", self.island_icon_check),
                     SettingRow("dynamic_island_name", "显示名称", "显示当前角色名称。", self.island_name_check),
-                    SettingRow("dynamic_island_info", "显示信息槽", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
+                    SettingRow("dynamic_island_info", "显示中间信息栏", "显示时间/余额/自定义短文本等信息。", self.island_info_check),
                     SettingRow("dynamic_island_status", "显示状态灯", "显示右侧状态圆点。", self.island_status_check),
-                    SettingRow("dynamic_island_info_mode", "信息槽内容", "选择信息槽显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
+                    SettingRow("dynamic_island_info_mode", "信息栏显示什么", "选择信息栏显示的内容；自定义文本在下方填写。", self.island_info_mode_select),
                     SettingRow(
                         "dynamic_island_style",
                         "背景风格",
@@ -575,7 +595,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("dynamic_island_accent", "主题色", "图标底圈、事件闪光、停靠描边共用的点缀色。", self.island_accent_select),
                     SettingRow("dynamic_island_icon_value", "图标", "默认显示鱼本体头像；可选 emoji 图标，首次绘制会多占约 30MB 内存。", self.island_icon_select),
                     SettingRow(
-                        "dynamic_island_custom_text", "自定义短文本", "信息槽选择“自定义短文本”时显示的内容。", self.island_custom_text_edit, stacked=True
+                        "dynamic_island_custom_text", "自定义短文本", "信息栏选择“自定义短文本”时显示的内容。", self.island_custom_text_edit, stacked=True
                     ),
                     SettingRow(
                         "dynamic_island_click_action",
@@ -613,6 +633,9 @@ class ModernSettingsDialog(QDialog):
                 island_content,
             )
         )
+        # 灵动岛指标（issue #172 + P1 Slice C）：控件/行/保存在 settings_network（行数预算原因）。
+        island_layout.addWidget(SettingsSection(
+            "桌面组件", settings_network.build_island_network_rows(self), island_content))
         island_layout.addStretch(1)
         self._add_page("灵动岛", "island", self._page_shell("灵动岛", island_content))
 
@@ -624,7 +647,9 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "动画",
                 [
-                    SettingRow("playback_speed", "播放速率", "控制所有桌宠动画的播放速度。", self.speed_select),
+                    # F06：``playback_speed`` 是**每宠**键（``PER_PET_KEYS``，B7b 起
+                    # 右键菜单的速率也只改被点的那一只），文案不许再说"所有桌宠"。
+                    SettingRow("playback_speed", "播放速率", "控制这只桌宠动画的播放速度。", self.speed_select),
                     SettingRow("animation_gap", "动作等待间隔", "非待机动作之间的休息时间；0 秒表示连续播放。", self.gap_spin),
                     SettingRow(
                         "idle_low_fps",
@@ -643,9 +668,9 @@ class ModernSettingsDialog(QDialog):
                 "音乐关联",
                 [
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
-                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
+                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制，酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
-                ] + settings_music.browser_media_rows(self),
+                ] + settings_music.browser_media_rows(self) + settings_music.foobar_lyrics_rows(self),
                 behavior_content,
             )
         )
@@ -654,6 +679,7 @@ class ModernSettingsDialog(QDialog):
                 "拖拽与弹射",
                 [
                     SettingRow("drag_physics", "拖动物理", "启用拖拽惯性、重力和边缘反弹。", self.drag_physics_check),
+                    SettingRow("drop_gravity", "静止放手下落", "松开鼠标时如果宠物几乎没移动，它不再停在半空，而是自然落下、落地静止；贴地松手不会弹起。与「拖动物理」无关：关掉拖动物理后甩出惯性依然不生效。", self.drop_gravity_check),
                     SettingRow("throw_strength", "甩出力度", "控制桌宠被甩出或弹射发射时的最大速度限制。", self.throw_strength_select),
                     SettingRow("slingshot_enabled", "弹弓弹射", "拖拽桌宠时点击右键进入蓄力瞄准，松开左键弹射飞出（Esc或右键取消）。", self.slingshot_check),
                     SettingRow("lock_position", "锁定位置", "桌宠固定不动，无法拖动（点击互动仍有效）。", self.lock_position_check),
@@ -685,13 +711,7 @@ class ModernSettingsDialog(QDialog):
                     ),
                     SettingRow("spawn_scale", "小肥鱼大小", "关闭“继承大小”时，新生成小肥鱼使用的桌面尺寸。", self.spawn_scale_combo, stacked=True),
                     SettingRow(
-                        "spawn_inherit_dynamic_island",
-                        "生小肥鱼继承灵动岛",
-                        "默认关闭：新生成的小肥鱼不打开自己的灵动岛。开启后小肥鱼继承主肥鱼的灵动岛设置。",
-                        self.spawn_inherit_dynamic_island_check,
-                    ),
-                    SettingRow(
-                        "clear_spawned_pets", "一键退出子肥鱼", "关闭所有已生成的小肥鱼，并删除它们的配置、会话与待办数据。", self.clear_spawned_pets_btn
+                        "clear_spawned_pets", "一键退出子肥鱼", "关闭所有已生成的小肥鱼。它们的档案、设置、会话与待办数据全部保留，随时可以再生成。", self.clear_spawned_pets_btn
                     ),
                 ],
                 behavior_content,
@@ -707,10 +727,10 @@ class ModernSettingsDialog(QDialog):
                         "多开桌宠之间发生碰撞物理互动。开启鼠标穿透的桌宠仍会参与碰撞，锁定位置的桌宠作为固定障碍。",
                         self.collision_enabled_check,
                     ),
-                    SettingRow("collision_restitution", "弹性系数", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
+                    SettingRow("collision_restitution", "撞后弹力", "碰撞反弹的能量保留程度（0~1.00，默认 0.82）。", self.collision_restitution_spin),
                     SettingRow("collision_friction", "摩擦系数", "擦边碰撞时的切向摩擦阻力（0~0.30，默认 0.08）。", self.collision_friction_spin),
-                    SettingRow("collision_mass_scale", "质量倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
-                    SettingRow("collision_impulse_cap", "冲量上限", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
+                    SettingRow("collision_mass_scale", "体重倍率", "桌宠的基础质量加权倍率（0.5~2.0，默认 1.0）。", self.collision_mass_scale_spin),
+                    SettingRow("collision_impulse_cap", "最大撞击力度", "单次碰撞能施加的最大冲量上限（1000~12000，默认 9000）。", self.collision_impulse_cap_spin),
                     SettingRow("collision_sound_enabled", "碰撞音效", "碰撞时播放音效反馈。", self.collision_sound_check),
                     SettingRow("collision_sound_volume", "碰撞音量", "调整碰撞音效播放音量。", self.collision_sound_volume_spin),
                 ],
@@ -726,7 +746,7 @@ class ModernSettingsDialog(QDialog):
         # 行数预算原因；组名与顺序的既有契约见 tests/test_menu_layout.py）。
         # Agent 联动：音效设置
         agent_sound_rows = [
-            SettingRow("agent_sound_enabled", "Agent 音效联动", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
+            SettingRow("agent_sound_enabled", "AI 编程助手提示音", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
             SettingRow("agent_sound_start", "开始工作提示音", "Agent 进入工作状态时播放。", self.agent_sound_start_widget, stacked=True),
             SettingRow("agent_sound_done", "任务完成提示音", "Agent 完成任务时播放。", self.agent_sound_done_widget, stacked=True),
             SettingRow("agent_sound_error", "发生错误提示音", "Agent 出现错误异常时播放。", self.agent_sound_error_widget, stacked=True),
@@ -883,10 +903,6 @@ class ModernSettingsDialog(QDialog):
         menu_page_layout = QVBoxLayout(menu_content)
         menu_page_layout.setContentsMargins(0, 0, 0, 0)
         menu_page_layout.setSpacing(18)
-        self.menu_template_select = ModernSelect(menu_content, width=156)
-        self.menu_template_select.addItem("新版菜单", "modern")
-        self.menu_template_select.addItem("旧版兼容菜单", "legacy")
-        self.menu_template_select.setCurrentData(str(self.config.get("context_menu_template", "modern") or "modern"))
         menu_available_actions = set(MENU_ACTIONS.ids)
         if sys.platform != "win32":
             menu_available_actions.discard("proactive_screen")
@@ -908,7 +924,6 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "内容与布局",
                 [
-                    SettingRow("menu_template", "菜单模式", "旧版仅用于迁移期兼容；内容编排只作用于新版菜单。", self.menu_template_select),
                     SettingRow("context_menu_layout", "菜单编排", "调整显示、顺序和层级；左侧编辑，右侧同步预览。", self.menu_layout_editor, stacked=True),
                 ],
                 menu_content,
@@ -985,6 +1000,7 @@ class ModernSettingsDialog(QDialog):
         self.island_info_mode_select.currentIndexChanged.connect(self._update_island_custom_text)
         self.egg_enabled_check.toggled.connect(self._update_egg_controls)
         self.egg_enabled_check.toggled.connect(self._sync_menu_action_states)
+        self.network_info_menu_check.toggled.connect(self._sync_menu_action_states)
         self.quick_launch_editor.changed.connect(self._sync_menu_action_states)
         self.collision_enabled_check.toggled.connect(self._update_collision_controls)
         self.collision_sound_check.toggled.connect(self._update_collision_sound_controls)
@@ -1023,6 +1039,8 @@ class ModernSettingsDialog(QDialog):
             from .settings_standalone import install_standalone_hooks
 
             install_standalone_hooks(self)
+        # 全部行（含域导航重建时才造出来的文件识别行）就位后再装「已修改」标记
+        settings_default_marks.install(self)
 
     def _sync_menu_action_states(self, *_args) -> None:
         enabled = set(self.menu_available_actions)
@@ -1030,6 +1048,8 @@ class ModernSettingsDialog(QDialog):
             enabled.discard("quick_launch")
         if not self.egg_enabled_check.isChecked():
             enabled.discard("ojingjing")
+        if not self.network_info_menu_check.isChecked():
+            enabled.discard("network_info")
         self.menu_layout_editor.set_enabled_actions(enabled)
 
     def _build_pet_controls(self) -> None:
@@ -1217,7 +1237,7 @@ class ModernSettingsDialog(QDialog):
                         "她会偶尔看一眼你在用的软件并说句话。截图只在内存处理、不落盘、不写入会话。",
                         self.pro_enabled_check,
                     ),
-                    SettingRow("proactive_dry_run", "dry-run 验证模式", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
+                    SettingRow("proactive_dry_run", "试运行（只记日志、不花钱）", "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
                     SettingRow(
                         "proactive_preset",
                         "陪伴节奏预设",
@@ -1232,9 +1252,9 @@ class ModernSettingsDialog(QDialog):
             SettingsSection(
                 "频率参数（自定义预设时生效）",
                 [
-                    SettingRow("proactive_dwell", "窗口停留门限（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
-                    SettingRow("proactive_cooldown", "关怀冷却间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
-                    SettingRow("proactive_min_interval", "最小请求间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
+                    SettingRow("proactive_dwell", "在同一窗口停多久才看（秒）", "同一前台窗口持续停留该时长才可能触发。", self.pro_dwell_spin),
+                    SettingRow("proactive_cooldown", "两次搭话至少间隔", "两次关怀的最短间隔，支持秒/分钟。", self._pro_cooldown_row()),
+                    SettingRow("proactive_min_interval", "两次识屏最短间隔（秒）", "免费模型的硬保护，不建议调太小。", self.pro_min_interval_spin),
                     SettingRow("proactive_daily_cap", "每日请求上限", "DeepSeek 视觉单次约 ¥0.003；上限 9999 约等于不限。", self.pro_cap_spin),
                 ],
                 content,
@@ -1250,7 +1270,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("proactive_pre_cue", "触发前先兆提示", "触发前先冒一句「让我看看……」。", self.pro_precue_check),
                     SettingRow(
                         "proactive_free",
-                        "识屏优先用独立视觉配置",
+                        "识屏用单独的看图模型",
                         "开：服务商配了独立视觉端点（如免费的智谱 GLM-4.6V-Flash）时识屏走它；关：始终跟随聊天模型。",
                         self.pro_free_check,
                     ),
@@ -1270,7 +1290,7 @@ class ModernSettingsDialog(QDialog):
                         stacked=True,
                     ),
                     SettingRow("proactive_whitelist_add", "快捷添加", "点击后 3 秒内切换到目标窗口，自动采样进程名/标题。", self.pro_add_btn),
-                    SettingRow("proactive_memory_clear", "陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
+                    SettingRow("proactive_memory_clear", "清空陪伴记忆", "只存进程名和活动分类（不落标题、不存截图），可随时清空。", self.pro_clear_mem_btn),
                 ],
                 content,
             )
@@ -1563,12 +1583,17 @@ class ModernSettingsDialog(QDialog):
         优先走 PetWindow 上已接线的 ``on_clear_spawned_pets``（= AppShell 路径，
         含进程内子窗前置于关闭）；拿不到回调（独立设置进程：本进程既无桌宠壳也
         无 sprite 世界）时统一走 **D12 指令通道**：写指令文件，由主进程
-        （OverlayShell / AppShell）经 config 目录 watcher + 轮询消费；按本配置
-        身份回填 target，语义收窄到"这一只"（主身份 = 全部）。
+        （OverlayShell / AppShell）经 config 目录 watcher + 轮询消费。
 
-        4.4a：legacy 的跨进程 taskkill 回退（child_pet_cleanup：runtime 标记 +
-        slot 锁 + taskkill）随多进程多宠退役层停用——两个拓扑现在共用同一条
-        指令通道，不再有"按钮静默失效"的拓扑分叉。
+        **这是全局动作，target 由"身份是不是主宠"决定，不由身份字符串真值决定**（判据与
+        ``settings_slot_config.is_main_identity`` 同源 = slot 号，不是字符串）：主身份 →
+        ``target=None``（= 退全部子肥鱼，两个消费者的"No target"分支），子宠身份 → 该子槽。
+        旧写法回填 ``slot_from_instance_id(instance_id)``，而 slot0 从 G1 起有显式
+        ``slot-0`` 身份 ⇒ 主宠页写出 ``target=0``，消费者把它当**子槽**去 ``_spawned`` 里找
+        （主 sprite 不在其中）→ 静默 no-op。
+
+        4.4a：legacy 的跨进程 taskkill 回退（child_pet_cleanup / runtime 标记 / slot 锁）
+        随多进程多宠退役层停用——两个拓扑现在共用同一条指令通道，不再有拓扑分叉。
 
         批 I：无确认框无结果框（操作不删数据可重新生成，子肥鱼消失即反馈）。
         """
@@ -1581,21 +1606,30 @@ class ModernSettingsDialog(QDialog):
             slot_from_instance_id,
             write_command,
         )
-        target = slot_from_instance_id(self.config.instance_id)
+        from .settings_slot_config import is_main_identity
+        target = (None if is_main_identity(self.config.instance_id)
+                  else slot_from_instance_id(self.config.instance_id))
         if write_command(self.config.dir, CMD_EXIT_SPAWNED_PETS, target=target):
             logging.info("退出子肥鱼：已写下指令（target=%s，主进程消费）", target)
         else:
             logging.warning("退出子肥鱼：写指令文件失败，本次未执行")
 
     def _apply_agent_sound_enabled_now(self, checked: bool) -> None:
-        """音效总开关即时生效，不等对话框关闭（合并写回，不动其他 agent_link 键）。"""
+        """音效总开关即时生效，不等对话框关闭（合并写回，不动其他 agent_link 键）。
+
+        写盘前先 reload（同 ``_write_config``）：``Config.save()`` 落的是整份内存
+        视图，而设置默认跑在独立进程里，内存快照从启动起就陈旧——不重读就会把
+        设置窗开着期间外部（托盘/主进程）改过的其他键一起盖回去。
+        """
+        self.config.reload()
         agent_cfg = dict(self.config.get("agent_link", {}))
         agent_cfg["sound_enabled"] = bool(checked)
         self.config.set("agent_link", agent_cfg)
         self.config.save()
 
     def _apply_click_sound_enabled_now(self, checked: bool) -> None:
-        """点击音效开关即时生效，不等对话框关闭。"""
+        """点击音效开关即时生效，不等对话框关闭（写盘前 reload，理由同上）。"""
+        self.config.reload()
         self.config.set("click_sound_enabled", bool(checked))
         self.config.save()
         if bool(checked):
@@ -1720,6 +1754,9 @@ class ModernSettingsDialog(QDialog):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(18)
             for section in sections:
+                if isinstance(section, QWidget):  # 已构造好的块（折叠框等）原样进布局
+                    layout.addWidget(section)
+                    continue
                 title, rows, *options = section
                 rows = [row for row in rows if row is not None]
                 if rows:
@@ -1736,8 +1773,11 @@ class ModernSettingsDialog(QDialog):
 
         general = page_content(
             [
-                ("应用启动", claim("autostart", "harness_autostart", "harness_launch_target")),
+                ("应用启动", claim("autostart")),
                 ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
+                # 首屏只回答"第一天会问的问题"：凡答案涉及 harness/dsh 的（自启服务、
+                # 自启目标）都是第 N 天才用的，进折叠——不是藏功能，是按"第几天用到"分层。
+                ("启动项（高级）", claim("harness_autostart", "harness_launch_target"), True),
                 # 「多开」分组已随拓扑收口 Phase A 隐藏（见上方注释）
             ]
         )
@@ -1751,18 +1791,39 @@ class ModernSettingsDialog(QDialog):
             "collision_impulse_cap",
             "collision_sound_volume",
         )
-        pet = page_content(
-            [
-                ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
-                ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media")
-                 + settings_music.build_music_player_rows(self)),
-                ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
-                ("边缘探头", claim("edge_probe")),
-                ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
-                ("多开碰撞", collision_primary),
-                ("碰撞参数（高级）", collision_advanced, True),
-            ]
+        # 音乐关联的故障恢复参数（标题格式 + 播放器路径）另立高级组：组名直说用途。
+        # 组序裁定：高频组按使用频率递减（标签 1 内音乐关联第 2），高级组垫底其标签页。
+        music_advanced = (
+            claim("foobar_title_format") + settings_music.build_music_player_rows(self))
+        # 「桌宠」域（2026-10-08 第二刀）：域内是两个**互斥任务**——「它长什么样 /
+        # 唱不唱歌」与「它怎么动 / 怎么撞」，页内切成两个标签，首屏只管一个任务。
+        # 侧栏 10 域是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
+        # _search_settings 的 activate_for_descendant 自动切标签。
+        pet = SettingsTabContainer(self)
+        pet.addTab(
+            "display_music",
+            "显示与音乐",
+            page_content(
+                [
+                    ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
+                    ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
+                    (settings_music.advanced_group_title(self), music_advanced, True),
+                ]
+            ),
+        )
+        pet.addTab(
+            "motion_collision",
+            "动作与碰撞",
+            page_content(
+                [
+                    ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
+                    ("拖拽与弹射", claim("drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
+                    ("边缘探头", claim("edge_probe")),
+                    ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "clear_spawned_pets")),
+                    ("多开碰撞", collision_primary),
+                    ("碰撞参数（高级）", collision_advanced, True),
+                ]
+            ),
         )
         # 「互动」域（2026-09-22 分页）：整页在本模块构建（settings_interaction，
         # 行数预算原因），页内用任务标签分成「点击与音效 / 自言自语」两个同级任务；
@@ -1776,7 +1837,7 @@ class ModernSettingsDialog(QDialog):
             "菜单编排",
             page_content(
                 [
-                    ("内容与布局", claim("menu_template", "context_menu_layout")),
+                    ("内容与布局", claim("context_menu_layout") + settings_network.build_menu_rows(self)),
                 ]
             ),
         )
@@ -1812,9 +1873,23 @@ class ModernSettingsDialog(QDialog):
             ),
         )
         menu.setProperty("contentMaxWidth", 1240)
-        island_rows = list(old_pages.get("灵动岛", QWidget()).findChildren(SettingRow))
+        island_rows = settings_page_guide.rows_in_layout_order(old_pages.get("灵动岛", QWidget()))  # 布局顺序，不是创建顺序
         claimed.update(island_rows)
-        desktop_components = page_content([("桌面胶囊（灵动岛）", island_rows)])
+        # 网络延迟检测（高级）只能在**最终域装配处**拆：旧岛页整节会被摊平进同一个
+        # 「桌面胶囊（灵动岛）」卡片（R2 §一-2）。只拆探测间隔行，其余岛行不动。
+        interval_rows = [row for row in island_rows
+                         if row.objectName() == "settingRow_network_probe_interval"]
+        island_rows = [row for row in island_rows if row not in interval_rows]
+        desktop_components = page_content(
+            [
+                ("桌面胶囊（灵动岛）", island_rows),
+                ("网络延迟检测（高级）", interval_rows, True),
+            ]
+        )
+        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是一条误导标题）。
+        for section in desktop_components.findChildren(SettingsSection):
+            if section.rows and all(row.isHidden() for row in section.rows):
+                section.setVisible(False)
 
         ai_sections = None
         if self.ai_page is not None:
@@ -1866,24 +1941,32 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.setParent(self)
             self.ai_page.hide()
 
-        proactive_rows = list(old_pages.get("主动识屏", QWidget()).findChildren(SettingRow))
-        claimed.update(proactive_rows)
-        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
-        claimed.update(voice_chime_rows)
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        # 「主动识屏」「语音报时」「节日提醒」的旧页分区在域装配时被压平成单张卡片，这里按行键重组（行键以代码实际为准，顺序同旧页）。
+        proactive_sections = [
+            ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_preset")),
+            ("主动识屏 · 什么时候看", claim("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
+            ("主动识屏 · 看哪些软件", claim("proactive_whitelist", "proactive_whitelist_add", "proactive_memory_clear")),
+            ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
+                                       "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
+        ]
+        voice_sections = [
+            ("语音报时 · 何时报", claim("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times")),
+            ("语音报时 · 用什么声音", claim("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume")),
+            ("语音报时 · 说什么", claim("voice_chime_show_bubble", "voice_chime_show_quote", "voice_chime_custom_quotes_zh",
+                                   "voice_chime_custom_quotes_en", "voice_chime_preview")),
+        ]
+        festival_sections = [
+            ("节日提醒 · 开关", claim("festival_reminder_enabled", "festival_reminder_cn", "festival_reminder_solar_terms",
+                                  "festival_reminder_west", "festival_reminder_speak")),
+            ("节日提醒 · 时间", claim("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times")),
+            ("节日提醒 · 文案", claim("festival_reminder_show_quote", "festival_custom_quotes_cn", "festival_custom_quotes_west", "festival_preview")),
+        ]
         dialogue_rows = claim_prefix("dialogue_")
-        automation = page_content(
-            [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
-                ("主动感知", proactive_rows),
-            ]
-        )
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
         # （见 _search_settings）。全局风格控件（表达风格/专属文案对象/模板 JSON）
         # 不是事件文案，单独放「文案风格与模板」小节。
-        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", automation)
+        phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", self)
         phrase_edit_keys = set(self.dialogue_phrase_edits)
         phrase_rows = [row for row in dialogue_rows
                        if row.objectName()[len("settingRow_dialogue_"):] in phrase_edit_keys]
@@ -1893,10 +1976,9 @@ class ModernSettingsDialog(QDialog):
             phrases_box.add_group("事件气泡文案", phrase_rows)
         phrases_box.set_expanded(False)
         self.dialogue_phrases_box = phrases_box
-        automation_layout = automation.layout()
-        # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
-        # 用现成的 CollapsibleGroup.add_group，不需要新造控件。
-        agent_box = CollapsibleGroup("Agent 联动", automation)
+        # 「Agent 联动」折叠框只装「提示音效」子组（默认折叠）；「消费统计」已独立成
+        # 一级分组留在框外（见本域 sections 表）。用现成的 CollapsibleGroup.add_group。
+        agent_box = CollapsibleGroup("Agent 联动", self)
         agent_cost_rows = [
             SettingRow("agent_cost", "显示本轮消费",
                        "Agent 每轮结束时查询一次余额，与开始时的余额相减得出本轮消费。"
@@ -1904,7 +1986,8 @@ class ModernSettingsDialog(QDialog):
                        self.agent_cost_check),
         ]
         agent_box.add_group("提示音效", claim_prefix("agent_sound_"))
-        agent_box.set_expanded(True)
+        # 默认折叠：6 行提示音效不该首屏铺开；消费统计是独立一级分组，留在框外。
+        agent_box.set_expanded(False)
         self.agent_link_box = agent_box
         # 这些行已被上面的折叠框认领，必须登记，否则会再落进「待分类」。
         claimed.update(agent_cost_rows)
@@ -1912,33 +1995,26 @@ class ModernSettingsDialog(QDialog):
         # dialogue_* 里的全局风格控件（表达风格、专属文案对象、弹窗文案模板 JSON）
         # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
         # leftovers），若不显式放回本域就会从设置页里彻底消失。
-        # 顶层顺序：「文案风格与模板」（全局风格控件）在前，自定义台词折叠框随后。
-        insert_at = 0
-        if ungated_dialogue_rows:
-            automation_layout.insertWidget(
-                insert_at,
-                SettingsSection("文案风格与模板", ungated_dialogue_rows, automation),
-            )
-            insert_at += 1
-        automation_layout.insertWidget(insert_at, phrases_box)
-        # 顶层顺序：消费统计 → Agent 联动 → 文案风格 → 自定义台词。
-        # 「消费统计」独立成一级分组且排最前（直接可见，不藏在折叠框里）。
-        # 必须在上面的插入全部做完之后再插，否则会被后来的 insertWidget(0, ...) 挤下去。
-        cost_section = SettingsSection("消费统计", agent_cost_rows, automation)
-        automation_layout.insertWidget(0, cost_section)
-        automation_layout.insertWidget(1, agent_box)
+        # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
+        automation = page_content(
+            [
+                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
+                # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
+                ("免打扰", settings_quiet.build_quiet_rows(self)),
+                *proactive_sections,
+                ("消费统计", agent_cost_rows),
+                agent_box,
+                ("文案风格与模板", ungated_dialogue_rows),
+                phrases_box,
+            ]
+        )
 
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
         # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、
         # 碰撞音效 2 行回「桌宠」碰撞组；Agent 提示音效（agent_sound_*）留在
         # Agent 联动折叠框内不动。
-        voice = page_content(
-            [
-                ("语音报时", voice_chime_rows),
-                ("节日提醒", festival_rows),
-            ]
-        )
+        voice = page_content(voice_sections + festival_sections)
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -1972,6 +2048,8 @@ class ModernSettingsDialog(QDialog):
             self._add_page(label, icon, self._page_shell(label, content))
         for page in old_pages.values():
             page.deleteLater()
+        # 域页全部装好之后再装「按区直找」：页头跳转条 + 每个分区的组描述。
+        settings_page_guide.install(self)
 
     def _clear_search_matches(self) -> None:
         for row in self._search_rows:
@@ -1988,7 +2066,7 @@ class ModernSettingsDialog(QDialog):
             self._search_index = -1
             self.search_status.hide()
             return
-        matches = [row for row in self._search_rows if query in f"{row.label.text()} {row.hint_label.text()} {row.objectName()}".lower()]
+        matches = settings_search.find_matches(self._search_rows, query)
         if not matches:
             self._search_matches = []
             self._search_index = -1
@@ -2016,6 +2094,9 @@ class ModernSettingsDialog(QDialog):
             if isinstance(ancestor, CollapsibleGroup):
                 # 命中折叠框内的行：先自动展开，否则搜索结果存在但看不见。
                 ancestor.set_expanded(True)
+            elif isinstance(ancestor, SettingsSection) and ancestor.advanced:
+                # 高级折叠组同理：不展开等于折了搜不到（新老全部 advanced 组一体生效）。
+                ancestor.toggle.setChecked(True)
             if isinstance(ancestor, SettingsTabContainer):
                 ancestor.activate_for_descendant(row)
                 break
@@ -2023,8 +2104,20 @@ class ModernSettingsDialog(QDialog):
         scroll = page.findChild(QScrollArea, "settingsScroll")
         if scroll is not None:
             scroll.ensureWidgetVisible(row, 0, 24)
-        self.search_status.setText(f"{self._search_index + 1}/{len(matches)} · {row.label.text()}")
+        # 依赖不满足的行：只给可见说明，绝不替用户改配置（R2 §一-3）。
+        note = "" if row.isVisibleTo(page) else f"（{self._hidden_prerequisite_note(row)}）"
+        self.search_status.setText(
+            f"{self._search_index + 1}/{len(matches)} · {row.label.text()}{note}")
         self.search_status.show()
+
+    def _hidden_prerequisite_note(self, row: SettingRow) -> str:
+        """命中行被前置开关隐藏时，指名要先去打开的那一项。"""
+        key = row.objectName()[len("settingRow_"):]
+        source_id = _SEARCH_HIDDEN_PREREQUISITES.get(key)
+        source = self.findChild(SettingRow, f"settingRow_{source_id}") if source_id else None
+        if source is None:
+            return "当前被前置开关隐藏"
+        return f"需先开启「{source.label.text()}」"
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.search_edit and event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -2063,11 +2156,12 @@ class ModernSettingsDialog(QDialog):
                 )
 
     def _save(self) -> None:
-        """「保存并退出」：写入配置并关闭对话框。"""
-        if not self._write_config():
+        """「保存并退出」：写入配置并关闭对话框（失败走同一条关闭闸门）。"""
+        if not self._save_before_close():
             return
+        # 闸门这次关闭已经做过决定（落盘成功，或用户明确选择放弃）：这里只负责关窗，
+        # 并闸住关闭路径再写一遍整表（放弃时尤其不能写——那正是要放弃的东西）。
         self._saved_via_button = True
-        self._apply_autostart()
         self.accept()
 
     def _write_config(self) -> bool:
@@ -2077,8 +2171,11 @@ class ModernSettingsDialog(QDialog):
         standalone 下这条尤其关键——主进程在设置开着期间会自己写 config
         （托盘菜单开关等），不 reload 就把别人的改动回滚了。
         已知限制：已暴露字段仍是 last-writer-wins（对话框获胜）。
-        返回是否成功落盘；失败时提示用户。
+        返回是否成功落盘；失败**不在这里弹**——把类别记进 ``self._write_failure``，
+        由关闭闸门（``pet/settings_close_flow``）统一给文案与「放弃未保存的改动并关闭」
+        出口（自己再弹一次就是同一件事弹两遍，且那两个出口只有闸门知道）。
         """
+        self._write_failure = None
         menu_layout_value = self.menu_layout_editor.value()
         menu_validation = resolve_menu_layout(
             menu_layout_value,
@@ -2086,11 +2183,8 @@ class ModernSettingsDialog(QDialog):
             available_actions=MENU_ACTIONS.ids,
         )
         if menu_validation.source == "fallback":
-            QMessageBox.warning(
-                self,
-                "菜单布局无效",
-                "菜单布局未保存：" + "、".join(menu_validation.diagnostics),
-            )
+            self._write_failure = settings_close_flow.layout_failure(
+                menu_validation.diagnostics)
             return False
         self.config.reload()
         minimum = min(self.min_spin.value(), self.max_spin.value())
@@ -2099,13 +2193,13 @@ class ModernSettingsDialog(QDialog):
         self.config.set("scale", float(self.scale_combo.currentData()))
         self.config.set("spawn_inherit_size", self.spawn_inherit_size_check.isChecked())
         self.config.set("spawn_scale", float(self.spawn_scale_combo.currentData()))
-        self.config.set("spawn_inherit_dynamic_island", self.spawn_inherit_dynamic_island_check.isChecked())
         self.config.set("on_top", self.on_top_check.isChecked())
         if self.dock_icon_check is not None:
             self.config.set("show_dock_icon", self.dock_icon_check.isChecked())
         self.config.set("no_move", self.no_move_check.isChecked())
         self.config.set("mouse_through", self.mouse_through_check.isChecked())
         self.config.set("drag_physics", self.drag_physics_check.isChecked())
+        self.config.set("drop_gravity", self.drop_gravity_check.isChecked())
         self.config.set("throw_strength", str(self.throw_strength_select.currentData() or "standard"))
         self.config.set("slingshot_enabled", self.slingshot_check.isChecked())
         self.config.set("collision_enabled", self.collision_enabled_check.isChecked())
@@ -2177,10 +2271,7 @@ class ModernSettingsDialog(QDialog):
             self.config.set(
                 "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
             )
-        if getattr(self, "music_browser_media_check", None) is not None:
-            self.config.set(
-                "music_browser_media_enabled", self.music_browser_media_check.isChecked()
-            )
+        settings_music.save_source_settings(self)
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())
@@ -2275,7 +2366,6 @@ class ModernSettingsDialog(QDialog):
                 "dark_hover": self.dark_hover_picker.text(),
             },
         )
-        self.config.set("context_menu_template", self.menu_template_select.currentData())
         default_menu_nodes = load_default_menu_layout().get("nodes", [])
         self.config.set(
             "context_menu_layout",
@@ -2296,7 +2386,10 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
+        settings_network.save_network_settings(self)
         settings_music.save_music_player_settings(self)
+        settings_quiet.save_quiet_settings(self)
+        settings_weather.save_weather_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 
@@ -2343,11 +2436,9 @@ class ModernSettingsDialog(QDialog):
             self.config.set("user_customized", True)
         ok = self.config.save()
         if not ok:
-            QMessageBox.warning(
-                self,
-                "保存失败",
-                "配置未能写入磁盘，改动可能在重启后丢失。\n\n配置路径：" + str(self.config.path),
-            )
+            self._write_failure = settings_close_flow.failure_of(self)
+        # 写回之后再对齐一次标记：落盘后的配置值才是「已改过没」的现行答案
+        settings_default_marks.refresh(self)
         return ok
 
     def _on_voice_chime_preview(self, text: str) -> None:
@@ -2367,28 +2458,32 @@ class ModernSettingsDialog(QDialog):
         if callable(cb):
             cb(text)
 
+    def _close_after_external_write(self) -> None:
+        """关窗，但跳过关闭路径的整表写回（``_write_config``）。
+
+        供"已在窗口外完成落盘"的入口使用（当前是「恢复默认设置」）：此时控件里
+        持有的仍是落盘前的旧值，关闭路径照常写回就会把刚写下的配置静默覆盖回去。
+        """
+        self._saved_via_button = True
+        self.accept()
+
+    def _save_before_close(self) -> bool:
+        """关闭前落盘（X / Esc / 关闭按钮 /「保存并退出」共用）；False = 要留在窗口里继续改。
+
+        落盘、失败文案与出口全在 ``pet/settings_close_flow``：保存成功或用户明确选择
+        「放弃未保存的改动并关闭」→ True（调用方照常 accept/reject），用户选「继续编辑」
+        → False（不关窗，草稿留在控件里）。这里只回答"这次关闭能不能真的关"。
+        """
+        outcome = settings_close_flow.save_before_close(self)
+        return outcome != settings_close_flow.CLOSE_KEEP_EDITING
+
     def reject(self) -> None:  # noqa: N802 - Qt API
-        """Esc 路径与关闭按钮一致：保存设置并应用开机自启。"""
-        if not getattr(self, "_saved_via_button", False):
-            try:
-                self._write_config()
-                self._apply_autostart()
-            except Exception:
-                logging.exception("Esc 关闭设置时保存配置失败")
-        super().reject()
+        """Esc / 关闭按钮与 X 同契约：保存失败不关窗，除非用户明确选择放弃改动。"""
+        if self._save_before_close():
+            super().reject()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        """直接关闭（X / Esc）时同样落盘，避免修改丢失。
-
-        设置项都是即时型偏好，与右键菜单/托盘修改的写入时机保持一致；
-        已走「保存并退出」则跳过（防重复写入）。
-        """
-        if not getattr(self, "_saved_via_button", False):
-            try:
-                if not self._write_config():
-                    event.ignore()
-                    return
-                self._apply_autostart()
-            except Exception:
-                logging.exception("关闭设置时保存配置失败")
+        if not self._save_before_close():
+            event.ignore()
+            return
         super().closeEvent(event)

@@ -86,7 +86,7 @@ from . import window_alerts
 from .animation_thumbnail import decode_representative_frame
 from .speech_bubble import PetSpeechBubble, list_self_talk_images
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
-from .context_menu import normalize_template_id, populate_context_menu as _populate_context_menu
+from .context_menu import populate_context_menu as _populate_context_menu
 from .context_menus.shared import release_menu_tree, take_deferred_menu_callbacks
 from . import physics as physics_mod
 from .click_sound import (
@@ -97,7 +97,8 @@ from .proactive import effective_proactive_config
 from .window_optional_services import WindowFeatureGateMixin
 
 from . import platform_win
-from .platform_mac import _keep_macos_tool_window_visible, _mac_set_window_level
+from .platform_mac import (
+    _keep_macos_tool_window_visible, _mac_no_window_shadow_flag, _mac_set_window_level)
 from .platform_win import (
     GWL_EXSTYLE as GWL_EXSTYLE,
     _set_windows_click_through as _set_windows_click_through,
@@ -190,6 +191,9 @@ def build_window_flags(config, mouse_through: bool = False, stream_capture_mode:
         flags |= Qt.WindowType.WindowStaysOnTopHint
     if mouse_through:
         flags |= Qt.WindowType.WindowTransparentForInput
+    # macOS 关窗口系统阴影（issue #229：外圈黑边，普通模式与直播捕获模式都要关）。
+    # 放在 flags 工厂里：捕获模式开关重算 flags 时自动带上，无需在显示后补写。
+    flags |= _mac_no_window_shadow_flag()
     return flags
 
 
@@ -384,17 +388,18 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.on_switch_character = None  # 由 app 注入，用于运行时切换角色
         self.on_open_chat = None
         self.on_open_quick_chat = None
-        self.on_open_modern_chat = None
         self.on_open_chat_settings = None
         self.on_show_balance = None
+        self.on_show_weather = None
         self.on_check_update = None
         self.on_look_synced = None
         self.on_look_screen = None
-        self.on_open_legacy_settings = None
         self.on_open_modern_settings = None
         self.on_restore_fun_windows = None
         self.on_spawn_pet = None
         self.on_clear_spawned_pets = None
+        # 由 app 注入：「恢复默认设置」后的运行态对齐（位置回默认落位，issue #220）
+        self.on_settings_reset = None
         self.on_hidden = None  # 由 app 注入：用户主动隐藏时弹托盘提示
         self.on_exit_window = None  # 由 app 注入：批5.2「退出这只」窗级退出回调
         self._position_listeners = []
@@ -539,7 +544,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
         # 直播捕获兼容模式（stream_capture_mode）：Tool → 普通顶层窗口 + 标题，
         # 使直播姬/OBS 的窗口捕获能枚举到桌宠（Tool 窗口会被捕获软件过滤）。
-        self._stream_capture_mode = bool(config.get('stream_capture_mode', False))
+        # 有效值由拓扑模块归并：主配置的捕获开关压过本窗配置（T4 Phase A；否则
+        # --slot N 的窗在捕获模式的 legacy 拓扑里仍是 Tool，OBS 枚举不到）。
+        from . import overlay_settings_command
+        self._stream_capture_mode = overlay_settings_command.effective_stream_capture_mode(
+            config.get('stream_capture_mode', False))
         self._capture_headroom = 0  # 捕获子气泡需要的透明头顶空间（逻辑像素）
         self._draw_delta = QPoint(0, 0)  # 贴边绘制偏移（见类属性注释）
         flags = build_window_flags(config, self.mouse_through, self._stream_capture_mode)
@@ -923,6 +932,20 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     def _stable_body_local_rect(self) -> QRect:
         """稳定身体框（窗口局部坐标）；实现见 window_placement.stable_body_local_rect。"""
         return window_placement.stable_body_local_rect(self)
+
+    def stable_body_local_rect(self) -> QRect:
+        """``_stable_body_local_rect`` 的公开面（跨模块定位用，见架构闸）。"""
+        return self._stable_body_local_rect()
+
+    @property
+    def profile_character(self) -> str | None:
+        """本窗档案角色（未绑定档案时为 None）；公开面，跨模块只经它读。"""
+        return getattr(self, "_profile_character", None)
+
+    def set_profile_identity(self, character_id, generation=None) -> None:
+        """绑定本窗的档案身份（角色 + 代次 token）：迟到几何/档案重下发据此判代次。"""
+        self._profile_character = str(character_id or "")
+        self._profile_generation = generation
 
     def _virtual_pos(self) -> QPoint:
         """虚拟窗口位置 = 实际位置 + 绘制偏移；实现见 window_placement.virtual_pos。"""
@@ -3793,7 +3816,15 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self.set_auto_hide_fullscreen(desired_auto_hide)
         desired_stream_capture = bool(self.cfg.get('stream_capture_mode', False))
         if desired_stream_capture != self._stream_capture_mode:
-            self.set_stream_capture_mode(desired_stream_capture)
+            from . import overlay_settings_command
+            if overlay_settings_command.capture_switch_is_restart_level():
+                # T4：该键是重启级拓扑输入——运行期撤掉窗旗标会把正在被 OBS 捕获
+                # 的窗口当场变回 Tool（直播断源），与设置页「重启后生效」矛盾。
+                # 显式 env legacy（dev 逃生门）不走这条：那边保留即时切换。
+                logging.info(
+                    "直播捕获兼容：本次启动由主配置决定（重启级开关），改动重启后生效")
+            else:
+                self.set_stream_capture_mode(desired_stream_capture)
         desired_drag_physics = bool(self.cfg.get('drag_physics', False))
         if desired_drag_physics != self.drag_physics:
             self.set_drag_physics(desired_drag_physics)
@@ -3869,12 +3900,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._schedule_self_talk()
         # Phase 1：主动识屏/Agent 联动按配置懒装配或同步。
         self.sync_optional_services()
-
-    def set_context_menu_template(self, template_id: str) -> None:
-        """Persist the selected right-click menu template for the next open."""
-        template_id = normalize_template_id(template_id)
-        self.cfg.set('context_menu_template', template_id)
-        self.cfg.save()
 
     def set_chat_status(self, state: str, text: str = '') -> None:
         if not text:

@@ -1,5 +1,17 @@
 # 右键菜单图标调研与双模板重构记录
 
+## 2026-10-08 后继变更：双模板已收成单模板
+
+本文记的是 2026-08-25 的双模板（legacy / modern）重构。**旧版扁平菜单已于
+2026-10-08 全量退役**：`pet/context_menus/legacy.py`、`menu_styles/legacy.py`、
+`menu_templates/{legacy,modern}.json` 与 `context_menu_template` 配置键全部删除，
+右键菜单只剩现代树（注册表 + 用户编排），配置里的旧值由
+`Config._migrate_menu_template_config` 静默丢弃。
+
+因此本文内所有"旧版默认 / 两版并存 / 模板切换项"的表述都是**历史状态**，不要再据此
+判断现状；现状口径见
+[docs/PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md](PR-REPORT-LEGACY-MENU-RETIREMENT-2026-10-08.md)。
+
 ## 2026-09 生命周期收口补充
 
 生产路径仍由 `PetWindow._show_context_menu()` 调用真实 `QMenu.exec()`，不改变菜单的

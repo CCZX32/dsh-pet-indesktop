@@ -2,8 +2,27 @@
 """检查更新模块测试。"""
 
 import json
+import os
+from types import SimpleNamespace
 
 from pet import updater
+
+
+def _ns_shim(real, **overrides):
+    """模块命名空间垫片：显式给出的成员覆盖，其余全部转发给真模块。
+
+    用法是 ``monkeypatch.setattr(updater, 'os', _ns_shim(os, name='nt'))``——只换
+    **被测模块里那个名字的绑定**。若写成 ``setattr(updater.os, 'name', …)``，改的
+    其实是**全局** os 模块：pathlib 的平台分派只看全局 ``os.name``，窗口期里 pytest
+    生成失败报告时会抛 ``NotImplementedError: cannot instantiate …Path``，整场
+    INTERNALERROR。转发而不是只给 ``name``，是因为同一窗口里被测模块的其它 ``os``
+    成员（``PathLike`` / ``environ`` …）仍要能用。
+    """
+    class _Shim(SimpleNamespace):
+        def __getattr__(self, item):
+            return getattr(real, item)
+
+    return _Shim(**overrides)
 
 
 def test_version_parts_and_is_newer():
@@ -92,17 +111,24 @@ def test_config_persists_auto_hide(tmp_path):
 
 
 def test_config_persists_click_behavior_keys(tmp_path):
-    """点击行为（显示余额/自言自语）与音效开关持久化。"""
-    from pet.config import Config
+    """点击行为（显示余额/自言自语）与音效开关持久化。
 
-    cfg = Config(tmp_path)
+    三键都是**每宠键**：真值在 ``config-slot-0.json``，生产里由 slot0 的路由视图读写。
+    """
+    from pet.config import Config
+    from pet.settings_slot_config import route_settings_config
+
+    def slot0():
+        return route_settings_config(Config(base=tmp_path, instance_id="slot-0"))
+
+    cfg = slot0()
     assert cfg.get("click_show_balance", False) is False
     cfg.set("click_sound_enabled", False)
     cfg.set("click_show_balance", True)
     cfg.set("click_show_self_talk", True)
-    cfg.save()
+    assert cfg.save() is True
 
-    reloaded = Config(tmp_path)
+    reloaded = slot0()
     assert reloaded.get("click_sound_enabled", True) is False
     assert reloaded.get("click_show_balance", False) is True
     assert reloaded.get("click_show_self_talk", False) is True
@@ -187,7 +213,7 @@ def test_download_asset_rejects_untrusted_origin(tmp_path):
 
 
 def test_select_windows_installer_supports_legacy_and_structured_assets(monkeypatch):
-    monkeypatch.setattr(updater.os, "name", "nt")
+    monkeypatch.setattr(updater, "os", _ns_shim(os, name="nt"))
     release = {
         "assets": {"dsh-pet-standalone-webm-setup.exe": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.0/a.exe"},
         "asset_details": {},

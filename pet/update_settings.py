@@ -24,8 +24,6 @@ from . import __version__, updater
 class UpdatePage(QWidget):
     """检查、下载并安装更新；不写入 Config，避免把一次性命令变成设置项。"""
 
-    update_available = Signal(object)
-    status_changed = Signal(str)
     check_finished = Signal(object)
     download_finished = Signal(object)
     download_progress = Signal(int, int)
@@ -157,7 +155,6 @@ class UpdatePage(QWidget):
         else:
             state = f"发现新版本 v{tag}，下载后会自动关闭并重启安装。"
         self._set_state(state, checking=False)
-        self.update_available.emit(result)
 
     def download_and_install(self) -> None:
         if self._busy or self.release is None:

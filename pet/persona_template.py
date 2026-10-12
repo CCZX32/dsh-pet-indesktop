@@ -208,9 +208,9 @@ PARAMETERS: dict[str, tuple[str, ...]] = {
 # 台词里的这些占位符必须在**所有**事件上自动隐藏而非字面露出——它们没有
 # per-key 归属（宿主事件已删），由渲染调用点统一并入 autohide。
 LEGACY_HIDDEN_PARAMETERS: tuple[str, ...] = ("command", "argsKey", "reasons")
-# 注意（2026-09-06 桥接源码核实）：tool/call 记录只含
-# tool/argsKey/command/callId/step/sessionId——target/ok 仅存在于 tool/result
-# 与 watchdog reasoning 记录，活动气泡在 tool/call 同轮触发时拿不到，不得宣称。
+# 注意（2026-10 桥接源码核实）：tool/call 记录只含 tool/callId/step/sessionId
+# （command/argsKey 已随脱敏退役，见上一段）；target/ok 只出现在 tool/result
+# 记录里，活动气泡在 tool/call 同轮触发时拿不到，不得宣称。
 # label 同名双义：activity.*/approval.tool 的 label=工具中文标签（保证注入，
 # 不含会话标签）；approval.generic、question.*、model_access.*、failure.*
 # 的 label=会话标签（条件注入）。

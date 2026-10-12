@@ -10,9 +10,19 @@ import logging
 import time
 import urllib.request
 
+import pytest
+
 from pet import music_lyric
 from pet.music_lyric import Lyrics, LyricLine, parse_lrc
 from pet.music_lyric_controller import LyricTracker
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    """真窗口用例需要 QApplication（其余用例只用 QObject 替身）。"""
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
 
 
 # ---------------------------------------------------------------- parse_lrc
@@ -418,9 +428,37 @@ def test_title_kept_when_song_has_no_lyrics():
     ctrl._title_line = "我在唱《x》"
     ctrl._on_lyrics_ready(("x", "y"), None)
 
-    assert ("x", "y") in ctrl._no_lyric_keys
+    assert ("x", "y") in ctrl._no_lyric_until, "失败应进重试冷却（不是永久拉黑）"
     assert win.shown[-1] == ("", "我在唱《x》"), win.shown[-1]
     assert ctrl._title_line == "我在唱《x》"
+
+
+def test_no_lyric_retry_after_cooldown_not_permanent_blacklist():
+    """一次失败只冷却 5 分钟（歌词族终审应修 3）：冷却内不重试，冷却外允许。"""
+    import time as _time
+
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    ctrl._current_key = ("x", "y")
+    ctrl._title_line = "我在唱《x》"
+    ctrl._on_lyrics_ready(("x", "y"), None)
+    until = ctrl._no_lyric_until[("x", "y")]
+    assert _time.monotonic() < until <= _time.monotonic() + 300.5
+
+    # 冷却内：_start_track 早退，不发取词
+    started = []
+    ctrl._loading.discard(("x", "y"))
+    ctrl._lyric_query = lambda *a, **k: started.append(1) or ("t", "a")
+    ctrl._start_track(("x", "y"), "x", "y", _playback(None), _time.monotonic())
+    assert started == [], "冷却内不许重复取词"
+
+    # 冷却外：允许重试（网络恢复可自愈）
+    ctrl._no_lyric_until[("x", "y")] = _time.monotonic() - 1.0
+    ctrl._primed = True
+    ctrl._start_track(("x", "y"), "x", "y", _playback(None), _time.monotonic())
+    assert started == [1], "冷却外必须允许重试"
 
 
 def test_title_goes_into_body_when_no_lyric():
@@ -736,10 +774,30 @@ def test_sample_thread_is_reused_across_disable_enable():
         ctrl.sync_enabled(False)
 
 
-def test_sampling_resumes_after_disable_enable(monkeypatch):
-    """关掉歌词再打开，采样必须恢复——不是永久停摆。
+class _ParkedSampleThread:
+    """「派发已记账、worker 尚未起跑」那一刻的采样线程替身。
 
-    这是用户可见的后果：一旦发生过一次开关，歌词再也不随播放更新。
+    真线程停不进这个窗口（要么还没起跑、要么已进 ``_sample_loop``），而它正是 R02
+    的充要条件：``_on_tick`` 已把 ``_sampling`` 记成 True，却没有任何 worker 会去
+    消费这一拍。``alive`` 可切；切成 False = 线程在 ``_sample_loop`` 的停止检查处
+    break 退出（生产里的结局：退出前不会发任何结果回调）。
+    """
+
+    def __init__(self) -> None:
+        self.alive = True
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+def test_sampling_resumes_after_disable_enable(monkeypatch):
+    """关掉歌词再打开，采样必须恢复——不是永久停摆（R02）。
+
+    真实时序：``_on_tick`` 先记 ``_sampling=True`` 再唤醒 worker；worker 若在起跑
+    前撞上关闭，就会消费掉唤醒口、在 ``_sample_loop`` 的停止检查处直接 break 退出
+    ——**不发任何结果回调**，唯一的常规复位点 ``_on_playback_ready`` 因此永不执行：
+    ``_sampling`` 卡在 True，重开后每一拍都在 ``_on_tick`` 第一道闸门返回，唤醒口也
+    再没人置位——采样线程永远停在 ``wake.wait()`` 上，歌词再也不更新，直到重启应用。
     """
     from pet import now_playing
     from pet.music_lyric_controller import MusicLyricController
@@ -758,22 +816,32 @@ def test_sampling_resumes_after_disable_enable(monkeypatch):
     win = _FakeWinVisible()
     ctrl = MusicLyricController(win)
     try:
-        ctrl.sync_enabled(True)
-        assert _wait_until(lambda: calls["n"] >= 1), "首次开启后应采样"
-        # 采样必须带上"当前跟踪的播放器"，否则会话选取会在两个播放器之间乱跳
-        assert seen and seen[0] == "", seen
+        # 摆出「派发已记账、worker 尚未起跑」：替身顶掉线程且从不跑循环。
+        # 此后**不许再手动碰 _sampling**——它卡不卡 True 正是被测行为。
+        parked = _ParkedSampleThread()
+        ctrl._sample_thread = parked
+        ctrl._on_tick()
+        assert ctrl._sampling is True, "前提：派发已记账"
+
+        ctrl.sync_enabled(False)
+        # worker 此刻才醒：消费掉关闭时置位的唤醒口，看到 stop 就退出（不发回调）。
+        ctrl._sample_wake.clear()
+        parked.alive = False
+        assert ctrl._sampling is False, (
+            "关闭必须结清未消费的派发；卡 True 会让重开后的 _on_tick 永远在第一道"
+            "闸门返回，唤醒口也再没人置位"
+        )
 
         before = calls["n"]
-        ctrl.sync_enabled(False)
         ctrl.sync_enabled(True)
-        # 再派发一拍；线程若因 _sample_stop 未复位而退出，这里就永远等不到。
-        ctrl._sampling = False
-        ctrl._on_tick()
 
         assert _wait_until(lambda: calls["n"] > before), (
-            "关闭再开启后采样必须恢复；"
-            "卡住说明 _sample_stop 仍是 set 状态，采样线程一进循环就退出了"
+            "关闭再开启后采样必须恢复；卡住说明 _sampling 仍卡在 True，"
+            "采样线程停在 wake.wait() 上等一个永远不来的唤醒"
         )
+        # 采样必须带上"当前跟踪的播放器"，否则会话选取会在两个播放器之间乱跳
+        assert seen and seen[0] == "", seen
+        assert ctrl._sample_thread is not parked, "替身已死，重开必须重建真线程"
     finally:
         ctrl.sync_enabled(False)
 
@@ -1133,7 +1201,7 @@ def test_start_track_first_song_without_position_fetches_lyrics(monkeypatch):
     ctrl._start_track(("夜曲", "周杰伦"), "夜曲", "周杰伦", _playback(None), 100.0)
 
     assert ("夜曲", "周杰伦") in ctrl._loading, "应已进入取词中"
-    assert ctrl._pending_playback is not None
+    assert ctrl._pending_by_key.get(("夜曲", "周杰伦")) is not None
     assert started.wait(5.0), "取词线程应被启动"
 
 
@@ -1147,7 +1215,15 @@ def test_estimated_progress_hint_shown_once_per_session(monkeypatch):
             self.alerts: list = []
 
         def show_alert(self, text, **kw):
+            # 替身必须建立**真实的占用态**：控制器的 `_bubble_blocked()` 读的就是
+            # ``_alert_current``，只记一笔文本会让"提醒正挂着 → 歌词让路"的整条
+            # 路径永远走不到（B4 的回归就藏在这个缺口后面）。
             self.alerts.append(text)
+            self._alert_current = {"id": kw.get("alert_id", ""), "text": str(text)}
+
+        def resolve_alert(self, alert_id):
+            if (self._alert_current or {}).get("id") == alert_id:
+                self._alert_current = None
 
     _patch_clock(monkeypatch, 100.0)
     win = _HintWin()
@@ -1184,6 +1260,88 @@ def test_no_hint_when_player_reports_progress(monkeypatch):
     assert win.alerts == [], win.alerts
 
 
+# --------------------------------------------- 引导让位（真窗口 + 真提醒队列）
+#
+# B4：「首首歌词到位即收起进度引导」曾经**不可达**——`_on_lyrics_ready` 先跑
+# `_bubble_blocked()`（`_alert_current` 非空即真）并 return，resolve 排在它后面。
+# 引导气泡自身就占着 `_alert_current`，于是这条 resolve 永远走不到，用户第一首歌
+# 12 秒内零帧歌词。故本组用例用**真 PetWindow + 真 window_alerts 队列**，而不是
+# 只记一笔调用的替身。
+
+def _real_window_controller(qapp, tmp_path, monkeypatch):
+    """真 PetWindow（含真提醒队列 + 真气泡）+ 真控制器（取词线程打桩，保持离线）。
+
+    返回 ``(win, ctrl, pushes)``：``pushes`` 记录 ``win.show_bubble`` 的每一次
+    真实调用（探针，不是打桩——原方法照跑），用来断言"歌词确实上屏了"。
+    刻意**不**替换气泡替身：`resolve_alert` 靠真 `dismiss()` 把气泡隐藏，控制器
+    的 `_bubble_taken_by_other` 又据此判定占用位是否还在——换成 isVisible 恒真的
+    假气泡就测不到"引导收起后歌词立即上屏"。
+    """
+    import pet.music_lyric_controller as mod
+    from tests.pet_window_fakes import make_pet_window
+
+    _patch_clock(monkeypatch, 100.0)
+    win = make_pet_window(tmp_path)
+    ctrl = mod.MusicLyricController(win)
+    ctrl._tracker.lead = 0.0
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+
+    pushes: list[dict] = []
+    real_show = win.show_bubble
+
+    def _spy(text, duration_ms=3200, subtitle=None, **kwargs):
+        pushes.append({"text": str(text), "subtitle": subtitle})
+        return real_show(text, duration_ms, subtitle, **kwargs)
+
+    monkeypatch.setattr(win, "show_bubble", _spy)
+    return win, ctrl, pushes
+
+
+def test_first_song_lyrics_resolve_the_progress_estimate_hint(qapp, tmp_path, monkeypatch):
+    """首首歌词到位 → 引导被精确收起 + 歌词立即刷新（修复前：引导仍占位、零气泡）。"""
+    win, ctrl, pushes = _real_window_controller(qapp, tmp_path, monkeypatch)
+    key = ("夜曲", "周杰伦")
+    try:
+        ctrl._start_track(key, "夜曲", "周杰伦", _playback(None), 100.0)
+        assert win._alert_current is not None
+        assert win._alert_current["id"] == "music-lyric-estimated", win._alert_current
+
+        pushes.clear()
+        ctrl._on_lyrics_ready(key, Lyrics(
+            lines=(LyricLine(0.0, "第一句"), LyricLine(5.0, "第二句"))))
+
+        assert win._alert_current is None, "进度引导必须被收起（否则歌词 12s 内上不了屏）"
+        assert pushes, "歌词必须立即刷新（修复前 _bubble_blocked 早退，一次都没送）"
+        assert pushes[-1]["text"] == "第一句", pushes
+        assert pushes[-1]["subtitle"] == "我在唱《夜曲》"
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
+def test_other_alerts_are_not_resolved_by_lyrics_arriving(qapp, tmp_path, monkeypatch):
+    """非回归：收起只认 music-lyric-estimated 这一条 id，队列里的其它提醒不动。"""
+    win, ctrl, pushes = _real_window_controller(qapp, tmp_path, monkeypatch)
+    key = ("夜曲", "周杰伦")
+    try:
+        ctrl._start_track(key, "夜曲", "周杰伦", _playback(None), 100.0)
+        win.resolve_alert("music-lyric-estimated")   # 先清掉引导，换成别人的提醒
+        win.show_alert("审批：需要你点一下", sticky=True, buttons=[("同意", lambda: None)],
+                       alert_id="approval-1", priority=0, alert_type="approval")
+        current = win._alert_current
+        assert current is not None and current["id"] == "approval-1"
+
+        pushes.clear()
+        ctrl._on_lyrics_ready(key, Lyrics(
+            lines=(LyricLine(0.0, "第一句"), LyricLine(5.0, "第二句"))))
+
+        assert win._alert_current is current, "别人的提醒不得被歌词到位顺手收掉"
+        assert pushes == [], "审批占着气球时歌词必须让路"
+    finally:
+        win.close()
+        qapp.processEvents()
+
+
 def test_resync_ignored_when_no_lyrics(monkeypatch):
     """还没取到词 / 无词歌：对齐入口不动作，也不该抛异常。"""
     win, ctrl, clock = _aligned_controller(monkeypatch)
@@ -1191,6 +1349,59 @@ def test_resync_ignored_when_no_lyrics(monkeypatch):
     assert ctrl.resync_to_start() is False
     assert ctrl.resync_to_line(1) is False
     assert ctrl.nudge(5.0) is False
+
+
+# ------------------------------------------------- 取词失败后的同曲自动重试（B5）
+
+def test_same_track_retries_lyric_fetch_after_cooldown(monkeypatch):
+    """冷却到期后同一首歌不切歌也要自动重试（修复前：同曲轮询永不重试）。
+
+    冷却到期的判断原先只在 ``_start_track``（切歌路径）里，而同曲轮询的曲目 key
+    不变、压根走不到那条判断——一次网络故障就把这首歌在本次会话里永久拉黑，
+    十次同曲采样 ``fetch_attempts`` 恒为 0，网络恢复也不会自愈。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    ctrl = mod.MusicLyricController(_FakeWin())
+    attempts: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: attempts.append(a))
+
+    key = ("song-a", "artist")
+    sampled = _playback(None, title="Song-A", artist="Artist")
+    ctrl._start_track(key, "Song-A", "Artist", sampled, 100.0)
+    assert len(attempts) == 1, "切歌路径照常取词"
+
+    ctrl._on_lyrics_ready(key, None)              # 取词失败：记冷却
+    cooldown_until = ctrl._no_lyric_until[key]
+    assert cooldown_until > clock.now
+
+    clock.now = cooldown_until - 1.0              # 冷却内：同曲采样不重复取
+    ctrl._on_playback_ready(sampled)
+    assert len(attempts) == 1, f"冷却期内不得重复取词：{attempts}"
+
+    clock.now = cooldown_until + 1.0              # 冷却到期：同曲采样自动重试
+    ctrl._on_playback_ready(sampled)
+    assert len(attempts) == 2, f"冷却到期后同曲必须自动重试：{attempts}"
+    assert key in ctrl._loading, "重试同样走「取词中」去重位"
+
+
+def test_same_track_does_not_refetch_while_already_loading(monkeypatch):
+    """非回归：取词在途时同曲采样不得叠加第二路请求。"""
+    import pet.music_lyric_controller as mod
+
+    _patch_clock(monkeypatch, 100.0)
+    ctrl = mod.MusicLyricController(_FakeWin())
+    attempts: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: attempts.append(a))
+
+    key = ("song-a", "artist")
+    sampled = _playback(None, title="Song-A", artist="Artist")
+    ctrl._start_track(key, "Song-A", "Artist", sampled, 100.0)
+    ctrl._on_playback_ready(sampled)
+    ctrl._on_playback_ready(sampled)
+
+    assert len(attempts) == 1, f"在途取词只允许一路：{attempts}"
 
 
 # ------------------------------------------------- 网络边界（系统代理必须被绕过）
@@ -1294,3 +1505,504 @@ def test_bypassing_system_proxy_is_logged_once(monkeypatch, caplog):
     assert len(hits) == 1, hits
     assert "127.0.0.1:12450" in hits[0], hits[0]
 
+
+
+# ---------------------------------------------------------------- 三源解析器 fixture（真实响应形态）
+# 2026-10-10 调查实锤：三个真实源解析器此前零覆盖（fetch 用例全部拿 lambda 桩换掉
+# _SOURCES），上游字段改名（网易云 artists→ar）在测试里不可见——这次事故的本来形态。
+# 以下 fixture 按当刻真实响应结构录制，堵住「结构变了测试还绿」这一类死法。
+
+class TestRealSourceParsers:
+    """三源解析器的真实响应 fixture（不碰网络：_http_get_json 全替身）。"""
+
+    @staticmethod
+    def _patch_http(monkeypatch, responses):
+        """按 URL 前缀分发录制响应；未命中前缀返回 None（模拟接口异常）。"""
+        def fake_get(url, **kwargs):
+            for prefix, payload in responses.items():
+                if prefix in url:
+                    return payload
+            return None
+        monkeypatch.setattr(music_lyric, "_http_get_json", fake_get)
+
+    def test_netease_matches_artist_via_ar_field(self, monkeypatch):
+        """现行响应：歌手在 ar（无 artists 字段）——本次事故的回归钉。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 12345, "name": "还是你的笑容最可爱",
+                 "ar": [{"name": "音阙诗听"}, {"name": "赵方婧"}],
+                 "al": {"name": "专辑"}},
+            ]}},
+            "song/lyric": {"lrc": {"lyric": "[00:01.00]第一句\n[00:05.00]第二句"}},
+        })
+        lyrics = music_lyric._fetch_from_netease("还是你的笑容最可爱", "音阙诗听")
+        assert lyrics is not None, "ar 字段必须能匹配歌手（artists 已下线）"
+        assert len(lyrics.lines) == 2
+
+    def test_netease_legacy_artists_field_still_works(self, monkeypatch):
+        """旧响应形态（artists）：向前兼容不丢。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 222, "name": "歌", "artists": [{"name": "歌手甲"}]},
+            ]}},
+            "song/lyric": {"lrc": {"lyric": "[00:01.00]词"}},
+        })
+        lyrics = music_lyric._fetch_from_netease("歌", "歌手甲")
+        assert lyrics is not None and len(lyrics.lines) == 1
+
+    def test_netease_candidates_without_match_logs_warning(self, monkeypatch, caplog):
+        """搜得到但无人匹配必须留 warning——静默失效是上次事故的共犯。"""
+        self._patch_http(monkeypatch, {
+            "cloudsearch": {"result": {"songs": [
+                {"id": 1, "name": "歌", "ar": [{"name": "别人"}]},
+            ]}},
+        })
+        import logging
+        with caplog.at_level(logging.WARNING, logger="pet.music_lyric"):
+            assert music_lyric._fetch_from_netease("歌", "查无此人") is None
+        assert any("无人匹配歌手" in rec.message for rec in caplog.records)
+
+    def test_lrclib_synced_lyrics_parsed(self, monkeypatch):
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {
+                "syncedLyrics": "[00:01.00]line one\n[00:03.00]line two",
+                "plainLyrics": "line one\nline two",
+                "instrumental": False,
+            },
+        })
+        lyrics = music_lyric._fetch_from_lrclib("song", "artist")
+        assert lyrics is not None and len(lyrics.lines) == 2
+
+    def test_lrclib_plain_only_returns_none(self, monkeypatch):
+        """只有 plainLyrics（无时间轴）按设计返回 None——逐行歌词对齐用不了它。"""
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {"syncedLyrics": None, "plainLyrics": "a\nb",
+                                   "instrumental": False},
+        })
+        assert music_lyric._fetch_from_lrclib("song", "artist") is None
+
+    def test_lrclib_instrumental_flag(self, monkeypatch):
+        self._patch_http(monkeypatch, {
+            "lrclib.net/api/get": {"syncedLyrics": None, "instrumental": True},
+        })
+        lyrics = music_lyric._fetch_from_lrclib("ost", "composer")
+        assert lyrics is not None and lyrics.instrumental is True
+
+    def test_qq_parser_with_recorded_shape(self, monkeypatch):
+        """QQ search 接口上游 500 是上游的事，解析器本身按录制形态必须有牙。"""
+        self._patch_http(monkeypatch, {
+            "client_search_cp": {"data": {"song": {"list": [
+                {"songmid": "mid123", "songname": "歌",
+                 "singer": [{"name": "歌手甲"}]},
+            ]}}},
+            "fcg_query_lyric_new": {"retcode": 0, "lyric": "[00:01.00]词一"},
+        })
+        lyrics = music_lyric._fetch_from_qq("歌", "歌手甲")
+        assert lyrics is not None and len(lyrics.lines) == 1
+
+
+class TestPendingPlaybackIsBoundPerRequest:
+    """A→B→A 快切时不许拿 B 的采样上下文装载 A 的歌词（歌词族终审阻塞 1）。
+
+    修复前：实例级 ``_pending_playback`` 被 B 覆盖，A 的结果回来读 B 的
+    position/reported——A 无进度、B 有进度时 A 被装成 reported=True，之后
+    A 每拍 position=None 清不掉它，「歌词对齐」整组置灰一整首。
+    """
+
+    def _controller(self, monkeypatch):
+        import pet.music_lyric_controller as mlc
+
+        monkeypatch.setattr(mlc.MusicLyricController, "_announce", lambda self, *a, **k: None)
+        monkeypatch.setattr(mlc.MusicLyricController, "_show", lambda self, *a, **k: None)
+        monkeypatch.setattr(mlc.MusicLyricController, "_bubble_blocked", lambda self: False)
+        return mlc, mlc.MusicLyricController(_FakeWin())
+
+    @staticmethod
+    def _playback(position, updated_at):
+        from types import SimpleNamespace
+        return SimpleNamespace(position=position, updated_at=updated_at)
+
+    def test_stale_pending_playback_never_leaks_across_songs(self, monkeypatch):
+        mlc, ctl = self._controller(monkeypatch)
+        pb_a = self._playback(None, 100.0)        # A 无真实进度（网易云型）
+        pb_b = self._playback(42.0, 100.0)        # B 有真实进度（QQ 音乐型）
+
+        # A 开始取词 → 快切 B → 再切回 A（A 在 _loading 早退，不重建上下文）
+        monkeypatch.setattr(ctl, "_lyric_query", lambda t, a, p: (t, a))
+        ctl._start_track("keyA", "歌A", "手A", pb_a, now=100.0)
+        ctl._start_track("keyB", "歌B", "手B", pb_b, now=101.0)
+        ctl._start_track("keyA", "歌A", "手A", pb_a, now=102.0)   # _loading 命中，早退
+        ctl._current_key = "keyA"
+
+        # A 的结果回来：必须读 A 自己的（无进度）上下文——reported=False
+        from pet.music_lyric import LyricLine, Lyrics
+        lyrics = Lyrics(lines=(LyricLine(1.0, "第一句"), LyricLine(5.0, "第二句")))
+
+        monkeypatch.setattr(ctl, "_enter_instrumental_mode", lambda l: None)
+        ctl._on_lyrics_ready("keyA", lyrics)
+        loaded = ctl._tracker
+        assert getattr(loaded, "_reported_position", None) in (False, None), (
+            "A 的歌词被 B 的真实进度污染（reported=True 会置灰对齐一整首）")
+
+
+# ------------------------------------------------- 关闭歌词后迟到采样的代次守卫
+#
+# 全产品审查 C4（2026-10-08）：``sync_enabled(False)`` 停表 + 置停止标 + ``_reset()``，
+# 但采样线程可能正卡在 WinRT 的 ``get_now_playing()`` 里（OS 边界，实测会长时间不
+# 返回）。它返回后照常 ``_playback_ready.emit``，主线程回调只查窗口可见性、不查启用
+# 态与代次：``_reset()`` 已把 ``_current_key`` 清空，迟到结果于是被当成"新歌"——重新
+# 取词并把歌词顶上屏，用户明明关了歌词，屏幕却冒出歌词、后台还白跑一次网络。
+
+
+class _GatedSampler:
+    """可控 SMTC 采样替身（只替换 OS 边界）：首次调用卡在事件上，之后立即返回。"""
+
+    def __init__(self, playback) -> None:
+        import threading
+
+        self.playback = playback
+        self.calls = 0
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def __call__(self, tracked_app_id=None, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            self.release_first.wait(timeout=10)
+        return self.playback
+
+
+def _pump_until(predicate, *, timeout=10.0) -> bool:
+    """宽预算轮询 + 事件泵：采样线程到主线程的 ``_playback_ready`` 是队列投递。"""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    app.processEvents()
+    return predicate()
+
+
+def _gated_controller(monkeypatch, *, title="夜曲", artist="周杰伦"):
+    """真实控制器 + 真实采样线程，只把 SMTC 采样换成卡在事件上的替身。"""
+    from pet import now_playing
+    from pet.music_lyric_controller import MusicLyricController
+
+    sampler = _GatedSampler(_playback(None, title=title, artist=artist))
+    monkeypatch.setattr(now_playing, "get_now_playing", sampler)
+    win = _FakeWinVisible()
+    ctrl = MusicLyricController(win)
+    fetched: list = []
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: fetched.append(a))
+    return win, ctrl, sampler, fetched
+
+
+def test_late_sample_after_disable_is_dropped(qapp, monkeypatch):
+    """关闭歌词后迟到的采样：不取词、不上屏（代次守卫）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10), "前提：采样已进入 SMTC 调用"
+        ctrl.sync_enabled(False)      # 用户关掉歌词：停表 + 置停止标 + _reset()
+        sampler.release_first.set()   # 放行卡住的采样 → 迟到结果回到主线程
+
+        assert _pump_until(lambda: ctrl._sampling is False), "迟到采样未回到主线程"
+        assert fetched == [], "关闭后迟到的采样不得重新派发取词"
+        assert win.shown == [], "关闭后迟到的采样不得把歌名/歌词顶上屏"
+    finally:
+        ctrl.shutdown()
+
+
+def test_sample_callback_still_processed_when_enabled(qapp, monkeypatch):
+    """非回归：开启状态下采样回调照常推进（代次守卫不得误杀正常一拍）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10)
+        sampler.release_first.set()
+
+        assert _pump_until(lambda: fetched), "开启状态下采样结果必须照常处理"
+        assert win.shown, "开启状态下歌名必须照常亮出"
+    finally:
+        ctrl.shutdown()
+
+
+def test_resample_after_disable_enable_is_processed(qapp, monkeypatch):
+    """关闭再开启：新一代采样照常处理（代次不串，不把新结果当陈旧的丢）。"""
+    win, ctrl, sampler, fetched = _gated_controller(monkeypatch)
+    try:
+        ctrl.sync_enabled(True)
+        assert sampler.first_started.wait(timeout=10)
+        ctrl.sync_enabled(False)
+        sampler.release_first.set()
+        assert _pump_until(lambda: ctrl._sampling is False)
+        assert fetched == []
+
+        ctrl.sync_enabled(True)       # 重新开启：新采样（第 2 次调用）立即返回
+        assert _pump_until(lambda: fetched), "关闭再开启后新采样不得被误丢"
+    finally:
+        ctrl.shutdown()
+
+
+
+# ------------------------------------------ 取词在飞期间的暂停（B05）
+
+
+def test_pause_during_lyric_fetch_is_not_counted_as_playback(monkeypatch):
+    """取词在飞期间按的暂停不算播放时间（B05）。
+
+    网易云这类播放器不上报进度，位置只能按"检测到切歌的时刻"往下估算；而取词那
+    几秒里 tracker 里还没有歌词，``set_paused`` 冻结不了任何东西（位置基准要等
+    歌词到位才由 ``load()`` 建立），暂停边沿也就没人记。结果取词回来按
+    ``now - detected`` 估算时把暂停时长算成播放进度，歌词当场跳到未来。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)   # 取词停在"在飞"
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))          # 检测到歌 → 取词在飞
+    assert ctrl._current_key == key and key in ctrl._loading
+    assert ctrl._tracker.has_lyrics is False
+
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))   # 暂停
+    clock.now = 104.0
+    ctrl._on_playback_ready(_playback(None, playing=False))   # 还在暂停（同一段，不重复记）
+    ctrl._on_playback_ready(_playback(None))                  # 恢复播放
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    # 真实播放时间 = 105 - 100 - 3 = 2s（LINES: A0 B5 C10 D15 → 还没唱到第一句）
+    assert ctrl._tracker.position(105.0) == pytest.approx(2.0)
+    assert ctrl._tracker.has_lyrics is True
+    assert ctrl.align_available() is True, "估算位置仍然要能手动对齐"
+    # 暂停区间的结算：段内重复采样不重复记，恢复那一拍封口。
+    assert ctrl._paused_since is None and ctrl._paused_total == pytest.approx(3.0)
+
+
+def test_pause_still_open_when_lyrics_arrive_freezes_clock(monkeypatch):
+    """取词回来时仍在暂停：以暂停态装载、**不立即显示**，恢复后从正确位置接上。
+
+    暂停中的歌词位置必须冻结在"暂停那一刻"：``load()`` 会清掉暂停态，不显式冻结
+    的话恢复播放后基准仍从 load 的时刻起算，暂停的这几秒又会被算成播放时间。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    shown_before = list(win.shown)
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    assert win.shown == shown_before, "仍暂停时不显示歌词（恢复播放那一拍再显示）"
+    assert ctrl._tracker.position(105.0) == pytest.approx(1.0), "105-100-4=1s"
+    # 暂停期间位置不动
+    assert ctrl._tracker.position(108.0) == pytest.approx(1.0)
+
+    clock.now = 110.0
+    ctrl._on_playback_ready(_playback(None))          # 恢复播放
+    assert ctrl._tracker.position(110.0) == pytest.approx(1.0), "从冻结处顺延，不跳"
+    assert win.shown[-1] == ("我在唱《t》", "A"), win.shown[-1]
+
+    clock.now = 111.0
+    ctrl._on_playback_ready(_playback(None))
+    assert ctrl._tracker.position(111.0) == pytest.approx(2.0), "恢复后按真实播放时间走"
+
+
+def test_pause_bookkeeping_resets_on_track_change(monkeypatch):
+    """切歌重置暂停记账：上一首的暂停时长绝不能算进下一首的进度。"""
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+
+    ctrl._on_playback_ready(_playback(None))
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    assert ctrl._paused_since == pytest.approx(101.0)
+
+    clock.now = 102.0
+    ctrl._on_playback_ready(_playback(None, title="other", artist="x"))
+
+    assert ctrl._paused_since is None
+    assert ctrl._paused_total == pytest.approx(0.0)
+
+
+def test_pause_during_fetch_freezes_clock_even_when_bubble_is_taken(monkeypatch):
+    """取词期间暂停 + 完成时气泡被占：冻结时钟不许被"不显示"那条早退跳过。
+
+    ``load()`` 会清掉暂停态，所以"仍暂停就以暂停态装载"这一步不可省；它一旦排在
+    ``_bubble_blocked()`` 早退之后，完成时气泡被别的提醒占着就直接 return——tracker
+    按播放态从 load 那一刻起算，取词期间的暂停被算成播放时间，恢复播放后歌词停在
+    错的那一句。冻结时钟与"是否显示"是两件事，必须解耦。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))                 # 检测到歌 → 取词在飞
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))  # 取词在飞期间暂停
+    win._alert_current = {"id": "agent-approval"}            # 完成那一刻气泡被占
+    shown_before = list(win.shown)
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    assert win.shown == shown_before, "气泡被占时仍然不显示歌词"
+    assert ctrl._tracker.position(105.0) == pytest.approx(1.0), "105-100-4=1s"
+    assert ctrl._tracker.position(108.0) == pytest.approx(1.0), "暂停态：位置不许前进"
+
+    win._alert_current = None
+    clock.now = 110.0
+    ctrl._on_playback_ready(_playback(None))                 # 恢复播放
+
+    # 暂停段 101→110 全程 9s（含"歌词到位时仍暂停"的那段），恢复这一拍封口
+    assert ctrl._paused_since is None and ctrl._paused_total == pytest.approx(9.0)
+    assert ctrl._tracker.position(110.0) == pytest.approx(1.0), "从冻结处顺延，不跳"
+    assert win.shown[-1] == ("我在唱《t》", "A"), win.shown[-1]
+
+
+def test_pause_during_fetch_is_deducted_from_reported_progress(monkeypatch):
+    """有真实进度的播放器同样要扣取词期间的暂停（窗口里并非全是播放时间）。
+
+    ``reported + (now - updated_at)`` 把整段取词耗时都当成播放时间：取词期间按的
+    暂停会被算进位置，歌词当场跳到未来。暂停时长要扣，但**只能扣窗口里那部分**——
+    保守取 min(暂停, 窗口)，宁可少扣也绝不多扣（多扣会把位置压到采样值以下，
+    歌词相对播放器倒退）。
+    """
+    import pet.music_lyric_controller as mod
+    from pet.now_playing import Playback, Track
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    def sample(position, *, playing=True):
+        return Playback(track=Track(title="t", artist="a", playing=playing),
+                        position=position, updated_at=clock.now)
+
+    ctrl._on_playback_ready(sample(30.0))                    # 取词在飞：真值 30s @100s
+    clock.now = 101.0
+    ctrl._on_playback_ready(sample(30.0, playing=False))     # 暂停
+    clock.now = 104.0
+    ctrl._on_playback_ready(sample(30.0))                    # 恢复（暂停段 = 3s）
+
+    clock.now = 105.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=(
+        LyricLine(0.0, "A"), LyricLine(30.0, "B"), LyricLine(34.0, "C"))))
+
+    # 30 + (105-100) - 3 = 32s；不扣暂停是 35s（越过 34s 那句 → 歌词超前一整句）
+    assert ctrl._tracker.position(105.0) == pytest.approx(32.0)
+    assert ctrl._tracker.uses_reported_position is True, "真值口径不变，仍不提供手动对齐"
+    assert win.shown[-1] == ("我在唱《t》", "B"), win.shown[-1]
+
+
+def test_pause_before_a_retry_dispatch_is_not_deducted_from_reported_progress(monkeypatch):
+    """同曲失败重试：只扣**本次派发之后**新增的暂停（astra F3）。
+
+    `_paused_seconds` 是**整首歌**累计（只在切歌时复位），而同曲失败重试会换一份新的
+    采样上下文——位置窗口 `[updated_at, now]` 从这次派发起算，早于它的暂停段（首试与
+    冷却期）根本不在窗口里。旧实现按窗口长度封顶（`min(暂停, 窗口)`）只保证"位置不低于
+    采样值"，保证不了"扣的暂停属于窗口"：30s 冷却期暂停撞上 5s 窗口，会把 105 算成 100
+    （歌词退回一整句）。修法是派发那一拍快照累计暂停，完成时只扣增量。
+    """
+    import pet.music_lyric_controller as mod
+    from pet.now_playing import Playback, Track
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    def sample(position):
+        return Playback(track=Track(title="t", artist="a", playing=True),
+                        position=position, updated_at=clock.now)
+
+    def paused_at(moment):
+        clock.now = moment
+        ctrl._on_playback_ready(Playback(
+            track=Track(title="t", artist="a", playing=False),
+            position=100.0, updated_at=clock.now))
+
+    ctrl._on_playback_ready(sample(100.0))        # t=100 首试派发（真值 100s）
+    paused_at(101.0)
+    clock.now = 131.0
+    ctrl._on_playback_ready(sample(100.0))        # t=131 恢复 → 冷却期暂停累计 30s
+
+    clock.now = 135.0
+    ctrl._on_lyrics_ready(key, None)              # 首试失败：记 5 分钟冷却
+    assert ctrl._no_lyric_until[key] > clock.now
+
+    clock.now = 436.0
+    ctrl._on_playback_ready(sample(100.0))        # 冷却到期：同曲重试 = 新派发
+    assert key in ctrl._loading, "前提：重试真的派发了"
+
+    clock.now = 441.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=(
+        LyricLine(0.0, "A"), LyricLine(100.0, "B"), LyricLine(104.0, "C"))))
+
+    # 窗口只有 5s（436→441，其间零暂停）：100 + 5 - 0 = 105。
+    # 按整首累计扣（旧的封顶写法）会算成 100 + 5 - min(30, 5) = 100。
+    assert ctrl._tracker.position(441.0) == pytest.approx(105.0)
+    assert win.shown[-1] == ("我在唱《t》", "C"), win.shown[-1]   # 错的 100 → B（退回一句）
+
+
+def test_cooldown_pause_is_still_deducted_without_reported_progress(monkeypatch):
+    """无进度分支的窗口起点是**切歌时刻**，所以重试前的暂停照样要扣（刻意的不同）。
+
+    两个分支只共用"同一份暂停记账 + 只扣锚点之后的暂停"这一条口径，锚点不同：
+    有进度 → 本次派发那次采样；无进度 → 检测到切歌的时刻（`_detected_at`，那里的
+    暂停记账本就归零）。把"派发基线"照搬到无进度分支会**漏扣**冷却期暂停，位置偏大。
+    """
+    import pet.music_lyric_controller as mod
+
+    clock = _patch_clock(monkeypatch, 100.0)
+    win = _FakeWin()
+    ctrl = mod.MusicLyricController(win)
+    monkeypatch.setattr(ctrl, "_fetch_worker", lambda *a, **k: None)
+    key = ("t", "a")
+
+    ctrl._on_playback_ready(_playback(None))            # t=100 检测到歌（无进度源）
+    clock.now = 101.0
+    ctrl._on_playback_ready(_playback(None, playing=False))
+    clock.now = 131.0
+    ctrl._on_playback_ready(_playback(None))            # 恢复：暂停累计 30s
+
+    clock.now = 135.0
+    ctrl._on_lyrics_ready(key, None)                    # 首试失败 → 冷却
+    clock.now = 436.0
+    ctrl._on_playback_ready(_playback(None))            # 冷却到期：重试派发
+
+    clock.now = 441.0
+    ctrl._on_lyrics_ready(key, Lyrics(lines=tuple(LINES)))
+
+    # 441 - 100 - 30 = 311（冷却期的 300s 算作播放——无进度源只能这么估，本修复没改）
+    assert ctrl._tracker.position(441.0) == pytest.approx(311.0)

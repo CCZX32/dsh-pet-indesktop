@@ -28,6 +28,7 @@ from .music_lyric_controller import (
     LEAD_MIN_SECONDS,
     LYRIC_LEAD_SECONDS,
 )
+from .music_title import FOOBAR_FORMAT_MAX_CHARS
 from .config import (
     DEFAULT_CONTEXT_MENU_APPEARANCE,
     DEFAULT_MENU_EASTER_EGG,
@@ -59,13 +60,35 @@ from .settings_widgets import (
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
 
-#: 「直播捕获兼容」基础文案（描述能力本身）；legacy 拓扑逐字用它。
-STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
-#: overlay 拓扑：该键无任何消费者（不建 PetWindow，壳上也无运行期入口），
-#: 重启同样不生效——如实说明不支持（配合置灰控件）。
-STREAM_CAPTURE_OVERLAY_HINT = (
-    STREAM_CAPTURE_HINT + "当前单窗口渲染模式暂不支持直播捕获兼容。"
+#: 全局键的作用域声明（措辞与「开机自启」行同源，见 ``modern_settings_dialog``
+#: 的 ``autostart_desc`` 与设置门禁 2026-10-10 条目；规范 §五的原文也是「影响所有桌宠」）。
+#:
+#: 与 ``ALL_PETS_SCOPE_NOTE`` 分开：那条是**窗口级键**在子宠页的补充说明
+#: （"这一行在一窗多宠里作用于整窗"），这条是**全局键**的作用域声明
+#: （"改了影响所有桌宠"）。两句话的适用对象不同，不合并成一句。
+GLOBAL_SCOPE_NOTE = "（影响所有桌宠）"
+
+#: 「直播捕获兼容」基础文案（描述能力本身）；显式 env legacy（运行期即时切换）
+#: 逐字用它。
+STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
+#: 默认（非显式 env legacy）路径的补充说明（T4：重启级切换）。
+#:
+#: 该键是**拓扑输入**（见 ``overlay_settings_command.is_overlay_topology``）：
+#: 勾选后重启走 legacy 单窗 PetWindow 路径，overlay 单合成窗没有可枚举的窗口；
+#: 重启时按 T4 口径多只桌宠先收拢为主宠物（活跃宠清单保留，不删档）。
+#: 已勾选未重启、以及 overlay 未勾选两种状态共用这句：省略"勾选后"这类前提，
+#: 免得用户在已勾选状态下看到「勾选后生效」而以为还要再勾一次。
+#:
+#: F03：末尾按规范 §五「任意宠可以编辑全局设置，但界面必须说明影响所有桌宠」
+#: 补上范围声明——这个键在**每个**身份的设置页上都能编辑（``SlotRoutedConfig``
+#: 把它路由进主配置），旧的"子宠页置灰只归主宠页"判据已被推翻。
+STREAM_CAPTURE_RESTART_HINT = (
+    STREAM_CAPTURE_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+    + GLOBAL_SCOPE_NOTE
 )
+
+#: 子宠设置页对这些键的补充说明（窗口级键：一窗多宠里作用于整窗）。
+ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
 
 #: 「省电模式」（idle_low_fps_enabled）文案，按拓扑分流：
 #: overlay 下该键唯一作用是关掉后台动画预热（``app.py`` 建库与
@@ -78,6 +101,25 @@ IDLE_LOW_FPS_OVERLAY_HINT = (
 IDLE_LOW_FPS_LEGACY_HINT = (
     "一段时间不操作桌宠时，动画按半帧率呈现（24fps 素材 → 12fps 效果）"
     "并停止后台动画预热，任何交互立即恢复全帧率。"
+)
+
+#: 「自启目标」（harness_launch_target）说明文案，按桌面端能力分流（能力口径是
+#: ``harness_launcher.DESKTOP_SUPPORTED``，设置页不另写一份平台判定）。
+#:
+#: 两句共用首句与末句，差别只在桌面端能不能自动拉起：支持时如实说可选
+#: web / 桌面端；不支持时该项在设置页保留但置灰（"暂不可用 ≠ 永久不支持"），
+#: 文案必须给出原因——不能留着「选桌面端界面」这种本平台做不到的话，也不能
+#: 反过来说成「只有服务可选」（dsh web 界面在本平台仍可选，见下方分流函数）。
+HARNESS_TARGET_HINT_DESKTOP = (
+    "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+    "也可以显式选择打开 web 界面或桌面端。右键菜单的手动启动不受此设置影响。"
+    "此设置影响所有桌宠。"
+)
+HARNESS_TARGET_HINT_UNSUPPORTED = (
+    "「自动」和「仅 dsh 服务」都会只拉起 dsh 后台服务（不打开界面）；"
+    "本平台暂不支持自动拉起桌面端（本版本仅 Windows），「桌面端界面」置灰，"
+    "想在自启时进界面只能显式选「dsh web 界面」。"
+    "右键菜单的手动启动不受此设置影响。此设置影响所有桌宠。"
 )
 
 #: overlay 单合成窗下物理上只能整窗生效的窗口级键（一窗多宠）：一套窗旗标
@@ -93,9 +135,6 @@ OVERLAY_WINDOW_SCOPE_IDS = (
     "auto_hide_fullscreen",
 )
 
-#: 子宠设置页对这些键的补充说明。
-ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
-
 
 def _is_overlay_topology() -> bool:
     """拓扑判定（懒 import：设置进程禁止导入重量级模块，见模块 docstring）。"""
@@ -105,20 +144,24 @@ def _is_overlay_topology() -> bool:
 
 
 def stream_capture_hint() -> str:
-    """「直播捕获兼容」说明文案（按渲染拓扑分流，T4 / PHASE4_DESIGN.md:80-82）。
+    """「直播捕获兼容」说明文案（T4 / PHASE4_DESIGN.md:80-82）。
 
-    捕获依赖 PetWindow 的窗旗标（``window_screen.py`` 的
-    set_stream_capture_mode），overlay 拓扑不构造 PetWindow，壳上也没有运行期
-    入口——该键在 overlay 下**无任何消费者，重启同样不生效**，故如实说明不支持
-    并在 ``build_pet_controls`` 里置灰控件。legacy 拓扑文案逐字不变（运行期即时
-    生效）。
+    文案按**当前进程的拓扑输入**分流：
+
+    - 显式 ``PET_RENDER_TOPOLOGY=legacy``（dev 逃生门）：本进程就是 legacy，
+      PetWindow 运行期即时生效（``window_screen.py`` 的
+      set_stream_capture_mode），逐字原提示、不提示重启；
+    - 其余（默认 overlay，或已勾选捕获模式 = 重启后走 legacy）：该键是**重启级
+      切换**——勾选只落配置，本进程不会翻拓扑，故如实说明重启与多宠收拢。
 
     文案落在本模块（控件本体也在这里）而不是 ``modern_settings_dialog``：
     后者的行数预算只随实测校准，能不加行就不加。
     """
-    if _is_overlay_topology():
-        return STREAM_CAPTURE_OVERLAY_HINT
-    return STREAM_CAPTURE_HINT
+    from . import overlay_settings_command
+
+    if overlay_settings_command.env_forces_legacy():
+        return STREAM_CAPTURE_HINT
+    return STREAM_CAPTURE_RESTART_HINT
 
 
 def idle_low_fps_hint() -> str:
@@ -126,6 +169,21 @@ def idle_low_fps_hint() -> str:
     if _is_overlay_topology():
         return IDLE_LOW_FPS_OVERLAY_HINT
     return IDLE_LOW_FPS_LEGACY_HINT
+
+
+def harness_target_hint(desktop_available: bool) -> str:
+    """「自启目标」说明文案（按桌面端能力分流）。
+
+    ``desktop_available`` 由调用方从 ``harness_launcher.DESKTOP_SUPPORTED`` 读入
+    （该常量是桌面端能力的唯一平台口径，设置页不另写一份判定）：本函数只做文案
+    选择，不自己探平台，两个分支都能脱离真实平台直接测。
+
+    文案落在本模块（与 ``stream_capture_hint`` 同一先例）而不是
+    ``modern_settings_dialog``：后者的行数预算只随实测校准，能不加行就不加。
+    """
+    if desktop_available:
+        return HARNESS_TARGET_HINT_DESKTOP
+    return HARNESS_TARGET_HINT_UNSUPPORTED
 
 
 def _apply_window_scope_rows(host) -> None:
@@ -179,16 +237,18 @@ def build_pet_controls(host) -> None:
     for scale in spawn_scales:
         host.spawn_scale_combo.addItem(f"{int(round(catalog.CANVAS_W * scale))} px", scale)
     host.spawn_scale_combo.setCurrentIndex(host.spawn_scale_combo.findData(current_spawn_scale))
-    host.spawn_inherit_dynamic_island_check = ToggleSwitch(host)
-    host.spawn_inherit_dynamic_island_check.setChecked(
-        bool(host.config.get("spawn_inherit_dynamic_island", False))
-    )
     host.clear_spawned_pets_btn = QPushButton("一键退出…", host)
     host.clear_spawned_pets_btn.clicked.connect(host._on_clear_spawned_pets)
-    if host.config.instance_id:
-        # 子肥鱼不能关闭主肥鱼进程，只允许主肥鱼执行退出操作。
+    from .settings_slot_config import is_main_identity
+
+    if not is_main_identity(host.config.instance_id):
+        # 这个动作是**全局**的「退出全部子肥鱼」：只有主身份页能发（子宠页里没有
+        # "子肥鱼"这个对象可管）。判据必须是"主身份"而不是"身份非空"——slot0 从
+        # G1 起有显式 `slot-0` 身份，按非空判会把**主宠自己的页面**也置灰，而
+        # tooltip 让用户"去主肥鱼设置"，用户就在那儿。子宠页的提示必须指向真实
+        # 可达的入口（托盘/右键菜单里有同一条动作），不能指向不存在的地方。
         host.clear_spawned_pets_btn.setEnabled(False)
-        host.clear_spawned_pets_btn.setToolTip("请在主肥鱼的设置里操作")
+        host.clear_spawned_pets_btn.setToolTip("这是全局操作：请在主肥鱼的设置或托盘菜单里操作")
 
     host.on_top_check = ToggleSwitch(host)
     host.on_top_check.setChecked(bool(host.config.get("on_top", True)))
@@ -203,6 +263,16 @@ def build_pet_controls(host) -> None:
         host.cursor_hidden_passthrough_check.setChecked(bool(host.config.get("cursor_hidden_passthrough", True)))
     host.drag_physics_check = ToggleSwitch(host)
     host.drag_physics_check.setChecked(bool(host.config.get("drag_physics", False)))
+    # 静止放手下落（#219）：低速松手零初速受重力落地。独立于「拖动物理」——
+    # 拖动物理关时低速松手同样是「原地放下」，用户要的下落不该被那个开关挡住。
+    host.drop_gravity_check = ToggleSwitch(host)
+    host.drop_gravity_check.setChecked(bool(host.config.get("drop_gravity", False)))
+    if not _is_overlay_topology():
+        # 静止放手下落只被 sprite 路径消费（pet_sprite；legacy 的 PetWindow 没有
+        # 对应行为）。捕获模式接通后 legacy 已是真实用户路径，开关摆在那里改了
+        # 没反应 ⇒ 如实置灰 + 说明（同节其它行 legacy 真的消费，保持可用）。
+        host.drop_gravity_check.setEnabled(False)
+        host.drop_gravity_check.setToolTip("仅单合成窗（overlay）拓扑生效")
     # 「单进程多开」开关不再创建（拓扑收口 Phase A：设置页隐藏；
     # 游离 ToggleSwitch 会被孤儿开关测试拦截）。
 
@@ -261,9 +331,11 @@ def build_pet_controls(host) -> None:
     host.autostart_check = ToggleSwitch(host)
     host._autostart_initial = autostart_mod.is_enabled()
     host.autostart_check.setChecked(host._autostart_initial)
-    if host.config.instance_id:
-        host.autostart_check.setEnabled(False)
-        host.autostart_check.setToolTip("仅主桌宠可设置")
+    # 开机自启是**全局**键（`autostart_wanted` 写在主配置，系统登录项只有一份），
+    # 但**任意宠**都能改它——界面必须自己说清影响范围，而不是把自己置灰。旧判据
+    # `if instance_id` 在 slot0 拿到显式身份后把主宠页也一起禁掉了，tooltip 却让人
+    # "去主桌宠设置"，指向一个用户正站着的地方（2026-10-10 终审 A04-b）。
+    host.autostart_check.setToolTip("影响所有桌宠：系统登录项只有一份。")
     host.dock_icon_check = None
     if sys.platform == "darwin":
         host.dock_icon_check = ToggleSwitch(host)
@@ -316,6 +388,21 @@ def build_pet_controls(host) -> None:
         host.music_browser_media_check.setChecked(
             bool(host.config.get("music_browser_media_enabled", False))
         )
+    # foobar2000 歌词（#228）同样只在 Windows 建控件：窗口标题源走 Win32 枚举，
+    # 其它平台建了也没效果。格式串输入框是**高级**项——自动模式已经能工作，只有
+    # 用户在 foobar 里改过「窗口标题」时才需要它把歌名/歌手切准。
+    host.foobar_lyrics_check = None
+    host.foobar_title_format_edit = None
+    if sys.platform == "win32":
+        host.foobar_lyrics_check = ToggleSwitch(host)
+        host.foobar_lyrics_check.setChecked(
+            bool(host.config.get("foobar_lyrics_enabled", False))
+        )
+        host.foobar_title_format_edit = _line_edit(
+            str(host.config.get("foobar_title_format", "") or "")
+        )
+        host.foobar_title_format_edit.setMaxLength(FOOBAR_FORMAT_MAX_CHARS)
+        host.foobar_title_format_edit.setPlaceholderText("留空 = 自动")
     host.agent_cost_check = ToggleSwitch(host)
     host.agent_cost_check.setChecked(bool(host.config.get("agent_cost_enabled", False)))
     host.music_lyric_lead_spin = BrowserDoubleSpinBox(host)
@@ -364,11 +451,13 @@ def build_pet_controls(host) -> None:
         host.auto_hide_fullscreen_check.setChecked(bool(host.config.get("auto_hide_fullscreen", True)))
         host.stream_capture_check = ToggleSwitch(host)
         host.stream_capture_check.setChecked(bool(host.config.get("stream_capture_mode", False)))
-        if _is_overlay_topology():
-            # overlay 无消费者（不建 PetWindow，壳上无 set_stream_capture_mode）：
-            # 置灰 + 如实说明，避免用户以为勾上就能被 OBS 枚举。
-            host.stream_capture_check.setEnabled(False)
-            host.stream_capture_check.setToolTip(STREAM_CAPTURE_OVERLAY_HINT)
+        # F03（2026-10-10 终审）：这里**不**按身份置灰。旧实现的理由是"子宠页保存只写
+        # config-slot-N.json、拓扑判定只读主配置 ⇒ 点什么都不生效"，但这条理由已被
+        # ``SlotRoutedConfig`` 的全局路由推翻：非每宠键一律落主 config.json，
+        # 而正常 UI 入口**只有** slot 身份（``--instance slot-0`` / ``slot-N``），
+        # 按"身份非空"判会把 slot0 自己的页面也拒掉，连已开捕获模式的用户都关不掉它。
+        # 规范 §五：任意宠可以编辑全局设置，界面说清"影响所有桌宠"即可（文案在
+        # ``stream_capture_hint``）。
 
     host.speed_select = ModernSelect(host, width=112)
     current_speed = float(host.config.get("playback_speed", 1.0))

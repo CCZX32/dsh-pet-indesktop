@@ -52,7 +52,7 @@ Config.context_menu_template
 | 10 | 主动识屏 | 补齐 | `facade.toggle_proactive_enabled` / `set_proactive_option` 写 `config.proactive_screen` + 共享 `proactive_watcher.apply_config()`（缺失时从 `AppShell._shared.proactive` 回填，等价 `_ensure_proactive_watcher`）；`win32 + 聊天门` |
 | 11 | Agent 联动 | 补齐 | `facade.toggle_agent_link` → `agent_link_manager.set_enabled`（拒绝时回滚勾选，同 `window.py:3945`）；`set_agent_link_option` 写 `agent_link.report_gates` 的 0/1 两端 |
 | 12 | 切换菜单模板 | 补齐 | `set_context_menu_template`（写配置，同 `window.py:3887`）+ `reopen_context_menu` 原位重开（新增 `ShellOverlayWindow.reopen_context_menu`） |
-| 13 | 桌宠设置（legacy 模板） | 保留并补位 | legacy.py 的设置槽 `on_open_legacy_settings` 在 app 里**恒为 None**（`app.py:457`）；若不补，切到旧版后没有任何设置入口。按被点 sprite 的 D13 身份路由 `open_settings_for(sprite)` |
+| 13 | 桌宠设置（legacy 模板） | 保留并补位 | legacy.py 的设置槽 `on_open_legacy_settings` 在 app 里**恒为 None**（`app.py:457`）；若不补，切到旧版后没有任何设置入口。按被点 sprite 的 D13 身份路由 `open_settings_for(sprite)`。**后续变更（2026-10-08）**：facade 的这条追加补丁已删除，改由 `build_legacy_menu` 在旧版设置槽为空时回退 `on_open_modern_settings`——同一「旧版菜单」在 capture/legacy 拓扑（真实 `PetWindow`）此前没有任何设置入口，两套正式拓扑能力不一致；回退收敛到建造器后两拓扑菜单树一致，facade 再补一条就是重名入口。见本批 `tests/test_desktop_pet_features.py` / `tests/test_sprite_menu_parity.py` 的契约用例 |
 | 14 | 隐藏桌宠 | 保留 | legacy.py 没有；overlay 的隐藏语义（`set_pet_visible`）没有别的菜单入口，删掉即实机功能回退 |
 | 15 | 退出这只 | 保留 | 仅多宠时注入，插在「退出」之前（4.2c D13 既有语义） |
 | 16 | 其余 legacy/modern 已有一项 | 顺带补齐 | `看看屏幕`（新 `OverlayShell.look_at_screen`，`look_done` 信号 + vision worker）、`重命名当前角色…`（`facade.rename_character`）、`DeepSeek 余额`、`检查更新`、`待办提醒`、`立即报时`/`节日提醒`（AppShell 路由）、`生小肥鱼` 菜单头像（`facade.icon_pixmap`）、`播放动画` 缩略图（`facade.animation_icon_image` / `_cached_image`，缓存挂壳、128 条上限同窗口版） |

@@ -60,9 +60,8 @@ def _flush_deferred_delete() -> None:
 
 
 def _menu_ready_shell(tmp_path):
-    """modern 模板 + 命中的主 sprite（右键落在它身体中心）。"""
+    """命中的主 sprite（右键落在它身体中心）。"""
     shell, _lib = fac._make_shell(tmp_path)
-    shell._config.set("context_menu_template", "modern")
     sprite = shell.sprite
     sprite.bind_clip("idle1")
     sprite._rebuild_pixmap()          # 命中图（alpha 判定）惰性重建

@@ -201,6 +201,12 @@ class FestivalReminderService:
         from . import window_alerts
         app = self._app
         win = getattr(app, "win", None)
+        # 免打扰（含全屏等效）判定必须在**可见性判断之前**：宿主隐藏时（全屏避让
+        # 走的正是这条）若先看 isVisible，提醒会直接落到系统通知——免打扰既压不住
+        # 也不进暂存队列（实测节日/报时通知照发、queued=0）。
+        if win is not None and window_alerts.quiet_blocked(win):
+            window_alerts.defer_quiet(text)
+            return
         if win is not None and win.isVisible():
             if window_alerts.sprite_in_flight(win):
                 return

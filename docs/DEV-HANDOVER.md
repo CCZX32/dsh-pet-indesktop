@@ -70,7 +70,6 @@ D:\dsh-pet\
 │   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3258 行）
 │   ├── window.py                 # 桌宠主窗口（组合根，4599 行，预算 4632）
 │   ├── config.py                 # 配置读取/清洗/迁移/持久化（1555 行）
-│   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
 │   ├── modern_settings_dialog.py # 现代设置主对话框（2347 行，预算 2347）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
 │   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
@@ -79,8 +78,8 @@ D:\dsh-pet\
 │   ├── voice_chime_service.py    # ★ 语音报时服务层（835 行，tick + 合成 + 播放）
 │   ├── voice_chime_settings.py   # ★ 语音报时设置页（239 行）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（237 行，中文 120 / 英文 96 条）
-│   ├── context_menus\            # 右键菜单（registry.py 动作注册 + legacy/modern/fun_entry）
-│   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json 为默认模板）
+│   ├── context_menus\            # 右键菜单（registry.py 动作注册 + modern/fun_entry/shared）
+│   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json，唯一布局来源）
 │   ├── chat\                     # AI 对话子系统（Chat 版打包变体）
 │   └── persona_presets\          # 角色台词预设
 ├── scripts\                      # 构建/校验脚本（build_onedir.ps1、slim_bundle.py 等 19 个）
@@ -183,7 +182,7 @@ modern_settings_dialog.py
 
 ## 三、架构红线与开发约束
 
-> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（213 行，7 个用例）。
+> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（577 行，13 个用例）。
 
 ### 3.1 行数预算（绊线，不是红线）
 
@@ -212,8 +211,6 @@ modern_settings_dialog.py
 1. `pet/config.py` → 默认值 dict（语音报时在 693-703 行）；
 2. `pet/config.py` → `reload()` 白名单元组（语音报时在 913-923 行）；
 3. `tests/test_config_schema.py` → `DEFAULTS_SNAPSHOT` 与 `RELOAD_WHITELIST_SNAPSHOT` 快照集合（护栏用例：`test_every_defaults_key_is_whitelisted_or_special_cased` 等；特殊键走 `SPECIAL_CASED_KEYS`）。
-
-`pet/config_domains.py` 只做「取子键 / 聚合成域 dict」的编排，**不允许写第二份清洗逻辑**。
 
 ### 3.4 孤儿文件禁令
 
@@ -251,8 +248,7 @@ modern_settings_dialog.py
 
 ### 4.1 配置对象与分组
 
-- `pet/config.py` 的 `Config` 负责读取、清洗、迁移、持久化；键以**顶层平铺**为主，复杂功能用嵌套 dict（chat / agent_link / proactive_screen / collision / menu）。
-- `pet/config_domains.py` 提供只读域 facade：`ChatConfig`、`AgentLinkConfig`、`ProactiveConfig`、`CollisionConfig`、`MenuConfig`，`normalize` 全部复用 `config.py` 既有清洗函数。
+- `pet/config.py` 的 `Config` 负责读取、清洗、迁移、持久化；键以**顶层平铺**为主，复杂功能用嵌套 dict（chat / agent_link / proactive_screen / collision / menu）。（曾有一层只读域 facade `config_domains`，因「只建不用」于 2026-10-09 整层退役，消费方直接读 `Config`。）
 - 配置落盘位置：运行期 `config.dir/config.json`（打包版为 `%APPDATA%\dsh-pet-standalone-<variant>\`）；仓库内 `pet/persona_presets/*.json` 属角色台词预设，不属运行期配置。
 
 ### 4.2 语音报时配置键（本项目的主要定制，11 个）
@@ -390,7 +386,7 @@ _on_tick(now)
 |---|---|---|
 | `tests/test_voice_chime.py`（952 行） | 61 个 def / 参数化后 153 用例 | 11 键默认值与清洗、六种调度数学、`chime_slot` 幂等、`build_chime_text`/`build_chime_bubble_text` 解耦、台词每日排列轮换（`quote_day_order`/`chime_index_in_day`/`pick_quote`）、库长不重复护栏、自定义台词清洗、预合成状态机、缓存裁剪、edge 参数格式化与 `cache_key` |
 | `tests/test_config_schema.py` | 5 | 三处登记护栏：`DEFAULTS_SNAPSHOT`、`RELOAD_WHITELIST_SNAPSHOT`、`SPECIAL_CASED_KEYS`，代表用例 `test_every_defaults_key_is_whitelisted_or_special_cased` |
-| `tests/test_architecture.py`（213 行） | 7 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫 |
+| `tests/test_architecture.py`（577 行） | 13 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫、多进程层与旧版菜单退役层的防复活守卫 |
 | `tests/test_menu_layout.py`（2108 行） | 65 | 菜单模板节点顺序、动作 resolve、populate 标签（含语音报时两项） |
 | `tests/test_desktop_pet_features.py`（3118 行） | 94 | 桌宠能力集成（含菜单标签断言） |
 | `tests/test_bundle_slim.py` | 10 | `plan_removals` / `verify_no_live_reference` / `verify_required` / dry-run / 实际应用 / 拒绝越界 |

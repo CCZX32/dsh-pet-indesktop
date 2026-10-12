@@ -282,7 +282,11 @@ def test_click_show_balance_routes_to_shell_show_balance(tmp_path):
     try:
         shell.overlay.show()
         _click_sprite(shell)
-        assert calls == [shell]                 # 余额气泡锚在本壳（有 show_bubble）
+        # 余额落点 = **被点 sprite 的 pet 形宿主**（绑定发起槽，不是壳本身）：
+        # slot0 关闭后迟到的余额不会再贴到子宠身上；宿主把 show_bubble 转给
+        # 这一只自己的气泡链（旧逐窗架构里"谁被点谁冒泡"的等价物）。
+        assert calls == [shell._sprite_host(shell.sprite)]
+        assert calls[0] is not shell
         assert shell._self_talk_timer.interval() == 5000  # 走余额分支，不重排自言自语
     finally:
         _cleanup(shell)
