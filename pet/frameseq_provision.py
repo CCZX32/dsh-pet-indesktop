@@ -208,9 +208,6 @@ from .webm_clip import session_ending
 
 try:  # 与 webm_clip 同一依赖口：不可用时供给静默 no-op（播放同样会降级）
     import imageio_ffmpeg
-    from .ffmpeg_hide import install as _install_ffmpeg_hide
-
-    _install_ffmpeg_hide()
 except Exception:  # pragma: no cover - 缺依赖属环境问题
     imageio_ffmpeg = None
 
@@ -1184,16 +1181,15 @@ def ffmpeg_exe() -> str | None:
 
 
 def _creation_flags() -> int:
-    """Windows：ffmpeg 低于正常优先级 + 隐藏控制台窗口（POSIX 忽略，返回 0）。
+    """Windows：ffmpeg 低于正常优先级 + 不建控制台窗口（POSIX 忽略，返回 0）。
 
-    ``CREATE_NO_WINDOW`` 必须有：缺了它每次转换都会闪出一个终端窗口（默认终端
-    承载子进程控制台），开机自启的集中供给时段最刺眼。fps 探测走
-    imageio_ffmpeg（内部已用 STARTUPINFO 隐藏），只有转换这一处直接 Popen。
+    打包产物是 --windowed（无控制台），派生 ffmpeg.exe 这类控制台程序不带
+    CREATE_NO_WINDOW 时系统会新建可见的命令行窗口，首跑供给期间反复闪窗。
     """
     if os.name != "nt":
         return 0
-    return int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)) | int(
-        getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return (int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0)))
 
 
 def _ffmpeg_argv(exe: str, webm: Path, tmp_dir: Path) -> list[str]:
