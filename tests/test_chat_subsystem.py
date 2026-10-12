@@ -3575,12 +3575,14 @@ def test_close_while_streaming_still_cancels_the_request(tmp_path, monkeypatch):
         window.input.setPlainText("你好")
         window.send_message()
         assert provider.entered.wait(timeout=10.0), "请求未进入 provider"
-        assert window.service.busy is True
+        # busy 依赖 worker 线程调度（isRunning），慢 runner 上 entered 与 busy
+        # 之间有一小段窗口，泵到可见再断言（CI 慢 runner 是本地数倍慢）
+        assert _pump_until(app, lambda: window.service.busy), "发送后 service 未进忙态"
 
         window.close()
-        assert _pump_until(app, lambda: not window.service.busy), "关窗未取消在途生成"
-        assert window._active_request_id is None
-        assert window.composer._busy is False
+        assert _pump_until(app, lambda: not window.service.busy, timeout=30.0), "关窗未取消在途生成"
+        assert _pump_until(app, lambda: window._active_request_id is None), "关窗后 request id 未复位"
+        assert _pump_until(app, lambda: not window.composer._busy), "关窗后 composer 忙碌态未复位"
         assert all(m.role != "assistant" for m in window.session.messages)
     finally:
         _abort_request(app, window, provider)
