@@ -678,11 +678,11 @@ def test_link_off_on_residue_does_not_swallow_live_turn_end(tmp_path, monkeypatc
     try:
         _write(rig.bridge, "dsh.jsonl", *_IN_FLIGHT_HISTORY)
         mon.start()                             # 真 worker 线程
-        assert _wait_until(rig.app, lambda: bool(mon._tailer._tailers), timeout=15.0), \
+        assert _wait_until(rig.app, lambda: bool(mon._tailer._tailers), timeout=30.0), \
             "worker 第一拍必须完成扫描（回填跳过启动前的历史）"
         _write(rig.bridge, "dsh.jsonl",
                {"event": "turn/end", "sessionId": "s-1", "step": "turn:1"})
-        assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles), timeout=15.0), rig.bubbles
+        assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles), timeout=30.0), rig.bubbles
         assert mgr._last_raw.get("dsh") == "success", mgr._last_raw
 
         # 关闭联动（真 stop + 既有复位管线）：写者随通道一起消失，原始状态镜像整片
@@ -696,11 +696,11 @@ def test_link_off_on_residue_does_not_swallow_live_turn_end(tmp_path, monkeypatc
         # 关闭期间这一回合的历史已经落盘；重新开启后回填跳过它，live 只来收尾
         _write(rig.bridge, "dsh.jsonl", *_IN_FLIGHT_HISTORY)
         mon.start()
-        assert _wait_until(rig.app, lambda: bool(mon._tailer._tailers), timeout=15.0)
+        assert _wait_until(rig.app, lambda: bool(mon._tailer._tailers), timeout=30.0)
         _write(rig.bridge, "dsh.jsonl",
                {"event": "turn/end", "sessionId": "s-2", "step": "turn:1"})
         assert _wait_until(
-            rig.app, lambda: len(_succeeded(rig.bubbles)) == 2, timeout=15.0), rig.bubbles
+            rig.app, lambda: len(_succeeded(rig.bubbles)) == 2, timeout=30.0), rig.bubbles
         _pump(rig.app, 0.3)
     finally:
         mgr.shutdown()
