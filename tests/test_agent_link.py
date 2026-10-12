@@ -5060,6 +5060,9 @@ class TestDshLateQueuedSignalsAreIsolated:
             cfg.set("agent_link", {"dsh": True})
             mgr.apply_config()
             app.processEvents()
+            # 监视器自己的探活 offline（测试环境没有 DSH 在听端口）在慢 runner 上
+            # 可能已经被 processEvents 送达——清掉再测直连路径，与竞态解耦
+            states.clear()
             mgr._on_dsh_converged_state("working", "offline", "probe/lost")
             assert states == ["offline"]
         finally:
