@@ -626,3 +626,37 @@ class TestWorkflowYamlShape:
             inputs = dispatch.get("inputs") or {}
             for key, spec in inputs.items():
                 assert spec.get("type") in {"string", "boolean"}, f"{path.name}:{key} 缺 type"
+
+
+class TestWindowsShardRunner:
+    """Windows 主套件分片执行器（2026-10-13，hosted runner AV 规避）的契约守卫。
+
+    背景：Windows CI 单进程整跑在 ~2/3 处反复 access violation（堆腐蚀签名，
+    漂移崩点；mac/Linux/本机不复现），分片（四个独立进程）两轮诊断零崩。
+    """
+
+    SHARD_STEP = "Pytest (main suite, Windows shards)"
+
+    def test_shard_step_exists_windows_only_and_runs_script(self):
+        step = _step_block(_text(PR_TEST), self.SHARD_STEP)
+        assert "python scripts/ci_shards.py" in _run_text(step)
+        assert "runner.os == 'Windows'" in _if_condition(step)
+
+    def test_monolithic_main_suite_skips_windows(self):
+        # 两个步骤合起来仍是「每端恰好一条主套件路径」
+        condition = _if_condition(_step_block(
+            _text(PR_TEST), TestPrTestCaptureAndFailureDiagnostics.MAIN_SUITE))
+        assert "runner.os != 'Windows'" in condition
+
+    def test_shard_script_ignores_parity_with_main_suite(self):
+        # 分片脚本里的忽略清单必须与主套件步骤同源同内容——漂移=漏跑一族
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ci_shards", ROOT / "scripts" / "ci_shards.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        run = _run_text(_step_block(
+            _text(PR_TEST), TestPrTestCaptureAndFailureDiagnostics.MAIN_SUITE))
+        for path in mod.IGNORES:
+            assert f"--ignore={path}" in run, f"主套件步骤缺 {path}"
+        assert len(mod.IGNORES) == 4 and len(set(mod.IGNORES)) == 4
