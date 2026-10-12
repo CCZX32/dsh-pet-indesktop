@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -75,7 +76,8 @@ def test_prompt_priority_and_limits(tmp_path: Path):
     ]
     builder = PromptBuilder(tmp_path / "assets" / "characters")
     messages = builder.build_messages(settings, "cat", history, "question", role_prompt="override")
-    assert messages[0] == {"role": "system", "content": "override"}
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"].startswith("override\n\n【时间信息】")
     assert messages[-1] == {"role": "user", "content": "question"}
     assert len(messages) <= 4
 
@@ -194,13 +196,13 @@ def test_message_bubble_exposes_avatar_body_and_state():
 
     bubble = MessageBubble("assistant", "hello", character_id="shenshen")
     assert bubble.objectName() == "message-bubble"
-    assert bubble.body.text() == "hello"
+    assert bubble.content == "hello"
     assert bubble.avatar.text() == "S"
     assert bubble.state == "normal"
     bubble.set_state("streaming")
     assert bubble.property("state") == "streaming"
     bubble.set_content("updated")
-    assert bubble.body.text() == "updated"
+    assert bubble.content == "updated"
 
 
 def test_session_sidebar_uses_readable_deepseek_style_list(tmp_path: Path):
@@ -1328,13 +1330,13 @@ def test_streaming_reply_uses_typewriter_and_finishes_after_buffer_drains(tmp_pa
     window._active_request_id = "request"
     text = "这是一段用于确认逐字输出效果的流式回复。"
     window._delta("request", text)
-    assert window._bubble.body.text() != text
+    assert window._bubble.content != text
     window._finished("request", text)
     deadline = time.time() + 5
-    while window._bubble.body.text() != text and time.time() < deadline:
+    while window._bubble.content != text and time.time() < deadline:
         app.processEvents()
         time.sleep(0.01)
-    assert window._bubble.body.text() == text
+    assert window._bubble.content == text
     assert window.session.messages[-1].content == text
     window.close()
     app.processEvents()
@@ -3434,4 +3436,235 @@ def test_system_notify_toggle_persists_on_save(tmp_path, monkeypatch):
     cfg.save()
     assert Config(tmp_path).get("system_notifications_enabled") is False, "拨动后的新值必须生效"
     page.close()
+    app.processEvents()
+
+
+# ---------------------------------------------- 在途请求状态机回归（F6 / X3）
+
+
+class _GatedChatProvider:
+    """可控假 provider：进入 stream 后阻塞，直到测试放行或收到取消。
+
+    取代「固定 sleep 猜时序」：请求真的进到 provider 里（entered 置位）才断言，
+    收尾也由 cancel / 放行事件驱动，不赌时间。
+    """
+
+    def __init__(self, reply: str = "回复正文") -> None:
+        self.reply = reply
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def stream(self, messages, config, cancel):
+        self.entered.set()
+        while not self.release.is_set() and not cancel.is_set():
+            self.release.wait(0.01)
+        if cancel.is_set():
+            return
+        yield self.reply
+
+
+class _RecordingPetWindow:
+    """只记录桌宠侧的聊天状态（PetChatLink → set_chat_status）。"""
+
+    def __init__(self) -> None:
+        self.states: list[str] = []
+
+    def set_chat_status(self, state, text="") -> None:
+        self.states.append(state)
+
+
+def _gated_chat_window(module, tmp_path, monkeypatch):
+    """构建 ChatWindow，并把其内部 `ChatService(parent=...)` 换成持有可控
+    provider 的真实 service——信号连接仍由窗口自己完成（走真实链路）。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.service import ChatService
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    provider = _GatedChatProvider()
+    service = ChatService(provider=provider)
+
+    def _factory(parent=None):
+        if parent is not None:
+            service.setParent(parent)
+        return service
+
+    monkeypatch.setattr(module, "ChatService", _factory)
+    pet = _RecordingPetWindow()
+    window = module.ChatWindow(Config(tmp_path), "shenshen", pet_window=pet)
+    return app, window, provider, pet
+
+
+def _abort_request(app, window, provider, timeout: float = 10.0) -> None:
+    """取消在途请求并等 worker 收尾，避免 QThread 运行中被销毁。"""
+    window.service.stop()
+    provider.release.set()
+    deadline = time.monotonic() + timeout
+    while window.service.busy and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    assert not window.service.busy, "worker 未在宽限期内退出"
+    app.processEvents()
+
+
+def _pump_until(app, predicate, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+def test_modern_send_switches_composer_to_busy_stop_state(tmp_path, monkeypatch):
+    """F6 回归（modern）：`started` 在 `send()` 内同步发出，窗口必须先把本轮
+    request id 落到 `_active_request_id`——否则 `_started` 的首行 id 过滤恒命中，
+    发送后既不进忙态、按钮不变停止，桌宠也不切思考态。"""
+    from pet.chat import widgets as chat_widgets
+
+    app, window, provider, pet = _gated_chat_window(chat_widgets, tmp_path, monkeypatch)
+    try:
+        assert not provider.entered.is_set()
+        window.input.setPlainText("你好")
+        window.send_message()
+
+        assert provider.entered.wait(timeout=10.0), "请求未进入 provider"
+        assert window.service.busy is True
+        assert window.composer._busy is True
+        assert window.composer.send.toolTip() == "停止"
+        assert window.composer.send.property("busy") is True
+        assert window.status.text() == "思考中…"
+        assert pet.states == ["thinking"]
+    finally:
+        _abort_request(app, window, provider)
+        window.close()
+        app.processEvents()
+
+
+def test_legacy_send_switches_composer_to_busy_stop_state(tmp_path, monkeypatch):
+    """F6 回归（legacy）：与 modern 同构——忙态/停止按钮/桌宠思考态必须生效。"""
+    from pet.chat import legacy_widgets as legacy_chat
+
+    app, window, provider, pet = _gated_chat_window(legacy_chat, tmp_path, monkeypatch)
+    try:
+        window.input.setPlainText("你好")
+        window.send_message()
+
+        assert provider.entered.wait(timeout=10.0), "请求未进入 provider"
+        assert window.service.busy is True
+        assert window.composer._busy is True
+        assert window.composer.send.text() == "停止"
+        assert window.status.text() == "思考中…"
+        assert pet.states == ["thinking"]
+    finally:
+        _abort_request(app, window, provider)
+        window.close()
+        app.processEvents()
+
+
+def test_close_while_streaming_still_cancels_the_request(tmp_path, monkeypatch):
+    """X3 修复只补「已完成未排空」的收尾，关窗取消在途生成这条行为不得变。"""
+    from pet.chat import widgets as chat_widgets
+
+    app, window, provider, pet = _gated_chat_window(chat_widgets, tmp_path, monkeypatch)
+    try:
+        window.show()
+        app.processEvents()
+        window.input.setPlainText("你好")
+        window.send_message()
+        assert provider.entered.wait(timeout=10.0), "请求未进入 provider"
+        # busy 依赖 worker 线程调度（isRunning），慢 runner 上 entered 与 busy
+        # 之间有一小段窗口，泵到可见再断言（CI 慢 runner 是本地数倍慢）
+        assert _pump_until(app, lambda: window.service.busy), "发送后 service 未进忙态"
+
+        window.close()
+        assert _pump_until(app, lambda: not window.service.busy, timeout=30.0), "关窗未取消在途生成"
+        assert _pump_until(app, lambda: window._active_request_id is None), "关窗后 request id 未复位"
+        assert _pump_until(app, lambda: not window.composer._busy), "关窗后 composer 忙碌态未复位"
+        assert all(m.role != "assistant" for m in window.session.messages)
+    finally:
+        _abort_request(app, window, provider)
+        window.close()
+        app.processEvents()
+
+
+def test_quick_chat_send_shows_generating_hint(tmp_path, monkeypatch):
+    """F6 同型回归（quick chat）：`_started` 此前因 id 过滤恒命中而形同死代码，
+    气泡提示停在 `_send` 里写下的「思考中…」，永远切不到「生成中…」。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.service import ChatService
+    from pet.config import Config
+    from pet import quick_chat as quick_chat_mod
+
+    app = QApplication.instance() or QApplication([])
+    provider = _GatedChatProvider()
+    service = ChatService(provider=provider)
+    monkeypatch.setattr(quick_chat_mod, "ChatService", lambda parent=None: service)
+
+    bubble = quick_chat_mod.QuickChatBubble(Config(tmp_path))
+    try:
+        bubble.input.setText("你好")
+        bubble._send()
+        assert provider.entered.wait(timeout=10.0), "请求未进入 provider"
+        assert _pump_until(app, lambda: bubble.hint_label.text() == "生成中…"), (
+            f"提示未切到生成中：{bubble.hint_label.text()!r}"
+        )
+    finally:
+        _abort_request(app, bubble, provider)
+        bubble.close()
+        app.processEvents()
+
+
+def test_close_during_typewriter_drain_saves_reply_and_resets(tmp_path):
+    """X3 回归：模型已完成、worker 已回收、打字机仍在排空时关窗——
+    `service.stop()` 是空操作且不会有 stopped 信号，必须先把已完成的回复按
+    完成路径落库再复位；否则回复永远丢失，重开还是「生成中」+ 停止按钮。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.show()
+    app.processEvents()
+
+    window.session.messages.append(ChatMessage("user", "提问"))
+    window.store.save(window.session)
+    window._bubble = window._add("assistant", "")
+    window._active_request_id = "request"
+    window._pending_output = "回复前半"      # 尚未排空
+    window._pending_finish_text = "回复全文"  # 模型已完成
+    window._typewriter_timer.start()
+    assert window._typewriter_timer.isActive()
+    session_id = window.session.session_id
+
+    window.close()
+    app.processEvents()
+
+    # 1) 已完成的回复按完成路径落库（内存 + 磁盘）。写盘是异步的，先 flush。
+    assert [m.content for m in window.session.messages] == ["提问", "回复全文"]
+    assert window.store.flush() is True
+    on_disk = json.loads(
+        (window.store.root / "shenshen" / f"{session_id}.json").read_text(encoding="utf-8")
+    )
+    assert [m["content"] for m in on_disk["messages"]] == ["提问", "回复全文"]
+
+    # 2) 状态复位：不再有残留的在途输出，按钮回到发送态、状态回到就绪
+    assert window._pending_finish_text is None
+    assert window._pending_output == ""
+    assert window._active_request_id is None
+    assert window.composer._busy is False
+    assert window.composer.send.toolTip() == "发送"
+    assert window.status.text() == "就绪"
+
+    # 3) 重开（窗口是复用窗口，close=hide）：仍是就绪态而非「生成中」
+    window.show()
+    app.processEvents()
+    assert window.composer._busy is False
+    assert window.status.text() == "就绪"
+    window.close()
     app.processEvents()

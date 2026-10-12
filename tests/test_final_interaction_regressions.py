@@ -559,12 +559,13 @@ def test_offline_probe_override_clears_pending_and_stops_converging(tmp_path, mo
                {"event": "approval/request", "tool": "bash", "rpcId": "r-off",
                 "sessionId": "s-1"})
         mon._poll()   # 第 1 拍不探活（_online 仍是 None）：记录照旧被消费
-        assert ("", "waiting_approval", "approval/request") in converged
+        # 收敛信号第 4 位是发出时的代次（F3：消费侧据此丢弃旧代次排队信号）
+        assert ("", "waiting_approval", "approval/request", mon._emit_gen) in converged
         assert len(mgr.pending_interactions_for("dsh")) == 1
 
         mon._poll()   # 第 2 拍触发探活：钉成跑不通 ⇒ 真离线
         assert mon._online is False, "钉死的探活必须落到离线"
-        assert ("waiting_approval", "offline", "") in converged, \
+        assert ("waiting_approval", "offline", "", mon._emit_gen) in converged, \
             f"离线收敛必须发生：{converged}"
         assert mgr.pending_interactions_for("dsh") == {}, \
             "离线收敛清空本地 pending 真值（dismiss_all_interactions）"

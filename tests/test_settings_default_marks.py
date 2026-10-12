@@ -56,6 +56,10 @@ NO_DEFAULT_ROWS = frozenset({
     # AI 服务商逐条目字段：每个服务商一套值，没有单一默认值可比
     "provider_name", "api_url", "model", "api_key", "timeout", "max_tokens", "skip_ssl",
     "vision_same", "vision_model", "vision_url", "vision_key",
+    # 深度思考开关/强度也是逐服务商字段（ProviderConfig.thinking/reasoning_effort）
+    "thinking_mode", "reasoning_effort",
+    # 搜索 API Key 是凭据字段（优先系统钥匙串），没有可比默认值
+    "web_search_key",
     # 岛指标行是 island_metrics **列表**的成员，不是标量键
     "island_network", "island_cpu", "island_mem", "island_gpu", "island_fps",
     # 台词编辑器的「上次打开的层」是 UI 记忆，不是偏好

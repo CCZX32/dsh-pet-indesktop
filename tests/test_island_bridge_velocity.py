@@ -617,7 +617,10 @@ def test_real_island_drag_into_pet_throws_with_paired_reports(tmp_path):
             QEvent.Type.MouseButtonRelease, press + QPoint(70 + step * 3, 0),
             buttons=Qt.MouseButton.NoButton))
         assert island._dragging is False
-        assert world._static_member_velocity[ISLAND][:2] == (0.0, 0.0)
+        # 松手后岛进入夹回/归位动画（_geo_to 非 None）：按旧 _wall_active 口径
+        # 动画期整条墙撤下（成员条目随之删除），比清零更强；若动画已结束则
+        # 成员仍在但速度必须归零。两种形态都满足「不留幽灵速度」。
+        assert world._static_member_velocity.get(ISLAND, (0.0, 0.0))[:2] == (0.0, 0.0)
     finally:
         bridge.close()
         island.close()

@@ -275,7 +275,8 @@ def _live_threads(name: str = "pet-fps-monitor") -> int:
 @pytest.fixture(autouse=True)
 def _no_orphan_threads():
     yield
-    deadline = time.monotonic() + 5.0
+    # 线程退出到 enumerate 可见在满载 runner 上有数秒调度延迟（macOS CI 实测超 5s）
+    deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline and _live_threads():
         time.sleep(0.01)
     assert _live_threads() == 0, "有采集线程没退出（线程泄漏）"
@@ -668,7 +669,10 @@ def test_excluded_foreground_holds_briefly_then_clears_without_measuring_others(
     own_pid = 4321
     fg = FakeForeground((111, "game.exe"))
     log = SessionLog()
-    monitor = _monitor(foreground_reader=fg, session_factory=log, self_pid=own_pid)
+    monitor = _monitor(foreground_reader=fg, session_factory=log, self_pid=own_pid,
+                       hold_seconds=2.0)  # 宽持有窗：sleep 在慢 runner 上 overshoot
+                                         # 也不能越过它（否则 50ms 睡眠睡到 1s+
+                                         # 就必然误停会话——macOS CI 实测）
     monitor.subscribe("fps")
     monitor.start()
     assert _wait_until(lambda: log.sessions)
@@ -679,7 +683,7 @@ def test_excluded_foreground_holds_briefly_then_clears_without_measuring_others(
     time.sleep(0.05)
     assert len(log.sessions) == 1, "短暂切走不该立刻换会话"
     assert log.sessions[0].stopped == 0
-    assert _wait_until(lambda: log.latest.stopped >= 1, timeout=3.0)
+    assert _wait_until(lambda: log.latest.stopped >= 1, timeout=10.0)
     time.sleep(0.1)
     assert len(log.sessions) == 1, "切到自身不得改采别的进程"
     sample = monitor.snapshot()

@@ -343,7 +343,7 @@ def grant(*, run=subprocess.run, sid: str | None = None, powershell: str | None 
                    timeout=GRANT_TIMEOUT_S, creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
         return GrantResult("unknown", "等待授权超时：超时后才批准的请求不会执行；"
-                                      "若已在超时前批准，注销并重新登录后生效")
+                                      "若已在超时前批准，注销或重启电脑后生效")
     except ValueError as exc:  # build_command 拒绝了不安全的输入（理论上前面已校验）
         return GrantResult("error", f"授权参数不安全：{exc}")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -351,7 +351,7 @@ def grant(*, run=subprocess.run, sid: str | None = None, powershell: str | None 
     code = proc.returncode
     if code == 0:
         mark_granted()
-        return GrantResult("ok", "已加入 Performance Log Users，注销并重新登录后生效")
+        return GrantResult("ok", "已加入 Performance Log Users，注销或重启电脑后生效")
     if code == EXIT_CANCELLED:
         return GrantResult("cancelled", "已取消授权")
     if code == EXIT_EXPIRED:

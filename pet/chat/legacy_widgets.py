@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal, QTimer
@@ -563,6 +564,7 @@ class ChatWindow(QDialog):
         self.composer.send_requested.connect(self.send_message)
         self.service.started.connect(self._started)
         self.service.delta.connect(self._delta)
+        self.service.activity.connect(self._activity)
         self.service.finished.connect(self._finished)
         self.service.error.connect(self._error)
         self.service.stopped.connect(self._stopped)
@@ -930,7 +932,11 @@ class ChatWindow(QDialog):
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
         messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text)
-        self._active_request_id = self.service.send(messages, config)
+        # 与 widgets.py 同款：id 必须先落本窗在途状态再 send（`started` 在
+        # send() 内同步发出，晚赋值会让 `_started` 的 id 过滤恒命中）。
+        request_id = uuid.uuid4().hex
+        self._active_request_id = request_id
+        self.service.send(messages, config, request_id=request_id)
         self._bottom()
 
     def _focus_chat(self) -> None:
@@ -980,6 +986,12 @@ class ChatWindow(QDialog):
         if self._bubble:
             self._bubble.set_state("streaming")
         self.pet_link.thinking()
+
+    def _activity(self, request_id: str, kind: str, text: str) -> None:
+        # 经典窗口只在状态栏提示思考/联网进度，思维链不进正文
+        if request_id != self._active_request_id or self._text:
+            return
+        self.status.setText("深度思考中…" if kind == "reasoning" else str(text).strip()[:30])
 
     def _delta(self, request_id: str, text: str) -> None:
         if request_id != self._active_request_id:

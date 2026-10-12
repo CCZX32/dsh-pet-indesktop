@@ -860,3 +860,47 @@ def test_qt_import_is_confined_to_lazy_event_filter():
     assert len(qt_imports) == 1, f"PySide6 只应有一处惰性 import：{qt_imports}"
     assert qt_imports[0].startswith("    ")  # 缩进 = 函数体内，非模块级
     assert "import QEvent, QObject" in qt_imports[0]
+
+
+def test_window_bridge_docked_strip_registers_no_wall():
+    """细条态不设墙（对齐旧 island_collision._wall_active）：停靠细条（约 16×64）
+    的胶囊等效圆是直径 44 的怪圆，注册成墙会把贴边/探头的宠莫名挤走；
+    悬停探出（_hover_peek）时恢复设墙。"""
+    overlay = OverlayWindow()
+    world = SpriteCollisionWorld()
+    island = StubIsland()
+    island._mode = "docked"
+    island._hover_peek = False
+    bridge = IslandWindowBridge(island, world, overlay)
+    try:
+        assert ISLAND not in world._static_members
+        island._hover_peek = True   # 悬停探出：恢复设墙
+        bridge.sync_geometry()
+        assert ISLAND in world._static_members
+        island._hover_peek = False
+        bridge.sync_geometry()
+        assert ISLAND not in world._static_members
+    finally:
+        bridge.close()
+        island.close()
+
+
+def test_window_bridge_geometry_animation_registers_no_wall():
+    """几何动画（展开/停靠/归位，岛 ``_geo_to`` 非 None）期间不设墙：动画中间帧
+    几何不代表最终落点，注册中间墙会推挤旁边的宠；动画结束后按最终几何复墙。"""
+    overlay = OverlayWindow()
+    world = SpriteCollisionWorld()
+    island = StubIsland()
+    bridge = IslandWindowBridge(island, world, overlay)
+    try:
+        assert ISLAND in world._static_members
+        island._geo_to = object()   # 动画开始
+        bridge.sync_geometry()
+        assert ISLAND not in world._static_members
+        island.set_stub_geometry(QRect(500, 0, 200, 44))
+        island._geo_to = None       # 动画结束
+        bridge.sync_geometry()
+        assert ISLAND in world._static_members
+    finally:
+        bridge.close()
+        island.close()

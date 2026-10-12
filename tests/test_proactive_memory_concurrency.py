@@ -41,6 +41,9 @@ def _child_env(target: Path, mode: str, release: Path | None = None) -> dict:
         "PM_MODE": mode,
         "PM_RELEASE": str(release or ""),
         "PM_REPO": REPO,
+        # 慢 runner 上 50 次串行化写（读→改→写 + fsync + 原子替换）的排队会远超
+        # 生产默认的 1s 锁超时——测试用 30s（验证的是不丢写，不是超时行为本身）
+        "PM_LOCK_TIMEOUT": "30000",
     })
     return env
 
@@ -63,7 +66,8 @@ release = os.environ["PM_RELEASE"]
 from pet.proactive_memory import ProactiveMemory, lock_path_for
 
 if mode == "write":
-    m = ProactiveMemory(target, max_entries=500)
+    m = ProactiveMemory(target, max_entries=500,
+                        lock_timeout_ms=int(os.environ.get("PM_LOCK_TIMEOUT", "1000")))
     for i in range(25):
         m.record("p%d-%d.exe" % (os.getpid(), i), "t", "x")
     sys.exit(0)
@@ -470,7 +474,9 @@ def test_reads_stay_complete_under_concurrent_local_writes(tmp_path):
     一把只在本地 I/O 瞬间持有的窄锁（跨进程锁仍在宽锁里等），才能既不丢写也不读到空。
     """
     target = tmp_path / "proactive_screen_memory.json"
-    mem = pm.ProactiveMemory(target, max_entries=500)
+    # 锁超时放宽到 30s：两个写线程各 60 条在慢 runner 上的窄锁+重试排队会远超
+    # 生产默认 1s（验证的是「不丢写/不读空」，不是超时行为本身）
+    mem = pm.ProactiveMemory(target, max_entries=500, lock_timeout_ms=30_000)
     mem.record("seed.exe", "", "上网")  # 前置：文件已存在且非空
 
     stop = threading.Event()

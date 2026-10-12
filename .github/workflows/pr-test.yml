@@ -149,7 +149,19 @@ jobs:
       # id 供下面那条诊断步骤按 `steps.main_suite.outcome` 判定「红的正是主套件」。
       - name: Pytest (main suite)
         id: main_suite
+        if: runner.os != 'Windows'
         run: python -m pytest -q ${{ runner.os == 'Linux' && '--capture=tee-sys' || '' }} --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py
+
+      # Windows 主套件走分片（scripts/ci_shards.py：收集序四等分、四个独立进程）：
+      # 2026-10-13 起 hosted runner（Python 3.11.9 toolcache + PySide6 6.12.0）单进程
+      # 整跑在 ~2/3 处反复 access violation（崩点漂移的堆腐蚀签名，mac/Linux/本机
+      # 6.11.2 均不复现；main 同样受累）。分片让每个进程的堆状态从头开始，腐蚀没有
+      # 积累窗口（诊断分支两轮零崩），且崩溃归因更准（崩在哪个分片日志直接点名）。
+      # 不掩盖失败：任一分片红 = 本步红 = job 红。取证链见
+      # .scratch/ci243/WIN-AV-HUNT-2026-10-13.md（注：.scratch 不入库，属本地档案）。
+      - name: Pytest (main suite, Windows shards)
+        if: runner.os == 'Windows'
+        run: python scripts/ci_shards.py
 
       # Linux 主套件失败后的**受限前缀**重跑（诊断，不是覆盖）：只跑收集序前缀
       # test_agent_cost → test_config_schema（44 个文件；本机 3.11 + offscreen 同口径

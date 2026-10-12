@@ -2829,22 +2829,24 @@ def test_dsh_converged_state_wiring_drives_thinking(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "dismiss_all_interactions", lambda: dismissed.append(True))
 
     try:
+        # 收敛信号带发出时的代次（仿真监视器未真启动，_emit_gen 即其当前代次）
+        gen = monitor._emit_gen
         # 真人消息 = 对话开始：与状态边沿竞态解耦的稳定触发
-        monitor.dsh_user_message.emit("s1", "hi")
+        monitor.dsh_user_message.emit("s1", "hi", gen)
         assert notified == ["thinking"]
 
         # thinking 状态也触发（turn/start 路径）；同轮重复由呈现管线去重
         notified.clear()
-        monitor.dsh_state_changed.emit("working", "thinking", "turn/start")
+        monitor.dsh_state_changed.emit("working", "thinking", "turn/start", gen)
         assert notified == ["thinking"]
 
         # offline：收掉失效的常驻审批/问题气泡
-        monitor.dsh_state_changed.emit("thinking", "offline", "")
+        monitor.dsh_state_changed.emit("thinking", "offline", "", gen)
         assert dismissed == [True]
 
         # 非 thinking/offline/等待态不动作
         notified.clear()
-        monitor.dsh_state_changed.emit("thinking", "working", "tool/call")
+        monitor.dsh_state_changed.emit("thinking", "working", "tool/call", gen)
         assert notified == []
 
         # AppShell 转发口在无岛时必须静默 no-op

@@ -636,3 +636,27 @@ def test_debounce_entry_dropped_when_member_leaves_collision_world():
     b.set_pos(FakePoint(80, 0))
     world.tick([a, b], 0.016)
     assert a.pos.x() < -1.0                        # 分离立即生效（没被旧条目抑制）
+
+
+def test_probe_sprite_exempt_from_island_static_wall():
+    """探头姿态（探出屏幕边缘）的 sprite 不与岛静态墙结算：开关「岛碰撞」把墙
+    注册到探头宠身上时，不得把它从探头姿态里挤出去（位置/速度/交互态都不动，
+    否则姿态与气泡锚点错位）。真实 sprite 的 ``probe_active`` 是 property，
+    这里用同名实例属性鸭子对齐（读取侧走 getattr）。"""
+    world = SpriteCollisionWorld()
+    probe = FakeSprite(100, 0)
+    probe.probe_active = True
+    world.add_static_member("island", 80, -10, 200, 44)
+    world.tick([probe], 0.016)
+    assert probe.pos.x() == 100 and probe.pos.y() == 0
+    assert probe.speed() == 0.0
+    assert probe.interaction_state == INTERACTION_NORMAL
+
+
+def test_normal_sprite_still_separated_from_island_wall():
+    """对照组：非探头 sprite 与岛墙重叠照常分离（探头豁免不把岛墙变幽灵）。"""
+    world = SpriteCollisionWorld()
+    sprite = FakeSprite(100, 0)
+    world.add_static_member("island", 80, -10, 200, 44)
+    world.tick([sprite], 0.016)
+    assert (sprite.pos.x(), sprite.pos.y()) != (100, 0)

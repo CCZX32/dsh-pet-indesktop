@@ -76,8 +76,7 @@ class QuickChatBubble(QFrame):
         self.character_id = str(config.get("character", "shenshen"))
         self.settings = config.chat_settings()
         self.prompt_builder = PromptBuilder(Path(__file__).resolve().parent.parent / "assets" / "characters")
-        identity = getattr(config, "instance_id", "")
-        self.store = SessionStore(config.dir, "" if identity == "slot-0" else identity)
+        self.store = SessionStore(config.dir, "" if str(getattr(config, "instance_id", "")) == "slot-0" else str(getattr(config, "instance_id", "")))
         self.session = self._get_session()
         self.service = ChatService(parent=self)
         self._active_request_id: str | None = None
@@ -179,8 +178,13 @@ class QuickChatBubble(QFrame):
         self.prev_btn.clicked.connect(lambda: self._show_page(self._page - 1))
         self.next_btn.clicked.connect(lambda: self._show_page(self._page + 1))
         self.open_chat_btn.clicked.connect(self._open_full_chat)
-        self.service.started.connect(self._started)
+        # started 在 send() 内**同步**发出，而 _active_request_id 是 send() 的
+        # 返回值——直连会让 _started 的 id 过滤恒命中（气泡提示永远停在
+        # 「思考中…」）。排队一拍：emit 先于 worker.start() 投递，事件按
+        # FIFO 处理，本槽必在首个 delta 之前跑到，此刻 id 已落位。
+        self.service.started.connect(self._started, Qt.ConnectionType.QueuedConnection)
         self.service.delta.connect(self._delta)
+        self.service.activity.connect(self._activity)
         self.service.finished.connect(self._finished)
         self.service.error.connect(self._error)
         self.service.stopped.connect(self._stopped)
@@ -228,7 +232,7 @@ class QuickChatBubble(QFrame):
         return sessions[0] if sessions else self._new_session()
 
     def refresh_session(self) -> None:
-        """从磁盘重取最近会话（公开 seam；外部刷新用，替代私访 _get_session）。"""
+        """从磁盘重取最近会话（公开 seam；角色切换后外部刷新用，替代私访 _get_session）。"""
         self.session = self._get_session()
 
     def switch_character(self, character_id: str) -> None:
@@ -404,6 +408,11 @@ class QuickChatBubble(QFrame):
         if request_id != self._active_request_id:
             return
         self.hint_label.setText("生成中…")
+
+    def _activity(self, request_id: str, kind: str, text: str) -> None:
+        if request_id != self._active_request_id or self._reply_full:
+            return
+        self.hint_label.setText("深度思考中…" if kind == "reasoning" else str(text).strip()[:30])
 
     def _request_presentation_valid(self) -> bool:
         target = getattr(self, "_request_pet_window", self.pet_window)

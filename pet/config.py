@@ -431,6 +431,17 @@ def _default_chat_data():
                 "max_tokens": 2048,
             }
         },
+        # 联网搜索全局默认值（与 pet/chat/models.py 的 WebSearchSettings 数据类保持一致；
+        # 默认值快照比对按这里的字面量走，不要再抄进 settings_default_marks）。
+        # 不写 api_key：保存路径会做密钥卫生（pop 掉 api_key），写了反而让
+        # 「重置→保存→重载」与出厂初始数据产生结构性差异。
+        "web_search": {
+            "enabled": False,
+            "engine": "baidu",
+            "api_key_ref": "websearch/api",
+            "max_results": 5,
+            "fetch_pages": True,
+        },
     }
 
 
@@ -2207,6 +2218,9 @@ class Config:
                     if isinstance(provider, dict):
                         provider.pop("api_key", None)
                         provider.pop("vision_api_key", None)
+            web_search = chat.get("web_search")
+            if isinstance(web_search, dict):
+                web_search.pop("api_key", None)
         return write_data
 
     def _read_reset_generations(self) -> dict:

@@ -881,11 +881,14 @@ def test_repeated_hide_show_cycles_keep_one_session_and_leak_no_worker(
     finally:
         island.close()
     assert monitor is not None
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + 20.0
     while monitor.running and time.monotonic() < deadline:
         time.sleep(0.02)
     assert monitor.running is False, "关窗口后采集线程必须退出"
-    assert _fps_threads() == before, "反复开关后不许留下采集线程（线程泄漏）"
+    # 线程退出到 threading.enumerate 可见之间还有一层调度延迟，慢 runner 上
+    # 裸读会误判泄漏——泵到名单回落（宽预算，不赌时序）
+    assert _drive_qt_loop(lambda: _fps_threads() == before), \
+        f"反复开关后不许留下采集线程（线程泄漏）：{_fps_threads()} vs {before}"
 
 
 def _fps_threads() -> list[str]:
