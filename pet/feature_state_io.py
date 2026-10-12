@@ -1,0 +1,219 @@
+"""Bounded local metadata I/O; kernel contention is not a filesystem failure."""
+
+from __future__ import annotations
+
+import errno
+import os
+import stat
+import sys
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from functools import lru_cache
+from pathlib import Path
+from typing import Callable, Iterator
+
+
+class StateError(Exception):
+    """Safe reason code only: never include document contents or OS paths."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def safe_path(path: Path) -> None:
+    """Reject links/reparse points in existing ancestors and hardlinked metadata."""
+    for part in (*reversed(path.parents), path):
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise StateError("unsafe_path")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise StateError("unsafe_path")
+        if part != path and not stat.S_ISDIR(info.st_mode):
+            raise StateError("io_error")
+
+
+def read_bytes(path: Path, limit: int) -> bytes:
+    safe_path(path)
+    with path.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise StateError("metadata_limit")
+    return data
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    """Flush a same-directory exclusive temporary file, then replace atomically.
+
+    Only our temporary file is removed on failure. This is not a promise of
+    power-loss durability on every filesystem; state receipts support recovery.
+    """
+    safe_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe_path(path)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        deadline = None
+        while True:
+            safe_path(path)
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers/scanners can briefly deny atomic replacement.
+                # Retry the same flushed file, never unlink the authoritative
+                # destination. Persistent denial remains a recoverable error.
+                if sys.platform != "win32" or exc.winerror not in (5, 32):
+                    raise
+                now = time.monotonic()
+                if deadline is None:
+                    deadline = now + 0.25
+                if now >= deadline:
+                    raise
+                threading.Event().wait(min(0.01, deadline - now))
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@lru_cache(maxsize=1)
+def _windows_lock() -> Callable[[int, bool], None]:
+    # Configure once, lazily: ctypes caches POINTER types, so defining the
+    # structure on every query would retain a new native type per lock call.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("internal", ctypes.c_size_t),
+            ("internal_high", ctypes.c_size_t),
+            ("offset", wintypes.DWORD),
+            ("offset_high", wintypes.DWORD),
+            ("event", wintypes.HANDLE),
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    acquire = kernel.LockFileEx
+    acquire.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+    acquire.restype = wintypes.BOOL
+
+    def lock(fd: int, exclusive: bool) -> None:
+        # Synchronous handle, immediate shared or exclusive lock. Locking beyond EOF is OK.
+        if not acquire(msvcrt.get_osfhandle(fd), 1 | (2 if exclusive else 0), 0, 1, 0, ctypes.byref(Overlapped())):
+            if ctypes.get_last_error() == 33:  # ERROR_LOCK_VIOLATION, not ACCESS_DENIED
+                raise StateError("lock_busy")
+            raise StateError("io_error")
+
+    return lock
+
+
+def _lock(fd: int, *, exclusive: bool = True) -> None:
+    if sys.platform == "win32":
+        _windows_lock()(fd, exclusive)
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise StateError("lock_busy") from None
+            raise StateError("io_error") from None
+
+
+class KernelLock:
+    """One non-blocking OS lock held until :meth:`close` is called.
+
+    The file is deliberately separate from the JSON record.  Closing the file
+    releases the kernel lock even when a process dies; the record is only
+    diagnostic evidence and is never treated as liveness proof.
+    """
+
+    def __init__(self, path: Path, fd: int):
+        self.path = path
+        self._fd: int | None = fd
+
+    @property
+    def closed(self) -> bool:
+        return self._fd is None
+
+    def close(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def __enter__(self) -> "KernelLock":
+        if self.closed:
+            raise StateError("lock_closed")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+def open_kernel_lock(path: Path, *, create: bool = True, exclusive: bool = True) -> KernelLock:
+    """Acquire a non-blocking lock; management and lease callers remain exclusive."""
+    fd = None
+    try:
+        safe_path(path)
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            safe_path(path)
+        try:
+            fd = os.open(path, os.O_RDWR | (os.O_CREAT if create else 0), 0o600)
+        except FileNotFoundError:
+            if create:
+                raise
+            raise StateError("missing") from None
+        os.set_inheritable(fd, False)
+        safe_path(path)
+        _lock(fd, exclusive=exclusive)
+        return KernelLock(path, fd)
+    except StateError:
+        if fd is not None:
+            os.close(fd)
+        raise
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        raise StateError("io_error") from None
+
+
+@contextmanager
+def state_lock(path: Path, *, create: bool = True, exclusive: bool = True, timeout: float = 0.0) -> Iterator[None]:
+    """Metadata coordinator, NOT a lease. Readers coexist; CAS writers exclude all.
+
+    Only background CAS commits opt into a one-second bounded acquisition wait.
+    Ordinary readers and all management/lease kernel locks remain nonblocking.
+    No journal or state I/O happens before successful acquisition.
+    """
+    deadline = time.monotonic() + max(0.0, min(float(timeout), 1.0))
+    wait = threading.Event()
+    while True:
+        try:
+            lock = open_kernel_lock(path, create=create, exclusive=exclusive)
+            break
+        except StateError as exc:
+            if not create and exc.code == "missing":
+                yield
+                return
+            remaining = deadline - time.monotonic()
+            if exc.code != "lock_busy" or remaining <= 0:
+                raise
+            wait.wait(min(0.01, remaining))
+    try:
+        yield
+    finally:
+        lock.close()
