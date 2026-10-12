@@ -30,6 +30,7 @@ INDEX.md 以 main 为准重新登记五份新报告。
 | F5 | 歌词关闭重开后旧采样冒充新代结果并提前清忙门 | 每次派发捕获不可变令牌随结果信号返回；回调只接受当前在途令牌，不匹配连忙门都不清；`_reset` 作废令牌同时结清忙门 |
 | F6 | `started` 在 `send()` 返回前同步发出 → `_started` 的 id 过滤恒命中，停止按钮永不进忙态（100% 必现） | 现代/经典聊天窗改为先生成 request id 再传入 `send(request_id=...)`；快捷气泡改 QueuedConnection（鸭子类型替身约束，见遗留） |
 | X3 | 打字机排空期关聊天窗：回复永不落库 + 重开卡忙碌态 | `closeEvent` 先走完成落库路径再 `_reset()`；真流式中关窗的取消路径不变（有护栏测试） |
+| 岛墙（用户实机报告） | 关掉岛碰撞 → 宠在岛下方进入边缘探头 → 再开碰撞，墙注册到探头宠身上把它挤出姿态（气泡随之错位）；且停靠细条会注册出直径 44 的怪圆墙 | `island_bridge.sync_geometry` 补回旧 `_wall_active` 两条豁免（停靠细条未悬停探出/几何动画中不设墙）；`sprite_collision.tick` 对 `probe_active` 的 sprite 与静态成员的 pair 进 ignored_pairs（宠-宠不豁免），探头收回后自动恢复 |
 | X4 | 多 DSH 修复缺真实桥数据验证 | 见「三、实机」节——真实桥日志统计已作为 X1 证据；两个真实例实机跑仍未做（诚实登记） |
 
 另外两笔小的：FPS 权限文案「注销并重新登录后生效」→「注销或重启电脑后生效」（4 处）；
@@ -44,6 +45,8 @@ INDEX.md 以 main 为准重新登记五份新报告。
 |---|---|---|
 | `pet/dsh_state.py` | +241/−70 | X1（`_observe_start`：真实形状 user/message 只刷 LRU 不发号不覆盖）+ X2（白名单 `is_human_user_message`）+ F2（`_turn_tokens` 有界绑定表）+ F4（`_TURN_END_ERROR_REASONS` 分流 + error 收尾专属分支带 source、解本写者锁存） |
 | `pet/agent_link.py` | +74/−27 | F3（两条收敛信号带代次 + `_dsh_convergence_current` 统一闸，管理器出口签名不变）+ F4 呈现分支（`to_state == "error"` → `notify_dsh_state("error")`）+ 两处过时 docstring 同步 |
+| `pet/island_bridge.py` | +16/−2 | 岛墙豁免补回：`sync_geometry` 在停靠细条未悬停探出、几何动画中两种状态不设墙（对齐旧 `_wall_active`） |
+| `pet/sprite_collision.py` | +26/−1 | 探头豁免：`_ignored_pairs` 合并宠-宠禁用 pair 与探头×静态成员 pair |
 | `pet/frameseq_clip.py` | +237/−31 | F1 退役协议：`_retire_lock`/`retire()`/`retired` 信号/`reap_retired_objects()`/`_on_worker_retired()`；close 清 `_img/_pm`；`_retired_workers` 有界 |
 | `pet/library.py` | +36/−4 | F1 库侧：`destroyed` 触发的钉表补排回收（切角色丢旧库路径） |
 | `pet/music_lyric_controller.py` | +62/−25 | F5：`_request_seq`/`_inflight_token`/`_pending_token` 取代可变 `_dispatch_generation` 单槽；信号带令牌 |
@@ -74,7 +77,9 @@ mid_attach_done（+74：镜像真链路 + error 两链）、frameseq_clip（+208
 music_lyric（+141：迟到采样守卫 + 重进音乐模式）、chat_subsystem（+237：F6 忙态 3 条 + X3 排空关窗 2 条 +
 markdown 共存适配）、agent_link（+124：代次闸 3 条）、quick_chat（切角色断言适配 #250 时间前缀）等。
 `test_chat_markdown.py`（+70）、`test_chat_thinking_web_search.py`（+511）、`test_chat_time_awareness.py`（+106）、
-`test_frameseq_no_console.py`（+26）为被集成 PR 自带。
+`test_frameseq_no_console.py`（+26）为被集成 PR 自带。岛墙修复：`test_island_bridge.py` +2 条（细条/动画不设墙）、
+`test_sprite_collision.py` +2 条（探头豁免 + 非探头对照）、`test_island_bridge_velocity.py` 松手断言适配
+动画期撤墙口径（成员条目删除或速度归零均满足"不留幽灵速度"）。
 
 ## 三、性能分析
 
@@ -89,6 +94,8 @@ markdown 共存适配）、agent_link（+124：代次闸 3 条）、quick_chat�
 - **X3**：closeEvent 仅在 `_pending_finish_text` 非 None（排空窗口）时多走一次既有落库路径。
 - **#249 Markdown**（引用其自测）：渲染+排版为纯文本 3.5 倍（6000 字 26.0 vs 7.5 ms），流式自适应节流
   把超 18ms 拍数 433→55。#250 时间感知：组装 8.6→198 µs/次。
+- **岛墙豁免**：细条/动画判断是两次 getattr；探头豁免每 tick 仅在存在探头宠时构造
+  O(探头数 × 静态成员数) 的 pair 集合（常态为空、零分配路径不变）。
 - 全部改动无新增线程/网络/磁盘/系统调用（frameseq 回收用的是既有线程与事件循环）。
 
 ## 四、实机运行记录
