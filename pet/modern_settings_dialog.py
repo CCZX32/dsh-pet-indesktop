@@ -169,6 +169,7 @@ from . import settings_automation_domain
 from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
+from . import settings_mod_domain
 from . import settings_music
 from . import settings_network
 from . import settings_page_guide
@@ -1926,6 +1927,10 @@ class ModernSettingsDialog(QDialog):
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
         file_interpret = settings_file_interpret.build_file_interpret_page(self)
 
+        # 「扩展管理」域（DLC 融合 S1b-2）：MOD 中心的宿主面与整页都在
+        # settings_mod_domain（行数预算原因），这里只留一行接线。
+        mod_center = settings_mod_domain.install_mod_domain(self)
+
         # Preserve any newly added row until it receives an explicit domain decision.
         leftovers = [row for row in all_rows if row not in claimed and (self.ai_page is None or not self.ai_page.isAncestorOf(row))]
         if leftovers:
@@ -1945,6 +1950,7 @@ class ModernSettingsDialog(QDialog):
             "自动化与联动": automation,
             "语音": voice,
             "文件识别": file_interpret,
+            "扩展管理": mod_center,
             "更新": self.update_page,
         }
         for label, icon in SETTINGS_DOMAIN_NAV:

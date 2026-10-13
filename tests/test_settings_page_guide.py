@@ -389,7 +389,7 @@ def test_anchor_bar_appears_only_from_four_sections_up(tmp_path, monkeypatch):
                 f"「{domain}」有 {len(blocks)} 个区，跳转条的显隐判反了")
             (hidden if bar.isHidden() else shown).add(domain)
         assert shown == {"AI 与对话", "自动化与联动", "语音"}
-        assert hidden == {"常规", "桌宠", "互动", "菜单", "桌面组件", "文件识别", "更新"}
+        assert hidden == {"常规", "桌宠", "互动", "菜单", "桌面组件", "文件识别", "扩展管理", "更新"}
     finally:
         dialog.close()
 

@@ -256,7 +256,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 「自动化与联动」两个域的整段行构造搬进 pet/settings_ai_domain.py 与
 # pet/settings_automation_domain.py（对话框各留一行调用，行键/组序/objectName 一字未改），
 # 为后续「扩展管理」新域腾空间。实测 2395，纯搬移无行为变更。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2395
+# 2026-10-13 上调到 2401（DLC 融合 S1b-2：「扩展管理」域接线，+6）：import 1 行 +
+# 域装配处 `install_mod_domain(self)` 与其注释 4 行 + domain_content 一行。控件/宿主面/
+# 整页装配全在 pet/settings_mod_domain.py（S1a 拆域腾出的正是这块地方），本文件仍只做接线；
+# 按文件约定只随实测校准，不为达标压行。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2401
 
 
 def _read(name: str) -> str:

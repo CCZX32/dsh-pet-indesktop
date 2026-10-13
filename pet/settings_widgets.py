@@ -85,6 +85,7 @@ SETTINGS_DOMAIN_NAV = (
     ("自动化与联动", "automation"),
     ("语音", "sound"),
     ("文件识别", "file"),
+    ("扩展管理", "tools"),
     ("更新", "update"),
 )
 
