@@ -131,7 +131,7 @@
 | 新增回归（**修前**） | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_modern_settings_rows_topwindow.py -q` | **2 failed**（默认配置 6 条游离窗口；全开配置 14 条，逐条 objectName 与 sizeHint 吻合） |
 | 新增回归（**修后**） | 同上 | **2 passed** |
 | 聚焦族 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_settings_{network,game_fps,fps_permission,ia_first_cut,pet_tabs,interaction_tabs,search_aliases,default_marks,page_guide,reset_defaults,process_isolation,and_resources}.py tests/test_api_provider_list.py tests/test_modern_settings_rows_topwindow.py -q` | **295 passed / 0 failed**（147.15s） |
-| 既有「放弃未保存改动」族 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_settings_stale_form_exit.py -q` | **1 failed / 49 passed** —— 唯一那条红见 §六之一（既有计时脆弱，非本改动的语义后果） |
+| 既有「放弃未保存改动」族 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_settings_stale_form_exit.py -q` | **1 failed / 49 passed** —— 唯一那条红见 §六之一（既有计时脆弱，非本改动的语义后果）；放进 14 文件批次里是 **2 failed / 341 passed**（同 §六之一 的 A/B 表） |
 | 交付证据纪律 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_pr_report_discipline.py` | 通过 |
 
 ### 六之一、一条**既有**用例在本分支上变红（如实登记，未掩盖）
@@ -142,9 +142,11 @@
 
 | 实验 | 命令/做法 | 结果 |
 |---|---|---|
-| 同文件、同批次的对照 | 两者各跑 3 遍 `tests/test_settings_stale_form_exit.py` | A：3/3 红；B：3/3 绿（两者单跑均约 36s） |
+| 同文件、同批次的对照 | 两者各跑 3 遍 `tests/test_settings_stale_form_exit.py` | A：3/3 红（每次只这一条）；B：3/3 绿（两者单跑均约 36s） |
+| **14 文件批次 A/B 交替两轮**（`.scratch/settings-topwindow-flicker/ab-compare.txt`） | 同一组 14 个设置相关文件，base→分支→base→分支 交替跑 | A：**2 failed / 341 passed**（两轮一致：`test_discard_unverified_notice_is_a_real_visible_box` + `test_product_confirm_discard_reads_the_real_button_click`）；B：**343 passed**（两轮一致） |
 | **纯计时扰动对照**（关键） | 在 **B 的代码上**只加一句 `time.sleep(0.03)` 到 `ModernSettingsDialog.__init__`（语义零改动），再跑同一条命令 | **红**（同一条用例、同一种失败） |
 | 事务隔离对照 | 只把 `pet/settings_network.py` 回退到基线（其余不动） | 绿 → 触发点确实在本次改动内 |
+| 另一实现变体的对照 | 不改父对象、只把「对无父行 `setVisible(True)`」改成不调用（等效修掉闪烁，见 `.scratch/settings-topwindow-flicker/settings_network.variantC.py` 的兄弟变体） | 新增回归绿、**该既有用例依旧红** → 不是「传父对象」这一种写法的问题，而是构造耗时变化本身 |
 | 进程内干净复现 | 该用例流程的逐字复刻（`.scratch/settings-topwindow-flicker/test_replica.py`）在**干净进程**里跑 | 通过：`activeModal=QMessageBox`、延迟 400 ms 探针也拿得到框 → 产品行为正常 |
 
 **机制（实测结论）**：该用例用 `QTimer.singleShot(0, …)` 在「放弃未保存改动」通知框的
