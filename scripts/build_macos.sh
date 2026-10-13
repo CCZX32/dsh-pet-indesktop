@@ -95,13 +95,18 @@ for cfg in config.yaml default_models.yaml; do
     fi
 done
 
-# 引擎模块本身也要显式 --hidden-import（2026-10-13 交叉审查 B1）：截图动作走的是
-# **动态** seam —— pet/screen_capture/actions.py 用 importlib 按字符串
-# （OCR_MODULE = "ocr"）解析 pet.screen_capture.ocr，全仓没有一处静态 import 指向它。
-# PyInstaller 从入口出发的静态分析摸不到这个模块，于是模型和配置都在包里、引擎模块
-# 却不在：冻结包里解析不出引擎，右键「截图 → 提取文字」永远置灰。它的依赖
-# （rapidocr / cv2 / numpy / onnxruntime）随这条 hidden-import 被静态收集。
-RAPIDOCR_HIDDEN=(--hidden-import pet.screen_capture.ocr)
+# 两个模块都要显式 --hidden-import（2026-10-13 交叉审查 B1；切片 5 加了第二个）：
+#
+# 1. 宿主侧引擎 pet.screen_capture.ocr —— 截图动作走的是**动态** seam：
+#    pet/screen_capture/actions.py 用 importlib 按字符串（OCR_MODULE = "ocr"）解析它，
+#    全仓没有一处静态 import 指向这个模块。PyInstaller 从入口出发的静态分析摸不到它，
+#    于是模型和配置都在包里、引擎模块却不在：冻结包里解析不出引擎，右键「截图 →
+#    提取文字」永远置灰。它的依赖（rapidocr / cv2 / numpy / onnxruntime）随这条
+#    hidden-import 被静态收集。
+# 2. 识别子进程 pet.screen_capture.ocr_worker（切片 5）—— 模块名只出现在命令行
+#    字符串里（<exe> --ocr-worker），静态分析同样摸不到。缺它不会崩，只是每次识屏
+#    报"起不了工作进程"。
+RAPIDOCR_HIDDEN=(--hidden-import pet.screen_capture.ocr --hidden-import pet.screen_capture.ocr_worker)
 
 for variant in "${variant_list[@]}"; do
     case "$variant" in

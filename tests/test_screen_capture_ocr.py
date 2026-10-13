@@ -1,25 +1,37 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」本地 OCR 引擎契约（offscreen 可跑）。
+"""「快速识屏」本地 OCR 契约（offscreen 可跑）。
 
-这一层要钉死三件事：
+切片 5 起一次识别 = 一个识别子进程（``pet/screen_capture/ocr_worker.py``；源码态
+``python -m pet.screen_capture.ocr_worker``，冻结态 ``<exe> --ocr-worker``）：像素从
+stdin 管道进、结果从 stdout 一行 JSON 出、日志走 stderr，认完即退出。**进程退出是
+"内存用完真归零"的唯一实现**——进程内 ``unload()`` 实测只回吐约 30 MB / 108 MB。
 
-1. **识别**：程序画出来的已知文字能被读回来，且返回的块序就是阅读顺序
-   （从上到下、行内从左到右），每块带置信度与框坐标。
-2. **错误**：模型缺失 / 依赖缺失 / 加载失败 / 识别失败四种故障各自翻译成
-   一句人话，且**不在下一次调用时反复重试**（坏掉的东西不会自己好，
-   重试只是把等待时间再收一遍）。
-3. **并发**：多个线程同时调 ``recognize`` 时模型只加载一次，且推理不重叠
-   ——``rapidocr`` 的流水线在实例上存了可变状态（每帧重写 ``preprocess_op``
-   与 ``update_params``），并行跑它是错误用法，不是"更快"。
+这一层要钉死五件事：
+
+1. **协议**：帧的编解码、短读、坏魔数、超长长度头；
+2. **像素**：``QImage`` → PNG 的通道数与色彩序（工作端拿到的必须是 3 通道 BGR）；
+3. **退出码语义**：0 = 有文字、3 = 没文字（**不是故障**）、≥4 = 各类故障，而
+   Windows 强杀落下的 1/2 永远不许被当成成功——那是"取消/超时看起来像空结果"的坑；
+4. **子进程的一生**：超时杀进程并报人话、释放中止在跑的进程、跑完不留孤儿；
+5. **真实端到端**：真工作端认出程序画出来的已知文字（含中文），空图返回空串，
+   且每次调用都是一个**新的**进程（用完就丢）。
+
+工作端的替身一律是**真的子进程**（``sys.executable -c ...``）：协议、管道、kill、
+回收全部走真实系统调用。把 ``Popen`` 换成假对象等于把这一片最该验的东西验掉了。
 
 字体说明（真机实测）：``QT_QPA_PLATFORM=offscreen`` 下 Qt 的字体库**是空的**
-（Windows 上 ``QFontDatabase.families()`` 返回 0 个家族），直接画字只会得到
-一串豆腐块。所以测试图必须先用 ``addApplicationFont`` 显式注册一个真实字体
+（Windows 上 ``QFontDatabase.families()`` 返回 0 个家族），直接画字只会得到一
+串豆腐块。所以测试图必须先用 ``addApplicationFont`` 显式注册一个真实字体
 文件；注册不到就跳过（那是环境缺字体，不是被测代码的问题）。
 """
 
 from __future__ import annotations
 
+import io
+import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,9 +43,10 @@ pytest.importorskip("PySide6")
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from pet.screen_capture import ocr  # noqa: E402
+from pet.screen_capture import ocr, ocr_worker  # noqa: E402
 from pet.screen_capture.ocr import (  # noqa: E402
     OcrEngine,
+    OcrError,
     OcrLoadError,
     OcrModelMissingError,
     OcrRecognitionError,
@@ -41,6 +54,8 @@ from pet.screen_capture.ocr import (  # noqa: E402
     TextBlock,
     reading_order,
 )
+
+REPO = Path(__file__).resolve().parents[1]
 
 #: 拉丁字体候选（三端常见路径）。取第一个能注册成功的。
 _LATIN_FONT_CANDIDATES = (
@@ -122,65 +137,114 @@ def _blank(width=64, height=32) -> QImage:
     return image
 
 
-class _FakeOutput:
-    """``RapidOCROutput`` 的最小形状替身（引擎契约只依赖这三个字段）。
-
-    刻意用**纯列表**而不是 numpy 数组：这样只装 PySide6 的环境也能跑完
-    这一整族契约测试，不必为了造一个假输出把重型依赖拖进来。
-    """
-
-    def __init__(self, *lines) -> None:
-        self.txts = tuple(line[0] for line in lines)
-        self.scores = tuple(line[1] for line in lines)
-        self.boxes = [list(line[2]) for line in lines]
+# ------------------------------------------------------- 假工作端（真子进程）
 
 
-class _FakeEngine:
-    """假引擎：记录调用次数与"同时在跑"的最大值，用来验证串行化。"""
-
-    def __init__(self, text="ok", delay=0.05) -> None:
-        self.text = text
-        self.delay = delay
-        self.calls = 0
-        self.max_active = 0
-        self._active = 0
-        self._lock = threading.Lock()
-
-    def __call__(self, _image):
-        with self._lock:
-            self.calls += 1
-            self._active += 1
-            self.max_active = max(self.max_active, self._active)
-        time.sleep(self.delay)
-        with self._lock:
-            self._active -= 1
-        return _FakeOutput((self.text, 0.99, _box(10, 5, 60, 30)))
+def _fake(body: str) -> list[str]:
+    """把一段 Python 源码当成假工作端的命令行（``python -c``）。"""
+    return [sys.executable, "-c", body]
 
 
-class _ScrambledEngine:
-    """故意把块**乱序**返回（含同行内右块比左块高的情况），用来验证拼接顺序。"""
-
-    def __call__(self, _image):
-        return _FakeOutput(
-            ("第二行", 0.9, _box(10, 60, 60, 30)),
-            ("右", 0.9, _box(120, 10, 60, 30)),
-            ("左", 0.9, _box(10, 14, 60, 30)),
-        )
+_FAKE_HEAD = "import json, os, sys\nsys.stdin.buffer.read()\n"
 
 
-def _factory(engine, calls: list | None = None, *, delay=0.0):
-    def _build(model_dir, cpu_threads):
-        if calls is not None:
-            calls.append((model_dir, cpu_threads))
-        if delay:
-            time.sleep(delay)
-        return engine
-
-    return _build
+def _record(record: dict) -> str:
+    """在工作端 stderr 上写一条本进程自己的结构化记录（宿主按前缀认）。"""
+    line = ocr_worker.STDERR_PREFIX + json.dumps(record, ensure_ascii=False)
+    return f"os.write(2, ({line!r} + chr(10)).encode('utf-8'))\n"
 
 
-def _box(left: float, top: float, width: float, height: float):
-    return ((left, top), (left + width, top), (left + width, top + height), (left, top + height))
+def _results(*blocks: dict) -> str:
+    payload = json.dumps({"blocks": list(blocks)})
+    return f"os.write(1, ({payload!r} + chr(10)).encode('utf-8'))\n"
+
+
+_BLOCK = {"text": "hello world", "score": 0.9, "box": [[1, 2], [30, 2], [30, 12], [1, 12]]}
+
+FAKE_TEXT = _FAKE_HEAD + _results(_BLOCK) + "sys.exit(0)\n"
+FAKE_NO_TEXT = _FAKE_HEAD + _results() + f"sys.exit({ocr_worker.EXIT_NO_TEXT})\n"
+FAKE_LIES = _FAKE_HEAD + _results(_BLOCK) + f"sys.exit({ocr_worker.EXIT_NO_TEXT})\n"
+FAKE_GARBAGE = _FAKE_HEAD + "os.write(1, b'not json at all' + chr(10).encode())\nsys.exit(0)\n"
+FAKE_SILENT_OK = _FAKE_HEAD + "sys.exit(0)\n"
+FAKE_MODEL_MISSING = (
+    _FAKE_HEAD
+    + 'os.write(2, b"noise from a native library\\n")\n'
+    + _record({"error": "缺少本地 OCR 模型文件 x.onnx（找过的目录：/tmp）"})
+    + f"sys.exit({ocr_worker.EXIT_MODEL_MISSING})\n"
+)
+FAKE_UNAVAILABLE = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_UNAVAILABLE})\n"
+FAKE_LOAD_FAILED = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_LOAD_FAILED})\n"
+FAKE_REC_FAILED = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_RECOGNIZE_FAILED})\n"
+#: 崩溃前一条 stage 记录都没有：宿主只能说"启动或读图那一段"。
+FAKE_CRASH_NO_STAGE = _FAKE_HEAD + "sys.exit(3221225477)\n"
+#: 已经读过帧（stage=frame-read），说明崩在模型加载那一段。
+FAKE_CRASH_LOADING = _FAKE_HEAD + _record({"stage": "frame-read"}) + "sys.exit(3221225477)\n"
+#: 崩溃前已经写过 stage=loaded：引擎起来了，崩在识别里。
+FAKE_CRASH_LATE = _FAKE_HEAD + _record({"stage": "loaded"}) + "sys.exit(3221225477)\n"
+#: Windows 上 TerminateProcess 的落码就是 1：绝不能被当成"图里没有文字"。
+FAKE_KILLED = _FAKE_HEAD + "sys.exit(1)\n"
+FAKE_HANG = _FAKE_HEAD + "import time\ntime.sleep(120)\n"
+#: 把收到的帧解析一遍、把结论当成识别结果报回来（用来断言**管道里只有一个帧**）。
+FAKE_FRAME_CHECK = (
+    "import json, os, struct, sys\n"
+    "data = sys.stdin.buffer.read()\n"
+    "magic = data[:7] == b'DSHOCR1'\n"
+    "size = struct.unpack('>I', data[7:11])[0] if len(data) >= 11 else -1\n"
+    "text = ('magic=%s size=%d payload=%d' % (magic, size, len(data) - 11))\n"
+    "block = {'text': text, 'score': 1.0, 'box': [[0, 0], [1, 0], [1, 1], [0, 1]]}\n"
+    "os.write(1, (json.dumps({'blocks': [block]}) + chr(10)).encode('utf-8'))\n"
+    "sys.exit(0)\n"
+)
+
+
+class _SpawnLog:
+    """记录 ``OcrEngine`` 起过的每个子进程（超时/孤儿断言要看它）。"""
+
+    def __init__(self) -> None:
+        self.processes: list = []
+
+    def __call__(self, argv):
+        process = ocr.spawn_worker(argv)
+        self.processes.append(process)
+        return process
+
+
+def _engine(body: str, *, timeout=ocr.DEFAULT_RECOGNIZE_TIMEOUT) -> tuple[OcrEngine, _SpawnLog]:
+    log = _SpawnLog()
+    return OcrEngine(command=lambda: _fake(body), spawn=log, timeout=timeout), log
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程是否还活着（**跨进程**判据，不看我们手里的 Popen 句柄）。"""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, wintypes.DWORD(pid))  # QUERY_LIMITED
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _wait_for(predicate, timeout=10.0, interval=0.02) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
 
 
 # ------------------------------------------------------------------ 模型路径
@@ -225,36 +289,478 @@ def test_resolve_model_dir_prefers_an_explicit_directory(tmp_path):
     assert ocr.resolve_model_dir(tmp_path) == tmp_path
 
 
-# -------------------------------------------------------------- 像素 → 数组
+def test_explicit_model_dir_never_falls_back_to_the_wheel(monkeypatch, tmp_path):
+    """显式指定（含环境变量）就是用户要的那一份，不许静默回退到另一批模型。
+
+    回退只是给"干净 clone 里随包模型还没落盘"这种开发场景的；一个用户明确换过的
+    目录要是悄悄被换回 wheel 里那批，识别结果会变而用户以为是同一批模型——
+    "同名不同内容"正是构建期 sha256 门专门防的那件事。
+    """
+    monkeypatch.setenv(ocr.OCR_MODEL_DIR_ENV, str(tmp_path))
+
+    assert ocr.resolve_model_dir() == tmp_path
+    assert ocr.model_problem(ocr.resolve_model_dir()), "空目录就该判定为缺失，而不是换个目录继续"
 
 
-def test_to_bgr_array_strips_row_padding():
-    """宽度不是 4 的倍数时 QImage 每行有对齐填充，不剥掉整张图会错位。"""
-    image = QImage(13, 3, QImage.Format.Format_RGB888)
-    image.fill(QColor(0, 0, 0))
-    image.setPixelColor(0, 0, QColor(255, 0, 0))
-    if image.bytesPerLine() == image.width() * 3:
-        pytest.skip("本平台的 QImage 不按 4 字节对齐，构造不出带填充的行")
-
-    array = ocr.to_bgr_array(image)
-
-    assert array.shape == (3, 13, 3), "行填充没被剥掉"
-    assert tuple(int(v) for v in array[0, 0]) == (0, 0, 255), "通道顺序必须是 BGR"
-    assert tuple(int(v) for v in array[1, 12]) == (0, 0, 0)
+# ------------------------------------------------------------------ 管道协议
 
 
-def test_to_bgr_array_accepts_non_rgb888_input():
-    """上游给的是 RGB888，但 recognize 不该因为别人给了 RGB32 就炸。"""
-    image = QImage(8, 4, QImage.Format.Format_ARGB32)
-    image.fill(QColor(10, 20, 30))
+def test_frame_bytes_prefixes_magic_and_big_endian_length():
+    frame = ocr.frame_bytes(b"\x89PNG-fake")
 
-    array = ocr.to_bgr_array(image)
+    assert frame[:len(ocr_worker.MAGIC)] == ocr_worker.MAGIC
+    assert frame[len(ocr_worker.MAGIC):len(ocr_worker.MAGIC) + 4] == b"\x00\x00\x00\x09"
+    assert frame.endswith(b"\x89PNG-fake")
 
-    assert array.shape == (4, 8, 3)
-    assert tuple(int(v) for v in array[0, 0]) == (30, 20, 10)
+
+def test_read_frame_round_trips_a_frame():
+    payload = b"\x89PNG" + bytes(range(256))
+
+    assert ocr_worker.read_frame(io.BytesIO(ocr.frame_bytes(payload))) == payload
+
+
+def test_read_exact_survives_short_reads():
+    """``read(n)`` 在管道上可能短读；把短读当读完，后面全错位。"""
+
+    class _Drip(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(1 if size != 4 else 4)
+
+    assert ocr_worker.read_exact(_Drip(b"abcdefgh"), 8) == b"abcdefgh"
+
+
+def test_read_frame_rejects_a_bad_magic():
+    with pytest.raises(ocr_worker.WorkerError) as excinfo:
+        ocr_worker.read_frame(io.BytesIO(b"NOTOURS!" + b"\x00\x00\x00\x01x"))
+
+    assert excinfo.value.code == ocr_worker.EXIT_PROTOCOL
+    assert "帧头" in str(excinfo.value)
+
+
+def test_read_frame_rejects_a_truncated_payload():
+    frame = ocr_worker.MAGIC + b"\x00\x00\x00\x10" + b"short"
+
+    with pytest.raises(ocr_worker.WorkerError) as excinfo:
+        ocr_worker.read_frame(io.BytesIO(frame))
+
+    assert excinfo.value.code == ocr_worker.EXIT_PROTOCOL
+    assert "不完整" in str(excinfo.value)
+
+
+def test_read_frame_rejects_an_oversize_length_header():
+    """长度头被写坏时不许照它去分配内存（64 MiB 上限，超了立刻判协议错）。"""
+    frame = ocr_worker.MAGIC + (ocr_worker.MAX_FRAME_BYTES + 1).to_bytes(4, "big")
+
+    with pytest.raises(ocr_worker.WorkerError) as excinfo:
+        ocr_worker.read_frame(io.BytesIO(frame))
+
+    assert excinfo.value.code == ocr_worker.EXIT_PROTOCOL
+    assert "上限" in str(excinfo.value)
+
+
+def test_read_frame_rejects_an_empty_frame():
+    with pytest.raises(ocr_worker.WorkerError) as excinfo:
+        ocr_worker.read_frame(io.BytesIO(ocr_worker.MAGIC + b"\x00\x00\x00\x00"))
+
+    assert excinfo.value.code == ocr_worker.EXIT_PROTOCOL
+
+
+def test_worker_stderr_records_are_parsed_and_noise_is_ignored():
+    stderr = (
+        b"onoise: onnxruntime says hi\n"
+        + (ocr_worker.STDERR_PREFIX + '{"stage": "loaded"}\n').encode()
+        + b"more noise\n"
+        + (ocr_worker.STDERR_PREFIX + '{"error": "模型没了"}\n').encode()
+    )
+
+    assert ocr.parse_stderr(stderr) == ("loaded", "模型没了")
+    assert ocr.parse_stderr(b"only noise\n") == ("", "")
+
+
+# ---------------------------------------------------------------- 像素 → PNG
+
+
+def _png_colour_type(png: bytes) -> int:
+    """PNG IHDR 的色彩类型字节（2 = truecolor RGB，6 = RGBA）。"""
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert png[12:16] == b"IHDR"
+    return png[25]
+
+
+def test_encode_png_is_a_three_channel_png():
+    png = ocr.encode_png(_blank(13, 7))
+
+    assert _png_colour_type(png) == 2, "必须是不带 alpha 的 3 通道 PNG（解码端只要 BGR）"
+    assert int.from_bytes(png[16:20], "big") == 13
+    assert int.from_bytes(png[20:24], "big") == 7
+
+
+def test_encode_png_strips_alpha_from_non_rgb888_input():
+    image = QImage(9, 5, QImage.Format.Format_ARGB32)
+    image.fill(QColor(10, 20, 30, 128))
+
+    assert _png_colour_type(ocr.encode_png(image)) == 2
+
+
+def test_encode_png_keeps_pixels_lossless_and_in_order():
+    """PNG 是无损的；顺带把色彩序钉死：源是 RGB，解码方看到的就是 BGR。"""
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+
+    image = QImage(4, 2, QImage.Format.Format_RGB888)
+    image.fill(QColor(255, 0, 0))
+
+    decoded = cv2.imdecode(np.frombuffer(ocr.encode_png(image), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+    assert decoded.shape == (2, 4, 3)
+    assert tuple(int(v) for v in decoded[0, 0]) == (0, 0, 255), "rapidocr 要的是 BGR"
+
+
+def test_encode_png_refuses_a_null_image():
+    with pytest.raises(OcrRecognitionError):
+        ocr.encode_png(QImage())
+
+
+def test_empty_image_is_rejected_before_starting_a_process():
+    engine, log = _engine(FAKE_TEXT)
+
+    with pytest.raises(ValueError):
+        engine.recognize(QImage())
+
+    assert log.processes == [], "空图不该起一个要付几百毫秒启动成本的子进程"
+
+
+def test_non_qimage_input_is_a_type_error():
+    engine, log = _engine(FAKE_TEXT)
+
+    with pytest.raises(TypeError):
+        engine.recognize("not an image")
+
+    assert log.processes == []
+
+
+# ------------------------------------------------------------ 退出码 → 人话
+
+
+def test_success_exit_returns_the_blocks_in_reading_order():
+    engine, _ = _engine(FAKE_TEXT)
+
+    blocks = engine.recognize(_blank())
+
+    assert [block.text for block in blocks] == ["hello world"]
+    assert blocks[0].score == pytest.approx(0.9)
+    assert blocks[0].bounds == (1.0, 2.0, 29.0, 10.0)
+
+
+def test_no_text_exit_is_an_empty_result_not_an_error():
+    """「没识别到文字」是**成功**的一种：它必须一路传到 UI 的"没有识别到文字"，
+    而不是变成一句错误提示。"""
+    engine, _ = _engine(FAKE_NO_TEXT)
+
+    assert engine.recognize(_blank(800, 400)) == []
+
+
+def test_the_pipe_carries_exactly_one_frame():
+    """管道里只能有**一个**帧：魔数 + 长度 + 正好那么长的 PNG，其后没有多余字节。
+
+    套两层帧的写法（拼一次、传的时候又拼一次）在工作端那侧表现为"图像解不开"——
+    报错指向图像格式，真正的原因却在传输层。这条把协议形状钉在管道上，而不是只钉
+    在 ``frame_bytes`` 这个函数上。
+    """
+    image = _blank(64, 32)
+    expected = len(ocr.encode_png(image))
+    engine, _ = _engine(FAKE_FRAME_CHECK)
+
+    blocks = engine.recognize(image)
+
+    assert [b.text for b in blocks] == [f"magic=True size={expected} payload={expected}"]
+
+
+def test_no_text_exit_that_carries_blocks_is_a_protocol_failure():
+    """退出码与载荷是一对冗余信号；不一致时宁可报故障，也不显示一个可能错的结果。"""
+    engine, _ = _engine(FAKE_LIES)
+
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "自相矛盾" in str(excinfo.value)
+
+
+def test_model_missing_exit_uses_the_workers_own_message():
+    engine, _ = _engine(FAKE_MODEL_MISSING)
+
+    with pytest.raises(OcrModelMissingError) as excinfo:
+        engine.recognize(_blank())
+
+    message = str(excinfo.value)
+    assert "缺少本地 OCR 模型文件" in message and "/tmp" in message
+    assert "noise from a native library" not in message, "没有前缀的噪声不许进人话"
+
+
+def test_missing_dependency_exit_falls_back_to_a_plain_language_message():
+    engine, _ = _engine(FAKE_UNAVAILABLE)
+
+    with pytest.raises(OcrUnavailableError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "依赖" in str(excinfo.value) and "重新安装" in str(excinfo.value)
+
+
+def test_load_failure_exit_is_a_load_error():
+    engine, _ = _engine(FAKE_LOAD_FAILED)
+
+    with pytest.raises(OcrLoadError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "加载" in str(excinfo.value)
+
+
+def test_recognition_failure_exit_is_a_recognition_error():
+    engine, _ = _engine(FAKE_REC_FAILED)
+
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "识别" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("code", [1, 2, 3221225477, -1073741819])
+def test_abnormal_exit_codes_are_never_read_as_success(code):
+    """**只有工作端自己会产生的两个码**算成功（0=有文字、3=没文字）。
+
+    其余一律是故障：1/2 是 Windows ``TerminateProcess`` 的常见落码（``Popen.kill``
+    走的就是它），3221225477 / -1073741819 是访问违例。谁把 1 划给"没有文字"，
+    取消与超时就会变成一句平静的「没有识别到文字」——用户以为机器没认出来，
+    其实是他自己的操作被中止了。
+    """
+    assert ocr_worker.EXIT_TEXT not in (1, 2)
+    assert ocr_worker.EXIT_NO_TEXT not in (1, 2)
+    assert ocr_worker.EXIT_NO_TEXT != ocr_worker.EXIT_TEXT
+
+    with pytest.raises(OcrError):
+        ocr.interpret(code, b'{"blocks": []}', b"")
+
+
+def test_a_crash_without_any_stage_record_still_names_the_exit_code():
+    engine, _ = _engine(FAKE_CRASH_NO_STAGE)
+
+    with pytest.raises(OcrLoadError) as excinfo:
+        engine.recognize(_blank())
+
+    message = str(excinfo.value)
+    assert "3221225477" in message, "退出码必须带出来，否则没人能定位"
+    assert "启动或读取图像" in message
+
+
+def test_a_crash_while_the_engine_loads_is_reported_as_a_load_error():
+    engine, _ = _engine(FAKE_CRASH_LOADING)
+
+    with pytest.raises(OcrLoadError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "加载识别模型" in str(excinfo.value)
+
+
+def test_a_crash_after_the_engine_loaded_is_reported_as_a_recognition_error():
+    engine, _ = _engine(FAKE_CRASH_LATE)
+
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "识别" in str(excinfo.value)
+
+
+def test_a_killed_worker_is_never_mistaken_for_an_empty_result():
+    """Windows 的 ``TerminateProcess`` 落码 1；协议里 1/2 刻意不分配给任何语义。
+
+    这条是本片最容易出的静默错：取消/超时被杀的子进程要是被判成"图里没有文字"，
+    用户会看到一句平静的「没有识别到文字」，而真相是他的这次操作被中止了。
+    """
+    engine, _ = _engine(FAKE_KILLED)
+
+    with pytest.raises(OcrError) as excinfo:
+        engine.recognize(_blank())
+
+    message = str(excinfo.value)
+    assert "没有识别到文字" not in message
+    assert "异常退出" in message and "退出码 1" in message
+
+
+@pytest.mark.parametrize("body", [FAKE_GARBAGE, FAKE_SILENT_OK])
+def test_unusable_stdout_with_a_success_code_is_a_protocol_failure(body):
+    engine, _ = _engine(body)
+
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "工作进程" in str(excinfo.value)
+
+
+def test_malformed_blocks_are_a_protocol_failure_not_a_crash():
+    engine, _ = _engine(_FAKE_HEAD + _results({"text": "x", "score": "not a number", "box": []}) + "sys.exit(0)\n")
+
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "坐标/置信度" in str(excinfo.value)
+
+
+# ------------------------------------------------------- 超时 / 不留孤儿
+
+
+def test_a_missing_worker_executable_reads_as_unavailable():
+    engine = OcrEngine(command=lambda: [str(Path(__file__).parent / "no-such-worker.exe")])
+
+    with pytest.raises(OcrUnavailableError) as excinfo:
+        engine.recognize(_blank())
+
+    assert "工作进程" in str(excinfo.value)
+
+
+def test_timeout_kills_the_worker_and_reports_plain_language():
+    engine, log = _engine(FAKE_HANG, timeout=1.0)
+
+    started = time.monotonic()
+    with pytest.raises(OcrRecognitionError) as excinfo:
+        engine.recognize(_blank())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 20, "超时必须真的生效，不能把调用方挂住"
+    assert "超时" in str(excinfo.value) and "等待 1 秒" in str(excinfo.value)
+
+    process = log.processes[0]
+    assert process.poll() is not None, "超时后进程必须已经被收走"
+    assert _wait_for(lambda: not _pid_alive(process.pid)), "超时的识别子进程成了孤儿"
+
+
+def test_release_engine_aborts_a_running_worker_and_says_so():
+    engine, log = _engine(FAKE_HANG)
+    errors: list = []
+
+    thread = threading.Thread(target=lambda: _capture(engine, errors))
+    thread.start()
+    assert _wait_for(lambda: len(ocr._LIVE_WORKERS) > 0), "识别子进程没能在预算内起来"
+
+    assert ocr.release_engine() is True, "在跑的识别子进程就该被中止"
+
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "被中止的识别没能收尾"
+    assert errors and "中止" in str(errors[0]), errors
+
+    process = log.processes[0]
+    assert process.poll() is not None
+    assert _wait_for(lambda: not _pid_alive(process.pid)), "被中止的识别子进程成了孤儿"
+    assert ocr._LIVE_WORKERS == set(), "收尾后不该还挂着进程"
+
+
+def _capture(engine: OcrEngine, errors: list) -> None:
+    try:
+        engine.recognize(_blank())
+    except Exception as exc:  # noqa: BLE001 - 测试要看清到底炸在哪
+        errors.append(exc)
+
+
+def test_release_engine_is_a_cheap_noop_when_nothing_runs():
+    """每次截图收口都会调它：没有识别在跑就必须是零成本 no-op。"""
+    assert ocr._LIVE_WORKERS == set()
+
+    assert ocr.release_engine() is False
+
+
+def test_a_successful_recognition_leaves_no_process_behind():
+    engine, log = _engine(FAKE_TEXT)
+
+    engine.recognize(_blank())
+
+    process = log.processes[-1]
+    assert process.poll() is not None, "认完就该退出（用完就丢）"
+    assert ocr._LIVE_WORKERS == set()
+    assert _wait_for(lambda: not _pid_alive(process.pid)), "跑完的识别子进程成了孤儿"
+
+
+# ------------------------------------------------------------ 命令行（两态）
+
+
+def test_worker_command_uses_the_module_in_source_mode(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert ocr.worker_command() == [sys.executable, "-m", ocr.WORKER_MODULE]
+
+
+def test_worker_command_uses_the_internal_flag_when_frozen(monkeypatch):
+    """冻结包里没有可用的 python：exe 自己就是解释器，走 --ocr-worker 子命令。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "C:/fake/dsh-pet-standalone.exe")
+
+    assert ocr.worker_command() == ["C:/fake/dsh-pet-standalone.exe", ocr.OCR_WORKER_FLAG]
+
+
+def test_the_package_entry_serves_the_worker_flag():
+    """源码态路由：``python -m pet --ocr-worker`` 必须真的进工作端（冻结入口同形）。"""
+    process = subprocess.run(
+        [sys.executable, "-m", "pet", ocr.OCR_WORKER_FLAG],
+        input=b"not-a-frame", capture_output=True, cwd=REPO, timeout=120,
+    )
+
+    assert process.returncode == ocr_worker.EXIT_PROTOCOL
+    assert ocr_worker.STDERR_PREFIX.encode() in process.stderr
+    assert process.stdout == b"", "stdout 是协议通道：失败时不许往里写任何东西"
+
+
+def test_the_worker_module_never_imports_pyside():
+    """工作端只该付 rapidocr/numpy/onnxruntime 的启动开销。
+
+    Qt 实测要多付约 0.2 s，而每次识屏都要付一遍——这正是子进程模型最想省的那一段。
+    用一个真的子进程把 ``PySide6`` 从 import 系统里挡住：真有人往工作端链上加了
+    Qt 依赖，这里立刻红（而不是等用户觉得"识屏怎么有点慢"）。
+    """
+    script = (
+        "import sys\n"
+        "class Blocker:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'PySide6' or name.startswith('PySide6.'):\n"
+        "            raise ImportError('PySide6 must not be imported by the OCR worker')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Blocker())\n"
+        "import pet.screen_capture.ocr_worker\n"
+        "leaked = [m for m in sys.modules if m == 'PySide6' or m.startswith('PySide6.')]\n"
+        "print('LEAK' if leaked else 'CLEAN')\n"
+    )
+    process = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             cwd=REPO, timeout=120)
+
+    assert process.returncode == 0, process.stderr.decode("utf-8", "replace")
+    assert process.stdout.strip() == b"CLEAN"
+
+
+# -------------------------------------------------------------------- 只读视图
+
+
+def test_shared_engine_is_a_single_instance():
+    assert ocr.shared_engine() is ocr.shared_engine()
+
+
+def test_module_level_recognize_joins_blocks_in_reading_order():
+    """切片 3 的 seam 契约：``ocr.recognize(QImage) -> str``（同步、纯本地、不联网）。"""
+    body = _FAKE_HEAD + _results(
+        {"text": "第二行", "score": 0.9, "box": [[10, 60], [70, 60], [70, 90], [10, 90]]},
+        {"text": "右", "score": 0.9, "box": [[120, 10], [180, 10], [180, 40], [120, 40]]},
+        {"text": "左", "score": 0.9, "box": [[10, 14], [70, 14], [70, 44], [10, 44]]},
+    ) + "sys.exit(0)\n"
+    engine, _ = _engine(body)
+    original = ocr.shared_engine
+    ocr.shared_engine = lambda: engine
+    try:
+        assert ocr.recognize(_blank()) == "左\n右\n第二行"
+    finally:
+        ocr.shared_engine = original
 
 
 # ---------------------------------------------------------------- 阅读顺序
+
+
+def _box(left: float, top: float, width: float, height: float):
+    return ((left, top), (left + width, top), (left + width, top + height), (left, top + height))
 
 
 def test_reading_order_sorts_lines_top_to_bottom_and_left_to_right():
@@ -291,495 +797,39 @@ def test_text_block_bounds_and_center():
     assert block.center == (25.0, 40.0)
 
 
-# ------------------------------------------------------------------ 懒加载
+# --------------------------------------------------------- 真实工作端（端到端）
 
 
-def test_engine_loads_only_on_first_use():
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(), calls))
+class _RealWorker:
+    """真工作端 + 起过的进程记录（pid 与存活状态是"用完就丢"的证据）。"""
 
-    assert engine.loaded is False
-    assert calls == [], "构造 OcrEngine 不该加载模型"
+    def __init__(self) -> None:
+        self.processes: list = []
+        self.engine = OcrEngine(spawn=self._spawn)
 
-    engine.recognize(_blank())
-
-    assert engine.loaded is True
-    assert len(calls) == 1
-
-
-def test_preload_loads_without_recognizing():
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(), calls))
-
-    engine.preload()
-
-    assert engine.loaded is True
-    assert len(calls) == 1
-
-
-def test_preload_is_idempotent():
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(), calls))
-
-    engine.preload()
-    engine.preload()
-    engine.recognize(_blank())
-
-    assert len(calls) == 1
-
-
-def test_shared_engine_is_a_single_instance():
-    assert ocr.shared_engine() is ocr.shared_engine()
-
-
-def test_module_level_recognize_joins_blocks_in_reading_order(monkeypatch):
-    """切片 3 的 seam 契约：``ocr.recognize(QImage) -> str``（同步、纯本地、不联网）。"""
-    engine = OcrEngine(engine_factory=_factory(_ScrambledEngine()))
-    monkeypatch.setattr(ocr, "shared_engine", lambda: engine)
-
-    assert ocr.recognize(_blank()) == "左\n右\n第二行"
-
-
-def test_module_level_recognize_returns_empty_string_for_a_blank_image(real_engine, monkeypatch):
-    monkeypatch.setattr(ocr, "shared_engine", lambda: real_engine)
-
-    assert ocr.recognize(_blank(800, 400)) == ""
-
-
-def test_engine_passes_cpu_thread_budget_to_the_loader():
-    calls: list = []
-    engine = OcrEngine(cpu_threads=1, engine_factory=_factory(_FakeEngine(), calls))
-
-    engine.preload()
-
-    assert calls[0][1] == 1, "CPU 线程预算必须传给加载器（设计约束：1~2 线程）"
-
-
-def test_cpu_threads_is_clamped_to_the_design_budget():
-    assert 1 <= OcrEngine(cpu_threads=99).cpu_threads <= 2
-    assert OcrEngine(cpu_threads=0).cpu_threads == 1
-    assert OcrEngine(cpu_threads=-4).cpu_threads == 1
-
-
-# -------------------------------------------------------------------- 并发
-
-
-def test_concurrent_recognize_loads_once_and_serializes_inference():
-    calls: list = []
-    fake = _FakeEngine(text="并发安全", delay=0.05)
-    engine = OcrEngine(engine_factory=_factory(fake, calls, delay=0.05))
-
-    results: list = [None] * 8
-    barrier = threading.Barrier(8)
-
-    def worker(index: int) -> None:
-        barrier.wait(timeout=30)
-        results[index] = engine.recognize(_blank())
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=60)
-
-    assert not any(thread.is_alive() for thread in threads), "并发 recognize 卡死了"
-    assert len(calls) == 1, f"模型只该加载一次，实际 {len(calls)} 次"
-    assert all(len(r) == 1 and r[0].text == "并发安全" for r in results)
-    assert fake.max_active == 1, "推理必须串行：rapidocr 流水线在实例上存了可变状态"
-
-
-def test_concurrent_preload_and_recognize_share_one_load():
-    calls: list = []
-    fake = _FakeEngine(delay=0.02)
-    engine = OcrEngine(engine_factory=_factory(fake, calls, delay=0.05))
-
-    barrier = threading.Barrier(4)
-    errors: list = []
-
-    def preloader() -> None:
-        barrier.wait(timeout=30)
-        try:
-            engine.preload()
-        except Exception as exc:  # noqa: BLE001 - 测试要看清到底炸在哪
-            errors.append(exc)
-
-    def recognizer() -> None:
-        barrier.wait(timeout=30)
-        try:
-            engine.recognize(_blank())
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-
-    threads = [threading.Thread(target=preloader) for _ in range(2)]
-    threads += [threading.Thread(target=recognizer) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=60)
-
-    assert not errors, errors
-    assert len(calls) == 1
-
-
-# -------------------------------------------------------------------- 错误
-
-
-def test_missing_models_are_reported_in_plain_language(tmp_path):
-    engine = OcrEngine(model_dir=tmp_path, engine_factory=ocr._load_rapidocr)
-
-    with pytest.raises(OcrModelMissingError) as excinfo:
-        engine.preload()
-
-    message = str(excinfo.value)
-    assert "模型" in message and str(tmp_path) in message
-
-
-def test_partial_model_set_names_the_missing_file(tmp_path):
-    present = list(ocr.MODEL_FILES.values())[0]
-    (tmp_path / present).write_bytes(b"")
-    engine = OcrEngine(model_dir=tmp_path)
-
-    with pytest.raises(OcrModelMissingError) as excinfo:
-        engine.preload()
-
-    missing = [name for name in ocr.MODEL_FILES.values() if name != present]
-    assert any(name in str(excinfo.value) for name in missing)
-
-
-def test_empty_image_is_rejected_before_loading():
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(), calls))
-
-    with pytest.raises(ValueError):
-        engine.recognize(QImage())
-
-    assert calls == [], "空图不该触发一次几秒钟的模型加载"
-
-
-def test_loader_crash_becomes_load_error():
-    def boom(_model_dir, _cpu_threads):
-        raise RuntimeError("onnxruntime 初始化崩了")
-
-    engine = OcrEngine(engine_factory=boom)
-
-    with pytest.raises(OcrLoadError) as excinfo:
-        engine.recognize(_blank())
-
-    message = str(excinfo.value)
-    assert "加载" in message
-    assert "onnxruntime 初始化崩了" in message, "原始错误必须带出来，否则没人能定位"
-
-
-def test_missing_dependency_is_reported_as_unavailable(monkeypatch, tmp_path):
-    for name in ocr.MODEL_FILES.values():
-        (tmp_path / name).write_bytes(b"")
-
-    def boom():
-        raise ImportError("No module named 'rapidocr'")
-
-    monkeypatch.setattr(ocr, "_import_rapidocr", boom)
-    engine = OcrEngine(model_dir=tmp_path)
-
-    with pytest.raises(OcrUnavailableError) as excinfo:
-        engine.preload()
-
-    assert "rapidocr" in str(excinfo.value)
-
-
-def test_inference_crash_becomes_recognition_error():
-    class _Boom:
-        def __call__(self, _image):
-            raise RuntimeError("onnx 跑炸了")
-
-    engine = OcrEngine(engine_factory=_factory(_Boom()))
-
-    with pytest.raises(OcrRecognitionError) as excinfo:
-        engine.recognize(_blank())
-
-    message = str(excinfo.value)
-    assert "识别" in message and "onnx 跑炸了" in message
-
-
-def test_engine_returning_nothing_is_a_recognition_error_not_an_empty_result():
-    """引擎不返结果 ≠ 图里没字——后者是"没有识别到文字"，前者必须报故障。"""
-    class _Silent:
-        def __call__(self, _image):
-            return None
-
-    engine = OcrEngine(engine_factory=_factory(_Silent()))
-
-    with pytest.raises(OcrRecognitionError):
-        engine.recognize(_blank())
-
-
-def test_error_detail_is_never_empty():
-    """冻结环境里 ImportError 系的 ``str(exc)`` 可能是空串（实测），
-    人话不能因此变成"……加载失败（x.onnx）："这种以冒号结尾的空话。"""
-    class _SilentFailure(Exception):
-        def __str__(self):
-            return ""
-
-    def boom(_model_dir, _cpu_threads):
-        raise _SilentFailure()
-
-    engine = OcrEngine(engine_factory=boom)
-
-    with pytest.raises(OcrLoadError) as excinfo:
-        engine.recognize(_blank())
-
-    message = str(excinfo.value)
-    assert not message.rstrip().endswith("："), message
-    assert "_SilentFailure" in message, message
-
-
-def test_failed_load_is_not_retried_on_every_call():
-    calls: list = []
-
-    def boom(_model_dir, _cpu_threads):
-        calls.append(1)
-        raise RuntimeError("加载失败")
-
-    engine = OcrEngine(engine_factory=boom)
-
-    for _ in range(3):
-        with pytest.raises(OcrLoadError):
-            engine.recognize(_blank())
-
-    assert len(calls) == 1, "已经失败的加载不该在每次调用时重跑一遍"
-
-
-def test_loader_timeout_is_reported_as_load_error():
-    def slow(_model_dir, _cpu_threads):
-        time.sleep(5)
-        return _FakeEngine()
-
-    engine = OcrEngine(engine_factory=slow, load_timeout=0.2)
-
-    started = time.monotonic()
-    with pytest.raises(OcrLoadError) as excinfo:
-        engine.preload()
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 3, "超时必须真的生效，不能把调用方挂住"
-    assert "超时" in str(excinfo.value)
-
-
-def test_a_timed_out_wait_does_not_poison_the_engine():
-    """等超时 ≠ 加载失败：后台线程稍后成功的话，后续调用要能拿到它。"""
-    def slow(_model_dir, _cpu_threads):
-        time.sleep(0.4)
-        return _FakeEngine(text="迟到的引擎")
-
-    engine = OcrEngine(engine_factory=slow, load_timeout=0.1)
-
-    with pytest.raises(OcrLoadError):
-        engine.preload()
-
-    deadline = time.monotonic() + 10
-    while not engine.loaded and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert engine.loaded, "后台加载线程没有在超时后继续跑完"
-
-    blocks = engine.recognize(_blank())
-    assert [block.text for block in blocks] == ["迟到的引擎"]
-
-
-# ------------------------------------------------------ 用完就丢（unload）
-
-
-def test_unload_releases_the_engine_and_the_next_use_reloads():
-    """「用完就丢」的核心契约：释放是真的（loaded → False），且**下次还能用**。"""
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(text="第一次"), calls))
-
-    assert [b.text for b in engine.recognize(_blank())] == ["第一次"]
-    assert engine.loaded is True
-    assert len(calls) == 1
-
-    assert engine.unload() is True
-
-    assert engine.loaded is False
-    assert engine._engine is None, "引擎对象必须真的被丢掉，而不是只把标志位翻面"
-
-    assert [b.text for b in engine.recognize(_blank())] == ["第一次"]
-    assert len(calls) == 2, "释放之后再次触发必须重新加载，不能变成一次性的"
-
-
-def test_unload_is_idempotent_when_nothing_is_loaded():
-    calls: list = []
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(), calls))
-
-    assert engine.unload() is False, "没加载过就没有东西可丢"
-    assert engine.unload() is False
-    assert calls == [], "释放不该顺手把模型加载起来"
-
-
-def test_unload_does_not_resurrect_a_failed_load():
-    """失败只试一次是设计约束：一次 unload 不能把它变成「每次点击重试一遍」。"""
-    calls: list = []
-
-    def boom(_model_dir, _cpu_threads):
-        calls.append(1)
-        raise RuntimeError("加载失败")
-
-    engine = OcrEngine(engine_factory=boom)
-
-    with pytest.raises(OcrLoadError):
-        engine.recognize(_blank())
-
-    assert engine.unload() is False
-    with pytest.raises(OcrLoadError):
-        engine.recognize(_blank())
-
-    assert len(calls) == 1
-
-
-def test_unload_discards_a_load_that_is_still_in_flight():
-    """在途加载被释放后必须作废：结果不许写回（否则「已释放」会退回成「有引擎」）。"""
-    gate = threading.Event()
-    calls: list = []
-
-    def gated(_model_dir, _cpu_threads):
-        calls.append(1)
-        assert gate.wait(30), "加载闸门没有被放行"
-        return _FakeEngine(text="迟到的引擎")
-
-    engine = OcrEngine(engine_factory=gated, load_timeout=0.05)
-    with pytest.raises(OcrLoadError):
-        engine.preload()
-    stale = engine._loader
-    assert stale is not None and stale.is_alive(), "这一步的前提是加载线程还在跑"
-
-    assert engine.unload() is True, "在途加载也算「有东西可丢」"
-
-    gate.set()
-    stale.join(timeout=30)
-    assert not stale.is_alive()
-
-    assert engine.loaded is False, "作废的加载结果不许写回状态"
-    assert engine._engine is None
-
-
-def test_unload_never_cuts_an_inference_that_is_already_running():
-    """卸载不许把正在跑的一次识别掐断（那条线程手里的引擎是它自己的强引用）。"""
-    engine = OcrEngine(engine_factory=_factory(_FakeEngine(text="在跑", delay=0.3)))
-    results: list = []
-    errors: list = []
-
-    def worker() -> None:
-        try:
-            results.append([b.text for b in engine.recognize(_blank())])
-        except Exception as exc:  # noqa: BLE001 - 测试要看清到底炸在哪
-            errors.append(exc)
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while engine._engine is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert engine._engine is not None, "识别线程没能在预算内把模型加载起来"
-
-    engine.unload()          # 识别还在跑（假引擎睡 0.3 s）
-
-    thread.join(timeout=30)
-    assert not thread.is_alive()
-    assert errors == []
-    assert results == [["在跑"]], "正在跑的识别必须跑完，不能被卸载掐掉"
-    assert engine.loaded is False
-
-
-def test_release_engine_drops_the_shared_singleton(monkeypatch):
-    """模块级释放：单例被摘掉、旧引擎确实释放、下一次 shared_engine() 是新的。"""
-    calls: list = []
-    first = OcrEngine(engine_factory=_factory(_FakeEngine(text="共享"), calls))
-    monkeypatch.setattr(ocr, "_SHARED_ENGINE", first)
-    assert ocr.shared_engine() is first
-    first.preload()
-
-    assert ocr.release_engine() is True
-
-    assert first.loaded is False
-    second = ocr.shared_engine()
-    assert second is not first, "释放后必须拿到一份干净的引擎，不能复用半拆的那份"
-    assert second.loaded is False, "新单例是懒加载的：没用到不该加载，也不该带上旧的那份"
-
-
-def test_release_engine_drops_the_singleton_even_after_a_failed_load(monkeypatch):
-    """模块级口径：失败**不**跨会话保留。
-
-    与引擎级的 ``test_unload_does_not_resurrect_a_failed_load`` 不矛盾：同一个引擎
-    对象里失败仍然只试一次，但会话收口时单例被摘掉，下一次拿到的是新引擎、会重新
-    尝试——装坏了的依赖用户重装一次就好，程序不该在整个进程生命周期里都判它死刑。
-    """
-    calls: list = []
-
-    def boom(_model_dir, _cpu_threads):
-        calls.append(1)
-        raise RuntimeError("模型坏了")
-
-    engine = OcrEngine(engine_factory=boom)
-    monkeypatch.setattr(ocr, "_SHARED_ENGINE", engine)
-
-    for _ in range(2):
-        with pytest.raises(OcrLoadError):
-            ocr.recognize(_blank())
-    assert len(calls) == 1, "同一个引擎对象里失败不许重试"
-
-    assert ocr.release_engine() is False, "失败的对象没有引擎可还"
-
-    fresh = ocr.shared_engine()
-    assert fresh is not engine, "单例必须被摘掉，下一次换成新引擎"
-    assert fresh.loaded is False
-    fresh.unload()
-
-
-def test_release_engine_is_a_cheap_noop_before_anything_is_loaded(monkeypatch):
-    """每次截图收口都会调它：没加载过就必须是零成本（不加载、不建单例）。"""
-    monkeypatch.setattr(ocr, "_SHARED_ENGINE", None)
-
-    assert ocr.release_engine() is False
-    assert ocr._SHARED_ENGINE is None
-
-
-# --------------------------------------------------------- 真实引擎（端到端）
+    def _spawn(self, argv):
+        process = ocr.spawn_worker(argv)
+        self.processes.append(process)
+        return process
 
 
 @pytest.fixture(scope="module")
-def real_engine():
+def real_worker():
     pytest.importorskip("rapidocr", reason="未安装本地 OCR 依赖（rapidocr）")
     directory = ocr.resolve_model_dir()
     problem = ocr.model_problem(directory)
     assert not problem, (
         f"本地 OCR 模型不可用：{problem}\n"
         f"模型随包放在 {ocr.bundled_model_dir()}；"
-        "重新取出的命令见 pet/screen_capture/ocr.py 的模块说明"
+        "重新取出的命令见 pet/screen_capture/ocr_models.py 的模块说明"
     )
-    engine = OcrEngine()
-    engine.preload()
-    return engine
+    return _RealWorker()
 
 
-def test_real_engine_sessions_are_cpu_only(real_engine, latin_family):
-    """首版禁 GPU：三个 session 的执行提供者里只能有 CPU。
-
-    这条只能从真引擎上验：``SessionOptions`` 没有 getter，所以"线程数/关自旋"
-    那两个旋钮只能靠构造时写死（见 ``ocr._new_session``），而**执行提供者**是
-    session 自己报得出来的——把它钉住，将来有人顺手打开 use_cuda 会在这里红。
-    """
-    # 三个子模型是首次调用时才惰性建出来的，所以先真跑一帧（检测/分类/识别都要跑过）。
-    real_engine.recognize(_screenshot(latin_family))
-
-    for attribute in ("text_det", "text_cls", "text_rec"):
-        ort_session = getattr(real_engine._engine, attribute).session.session
-        assert ort_session.get_providers() == ["CPUExecutionProvider"], (
-            f"{attribute} 挂上了非 CPU 的执行提供者：{ort_session.get_providers()}"
-        )
-
-
-def test_real_engine_reads_known_latin_lines_in_reading_order(real_engine, latin_family):
+def test_real_worker_reads_known_latin_lines_in_reading_order(real_worker, latin_family):
     image = _screenshot(latin_family)
 
-    blocks = real_engine.recognize(image)
+    blocks = real_worker.engine.recognize(image)
 
     joined = " ".join(block.text for block in blocks).lower()
     assert "12345" in joined, f"没读出行 1 的关键词，实际识别：{joined!r}"
@@ -798,44 +848,97 @@ def test_real_engine_reads_known_latin_lines_in_reading_order(real_engine, latin
         assert top + height <= image.height() + 1
 
 
-def test_real_engine_reads_chinese_lines(real_engine, cjk_family):
+def test_real_worker_reads_chinese_lines(real_worker, cjk_family):
     image = _screenshot(cjk_family, ("本地离线识别", "快速识屏提取文字"))
 
-    blocks = real_engine.recognize(image)
+    blocks = real_worker.engine.recognize(image)
 
     joined = "".join(block.text for block in blocks)
     assert "离线" in joined, f"中文识别没对上，实际识别：{joined!r}"
     assert "文字" in joined, f"中文识别没对上，实际识别：{joined!r}"
 
 
-def test_real_engine_returns_empty_list_for_blank_image(real_engine):
-    assert real_engine.recognize(_blank(800, 400)) == []
+def test_real_worker_returns_empty_list_for_blank_image(real_worker):
+    assert real_worker.engine.recognize(_blank(800, 400)) == []
 
 
-def test_real_engine_load_never_touches_the_network(monkeypatch):
-    """断网可用是硬要求：加载期任何 HTTP 请求都算违规（模型必须随包）。"""
-    pytest.importorskip("rapidocr", reason="未安装本地 OCR 依赖（rapidocr）")
-    import requests
+def test_real_worker_exits_after_every_recognition(real_worker, latin_family):
+    """「用完就丢」的进程级证据：每次识别都是一个**新的**、认完就死的进程。
 
-    def _forbidden(*args, **kwargs):
-        raise AssertionError(f"OCR 加载期发起了网络请求：{args[:1]}（模型没有随包？）")
+    这正是切片 5 存在的理由：进程退出时操作系统把所有 native 堆收走，RSS 回到
+    触发前的水位（实测数字见 ``.scratch/screen-capture/probe_ocr_subprocess.txt``）。
+    进程内 ``unload()`` 做不到这件事（只回吐约 30 MB / 108 MB）。
+    """
+    before = len(real_worker.processes)
 
-    monkeypatch.setattr(requests, "get", _forbidden)
-    monkeypatch.setattr(requests, "post", _forbidden)
+    real_worker.engine.recognize(_blank(320, 120))
+    real_worker.engine.recognize(_blank(320, 120))
 
+    started = real_worker.processes[before:]
+    assert len(started) == 2, "每次 recognize 都该起一个新进程（不许复用常驻进程）"
+    assert started[0].pid != started[1].pid
+    for process in started:
+        assert process.poll() is not None, "认完就退：进程还在就是「内存没真归零」"
+        assert _wait_for(lambda p=process: not _pid_alive(p.pid))
+
+
+def test_real_worker_reports_missing_models_in_plain_language(monkeypatch, tmp_path):
+    """真工作端子进程 + 显式模型目录：报出来的那句话必须能直接给用户看。"""
+    monkeypatch.setenv(ocr.OCR_MODEL_DIR_ENV, str(tmp_path))
     engine = OcrEngine()
-    engine.preload()
 
-    assert engine.loaded is True
+    with pytest.raises(OcrModelMissingError) as excinfo:
+        engine.recognize(_blank(320, 120))
+
+    message = str(excinfo.value)
+    assert "模型" in message and str(tmp_path) in message
 
 
-def test_real_engine_can_be_released_and_loaded_again(real_engine):
-    """真机口径：释放后重新加载能再认一次（"用完就丢"不是"丢了就没了"）。"""
-    assert real_engine.loaded is True
-    assert real_engine.unload() is True
-    assert real_engine.loaded is False
-    assert real_engine._engine is None
+def test_self_built_sessions_are_injected_into_the_engine_cfg():
+    """「断网可用」的承重结构：三份 session 必须真的被写回引擎配置。
 
-    assert real_engine.recognize(_blank(800, 400)) == []
+    rapidocr 自建 session 时会去读 ``Det/Rec/Cls.model_path``，那个字段为空时它
+    **会去网上下**（``DownloadFile.run``）。从外面把 session 塞进去，那条分支就短路
+    了——所以"断网可用"是结构保证，不是"但愿随包文件都在"。
+    """
+    from omegaconf import OmegaConf
 
-    assert real_engine.loaded is True, "释放后必须能重新加载"
+    class _FakeEngine:
+        cfg = {"Det": OmegaConf.create({"model_path": ""}), "Cls": OmegaConf.create({}),
+               "Rec": OmegaConf.create({})}
+
+    sessions = {"Det": object(), "Cls": object(), "Rec": object()}
+
+    ocr_worker._attach_sessions(_FakeEngine, sessions)
+
+    for section, session in sessions.items():
+        assert _FakeEngine.cfg[section].session is session
+
+
+def test_the_real_worker_recognizes_with_the_network_blocked():
+    """断网可用是硬要求：把 ``socket.socket`` 换成会抛异常的桩之后，真工作端照样认字。
+
+    模型必须随包，加载期任何 HTTP 请求都算违规——而"加载期"现在发生在**另一个
+    进程**里，所以在进程内打桩 ``requests`` 已经管不到它（切片 2 那条做法到此失效）。
+    这里改成在真子进程里把 socket 层堵死：堵住了还认出字，才说明走的是随包模型。
+    """
+    pytest.importorskip("rapidocr", reason="未安装本地 OCR 依赖（rapidocr）")
+    script = (
+        "import socket, sys\n"
+        "def _forbidden(*args, **kwargs):\n"
+        "    raise AssertionError('识别子进程在加载/识别期发起了网络连接')\n"
+        "socket.getaddrinfo = _forbidden\n"
+        "socket.create_connection = _forbidden\n"
+        "socket.socket.connect = _forbidden\n"
+        "socket.socket.connect_ex = _forbidden\n"
+        "import runpy\n"
+        "runpy.run_module('pet.screen_capture.ocr_worker', run_name='__main__')\n"
+    )
+    image = _blank(320, 120)
+    process = subprocess.run(
+        [sys.executable, "-c", script], input=ocr.frame_bytes(ocr.encode_png(image)),
+        capture_output=True, cwd=REPO, timeout=180,
+    )
+
+    assert process.returncode == ocr_worker.EXIT_NO_TEXT, process.stderr.decode("utf-8", "replace")
+    assert b'"blocks"' in process.stdout

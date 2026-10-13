@@ -178,13 +178,13 @@ def test_app_dir_mode_judges_three_things_not_just_the_models(verifier, tmp_path
     assert any("config.yaml" in problem for problem in report["problems"])
 
 
-def test_required_bundle_modules_come_from_the_engine_seam(verifier):
-    """判据必须来自产品那一份 seam（``actions.OCR_MODULE`` + 包名），不抄第二份字面量。"""
-    from pet.screen_capture import actions
+def test_required_bundle_modules_come_from_the_product(verifier):
+    """判据必须来自产品那一份声明（``ocr.BUNDLE_MODULES``），不抄第二份字面量。"""
+    from pet.screen_capture import ocr
 
+    assert verifier.required_bundle_modules() == ocr.BUNDLE_MODULES
     assert verifier.required_bundle_modules() == (
-        f"{actions.__package__}.{actions.OCR_MODULE}",)
-    assert verifier.required_bundle_modules() == ("pet.screen_capture.ocr",)
+        "pet.screen_capture.ocr", "pet.screen_capture.ocr_worker")
 
 
 def test_missing_bundle_modules_is_a_pure_set_difference(verifier):

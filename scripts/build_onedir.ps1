@@ -35,14 +35,18 @@
       scripts\verify_rapidocr_models.py both before PyInstaller and again inside
       the built app. Missing/renamed/re-cut models do not crash the app - they
       only make "screenshot -> text" quietly wrong, so the gate has to be here.
-      The same script's --app-dir mode also proves the engine module
-      `pet.screen_capture.ocr` is in the bundle: the action layer resolves it by
-      name through importlib, so the static analysis cannot see it and only the
-      explicit --hidden-import below puts it in the module graph (2026-10-13
-      review B1: without it the frozen app never resolves an engine and the
-      menu entry stays grey forever). numpy/cv2 are runtime dependencies of that
-      feature and are therefore NOT excluded anymore (excluding them made OCR
-      unusable in the frozen bundle - measured 2026-10-13).
+      The same script's --app-dir mode also proves both dynamic targets are in the
+      bundle: `pet.screen_capture.ocr` (the action layer resolves it by name
+      through importlib) and `pet.screen_capture.ocr_worker` (the recognition
+      subprocess, whose module name only ever appears inside a command-line
+      string). The static analysis can see neither, so only the explicit
+      --hidden-import lines below put them in the module graph (2026-10-13
+      review B1: without the first one the frozen app never resolves an engine
+      and the menu entry stays grey forever; without the second every capture
+      fails with "cannot start worker process"), numpy/cv2 are runtime
+      dependencies of that feature and are therefore NOT excluded anymore
+      (excluding them made OCR unusable in the frozen bundle - measured
+      2026-10-13).
 
     Examples:
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1
@@ -274,15 +278,27 @@ if (-not $SkipBuild) {
         '--add-data', "$rapidocrDir\default_models.yaml;rapidocr"
     )
 
-    # 引擎模块本身也必须显式 hidden-import（2026-10-13 交叉审查 B1）：截图动作走的是
-    # **动态** seam——`pet\screen_capture\actions.py` 用 importlib 按字符串
-    # （`OCR_MODULE = "ocr"`）解析 `pet.screen_capture.ocr`，全仓没有一处静态 import 指向
-    # 它。PyInstaller 的静态分析从入口 `packaging\pet_entry.py` 出发摸不到这个模块，
-    # 于是**原件全在、模块不在**：模型和 rapidocr 配置都随包，冻结包里却解析不出引擎，
-    # 右键「截图 → 提取文字」永远置灰（实测见 .scratch\screen-capture\
-    # build_ocr_hidden.out 的 NO-HIDDEN 那一轮）。这里显式把它拉进模块图，它的依赖
-    # （rapidocr / cv2 / numpy / onnxruntime）随之被静态收集。
-    $rapidocrHidden = @('--hidden-import', 'pet.screen_capture.ocr')
+    # 两个模块必须显式 hidden-import（2026-10-13 交叉审查 B1；切片 5 加了第二个）：
+    #
+    # 1. 宿主侧引擎 `pet.screen_capture.ocr`——截图动作走的是**动态** seam
+    #    （`pet\screen_capture\actions.py` 用 importlib 按字符串 `OCR_MODULE = "ocr"`
+    #    解析它），全仓没有一处静态 import 指向它。PyInstaller 的静态分析从入口
+    #    `packaging\pet_entry.py` 出发摸不到这个模块，于是**原件全在、模块不在**：
+    #    模型和 rapidocr 配置都随包，冻结包里却解析不出引擎，右键「截图 → 提取文字」
+    #    永远置灰（实测见 .scratch\screen-capture\build_ocr_hidden.out 的 NO-HIDDEN
+    #    那一轮）。这里显式把它拉进模块图，它的依赖（rapidocr / cv2 / numpy /
+    #    onnxruntime）随之被静态收集。
+    #
+    # 2. 识别子进程 `pet.screen_capture.ocr_worker`（切片 5）——它的模块名只出现在
+    #    命令行字符串里（`<exe> --ocr-worker`，见 pet\screen_capture\ocr.py 的
+    #    worker_command），静态分析同样摸不到。缺它不会崩，只是每次识屏都报"起不了
+    #    工作进程"。入口里的 `from pet.__main__ import _run_ocr_worker` 现在**恰好**
+    #    能把它捎进图（静态分析会进 if 分支），但那条路由随时可能被挪走/改成惰性
+    #    import——本参数是不依赖这种巧合的那一份保证，产物侧的门会把它验回来。
+    $rapidocrHidden = @(
+        '--hidden-import', 'pet.screen_capture.ocr',
+        '--hidden-import', 'pet.screen_capture.ocr_worker'
+    )
 
     # DLL 冲突隔离（issue: Qt6Core "procedure not found" / 找不到指定的程序）：
     # conda 的 Library\bin 与 MiKTeX 的 bin\x64 各自携带一套 Qt6/ICU DLL（版本与

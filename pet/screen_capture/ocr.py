@@ -1,83 +1,83 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」本地 OCR：截图像素 → 带阅读顺序的文本块。
+"""「快速识屏」本地 OCR 的**宿主侧驱动**：截图像素 → 一个识别子进程 → 文本块。
 
-设计定稿的四条硬约束，以及它们在这一层各自的落点：
+设计定稿的五条硬约束，以及它们在这一层各自的落点：
 
 1. **本地 + 断网可用**。引擎是 RapidOCR（PaddleOCR 的 PP-OCR 模型，ONNXRuntime
    推理），模型文件随包放在 ``resources/rapidocr_models/``。加载路径上**不存在**
-   下载分支：每个模型都由本模块自己按显式路径建 session 再交给 rapidocr，
-   而 rapidocr 一旦拿到外部 session 就直接返回，连"模型路径 → 下载"那段代码都
-   不会进（见 :func:`_attach_sessions`）。
-2. **CPU、1~2 线程、关自旋、首版禁 GPU**。``SessionOptions`` 显式写死
-   ``intra_op_num_threads``（1~2）、``inter_op_num_threads=1``、
-   ``allow_spinning=0``，执行提供者只有 ``CPUExecutionProvider``。桌宠是常驻
-   后台程序，识别期间把整机 CPU 打满、或让工作线程空转让风扇起飞，都是不可接受
-   的代价。
-3. **懒加载：进程内单后台线程**。``import`` 这个模块不碰 numpy/onnxruntime/
-   rapidocr；模型加载发生在首次使用（``recognize`` 或 ``preload``）时启动的
-   那**一个**后台线程里。并发的调用方一起等同一个 ``Event``，不会各起一个线程
-   把同一份模型加载三遍。
-4. **错误说人话**。模型缺失 / 依赖缺失 / 加载失败 / 识别失败四类故障各有自己的
-   异常类型与一句能直接给用户看的中文说明，并且**失败只试一次**——坏掉的东西
-   不会在几百毫秒后自己好起来，每次点击都重跑一遍加载只是把等待时间再收一遍。
-5. **用完就丢**。一次识屏结束后由编排层调 :func:`release_engine`（引擎侧是
-   :meth:`OcrEngine.unload`）：丢弃引擎与三份 session、跑一次 ``gc``。释放后
-   再触发会**重新加载**（同一份模型再建 session），不需要重启进程——这是
-   「不想常驻 100 MB，但也不能因为丢掉了就再也用不了」这个取舍的落点。
-   实测口径（本机 2026-10-13，见 ``.scratch/screen-capture/probe_ocr_unload_rss.txt``）：
-   加载后 RSS +108 MB、识别后的平台期约 159 MB；``unload()`` 耗时约 48 ms，
-   **只回吐约 30 MB**（152.4 → 122.5 MB），再手动 ``gc.collect()`` 与等 5 秒
-   都不再变。也就是说：释放的是进程内的引用与 ONNXRuntime 会话对象，
-   **native 堆与已 import 的 cv2/numpy 模块内存不还给操作系统**——RSS 回不到
-   加载前的水位（仍高出约 78 MB）。冻结包里同一组数字（42.6 → 137.3，
-   unload 后 108.3）：结论一样。这里如实记下来，不把"逻辑上释放了"说成
-   "内存还回去了"。
+   下载分支：每个模型都由工作端按显式路径建 session 再交给 rapidocr，而 rapidocr
+   一旦拿到外部 session 就直接返回，连"模型路径 → 下载"那段代码都不会进
+   （见 ``ocr_worker._attach_sessions``）。
+2. **CPU、1~2 线程、关自旋、首版禁 GPU**。旋钮全在工作端
+   （``ocr_worker._new_session``）：桌宠是常驻后台程序，识别期间把整机 CPU 打满、
+   或让工作线程空转让风扇起飞，都是不可接受的代价。
+3. **一次识别 = 一个子进程，用完就丢**（切片 5 的用户拍板）。识别的全部常驻内存
+   都长在那个进程里，它退出即归零。**为什么非子进程不可**：切片 2 的进程内
+   ``unload()`` 实测只回吐约 30 MB / 108 MB（152.4 → 122.5 MB，再等 5 秒不动）
+   ——释放的是 Python 引用与 session 对象，native 堆与已 import 的 cv2/numpy
+   模块内存**不还给操作系统**，冻结包里同一组数字（42.6 → 137.3，unload 后
+   108.3）。要让"用完就丢"literally 成立，只能让进程死掉。代价是每次触发多付一次
+   进程启动 + 模型加载，实测见 ``.scratch/screen-capture/probe_ocr_subprocess.txt``。
+4. **错误说人话**。模型缺失 / 依赖缺失 / 加载失败 / 识别失败 / 超时 / 工作进程崩溃
+   各有自己的异常类型与一句能直接给用户看的中文说明。人话优先取工作端自己报的
+   那一条（它知道得最具体，比如是哪个模型文件），端口侧只兜底。
+5. **不留孤儿**。子进程的生命周期只有三种收尾：正常退出（结果已读走）、超时被杀、
+   被 :func:`release_engine` 中止。每一次 ``recognize`` 都在 ``finally`` 里确保
+   进程已经被回收；:func:`release_engine` 是会话收口处的第二道网（"取消/失败杀子进程"）。
 
-模型文件的来源与体积（真机实测，2026-10-13）：
-
-===========================================  ==========
-文件                                           体积
-===========================================  ==========
-``PP-OCRv6_det_small.onnx``（文本检测）         9.5 MB
-``PP-OCRv6_rec_small.onnx``（文本识别）        20.2 MB
-``ch_ppocr_mobile_v2.0_cls_mobile.onnx``（方向分类） 0.6 MB
-===========================================  ==========
-
-三个文件都直接取自 ``rapidocr`` wheel 自带的 ``rapidocr/models/``（同一版本、
-逐字节相同），重新取出/换版本的命令::
-
-    python -c "import os, rapidocr, shutil; src=os.path.join(os.path.dirname(rapidocr.__file__),'models'); [shutil.copy2(os.path.join(src,n), 'resources/rapidocr_models/') for n in os.listdir(src) if n.endswith('.onnx')]"
-
-识别模型的字符表（18708 个字符）**内嵌在 onnx 元数据里**（实测
-``custom_metadata_map['character']``），所以不需要额外的 ``ppocr_keys_v1.txt``
-——这也是"断网可用"能成立的另一半：字典不会在首次识别时被顺手下拉。
-
-隐私与职责边界：本层只做"像素进、文本出"，不落盘、不联网、不管 UI，也不决定
-识别结果怎么展示。
+隐私与职责边界：本层只做"像素进、文本出"，不落盘（图像只走管道与内存）、不联网、
+不管 UI，也不决定识别结果怎么展示。展示顺序的契约（:func:`reading_order` 与
+:class:`TextBlock`）留在本层：工作端只负责"图里有哪些框和字"，"读起来是什么顺序"
+是给人看的事。
 """
 
 from __future__ import annotations
 
-import gc
-import importlib.util
+import json
 import logging
-import os
+import struct
+import subprocess
 import sys
 import threading
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from PySide6.QtGui import QImage
 
+# 模型事实（文件名 / 摘要 / 目录解析）住在 PySide 无关的 ``ocr_models`` 里，因为
+# 识别子进程也要用同一份、却不许 import PySide（见该模块说明）。这里整组再导出：
+# 构建期硬门（``scripts/verify_rapidocr_models.py``）与既有测试继续从 ``ocr.MODEL_*``
+# 取判据，判据不会因为这次搬家变成两份。
+from .ocr_models import (  # noqa: F401  -- 刻意的 re-export，见上
+    MODEL_FILES,
+    MODEL_RELATIVE_DIR,
+    MODEL_SHA256,
+    OCR_MODEL_DIR_ENV,
+    bundled_model_dir,
+    model_problem,
+    resolve_model_dir,
+)
+from .ocr_worker import (
+    EXIT_LOAD_FAILED,
+    EXIT_MODEL_MISSING,
+    EXIT_NO_TEXT,
+    EXIT_PROTOCOL,
+    EXIT_RECOGNIZE_FAILED,
+    EXIT_TEXT,
+    EXIT_UNAVAILABLE,
+    MAGIC,
+    STDERR_PREFIX,
+)
+
 log = logging.getLogger("dsh-pet-standalone")
 
 __all__ = [
+    "BUNDLE_MODULES",
     "MODEL_FILES",
     "MODEL_RELATIVE_DIR",
     "MODEL_SHA256",
     "OCR_MODEL_DIR_ENV",
+    "OCR_WORKER_FLAG",
     "OcrEngine",
     "OcrError",
     "OcrLoadError",
@@ -85,63 +85,46 @@ __all__ = [
     "OcrRecognitionError",
     "OcrUnavailableError",
     "TextBlock",
+    "WORKER_MODULE",
+    "abandon_workers",
     "bundled_model_dir",
+    "encode_png",
     "model_problem",
     "reading_order",
     "recognize",
     "release_engine",
     "resolve_model_dir",
     "shared_engine",
-    "to_bgr_array",
+    "worker_command",
 ]
 
-#: 模型在源码树 / 冻结包里的相对目录。冻结包按 ``sys._MEIPASS`` 为根（与
-#: ``pet/game_fps.py::bundled_backend_path`` 同一约定）。
-MODEL_RELATIVE_DIR = ("resources", "rapidocr_models")
+#: 识别工作端的模块路径（源码态 ``python -m <这个>``）。冻结态换成本 exe 的
+#: ``--ocr-worker`` 内部子命令（见 :func:`worker_command`）。
+WORKER_MODULE = f"{__package__}.ocr_worker"
 
-#: 三个模型文件（键就是 rapidocr 配置里的段名，注入 session 时按它对应）。
-MODEL_FILES = {
-    "Det": "PP-OCRv6_det_small.onnx",
-    "Cls": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
-    "Rec": "PP-OCRv6_rec_small.onnx",
-}
+#: 冻结态的 worker 子命令开关（登记在 ``pet/__main__.py`` 与 ``packaging/pet_entry*.py``）。
+OCR_WORKER_FLAG = "--ocr-worker"
 
-#: 三个模型文件的 sha256（2026-10-13 按随包文件实测值登记）。
-#:
-#: 这是**构建期硬门**（``scripts/verify_rapidocr_models.py``）的唯一真相源：模型
-#: 要是被截断、换成了同名的另一版、或者混进别的语言模型，产品**不会崩**——识别
-#: 结果会静默变差（错字、漏行），用户只会觉得"这个识屏不准"。所以在打包阶段就按
-#: 名字 + 摘要挡住，而不是等用户发现问题。运行期**不**校验：每次启动多读 31 MB
-#: 只为一件 CI 该做的事（与 ``pet/game_fps.py::REQUIRED_SHA256`` 同一取舍）。
-#:
-#: 换模型版本时：改 ``MODEL_FILES`` + 本表 + THIRD_PARTY_NOTICES.md，三处必须同时改。
-MODEL_SHA256 = {
-    "Det": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
-    "Cls": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
-    "Rec": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
-}
+#: 冻结包里必须存在的模块。两者都是 **PyInstaller 静态分析摸不到的目标**：
+#: ``ocr`` 走 ``actions`` 的 importlib 动态 seam（模块名是字符串），``ocr_worker``
+#: 只以 ``sys.executable -m ...`` 的形式出现在子进程命令行里。少任何一个，冻结包
+#: 都不会崩——只是"截图 → 提取文字"永远置灰、或者每次点击都报"工作进程起不来"。
+#: 构建脚本必须显式 ``--hidden-import`` 它们，产物侧由
+#: ``scripts/verify_rapidocr_models.py --app-dir`` 从模块图里读回来核对。
+BUNDLE_MODULES = (__name__, WORKER_MODULE)
 
-#: 模型目录覆盖开关（开发/自定义部署用）。正式包不设它，走随包目录。
-OCR_MODEL_DIR_ENV = "DSH_PET_OCR_MODEL_DIR"
+#: 默认识别超时（秒）。覆盖"进程启动 + import + 模型加载 + 一次推理"的全程预算：
+#: 本机实测 1600×900 截图端到端约 2.5 s（暖）/ 2.9 s（模型文件冷），见
+#: ``.scratch/screen-capture/probe_ocr_subprocess.txt``。30 s 是给慢机器 + 杀毒软件
+#: 首扫的宽预算。真挂住时也不能让调用方无限等下去——桌宠是个 GUI 程序，一次点击
+#: 不能没有尽头。
+DEFAULT_RECOGNIZE_TIMEOUT = 30.0
 
-#: 交给 rapidocr 的固定配置。GPU 相关的开关在这里显式关一遍，作为"执行提供者只有
-#: CPU"的第二道防线（第一道是本模块自建 session 时写死的 providers）。日志放到
-#: ``error``：rapidocr 在整张图没检出文字时会打一条 WARNING，而"截了一张没有文字的
-#: 图"是**正常输入**，不该污染用户的日志。
-_RAPIDOCR_PARAMS = {
-    "Global.log_level": "error",
-    "EngineConfig.onnxruntime.use_cuda": False,
-    "EngineConfig.onnxruntime.use_dml": False,
-    "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
-}
+#: 结束子进程时给它的宽限（秒）：先 ``terminate``，超时再 ``kill``。
+_KILL_GRACE = 2.0
 
-#: 线程预算的上下界（设计约束：CPU 限定 1~2 线程）。
-_MIN_CPU_THREADS = 1
-_MAX_CPU_THREADS = 2
-
-#: 默认加载超时。模型加载实测 ~0.6 s（本机），给 60 s 是"慢机器 + 杀毒软件首扫"
-#: 的宽预算；真挂住时也不能让调用方无限等下去——桌宠是个 GUI 程序。
-_DEFAULT_LOAD_TIMEOUT = 60.0
+#: 日志尾巴最多带多少字符进人话（native 崩栈可能很长，全塞进气泡没人看）。
+_STDERR_TAIL_LIMIT = 400
 
 
 # ---------------------------------------------------------------------- 异常
@@ -160,11 +143,11 @@ class OcrModelMissingError(OcrError):
 
 
 class OcrLoadError(OcrError):
-    """模型/引擎加载失败（文件损坏、DLL 不匹配、加载超时）。"""
+    """模型/引擎加载失败（文件损坏、DLL 不匹配、工作进程加载期崩溃）。"""
 
 
 class OcrRecognitionError(OcrError):
-    """引擎起来了但这一次识别失败。"""
+    """引擎起来了但这一次识别失败（含超时、被中止、协议不成立）。"""
 
 
 # ------------------------------------------------------------------ 数据契约
@@ -230,433 +213,387 @@ def reading_order(blocks: Iterable[TextBlock]) -> list[TextBlock]:
     return result
 
 
-# ------------------------------------------------------------------ 模型路径
+# ---------------------------------------------------------------- 像素 → PNG
 
 
-def bundled_model_dir() -> Path:
-    """随包模型目录（**纯函数**，不碰文件系统，也不做回退）。
+def encode_png(image: QImage) -> bytes:
+    """``QImage`` → 内存 PNG 字节（**不落盘**，切片 5 的红线）。
 
-    冻结包取 ``sys._MEIPASS/resources/rapidocr_models``，源码运行取仓库根的同一
-    相对路径；``DSH_PET_OCR_MODEL_DIR`` 可以整个覆盖它。与
-    ``pet/game_fps.py::bundled_backend_path`` 同一套写法，理由也一样：模型必须
-    来自我们知道的那一份，不能在 PATH / 环境里"就近找一个"。
+    为什么过一趟 PNG 而不是把裸像素喂进管道：裸像素要求两边对 stride、通道序、
+    字节序逐条对齐，任何一条不一致都是"识别结果莫名其妙地错"，而且错得看不出来；
+    PNG 把这些约定全部收进格式本身，宿主只管编码、工作端只管解码。
+
+    PNG 是**无损**的，所以这一步不损失识别精度。先统一到 ``Format_RGB888`` 有两个
+    理由：alpha 通道对截图没有意义（反而会让解码端拿到 4 通道），以及让编码结果
+    的通道序与色彩空间确定下来（cv2 解码后就是 rapidocr 要的 BGR 3 通道）。
     """
-    override = os.environ.get(OCR_MODEL_DIR_ENV)
-    if override:
-        return Path(override)
-    meipass = getattr(sys, "_MEIPASS", None)
-    root = Path(meipass) if meipass else Path(__file__).resolve().parents[2]
-    return root.joinpath(*MODEL_RELATIVE_DIR)
+    from PySide6.QtCore import QBuffer, QIODevice
 
-
-def model_problem(directory: Path | None = None) -> str:
-    """模型目录不可用的**人话**原因；可用返回 ``""``。
-
-    只判存在性：文件在不在是安装完整性问题；内容对不对要等 ONNXRuntime 加载时
-    才知道（那时由 :class:`OcrLoadError` 接手）。缺哪个文件就报哪个，用户拿着
-    这句话才知道该重装还是该补文件。
-    """
-    target = Path(directory) if directory is not None else bundled_model_dir()
-    missing = [name for name in MODEL_FILES.values() if not (target / name).is_file()]
-    if not missing:
-        return ""
-    return (
-        f"缺少本地 OCR 模型文件 {', '.join(missing)}（找过的目录：{target}）"
-        "——模型随安装包分发，缺失说明安装不完整，请重新安装"
-    )
-
-
-def _installed_models_dir() -> Path | None:
-    """已安装的 rapidocr wheel 自带的模型目录（开发环境的回退）。"""
-    try:
-        import rapidocr
-    except ImportError:
-        return None
-    return Path(rapidocr.__file__).resolve().parent / "models"
-
-
-def resolve_model_dir(explicit: Path | None = None) -> Path:
-    """实际使用的模型目录：显式指定 > 随包 ``resources/`` > 已装 wheel 自带。
-
-    中间那条回退是给**开发环境**的：干净 clone 里 ``resources/rapidocr_models/``
-    可能还没落盘，而 ``rapidocr`` 依赖本身就带着同一批模型文件（版本钉死）。
-    两者都不可用时返回随包路径——报错要报用户机器上的那一个，不是开发机的。
-    """
-    if explicit is not None:
-        return Path(explicit)
-    packaged = bundled_model_dir()
-    if model_problem(packaged) == "":
-        return packaged
-    installed = _installed_models_dir()
-    if installed is not None and model_problem(installed) == "":
-        return installed
-    return packaged
-
-
-# ---------------------------------------------------------------- 引擎加载器
-
-
-def _import_rapidocr():
-    """厚重导入的唯一入口。
-
-    单独成函数有两个理由：模块 import 期不把 rapidocr（连带 numpy / opencv /
-    onnxruntime，实测 import 1.7 s）拖进进程；以及让"依赖没装"这条错误路径可以
-    被精确注入测试，而不必去动 ``sys.modules``。
-    """
-    import rapidocr
-
-    return rapidocr
-
-
-def _describe(exc: BaseException) -> str:
-    """异常 → 一句可读的原因；消息为空时退回到类型名。
-
-    实测（冻结包缺 numpy，2026-10-13）：``ImportError`` 系异常在冻结环境里可能
-    ``str(exc) == ""``，直接拼进人话里就得到"……加载失败（x.onnx）："这种以冒号
-    结尾的空话——用户拿它什么都做不了，排查的人也无从下手。
-    """
-    detail = str(exc).strip()
-    return detail if detail else type(exc).__name__
-
-
-def _new_session(model_path: Path, cpu_threads: int):
-    """按设计约束建一个 CPU-only、关自旋的 ONNXRuntime session。"""
-    from onnxruntime import GraphOptimizationLevel, InferenceSession, SessionOptions
-
-    options = SessionOptions()
-    # 4 = 只报 fatal：onnxruntime 的 info 级日志会把控制台刷满。
-    options.log_severity_level = 4
-    options.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
-    options.intra_op_num_threads = cpu_threads
-    options.inter_op_num_threads = 1
-    options.enable_cpu_mem_arena = False
-    for key in ("session.intra_op.allow_spinning", "session.inter_op.allow_spinning"):
-        try:
-            options.add_session_config_entry(key, "0")
-        except Exception as exc:  # 不同 ORT 版本对配置键的接受度不一样
-            log.debug("本地 OCR：%s 设置失败，沿用 ONNXRuntime 默认值 (%s)", key, exc)
-    # 只挂 CPU：首版禁 GPU（没有实机验证过 GPU 路径，宁可慢也不给用户装一个
-    # 会在别的机器上崩的默认值）。
-    return InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-
-
-def _attach_sessions(engine, sessions: dict) -> None:
-    """把本模块自建的 session 塞进 rapidocr 的配置。
-
-    rapidocr 的 ``OrtInferSession`` **本来**就支持外部传入 session（``cfg["session"]``，
-    上游 PR #451），但它的参数入口经 OmegaConf，拒收任意对象值（实测
-    ``UnsupportedValueType: Value 'InferenceSession' is not a supported primitive
-    type``），所以只能建好引擎之后写回它自己的 cfg；``allow_objects`` 正是
-    OmegaConf 为这种"配置里要挂一个活对象"提供的开关。
-
-    为什么非走这条路不可：rapidocr 自建 session 时会去读 ``Det/Rec/Cls`` 的
-    ``model_path``，而该字段为空时它**会去网上下**（``DownloadFile.run``）。把
-    session 从外面塞进去，那条分支直接短路——"断网可用"于是是结构保证，而不是
-    "但愿文件都在"。
-    """
-    from omegaconf import OmegaConf
-
-    for section, session in sessions.items():
-        node = OmegaConf.create(
-            OmegaConf.to_container(engine.cfg[section]), flags={"allow_objects": True}
-        )
-        node.session = session
-        engine.cfg[section] = node
-
-
-def _load_rapidocr(model_dir: Path | None, cpu_threads: int):
-    """默认加载器：跑在后台线程里，返回一个 ``callable(ndarray) -> 结果``。
-
-    失败一律抛 :class:`OcrError` 子类（``str(exc)`` 即人话），调用方只负责
-    记录与展示。
-    """
-    directory = resolve_model_dir(model_dir)
-    problem = model_problem(directory)
-    if problem:
-        raise OcrModelMissingError(problem)
-
-    if importlib.util.find_spec("onnxruntime") is None:
-        raise OcrUnavailableError(
-            "本地 OCR 运行库 onnxruntime 没装——依赖随安装包分发，缺失说明安装不完整，请重新安装"
-        )
-    try:
-        rapidocr = _import_rapidocr()
-    except ImportError as exc:
-        raise OcrUnavailableError(
-            f"本地 OCR 库 rapidocr 不可用（{exc}）——依赖随安装包分发，缺失请重新安装"
-        ) from exc
-
-    sessions = {}
-    for section, file_name in MODEL_FILES.items():
-        try:
-            sessions[section] = _new_session(directory / file_name, cpu_threads)
-        except Exception as exc:
-            raise OcrLoadError(f"本地 OCR 模型加载失败（{file_name}）：{_describe(exc)}") from exc
-
-    try:
-        engine = rapidocr.RapidOCR(params=dict(_RAPIDOCR_PARAMS))
-    except Exception as exc:
-        raise OcrLoadError(f"本地 OCR 引擎初始化失败：{_describe(exc)}") from exc
-    _attach_sessions(engine, sessions)
-    log.info(
-        "快速识屏：本地 OCR 引擎就绪（模型目录 %s，CPU 线程 %d）", directory, cpu_threads
-    )
-    return engine
-
-
-# ---------------------------------------------------------------- 像素 → 数组
-
-
-def to_bgr_array(image: QImage):
-    """``QImage`` → 连续 BGR ``ndarray``（OpenCV 口径，rapidocr 直接吃）。
-
-    用 Qt 自己的 ``Format_BGR888`` 转换，而不是"先取 RGB 再翻通道"：通道顺序由
-    Qt 保证，少一次全图逐像素操作。``bytesPerLine`` 会把每行对齐到 4 字节，
-    宽度不是 4 的倍数时行尾有垃圾字节——不按 stride 剥掉就会把整张图错位，
-    所以这里先按 stride 取行、再切前 ``width*3`` 个字节。
-    """
-    import numpy as np
-
-    if image.format() != QImage.Format.Format_BGR888:
-        converted = image.convertToFormat(QImage.Format.Format_BGR888)
+    if image.format() != QImage.Format.Format_RGB888:
+        converted = image.convertToFormat(QImage.Format.Format_RGB888)
         if converted.isNull():
-            raise OcrRecognitionError("图像转换失败：无法把截图转成 8-bit BGR")
+            raise OcrRecognitionError("图像转换失败：无法把截图转成 8-bit RGB")
         image = converted
+    buffer = QBuffer()
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        raise OcrRecognitionError("截图编码失败：无法打开内存缓冲")
+    try:
+        if not image.save(buffer, "PNG"):
+            raise OcrRecognitionError("截图编码失败：无法把选区编码成 PNG")
+        return bytes(buffer.data())
+    finally:
+        buffer.close()
 
-    width, height = image.width(), image.height()
-    stride = image.bytesPerLine()
-    buffer = np.frombuffer(image.constBits(), dtype=np.uint8)
-    if buffer.size < stride * height:
+
+def frame_bytes(png: bytes) -> bytes:
+    """按管道协议拼一帧：魔数 + 大端长度 + PNG 字节（见 ``ocr_worker`` 的协议说明）。"""
+    return MAGIC + struct.pack(">I", len(png)) + png
+
+
+# ------------------------------------------------------------- 子进程的一生
+
+
+def worker_command() -> list[str]:
+    """启动识别工作端的命令行。
+
+    - **源码态**：``<python> -m pet.screen_capture.ocr_worker``；
+    - **冻结态**：``<本 exe> --ocr-worker``——冻结包里没有可用的 ``python``，
+      而 exe 自己就是解释器，所以给它一个内部子命令（照 ``--settings`` /
+      ``--uninstall-cleanup`` 的先例，路由登记在 ``pet/__main__.py`` 与
+      ``packaging/pet_entry*.py``）。
+
+    两态都必须走**同一个解释器/同一个 exe**：换一个 python 就可能换一套
+    onnxruntime / cv2 的 DLL，而"引擎在别的解释器里加载失败"是最难查的一类。
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, OCR_WORKER_FLAG]
+    return [sys.executable, "-m", WORKER_MODULE]
+
+
+def spawn_worker(argv: list[str]):
+    """按给定命令行起一个识别子进程（三条管道都是 PIPE）。
+
+    Windows 上必须带 ``CREATE_NO_WINDOW``：我们是个 GUI 程序，不带它每触发一次
+    识别就会在屏幕上闪一下黑色控制台窗口——**这就是用户看得见的故障**。
+    """
+    kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs,
+    )
+
+
+def kill_worker(process, grace: float = _KILL_GRACE) -> bool:
+    """结束一个识别子进程；返回是否真的动了手（已经退出的返回 False）。
+
+    ``terminate`` 之后再 ``kill`` 是防"它不理会终止请求"：本地引擎没有要存盘的
+    东西，硬杀不会丢数据，而留一个还在跑模型的 PID 是我们明确不要的。
+    """
+    if process.poll() is not None:
+        return False
+    try:
+        process.terminate()
+    except Exception:  # 已经退了 / 句柄没了：下面照样补一刀
+        log.debug("快速识屏：终止 OCR 工作进程失败", exc_info=True)
+    try:
+        process.wait(timeout=grace)
+    except Exception:
+        try:
+            process.kill()
+            process.wait(timeout=grace)
+        except Exception:
+            log.debug("快速识屏：强杀 OCR 工作进程失败", exc_info=True)
+    return True
+
+
+#: 仍在跑的识别子进程（:func:`release_engine` 的清扫对象）。用 set 是因为
+#: 进程对象本身可哈希、且认的是"对象还在不在"，不是 pid。
+_LIVE_LOCK = threading.Lock()
+_LIVE_WORKERS: set = set()
+
+
+def _register_worker(process) -> None:
+    with _LIVE_LOCK:
+        _LIVE_WORKERS.add(process)
+
+
+def _unregister_worker(process) -> None:
+    with _LIVE_LOCK:
+        _LIVE_WORKERS.discard(process)
+
+
+def abandon_workers() -> int:
+    """中止所有仍在跑的识别子进程；返回中止了几个。
+
+    调用方是会话收口（``actions._finish`` → :func:`release_engine`）：用户取消或
+    整条链路失败时，那个可能还在跑模型的进程必须立刻消失，不能留在后台继续吃内存
+    ——"用完就丢"里那个"丢"字包括它的进程。已经退出的进程不记账。
+
+    **先打标、再动手**：``_dsh_ocr_abandoned`` 必须在进程真的死掉之前写上。识别
+    线程的收尾顺序是"``communicate`` 返回 → 查标记"，而 ``communicate`` 在进程一死
+    就返回——先杀后标记的话，那条线程有真实概率查到一个还没写上标记的进程，于是把
+    一次**有意中止**报成"异常退出（退出码 1）"，用户看到的是一句莫名其妙的崩溃。
+    """
+    with _LIVE_LOCK:
+        processes = list(_LIVE_WORKERS)
+    killed = 0
+    for process in processes:
+        if process.poll() is not None:
+            continue
+        setattr(process, "_dsh_ocr_abandoned", True)
+        if kill_worker(process):
+            killed += 1
+    return killed
+
+
+# ------------------------------------------------------------ 结果的两端解析
+
+
+def _clip(text: str) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= _STDERR_TAIL_LIMIT else text[:_STDERR_TAIL_LIMIT] + "…"
+
+
+def _as_text(raw) -> str:
+    """``communicate()`` 给的是 bytes；测试和调用方也可能直接塞 str。"""
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw).decode("utf-8", "replace")
+    return str(raw or "")
+
+
+def parse_stderr(stderr) -> tuple[str, str]:
+    """工作端 stderr → ``(stage, error)``。
+
+    只认带 :data:`STDERR_PREFIX` 的那几行（工作端自己的结构化记录），其余是
+    rapidocr/onnxruntime/cv2 的噪声——把它们当"错误消息"给用户看，等于把一段栈
+    丢进气泡。``stage`` 是最后一条进度记录（``""`` = 一条都没走到），宿主靠它把
+    "硬崩在哪一段"说清楚；``error`` 是工作端自己写的人话。
+    """
+    stage, error = "", ""
+    for line in _as_text(stderr).splitlines():
+        line = line.strip()
+        if not line.startswith(STDERR_PREFIX):
+            continue
+        try:
+            record = json.loads(line[len(STDERR_PREFIX):])
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("stage"):
+            stage = str(record["stage"])
+        if record.get("error"):
+            error = str(record["error"])
+    return stage, error
+
+
+def parse_result(stdout) -> list[dict]:
+    """工作端 stdout → 原始块列表（一行 JSON）。读不出来按协议故障报，不猜。"""
+    text = _as_text(stdout).strip()
+    if not text:
         raise OcrRecognitionError(
-            f"图像缓冲区不完整（{buffer.size} 字节 < {stride * height} 字节）"
+            "本地 OCR 工作进程没有输出结果（进程按成功退出，stdout 却是空的）"
+            "——协议不成立，这次识别的结果不可信"
         )
-    rows = buffer[: stride * height].reshape(height, stride)[:, : width * 3]
-    # 显式 copy：stride == width*3 时上面取到的是 QImage 自己的内存视图，
-    # 让引擎拿着一个指向 Qt 缓冲区的数组跑推理是在赌生命周期，不值得省这一次拷贝。
-    return np.array(rows.reshape(height, width, 3), dtype=np.uint8, order="C", copy=True)
-
-
-def _to_blocks(result: Any) -> list[TextBlock]:
-    """引擎原始输出 → 阅读顺序的文本块列表（没文字就是空列表，不是错误）。"""
-    if result is None:
-        # 引擎不返结果 ≠ 图里没字：前者是故障，必须报出来，不能让上层显示"没有识别到文字"。
-        raise OcrRecognitionError("本地 OCR 引擎没有返回结果")
-    texts = getattr(result, "txts", None)
-    if not texts:
-        return []
-    boxes = getattr(result, "boxes", None)
-    scores = getattr(result, "scores", None)
-    if boxes is None or len(boxes) < len(texts):
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
         raise OcrRecognitionError(
-            f"识别结果缺框坐标（文字 {len(texts)} 块，框 {0 if boxes is None else len(boxes)} 个）"
-        )
+            f"本地 OCR 工作进程的输出不是合法 JSON（{exc}）：{_clip(text)}"
+        ) from exc
+    blocks = payload.get("blocks") if isinstance(payload, dict) else None
+    if not isinstance(blocks, list):
+        raise OcrRecognitionError(f"本地 OCR 工作进程的输出缺少 blocks 列表：{_clip(text)}")
+    return blocks
 
+
+def blocks_from_payload(raw: Iterable) -> list[TextBlock]:
+    """原始块字典 → 阅读顺序的 :class:`TextBlock` 列表（形状不对就报故障）。"""
     blocks: list[TextBlock] = []
-    for index, text in enumerate(texts):
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise OcrRecognitionError(f"本地 OCR 结果第 {index} 块不是对象：{_clip(item)}")
+        text = str(item.get("text") or "")
         if not text:
             continue
-        score = float(scores[index]) if scores is not None and index < len(scores) else 0.0
-        box = tuple((float(point[0]), float(point[1])) for point in boxes[index])
-        blocks.append(TextBlock(str(text), score, box))
+        try:
+            score = float(item.get("score") or 0.0)
+            box = tuple((float(point[0]), float(point[1])) for point in item.get("box") or ())
+        except (TypeError, ValueError, IndexError) as exc:
+            raise OcrRecognitionError(f"本地 OCR 结果第 {index} 块的坐标/置信度不可用：{exc}") from exc
+        blocks.append(TextBlock(text, score, box))
     return reading_order(blocks)
+
+
+#: 退出码 → 异常类型（**成功码不在这里**，见 :func:`interpret`）。
+_FAILURE_TYPES: dict[int, type[OcrError]] = {
+    EXIT_PROTOCOL: OcrRecognitionError,
+    EXIT_UNAVAILABLE: OcrUnavailableError,
+    EXIT_MODEL_MISSING: OcrModelMissingError,
+    EXIT_LOAD_FAILED: OcrLoadError,
+    EXIT_RECOGNIZE_FAILED: OcrRecognitionError,
+}
+
+#: 工作端没写人话时按退出码兜底的说明（写死了也不会误导：它只说类别与建议）。
+_FAILURE_MESSAGES: dict[int, str] = {
+    EXIT_PROTOCOL: "本地 OCR 工作进程收到的图像数据不合协议——这次识别没能开始，请重试",
+    EXIT_UNAVAILABLE: "本地 OCR 依赖没装全（rapidocr / onnxruntime）——依赖随安装包分发，请重新安装",
+    EXIT_MODEL_MISSING: "缺少本地 OCR 模型文件——模型随安装包分发，缺失说明安装不完整，请重新安装",
+    EXIT_LOAD_FAILED: "本地 OCR 引擎加载失败",
+    EXIT_RECOGNIZE_FAILED: "本地 OCR 识别失败",
+}
+
+
+def _stage_phrase(stage: str) -> str:
+    """进度标记 → "崩在哪一段"（stage 的顺序见 ``ocr_worker.run``）。"""
+    if stage == "frame-read":
+        return "在加载识别模型期间"
+    if stage in ("loaded", "decoded"):
+        return "在识别期间"
+    return "在启动或读取图像期间"
+
+
+def interpret(returncode: int, stdout: bytes, stderr: bytes) -> tuple[int, list[dict]]:
+    """子进程的 ``(退出码, stdout, stderr)`` → ``(退出码, 原始块列表)``；失败抛人话。
+
+    退出码是**主判据**、JSON 是载荷：两者都表达"有没有文字"时必须一致，不一致说明
+    协议坏了——这时宁可报故障，也不能拿一个可能错的结果去填结果浮层。硬杀（Windows
+    上 ``TerminateProcess`` 落码 1）与崩溃（负码）永远落进"故障"那一支，绝不会被
+    当成一次空结果。
+    """
+    stage, error = parse_stderr(stderr)
+    if returncode in (EXIT_TEXT, EXIT_NO_TEXT):
+        blocks = parse_result(stdout)
+        if returncode == EXIT_NO_TEXT and blocks:
+            raise OcrRecognitionError(
+                f"本地 OCR 工作进程的退出码说「没有文字」，结果里却有 {len(blocks)} 块"
+                "——协议自相矛盾，这次识别的结果不可信"
+            )
+        return returncode, blocks
+
+    message = error or _FAILURE_MESSAGES.get(returncode)
+    if not message:
+        tail = _clip(_as_text(stderr))
+        message = (
+            f"本地 OCR 工作进程异常退出（退出码 {returncode}）——{_stage_phrase(stage)}崩了"
+            "；这次识别没有结果"
+        )
+        if tail:
+            message += f"（{tail}）"
+    exception_type = _FAILURE_TYPES.get(
+        returncode, OcrLoadError if stage in ("", "frame-read") else OcrRecognitionError)
+    raise exception_type(message)
 
 
 # -------------------------------------------------------------------- 引擎
 
 
 class OcrEngine:
-    """本地 OCR 引擎：懒加载、线程安全、一次调用认一张图。
+    """本地 OCR 的一次性驱动：``recognize`` 起一个子进程，拿到结果就等它退出。
 
-    线程模型（三把锁各司其职，别合并）：
+    与切片 2 的进程内引擎相比，这里**没有**加载状态、代次、``unload``、串行化锁
+    ——那些机制存在的前提是"引擎常驻在进程里，得管它的生死"；进程模型下每次识别
+    自带一份全新引擎，跑完连进程一起消失，没有可以串台的状态，也没有需要守的常驻
+    内存。剩下要管的只有两件事：**超时**与**不留孤儿**。
 
-    - ``_state_lock``：保证**只有一个**加载线程被创建（决定谁去加载）；
-    - ``_ready``：所有调用方一起等同一份加载结果（等加载）；
-    - ``_infer_lock``：识别串行化。rapidocr 的流水线在实例上存可变状态
-      （每次调用重写 ``preprocess_op``、``update_params``），并行跑它不是"更快"
-      而是错误用法——races 不会稳定复现，只会在某个用户机器上偶发错行。
-
-    ``engine_factory`` 是可注入的加载缝（签名 ``(model_dir, cpu_threads) -> engine``），
-    默认走 :func:`_load_rapidocr`；``engine`` 只需要能被 ``call`` 并返回带
-    ``txts`` / ``scores`` / ``boxes`` 的结果对象。
-
-    生命周期还有一个 :meth:`unload`（"用完就丢"）：它把已加载的引擎与状态一起
-    丢掉，此后 ``recognize``/``preload`` 会重新加载。**加载中的加载**用 ``_generation``
-    计数防串台：每次 ``unload`` 递增，加载线程在写回状态前对比自己出发时的代次，
-    代次不符就把结果丢弃（引擎对象随本线程退出被回收），绝不写回——否则"已经释放"
-    会退回成"又有了一份引擎"。
+    并发：多个线程同时 ``recognize`` 会各起一个进程（真并行，各占自己那份内存）。
+    产品面上不会发生——``actions`` 一次只跑一条链路，且识别在后台线程里、收口前
+    不会再来一次。这里不为它加锁：加锁等于把两次识别排队，而排队节省的正是我们
+    已经决定不省的那点内存。
     """
 
     def __init__(
         self,
         *,
-        model_dir: Path | None = None,
-        cpu_threads: int = _MAX_CPU_THREADS,
-        load_timeout: float = _DEFAULT_LOAD_TIMEOUT,
-        engine_factory: Callable[[Path | None, int], Any] | None = None,
+        timeout: float = DEFAULT_RECOGNIZE_TIMEOUT,
+        command: Callable[[], list[str]] | None = None,
+        spawn: Callable[[list[str]], Any] | None = None,
     ) -> None:
-        self._model_dir = Path(model_dir) if model_dir is not None else None
-        self.cpu_threads = max(_MIN_CPU_THREADS, min(_MAX_CPU_THREADS, int(cpu_threads)))
-        self._load_timeout = float(load_timeout)
-        self._engine_factory = engine_factory if engine_factory is not None else _load_rapidocr
-
-        self._state_lock = threading.Lock()
-        self._infer_lock = threading.Lock()
-        self._ready = threading.Event()
-        self._loader: threading.Thread | None = None
-        self._engine: Any = None
-        #: 加载代次（见类说明）。只由 ``unload`` / ``_start_loader`` 读写。
-        self._generation = 0
-        #: 加载失败的「类型 + 人话」；只由加载线程写，失败后不再重试。
-        self._failure: tuple[type[OcrError], str] | None = None
-
-    # ---------------------------------------------------------------- 释放
-
-    def unload(self) -> bool:
-        """丢掉引擎与加载状态（"用完就丢"），返回是否真的丢了东西。
-
-        语义与边界：
-
-        - **同步**：返回时 ``loaded`` 已为 False。正在跑的识别不会被中途掐断
-          （本方法不碰 ``_infer_lock``，那条线程手里的引擎对象是它自己的强引用，
-          跑完自然释放）；已经在途的**加载**会被作废——代次 +1 后它写不回来。
-        - **加载在途时释放，会让两份引擎短暂并存**：在途那条加载线程**停不下来**
-          （它已经在 rapidocr/ONNXRuntime 里造引擎了），代次只是让它写不回状态；而紧接着
-          的下一次 ``recognize``/``preload`` 会另起一条新加载线程。两份各 ~100 MB 常驻，
-          一直并存到在途那条跑完、把它手上那份交还给 GC 为止（实测见
-          ``.scratch/screen-capture/probe_ocr_unload_rss.txt``）。这是刻意的取舍：
-          掐断一条正在 ``import``/建 session 的线程，比多占一会儿内存危险得多——
-          "同一份引擎半拆半用"才是真事故（同 :func:`release_engine` 的"短暂两份"）。
-        - **幂等**：没加载过、或加载已经失败时返回 False，也不清掉失败记录
-          （"失败只试一次"是设计约束，不能靠一次 unload 把它绕开）。
-        - **可重来**：释放后再调 ``recognize``/``preload`` 会重新加载同一份模型。
-        - **不假装**：只丢进程内的引用与 ONNXRuntime 会话对象，``gc.collect()``
-          只回收 Python 侧对象；native 堆与已 import 的 cv2/numpy 模块内存**不会**
-          还给操作系统。RSS 因此回不到加载前的水位（实测见模块说明第 5 条）。
-        """
-        with self._state_lock:
-            engine, self._engine = self._engine, None
-            in_flight = self._loader is not None and self._loader.is_alive()
-            if engine is None and not in_flight:
-                return False
-            self._generation += 1
-            self._loader = None
-            self._ready.clear()
-        del engine
-        gc.collect()
-        return True
-
-    # ------------------------------------------------------------ 只读视图
+        self.timeout = float(timeout)
+        self._command = command
+        self._spawn = spawn if spawn is not None else spawn_worker
 
     @property
-    def loaded(self) -> bool:
-        """模型是否已经加载成功（失败的加载不算 loaded）。"""
-        return self._ready.is_set() and self._failure is None
-
-    # ---------------------------------------------------------------- 入口
-
-    def preload(self, timeout: float | None = None) -> None:
-        """主动把模型加载出来（仍走那唯一一个后台线程），失败直接抛。"""
-        self._ensure_ready(timeout)
+    def command(self) -> list[str]:
+        """本次要跑的命令行（``command`` 是测试注入缝；默认真实两态解析）。"""
+        factory = self._command if self._command is not None else worker_command
+        return list(factory())
 
     def recognize(self, image: QImage) -> list[TextBlock]:
         """认一张图，返回按阅读顺序排好的文本块；没有文字返回空列表。
 
-        空图在**加载模型之前**就被拒掉：一次无谓的模型加载要等几百毫秒到几秒，
-        而空图是调用方的 bug，不该罚用户等。
+        空图在**起进程之前**就被拒掉：起一次进程要付几百毫秒到几秒，而空图是
+        调用方的 bug，不该罚用户等。
         """
         if not isinstance(image, QImage):
             raise TypeError(f"recognize() 需要 QImage，收到 {type(image).__name__}")
         if image.isNull() or image.width() <= 0 or image.height() <= 0:
             raise ValueError("待识别的图像为空（宽高为 0 或 QImage.isNull()）")
 
-        engine = self._ensure_ready()
-        pixels = to_bgr_array(image)
-        with self._infer_lock:
-            try:
-                return _to_blocks(engine(pixels))
-            except OcrError:
-                raise
-            except Exception as exc:
-                raise OcrRecognitionError(f"本地 OCR 识别失败：{_describe(exc)}") from exc
-
-    # ---------------------------------------------------------------- 加载
-
-    def _ensure_ready(self, timeout: float | None = None):
-        effective = self._load_timeout if timeout is None else float(timeout)
-        deadline = time.monotonic() + effective
-        while True:
-            if not self._ready.is_set():
-                self._start_loader()
-                self._ready.wait(max(0.0, deadline - time.monotonic()))
-
-            failure = self._failure
-            if failure is not None:
-                raise failure[0](failure[1])
-            if self._engine is not None:
-                return self._engine
-            # 走到这里只有两种可能：等超时（后台线程还在加载），或者引擎在等的
-            # 过程中被 unload() 丢掉了。两种都按同一条预算继续等/重来——绝不
-            # 返回 None 让调用方去 call 一个空对象。
-            if time.monotonic() >= deadline:
-                raise OcrLoadError(
-                    f"本地 OCR 模型加载超时（等待 {effective:g} 秒仍未就绪）"
-                    "——已放弃等待，可稍后重试"
-                )
-
-    def _start_loader(self) -> None:
-        """启动唯一的加载线程（已经起过就直接返回，后来的调用方只等结果）。"""
-        with self._state_lock:
-            if self._loader is not None:
-                return
-            thread = threading.Thread(
-                target=self._load_in_background, args=(self._generation,),
-                name="dsh-pet-ocr-loader", daemon=True,
-            )
-            self._loader = thread
-            thread.start()
-
-    def _load_in_background(self, generation: int) -> None:
-        engine: Any = None
-        failure: tuple[type[OcrError], str] | None = None
+        # 编码放在**起进程之前**：编码失败（格式不支持的图）时还没有子进程要收尸。
+        # 反过来的话，那个刚起来的进程会一直阻塞在读 stdin 上，而它的父进程已经
+        # 带着异常走了——一个后台孤儿就是这么做出来的。
+        payload = frame_bytes(encode_png(image))
+        argv = self.command
         try:
-            engine = self._engine_factory(self._model_dir, self.cpu_threads)
-            if engine is None:
-                raise OcrLoadError("本地 OCR 加载器没有返回引擎")
-        except OcrError as exc:
-            failure = (type(exc), _describe(exc))
-        except Exception as exc:  # 加载器里什么都能炸：DLL 缺失、文件损坏、超时……
-            failure = (OcrLoadError, f"本地 OCR 引擎加载失败：{_describe(exc)}")
+            process = self._spawn(argv)
+        except OSError as exc:
+            raise OcrUnavailableError(
+                f"起不了本地 OCR 工作进程（{' '.join(argv)}）：{exc}"
+                "——依赖随安装包分发，缺失说明安装不完整，请重新安装"
+            ) from exc
+        _register_worker(process)
+        try:
+            stdout, stderr = self._exchange(process, payload)
+        except BaseException:
+            # 超时那条路已经杀过（重复调用是幂等的）；其余任何出口都不许留下子进程。
+            kill_worker(process)
+            raise
         finally:
-            # 失败也置位：等结果的调用方要立刻拿到结论，而不是各自等满超时。
-            self._publish_load(generation, engine, failure)
+            _unregister_worker(process)
 
-    def _publish_load(self, generation: int, engine: Any,
-                      failure: tuple[type[OcrError], str] | None) -> None:
-        """把加载结果写回状态；代次不符就丢弃（这次加载已经被 ``unload()`` 作废）。"""
-        if engine is None and failure is None:  # 加载线程被更底层的东西打断（BaseException）
-            failure = (OcrLoadError, "本地 OCR 引擎加载失败")
-        with self._state_lock:
-            if generation != self._generation:
-                log.debug("快速识屏：放弃已作废的模型加载结果（已被释放）")
-                return
-            self._engine = engine
-            self._failure = failure
-            self._ready.set()
+        if getattr(process, "_dsh_ocr_abandoned", False):
+            raise OcrRecognitionError(
+                "这次本地识别已被中止（会话已收口或宿主正在释放），没有结果"
+            )
+        _, blocks = interpret(process.returncode, stdout, stderr)
+        return blocks_from_payload(blocks)
+
+    def _exchange(self, process, frame: bytes) -> tuple[bytes, bytes]:
+        """把**已经按协议拼好的一帧**喂进去、把两条输出读回来（超时即杀进程并报人话）。
+
+        拼帧（``frame_bytes``）由调用方负责，这里只负责传——两处各拼一次的话管道里
+        就变成"套了两层的帧"，工作端读到长度头后面的第一段是内层帧的前缀，解码必败
+        （那条报错是"图像解不开"，排查方向会一路跑偏到图像格式上）。
+        """
+        try:
+            return process.communicate(frame, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            kill_worker(process)
+            try:  # 把半截管道读干净，别把 ResourceWarning 留给解释器退出期
+                process.communicate()
+            except Exception:
+                log.debug("快速识屏：超时后回收 OCR 工作进程的输出失败", exc_info=True)
+            raise OcrRecognitionError(
+                f"本地 OCR 识别超时（等待 {self.timeout:g} 秒仍未返回）"
+                "——已中止这次识别，可稍后重试"
+            ) from None
 
 
 # --------------------------------------------------------------- 进程内单例
+
 
 _SHARED_LOCK = threading.Lock()
 _SHARED_ENGINE: OcrEngine | None = None
 
 
 def shared_engine() -> OcrEngine:
-    """进程内共享的默认引擎（"进程内单后台线程"这句话的落脚点）。
+    """进程内共享的默认驱动（记录超时与命令行，本身不持有任何重资源）。
 
-    一次识屏只会用到一个引擎，而每个引擎各自持有三份 ONNXRuntime session
-    （实测约 100 MB 常驻）。让每个调用方自己 ``new`` 一个，等于按调用次数
-    把这份内存翻倍。所以上限是**一份**；闲置回收由 :func:`release_engine`
-    在会话收口时显式触发（"用完就丢"），不靠后台定时器去猜。
+    子进程模型下它已经很轻——但"一次识屏只应该有一个驱动、配置只有一份"这条口径
+    没有变，所以仍然只建一个：调用方各自 ``new`` 会得到几份可能不一样的超时设置，
+    而"这次超时是 30 秒还是 5 秒"在排查时是个必须唯一的问题。
     """
     global _SHARED_ENGINE
     with _SHARED_LOCK:
@@ -666,37 +603,33 @@ def shared_engine() -> OcrEngine:
 
 
 def release_engine() -> bool:
-    """丢弃进程内共享引擎（"用完就丢"的模块级入口）；返回是否真的丢了东西。
+    """「用完就丢」的模块级入口（**兼容层**）：中止仍在跑的识别子进程，返回是否真做了事。
 
-    **同步**：返回时共享单例已经摘掉、引擎状态已清空，下一次 ``recognize``
-    会重新加载（不是"丢了就再也用不了"）。没加载过（模块级没有单例）时立刻返回
-    False——这条路径每次截图收口都会走，没加载过就不该付 ``gc.collect()`` 的代价。
+    切片 2 的语义是"丢掉进程内那份常驻引擎"；切片 5 之后**进程内不再有引擎可丢**
+    ——每次识别的内存都长在子进程里，它退出即归零。这个入口因此被保留成兼容层，
+    承载的是一件事：**会话取消/失败时，那个还在跑模型的子进程必须死**。
 
-    **摘掉单例**是刻意的：调用方刚释放完立刻再触发时，拿到的是另一份干净的引擎，
-    不会跟正在拆的那份纠缠。代价是"释放期间又立刻用"会短暂同时存在两份引擎
-    （各 ~100 MB）；这比"同一份引擎半拆半用"要安全得多。
+    因此：
 
-    也因此**加载失败不跨会话保留**：摘掉单例后下一次是新引擎、会重新尝试加载
-    （引擎对象内部仍然"失败只试一次"，见 :meth:`OcrEngine.unload`）。这是有意的
-    ——装坏了的模型/依赖用户重装一次就好，程序不该在整个进程生命周期里都判它死刑；
-    代价是坏安装下每次点击多花一次加载尝试（模型缺失/依赖缺失这两条都是**文件系统
-    级**的快速判定，实际约 0 ms）。
+    - 没有任何识别在跑时返回 ``False``（每次截图收口都会调它，这条路径必须零成本，
+      不该付一次目录扫描或 ``gc`` 的代价）；
+    - 有识别在跑时中止它并返回 ``True``。被中止的那一次 ``recognize`` 会抛
+      :class:`OcrRecognitionError`（"已被中止"），调用方按失败收口；
+    - 生产路径上两者不重叠：``actions`` 只在识别那一步**收口之后**才调它
+      （见 ``ScreenCaptureActions._finish``），所以正常识别不会被它半路掐掉。
+      它真正的用武之地是异常/取消路径上的兜底清扫。
     """
-    global _SHARED_ENGINE
-    with _SHARED_LOCK:
-        engine, _SHARED_ENGINE = _SHARED_ENGINE, None
-    if engine is None:
-        return False
-    return engine.unload()
+    return abandon_workers() > 0
 
 
 # -------------------------------------------------------------- 同包 seam
+
 
 def recognize(image: QImage) -> str:
     """模块级入口：``recognize(QImage) -> str``——切片的接入点。
 
     这是同一功能面向 UI 的一层薄壳：结果按阅读顺序用换行拼成一段纯文本，没有文字
-    返回空串，失败抛 :class:`OcrError`（``str(exc)`` 直接展示给用户）。切片 3 的
+    返回空串，失败抛 :class:`OcrError`（``str(exc)`` 直接展示给用户）。
     ``pet/screen_capture/actions.py`` 就是按这个契约解析同包入口的
     （``OCR_MODULE = "ocr"`` / ``OCR_ENTRY = "recognize"``，同步、纯本地、不联网）。
 

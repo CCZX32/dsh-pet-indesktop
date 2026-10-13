@@ -22,11 +22,12 @@
    不许留下"此后每次触发都被拒"的中间态。
 4. **阻塞步骤不占 GUI 线程**：OCR 与网络都在后台线程跑，结果经 Qt 信号回到
    GUI 线程再动界面（Qt 对象只在拥有它的线程里碰）。
-5. **用完就丢**：会话收口（交付 / 取消 / 失败）时把本地 OCR 引擎还回去
-   （``ocr.release_engine``）——它那 ~110 MB 常驻是明确不想长期背的代价；
-   归还放后台线程（实测 unload 约 48 ms，正好压在结果浮层弹出的那一刻）。
-   释放后再次触发会**重新加载**，不是"一次性"。所有出口都汇到 ``_finish()``，
-   释放只挂在那里一处。
+5. **用完就丢**：会话收口（交付 / 取消 / 失败）时调 ``ocr.release_engine``。切片 5
+   起识别跑在**独立子进程**里，进程退出即把 ~108 MB 的 native 堆整份还回操作系统
+   （进程内 ``unload`` 实测只回吐约 30 MB，见 ``ocr.py`` 与
+   ``.scratch/screen-capture/probe_ocr_subprocess.txt``）；收口处这一次调用因此
+   是一道**兜底清扫**：真取消/失败时把还在跑的识别子进程杀掉，不留孤儿。所有出口
+   都汇到 ``_finish()``，清扫只挂在那里一处。
 """
 
 from __future__ import annotations
@@ -85,9 +86,9 @@ TITLE_ASK = "截图问答"
 #: 用户）。引擎模块（切片 2 的 ``ocr.py``）不在时解析结果为空，动作如实说明。
 OCR_MODULE = "ocr"
 OCR_ENTRY = "recognize"
-#: 「用完就丢」的释放入口：``release_engine() -> bool``（同步、幂等；没加载过是
-#: 零成本 no-op）。每次会话收口都调它——引擎那 ~110 MB 常驻是明确不想长期背的
-#: 代价，由编排层在收口处归还，而不是靠后台定时器去猜"用户不再用了"。
+#: 「用完就丢」的释放入口：``release_engine() -> bool``（同步、幂等；没有识别在跑
+#: 时是零成本 no-op）。每次会话收口都调它——切片 5 起识别跑在独立子进程里，收口处
+#: 这一次调用是**兜底清扫**：把还在跑的识别子进程杀掉，不留孤儿。
 OCR_RELEASE_ENTRY = "release_engine"
 #: 翻译引擎 seam 的契约：``translate_selection(image: QImage, source: str) -> str``。
 #: 本片一律解析为空（入口与双语对照位就位，引擎是后续片）。
@@ -674,11 +675,11 @@ class ScreenCaptureActions(QObject):
         self._pending = None
         # 「用完就丢」的调用点：本方法是**所有**出口的唯一收口（成功交付 / 取消 /
         # 失败 / 引擎缺席），所以这里放一次就覆盖了全部终态，不必在每条链路上
-        # 各写一遍（漏一处就是"引擎悄悄常驻到下次重启"）。
+        # 各写一遍（漏一处就是"识别子进程在后台一直活着"）。
         self._release_engine()
 
     def _release_engine(self) -> None:
-        """把本地 OCR 引擎还回去（后台线程；详见 :meth:`_release_worker`）。"""
+        """清扫本地 OCR（后台线程；详见 :meth:`_release_worker`）。"""
         release = self._release
         if release is None:
             release = resolve_ocr_release()
@@ -694,15 +695,16 @@ class ScreenCaptureActions(QObject):
     def _release_worker(release: Callable) -> None:
         """在后台线程里执行释放。
 
-        不占 GUI 线程的理由是**实测**的：`unload()` 一次约 48 ms（本机，
-        见 ``.scratch/screen-capture/probe_ocr_unload_rss.txt``），而它正好落在
+        不占 GUI 线程的理由是**实测**的：这一下要做的是"结束一个可能还在跑模型的
+        进程"，实测 2~10 ms 量级（本机，见
+        ``.scratch/screen-capture/probe_ocr_subprocess.txt``），而它正好落在
         "结果浮层即将弹出"这一刻——放 GUI 线程就是一次可见的掉帧。释放失败
-        只记日志：图已经拿到了，归还失败不该变成用户可见的错误。
+        只记日志：图已经拿到了，清扫失败不该变成用户可见的错误。
         """
         try:
             release()
         except Exception:
-            log.exception("快速识屏：归还本地 OCR 引擎失败（不影响本次结果）")
+            log.exception("快速识屏：释放本地 OCR 资源失败（不影响本次结果）")
 
     def _emit_result(self, result: ScreenResult) -> None:
         self._presenter.show(result)

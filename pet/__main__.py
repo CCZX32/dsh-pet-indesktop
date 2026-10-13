@@ -112,6 +112,24 @@ def _run_settings(config=None) -> int:
     )
 
 
+def _run_ocr_worker() -> int:
+    """--ocr-worker：本地 OCR 的识别子进程（**不导入 pet.app，也不导入 PySide**）。
+
+    切片 5 把识别搬进独立进程，为的是"用完就丢"里的内存**真归零**——进程退出时
+    操作系统把所有 native 堆都收走。这条路径唯一的存在理由是省：它只该付
+    rapidocr / numpy / onnxruntime 的导入成本，多拖一个 Qt（实测约 0.2 s）就等于
+    每次识屏白加一段等待，所以路由必须在 ``from .app import main`` **之前**分流
+    （与 ``--settings`` / ``--uninstall-cleanup`` 同一范式），且 ocr_worker 自己
+    只 import 标准库。
+
+    冻结态下这条路由同样登记在 ``packaging/pet_entry.py``：那份入口才是 exe 的
+    ``__main__``，``pet/__main__.py`` 在冻结包里根本不参与启动。
+    """
+    from .screen_capture.ocr_worker import main as ocr_worker_main
+
+    return ocr_worker_main()
+
+
 def _main() -> int:
     # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环），
     # 并与两个冻结入口共用 pet.uninstall_cleanup.main——逐步诊断输出、配置目录留痕、
@@ -122,6 +140,9 @@ def _main() -> int:
     # 设置页独立进程同样不导入 pet.app（模块集合是主进程的子集，见模块 docstring）。
     if "--settings" in sys.argv:
         return _run_settings()
+    # OCR 识别子进程：同样不导入 pet.app，而且**连 Qt 都不导入**（见 _run_ocr_worker）。
+    if "--ocr-worker" in sys.argv:
+        return _run_ocr_worker()
     from .app import main as app_main
     return app_main()
 

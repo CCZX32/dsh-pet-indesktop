@@ -34,8 +34,14 @@
 字符串 ``"ocr"`` 解析 ``pet.screen_capture.ocr``），PyInstaller 的静态分析从入口出发
 摸不到这个模块——只有构建脚本里那条 ``--hidden-import pet.screen_capture.ocr`` 能让它
 进包。少了那条参数，模型、rapidocr 配置全都随包，冻结包里却解析不出引擎，产品不崩、
-只是右键「截图 → 提取文字」永远置灰。所以要判的是**三件事**（模块 + 模型 + 配置），
-而模块那一件只能从产物的模块图里读。
+只是右键「截图 → 提取文字」永远置灰。
+
+切片 5 之后要判的模块变成**两个**：宿主侧的 ``pet.screen_capture.ocr``，以及识别
+子进程的 ``pet.screen_capture.ocr_worker``（冻结包里是 ``<exe> --ocr-worker``，模块
+名只以字符串出现在命令行里）。缺后者不会崩——每次点击报一句"起不了工作进程"，同样
+是"包看着完整、功能是死的"。判据见 :func:`required_bundle_modules`。
+
+所以要判的是**四件事**（两个模块 + 模型 + 配置），而模块那两件只能从产物的模块图里读。
 """
 from __future__ import annotations
 
@@ -71,17 +77,21 @@ def _repo_on_path() -> None:
 
 
 def required_bundle_modules() -> tuple[str, ...]:
-    """产物模块图里必须存在的模块（「截图提取文字」的引擎 seam 目标）。
+    """产物模块图里必须存在的模块（「截图提取文字」的两个动态目标）。
 
-    判据同样来自单一真相源：``pet/screen_capture/actions.py`` 的 ``OCR_MODULE`` 与它
-    所在包的包名（``_resolve_engine`` 拼的就是这两个）。本脚本不抄第二份字面量——
-    抄一份的下场是"改了产品没改门"。代价是这里连带 import 整条截图动作栈
-    （实测 +0.04 s：QtGui 已为 ocr.py 加载过），构建机上无感。
+    判据同样来自单一真相源：``pet/screen_capture/ocr.py`` 的 :data:`BUNDLE_MODULES`
+    ——宿主侧那一条是模块名（``actions`` 的 importlib seam 拼出来的
+    ``pet.screen_capture.ocr``），子进程那一条也是模块名（``ocr_worker.py`` 只以
+    ``<python> -m pet.screen_capture.ocr_worker`` 的形式出现在命令行字符串里）。
+    两者都**没有**静态 import 指向，PyInstaller 从入口出发摸不到；只有构建脚本的
+    ``--hidden-import`` 能把它们拉进包。本脚本不抄第二份字面量——抄一份的下场是
+    "改了产品没改门"。代价是这里会连带 import 整条截图动作栈（实测 +0.04 s：
+    QtGui 已为 ocr.py 加载过），构建机上无感。
     """
     _repo_on_path()
-    from pet.screen_capture import actions  # noqa: PLC0415 —— 路径先就位才能 import
+    from pet.screen_capture import ocr  # noqa: PLC0415 —— 路径先就位才能 import
 
-    return (f"{actions.__package__}.{actions.OCR_MODULE}",)
+    return tuple(ocr.BUNDLE_MODULES)
 
 
 def load_expectations():
