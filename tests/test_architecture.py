@@ -355,6 +355,11 @@ def test_pure_logic_modules_do_not_import_qt():
         # **解析期**拦 PySide6，并真起一个子进程跑完整条预检。
         "feature_package_preflight.py",
         "local_package_intents.py",
+        # 2026-10-14（D4）加入 feature_policy：它是本地功能包的策略真相源（能力上限 /
+        # API 版本 / 验签器装配），**作者侧打包脚本与构建门也要用同一份**——那两边在
+        # scripts/ 下跑，不该为了两个常量把 PySide6 拉起来（构建门另有一条机器判据：
+        # tests/test_feature_package_gate.py 在解析期把 PySide6 置成 None 再跑一次）。
+        "feature_policy.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

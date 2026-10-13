@@ -33,9 +33,19 @@
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm -SkipZip
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -SkipSlim
+      powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -FeaturePackages <package-root>
+
+    Feature packages (2026-10-14):
+      -FeaturePackages <dir> declares the package root this release carries
+      (packages built by scripts\build_mod_example.py). It is verified twice -
+      on the source root before PyInstaller and on the copy inside the built
+      app - and the copy lands at <app>\features\. Omit the switch and the
+      build carries no packages (the product's own reader for that root is
+      future work; see docs\ONEDIR_PACKAGING.md).
 #>
 param(
     [string]$Variant = 'webm-chat',
+    [string]$FeaturePackages = '',
     [switch]$SkipBuild,
     [switch]$SkipZip,
     [switch]$SkipCheck,
@@ -106,6 +116,21 @@ if ($nodeExe) {
     Write-Host "[bridge] import smoke OK" -ForegroundColor Green
 } else {
     Write-Host "[bridge] node not found - smoke skipped (PR gate covers it)" -ForegroundColor Yellow
+}
+
+# ---------- 功能包硬门（2026-10-14，两道，同 presentmon 先例） ----------
+# -FeaturePackages 声明这次发布要**随包携带**的包根（作者用
+# scripts\build_mod_example.py 打出来的成品包：目录或 ZIP）。源目录先验一遍——坏包
+# 不该等 PyInstaller 跑完（甚至装到用户机器上）才说话；产物里那一份在下面再验一次
+# （拷贝截断/漏件同样致命：运行期看不出来，用户只会得到"装不上"）。
+# 判据只有一份，在 scripts\verify_feature_package.py（清单 + 验签 + 装前子进程预检）。
+# 不给这个开关就一个包都不带——产品侧读 <app>\features\ 的那条链（Setup 选装 / 便携）
+# 不在本轮范围，别把没带包的构建读成"功能扩展不可用"。
+if ($FeaturePackages) {
+    Write-Host "[features] verifying the feature package root (source side)..." -ForegroundColor Cyan
+    python scripts\verify_feature_package.py --bundle-root $FeaturePackages --target-platform win32
+    if ($LASTEXITCODE -ne 0) { throw "verify_feature_package failed on the source root: $LASTEXITCODE" }
+    Write-Host "[features] source package root OK" -ForegroundColor Green
 }
 
 # GIF builds ship assets/characters_gif (webm dir must NOT be bundled, else runtime prefers webm)
@@ -545,6 +570,23 @@ try {
     Remove-Item $smokeBase -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host "[smoke] --settings started OK" -ForegroundColor Green
+
+# ---------- 功能包随包携带 + 产物门（2026-10-14） ----------
+# 明确要求携带的包根复制进 <app>\features\（设计文档里"旁置 packages 根"在 onedir 树
+# 上的落法；安装器那条链不在本轮范围），随后对**产物里那一份**再验一遍——源目录验过
+# 不等于产物里完好：拷贝截断、漏件、被后续步骤删掉都发生过，而产品界面看不出来。
+# 位置约束：必须在 slim / 编码自检 / 冒烟之后（那几步会扫产物，别让包的源码参与它们），
+# 且在打 portable zip 之前（否则包不在 zip 里）。
+if ($FeaturePackages) {
+    $featuresDir = Join-Path $appDir 'features'
+    Write-Host "[features] copying the package root into the bundle..." -ForegroundColor Cyan
+    if (Test-Path $featuresDir) { Remove-Item $featuresDir -Recurse -Force }
+    Copy-Item $FeaturePackages $featuresDir -Recurse -Force
+    Write-Host "[features] verifying the bundled package copies..." -ForegroundColor Cyan
+    python scripts\verify_feature_package.py --bundle-root (Join-Path $appDir 'features') --target-platform win32
+    if ($LASTEXITCODE -ne 0) { throw "[features] bundled feature packages missing or corrupt" }
+    Write-Host "[features] bundle carries verified feature packages under features\" -ForegroundColor Green
+}
 
 if (-not $SkipZip) {
     Write-Host "[2/3] Packing portable zip..." -ForegroundColor Cyan

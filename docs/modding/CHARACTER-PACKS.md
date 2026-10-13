@@ -3,9 +3,12 @@
 > **移植基线（2026-10-13，本仓库分支 `dlc/mod-center-port`）**：本文移植自上游 DLC 分支
 > 的同名文档（分支名与基线 SHA 属仓库内工作档案，见 `.scratch/dlc-fusion/PLAN.md`；
 > 本目录正文不写外部工具名）。文中描述的**功能扩展宿主运行时**在本仓库
-> **尚未接入**（`pet.mod_api.v1`、`pet/feature_management.py`、`pet/local_package_intents.py`、
-> `scripts/build_mod_example.py`、`scripts/build_character_mod_example.py` 都不存在；
-> MOD 中心的 `extensions()` 注册表恒空）。逐项对照与 ZIP 缺陷的处置口径见
+> **已经接入**（D2/D3/D4）：`pet.mod_api.v1`、`pet/feature_management.py`、
+> `pet/local_package_intents.py`、`scripts/build_mod_example.py`（作者侧打包入口）都已存在，
+> MOD 中心的 `extensions()` 由安装状态导出——**第三方本地功能包**（未知 owner）可以
+> 构建、导入、启停；**官方包（`official.*`）的安装链与 host-worker 的真实冻结构建仍未落地**
+> （`scripts/build_character_mod_example.py` / `build_mod_echo` / `build_feature_probe_native`
+> 都不在本仓库）。逐项对照与 ZIP 缺陷的处置口径见
 > [README.md 的「移植基线与现状」](README.md#移植基线与现状2026-10-13)。
 
 [入口](README.md) · [用户指南](USER-GUIDE.md)

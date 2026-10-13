@@ -36,6 +36,35 @@ dist-onedir\dsh-pet-standalone-webm-chat-portable.zip
 
 绿色版用法：解压 zip 到任意盘（E:\、D:\、U 盘均可），双击 exe 即用；无安装、无缓存。
 
+### 随包携带的功能扩展包：`<app>\features\`（2026-10-14）
+
+作者用 `scripts/build_mod_example.py` 打出来的功能包（目录或 ZIP）可以随包携带：
+
+```powershell
+# Windows（产物里落在 <app>\features\）
+powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -FeaturePackages <包根>
+```
+```bash
+# Linux / macOS（--feature-packages <包根>；macOS 落在 .app/Contents/Resources/features/）
+./scripts/build_linux.sh --feature-packages <包根>
+./scripts/build_macos.sh --feature-packages <包根>
+```
+
+- **两道门，判据只有一份**：`python scripts/verify_feature_package.py --bundle-root <包根>`
+  在 PyInstaller **之前**验源包根、在产物里再验一次拷贝（与 `verify_presentmon.py` 同款
+  两道门的理由：`Copy-Item`/`cp` 出的那一份截断或漏件，运行期看不出来）。门做三件事——
+  清单、验签（结构/兼容性/路径边界/逐文件摘要）、**装前子进程预检**；`--target-platform`
+  传**产物平台**（`win32` / `linux` / `darwin`），所以为别的平台声明的包在这里就会被点名拒绝。
+- **包根的候选不猜**：根下**每个直接子目录**与**每个 `*.zip`** 都算一份候选（点开头的条目
+  除外），没有 `manifest.json` 的子目录被如实报成 `route_rejected`；根下一条候选都找不到
+  按失败处理（`bundle_empty`）——"根给错了"比"没坏包"更常见。
+- **诚实边界**：`<app>\features\` 是设计文档里"旁置 packages 根"在 onedir 树上的落法，
+  **产品运行期今天没有读它的地方**——已安装的功能包住在用户配置根
+  （`%APPDATA%\<变体名>\plugins\<owner>\`），安装/启停走 MOD 中心那条链
+  （`docs/modding/PORT-STATUS.md`）。安装器侧的选装（Setup 内嵌官方 ZIP）与便携模式
+  不在本轮范围，所以**不带 `-FeaturePackages` 的构建是正常构建，不代表功能扩展不可用**。
+- 不给这两个开关时构建脚本一行都不碰功能包（没有任何门被跳过的问题：没有包要验）。
+
 ### 包体瘦身（默认开启，`-SkipSlim` 可关闭）
 
 构建在 Qt runtime 复制之后、中文编码自检之前自动执行 `python scripts\slim_bundle.py`：

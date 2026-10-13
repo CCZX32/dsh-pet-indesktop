@@ -3,9 +3,12 @@
 > **移植基线（2026-10-13，本仓库分支 `dlc/mod-center-port`）**：本文移植自上游 DLC 分支
 > 的同名文档（分支名与基线 SHA 属仓库内工作档案，见 `.scratch/dlc-fusion/PLAN.md`；
 > 本目录正文不写外部工具名）。文中描述的**功能扩展宿主运行时**在本仓库
-> **尚未接入**（`pet.mod_api.v1`、`pet/feature_management.py`、`pet/local_package_intents.py`、
-> `scripts/build_mod_example.py`、`scripts/build_character_mod_example.py` 都不存在；
-> MOD 中心的 `extensions()` 注册表恒空）。逐项对照与 ZIP 缺陷的处置口径见
+> **已经接入**（D2/D3/D4）：`pet.mod_api.v1`、`pet/feature_management.py`、
+> `pet/local_package_intents.py`、`scripts/build_mod_example.py`（作者侧打包入口）都已存在，
+> MOD 中心的 `extensions()` 由安装状态导出——**第三方本地功能包**（未知 owner）可以
+> 构建、导入、启停；**官方包（`official.*`）的安装链与 host-worker 的真实冻结构建仍未落地**
+> （`scripts/build_character_mod_example.py` / `build_mod_echo` / `build_feature_probe_native`
+> 都不在本仓库）。逐项对照与 ZIP 缺陷的处置口径见
 > [README.md 的「移植基线与现状」](README.md#移植基线与现状2026-10-13)。
 
 **基线**：Core **4.2.5**、AI / 识屏 DLC **1.0.4**、`pet.mod_api.v1`；记录日期 2026-10-10。适用于本地受信任 MOD。工程完成度以**持续状态**（上游 DLC 分支 `.scratch/mod-authoring-v1/` 内的档案）与[交付报告](../PR-REPORT-DLC-MOD-CENTER-2026-10-13.md)为准。
@@ -135,11 +138,25 @@ python -X utf8 -m scripts.build_character_mod_example .scratch/my-mods/mod-demo-
 **打包与自检**
 
 ```powershell
-python -X utf8 -m scripts.build_mod_example examples/mods/hello-local .scratch/my-mods/hello-local-1
-python -X utf8 -m scripts.build_mod_example .scratch/my-mods/hello-local-1 --check
+python -X utf8 scripts/build_mod_example.py examples/mods/hello-local .scratch/my-mods/hello-local-1
+python -X utf8 scripts/build_mod_example.py .scratch/my-mods/hello-local-1 --check
+# 同一道门，可批量（一个包根下每份候选都验）或出机器可读 JSON：
+python -X utf8 scripts/verify_feature_package.py --bundle-root .scratch/my-mods/release --json
 ```
 
+打包产出**目录 + 同名 ZIP**两份，装配链把它们当同一份东西（ZIP 会按同一套边界解包再验）。
+`--check` 与 `verify_feature_package.py` 是同一套判据，做三件事：**清单**（有界路由）、
+**验签**（结构 / Core·API·平台兼容 / 路径边界 / 逐文件摘要与指纹）、**装前子进程预检**
+（另起一个进程把包装一次，读回 `create_host()` 的说法）。它只在"拒绝"方向有权威：说不行的
+就是不行，说行的那一半仍由宿主按完整验签链重新回答。
+
+> 门的退出码就是它的结论：0 = 过，1 = 拒（原因码在 stdout/stderr 与 `--json` 里）。
+> `--target-platform` 是**目标平台**（默认本机）：构建脚本按产物平台传，为别的平台声明的包
+> 在那里会被点名拒绝（`platform_mismatch`）。
+
 发布包只含 `host/` 与 `manifest.json`（后者含文件大小与 SHA-256 清单），不需要带开发环境、密钥或 `.pyc`。
+`host/` 下**只有 `.py` 会进包**（装载链只从捕获并验过摘要的 `host/*.py` 字节导入）——放了别的
+文件，打包入口会在写任何字节之前报错，而不是默默丢掉它。
 
 **接口 A：`create_host()`**
 

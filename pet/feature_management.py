@@ -44,7 +44,6 @@ Ported from the DLC branch ``pet/feature_management.py``；那一半在 DLC 里�
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,12 +51,15 @@ from pathlib import Path
 import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from . import __version__
 from .feature_host_bindings import bind_local_context
 from .feature_package_preflight import LocalPackageProbe
 from .feature_package_startup import ProductionFeatureStartup
 from .feature_package_transactions import LOCK_BUSY_REASONS, FeaturePackageTransactionService
 from .feature_ports import FeatureHostContext  # noqa: F401  （契约面：宿主上下文）
+# 能力上限 / API 版本 / 本地包的验签策略只有一份，在零 Qt 的 feature_policy 里
+# （作者侧打包脚本与构建门也要用同一份，它们不该为了两个常量把 PySide6 拉起来）。
+# 这里再导出一次：既有的 from pet.feature_management import FEATURE_CAPABILITIES 照旧可用。
+from .feature_policy import API_VERSION, FEATURE_CAPABILITIES, local_package_verifier  # noqa: F401
 from .official_features import OFFICIAL_FEATURES, is_valid_feature_id
 from .plugins.feature_host import FeatureHost
 from .plugins.feature_packages import FeaturePackageLoader
@@ -66,11 +68,6 @@ from .plugins.package_binding import bind_verified_feature
 from .plugins.package_trust import FeaturePackageVerifier, PackageVerificationError
 
 _LOG = logging.getLogger(__name__)
-
-#: v1 公开面声明的能力上限（与 ``scripts/build_mod_example.py`` 同一份口径）。
-#: **是兼容上限声明，不是运行期权限**（host-only 的 MOD 与桌宠同权限运行）。
-FEATURE_CAPABILITIES = frozenset({"menu.contribute", "settings.contribute"})
-API_VERSION = "1"
 
 #: 设置贡献的 scope（与菜单挂载的 ``GenericModMounts.scope`` 分开：两处生命周期不同）。
 SETTINGS_SCOPE = "mod:v1:settings"
@@ -158,14 +155,7 @@ class FeatureManagementManager(QObject):
         self._auto_apply_requested = False
         self.last_operation = None
         self.last_result = self._result("idempotent", reason="not_installed")
-        self.verifier = FeaturePackageVerifier(
-            core_version=__version__,
-            api_version=API_VERSION,
-            feature_id=owner,
-            allowed_capabilities=FEATURE_CAPABILITIES,
-            allow_local_packages=True,
-            platform=sys.platform,
-        )
+        self.verifier = local_package_verifier(owner)
         self.service = FeaturePackageTransactionService(
             config.dir,
             self.verifier,

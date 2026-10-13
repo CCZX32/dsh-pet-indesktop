@@ -19,7 +19,7 @@
 > 文中列出的命令与测试当场核过（核验时点 2026-10-13 22:10）。
 > **写作期间同一工作树内另有一片正在落地「宿主侧运行时」**——写作时它还是未提交状态。
 > 那一片（D2）与随后的 D3 已分别提交，**本文 §二 的格子里凡与之冲突的，以 §六「D2 / D3 回写」
-> 为准**；§二 正文按快照基线保留原样，不复写历史判定。引用前先复核一次
+> 与 §七「D4 回写」为准**；§二 正文按快照基线保留原样，不复写历史判定。引用前先复核一次
 > `git ls-tree -r --name-only HEAD | grep <路径>`。
 
 ---
@@ -63,6 +63,9 @@
    `scripts/build_{mod_example,character_mod_example,screen_worker,feature_probe,feature_release}.py`
    在本仓库**全部不存在**；`packaging/` 与 `scripts/build_*` 里只有本站既有的 onedir / Inno
    Setup 构建。
+   **（2026-10-14 更新）**：D4 已补这条链的**最小可用子集**（作者侧打包入口 `build_mod_example.py`、
+   发布/构建门 `verify_feature_package.py`、三端构建脚本的两道门与 `<app>/features/`）——
+   本条的判定说的是**快照基线**（HEAD `7575572`），现状见 §七。
 5. **「热插拔」这个词在作者文档里是刻意避开的**。正确说法是**「可停用 / 可卸载 / 进程级卸载」**；
    **Python 模块热卸载不承诺**——`feature_host` 一旦进入解释器，`sys.modules`、Qt 对象、回调、
    定时器、线程和第三方库全局状态都可能仍留引用，用 `stop()`/`dispose()` 撤销菜单也不能严谨地
@@ -266,6 +269,37 @@ D3 的范围与验收口径（本地 ZIP 功能包导入链）与作者文档逐
 | 「复制后的完整包先验证，才允许 factory 或自检执行」「自检用独立进程」（同上） | `FeaturePackageTransactionService._continue` 的次序未改；D3 把自检补成真子进程（`pet/feature_package_preflight.py`） |
 | 「preflight 绝不执行候选；确认后完整复验、沙箱自检」（`PHASE5A` §5A-1） | 探针只在 `apply` 的候选检查处跑（`preflight_*` 不执行包代码） |
 | LPAC 原生沙箱与 `probe bundle`（`PHASE4B` §probe） | **不移植**（已拍板）：D3 走务实路线，探针不声称隔离，文档逐字写明 |
+
+---
+
+## 七、D4 回写：分发 / 打包链（packaging / scripts 侧）最小可用子集
+
+作者 Phase 5A 的分发链文件（`build_variant.py`、`core_webm.iss`、`build_core_webm_setup.py`、
+`validate_phase5a_*`、`feature_release_*`、`release_distribution.py` 等）在本仓库**一个都没有**，
+D4 补的是其中**与本站拓扑对得上**的那一段。范围划分与文档口径的对照：
+
+| 作者口径（出处） | D4 落法（本仓库） |
+|---|---|
+| 官方包链：官方 ZIP 编译期嵌入 Setup、勾选后无界面 preflight/apply 与 startup receipt（`PHASE5A` §1） | **不做**（官方包安装链本身未落地，见 §二 Phase 4A/5A 两格）；D4 不含 Inno Setup 选装器 |
+| 显式便携模式与 `portable.json`（`PHASE5A` §4） | **不做**（本仓库拓扑是 `%APPDATA%\<变体>`；便携属未排期的打包片） |
+| 旁置包根（`PHASE5A` 的 Setup 旁 `packages` 根；卸载/重装边界） | ⚠️ **半做**：构建脚本可**明确要求**随包携带一个包根，落到产物 `<app>/features/`（macOS 在 `.app/Contents/Resources/features/`）并两道门校验；**产品运行期还没有读这个目录的地方**，安装器侧那条链也没做——不带 `-FeaturePackages` 的构建是正常构建 |
+| 本地分发签名与体积门（`PHASE5A` §5 的五产物总签名） | **不做**（正式签名基线与官方产物都不在本仓库） |
+| 4B-5「真实构建端到端」 | ⚠️ 前进一步：作者侧**打包入口 + 发布前自检 + 三端构建门**已落地；**冻结 exe 与 host-worker 的真实构建仍未做** |
+| 作者要「一条命令产出可导入包」（`AUTHORING-HANDBOOK` §4） | ✅ `scripts/build_mod_example.py` 从测试材料级升级为**正式入口**：源码树不合格/`host/` 里有打不进包的文件/输出已存在都在写任何字节之前报错，`--check` 升级为「清单 + 验签 + 装前子进程预检」 |
+| 社区作者需要打包自检工具（作者 Phase 6 的「校验工具」） | ✅ `scripts/verify_feature_package.py`：单份/包根/`--json`/`--target-platform`，退出码与原因码是闭集，只读、零 Qt |
+
+**D4 新增/改动的文件**：新增 `scripts/verify_feature_package.py`（发布/构建门）、
+`pet/feature_policy.py`（能力上限 / API 版本 / 验签器装配的**唯一真相源**，零 Qt，
+宿主与 scripts 两侧共用）、`tests/test_feature_package_gate.py`、
+`tests/test_feature_packaging_wiring.py`；改 `scripts/build_mod_example.py`（正式入口）、
+`scripts/build_{onedir.ps1,linux.sh,macos.sh}`（两道门 + `<app>/features/`）、
+`pet/feature_management.py`（改从 `feature_policy` 取策略，删掉那份重复字面量）、
+`tests/test_architecture.py`（零 Qt 名单加 `feature_policy.py`）与 §六/§七 涉及的文档。
+
+**明确未做（后续片边界）**：Setup 选装器与官方包链、便携模式迁移、产品侧读
+`<app>/features/` 的那条链、host-worker 的真实冻结构建（`build_mod_echo` /
+`build_feature_probe_native`）、官方包构件脚本（`build_character_mod_example.py`）、
+LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understanding`**（本轮不动）。
 
 ---
 

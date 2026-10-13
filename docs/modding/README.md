@@ -22,8 +22,10 @@
 完整步骤、更新 / 停用 / 回滚 / 批量删除、项目目录布局与常见问题：[MOD 使用指南](USER-GUIDE.md)。
 
 > **角色资源包**：ZIP 与目录两条路都可用（`pet/mod_management.py::_materialize`）。
-> **功能扩展包**：本仓库尚未接入宿主运行时，导入会被**如实拒绝**并说明原因
-> （`pet/mod_center_controller.py::unsupported_package_message`），不是静默失败。
+> **功能扩展包（第三方本地包）**：ZIP 与目录都装得上（D2/D3）——显式用户信任 +
+> 装前子进程预检，导入后在「扩展管理」里启停；**官方包（`official.*`）**的安装链未落地，
+> 本地包声明官方 ID 会被点名拒绝（`pet/mod_center_controller.py::unsupported_package_message`），
+> 不是静默失败。
 
 ## 二、我想做 MOD（作者）
 
@@ -85,6 +87,8 @@ MOD 中心**分片移植**，落地面如下——判定依据是分支上的六
 | 探针契约（策略 / 结果 / transcript 校验） | ✅ 已落地 | `pet/feature_package_probe.py` |
 | 原生探针沙箱（LPAC 启动器 + 密封 bundle） | ❌ 未移植（**本拓扑不做**，见下） | 默认 fail-closed 那一半不变；本地导入走"显式用户信任 + 装前子进程预检" |
 | 本地包装前预检（子进程，元信息 + 失败检查） | ✅ 已落地（**不是沙箱**） | `pet/feature_package_preflight.py`（D3） |
+| 作者侧打包入口 + 发布前自检 | ✅ 已落地（D4）：构建入口产目录 + ZIP，自检走"清单 + 验签 + 装前子进程预检" | `scripts/build_mod_example.py`、`scripts/verify_feature_package.py` |
+| 随包携带功能包的构建门（三端两道门 + `<app>/features/`） | ✅ 接线已落地（D4）；**产品运行期还没有读那个目录的地方**（Setup 选装 / 便携未做） | `scripts/build_{onedir.ps1,linux.sh,macos.sh}`、`docs/ONEDIR_PACKAGING.md` |
 | 功能扩展宿主运行时（`pet.mod_api.v1` / `pet/feature_management.py` / `pet/local_package_intents.py`） | ✅ 已落地并已接入 MOD 中心（D2/D3） | `pet/feature_management.py`、`pet/mod_runtime.py`、`pet/mod_menu.py`、`pet/settings_mod_panel.py`、`pet/plugins/{feature_host,feature_packages,package_binding}.py` |
 | 官方功能包（`official.ai-chat` / `official.screen-understanding`）的安装链 | ❌ 未落地（官方 ID 在本地导入处按保留 ID 拒绝） | `pet/official_features.py`、`pet/mod_center_controller.py` |
 | workers 子进程基础设施 | ✅ 已落地 | `pet/workers/`（protocol / supervisor / launch / proactive-screen worker） |
@@ -114,10 +118,17 @@ tarball + MSVC + 官方 libsodium + AppContainer canary，本仓库没有也不�
 
 样例源码在 [`examples/mods/`](../../examples/mods/README.md)：`hello-local`（host-only）、
 `echo-worker`（host-worker）、`persona-phrases.json`（台词模板）。它们保留 DLC 的作者侧
-源码形态（`mod.json` + `host/`）；打包用 `scripts/build_mod_example.py`
-（`python scripts/build_mod_example.py examples/mods/hello-local <输出目录>`，同时产出目录与
-同名 ZIP，`--check` 只做路由与验签）。`echo-worker` 那条 host-worker 路径需要冻结的 worker
-可执行，本机不可验证。
+源码形态（`mod.json` + `host/`）——**是源码不是包**，要用打包入口打出来：
+
+```bash
+python scripts/build_mod_example.py examples/mods/hello-local <输出目录>   # 同时产出目录与同名 ZIP
+python scripts/build_mod_example.py <输出目录> --check                     # 发布前自检
+python scripts/verify_feature_package.py <包目录或 ZIP>                    # 同一道门，可批量/可 --json
+```
+
+`--check` 与 `verify_feature_package.py` 是**同一套判据**：清单（有界路由）+ 验签
+（结构 / 兼容性 / 路径边界 / 逐文件摘要）+ **装前子进程预检**。`echo-worker` 那条
+host-worker 路径需要冻结的 worker 可执行（`--worker-bundle`），本机不可验证。
 
 上表只覆盖 MOD 这一面。**要把作者的全部 phase（1 / 2 / 3A / 3B / 3C / 4A / 4B / 5A / 5B /
 6 / 7）逐项对照本仓库的落地状态，读 [`PORT-STATUS.md`](PORT-STATUS.md)**——它按作者的 phase
@@ -134,4 +145,4 @@ tarball + MSVC + 官方 libsodium + AppContainer canary，本仓库没有也不�
 
 ## 实际效果与限制
 
-这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前只交付「角色资源」这条腿**，功能扩展侧等宿主运行时与探针沙箱到位后再开。
+这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前两条腿都在**：角色资源包（一直可用）与第三方本地功能扩展包（D2/D3：导入 → 启停 → 卸载 → 重装），打包与发布前的自检在 D4 补齐（`scripts/build_mod_example.py` + `scripts/verify_feature_package.py`）。**仍未落地的是官方功能包（`official.*`）的安装链、host-worker 的真实冻结构建与 LPAC 探针沙箱**——这三条见 [移植状态对照](PORT-STATUS.md)。
