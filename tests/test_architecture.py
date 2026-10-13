@@ -335,6 +335,13 @@ def test_pure_logic_modules_do_not_import_qt():
         "feature_package_files.py", "feature_package_probe.py",
         "feature_package_transactions.py", "feature_package_startup.py",
         "plugins/package_trust.py",
+        # 2026-10-13（D2 第一片）加入 mod_api/v1 与 mod_api/worker_v1：
+        # v1.py 是**无 GUI 探针要 import 的作者门面**（首次导入即拉 Qt 就等于把 GUI
+        # 依赖塞进一个不该有窗口的进程），WorkerClient 因此走模块级 __getattr__ 惰性
+        # 导出；worker_v1.py 跑在 MOD worker **子进程**里，只许 import
+        # workers/protocol（S2 已定）。workers/lease_bootstrap.py 同理由——子进程
+        # 认领租约发生在任何运行时代码之前。
+        "mod_api/v1.py", "mod_api/worker_v1.py", "workers/lease_bootstrap.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

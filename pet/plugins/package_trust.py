@@ -638,6 +638,17 @@ class FeaturePackageVerifier:
         self._snapshot(descriptor, capture_sources=False)
         return descriptor
 
+    def capture_sources(self, descriptor: VerifiedFeatureDescriptor) -> Mapping[str, bytes]:
+        """已验签的 ``host/`` 与 ``common/`` Python 源码字节（相对路径 → 字节）。
+
+        加载器必须用**这次验签抓下的字节**装载宿主代码，而不是对磁盘路径现开
+        ``SourceFileLoader``——``_inspect`` 的既有口径是 "execution uses captured,
+        digest-checked Python bytes, never a fresh unchecked SourceFileLoader"。
+        本方法是那口缝的公开入口（此前只有私有 ``_snapshot``，跨模块伸手不可接受）：
+        调用即按当前策略重跑完整校验，证据变了就抛，不会拿到过期字节。
+        """
+        return MappingProxyType(self._snapshot(descriptor))
+
     def _snapshot(self, descriptor, *, capture_sources=True):
         if not isinstance(descriptor, VerifiedFeatureDescriptor):
             raise PackageVerificationError("a verified descriptor is required")

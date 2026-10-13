@@ -288,6 +288,27 @@ class ModCenterController(QObject):
             return {}
         return dict(values) if values else {}
 
+    def feature_route(self, source: Path) -> str | None:
+        """问一次宿主：「这个包该交给哪个功能扩展？」答不上来 = ``None``（现状）。
+
+        死锁修复（见 ``.scratch/dlc-fusion/D2-RUNTIME-SPEC.md`` §7.4-1）：注册表由
+        **安装状态**导出，而安装状态只能通过导入改变——所以"这个 id 还没注册"
+        不能反过来否掉一次导入，否则首次安装一个功能包永远进不去。宿主在这一步
+        读的是包自己的有界清单（不导入、不执行），答得出 owner 就当场把该 owner 的
+        管理器装上，本方法再让控制器重新接一遍注册表。
+
+        没有这个缝的宿主（含全部既有测试替身）行为与之前**完全一致**。
+        """
+        provider = getattr(self.host, "feature_route", None)
+        if provider is None:
+            return None
+        try:
+            owner = provider(source)
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("Feature route unavailable")
+            return None
+        return owner if isinstance(owner, str) and owner else None
+
     # ------------------------------------------------------------- 清单
 
     def entries(self) -> list[ModEntry]:
@@ -363,6 +384,14 @@ class ModCenterController(QObject):
                 self.result.emit(expected, ModOutcome(False, "导入失败：更新文件不是同一个包。"))
                 return False
             return self._begin([("import_feature", owner, source)])
+        routed = self.feature_route(source)
+        if routed is not None and declared_kind(manifest) == KIND_EXTENSION and routed == manifest.get("id"):
+            # 首次安装：宿主刚刚为这只包建好管理器，注册表要重新接一遍才看得见它。
+            self.connect_extensions()
+            if expected is not None and expected != KIND_EXTENSION + ":" + routed:
+                self.result.emit(expected, ModOutcome(False, "导入失败：更新文件不是同一个包。"))
+                return False
+            return self._begin([("import_feature", routed, source)])
         message = unsupported_package_message(source, extensions=self.extensions)
         if message:
             self.result.emit(expected or "", ModOutcome(False, message))
