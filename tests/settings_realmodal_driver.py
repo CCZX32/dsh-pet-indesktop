@@ -79,14 +79,15 @@ def main() -> None:
     dialog.finished.connect(lambda code: result.__setitem__("finished", int(code)))
 
     # 模态框观察器：事件同步轮询 activeModalWidget（10ms 一拍），确认框点「放弃」、
-    # 通知框点掉；每个框只处理一次。定时器在框的嵌套 exec 里照常触发。
-    handled: set = set()
+    # 通知框点掉；每个框只处理一次。注意必须持框的**强引用**做去重——不能记 id()，
+    # 框销毁后新框可能复用同一地址（Windows CI 实测：通知框被误判为已处理而漏点）。
+    handled: list = []
 
     def poll():
         box = app.activeModalWidget()
-        if box is None or id(box) in handled:
+        if box is None or any(box is prev for prev in handled):
             return
-        handled.add(id(box))
+        handled.append(box)
         buttons = [b.text() for b in box.buttons()] if hasattr(box, "buttons") else []
         result["boxes"].append({
             "title": box.windowTitle(),
@@ -109,6 +110,7 @@ def main() -> None:
 
     def watchdog():
         # 兜底：流程真挂住时收掉当前模态框让流程解开，结果字段缺失由父进程断言变红。
+        result["watchdog_fired"] = True
         box = app.activeModalWidget()
         if box is not None:
             box.reject()
