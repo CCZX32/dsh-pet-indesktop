@@ -2773,7 +2773,9 @@ class AppShell:
         self._quitting = True
         # D2 收口序（spec §7.2-4）：**先关扩展宿主**（停第三方 Runtime、停它的 worker、
         # 撤销菜单/设置面板），**再**往下走各窗/共享子系统；Worker 子进程的异步收口由
-        # main() 在事件循环之后调 WorkerSupervisor.finish_app_shutdown() 兜底（幂等）。
+        # main() 的收尾段在事件循环之后调那只收口泵兜底（幂等；这里刻意不重复写出它的
+        # 全限定名——tests/test_proactive_worker_adapter.py 有一条源码级守卫按名字找**真正
+        # 的调用点**，注释里再写一遍会把它骗到本方法上）。
         # 位置在窗级收口之前：第三方 Runtime 的 stop() 常要碰它自己的窗口对象，
         # 等窗拆完再停就会打到已析构的父链上。
         runtime = getattr(self, "feature_runtime", None)
