@@ -17,28 +17,32 @@
 
 > **快照口径（重要）**：本文的 ✅ / ⚠️ / ❌ 判定以本仓库 **HEAD `7575572`** 为基准，证据由
 > 文中列出的命令与测试当场核过（核验时点 2026-10-13 22:10）。
-> **写作期间同一工作树内另有一片正在落地「宿主侧运行时」**——`git status` 里
-> `pet/mod_api/`、`pet/feature_ports.py`、`pet/api_ports.py`、
-> `pet/plugins/{ports,capabilities,contributions,feature_host,feature_packages,package_binding,worker_launch}.py`、
-> `pet/workers/{lease_bootstrap,worker_client}.py`、`tests/test_mod_center_contracts.py`
-> 显示为**未跟踪**（这一片不是本文作者改的，本文只动 `docs/`）。因此：**本文凡写
-> 「本仓库不存在 X」，一律按 HEAD 读**；引用前先复核一次
-> `git ls-tree -r --name-only HEAD | grep <路径>`。等那一片提交后，本文的 Phase 2 / Phase 4A
-> 两格需要按新事实回写。
+> **写作期间同一工作树内另有一片正在落地「宿主侧运行时」**——写作时它还是未提交状态。
+> 那一片（D2）与随后的 D3 已分别提交，**本文 §二 的格子里凡与之冲突的，以 §六「D2 / D3 回写」
+> 为准**；§二 正文按快照基线保留原样，不复写历史判定。引用前先复核一次
+> `git ls-tree -r --name-only HEAD | grep <路径>`。
 
 ---
 
 ## 一、五条必须先知道的口径（2026-10-13）
 
-1. **功能扩展包 ZIP 导入是 fail-closed 的**。本仓库**没有** LPAC 原生探针沙箱与其
-   `_internal/feature-probe` 密封 bundle——那条流水线要钉版 PyInstaller 源码 tarball +
-   MSVC + 官方 libsodium + AppContainer canary，属**未排期的构建片**。因此功能扩展包在本仓库
-   被**更上游**的一道闸门如实拒绝：`FeaturePackageTransactionService` 见
+1. **功能扩展包 ZIP 导入在本仓库是"显式用户信任 + 装前子进程预检"**，不是沙箱。本仓库
+   **没有** LPAC 原生探针沙箱与其 `_internal/feature-probe` 密封 bundle——那条流水线要
+   钉版 PyInstaller 源码 tarball + MSVC + 官方 libsodium + AppContainer canary，属**未排期的
+   构建片**。默认装配因此仍然是 fail-closed：`FeaturePackageTransactionService` 见
    `self_checker.available is False` 即抛 `self_check_sandbox_unavailable`
    （`pet/feature_package_transactions.py:772`；守卫
-   `tests/test_feature_package_transactions.py::test_default_selfcheck_fails_closed_without_os_sandbox:499`）。
-   作者文档里「目录可以、ZIP 不行」那个差异**在本仓库没有复现面**——ZIP 与目录在 `preflight_*`
-   里都被归一成同一个已解包的 `staged_root`，两条路收敛到同一处拒绝。
+   `tests/test_feature_package_transactions.py::test_default_selfcheck_fails_closed_without_os_sandbox`
+   继续绿——**那条纪律一个字没改**）。
+   本地用户自选包走的是**另一条明确的口子**：生产装配注入
+   `pet/feature_management.LocalUserTrustSelfChecker`（`available=True`，Phase 5A 的
+   "本地激活是用户明确选择的信任边界，不是发布者认证"），它做三件事——重新验签/指纹对账、
+   host-worker 的 worker 路径边界断言、以及（D3 起的默认装配）把包交给
+   `pet/feature_package_preflight` 在**子进程**里装前预检一次。探针只回答"包装载得起来吗、
+   `create_host()` 说的 owner 与清单一致吗"，**只在拒绝方向有权威**：没有 OS 沙箱、环境清理
+   与超时都不是安全边界，说行的那一半仍由宿主按完整验签链重新回答。
+   作者文档里「目录可以、ZIP 不行」那个差异**在本仓库没有复现面**——ZIP 与目录在
+   `preflight_*` 里都被归一成同一个已解包的 `staged_root`，探针看到的也只有那一份。
 2. **`pet/plugins/` 在 HEAD 里只留了 `package_trust.py`**（705 行：验签 / 清单 / 指纹 /
    路径边界 / 祖先快照，零 Qt；`FeaturePackageVerifier:420`、`read_manifest_registration:343`、
    `SigningKeyPolicy:394`）。`git ls-tree -r --name-only HEAD | grep '^pet/plugins/'` 只有
@@ -225,14 +229,43 @@
   停用 → 批量删除，设置页「扩展管理」域是入口。教程见
   [`USER-GUIDE.md`](USER-GUIDE.md)、[`CHARACTER-PACKS.md`](CHARACTER-PACKS.md)。
 - **包信任链**：验签 / 清单 / 指纹 / 路径边界 / 祖先快照（`pet/plugins/package_trust.py`）。
-- **安装事务 / 状态机 / 版本租约 / 探针契约**：代码完整、测试齐备，**未接宿主**。
+- **安装事务 / 状态机 / 版本租约 / 探针契约**：代码完整、测试齐备，**已接宿主**（见 §六）。
+- **第三方功能扩展全链路（D2/D3）**：导入（ZIP / 目录）→ 停用态落盘 → 启用（菜单贡献出现）
+  → 停用（撤销贡献、旧句柄失效）→ 卸载（保留个人数据）→ 重装；装前有子进程预检
+  （`pet/feature_package_preflight.py`）。
 - **workers 子进程底座**：`pet-worker/v1` + QProcess 监督 + 启动租约 + 诊断白名单；主动识屏
   已真实跑在这条通道上。
 - **冻结版长路径修复**：`pet/frozen_runtime_paths.py`（把执行文件密封 `_internal` 以 `\\?\`
   扩展拼写放进 `sys.path`，**就地替换**而非追加——依据是本机实测，追加无效）。
 
-反面口径同样重要：**功能扩展包现在装不上**，而且这是**设计如此**（fail-closed），不是缺陷。
-「装了没反应」的准确解释见 §一-1。
+反面口径同样重要：**官方功能包（`official.*`）现在装不上**——那条链是 Core 自有的，
+本仓库还没落地；本地 ZIP/目录也不许占用官方 owner 的名字（路由按闭集登记表判定，声明官方 ID
+的本地包在 `unsupported_package_message` 处得到一句点名"保留 ID"的拒绝语）。
+**第三方功能包（未知 owner）现在装得上**，能力与边界见 §一-1。
+
+---
+
+## 六、D2 / D3 回写（2026-10-13 之后）
+
+上面 §二 的判定以 HEAD `7575572` 为基准。其后两片落地，下列格子按新事实回写（其余格子不变）：
+
+| 项 | 新事实 | 证据落点 |
+|---|---|---|
+| Phase 4A「宿主侧接口半未落」 | ✅ 宿主运行时已落地：`pet/mod_api/{__init__,v1}.py`、`pet/plugins/{feature_host,feature_packages,package_binding,lifecycle,ports,capabilities,contributions,worker_launch}.py`、`pet/feature_ports.py`、`pet/api_ports.py`、`pet/mod_runtime.py`、`pet/mod_menu.py`、`pet/settings_mod_panel.py` | `git log --oneline` 的 `feat(plugins): D2` 两笔；`tests/test_mod_center_end_to_end.py` 的命题 1–7 |
+| Phase 4B-4「功能扩展那一格因 `extensions()` 恒空而不出现」 | ✅ 已回填：`DialogModHost.extensions()` 由 `pet/feature_management.LocalFeatureRuntime` 提供，第一次导入就把管理器装上（`feature_route` 死锁修复） | `pet/settings_mod_domain.py::extensions/feature_route`、`tests/test_feature_package_import_zip.py` |
+| Phase 4B-5「真实构建端到端未做」 | ⚠️ 半做：本地用户自选包（host-only）的 **ZIP/目录 → 导入 → 安装 → 装载 → 启停 → 卸载 → 重装** 端到端已可跑；**冻结 exe 与 host-worker 的真实构建仍未做** | `tests/test_feature_package_import_zip.py`、`tests/test_feature_management.py` |
+| Phase 5A「ZIP/目录显式导入」 | ⚠️ 半做：第三方 owner 的 ZIP/目录显式导入已落地（按有界清单自动路由、未知 owner 按第三方 DLC 接受）；**Setup 选装 / 便携 / 官方 ZIP 仍未做** | `pet/local_package_intents.py`、`pet/feature_package_preflight.py` |
+| §一-1 的"装不上"口径 | 已改写为"显式用户信任 + 装前子进程预检"，默认 fail-closed 那一半保持不变 | 本文件 §一-1 |
+
+D3 的范围与验收口径（本地 ZIP 功能包导入链）与作者文档逐条对照：
+
+| 作者口径（出处） | 本仓库落法 |
+|---|---|
+| 只预读受限大小的 `manifest.json`，按 `id`/`factory`/`execution_kind` 自动路由；**未知 owner 也作为第三方 DLC 接受**（`PHASE5A-LOCAL-DISTRIBUTION-DESIGN.md` §1） | `pet/local_package_intents.route_local_package` + `LocalFeatureRuntime.route`（官方 ID 例外：保留） |
+| 拒绝路径穿越、链接、大小写冲突、重复 ZIP 条目、未登记文件及解压超限（`PHASE4B-LOCAL-MANAGEMENT-DESIGN.md`） | 既有 `pet/feature_package_files.stage` + `package_trust`（D3 未改，ZIP/目录同一处归一） |
+| 「复制后的完整包先验证，才允许 factory 或自检执行」「自检用独立进程」（同上） | `FeaturePackageTransactionService._continue` 的次序未改；D3 把自检补成真子进程（`pet/feature_package_preflight.py`） |
+| 「preflight 绝不执行候选；确认后完整复验、沙箱自检」（`PHASE5A` §5A-1） | 探针只在 `apply` 的候选检查处跑（`preflight_*` 不执行包代码） |
+| LPAC 原生沙箱与 `probe bundle`（`PHASE4B` §probe） | **不移植**（已拍板）：D3 走务实路线，探针不声称隔离，文档逐字写明 |
 
 ---
 

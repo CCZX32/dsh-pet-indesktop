@@ -33,9 +33,12 @@ Ported from the DLC branch ``pet/feature_management.py``；那一半在 DLC 里�
 * 草稿快照由 GUI 线程在派发前喂给 :class:`pet.plugins.lifecycle.FeatureHostLifecycle`，
   后台线程只读（见 ``pet/plugins/lifecycle.py``）。
 
-**自检器**：本线注入 :class:`LocalUserTrustSelfChecker`（显式用户信任），取代默认的
-fail-closed ``SubprocessFeatureSelfChecker``（无 OS 沙箱时它一律拒装）。它不声称任何
-OS 隔离：本地 MOD 是用户自己选择信任的 Python 代码，与桌宠同权限运行。
+**自检器**：本线注入 :class:`LocalUserTrustSelfChecker`（显式用户信任 + 一次装前子进程
+预检），取代默认的 fail-closed ``SubprocessFeatureSelfChecker``（无 OS 沙箱时它一律拒装）。
+两者都不声称任何 OS 隔离：本地 MOD 是用户自己选择信任的 Python 代码，与桌宠同权限运行；
+子进程预检（:mod:`pet.feature_package_preflight`）只在"拒绝"方向有权威——包装不起来、
+``create_host()`` 说的 owner 与清单不符，都在**装之前**如实拒掉，说行的那一半仍由宿主
+自己按完整验签链重新回答。
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from . import __version__
 from .feature_host_bindings import bind_local_context
+from .feature_package_preflight import LocalPackageProbe
 from .feature_package_startup import ProductionFeatureStartup
 from .feature_package_transactions import LOCK_BUSY_REASONS, FeaturePackageTransactionService
 from .feature_ports import FeatureHostContext  # noqa: F401  （契约面：宿主上下文）
@@ -81,15 +85,18 @@ _RELEASING_KINDS = frozenset({"uninstall", "rollback", "upgrade"})
 
 @dataclass(frozen=True)
 class LocalUserTrustSelfChecker:
-    """显式用户信任，**不是沙箱**。
+    """显式用户信任 + 一次子进程预检，**不是沙箱**。
 
     本仓库没有 LPAC 原生探针沙箱（``SubprocessFeatureSelfChecker.available is False``），
     默认装配会对任何非卸载操作以 ``self_check_sandbox_unavailable`` 如实拒绝——这是
     "验证不了就别执行"的纪律，不是缺陷。本地功能包走的是另一条**明确**的口子：
-    用户自己挑了这份包 ⇒ 显式信任。于是这里只做两件不含糊的事：
+    用户自己挑了这份包 ⇒ 显式信任。于是这里只做三件不含糊的事：
 
     * 重新验签 / 指纹对账（``verifier.reverify``）——它仍然保证"跑的就是验过的那份字节"；
-    * host-worker 声明下断言 worker 路径存在且**在版本目录内**。
+    * host-worker 声明下断言 worker 路径存在且**在版本目录内**；
+    * 给上 ``probe`` 时（生产装配默认给），把包交给 :mod:`pet.feature_package_preflight`
+      的**子进程**预检一次：装载得起来吗、``create_host()`` 说的 owner 与清单一致吗。
+      探针只在"拒绝"方向有权威，说行的那一半仍由宿主自己重新验。
 
     它不声称任何 OS 隔离，也不做 capability 强制（``allowed_capabilities`` 是兼容上限）。
     """
@@ -97,6 +104,8 @@ class LocalUserTrustSelfChecker:
     verifier: FeaturePackageVerifier
     #: 显式：默认的 fail-closed 不适用于"用户自己选的包"这条路径。
     available: bool = True
+    #: 装前子进程预检；``None`` = 只做上面两条（历史行为，既有用例仍走这条）。
+    probe: "LocalPackageProbe | None" = None
 
     def check(self, descriptor) -> "object":
         from .feature_package_transactions import RuntimePreparation
@@ -113,6 +122,12 @@ class LocalUserTrustSelfChecker:
                 inside = False
             if not inside:
                 return RuntimePreparation("failed", "self_check_worker_missing")
+        if self.probe is not None:
+            verdict = self.probe.run(descriptor, self.verifier)
+            if not verdict.ok:
+                return RuntimePreparation("failed", verdict.reason or "probe_failed")
+            # 元信息只作诊断：安装状态里不存它，执行授权也不看它（探针不授权执行）。
+            return RuntimePreparation(details={"probe": verdict.metadata.document()} if verdict.metadata else {})
         return RuntimePreparation()
 
 
@@ -154,7 +169,7 @@ class FeatureManagementManager(QObject):
         self.service = FeaturePackageTransactionService(
             config.dir,
             self.verifier,
-            self_checker=LocalUserTrustSelfChecker(self.verifier),
+            self_checker=LocalUserTrustSelfChecker(self.verifier, probe=LocalPackageProbe()),
             runtime=self.lifecycle,
         )
         self.startup = ProductionFeatureStartup(
@@ -516,14 +531,19 @@ class LocalFeatureRuntime:
 
         这是 ``ModCenterController.feature_route`` 的宿主侧实现：注册表由安装状态导出，
         而安装状态只能靠一次导入改变——所以"这个 id 还没注册"不能反过来否掉一次导入，
-        否则首次安装永远进不去（见 D2 spec §7.4-1）。"""
+        否则首次安装永远进不去（见 D2 spec §7.4-1）。
+
+        **未知 owner 一律按第三方 DLC 接受**（Phase 5A 的显式导入口径）；唯一例外是
+        官方登记表里的 owner：那条链是 Core 自有的，本地包占不了它的名字，这里如实
+        答不上来（``None``），由 ``unsupported_package_message`` 给出可照做的拒绝语。
+        """
         from .local_package_intents import route_local_package
 
         try:
             route = route_local_package(source)
         except (OSError, ValueError, RuntimeError, TypeError):
             return None
-        if route.feature_id in OFFICIAL_FEATURES:
+        if route.is_official:
             return None
         self.attach(route.feature_id)
         return route.feature_id

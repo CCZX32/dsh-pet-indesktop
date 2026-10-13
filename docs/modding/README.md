@@ -53,12 +53,14 @@ DLC 原文（2026-10-10）报的是「用 ZIP 导入示例功能包报 `worker_p
 | 环 | 结论（2026-10-13） | 依据 |
 |---|---|---|
 | ① 冻结版 onedir 的密封依赖目录查找 | **已修复** | `pet/frozen_runtime_paths.py`（本仓库新增）+ `pet/workers/screen_entry.py` 首行接线。探针 `_probe()` 的第一步是 `import _dsh_probe_native`；该 `.pyd` 只存在于执行文件自己的 `_internal` 里，安装路径一长 `LoadLibrary` 就以「文件名或扩展名太长」失败 ⇒ 探针恒 77 ⇒ `worker_probe_failed`。**修复前 vs 修复后原始输出见 `.scratch/dlc-fusion/S4-HANDOFF.md`**（同一个 `.pyd`：普通拼写 ⇒ `ImportError: DLL load failed … 文件名或扩展名太长`；扩展拼写 ⇒ 导入成功）。 |
-| ② 之上的 LPAC 原生探针沙箱与其 `_internal/feature-probe` 密封 bundle | **本仓库不存在**，且**不是本仓库能修的** | 该 bundle 由 DLC 的原生构建流水线产出（钉版 PyInstaller 源码 tarball + MSVC + 官方 libsodium + AppContainer/LPAC canary）。本仓库没有也不该凭空造一个"看起来像沙箱"的东西。因此功能扩展包导入在本仓库被**更上游**的一道闸门如实拒绝：`FeaturePackageTransactionService` 见 `self_checker.available is False` 即抛 `self_check_sandbox_unavailable`（守卫：`tests/test_feature_package_transactions.py::test_default_selfcheck_fails_closed_without_os_sandbox`）。 |
+| ② 之上的 LPAC 原生探针沙箱与其 `_internal/feature-probe` 密封 bundle | **本仓库不存在**，且**不是本仓库能修的**；D3 起本地导入走另一条明确的口子 | 该 bundle 由 DLC 的原生构建流水线产出（钉版 PyInstaller 源码 tarball + MSVC + 官方 libsodium + AppContainer/LPAC canary）。本仓库没有也不该凭空造一个"看起来像沙箱"的东西，所以**默认装配仍然 fail-closed**：`FeaturePackageTransactionService` 见 `self_checker.available is False` 即抛 `self_check_sandbox_unavailable`（守卫：`tests/test_feature_package_transactions.py::test_default_selfcheck_fails_closed_without_os_sandbox`，**未改**）。用户**自己挑选**的本地包另走"显式用户信任"（Phase 5A 口径）+ D3 的**装前子进程预检**（`pet/feature_package_preflight.py`）；探针**不是沙箱**，只在拒绝方向有权威。 |
 
 **由此得到的一条可直接照做的结论**：DLC 报告里「目录可以、ZIP 不行」这个差异**在本仓库
 没有复现面**——ZIP 与目录在 `preflight_*` 里都被 `files.stage()` 归一成同一个已解包的
-`staged_root`，两条路在本仓库收敛到同一处拒绝。DLC 自己也记录过"本地非冻结环境无法复现
+`staged_root`，两条路收敛到同一处判定。DLC 自己也记录过"本地非冻结环境无法复现
 该差异"，并把 `hello-local`（host-only）的准确 reason 列为待补信息。
+**本仓库现状（D3）**：第三方本地功能包的 ZIP 与目录现在都能装（走显式用户信任 + 装前子进程
+预检）；官方包与 host-worker 的真实冻结构建仍未做。
 
 顺带补上 DLC 列为"待补信息"的那一项：本仓库给 77 加了**可读的原因**——
 `pet/workers/screen_entry.py::sandbox_verdict()` 把前置状态分成
@@ -78,24 +80,44 @@ MOD 中心**分片移植**，落地面如下——判定依据是分支上的六
 | DLC 面 | 本仓库现状 | 落点 |
 |---|---|---|
 | 角色资源包（清单、原子写、启停、更新、回滚、批量删除） | ✅ 已落地并已接入设置页 | `pet/mod_catalog.py`、`pet/mod_management.py`、`pet/mod_center_controller.py`、`pet/mod_center_ui.py`、`pet/settings_mod_domain.py` |
-| 包信任（签名 / 清单 / 指纹 / 路径边界） | ✅ 已落地（**未接入宿主**） | `pet/plugins/package_trust.py`、`pet/feature_package_files.py` |
-| 安装事务 / 状态机 / 版本租约 | ✅ 已落地（**未接入宿主**） | `pet/feature_package_transactions.py`、`pet/feature_state_io.py`、`pet/feature_version_lease.py` |
-| 探针契约（策略 / 结果 / transcript 校验） | ✅ 已落地（**未接入宿主**） | `pet/feature_package_probe.py` |
-| 原生探针沙箱（LPAC 启动器 + 密封 bundle） | ❌ 未移植 | 见上表第②环 |
-| 功能扩展宿主运行时（`pet.mod_api.v1` / `pet/feature_management.py` / `pet/local_package_intents.py`） | ❌ 未移植 | MOD 中心 `extensions()` 注册表恒空 |
+| 包信任（签名 / 清单 / 指纹 / 路径边界） | ✅ 已落地 | `pet/plugins/package_trust.py`、`pet/feature_package_files.py` |
+| 安装事务 / 状态机 / 版本租约 | ✅ 已落地 | `pet/feature_package_transactions.py`、`pet/feature_state_io.py`、`pet/feature_version_lease.py` |
+| 探针契约（策略 / 结果 / transcript 校验） | ✅ 已落地 | `pet/feature_package_probe.py` |
+| 原生探针沙箱（LPAC 启动器 + 密封 bundle） | ❌ 未移植（**本拓扑不做**，见下） | 默认 fail-closed 那一半不变；本地导入走"显式用户信任 + 装前子进程预检" |
+| 本地包装前预检（子进程，元信息 + 失败检查） | ✅ 已落地（**不是沙箱**） | `pet/feature_package_preflight.py`（D3） |
+| 功能扩展宿主运行时（`pet.mod_api.v1` / `pet/feature_management.py` / `pet/local_package_intents.py`） | ✅ 已落地并已接入 MOD 中心（D2/D3） | `pet/feature_management.py`、`pet/mod_runtime.py`、`pet/mod_menu.py`、`pet/settings_mod_panel.py`、`pet/plugins/{feature_host,feature_packages,package_binding}.py` |
+| 官方功能包（`official.ai-chat` / `official.screen-understanding`）的安装链 | ❌ 未落地（官方 ID 在本地导入处按保留 ID 拒绝） | `pet/official_features.py`、`pet/mod_center_controller.py` |
 | workers 子进程基础设施 | ✅ 已落地 | `pet/workers/`（protocol / supervisor / launch / proactive-screen worker） |
 | 跨进程角色控制通道（`pet/mod_resource_ipc.py`） | ❌ 放弃 | 属 4.4b 淘汰语义；等价物是设置页所属桌宠窗口上的 `on_switch_character` |
 
+### 本地功能包的信任口径（一句话）
+
+**没有 LPAC 原生沙箱**：那个 `_internal/feature-probe` 密封 bundle 要钉版 PyInstaller 源码
+tarball + MSVC + 官方 libsodium + AppContainer canary，本仓库没有也不该凭空造一个"看起来像
+沙箱"的东西。所以：**默认装配仍然 fail-closed**（无沙箱即拒装，这条纪律一个字没改）；用户
+**自己挑选**的本地 ZIP/目录走另一条明确的口子——"显式用户信任"（Phase 5A 的原文口径），
+外加 D3 的一道**装前子进程预检**：在另一个进程里把包装一次，回答"装载得起来吗、
+`create_host()` 说的 owner 与清单一致吗"。
+
+> 本地 MOD 是你自己选择信任的 Python 代码，与桌宠以相同权限运行；子进程预检只是另一个进程，
+> **不是沙箱**。导入即代表你信任它的来源。
+
+探针**只在拒绝方向有权威**（包装不起来、owner 对不上 ⇒ 装之前就拒，状态与版本目录都不动），
+说行的那一半仍由宿主按完整验签链重新回答。
+
 **因此**：本目录里凡描述「功能扩展」的教程（`API-V1.md` / `HOST-ONLY.md` /
 `HOST-WORKER.md` / `AUTHORING-HANDBOOK.md` 的功能扩展部分 / `COMPATIBILITY.md`）
-在本仓库是**作者契约的权威描述 + 待落地目标**，不是"现在就能照着跑一遍"的操作手册；
-凡描述「角色素材包」的（`CHARACTER-PACKS.md` / `PERSONA-TEMPLATES.md` / `USER-GUIDE.md`
-的导入与管理部分）**现在就可用**。
+在**第三方本地包（未知 owner、host-only）**这一面上现在可以照着跑一遍（导入 → 启停 →
+卸载 → 重装），官方包与 host-worker 仍是**待落地目标**；凡描述「角色素材包」的
+（`CHARACTER-PACKS.md` / `PERSONA-TEMPLATES.md` / `USER-GUIDE.md`
+的导入与管理部分）**一直可用**。
 
 样例源码在 [`examples/mods/`](../../examples/mods/README.md)：`hello-local`（host-only）、
 `echo-worker`（host-worker）、`persona-phrases.json`（台词模板）。它们保留 DLC 的作者侧
-源码形态（`mod.json` + `host/`），**打包脚本 `scripts/build_mod_example.py` 未移植**——
-本仓库的 MOD 中心按成品包的 `manifest.json` 接入，不提供示例打包命令。
+源码形态（`mod.json` + `host/`）；打包用 `scripts/build_mod_example.py`
+（`python scripts/build_mod_example.py examples/mods/hello-local <输出目录>`，同时产出目录与
+同名 ZIP，`--check` 只做路由与验签）。`echo-worker` 那条 host-worker 路径需要冻结的 worker
+可执行，本机不可验证。
 
 上表只覆盖 MOD 这一面。**要把作者的全部 phase（1 / 2 / 3A / 3B / 3C / 4A / 4B / 5A / 5B /
 6 / 7）逐项对照本仓库的落地状态，读 [`PORT-STATUS.md`](PORT-STATUS.md)**——它按作者的 phase

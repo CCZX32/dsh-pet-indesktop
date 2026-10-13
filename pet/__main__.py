@@ -133,11 +133,26 @@ def _run_worker(worker_id: str | None = None) -> int:
     return worker_main(worker_id)
 
 
+def _run_feature_probe() -> int:
+    """--feature-package-probe：本地功能包的装前子进程预检（冻结态的入口形态）。
+
+    与 ``--worker`` 同一条纪律：分流必须早于 ``pet.app``——探针进程存在的理由是
+    "在一个干净的进程里把包装一次看看"，它自己不许拉起窗口、托盘或素材库。
+    源码态不走这里（``probe_command`` 用解释器的 ``-m pet.feature_package_preflight``）。
+    """
+    from .feature_package_preflight import child_main
+
+    return child_main(sys.argv[1:])
+
+
 def _main() -> int:
     # Worker 子进程分流排最前：它既不是设置页（不能建 QApplication），也不是主程序
     # （导入 pet.app 会把整只桌宠拉起来）。见 pet/workers/worker_entry.py。
     if "--worker" in sys.argv:
         return _run_worker(_worker_id(sys.argv))
+    # 功能包预检子进程同理：它只读一个包、写一份回执，不建 QApplication。
+    if "--feature-package-probe" in sys.argv:
+        return _run_feature_probe()
     # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环），
     # 并与两个冻结入口共用 pet.uninstall_cleanup.main——逐步诊断输出、配置目录留痕、
     # 退出码语义只有那一处实现，入口侧不再自己复刻一份。

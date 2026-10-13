@@ -93,6 +93,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 import shiboken6
 
 from .mod_management import KIND_RESOURCE, ModEntry, ModOutcome, ResourceMods
+from .official_features import OFFICIAL_FEATURES
 
 _LOG = logging.getLogger(__name__)
 
@@ -215,6 +216,8 @@ def unsupported_package_message(source: Path, *, extensions=()) -> str:
             return "本版本只支持角色资源包；该包声明的种类是「" + kind[:32] + "」。"
         return ""
     declared_id = manifest.get("id")
+    if isinstance(declared_id, str) and declared_id in OFFICIAL_FEATURES:
+        return "这个包声明的 ID（" + declared_id[:64] + "）是官方功能扩展的保留 ID：官方功能包不由本地 ZIP 导入安装。"
     if isinstance(declared_id, str) and declared_id in set(extensions):
         return ""
     return "这个包自称是功能扩展包，但这次没能接上它的扩展宿主：请重新打开设置页再试；若仍失败，检查该包的清单是否完整。"

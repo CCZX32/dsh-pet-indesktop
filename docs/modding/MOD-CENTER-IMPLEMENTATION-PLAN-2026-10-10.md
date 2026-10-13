@@ -1,11 +1,13 @@
 # MOD 管理中心重做、开发教程与兼容基线
 
-> **移植基线（2026-10-13，本仓库分支 `dlc/mod-center-port`）**：本文移植自上游 DLC 分支
-> 的同名文档（分支名与基线 SHA 属仓库内工作档案，见 `.scratch/dlc-fusion/PLAN.md`；
+> **移植基线（2026-10-13，本仓库分支 `dlc/mod-center-port`）**：本文移植自上游 DLC 分支的
+> 同名文档（分支名与基线 SHA 属仓库内工作档案，见 `.scratch/dlc-fusion/PLAN.md`；
 > 本目录正文不写外部工具名）。文中描述的**功能扩展宿主运行时**在本仓库
-> **尚未接入**（`pet.mod_api.v1`、`pet/feature_management.py`、`pet/local_package_intents.py`、
-> `scripts/build_mod_example.py`、`scripts/build_character_mod_example.py` 都不存在；
-> MOD 中心的 `extensions()` 注册表恒空）。逐项对照与 ZIP 缺陷的处置口径见
+> **已经接入**（D2/D3）：`pet.mod_api.v1`、`pet/feature_management.py`、
+> `pet/local_package_intents.py`、`scripts/build_mod_example.py` 都已存在，
+> MOD 中心的 `extensions()` 注册表由安装状态导出——第三方本地功能包可以导入并启停；
+> **官方包（`official.*`）与 host-worker 的真实冻结构建仍未落地**。
+> 逐项对照见 [PORT-STATUS.md](PORT-STATUS.md) §六（D2/D3 回写），ZIP 缺陷的处置口径见
 > [README.md 的「移植基线与现状」](README.md#移植基线与现状2026-10-13)。
 
 基线：2026-10-10；用户已批准执行。M00 已提交并核对上游 DLC 远程分支：`0a299612714e5fad55a24a5506dfce938b9eeb1c`。新功能尚未交付，以下为实施合同，不是已完成声明。

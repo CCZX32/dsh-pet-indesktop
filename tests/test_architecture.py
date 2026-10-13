@@ -347,6 +347,14 @@ def test_pure_logic_modules_do_not_import_qt():
         # 派发前喂好）——沾上 Qt 就等于让后台线程去碰 GUI 对象。机器判据不止这里：
         # tests/test_mod_lifecycle_gate.py 用无 GUI 探针在**解析期**钉住它。
         "plugins/lifecycle.py",
+        # 2026-10-13（D3）加入 feature_package_preflight：它既是父侧的探针运行器，
+        # 也是**子进程入口本体**（源码态 `-m pet.feature_package_preflight`，冻结态
+        # `<exe> --feature-package-probe`）。子进程里唯一要做的事是把一个包导入一次、
+        # 写回回执，沾上 Qt 就等于把 GUI 依赖塞进一个不该有窗口的进程。机器判据不止
+        # 这里：tests/test_feature_package_preflight.py 用 sitecustomize 导入探针在
+        # **解析期**拦 PySide6，并真起一个子进程跑完整条预检。
+        "feature_package_preflight.py",
+        "local_package_intents.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

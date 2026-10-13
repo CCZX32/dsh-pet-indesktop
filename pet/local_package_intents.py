@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Mapping
 
+from .official_features import OFFICIAL_FEATURES
 from .plugins.package_trust import PackageVerificationError, read_manifest_registration
 
 _ROUTE_MANIFEST_LIMIT = 2 * 1024 * 1024
@@ -61,6 +62,18 @@ class LocalPackageRoute:
     capabilities: tuple[str, ...]
     manifest_digest: str
     manifest: Mapping
+
+    @property
+    def is_official(self) -> bool:
+        """这个 owner 是否属于 Core 自己的官方登记表（``official.*``）。
+
+        官方功能包的安装链是 Core 自有的（本仓库尚未落地，见
+        ``docs/modding/PORT-STATUS.md`` 的 Phase 4A/5A 两格）；本地 ZIP/目录因此
+        **不许**占用官方 owner 的名字——否则一个自选包就能把官方 id 的
+        ``feature-data/<owner>/`` 与运行入口先占住，而它并不受官方那份工厂/能力契约
+        约束。这条判据只读闭集登记表，不看包自己怎么说。
+        """
+        return self.feature_id in OFFICIAL_FEATURES
 
     @classmethod
     def from_manifest(cls, source: Path, raw: bytes) -> "LocalPackageRoute":
