@@ -274,11 +274,15 @@
 **先读 [`modding/README.md`](modding/README.md) 的「移植基线与现状」**——本仓库当前只交付
 「角色资源」这条腿，功能扩展侧（`pet.mod_api.v1` / 宿主运行时 / 原生探针沙箱）**尚未接入**；
 每篇都带统一的移植基线头，README 有逐项对照表。作者侧样例源码在
-[`examples/mods/`](../examples/mods/README.md)。
+[`examples/mods/`](../examples/mods/README.md)。**判断"作者的某个 phase 在本仓库到底做到哪
+一步"读 [`modding/PORT-STATUS.md`](modding/PORT-STATUS.md)**（逐 phase ✅/⚠️/❌ + 证据落点 +
+未做原因），它同时是 [下方「插件化与 DLC 分阶段文档」](#插件化与-dlc-分阶段文档)那批移植件的
+状态总表。
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
-| [`modding/README.md`](modding/README.md) | MOD 文档总入口：使用者 / 作者两条分流、四类 MOD 对照、**移植基线与现状**（DLC 面 → 本仓库落点，逐项 ✅/❌）、ZIP 探针缺陷的逐环收口口径。 | 第一次接触 MOD 中心、或判断"某个 DLC 能力在本仓库到底有没有"时必读（先读它的「移植基线与现状」，再读具体教程）。 |
+| [`modding/PORT-STATUS.md`](modding/PORT-STATUS.md) | **DLC 设计移植状态对照**：作者 phase 1 / 2 / 3A / 3B / 3C / 4A / 4B / 5A / 5B / 6 / 7 逐项对照本仓库的 ✅ 做到 / ⚠️ 半做 / ❌ 未做、证据落点（文件:行号或测试名）、没做的原因与后续片归属；开头是五条必须知道的口径（ZIP 导入 fail-closed、`pet/plugins/` 只留 `package_trust.py`、workers 底座与 agent_link worker、打包分发链零移植、「可停用 / 进程级卸载」而非热插拔）。 | **读 `plugin-roadmap/` 或 `plugin-phase-0N-*/` 里任何一篇之前必读**（那批是上游分支的记录，文中「已实现」说的是上游）；回答"这个 DLC 能力我们做了没有 / 为什么没做 / 什么时候做"时也只看这一篇。 |
+| [`modding/README.md`](modding/README.md) | MOD 文档总入口：使用者 / 作者两条分流、四类 MOD 对照、**移植基线与现状**（DLC 面 → 本仓库落点，逐项 ✅/❌）、ZIP 探针缺陷的逐环收口口径。 | 第一次接触 MOD 中心、或判断"某个 DLC 能力在本仓库到底有没有"时必读（先读它的「移植基线与现状」，再读具体教程）。**它只覆盖 MOD 这一面**；要按作者的 phase 结构查全量落地状态，转 [`modding/PORT-STATUS.md`](modding/PORT-STATUS.md)。 |
 | [`modding/USER-GUIDE.md`](modding/USER-GUIDE.md) | 使用者教程：导入 / 启用 / 更新 / 停用 / 回滚 / 批量删除、项目目录布局、常见问题（含 ZIP 缺陷的现行口径）。 | 改 `pet/mod_management.py` 的托管布局、导入归一或启停语义时；回答"这个包为什么装不上 / 删不掉"时。 |
 | [`modding/CHARACTER-PACKS.md`](modding/CHARACTER-PACKS.md) | 角色素材包（纯内容）教程：清单字段、`videos/` 结构、`body_box` 等。 | **本仓库可用**。改 `pet/catalog.py` / `pet/mod_catalog.py` 的角色包识别与体框时必读。 |
 | [`modding/PERSONA-TEMPLATES.md`](modding/PERSONA-TEMPLATES.md) | 台词 / 人格模板包的格式与放置。 | 改 `pet/persona_phrases.py` 或 `pet/persona_presets/` 的导入格式时必读（另见 [`PERSONA-PHRASES-PRESET-STORAGE-2026-09-08.md`](PERSONA-PHRASES-PRESET-STORAGE-2026-09-08.md)）。 |
@@ -291,6 +295,12 @@
 
 ## 插件化与 DLC 分阶段文档
 
+> **先读 [`modding/PORT-STATUS.md`](modding/PORT-STATUS.md)**：下面这批是**上游 DLC 分支**的
+> 设计与实施记录（2026-10-13 同步其最新版，28 篇逐字移植，每篇带统一移植基线头）。文中
+> 「本仓库 / 当前仓库 / 已实现」指的是**上游分支自己的进度**，不是本仓库的交付声明；本仓库
+> 逐 phase 的落地对照与未做原因全在 PORT-STATUS.md。凡指向上游独有文档/代码的链接已降级为
+> **文字 + 反引号路径**（不留假链接）。
+
 | 阶段 | 目录 | 用途 |
 |---|---|---|
 | 总路线 | [`plugin-roadmap/`](plugin-roadmap/) | 查看完整阶段路线、依赖和阶段出口。 |
@@ -301,6 +311,39 @@
 | Phase 5 | [`plugin-phase-05-distribution/`](plugin-phase-05-distribution/) | 增加本地、GitHub、CDN 或 Workshop 来源前必读。 |
 | Phase 6 | [`plugin-phase-06-ecosystem/`](plugin-phase-06-ecosystem/) | 开放第三方插件 SDK、签名和社区 catalog 前必读。 |
 | Phase 7 | [`plugin-phase-07-release/`](plugin-phase-07-release/) | 做跨平台正式发布和生态运维前必读。 |
+
+### 逐篇登记（2026-10-13 移植）
+
+| 文档 | 一句话内容 | 何时必读 |
+|---|---|---|
+| [`plugin-roadmap/PLUGIN-DLC-ROADMAP-v5.md`](plugin-roadmap/PLUGIN-DLC-ROADMAP-v5.md) | 总路线图：Phase 1–7 的职责与出口、四项长期判断（拔掉 / 溺水 / 换皮 / 离线测试）、横向审计与统一合同、统一交付门与失败重启表。 | 判断"某能力属于哪个 phase、出口是什么、失败该退回哪一步"时；排任何插件化/拆包批次前。 |
+| [`plugin-roadmap/PLUGIN-FEATURE-DELIVERY-MATRIX.md`](plugin-roadmap/PLUGIN-FEATURE-DELIVERY-MATRIX.md) | 功能归属与官方可选交付总表：Core 必须保留什么、F01–F11 十一个领域的业务所有者 / 数据所有者 / 验收矩阵。 | 讨论"某功能该归谁、要不要拆包、菜单设置归哪一方"时（这是唯一清单出处，别另建一套）。 |
+| [`plugin-roadmap/PLUGIN-DLC-OPENING-ORDER-AND-THIRD-PARTY-INTERFACES.md`](plugin-roadmap/PLUGIN-DLC-OPENING-ORDER-AND-THIRD-PARTY-INTERFACES.md) | 开放顺序与第三方接口路线：资源 / 官方功能 / 用户自制三级开放，`pet-content/v1`·`pet-worker/v1`·`feature-contribution/v1`·`feature-data/v1`·`feature-credentials/v1` 五个接口层级，第三方包目录与数据布局，**§8「Python host 即时热卸载」为什么不能对外宣传**（:442-526）。 | **写任何对外措辞（"可卸载 / 热插拔 / 无需重启"）之前必读**；设计第三方包的数据 / 缓存 / 密钥作用域时。 |
+| [`plugin-roadmap/DLC-BASELINE-REVIEW-REMEDIATION-2026-10-02.md`](plugin-roadmap/DLC-BASELINE-REVIEW-REMEDIATION-2026-10-02.md) | 外部基线评审的逐条回应：已修正 / 仍需补强 / 未解决 P0（A–E：安装后资源根与 Registry 解析根不一致、冲突安装异常清理可能误删旧版本、Phase 1 不能称发布级闭环、Starter 与 Core 更新保护、安装卸载中断恢复缺真实链路）。 | 判断"作者为什么把 Phase 1 标成 P0 未封存""某条评审意见到底修没修"时；引用任何"P0"结论前。 |
+| [`plugin-phase-01-foundation/PLUGIN-DLC-ARCHITECTURE.md`](plugin-phase-01-foundation/PLUGIN-DLC-ARCHITECTURE.md) | Phase 1 资源型 DLC 架构基线：四类边界与两种交付、Registry 来源顺序、资源目录与安全、fallback 链；§8 基线评审后的资源硬门与 P0 封存条件。 | 改角色资源发现 / 安装 / 回滚 / fallback 前；写"资源类交付完成度"时。 |
+| [`plugin-phase-01-foundation/PLUGIN-API-CONTRACT.md`](plugin-phase-01-foundation/PLUGIN-API-CONTRACT.md) | 插件 / DLC 内部接口与可选交付合同：数据型 content manifest、内容 provider、官方功能运行时与交付边界、屏幕理解最小拆包端口、菜单设置命令快捷键贡献、Worker 控制协议与凭据、capability 与 fallback、包身份与签名字段边界。 | 定"什么能进公开接口、什么只能内部用"时；设计贡献注册面或 Worker 凭据边界时。 |
+| [`plugin-phase-01-foundation/PLUGIN-MIGRATION-v4-to-v5.md`](plugin-phase-01-foundation/PLUGIN-MIGRATION-v4-to-v5.md) | v4→v5 配置 / 功能数据 / 可恢复迁移合同：逻辑分层与样板数据边界、迁移事务与重复执行、归属与兼容映射、Worker 配置与密钥、卸载重装与跨实例恢复。 | 设计任何配置或用户数据迁移（备份、幂等、secret 排除、回滚）前。 |
+| [`plugin-phase-02-runtime/README.md`](plugin-phase-02-runtime/README.md) | Phase 2 官方插件运行时基线与后续贡献合同；明确区分"运行边界已解决"与"功能代码已从 Core 安装包移除"。 | 讨论"功能通过受限接口接入"和"可选安装"的区别时。 |
+| [`plugin-phase-02-runtime/PLUGIN-RUNTIME-DESIGN.md`](plugin-phase-02-runtime/PLUGIN-RUNTIME-DESIGN.md) | Core 插件运行时设计：依赖方向、`PluginRegistry`、`PluginContext` 与 host ports、`CoreEventBus`、配置隔离、capability、生命周期接入、与 Worker 的关系、API 冻结与失败重启。 | 实现或评审 Core 插件运行时、或设计按包所有者的贡献注册 / 撤销面时。 |
+| [`plugin-phase-02-runtime/PLUGIN-RUNTIME-TEST-PLAN.md`](plugin-phase-02-runtime/PLUGIN-RUNTIME-TEST-PLAN.md) | 运行时回归与选装交付扩展测试计划：现有基线回归、新增选装合同的验收门、Qt 与故障隔离纪律、验证入口与报告。 | 给运行时或选装合同写测试计划时（含"哪些回归互不替代"的口径）。 |
+| [`plugin-phase-03-worker/README.md`](plugin-phase-03-worker/README.md) | Phase 3 Worker 运行隔离与官方选装衔接：已有成果与**证据分层表**（代码 / 自动化 / 用户手测 / 最新收尾各自能外推到什么程度）。 | 判断某条 Phase 3 结论属于"封存基线"还是"用户手测已确认"时。 |
+| [`plugin-phase-03-worker/PHASE3_PROCESS_PLUGIN_RESEARCH.md`](plugin-phase-03-worker/PHASE3_PROCESS_PLUGIN_RESEARCH.md) | 进程边界、迁移决策与复建依据：为什么先拆事件采集、协议与启动边界、3A/3B/3C 的阶段边界、与 Phase 4/5 的交接。 | 考虑把某项能力移出主进程之前。 |
+| [`plugin-phase-03-worker/PHASE3A-STABILITY-CLOSEOUT.md`](plugin-phase-03-worker/PHASE3A-STABILITY-CLOSEOUT.md) | Phase 3A Worker 稳定性封存报告，三份交付证据齐备（修改文件说明 / 性能分析 / 实机运行记录）。 | 需要"Worker 稳定性该拿什么当证据"的完整范例时；改 worker 监督器 / 重启阶梯 / 退出收口前。 |
+| [`plugin-phase-03-worker/PHASE3B-PROACTIVE-SCREEN-DESIGN.md`](plugin-phase-03-worker/PHASE3B-PROACTIVE-SCREEN-DESIGN.md) | 主动识屏 Worker 边界、实现与复建计划：控制协议与业务请求、自动识屏数据流、手动"看看屏幕"与多窗口、密钥截图与日志、上限与生命周期与取消与回退。 | 改识屏的截图 / 视觉请求执行位置、上限、取消或回退语义前（**注意本仓库多一条"不许静默回退"硬纪律**，见 PORT-STATUS.md §二 Phase 3B）。 |
+| [`plugin-phase-03-worker/PHASE3B-STABILITY-CLOSEOUT.md`](plugin-phase-03-worker/PHASE3B-STABILITY-CLOSEOUT.md) | Phase 3B 稳定性收尾记录与未关闭验收门；§10 前台窗口测试边界修复与验收澄清（事实 / 根因 / 确定性回归与显式探针分开）。 | 判断"3B 的人工门关没关""前台窗口那条测试边界怎么定的"时。 |
+| [`plugin-phase-03-worker/PHASE3C-ISOLATION-ASSESSMENT.md`](plugin-phase-03-worker/PHASE3C-ISOLATION-ASSESSMENT.md) | 剩余执行风险与选装交付评估：AI 对话与文件理解、屏幕理解、音乐、语音报时、余额账户、Harness/bridge 逐项该不该变 worker，附候选决策总表。 | 给某项能力决定进程形态之前（**本仓库拓扑不同，结论需按本仓库重做**，见 PORT-STATUS.md）。 |
+| [`plugin-phase-04-updates/README.md`](plugin-phase-04-updates/README.md) | Phase 4 屏幕理解可拔除样板与本地安装事务：4A 审计后定最小接口、4B 交付第一个完整样板、出口与回滚。 | 排 Phase 4A/4B 顺序、或判断"为什么要先做屏幕理解这个样板"时。 |
+| [`plugin-phase-04-updates/PHASE4A-SCREEN-DELIVERY-AUDIT.md`](plugin-phase-04-updates/PHASE4A-SCREEN-DELIVERY-AUDIT.md) | 屏幕理解交付边界只读审计：功能代码与导入边界、聊天依赖、菜单设置命令搜索贡献、配置数据权限卸载责任、构建清单，事实与建议分列。 | 判断"识屏专属代码到底有多少、和聊天 / 窗口查询共享了什么"时。 |
+| [`plugin-phase-04-updates/PHASE4A-SCREEN-PACKAGE-DESIGN.md`](plugin-phase-04-updates/PHASE4A-SCREEN-PACKAGE-DESIGN.md) | 屏幕理解最小拆包设计与可选聊天联动：五组接口（平台查询 / 独立视觉配置与凭据端口 / 贡献生命周期 / 识屏—聊天联动 / 自包含 Worker 与独立构建）。 | 设计功能包宿主面、贡献生命周期或凭据边界时。 |
+| [`plugin-phase-04-updates/PHASE4B-LOCAL-MANAGEMENT-DESIGN.md`](plugin-phase-04-updates/PHASE4B-LOCAL-MANAGEMENT-DESIGN.md) | Phase 4B 本地安装与管理闭环总设计（4B-1 唯一状态 → 4B-1.5 资源硬门 → 4B-2 租约 → 4B-3 事务 → 4B-4 管理 UI → 4B-5 真实构建），含逐次落盘的收尾合同。 | 实现或评审"唯一安装状态 / 租约 / 事务 / 管理 UI"这条链之前。 |
+| [`plugin-phase-04-updates/PHASE4B-1.5-RESOURCE-HARD-GATE-DESIGN.md`](plugin-phase-04-updates/PHASE4B-1.5-RESOURCE-HARD-GATE-DESIGN.md) | 资源 DLC 硬门设计与验收详情：统一资源包根路径合同、冲突安装与清理所有权、安装到实际播放 E2E、Starter 与 Core 更新保护、内容缓存 hash 隔离、卸载中断恢复。 | 改资源包根路径合同、冲突安装清理、Starter/Core 更新保护或缓存隔离时。 |
+| [`plugin-phase-04-updates/PHASE4B-2-CROSS-PROCESS-VERSION-LEASE-DESIGN.md`](plugin-phase-04-updates/PHASE4B-2-CROSS-PROCESS-VERSION-LEASE-DESIGN.md) | 跨进程版本租约设计：租约布局、获取流程、Core Host / 独立设置页 / Worker 三处生命周期、状态监视与旧请求保护、占用检查与失败安全。 | 实现版本占用检测、卸载前释放或跨进程状态同步时。 |
+| [`plugin-phase-04-updates/PHASE4B-3-LOCAL-TRANSACTIONS-DESIGN.md`](plugin-phase-04-updates/PHASE4B-3-LOCAL-TRANSACTIONS-DESIGN.md) | 官方功能包安装 / 升级 / 卸载事务设计：安全 staging 与完整验证、安装升级启动确认与回滚、卸载与延迟 GC、原生 probe 的可验证实现细节。 | 改安装事务状态机、staging 边界、回滚或延迟 GC 时。 |
+| [`plugin-phase-04-updates/PLUGIN-UPDATE-PROTOCOL.md`](plugin-phase-04-updates/PLUGIN-UPDATE-PROTOCOL.md) | 资源包与官方功能包的安装 / 卸载 / 更新合同：两类包分开（不是一套任意代码加载器）、来源信任与执行前校验、统一安装状态与生命周期、UI 贡献与管理、停用卸载重装、Core 更新与便携边界、条件远程能力、验收矩阵。 | 改包类型语义、来源信任、安装 / 更新协议或停用卸载语义时。 |
+| [`plugin-phase-05-distribution/README.md`](plugin-phase-05-distribution/README.md) | Phase 5 官方功能选装交付与推广：5A 小 Core Setup 内嵌选装与 ZIP / 便携，5B AI 对话优先再推广全部官方领域，条件来源适配器，验收与失败恢复。 | 设计分发入口、便携布局或排官方功能推广批次时。 |
+| [`plugin-phase-05-distribution/PHASE5A-LOCAL-DISTRIBUTION-DESIGN.md`](plugin-phase-05-distribution/PHASE5A-LOCAL-DISTRIBUTION-DESIGN.md) | Phase5A 本地分发设计与验收，含逐次落盘的补充（生产构建前置实证、卸载边界、显式导入与锁合同、probe 材料有界恢复、空间预算、五产物总签名与空间门）。 | 做本地分发、便携、卸载边界或分发签名与体积门时。 |
+| [`plugin-phase-06-ecosystem/README.md`](plugin-phase-06-ecosystem/README.md) | Phase 6 第三方 SDK 与社区生态（条件阶段）：与官方选装分开、有条件推进顺序、进入和退出门、开放闸门，明确不开放任意 `in_process` Python host。 | 讨论"要不要开放第三方 SDK / 社区目录"时；写对外 SDK 措辞前。 |
+| [`plugin-phase-07-release/README.md`](plugin-phase-07-release/README.md) | Phase 7 最小 Core 与官方选装的正式发布验收：发布范围与状态必须真实、三平台与生命周期门、产物与性能门、可信发布与维护门。 | 做"最小 Core + 官方选装"发布形态的验收时（**本仓库尚无该发布形态**，见 PORT-STATUS.md）。 |
 
 ## 在线更新与网络发布
 

@@ -97,11 +97,17 @@ MOD 中心**分片移植**，落地面如下——判定依据是分支上的六
 源码形态（`mod.json` + `host/`），**打包脚本 `scripts/build_mod_example.py` 未移植**——
 本仓库的 MOD 中心按成品包的 `manifest.json` 接入，不提供示例打包命令。
 
+上表只覆盖 MOD 这一面。**要把作者的全部 phase（1 / 2 / 3A / 3B / 3C / 4A / 4B / 5A / 5B /
+6 / 7）逐项对照本仓库的落地状态，读 [`PORT-STATUS.md`](PORT-STATUS.md)**——它按作者的 phase
+结构写明 ✅ 做到 / ⚠️ 半做 / ❌ 未做、证据落点与没做的原因，也是
+[`../plugin-roadmap/`](../plugin-roadmap/) 与 [`../plugin-phase-01-foundation/`](../plugin-phase-01-foundation/)
+那批移植件的状态总表。
+
 ## 工程入口
 
 [总索引](../INDEX.md) · [制作手册](AUTHORING-HANDBOOK.md) · [实施计划](MOD-CENTER-IMPLEMENTATION-PLAN-2026-10-10.md) ·
 [角色素材教程](CHARACTER-PACKS.md) · [MOD 使用指南](USER-GUIDE.md) ·
-[交付报告（本仓库汇总）](../PR-REPORT-DLC-MOD-CENTER-2026-10-13.md)。
+[移植状态对照](PORT-STATUS.md) · [交付报告（本仓库汇总）](../PR-REPORT-DLC-MOD-CENTER-2026-10-13.md)。
 所有命令在仓库根目录执行；推荐独立 Python 虚拟环境，不读取真实用户配置或 Key。
 
 ## 实际效果与限制
