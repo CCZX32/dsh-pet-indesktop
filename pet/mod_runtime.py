@@ -32,7 +32,28 @@ class GenericModMounts:
     def _changed(self, owner, state):
         if state != "enabled":
             self._stop(owner)
+        if state == "absent":
+            self._forget(owner)
         self.sync()
+
+    def _forget(self, owner):
+        """owner 被移出宿主（卸载）时连 Runtime 一起丢掉。
+
+        留着上一代的 Runtime 会让**重装**走错路：``sync()`` 见 owner 还在 ``runtimes``
+        里就不再构造新的，于是重装后的启用把命令打在一个已经 ``close()`` 过的对象上。
+        """
+        runtime = self.runtimes.pop(owner, None)
+        self.running.discard(owner)
+        if runtime is None:
+            return
+        try:
+            runtime.close()
+        except Exception:
+            _LOG.exception("MOD runtime could not be closed: %s", owner)
+        try:
+            self.host.detach(owner, self.scope)
+        except Exception:
+            _LOG.exception("MOD contributions could not be detached: %s", owner)
 
     def sync(self):
         for owner in self.host.owners():

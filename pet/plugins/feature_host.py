@@ -261,6 +261,19 @@ class FeatureHost:
         self._notify(owner)
 
     def remove(self, owner: str) -> bool:
+        """撤回一个 owner 在宿主里的**全部**痕迹（幂等）；False = 被 ``before_remove`` 否决。
+
+        ``disable`` 只停执行；``remove`` 还要摘干净这个 owner 的声明与绑定，否则
+        **重装会撞上死代码**：
+
+        * ``provide`` 会因为 ``_definitions`` 里那份旧声明拒绝（"feature already
+          provided"），于是卸载后在同一进程里再装一次永远装不进来；
+        * 残留的 ``_bindings`` 会让下一次 ``enable`` 把菜单挂回**上一代已经关闭的**
+          Runtime 上（菜单能点，命令打在死对象上）。
+
+        撤走的是声明与绑定，**不是**导入过的代码（``sys.modules`` 里那份仍然在
+        （Python 没有卸载），所以卸载只删安装副本，代码留到进程退出。
+        """
         self.registry.check_thread()
         for prepare in tuple(self._prepare.get(owner, ())):
             if not prepare():
@@ -268,6 +281,15 @@ class FeatureHost:
         self.disable(owner)
         self._states[owner] = "absent"
         self.registry.revoke_owner(owner)
+        self._definitions.pop(owner, None)
+        self._bindings = {key: value for key, value in self._bindings.items() if key[0] != owner}
+        self._authorities.pop(owner, None)
+        self._menus = {key: value for key, value in self._menus.items() if key[0] != owner}
+        self._settings = {key: value for key, value in self._settings.items() if key[0] != owner}
+        self._executions = {token: value for token, value in self._executions.items() if value[0] != owner}
+        # ``_prepare``（before_remove 闸门）**故意留着**：它是"动这个 owner 之前必须先问谁"
+        # 的**常设**登记，不是随 provide 派生的一份状态。摘掉它会让"卸载→重装"之后的
+        # 第二次撤回失去闸门（重装不会再走一遍 attach，闸门没人重挂）。
         self._notify(owner)
         return True
 

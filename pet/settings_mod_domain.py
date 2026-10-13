@@ -100,6 +100,95 @@ class DialogModHost:
         self.window = dialog.parent()
         #: 已记录、等设置窗关闭时执行的换装请求（见 :meth:`use_resource`）。
         self.pending_use = ""
+        #: 扩展宿主：懒解析（见 :meth:`feature_host`）。``_UNSET`` 表示还没问过。
+        self._feature_host = _UNSET
+        #: 只建"自建宿主"的那个开关（见 :meth:`feature_host`）：只有真正装配了 MOD
+        #: 中心页才置位——只建一个对话框不该顺带拉起一份扩展宿主。
+        self.allow_own_host = False
+
+    # ------------------------------------------------------- 扩展宿主
+
+    def feature_host(self):
+        """进程级扩展宿主；答不上来返回 ``None``（MOD 中心如实显示"宿主未接入"）。
+
+        两条来源，按**拓扑**而不是按偏好选：
+
+        * 有父窗 ⇒ 用**父窗那一份**（主进程 ``AppShell.feature_runtime``）。宿主是
+          进程级单例，这里绝不另建第二份——两个宿主会在同一份安装状态上互相打架。
+        * 没有父窗（独立设置进程 ``python -m pet --settings``）⇒ 按需建一份
+          ``role="settings"`` 的宿主：只 provide + 按需 ``settings_factory``，
+          **永不构造 Runtime、永不启 Worker**（见 ``pet/feature_management.py``）。
+        """
+        if self._feature_host is not _UNSET:
+            return self._feature_host
+        runtime = getattr(self.window, "feature_runtime", None)
+        if runtime is None and self.dialog.parent() is None and self.allow_own_host:
+            from .feature_management import LocalFeatureRuntime
+
+            try:
+                runtime = LocalFeatureRuntime(self.dialog.config, role="settings")
+                self._owns_host = True
+            except Exception:
+                _LOG.exception("设置进程内装配扩展宿主失败；MOD 中心显示宿主不可用")
+                runtime = None
+        self._feature_host = runtime
+        return runtime
+
+    def shutdown(self) -> None:
+        """设置窗关闭时的收口：只收**自建**的那一份（主进程那一份归 AppShell）。"""
+        runtime = self._feature_host
+        self._feature_host = _UNSET
+        if runtime is None or not getattr(self, "_owns_host", False):
+            return
+        try:
+            runtime.close()
+        except Exception:
+            _LOG.exception("关闭设置进程内的扩展宿主失败")
+
+    def extensions(self) -> dict:
+        """功能扩展注册表（``feature_id -> 管理器``）。
+
+        真值来自 :class:`pet.feature_management.LocalFeatureRuntime`：每个 owner 一个
+        ``FeatureManagementManager``（事务服务 + 启动装载 + 结果信号）。宿主答不上来
+        （装配失败、或本进程还没接上）时如实返回**空表**——``ModCenterController``
+        见空表就不列「功能扩展」行、导入功能包时给出"宿主未接入"的拒绝语，
+        不给占位管理器（占位会让 UI 显示一个点不动的条目）。
+        """
+        runtime = self.feature_host()
+        if runtime is None:
+            return {}
+        try:
+            return runtime.extensions()
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("扩展注册表不可用")
+            return {}
+
+    def feature_route(self, source):
+        """包声明路由：读一次有界清单，为它建好管理器（不导入、不执行）。
+
+        死锁修复（D2 spec §7.4-1）：注册表由**安装状态**导出，而安装状态只能通过导入
+        改变——"这个 id 还没注册"不能反过来否掉一次导入。宿主答不出来 = 现状（``None``）。
+        """
+        runtime = self.feature_host()
+        if runtime is None:
+            return None
+        try:
+            return runtime.route(source)
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("包声明路由不可用")
+            return None
+
+    def prepare_feature_revocation(self, owner: str) -> bool:
+        """撤回（停用/删除/回滚/更新）前的 GUI 预检：有草稿就问一次三键。
+
+        与事务层的 ``draft_blocked`` 是**同一条判据的两个入口**，读同一份快照
+        （``pet/settings_mod_panel.prepare_revocation``）。返回 False = 用户取消，
+        调用方必须**中止**这次动作并如实回报。
+        """
+        runtime = self.feature_host()
+        if runtime is None:
+            return True
+        return bool(runtime.prepare_feature_revocation(owner, self.dialog))
 
     # ------------------------------------------------------------- 能力
 
@@ -143,17 +232,6 @@ class DialogModHost:
         verified = bool(dirs) or all(ids)
         return LiveUsage(verified=verified, asset_dirs=dirs,
                          character_ids=tuple(dict.fromkeys(ids)))
-
-    def extensions(self) -> dict:
-        """功能扩展注册表（``feature_id -> 管理器``）；本版本恒为空。
-
-        功能扩展的管理器要接上官方功能包安装信任链（``feature_package_transactions``
-        等）与宿主运行时，本仓库尚未接入——**这里如实返回空表**而不是给一个占位管理器：
-        ``ModCenterController`` 见空表就不列「功能扩展」行，导入功能扩展包时给出
-        「宿主未接入」的拒绝语（见 ``pet/mod_center_controller.py`` 的模块 docstring）。
-        接回时把管理器填进这张表即可，控制器侧不用改。
-        """
-        return {}
 
     # ------------------------------------------------------------- 动作
 
@@ -211,24 +289,87 @@ def build_mod_rows(dialog) -> list[SettingRow]:
     ]
 
 
+_UNSET = object()
+
+
+def open_extension_settings(dialog, owner: str) -> bool:
+    """把某个扩展自己的设置面板挂进 MOD 中心页（**按 owner 局部挂载**）。
+
+    切 owner 时先对上一块 ``dispose()``：MOD 列表的刷新只重建它自己的行，别的页与
+    上一块面板的草稿都不该因为一次列表刷新而重建（spec §3.2）。返回 False = 这个
+    扩展当下没有可用的设置界面（如实拒绝，不假造一个空面板）。
+    """
+    close_extension_settings(dialog)
+    runtime = dialog.mod_host.feature_host()
+    host_widget = getattr(dialog, "mod_panel_host", None)
+    if runtime is None or host_widget is None:
+        return False
+    try:
+        panel = runtime.settings_panel(owner, host_widget)
+    except (OSError, ValueError, RuntimeError):
+        _LOG.exception("扩展设置面板不可用: %s", owner)
+        return False
+    if panel is None:
+        return False
+    dialog.mod_panel = panel
+    dialog.mod_panel_owner = str(owner)
+    host_widget.layout().addWidget(panel)
+    panel.show()
+    return True
+
+
+def close_extension_settings(dialog) -> None:
+    """收走当前挂着的扩展设置面板（幂等；没有就什么都不做）。"""
+    panel, dialog.mod_panel = getattr(dialog, "mod_panel", None), None
+    dialog.mod_panel_owner = ""
+    if panel is None:
+        return
+    try:
+        panel.dispose()
+    except (RuntimeError, ValueError):
+        _LOG.exception("扩展设置面板收尾失败")
+
+
 def install_mod_domain(dialog) -> QWidget:
     """「扩展管理」域整页（幂等：域导航重建时复用同一个控制器与控件）。"""
     if getattr(dialog, "mod_controller", None) is None:
         host = DialogModHost(dialog)
+        # 只有真正装配了 MOD 中心页才允许"本进程自建宿主"（独立设置进程那条路）。
+        host.allow_own_host = True
         dialog.mod_host = host
         dialog.mod_controller = ModCenterController(host, parent=dialog)
         dialog.mod_center = ModCenterWidget(dialog.mod_controller, dialog, kinds=dialog.mod_controller.kinds)
+        # 扩张自己的设置入口：按 owner 局部挂载（见 open_extension_settings）。
+        dialog.mod_center.settings_requested.connect(lambda owner: open_extension_settings(dialog, owner))
+        dialog.mod_panel = None
+        dialog.mod_panel_owner = ""
         # 关窗即收尾：批处理的后续格子不再继续动文件（正在跑的那一格仍会跑完）；
-        # 记下的换装请求此时执行（见 DialogModHost.use_resource 的时序说明）。
+        # 记下的换装请求此时执行（见 DialogModHost.use_resource 的时序说明）；
+        # 扩展设置面板与自建宿主也在这一条链上收（顺序即连接顺序）。
         dialog.finished.connect(dialog.mod_controller.close)
+        dialog.finished.connect(lambda *_: close_extension_settings(dialog))
         dialog.finished.connect(host.apply_pending_use)
+        dialog.finished.connect(lambda *_: host.shutdown())
     content = QWidget(dialog)
     layout = QVBoxLayout(content)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(18)
     layout.addWidget(SettingsSection("MOD 中心", build_mod_rows(dialog), content))
+    # 扩展自己的设置面板挂在这里（没有时是空的，不占位、不加新设置行）。
+    panel_host = QWidget(content)
+    panel_layout = QVBoxLayout(panel_host)
+    panel_layout.setContentsMargins(0, 0, 0, 0)
+    dialog.mod_panel_host = panel_host
+    layout.addWidget(panel_host)
     layout.addStretch(1)
     return content
 
 
-__all__ = ["DialogModHost", "USE_HINT", "build_mod_rows", "install_mod_domain"]
+__all__ = [
+    "DialogModHost",
+    "USE_HINT",
+    "build_mod_rows",
+    "close_extension_settings",
+    "install_mod_domain",
+    "open_extension_settings",
+]

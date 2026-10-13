@@ -4,8 +4,11 @@ Blueprint: the DLC branch's ``tests/test_feature_package_transactions.py``. The
 transaction/journal/lock/lease cases are kept verbatim. Two host-face changes are
 required and listed in ``.scratch/dlc-fusion/S1c-HANDOFF.md``:
 
-* the fixture package's ``host/factory.py`` no longer imports
-  ``pet.plugins.feature_host`` (the feature-host runtime is not ported);
+* the fixture package's ``host/factory.py`` does not import
+  ``pet.plugins.feature_host``: this file drives the **transaction** layer with a
+  stub self-checker, so the factory is only a digest-checked payload here.  The
+  host runtime itself has since landed (D2), and its own end-to-end lives in
+  ``tests/test_mod_center_end_to_end.py``;
 * ``_startup`` drives the adapted ``tests/_feature_startup_child.py``.
 """
 

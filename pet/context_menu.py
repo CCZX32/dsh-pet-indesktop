@@ -10,6 +10,7 @@ from .context_menus.menu_styles import (
     install_modern_check_indicators,
 )
 from .context_menus.menu_styles.common import install_responsive_menu_style, install_stay_open_interaction
+from .mod_menu import append_extension_submenu
 
 
 def populate_context_menu(menu: QMenu, pet) -> None:
@@ -17,7 +18,7 @@ def populate_context_menu(menu: QMenu, pet) -> None:
 
     现代树的形状由 ``context_menu_layout``（默认 ``modern-default-v1``）与
     动作注册表决定，本函数只负责「样式 → 建树 → 勾选指示/响应式/停留交互」
-    这条固定流水线。
+    这条固定流水线；末尾按需追加「扩展」子菜单（注册表之外，见 ``pet/mod_menu.py``）。
     """
     cfg = getattr(pet, "cfg", None)
     apply_modern_menu_style(menu, cfg.get("context_menu_appearance", {}) if cfg is not None else {})
@@ -25,6 +26,7 @@ def populate_context_menu(menu: QMenu, pet) -> None:
     install_modern_check_indicators(menu)
     install_responsive_menu_style(menu)
     install_stay_open_interaction(menu)
+    append_extension_submenu(menu, pet)
 
 
 __all__ = [

@@ -58,6 +58,7 @@ from .context_menus.shared import (
     animation_icon_cache_hit,
     animation_icon_cache_key,
 )
+from .mod_menu import append_extension_submenu, move_before_quit
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,19 @@ class SpriteMenuFacade:
     def _instance(self):
         """本壳的 PetInstance（app.py）：聊天/角色/视觉识别的进程内持有点。"""
         return getattr(self._shell, "_instance", None)
+
+    @property
+    def feature_runtime(self):
+        """进程级扩展宿主（``pet/mod_menu.append_extension_submenu`` 读的那一项）。
+
+        宿主是长寿命对象（``AppShell`` 持有，会话横跨菜单关闭），overlay 壳只是带着
+        同一个引用；facade 每次右键重建，所以这里必须是**转发**而不是缓存——缓存会
+        在换角色重建壳之后指向上一代。
+        """
+        runtime = getattr(self._shell, "feature_runtime", None)
+        if runtime is not None:
+            return runtime
+        return getattr(self._app_shell, "feature_runtime", None)
 
     @property
     def _app_shell(self):
@@ -749,14 +763,8 @@ def _drop_music_group(menu: QMenu) -> None:
 
 
 def _move_before_quit(menu: QMenu, action) -> None:
-    """把新增项插到「退出」之前（保持"设置/退出这只 紧邻退出"的既有分组）。"""
-    for candidate in menu.actions():
-        if candidate is action:
-            continue
-        if candidate.text() == "退出":
-            menu.removeAction(action)          # 显式摘除再插入 = 确定性移动
-            menu.insertAction(candidate, action)
-            return
+    """把新增项插到「退出」之前（实现收在 ``pet/mod_menu.py``，两条拓扑共用一份）。"""
+    return move_before_quit(menu, action)
 
 
 def build_sprite_full_menu(shell, sprite=None) -> QMenu:
@@ -788,6 +796,8 @@ def build_sprite_full_menu(shell, sprite=None) -> QMenu:
         exit_action = _add_action(menu, "退出这只", None, facade.on_exit_pet,
                                   close_on_trigger=True)
         _move_before_quit(menu, exit_action)
+    # 「扩展」子菜单：与窗口侧同一个追加函数（注册表之外，见 pet/mod_menu.py）
+    append_extension_submenu(menu, facade)
     # F5 教训：facade 与菜单同寿命（wrapper 回收后回调命中失效引用）
     menu._facade = facade
     return menu

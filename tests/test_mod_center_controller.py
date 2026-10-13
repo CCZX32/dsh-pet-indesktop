@@ -286,14 +286,18 @@ def test_feature_package_is_refused_with_a_truthful_reason(env):
 
 
 def test_a_feature_package_without_a_registered_extension_names_the_missing_half(env):
-    """标记字段存在但没有对应注册表条目时，拒绝语要指向真正的缺口。"""
+    """标记字段存在但没有对应注册表条目时，拒绝语要指向真正的缺口。
+
+    D2 片 2 起宿主已接上，这条只剩「这次没能接上」（装配失败 / 路由失败）两种成因，
+    所以文案不再说"本版本还没有接上"——那是新的假话。
+    """
     controller, _host = _controller(env)
     package = _write_package(env[0] / "marker-only", extra={"execution_kind": "host-worker"})
     results = []
     controller.result.connect(lambda _key, outcome: results.append(outcome))
     assert not controller.import_source(package)
     assert "功能扩展" in results[-1].message
-    assert "未接入" in results[-1].message
+    assert "没能接上" in results[-1].message
     assert not results[-1].success
 
 
@@ -702,4 +706,98 @@ def test_extension_and_resource_rows_share_one_queue_and_one_batch(env):
     pump(lambda: batches)
     assert [key for key, _outcome in batches[-1]] == ["角色资源:demo", KIND_EXTENSION + ":official.demo"]
     assert all(outcome.success for _key, outcome in batches[-1])
+    assert manager.submitted[0][0] == "enable"
+
+
+# ------------------------------------------------------- 撤回前的草稿预检（D2 片 2）
+
+class _DraftHost(ExtensionHost):
+    """带 ``prepare_feature_revocation`` 的宿主：预检结论由用例给定。"""
+
+    def __init__(self, data_root, managers, *, allowed=True):
+        super().__init__(data_root, managers)
+        self.allowed = allowed
+        self.asked: list = []
+
+    def prepare_feature_revocation(self, owner):
+        self.asked.append(owner)
+        return self.allowed
+
+
+def _draft_controller(env, manager, *, allowed=True):
+    host = _DraftHost(env[0], {"official.demo": manager}, allowed=allowed)
+    return host, ModCenterController(host)
+
+
+def test_a_refused_revocation_precheck_aborts_before_touching_the_manager(env):
+    """取消 = 中止：管理器连一条命令都不该收到（草稿与安装副本都原样保留）。"""
+    manager = _extension_env(env)
+    host, controller = _draft_controller(env, manager, allowed=False)
+    results = []
+    controller.result.connect(lambda key, outcome: results.append((key, outcome)))
+    entry = _only_extensions(controller)[0]
+    controller._begin([("disable", entry, None)])
+    pump(lambda: results)
+    assert host.asked == ["official.demo"]
+    assert manager.submitted == []
+    assert results[-1][1].success is False
+    assert "已取消" in results[-1][1].message
+
+
+def test_an_allowed_revocation_precheck_reaches_the_manager(env):
+    manager = _extension_env(env)
+    host, controller = _draft_controller(env, manager, allowed=True)
+    entry = _only_extensions(controller)[0]
+    controller._begin([("disable", entry, None)])
+    pump(lambda: not controller.busy)
+    assert host.asked == ["official.demo"]
+    assert manager.submitted[0][0] == "enable"
+
+
+def test_enable_is_never_gated_by_the_draft_precheck(env):
+    """启用不丢任何东西：不该被草稿问一次（问的每一条都要能中止动作才有意义）。"""
+    manager = _extension_env(env, enabled=False)
+    host, controller = _draft_controller(env, manager, allowed=False)
+    entry = _only_extensions(controller)[0]
+    controller._begin([("enable", entry, None)])
+    pump(lambda: not controller.busy)
+    assert host.asked == []
+    assert manager.submitted[0][0] == "enable"
+
+
+def test_an_update_of_an_installed_extension_is_gated_too(env):
+    manager = _extension_env(env)
+    host, controller = _draft_controller(env, manager, allowed=False)
+    package = _feature_package(env[0] / "incoming")
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    assert controller.import_source(package, expected=KIND_EXTENSION + ":official.demo") is True
+    pump(lambda: results)
+    assert host.asked == ["official.demo"]
+    assert manager.imported == []
+    assert "已取消" in results[-1].message
+
+
+def test_a_host_without_the_precheck_capability_behaves_exactly_as_before(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    entry = _only_extensions(controller)[0]
+    controller._begin([("disable", entry, None)])
+    pump(lambda: not controller.busy)
+    assert manager.submitted[0][0] == "enable"
+
+
+def test_a_precheck_that_raises_does_not_block_the_user(env):
+    """预检本身出错不许把用户卡死在"点不动"上：如实放行，让下游权威判据回答。"""
+    manager = _extension_env(env)
+    host = _DraftHost(env[0], {"official.demo": manager})
+
+    def broken(_owner):
+        raise RuntimeError("precheck blew up")
+
+    host.prepare_feature_revocation = broken
+    controller = ModCenterController(host)
+    entry = _only_extensions(controller)[0]
+    controller._begin([("disable", entry, None)])
+    pump(lambda: not controller.busy)
     assert manager.submitted[0][0] == "enable"

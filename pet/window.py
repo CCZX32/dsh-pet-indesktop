@@ -395,6 +395,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.on_look_synced = None
         self.on_look_screen = None
         self.on_open_modern_settings = None
+        # 进程级扩展宿主（D2）：由 AppShell._wire_window 注入，窗口只持引用。
+        # 右键菜单每次弹出即建即用，宿主必须**长寿命**——所以这里绝不自建。
+        self.feature_runtime = None
         self.on_restore_fun_windows = None
         self.on_spawn_pet = None
         self.on_clear_spawned_pets = None

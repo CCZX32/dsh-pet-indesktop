@@ -342,6 +342,11 @@ def test_pure_logic_modules_do_not_import_qt():
         # workers/protocol（S2 已定）。workers/lease_bootstrap.py 同理由——子进程
         # 认领租约发生在任何运行时代码之前。
         "mod_api/v1.py", "mod_api/worker_v1.py", "workers/lease_bootstrap.py",
+        # 2026-10-13（D2 第二片）加入 plugins/lifecycle.py：它是事务层 runtime= 的
+        # 唯一消费方，prepare() 由管理器的**后台线程**调用（草稿快照由 GUI 线程在
+        # 派发前喂好）——沾上 Qt 就等于让后台线程去碰 GUI 对象。机器判据不止这里：
+        # tests/test_mod_lifecycle_gate.py 用无 GUI 探针在**解析期**钉住它。
+        "plugins/lifecycle.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

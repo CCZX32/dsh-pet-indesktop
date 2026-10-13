@@ -157,6 +157,37 @@ class ProductionFeatureStartup:
             raise StateError("state_lock_busy")
         return FeatureVersionSelection.from_resolution(resolution)
 
+    def release(self) -> bool:
+        """把当前绑定交还宿主（卸载 / 换版本前必须先放掉进程 pin 与 Runtime）。
+
+        ``FeaturePackageBinding.close()`` 会走 ``host.remove(owner)``（停 Runtime、撤销
+        贡献、清空状态）并关掉 host handle。本对象随后不再持有已关闭的绑定——下一次
+        ``load_current()`` / ``load_pending()`` 会重新绑定。
+
+        **额外放掉跨进程 host pin**：``HostHandle.close()`` 刻意不动 ``process_pin``
+        （导入过的代码无法卸载，pin 因此在 DLC 口径里活到进程退出）。但"用户明确卸载 /
+        换版本"是另一回事——不放手的话删除动作永远做不到（占用判据全 free 才允许删），
+        用户会看到"等你把桌宠退了再说"，而重装又被 pending 事务挡住。这里放掉的是**本
+        进程自己那一份**租约：别的进程（例如独立设置进程）的 pin 照旧拦着，那句"等程序
+        自然退出"因此仍然是真话。释放后若本次事务失败，下一次 ``load_current`` 会重新
+        取租约，恢复到原状。
+
+        宿主拒绝交还时（``host.remove`` 被 ``before_remove`` 闸门否决，例如面板还有
+        未保存编辑）返回 False 且**不改变本对象的状态**：撤回动作应当在那里如实中止。
+        """
+        binding = self.binding
+        if binding is None:
+            return True
+        if not binding.close():
+            return False
+        pin = getattr(binding.handle, "process_pin", None)
+        if pin is not None and not getattr(pin, "closed", True):
+            pin.close()
+        self.binding = None
+        self.context = None
+        self._pending_receipt = None
+        return True
+
     def load_current(self) -> OperationResult:
         if self._pending_receipt is not None:
             return self._confirm_receipt()

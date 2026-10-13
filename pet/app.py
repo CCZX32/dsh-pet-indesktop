@@ -562,6 +562,7 @@ class PetInstance:
         wrapper.__doc__ = getattr(fn, "__doc__", None)
         return wrapper
 
+
     def _wire_window(self, win: PetWindow) -> None:
         """绑定新窗口的回调接线（创建与角色切换共用，两处历史逐行重复）。
 
@@ -581,6 +582,8 @@ class PetInstance:
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
+        # 进程级扩展宿主（D2）：窗口只持引用，「扩展」子菜单由 pet/mod_menu.py 按需追加。
+        win.feature_runtime = getattr(self.shell, "feature_runtime", None)
         # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见
         # window_alerts.redirect_hidden_bubble）；岛对话不可用时注入方返回 False。
         win.hidden_bubble_redirect = self.shell._island_feedback_bubble
@@ -1323,6 +1326,12 @@ class AppShell:
         # overlay 拓扑不再需要额外门控，legacy 多窗同样受益）。
         self._decode_hub = DecodeFanoutHub(
             enabled=bool(config.get('experimental_shared_decode', True)))
+        # D2：进程级功能扩展宿主（MOD 中心的可执行包）。**必须在建窗之前装配**——窗口与
+        # overlay 壳各持一个引用供右键菜单用（``pet/mod_menu.py``），而它是长寿命单例：
+        # 菜单/设置面板每次弹出即建即用，宿主跨会话活着（spec §7.2-1）。
+        # 与角色/slot0 健康度**解耦**：装配失败只记诊断、MOD 中心如实显示"宿主不可用"，
+        # 绝不让桌宠启动失败（spec §7.2-3）。
+        self.feature_runtime = self._build_feature_runtime()
         # 4.4b（T6「multi_window_shared 不删，常开化」）：进程级共享子系统
         # （agent_link / proactive / 全屏 watcher）**恒建**，各窗经 PetWindow
         # 构造参数引用同一份，崩溃/换角色不重建。sprite 拓扑里共享子系统缺位
@@ -1383,6 +1392,21 @@ class AppShell:
         # 驱动灵动岛的 agent 活跃指示。
         self._shared.agent_link.dsh_state_changed.connect(self._on_dsh_state_changed)
         _LIVE_SHELLS.add(self)
+
+    def _build_feature_runtime(self):
+        """装配进程级功能扩展宿主；失败只记诊断，绝不让桌宠启动失败。
+
+        ``LocalFeatureRuntime`` 构造期会按安装状态账本发现 owner 并尝试装载当前版本
+        （走既有事务/租约/状态机）。那一步可能因为锁竞争、包被改坏等原因失败——**桌宠
+        照常起来**，MOD 中心随后如实显示该扩展不可用（``fault`` / ``recovery_required``）。
+        """
+        try:
+            from .feature_management import LocalFeatureRuntime
+
+            return LocalFeatureRuntime(self.config, role='core')
+        except Exception:
+            logging.exception('功能扩展宿主装配失败；桌宠照常启动，MOD 中心显示宿主不可用')
+            return None
 
     def _mark_slot0_profile_unusable(self, migration) -> None:
         """slot0 档案不可用（单槽损坏）：**降级该槽**，不拖死整个应用（ops D2）。
@@ -2359,6 +2383,9 @@ class AppShell:
             # AppShell，故直接取 self.speak_self_talk——写 self.shell 会
             # AttributeError（见 _precache 段同款注释）。
             self._overlay_shell.on_self_talk_speak = self.speak_self_talk
+            # 进程级扩展宿主（D2）：overlay 壳只持引用，右键菜单经 SpriteMenuFacade
+            # 转发读到它（``pet/mod_menu.feature_runtime_for``）。
+            self._overlay_shell.feature_runtime = self.feature_runtime
             self._overlay_shell.start()
             selector = getattr(self._overlay_shell, "select_slot", None)
             if self._slot_id is not None and callable(selector):
@@ -2744,6 +2771,17 @@ class AppShell:
         # 退出标记（R2 第五缺口）：在途自动拉起 worker 凭它中止或补偿收口——
         # 否则「退出时登记表为空 → worker 随后 spawn 登记」会留下永远无人收的进程。
         self._quitting = True
+        # D2 收口序（spec §7.2-4）：**先关扩展宿主**（停第三方 Runtime、停它的 worker、
+        # 撤销菜单/设置面板），**再**往下走各窗/共享子系统；Worker 子进程的异步收口由
+        # main() 在事件循环之后调 WorkerSupervisor.finish_app_shutdown() 兜底（幂等）。
+        # 位置在窗级收口之前：第三方 Runtime 的 stop() 常要碰它自己的窗口对象，
+        # 等窗拆完再停就会打到已析构的父链上。
+        runtime = getattr(self, "feature_runtime", None)
+        if runtime is not None:
+            try:
+                runtime.close()
+            except Exception:
+                logging.exception("退出时关闭功能扩展宿主失败")
         # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win

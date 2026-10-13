@@ -12,9 +12,10 @@ provided; it never quietly downgrades an isolation requirement.
   （``WindowsFeatureProbeSandbox`` / ``TrustedProbeBundle``）是原生 Windows
   沙箱启动器，不在本片范围。折进来之后 :class:`SubprocessFeatureSelfChecker`
   自成一个完整单元，不再有一条指向未移植模块的惰性 import。
-* 未移植 DLC 的 ``verified_host_probe``：它按契约"只在沙箱内调用"，但体内
-  要用 ``plugins.feature_host`` / ``plugins.feature_packages``（宿主运行时，
-  本片范围外）。宿主运行时接入时一并落。
+* 未移植 DLC 的 ``verified_host_probe``：它按契约"只在沙箱内调用"，而本仓库没有
+  LPAC 原生沙箱流水线（``SubprocessFeatureSelfChecker.available`` 恒 False），
+  所以这条探针路径在本拓扑根本跑不起来。宿主运行时（``plugins.feature_host``）
+  已在 D2 落地；缺的是沙箱本身，不是它。
 """
 
 from __future__ import annotations

@@ -34,10 +34,12 @@
         的结果映射与忙等重试阶梯；后者转成 ``changed``。
 
 DLC 原文在 ``.scratch/dlc-fusion/src/mod_center_controller.py``；本文件保留同一套队列、
-结果协议与重试阶梯，只把 `managers` 换成宿主给的 `extensions` 注册表。功能扩展的
-**包声明路由**（``local_package_intents.route_local_package``）与 `FeatureManagementManager`
-本身仍未移植——本仓库的宿主面（``pet/settings_mod_domain.py``）目前返回空注册表，
-所以「功能扩展」这一格在真实运行里还不会出现；接回时的落点就是 ``extensions()``。
+结果协议与重试阶梯，只把 `managers` 换成宿主给的 `extensions` 注册表。D2 片 1 落了
+**包声明路由**（``local_package_intents.route_local_package``）与宿主缝 ``feature_route``，
+片 2 把真值接上：``pet/settings_mod_domain.py`` 的 ``extensions()`` 现在由
+``pet/feature_management.LocalFeatureRuntime`` 提供（每个 owner 一个
+``FeatureManagementManager``），所以「功能扩展」这一格在真实运行里真的会出现。
+本仓库仍**没有**的只有官方内置域（识屏 / AI）与 LPAC 探针沙箱，见 spec §5。
 
 **ZIP 导入探针缺陷（S4 收口，逐环判定）**：DLC 侧用 ZIP 导入**功能扩展**示例包会报
 ``worker_probe_failed``，处置结果分两半，**不要**笼统表述为"已修复"：
@@ -198,9 +200,13 @@ def declared_kind(manifest: dict) -> str:
 def unsupported_package_message(source: Path, *, extensions=()) -> str:
     """非资源包的如实拒绝语；空串 = 交给资源存储层按内容校验。
 
-    ``extensions`` = 已注册的功能扩展 id 集合。一个功能扩展包只有在**声明的 id 已有
-    注册表条目**（即本进程真的能驱动它的安装信任链）时才被路由；否则如实说清是哪一个
-    环节没接上，而不是静默失败。缺 ``kind`` 的手工角色包照样往下走。
+    ``extensions`` = 已注册的功能扩展 id 集合。一个功能扩展包只有在**声明的 id 已在
+    注册表里**（即本进程真的能驱动它）时才被路由；否则如实说清是哪一个环节没接上，
+    而不是静默失败。缺 ``kind`` 的手工角色包照样往下走。
+
+    D2 片 2 起宿主**已经接上**：这条拒绝语只剩两种真实成因——① 宿主装配失败（
+    ``AppShell`` 里只记诊断、桌宠照常启动），② 包声明本身读不出来/路由失败。所以
+    文案不再说"本版本没有接上"（那是新的假话），改说"这次没能认出/接上"。
     """
     manifest = declared_manifest(source)
     if declared_kind(manifest) != KIND_EXTENSION:
@@ -211,7 +217,7 @@ def unsupported_package_message(source: Path, *, extensions=()) -> str:
     declared_id = manifest.get("id")
     if isinstance(declared_id, str) and declared_id in set(extensions):
         return ""
-    return "这个包是功能扩展包，但本版本还没有接上它对应的功能扩展宿主：安装子系统未接入。"
+    return "这个包自称是功能扩展包，但这次没能接上它的扩展宿主：请重新打开设置页再试；若仍失败，检查该包的清单是否完整。"
 
 
 class ModCenterController(QObject):
@@ -449,6 +455,9 @@ class ModCenterController(QObject):
             self._background(lambda: self._install(source, entry))
             return
         if action == "import_feature":
+            if not self._feature_revocation_allowed(str(entry)):
+                self._finish(ModOutcome(False, "已取消，编辑保留"))
+                return
             self._import_feature(str(entry), source)
             return
         if entry.kind == KIND_EXTENSION:
@@ -464,6 +473,9 @@ class ModCenterController(QObject):
     def _extension_action(self, action: str, entry: ModEntry) -> None:
         """把一个动作交给该功能扩展的管理器；管理器忙/答不上来 = 如实拒绝。"""
         manager = self.extensions.get(entry.id)
+        if action in _RELEASING_ACTIONS and not self._feature_revocation_allowed(entry.id):
+            self._finish(ModOutcome(False, "已取消，编辑保留"))
+            return
         if manager is None:
             self._finish(ModOutcome(False, "这个功能扩展已经不可用：请重新打开设置页。"))
             return
@@ -483,6 +495,26 @@ class ModCenterController(QObject):
             return
         if not accepted:
             self._finish(ModOutcome(False, "该包正在操作，请稍后重试"))
+
+    def _feature_revocation_allowed(self, owner: str) -> bool:
+        """撤回前的宿主预检（**可选能力**，缺省放行）。
+
+        DLC 同款（``_prepare_feature_revocation``）：停用 / 删除 / 回滚 / 更新一个功能
+        扩展之前，若它自己的设置面板还有未保存编辑，问一次「保存 / 放弃 / 取消」；
+        取消 = 中止这次动作并如实回报（``已取消，编辑保留``）。
+
+        判据与事务层的 ``draft_blocked`` 是**同一条判据的两个入口**，读的是同一份草稿
+        快照（``pet/settings_mod_panel.prepare_revocation``），所以不会出现"预检说可以、
+        事务层说不行"。答不上来的宿主（含全部既有测试替身）行为与之前完全一致。
+        """
+        provider = getattr(self.host, "prepare_feature_revocation", None)
+        if provider is None:
+            return True
+        try:
+            return bool(provider(owner))
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("扩展撤回预检不可用")
+            return True
 
     def _import_feature(self, owner: str, source: Path) -> None:
         """导入一个本地功能扩展包：走该扩展管理器自己的本地源入口。"""

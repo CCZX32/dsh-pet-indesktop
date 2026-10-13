@@ -1014,6 +1014,9 @@ class OverlayShell(QObject):
         _LIVE_OVERLAY_SHELLS.add(self)  # 测试收口登记（构造即登记，幂等弱引用）
         self.app = app
         self._instance = instance
+        # 进程级扩展宿主（D2）：由 AppShell 装配后注入，壳只持引用。菜单每次右键
+        # 即建即用，宿主必须**长寿命**（会话横跨菜单关闭）——所以绝不在这里新建。
+        self.feature_runtime = None
         self._config = getattr(instance.config, "_main", instance.config)
         self._screen = screen if screen is not None else app.primaryScreen()
         self._sprite_factory = sprite_factory or (

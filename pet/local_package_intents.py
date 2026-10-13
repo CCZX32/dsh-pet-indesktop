@@ -7,7 +7,12 @@ Ported from the DLC branch ``pet/local_package_intents.py``；本片只搬**路�
 
 DLC 同文件的后半段（``LocalPackageIntent`` / ``attach_local_package_manager`` /
 ``create_local_package_dialog`` / ``run_local_packages``）是**已关闭的 Setup 适配层**，
-依赖 GUI 管理面板与 ``FeatureManagementRuntime``，属后续切片。
+依赖 GUI 管理面板与 ``FeatureManagementRuntime``。
+**D2 片 2 起本仓库的等价物已经落地，但不在这条路上**：包声明路由由
+``pet/settings_mod_domain.DialogModHost.feature_route`` 转给
+``pet/feature_management.LocalFeatureRuntime.route``（读到 owner 就地为它建管理器），
+导入动作仍由 ``ModCenterController`` 派给那个管理器——所以这里只保留只读路由那一半，
+不搬 Setup 的对话框与批量安装器。
 
 A user-selected directory or ZIP is routed only from bounded manifest metadata.
 The target manager performs the full verifier, transaction, self-check and

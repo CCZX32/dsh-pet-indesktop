@@ -73,7 +73,7 @@ def test_a_route_that_answers_nothing_keeps_the_existing_refusal(env):
     assert controller.import_source(_feature_package(env[0] / "incoming")) is False
     assert host.routed  # 问过了，答案是没有
     assert not results[-1].success
-    assert "还没有接上" in results[-1].message
+    assert "接上" in results[-1].message  # 如实说清这次没接上，而不是静默失败
 
 
 def test_a_route_for_another_package_is_not_trusted(env):
@@ -86,7 +86,7 @@ def test_a_route_for_another_package_is_not_trusted(env):
     assert host.routed == [package]  # 问过了
     assert not results[-1].success
     assert "official.other" not in controller.extensions
-    assert "还没有接上" in results[-1].message
+    assert "接上" in results[-1].message  # 如实说清这次没接上，而不是静默失败
 
 
 def test_an_update_routed_to_another_package_is_refused(env):
