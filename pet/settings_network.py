@@ -338,10 +338,16 @@ def build_island_network_rows(dialog) -> list[SettingRow]:
     行随域导航每次重建（行壳随旧页 deleteLater，控件对象复用），与 island /
     file_interpret 行的重建口径一致。**没有控件的 id 不建行**：清单可能在窗口打开
     之后变动，那一行的开关并不存在（装配一个 ``None`` buddy 只会做出一个空行）。
+
+    **每行都建在宿主上（``parent=dialog``）**：行壳建出来时还没进卡片，而
+    :func:`_install_visibility` 当场就要按依赖位 ``setVisible``——无父控件的
+    ``setVisible(True)`` 会当场开出一个顶层窗口（Windows 上就是用户看到的无标题
+    小窗，见 ``pet/chat/settings_dialog.py`` 同款坑的注释）。
     """
     create_network_controls(dialog)
     rows = [
-        SettingRow(key, title, hint, getattr(dialog, _metric_attr(metric_id), None))
+        SettingRow(key, title, hint, getattr(dialog, _metric_attr(metric_id), None),
+                   parent=dialog)
         for metric_id, key, title, hint in metric_rows()
         if getattr(dialog, _metric_attr(metric_id), None) is not None
     ]
@@ -350,9 +356,10 @@ def build_island_network_rows(dialog) -> list[SettingRow]:
         "延迟探测间隔",
         _interval_hint(dialog),
         dialog.network_probe_interval_spin,
+        parent=dialog,
     ))
     rows.extend(build_game_fps_rows(dialog))
-    _install_visibility(dialog, rows)
+    _install_visibility(dialog)
     return rows
 
 
@@ -362,6 +369,7 @@ def build_game_fps_rows(dialog) -> list[SettingRow]:
     **新行一律追加在末尾**（同 ``_METRIC_ROWS`` 的取舍）：把新行插进中间会让老用户
     保存一次就把既有行序重排一次。前两行是"跟随设置"——只在帧率指标开启时才显示
     （与「延迟探测间隔」跟网络开关同规：关闭时留着可编辑就是"改了没反应"）。
+    三行都建在宿主上（``parent=dialog``），理由同 :func:`build_island_network_rows`。
     """
     create_network_controls(dialog)
     create_fps_controls(dialog)
@@ -373,6 +381,7 @@ def build_game_fps_rows(dialog) -> list[SettingRow]:
             "上一个目标的旧读数会被丢掉，不会留在岛上）。指定程序：只采集下面填的"
             "那个程序——窗口化游戏的前台窗口不一定是游戏本体时用它。",
             dialog.game_fps_target_mode_select,
+            parent=dialog,
         ),
         SettingRow(
             "game_fps_process",
@@ -382,6 +391,7 @@ def build_game_fps_rows(dialog) -> list[SettingRow]:
             "（例如 My Game.exe）。只在「指定程序」模式下可编辑；"
             "留空等于没有目标——不会替你挑一个帧率最高的程序来显示。",
             dialog.game_fps_process_edit,
+            parent=dialog,
         ),
     ] + _fps_permission_rows(dialog)
 
@@ -391,6 +401,7 @@ def _fps_permission_rows(dialog) -> list[SettingRow]:
 
     这一行没有配置键、不写盘：权限状态每次打开设置页用进程内令牌 / 组成员 API 现查，
     点按钮才弹系统 UAC 把当前用户加进 ``Performance Log Users`` 组。
+    本行同样在 ``_FPS_FOLLOW_KEYS`` 里跟着帧率开关显隐，故也建在宿主上。
     """
     button = getattr(dialog, "game_fps_permission_btn", None)
     if button is None:
@@ -404,6 +415,7 @@ def _fps_permission_rows(dialog) -> list[SettingRow]:
             "权限运行，不装服务、不常驻提权进程。加入后，注销或重启电脑才生效；"
             "要撤销，在「计算机管理 · 本地用户和组」里把自己移出该组即可。",
             button,
+            parent=dialog,
         )
     ]
 
@@ -567,22 +579,20 @@ def _sync_fps_target(dialog) -> None:
     edit.setToolTip(_FPS_PROCESS_TOOLTIP if in_process_mode else _FPS_PROCESS_DISABLED_TOOLTIP)
 
 
-def _install_visibility(dialog, rows: list[SettingRow]) -> None:
+def _install_visibility(dialog) -> None:
     """把岛侧三级的显隐依赖接上（岛开关 → 信息槽开关 → 指标行 / 间隔行）。
 
     依赖位（``_visibility_dependencies``）与 ``settings_pet_controls`` 写的那些位
     按 AND 合成，两边互不干扰、与调用顺序无关。信号只连一次；行壳每次域导航重建
     都是新的，故信号回调统一读 ``dialog._island_network_sync`` 上的最新闭包。
+
+    行壳建在宿主上（``parent=dialog``），所以这里的 ``findChild`` 一次就能命中，
+    不必再对无父的行补 ``setVisible``——那条补丁正是「无父控件被显示成顶层窗口」
+    的来源（见 :func:`build_island_network_rows` 的 docstring）。
     """
-    by_key = {row.objectName()[len("settingRow_"):]: row for row in rows}
 
     def apply(key: str, visible: bool, dependency: str) -> None:
         dialog._set_setting_rows_visible((key,), visible, dependency=dependency)
-        row = by_key.get(key)
-        # 行壳刚构造出来、还没进卡片时 ``findChild`` 找不到它（父对象尚未设置），
-        # 上面那条通道会落空——这里对本体补一次，语义完全相同（进卡片后不再走）。
-        if row is not None and row.parent() is None:
-            row.setVisible(visible)
 
     def sync(*_args) -> None:
         island_on = bool(dialog.island_enabled_check.isChecked())
