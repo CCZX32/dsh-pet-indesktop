@@ -28,7 +28,7 @@ from PySide6.QtCore import (
     QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter,
+    QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QLinearGradient, QPainter,
     QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -4445,6 +4445,34 @@ class DynamicIsland(QWidget):
         QTimer.singleShot(0, self, self.reassert_topmost)
 
     # ------------------------------------------------------------ 悬停
+    def _hover_rects(self) -> tuple[QRect, ...]:
+        """可 hover 区的矩形集合 = 当前窗口矩形 + 细条矩形；非停靠态只有窗口矩形。
+
+        左右停靠时滑出胶囊比细条矮：细条 16×64、胶囊高 44 且以细条中心居中，细条
+        上下各露 (64-44)/2 = 10px **死区**——光标停在那里时滑出的窗口盖不住它
+        （Qt 合成 leave），但收回细条又会盖住它（enter），于是形成
+        收回 → 再滑出 的自持循环。所以"鼠标走了没有"不能只看窗口矩形，要看这张网。
+
+        细条矩形按当前窗口推导（``strip_rect_for``），与 ``_target_rect`` 的停靠
+        收口公式同源：滑出时它就是收回后窗口将落到的那个矩形（有测试钉住这条等价）。
+        **逐矩形判包含**（``any(contains)``），不取 ``QRect.united`` 的包围盒——包围
+        盒会把"胶囊下缘外那 10px 横带"也划进区内（那里的像素既不在胶囊里也不在细条
+        里，收回去完全安全），收回会被无谓地拖到光标走得更远才发生。
+        """
+        rect = self.geometry()
+        if self._mode != "docked":
+            return (rect,)
+        screen = self._current_screen()
+        if screen is None:
+            return (rect,)
+        strip = strip_rect_for(rect, self.dock_edge, screen.availableGeometry())
+        return (rect,) if strip == rect else (rect, strip)
+
+    def _cursor_in_hover_zone(self) -> bool:
+        """光标是否仍在可 hover 区内（``_hover_rects`` 的唯一判据入口）。"""
+        point = QCursor.pos()
+        return any(rect.contains(point) for rect in self._hover_rects())
+
     def enterEvent(self, event) -> None:  # noqa: N802
         self._cursor_inside = True
         # 展开卡片时不悬停放大（整窗缩放会截掉贴边的卡片底板，见 paintEvent）
@@ -4467,12 +4495,24 @@ class DynamicIsland(QWidget):
         if self._mode == "expanded":
             self._card_collapse_timer.start()
         if self._mode == "docked" and self._hover_peek:
+            # 这里**不**按可 hover 区拦表：只离开窗口、没离开区（死区）时仍然起表，
+            # 表到点由 _dock_back 按同一判据复检，光标真走了才会收回。在这里拦会
+            # 漏掉收口——光标先停在死区（leave 发生在区内、被拦下）再走出细条时，
+            # 窗口和光标都不再动，不会再有第二个事件把它找回来，滑出就永久钉住
+            # （实机实测：真实光标停在死区、随后移出细条，滑出 3s 不回收）。
             self._dock_back_timer.start()
         self._ensure_anim_timer()
         super().leaveEvent(event)
 
     def _dock_back(self) -> None:
         if self._mode == "docked" and self._hover_peek:
+            if self._cursor_in_hover_zone():
+                # 复检：细条单击滑出的预览（光标就停在细条上）、以及"光标还泡在
+                # 死区里"这两种情况都会走到这里。此刻收回 → 细条立刻盖回光标 →
+                # enterEvent 再滑出，就是 1s 周期的自持振荡。不收回，也不留悬表：
+                # 延后一拍再判，光标真走了仍会在一个周期（800ms）内收口。
+                self._dock_back_timer.start()
+                return
             self._hover_peek = False
             self._animate_to(self._target_rect())
             self._sync_content_sampling()   # 收回细条 = 内容全不画 → 全停采样
