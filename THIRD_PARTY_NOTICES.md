@@ -237,3 +237,70 @@ OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
 OR OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+---
+
+## 7. 本地 OCR（快速识屏：RapidOCR + PP-OCR 模型 + ONNXRuntime）
+
+- **随包模型 Files**（`resources/rapidocr_models/`，共 30.3 MiB / 31.7 MB，
+  31,772,168 字节——下表逐项相加所得，2026-10-13 实测；其中三个 `.onnx` 占
+  31,749,509 字节）：
+
+  | 文件 | 字节 | sha256 |
+  | --- | --- | --- |
+  | `PP-OCRv6_det_small.onnx`（文本检测） | 9,929,594 | `090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f` |
+  | `PP-OCRv6_rec_small.onnx`（文本识别） | 21,234,383 | `6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884` |
+  | `ch_ppocr_mobile_v2.0_cls_mobile.onnx`（方向分类） | 585,532 | `e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c` |
+  | `LICENSE.txt`（Apache-2.0 全文） | 11,422 | `3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333` |
+  | `MODEL_LICENSES.md`（上游模型许可与出处声明） | 8,398 | `c5fd0e8603d3df743355b546121e6fe0f4ef8ff455c5a85c1681fd3ae520e153` |
+  | `NOTICE.md`（本目录的出处/许可说明） | 2,839 | 由本项目编写 |
+
+- **Origin / Source**：三个 `.onnx` 逐字节取自 PyPI 上 `rapidocr` wheel 自带的
+  `rapidocr/models/`（本项目钉 `rapidocr>=3.10,<4`，本机 3.10.0）；上游权重来自
+  PaddleOCR 官方模型（`PP-OCRv6_small_det` / `PP-OCRv6_small_rec` 与旧版
+  `ch_ppocr_mobile_v2.0_cls`），由 RapidOCR 转换为 ONNX 后按 Apache-2.0 分发。
+  取出命令写在 `pet/screen_capture/ocr.py` 的模块说明里；摘要与上游
+  `MODEL_LICENSES.md` 第 6 节登记值逐项一致。
+- **License**: **Apache License 2.0**（模型与应用同许可）。权重的版权归
+  **Baidu 和/或相应的 PaddleOCR 权利人**；RapidOCR 不主张上游权重所有权。
+  `LICENSE.txt` 与 `MODEL_LICENSES.md` 是 `rapidocr` wheel 内同名文件的
+  **逐字拷贝，未改动**，随模型一起进包（安装器整目录拷贝）。
+  Apache-2.0 §4 要求的"给接收者一份许可证"由 `LICENSE.txt` 满足；
+  §4(c)/(d) 的署名与上游声明由 `MODEL_LICENSES.md` 原文满足；§4(b) 的"改动声明"
+  不适用——我们没有修改模型文件（原样拷贝，文件名与字节都未变），
+  上游对"转换后产物"建议的声明文本随 `NOTICE.md` 一并附上。
+- **Used by**: `pet/screen_capture/ocr.py`（本地 OCR，纯离线）与
+  `pet/screen_capture/actions.py`（「截图 → 提取文字」动作）。
+  **隐私边界：识别全程在本机内存里完成，不联网、不落盘**——模型与字符表都在
+  包里（字符表内嵌在识别模型的 ONNX 元数据里，没有额外的字典文件被下载）；
+  加载路径上不存在下载分支（自建 ONNXRuntime 会话注入 rapidocr，短路其"模型路径
+  为空就去网上下"的分支）。
+- **校验**：构建期由 `scripts/verify_rapidocr_models.py` 按「文件名 + sha256」
+  三重核对（源目录一次、产物里再一次），任一不符即中止打包。缺件或换版时产品
+  **不会崩**——只会让识别静默变差（错字/漏行）或直接报"请重新安装"，所以必须在
+  打包阶段拦住。运行期不做摘要校验（每次启动多读 31 MB 只为一件事 CI 该做的事）。
+- **测试数据**：`rapidocr/models/` 之外的一切（推理引擎、字符表、配置）不进本仓库。
+
+### 新增运行时依赖（`requirements.txt`）
+
+| 发行包 | 版本约束 | License | 用途 |
+| --- | --- | --- | --- |
+| [`rapidocr`](https://pypi.org/project/rapidocr/) | `>=3.10,<4` | Apache-2.0 | OCR 流水线（检测/识别/方向分类的预处理与后处理） |
+| [`onnxruntime`](https://pypi.org/project/onnxruntime/) | `>=1.20` | MIT | 推理引擎（CPU-only，显式关自旋与 GPU） |
+| [`numpy`](https://pypi.org/project/numpy/) | `>=1.26` | BSD-3-Clause | `QImage` 像素缓冲 → BGR 数组；输出块坐标 |
+| [`omegaconf`](https://pypi.org/project/omegaconf/) | `>=2.3` | BSD-3-Clause | rapidocr 的配置容器（用 `allow_objects` 注入自建会话） |
+
+许可名取自各发行包自带的 LICENSE 文件（`rapidocr` 为 Apache-2.0、
+`onnxruntime/LICENSE` 为 MIT、`numpy` 与 `omegaconf` 为 BSD-3-Clause）。
+这四个包之外，`rapidocr` 还会带进一批传递依赖，它们同样随包分发；各自的许可与
+版权声明随其 wheel 一起（PyPI 页面与 wheel 内的 `dist-info/licenses/`），
+全部是宽松许可（GEOS 的 LGPL 除外，且是随 shapely 动态链接的独立库）：
+`opencv-python` / `opencv-python-headless`（Apache-2.0；rapidocr 声明的发行名是
+headless，本机两个发行名同版本并存、都提供 `cv2` 顶层模块与同名的 FFMPEG 视频
+后端 DLL）、`shapely`（BSD-3-Clause，其二进制发行还捆绑 GEOS，**LGPLv2.1**，
+条款见 wheel 内 `LICENSE_GEOS`）、`pyclipper`（MIT）、`six`（MIT）、
+`PyYAML`（MIT）、`tqdm`（MPL-2.0 AND MIT）、`colorlog`（MIT）、
+`requests`（Apache-2.0，项目本身已依赖）。
+`numpy`/`cv2` **不再**出现在构建脚本的"构建机环境污染"排除清单里，也不再被
+`scripts/slim_bundle.py` 的违禁清单拦——它们现在是产品依赖（排除它们曾让冻结包
+的 OCR 全线不可用，2026-10-13 实测）。

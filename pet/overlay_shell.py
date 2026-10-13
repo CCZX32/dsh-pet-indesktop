@@ -2724,6 +2724,34 @@ class OverlayShell(QObject):
         if callable(sync):
             sync(user_text, text)
 
+    # ---- 截图（快速识屏 P0 切片 3：三个产品入口的 sprite 侧接线）----
+    def _screen_capture(self):
+        """三个截图动作的编排件（**本壳长期持有**，菜单对象每次右键重建）。
+
+        等价性：与 ``PetWindow`` 的三个同名入口指向**同一个**编排件实现
+        （``screen_capture.actions``），差别只在宿主面——本壳的 ``_config`` /
+        ``show_bubble`` / ``proactive_watcher`` / ``_instance.shell.island``。
+        采集闭环自己负责隐藏/还原窗口，所以这里不需要逐 sprite 的宿主路由。
+        """
+        from .screen_capture.actions import actions_for
+
+        return actions_for(self)
+
+    @property
+    def on_screen_capture_ocr(self):
+        """「截图 → 提取文字」：采集 → 本地 OCR → 结果浮层（纯本地，不联网）。"""
+        return lambda: self._screen_capture().run("ocr")
+
+    @property
+    def on_screen_capture_translate(self):
+        """「截图 → 翻译」：本片只接通道（原文 + 双语对照位），引擎是后续片。"""
+        return lambda: self._screen_capture().run("translate")
+
+    @property
+    def on_screen_capture_ask(self):
+        """「截图 → 问答」：采集 → 显式确认 → vision/chat 通道 → 岛／结果浮层。"""
+        return lambda: self._screen_capture().run("ask")
+
     # ---- 黄金回旋（复用 golden_spin.GoldenSpinController + sprite 宿主）----
     def _golden_spin_capable(self, sprite) -> bool:
         """sprite 是否支持整帧旋转通道（假 sprite/替身没有则整族静默降级）。"""

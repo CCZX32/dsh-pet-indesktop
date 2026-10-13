@@ -91,6 +91,11 @@ def _run_settings(config=None) -> int:
     # 设置进程只有设置窗一个窗口：关窗即退出，OS 立刻回收全部内存
     #（进程内设置页首开留下的字体/样式/模块高水位没有卸载 API，只能靠进程退出）。
     app.setQuitOnLastWindowClosed(True)
+    # 图片解码上限：设置页要用 QImageReader 读用户挑的头像/图片文件，超大图在
+    # Qt 默认上限（256 MB/张，本机实测）下读不出来。与 pet/app.py::main 同一处设定
+    # （这里的 QApplication 是本进程自己建的，静态设置不跨进程继承）。
+    from .qt_image_limits import apply_image_allocation_limit
+    apply_image_allocation_limit()
     if config is None:
         from .config import Config
 
