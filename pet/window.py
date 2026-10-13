@@ -458,6 +458,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._speech_bubble = PetSpeechBubble(
             style_id=str(config.get('self_talk_bubble_style', DEFAULT_SELF_TALK_BUBBLE_STYLE))
         )
+        self._speech_bubble.set_host_on_top(bool(config.get('on_top', True)))
         self._speech_bubble.clicked.connect(self._on_speech_bubble_clicked)
         self._look_busy = False
         self._last_look_ts = 0.0
@@ -1123,6 +1124,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._schedule_macos_window_level(on)
         if on:
             self.raise_()
+        bubble = getattr(self, '_speech_bubble', None)
+        if bubble is not None:
+            bubble.set_host_on_top(on)
 
     def _restore_on_top_after_context_menu(self) -> None:
         """Reassert the native floating level after menus/app activation changes."""

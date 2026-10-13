@@ -324,17 +324,11 @@ class PetSpeechBubble(QFrame):
         self._interactive = False
         self._capture_compat = False
         self._capture_host: QWidget | None = None
+        # 置顶跟随宿主「桌面置顶」设置（set_host_on_top）：宿主不置顶时气泡
+        # 也不置顶，否则宠物被其他窗口挡住、气泡却浮在最上层。
+        self._host_on_top = True
         self.setObjectName("pet-speech-bubble")
-        flags = (
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
-        # 气泡只是状态提示，在所有平台都不应该成为键盘焦点窗口。
-        # WA_ShowWithoutActivating 在部分窗口系统上只是提示，而这个原生窗口
-        # flag 才是防止定时 show() 抢走其他应用输入光标的硬约束。
-        flags |= Qt.WindowType.WindowDoesNotAcceptFocus
-        self.setWindowFlags(flags)
+        self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -796,6 +790,33 @@ class PetSpeechBubble(QFrame):
                     min(int(round(BREATH_CANVAS_MAX_W * content_scale)), width))
         return QSize(width, int(width * 195 / 240 + 0.5))
 
+    def _apply_window_flags(self) -> None:
+        """按 _host_on_top 重建独立窗口旗标；setWindowFlags 会隐窗，可见性要保住。"""
+        was_visible = self.isVisible()
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            # 气泡只是状态提示，在所有平台都不应该成为键盘焦点窗口。
+            # WA_ShowWithoutActivating 在部分窗口系统上只是提示，而这个原生窗口
+            # flag 才是防止定时 show() 抢走其他应用输入光标的硬约束。
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        if self._host_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        if was_visible:
+            self.show()
+
+    def set_host_on_top(self, on: bool) -> None:
+        """跟随宿主「桌面置顶」开关。capture 兼容模式是主窗子控件，无窗口旗标，跳过。"""
+        on = bool(on)
+        if on == self._host_on_top:
+            return
+        self._host_on_top = on
+        if self._capture_compat:
+            return
+        self._apply_window_flags()
+
     def set_interactive(self, on: bool) -> None:
         """开启后气泡可被鼠标点击（用于触发快速对话），默认全透明穿透。"""
         self._interactive = bool(on)
@@ -822,13 +843,7 @@ class PetSpeechBubble(QFrame):
         else:
             self._capture_host = None
             self.setParent(None)
-            flags = (
-                Qt.WindowType.Tool
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowStaysOnTopHint
-                | Qt.WindowType.WindowDoesNotAcceptFocus
-            )
-            self.setWindowFlags(flags)
+            self._apply_window_flags()
             if _MAC:
                 self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
         if not self._anchor_rect.isEmpty():
