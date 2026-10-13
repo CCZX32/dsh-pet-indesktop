@@ -208,6 +208,9 @@ from .webm_clip import session_ending
 
 try:  # 与 webm_clip 同一依赖口：不可用时供给静默 no-op（播放同样会降级）
     import imageio_ffmpeg
+    from .ffmpeg_hide import install as _install_ffmpeg_hide
+
+    _install_ffmpeg_hide()
 except Exception:  # pragma: no cover - 缺依赖属环境问题
     imageio_ffmpeg = None
 

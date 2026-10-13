@@ -647,9 +647,10 @@ def test_live_turn_end_notifies_when_converger_stays_success(tmp_path, monkeypat
 def test_link_off_on_residue_does_not_swallow_live_turn_end(tmp_path, monkeypatch):
     """R3：关掉再开启联动（真 start/stop + 真 worker）后，残留终态不得吞掉 live 收尾。
 
-    ``_last_raw`` 不随监视器生命周期清空——关闭联动时它停在上一轮的 "success"。
-    重新接上时回填会把这一回合的历史整批跳过，prev 因此不是 None 而是残留的
-    "success"；判定交给 live 记录身份后不受影响。
+    关闭联动会经 offline 复位管线清掉原始状态镜像（``_last_raw`` 不再残留上一轮的
+    终态，"新 DSH 重启不永远忙"）。本用例证明的是另一件事：**即便呈现管线里没有
+    任何可用的 prev**（复位后 prev 是 None、回填又把这一回合的历史整批跳过），
+    live 回合收尾仍然照常提醒一次——判定交给 live 记录身份，不依赖 prev。
     """
     rig = _make_rig(tmp_path, monkeypatch)
     mon, mgr = rig.mon, rig.mgr
@@ -663,10 +664,12 @@ def test_link_off_on_residue_does_not_swallow_live_turn_end(tmp_path, monkeypatc
         assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles), timeout=15.0), rig.bubbles
         assert mgr._last_raw.get("dsh") == "success", mgr._last_raw
 
-        # 关闭联动（真 stop + 既有复位管线），残留终态留在 _last_raw
+        # 关闭联动（真 stop + 既有复位管线）：写者随通道一起消失，原始状态镜像整片
+        # 作废——否则旧实例留下的终态/忙态会跨代次存活（关掉再开一直是"忙"）。
         mon.stop()
         mgr._on_dsh_converged_state("", "offline", "link-disabled")
-        assert mgr._last_raw.get("dsh") == "success", "残留终态（本用例要证明它不吞提醒）"
+        assert mgr._last_raw.get("dsh") is None, "offline 必须清掉原始状态镜像"
+        assert not mgr._owner_raw, "offline 必须清掉写者分片"
         rig.clock[0] += 10.0                    # 越过完成冷却
 
         # 关闭期间这一回合的历史已经落盘；重新开启后回填跳过它，live 只来收尾
@@ -707,6 +710,86 @@ def test_same_turn_end_written_to_two_files_notifies_once(tmp_path, monkeypatch)
         mgr.shutdown()
     assert len(_succeeded(rig.bubbles)) == 1, rig.bubbles
     assert rig.sounds.count("done.wav") == 1, rig.sounds
+
+
+def test_mirrored_envelope_with_user_message_notifies_once(tmp_path, monkeypatch):
+    """M2：两个写者各写**一整封镜像信封**（含 user/message）→ 只提醒一次。
+
+    旧行为：镜像判定只认 ``turn/start``，``user/message`` 永远重新发号——它进的是全
+    写者共享的会话表，第二条 user/message 一发号，同一回合的两份收尾就落在两个 token
+    上、算出两个身份，消费侧身份去重失效，第二次完成提醒照弹。桥接透传 ``sourceTurn``
+    后两侧回合号相同 → 镜像副本绑到同一个身份（身份构造见 dsh_state）。
+    """
+    rig = _make_rig(tmp_path, monkeypatch)
+    mon, mgr = rig.mon, rig.mgr
+    envelope = (
+        {"event": "user/message", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+        {"event": "turn/start", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+        {"event": "turn/end", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+    )
+    try:
+        mon._probe_online()
+        (rig.bridge / "dsh-11.jsonl").touch()
+        (rig.bridge / "dsh-22.jsonl").touch()
+        _bump_dir_mtime(rig.bridge)
+        mon._poll()                             # 两个空文件都被发现
+        assert len(mon._tailer._tailers) == 2, list(mon._tailer._tailers)
+
+        _write(rig.bridge, "dsh-11.jsonl", *[{**r, "inst": "bootA"} for r in envelope])
+        mon._poll()
+        assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles)), rig.bubbles
+        _pump(rig.app, 0.3)
+        rig.clock[0] += 10.0                    # 越过完成冷却：真排定的第二次确认会弹
+
+        _write(rig.bridge, "dsh-22.jsonl", *[{**r, "inst": "bootB"} for r in envelope])
+        mon._poll()
+        _pump(rig.app, 1.5)                     # 给不该存在的第二次确认留出整个确认窗
+    finally:
+        mgr.shutdown()
+    assert len(_succeeded(rig.bubbles)) == 1, rig.bubbles
+    assert rig.sounds.count("done.wav") == 1, rig.sounds
+
+
+def test_next_turn_on_another_writer_with_new_source_turn_notifies_again(
+        tmp_path, monkeypatch):
+    """另一回合在另一个写者上继续（回合号不同）→ 两次完成都要提醒，绝不吞。
+
+    与上一个用例成对：镜像绑定只看**回合号**，不看写者归属。同一 (会话, step) 上另一
+    个回合号就是另一回合——「别的写者的 user/message 一律算镜像」会把这次完成整条吞掉
+    （漏报完成，动画/音效都不会有）。
+    """
+    rig = _make_rig(tmp_path, monkeypatch)
+    mon, mgr = rig.mon, rig.mgr
+    first_env = (
+        {"event": "user/message", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+        {"event": "turn/start", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+        {"event": "turn/end", "sessionId": "s-1", "step": "turn:7", "sourceTurn": "7"},
+    )
+    # 下一回合：步长沿用同值（镜像绑定的诱饵），只有回合号变了
+    next_env = tuple({**r, "sourceTurn": "8"} for r in first_env)
+    try:
+        mon._probe_online()
+        (rig.bridge / "dsh-11.jsonl").touch()
+        (rig.bridge / "dsh-22.jsonl").touch()
+        _bump_dir_mtime(rig.bridge)
+        mon._poll()
+        assert len(mon._tailer._tailers) == 2, list(mon._tailer._tailers)
+
+        _write(rig.bridge, "dsh-11.jsonl", *[{**r, "inst": "bootA"} for r in first_env])
+        mon._poll()
+        assert _wait_until(rig.app, lambda: _succeeded(rig.bubbles)), rig.bubbles
+        _pump(rig.app, 0.3)
+        rig.clock[0] += 10.0                    # 越过完成冷却
+
+        _write(rig.bridge, "dsh-22.jsonl", *[{**r, "inst": "bootB"} for r in next_env])
+        mon._poll()
+        assert _wait_until(
+            rig.app, lambda: len(_succeeded(rig.bubbles)) == 2), rig.bubbles
+        _pump(rig.app, 0.3)
+    finally:
+        mgr.shutdown()
+    assert len(_succeeded(rig.bubbles)) == 2, rig.bubbles
+    assert rig.sounds.count("done.wav") == 2, rig.sounds
 
 
 def test_successive_turns_in_one_session_each_notify_once(tmp_path, monkeypatch):

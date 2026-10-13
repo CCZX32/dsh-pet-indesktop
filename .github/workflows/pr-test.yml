@@ -123,14 +123,14 @@ jobs:
       # 用户 profile，link 不装依赖、链接目标常是打包版 _internal 副本（无
       # node_modules）——任何外部 bare import 都会让用户开联动后整个 dsh
       # 插件树加载失败。此前这类回归无任何 CI 覆盖。
-      # 两层校验：node --test 跑全部 7 个 bridge 契约测试（原地 import 捕获
+      # 两层校验：node --test 跑全部 8 个 bridge 契约测试（原地 import 捕获
       # 静态外部依赖回归）；verify_import.mjs 做 hermetic 校验（拷进无
       # node_modules 的临时目录 import + 清单零依赖 + envelope 形状 + 动态
       # import/require 静态禁令 + 临时目录祖先链污染探测）。
       # 注意：新增 bridge 测试文件时必须同步下面的显式清单（Node 20 无 glob）。
       - name: Bridge plugin zero-dependency gate
         run: |
-          node --test tests/test_bridge_hardfailure.js tests/test_bridge_interaction_dedup.js tests/test_bridge_manifest.js tests/test_bridge_question_callid.js tests/test_bridge_retry.js tests/test_bridge_root_control.js tests/test_bridge_user_action_guard.js
+          node --test tests/test_bridge_hardfailure.js tests/test_bridge_instance_scope.js tests/test_bridge_interaction_dedup.js tests/test_bridge_manifest.js tests/test_bridge_question_callid.js tests/test_bridge_retry.js tests/test_bridge_root_control.js tests/test_bridge_user_action_guard.js
           node integrations/dsh-pet-bridge/verify_import.mjs
 
       # 捕获方式按 OS 分流（2026-10-12）：Linux 主套件加 --capture=tee-sys，
@@ -146,7 +146,9 @@ jobs:
       # sys.stdin 只出现在子进程脚本里）。
       # 只给 Linux 加这一口：按 OS 条件内联拼出**同一条命令**，不复制出第二个主套件
       # 步骤——主套件单跑就是 13-15 分钟（round3 实测 mac 13:10 / Windows 15:18）。
+      # id 供下面那条诊断步骤按 `steps.main_suite.outcome` 判定「红的正是主套件」。
       - name: Pytest (main suite)
+        id: main_suite
         run: python -m pytest -q ${{ runner.os == 'Linux' && '--capture=tee-sys' || '' }} --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py
 
       # Linux 主套件失败后的**受限前缀**重跑（诊断，不是覆盖）：只跑收集序前缀
@@ -161,14 +163,17 @@ jobs:
       # test_desktop_pet_features（前缀之外 10 个文件）——那种落点由主套件的 tee-sys
       # 原生日志取证，本步刻意不随崩点漂移扩大。
       # 红绿不变：主套件步骤自己的退出码决定 job 结果，本步无 continue-on-error、
-      # 也不用 `||` 兜底。条件按 GitHub 语义用 failure()（= 之前任一步骤失败）：
-      # ruff/bridge 门在 Linux 上失败时也会多跑这 ~2.5 min，判红仍由那一步决定。
+      # 也不用 `||` 兜底。条件必须**显式**写 failure()：GitHub 在 `if:` 里没有状态
+      # 函数时会隐式套一层 success()，前序步骤一红本步会被直接跳过——诊断恰恰要在
+      # 红的时候跑。再加 `steps.main_suite.outcome == 'failure'`：只有主套件自己红
+      # 才重跑这 ~2.5 min，ruff/bridge 门或隔离族红不再多烧一轮（outcome 而非
+      # conclusion：前者是该步原始结果，不受 continue-on-error 影响）。
       # 独立 DSPET_TEST_DIAG_DIR：诊断重跑若没复现崩溃，不许把主套件那份面包屑
       # （「死在谁、哪个阶段」的唯一记录）覆盖成一份跑完通过的前缀记录。
       # 清单显式写出：改名/删除当场 exit 4 报错，不会静默缩水，也不会因 glob 落空
       # 退化成跑全量。新增测试文件落在该前缀内时同步此清单。
       - name: Pytest (Linux prefix diagnostics after main-suite failure)
-        if: failure() && runner.os == 'Linux'
+        if: failure() && runner.os == 'Linux' && steps.main_suite.outcome == 'failure'
         env:
           DSPET_TEST_DIAG_DIR: ${{ runner.temp }}/dspet-pytest-diag-linux-prefix
         run: >-
@@ -243,13 +248,20 @@ jobs:
 
       # 放在所有 pytest 步骤之后，主套件或隔离族失败均可回读最后运行的面包屑。
       # 失败详情由 conftest 当刻写 stderr；这里只读末尾，不输出两万多行。
+      # 两个目录都回读：主套件那份（dspet-pytest-diag）与 Linux 受限前缀重跑那份
+      # （dspet-pytest-diag-linux-prefix，只有前缀步骤真跑过才存在）。前缀重跑若
+      # 没复现崩溃，主套件那份仍是「死在谁、哪个阶段」的唯一记录——只读其中一份
+      # 就会漏掉另一半现场。
       - name: Pytest crash diagnostics
         if: failure()
         shell: bash
         run: |
-          DIR="${RUNNER_TEMP:-$TMPDIR}/dspet-pytest-diag"
-          [ -f "$DIR/pytest-breadcrumb.txt" ] || exit 0
-          echo "::group::pytest-breadcrumb.txt (tail -30)"
-          tail -n 30 "$DIR/pytest-breadcrumb.txt"
-          echo "::endgroup::"
+          for NAME in dspet-pytest-diag dspet-pytest-diag-linux-prefix; do
+            DIR="${RUNNER_TEMP:-$TMPDIR}/$NAME"
+            if [ -f "$DIR/pytest-breadcrumb.txt" ]; then
+              echo "::group::$NAME/pytest-breadcrumb.txt (tail -30)"
+              tail -n 30 "$DIR/pytest-breadcrumb.txt"
+              echo "::endgroup::"
+            fi
+          done
 

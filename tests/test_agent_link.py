@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 import pet.agent_link as agent_link
 from pet import click_sound, harness_launcher
-from pet.dsh_state import DshState
+from pet.dsh_state import DshState, SCOPE_REJECT_LOG_EVERY
 from pet.agent_link import (
     AgentLinkManager,
     AgentEvent,
@@ -415,13 +417,14 @@ class TestDirGlobTailer:
         """超出 pid_t 表示范围的 pid：posix ``os.kill`` 抛 OverflowError，判定为已死。
 
         复现 CI（ubuntu/macos）：``_bridge_writer_alive(2**32-8)`` 返回 None
-        而非 False——OverflowError 非 OSError，穿透 ``pid_alive`` 的捕获后被
-        上层兜底成「判定失败」。本用例在 Windows 上也能钉死这条分支。
+        而非 False——OverflowError 非 OSError，若被上层兜底就成了「判定失败」。
+        本用例在 Windows 上也能钉死这条分支（注入 posix 侧边界；真平台走
+        ``OpenProcess`` 的 ERROR_INVALID_PARAMETER，同判已死）。
         """
-        def raise_overflow(pid):
-            raise OverflowError("pid is out of range")
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(OverflowError("pid is out of range")))
 
-        monkeypatch.setattr("pet.slot_manager.pid_alive", raise_overflow)
+        assert agent_link._probe_writer_pid_posix(4294967288) is False
         assert agent_link._bridge_writer_alive(4294967288) is False
 
     def test_scan_keeps_stale_file_when_liveness_cannot_be_decided(self, tmp_path, monkeypatch):
@@ -467,6 +470,168 @@ class TestDirGlobTailer:
             tailer.read_new_lines()
         assert [p for p in stale if p.exists()] == []
         assert str(fresh) in tailer._tailers
+
+
+def _raiser(exc):
+    """构造一个"调用即抛该异常"的桩（注入 OS 边界用）。"""
+    def _raise(*_args, **_kwargs):
+        raise exc
+    return _raise
+
+
+class _FakeKernel32:
+    """假 ``kernel32``：只实现探活用到的四个入口（不碰真进程，跨平台可注入）。"""
+
+    def __init__(self, *, open_result=0, last_error=0, exit_code=0, exit_code_ok=True):
+        self._open_result = open_result
+        self._last_error = last_error
+        self._exit_code = exit_code
+        self._exit_code_ok = exit_code_ok
+        self.closed: list = []
+
+    def OpenProcess(self, access, inherit, pid):  # noqa: N802 - Win32 名字
+        self.opened_args = (access, inherit, pid)
+        return self._open_result
+
+    def GetLastError(self):  # noqa: N802
+        return self._last_error
+
+    def GetExitCodeProcess(self, handle, ref):  # noqa: N802
+        if not self._exit_code_ok:
+            return 0
+        ref._obj.value = self._exit_code
+        return 1
+
+    def CloseHandle(self, handle):  # noqa: N802
+        self.closed.append(handle)
+        return 1
+
+
+class TestBridgeWriterLivenessProbe:
+    """桥写者探活的三态判定：权限拒绝**不是**死亡（Win err5 / POSIX EPERM 分开钉死）。
+
+    缺陷（多实例隔离批复审，2026-10）：``_bridge_writer_alive`` 直接复用
+    ``slot_manager.pid_alive`` 的 bool——"权限拒绝"与"没有这个 pid"被压成同一个
+    False。Windows ``OpenProcess`` 面对受保护进程/其他用户/更高完整性级别的目标回
+    ``ERROR_ACCESS_DENIED(5)``，POSIX ``kill(pid, 0)`` 回 ``EPERM``：目标**活着**，
+    只是探不动。判死会退役活写者的忙态与待处理交互（用户还在等的气泡被撤掉），
+    所以这两类必须落成判定失败（``None``）：只有"没有这个 pid"（Win 87 / POSIX
+    ESRCH）与"进程已退出"（退出码非 STILL_ACTIVE）才是确定已死。
+
+    ``slot_manager.pid_alive`` 的布尔语义被多处消费，本批**不动它**：三态口径只落在
+    本模块自己的探活路径上（``_bridge_writer_alive``）。
+    """
+
+    def test_windows_error_codes_are_distinguished(self, monkeypatch):
+        """Win err5（拒绝访问）判不了，Win err87（参数无效 = 没有这个 pid）才是死。"""
+        cases = [
+            (5, None, "ERROR_ACCESS_DENIED：进程存在但探不动"),
+            (87, False, "ERROR_INVALID_PARAMETER：没有这个 pid"),
+            (0, None, "错误码未知（句柄为空但没设错误码）：判不了"),
+            (1231, None, "网络/其他错误：判不了"),
+        ]
+        for winerr, expected, why in cases:
+            kernel32 = _FakeKernel32(open_result=0, last_error=winerr)
+            monkeypatch.setattr(agent_link, "_win32_kernel32", lambda k=kernel32: k)
+            got = agent_link._probe_writer_pid_windows(4242)
+            assert got is expected, f"winerr={winerr}（{why}）得到 {got!r}"
+
+    def test_windows_exit_code_decides_not_handle(self, monkeypatch):
+        """句柄打得开 ≠ 活着（同 ``pid_alive`` 的既有口径）：退出码说了算，句柄必关。"""
+        alive = _FakeKernel32(open_result=0x1234, exit_code=259)      # STILL_ACTIVE
+        monkeypatch.setattr(agent_link, "_win32_kernel32", lambda: alive)
+        assert agent_link._probe_writer_pid_windows(4242) is True
+        assert alive.closed == [0x1234], "每个打开的句柄都必须关上"
+        # 只申请最小查询权限，且除这四个入口外不碰任何 kernel32 API（不为探活提权：
+        # 任何调令牌/权限的 API 都不在这份替身上，一旦被调用本用例立刻红）
+        assert alive.opened_args[0] == agent_link._PROCESS_QUERY_LIMITED_INFORMATION
+
+        exited = _FakeKernel32(open_result=0x1234, exit_code=0)
+        monkeypatch.setattr(agent_link, "_win32_kernel32", lambda: exited)
+        assert agent_link._probe_writer_pid_windows(4242) is False, "退出码不是 STILL_ACTIVE = 已退出"
+        assert exited.closed == [0x1234]
+
+        broken = _FakeKernel32(open_result=0x1234, exit_code_ok=False)
+        monkeypatch.setattr(agent_link, "_win32_kernel32", lambda: broken)
+        assert agent_link._probe_writer_pid_windows(4242) is None, "读不到退出码：判不了，不许判死"
+        assert broken.closed == [0x1234], "失败路径同样必须关句柄"
+
+    def test_posix_esrch_is_confirmed_dead_eperm_is_undecidable(self, monkeypatch):
+        """POSIX：只有 ESRCH 是确定已死；EPERM/EACCES/未知 errno 一律判不了。"""
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(ProcessLookupError(errno.ESRCH, "No such process")))
+        assert agent_link._probe_writer_pid_posix(4242) is False
+
+        for exc, why in ((PermissionError(errno.EPERM, "Operation not permitted"),
+                          "EPERM：进程存在但无权发信号"),
+                         (PermissionError(errno.EACCES, "Permission denied"),
+                          "EACCES：同权限拒绝"),
+                         (OSError(errno.EINVAL, "Invalid argument"), "未知 errno")):
+            monkeypatch.setattr(agent_link, "_os_kill_signal_0", _raiser(exc))
+            got = agent_link._probe_writer_pid_posix(4242)
+            assert got is None, f"{why}：探不动不等于死，得到 {got!r}"
+
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0", lambda pid: None)
+        assert agent_link._probe_writer_pid_posix(4242) is True, "没有异常 = 活着"
+
+    def test_dispatch_keeps_three_states_through_injected_boundaries(self, monkeypatch):
+        """真分派 + 同时注入两个平台的边界：同一断言在 Windows/Linux/macOS 都成立。
+
+        两个边界都注上是刻意的：真分派走哪个分支，那个分支都已按目标注入。
+        """
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(PermissionError(errno.EPERM, "Operation not permitted")))
+        monkeypatch.setattr(agent_link, "_win32_kernel32",
+                            lambda: _FakeKernel32(open_result=0, last_error=5))
+        assert agent_link._bridge_writer_alive(4242) is None, "权限拒绝必须判不了，绝不许判死"
+
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(ProcessLookupError(errno.ESRCH, "No such process")))
+        monkeypatch.setattr(agent_link, "_win32_kernel32",
+                            lambda: _FakeKernel32(open_result=0, last_error=87))
+        assert agent_link._bridge_writer_alive(4242) is False, "没有这个 pid 才是确定已死"
+
+    def test_own_pid_is_alive_through_real_boundary(self):
+        """自己的 pid 必须判活（真 OS 边界：Windows OpenProcess / POSIX kill(pid, 0)）。
+
+        这条是``_maybe_probe_dead_writers`` 的安全前提：把"自己"判死就会自我退役。
+        """
+        assert agent_link._bridge_writer_alive(os.getpid()) is True
+        assert agent_link._bridge_writer_alive(0) is None, "无意义的 pid 判不了，不当死"
+
+
+class TestOwnerFileRetention:
+    """写者→文件映射的淘汰策略（纯函数）：**活跃写者永不被淘汰**。
+
+    映射表是存活探活的唯一 pid 来源（``_maybe_probe_dead_writers`` 的候选必须
+    "写者还在映射表里"）。旧实现按插入次序 FIFO 淘汰最老条目，会把**正忙/正等用户
+    输入**的写者挤出表——那条写者的进程死掉后没有 pid 可探，忙态永远留在桌宠里。
+    """
+
+    def test_evicts_only_inactive_oldest_first(self):
+        owner_files = OrderedDict([("inst:A", "dsh-1.jsonl"), ("inst:B", "dsh-2.jsonl"),
+                                   ("inst:C", "dsh-3.jsonl")])
+
+        evicted = agent_link._evict_inactive_owner_files(owner_files, {"inst:A"}, max_entries=1)
+
+        assert evicted == ["inst:B", "inst:C"], "淘汰只找非活跃的，且从最老的开始"
+        assert list(owner_files) == ["inst:A"]
+
+    def test_active_writers_are_kept_over_capacity(self):
+        owner_files = OrderedDict([("inst:A", "a"), ("inst:B", "b"), ("inst:C", "c")])
+
+        evicted = agent_link._evict_inactive_owner_files(
+            owner_files, {"inst:A", "inst:B", "inst:C"}, max_entries=2)
+
+        assert evicted == []
+        assert list(owner_files) == ["inst:A", "inst:B", "inst:C"], \
+            "全部活跃时宁可暂时超容量，也不丢活跃写者的探活线索"
+
+    def test_within_capacity_is_noop(self):
+        owner_files = OrderedDict([("inst:A", "a")])
+
+        assert agent_link._evict_inactive_owner_files(owner_files, set(), max_entries=8) == []
+        assert list(owner_files) == ["inst:A"]
 
 
 class TestEventStateNormalization:
@@ -5121,3 +5286,1088 @@ class TestBridgeResolutionFrames:
         assert harness.mgr.pending_interactions_for("dsh") == {}, \
             "approval/decided 的旁路兜底收尾被破坏"
         assert harness.win.resolved, "关闭必须经 resolve_alert 精确关闭那一条气泡"
+
+
+class TestMultiDshInstanceIsolation:
+    """两个 DSH 实例（两个桥写者）同时联动时的串扰回归（2026-10，实机复现）。
+
+    桥目录里可以同时有多个 ``dsh-{pid}.jsonl``（每个 DSH 实例一份），桌宠 glob 全部
+    读入。修复前收敛器只有**一份**状态与锁存、呈现侧也只有一份原始状态——
+    A 实例回待机（``AgentStatus idle``）会：
+      ① 撤掉 B 实例还在等的问题/审批气泡（typed state 与 lifecycle record 两条清
+         路径都会清）；
+      ② 把 B 实例的 working 顶成待机（``_last_raw`` 被覆盖 → busy→idle 边沿排定
+         完成确认，弹假完成）；
+      ③ A 的 ``question/resolved`` 解开 B 的问题锁存。
+    这些用例走真链路：真 ``DirGlobTailer``（多文件）+ 真 ``DshMonitor._poll`` + 真
+    收敛器 + 真 ``AgentLinkManager`` + 真 800ms 确认窗；只有窗口与音效是桩。
+
+    唯一被中性化的是回填防护（``_initial_backfill_done = True``）：本类的被测对象是
+    写者隔离，不是回填（回填契约由 tests/test_dsh_mid_attach_done.py 专门守），不置真
+    就要给每个新文件先写一遍"历史"再写"live"，把用例变成回填时序测试。
+    """
+
+    _SOUND_PATHS = {
+        "builtin:agent-start": "start.wav",
+        "builtin:agent-done": "done.wav",
+        "builtin:agent-error": "error.wav",
+    }
+
+    def _make_rig(self, tmp_path, monkeypatch):
+        """真 manager（真 DshMonitor，worker 不启动、手动驱动 _poll）+ 假窗口 + spy。"""
+        app = QApplication.instance() or QApplication([])
+        bubbles: list[str] = []
+        alerts: list[tuple[str, str]] = []
+        resolved: list[str] = []
+        sounds: list[str] = []
+
+        files = {}
+        for value, name in self._SOUND_PATHS.items():
+            path = tmp_path / name
+            path.write_bytes(b"RIFF")
+            files[value] = path
+        # 音效钉在播放漏斗层（winmm 直放 / Qt 后端都逃不掉）
+        monkeypatch.setattr(agent_link, "resolve_builtin_sound", lambda p: files.get(str(p)))
+        for fn in ("play_sound", "play_with_winmm", "play_with_qt"):
+            monkeypatch.setattr(click_sound._pool, fn,
+                                lambda path, volume=1.0: sounds.append(Path(path).name) or True)
+        monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+        monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: True)
+
+        class DummyWin:
+            cats = {"acts": ["写代码", "吃Token"]}
+            idles = ["待机呼吸"]
+            _bubble_busy_until = 0.0
+            _alert_current = None
+            _alert_queue: list = []
+            _sticky_bubble_active = False
+
+            def __init__(self):
+                self.switched: list[str] = []
+
+            def isVisible(self):
+                return True
+
+            def mark_activity(self):
+                pass
+
+            def _switch(self, name):
+                self.switched.append(str(name))
+
+            def request_link_anim(self, name):
+                self.switched.append("anim:" + str(name))
+
+            def request_link_idle(self):
+                self.switched.append("idle")
+
+            def show_bubble(self, text, duration_ms=3000, **_kw):
+                bubbles.append(str(text))
+
+            def show_alert(self, text, *, alert_id="", **_kw):
+                alerts.append((str(alert_id), str(text)))
+                return str(alert_id)
+
+            def resolve_alert(self, alert_id):
+                resolved.append(str(alert_id))
+
+            def hide_bubble(self):
+                pass
+
+            def _pick(self, lst):
+                return lst[0]
+
+        cfg = Config(base=tmp_path / "cfg")
+        cfg.data["agent_link"].update({
+            "sound_enabled": True,
+            "sound_cooldown_seconds": 0.0,
+            "sound_start_path": "builtin:agent-start",
+            "sound_done_path": "builtin:agent-done",
+            "sound_error_path": "builtin:agent-error",
+        })
+        cfg.save()
+        clock = [1000.0]
+        mgr = AgentLinkManager(DummyWin(), cfg, min_interval=0.0, clock=lambda: clock[0])
+        mon = mgr.monitors["dsh"]
+        # 白盒：等效 agent_link.dsh 已启用——迟到信号隔离闸只放行「监视器在跑」的信号
+        mon._running = True
+        mon.events_dir.mkdir(parents=True, exist_ok=True)
+        # 扫描节流关掉（scan_interval=0 是产品合法取值）：本类要的是"新文件当拍摄入"，
+        # 不该赌目录 mtime 的更新时序（Windows 上惰性更新，g2 用例已有实测记录）。
+        mon._tailer.scan_interval = 0.0
+        mon._tailer._initial_backfill_done = True
+        return mgr, mon, bubbles, alerts, resolved, sounds, clock, app
+
+    @staticmethod
+    def _write(bridge: Path, name: str, *records) -> None:
+        with (bridge / name).open("a", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _pump(app, seconds: float) -> None:
+        """跑满一段事件循环（负向断言专用：给不该存在的定时器犯错的机会）。"""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+    @staticmethod
+    def _wait_until(app, predicate, timeout: float = 5.0) -> bool:
+        """宽预算轮询等待（禁止固定 sleep 猜时序：800ms 确认窗在慢 runner 上会漂）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        app.processEvents()
+        return bool(predicate())
+
+    @staticmethod
+    def _succeeded(bubbles) -> list:
+        return [b for b in bubbles if "已完成本轮任务" in b or "执行完成" in b or "已顺利完成" in b]
+
+    def test_other_writer_idle_keeps_pending_question(self, tmp_path, monkeypatch):
+        """A 实例回待机不得撤掉 B 实例还在等的问题（typed state 与 lifecycle 两条清路径）。"""
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "question/requested", "sessionId": "sB", "callId": "qB",
+                         "inst": "bootB", "questions": [{"id": "q1", "question": "选哪个？"}]})
+            mon._poll()
+            pending = mgr.pending_interactions_for("dsh")
+            assert len(pending) == 1, pending
+
+            # A 实例回待机：typed state（AgentStatus idle）与 lifecycle record 是两条
+            # 清路径，同一条记录会同时经过它们，必须都按写者过滤。
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootA"})
+            mon._poll()
+
+            assert mgr.pending_interactions_for("dsh"), "另一个实例回待机不得撤掉 B 还在等的问题"
+            assert resolved == [], "不得关闭 B 的常驻气泡"
+            assert next(iter(pending.values()))["owners"] == {"inst:bootB"}, "交互归属必须是 B"
+        finally:
+            mgr.shutdown()
+
+    def test_double_written_question_keeps_one_body_and_both_writers(self, tmp_path, monkeypatch):
+        """同一问题被两个写者各写一份：正文一次、归属两个（去重不去归属）。
+
+        去重契约不变（正文/提示音只响一次），但第二个写者也在等这条交互——归属集合
+        记全了，先回待机的那个写者才撤不掉用户还在等的气泡。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        record = {"event": "question/requested", "sessionId": "sX", "callId": "qX", "inst": "bootA",
+                  "questions": [{"id": "q1", "question": "同一个问题"}]}
+        try:
+            self._write(bridge, "dsh-11.jsonl", record)
+            self._write(bridge, "dsh-22.jsonl", {**record, "inst": "bootB"})
+            mon._poll()
+
+            pending = mgr.pending_interactions_for("dsh")
+            assert len(pending) == 1, f"同一逻辑事件只允许一份 pending：{pending}"
+            assert len(alerts) == 1, f"正文只落一次：{alerts}"
+            assert next(iter(pending.values()))["owners"] == {"inst:bootA", "inst:bootB"}, \
+                "两个写者都写过这条交互，归属必须记全（去重不去归属）"
+
+            # A 回待机：它自己那份归属被撤（旧口径：实例回待机 = 它等的交互已失效），
+            # 但 B 仍归它 -> 用户还在等的气泡必须保留（这正是归属集合拦下的串扰）
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootA"})
+            mon._poll()
+            left = mgr.pending_interactions_for("dsh")
+            assert left, "A 回待机撤掉了 B 还在等的交互"
+            assert next(iter(left.values()))["owners"] == {"inst:bootB"}, "只剩 B 的归属"
+            assert resolved == []
+
+            # B 自己的 resolved 才收尾
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "question/resolved", "sessionId": "sX", "callId": "qX",
+                         "inst": "bootB"})
+            mon._poll()
+            assert mgr.pending_interactions_for("dsh") == {}
+            assert resolved, "B 的收尾必须把气泡关上"
+        finally:
+            mgr.shutdown()
+
+    def test_busy_writer_not_overridden_by_other_writer_idle(self, tmp_path, monkeypatch):
+        """A 回待机不得把 B 的忙判成待机（否则弹假完成 + 动画切回待机）。"""
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            assert mgr._last_raw["dsh"] == "working"
+
+            bubbles.clear()
+            sounds.clear()
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootA"})
+            mon._poll()
+            assert mgr._last_raw["dsh"] == "working", "A 回待机把整体判成了待机"
+            assert "dsh" not in mgr._done_pending, "还有实例在忙，不得排定完成确认"
+            self._pump(app, 1.2)
+            assert self._succeeded(bubbles) == [], f"不得弹假完成：{bubbles}"
+            assert sounds == [], f"不得播完成音效：{sounds}"
+
+            # 两个实例都回待机：这时才是真实完成，正常排定确认
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootB"})
+            mon._poll()
+            assert mgr._last_raw["dsh"] == "idle"
+            assert "dsh" in mgr._done_pending, "全部实例回待机后必须照常排定完成确认"
+        finally:
+            mgr.shutdown()
+
+    def test_dead_writer_withdraws_only_its_pending_and_stays_silent(self, tmp_path, monkeypatch):
+        """写者被确认死亡：只撤它自己的常驻交互，且**不报完成**。
+
+        「写者已死」的确认口径沿用桥目录清理的保守三连（超龄 + 文件名带 pid + 探活
+        明确为假）；确认后它的状态与交互归属一起退役，但消失不是回合收尾——不得弹
+        「已完成本轮任务」，也不能碰到另一个实例还在等的交互。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        monkeypatch.setattr(agent_link, "_bridge_writer_alive",
+                            lambda pid: pid != 101)   # 只有 dsh-101 的写者已死
+        try:
+            self._write(bridge, "dsh-101.jsonl",
+                        {"event": "question/requested", "sessionId": "sA", "callId": "qA",
+                         "inst": "bootA", "questions": [{"id": "q1", "question": "A 的问题"}]},
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._write(bridge, "dsh-202.jsonl",
+                        {"event": "question/requested", "sessionId": "sB", "callId": "qB",
+                         "inst": "bootB", "questions": [{"id": "q1", "question": "B 的问题"}]},
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            assert len(mgr.pending_interactions_for("dsh")) == 2
+
+            # 让 dsh-101 超龄（写者探活已判死）→ 下一拍扫描确认死亡并清理该文件
+            old = time.time() - 48 * 3600
+            os.utime(bridge / "dsh-101.jsonl", (old, old))
+            bubbles.clear()
+            sounds.clear()
+            mon._poll()
+
+            left = mgr.pending_interactions_for("dsh")
+            assert len(left) == 1, f"只该撤死写者自己的那条：{left}"
+            assert next(iter(left.values()))["owners"] == {"inst:bootB"}
+            self._pump(app, 1.2)
+            assert self._succeeded(bubbles) == [], f"写者死亡不得报完成：{bubbles}"
+            assert sounds == [], f"写者死亡不得播完成音效：{sounds}"
+            assert "dsh" not in mgr._done_pending
+
+            # B（活写者）的收尾照常有效
+            self._write(bridge, "dsh-202.jsonl",
+                        {"event": "question/resolved", "sessionId": "sB", "callId": "qB",
+                         "inst": "bootB"})
+            mon._poll()
+            assert mgr.pending_interactions_for("dsh") == {}
+        finally:
+            mgr.shutdown()
+
+    def test_writer_identity_boot_uuid_beats_pid_reuse(self, tmp_path, monkeypatch):
+        """写者身份 = 插件 boot UUID（旧桥退化为「路径 + 文件身份」），**不是 pid**。
+
+        同一 pid 重启后复用同一个 ``dsh-{pid}.jsonl`` 是两个写者：新实例回待机不得
+        撤销前一个实例还在等的交互。旧桥没有 boot UUID 时用摄入游标里的文件身份，
+        文件被轮转/替换（同路径、新身份）同样算新写者。
+        """
+        # 端到端：同一个文件里先后出现两个 boot 身份（同 pid 重启复用文件）
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-303.jsonl",
+                        {"event": "question/requested", "sessionId": "sN", "callId": "qN",
+                         "inst": "boot-1", "questions": [{"id": "q1", "question": "旧实例的问题"}]})
+            mon._poll()
+            assert len(mgr.pending_interactions_for("dsh")) == 1
+
+            # 新实例（同 pid / 同文件、新 boot）回待机：不得撤掉旧实例的交互
+            self._write(bridge, "dsh-303.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "boot-2"})
+            mon._poll()
+            assert mgr.pending_interactions_for("dsh"), "新 boot 身份回待机撤掉了旧实例的交互"
+            assert resolved == []
+        finally:
+            mgr.shutdown()
+
+        # 纯推导：inst 优先；无 inst 用（路径, 文件身份）；两者都没有 → 不知道归属
+        same_file = ("p/dsh-101.jsonl", (11, 22), 0)
+        assert agent_link.record_owner({"inst": "boot-1"}, same_file) == "inst:boot-1"
+        assert agent_link.record_owner({"inst": "boot-2"}, same_file) == "inst:boot-2"
+        assert agent_link.record_owner({}, same_file) == agent_link.record_owner(
+            {}, ("p/dsh-101.jsonl", (11, 22), 512)), "同一文件的后续行仍是同一写者"
+        assert agent_link.record_owner({}, same_file) != agent_link.record_owner(
+            {}, ("p/dsh-101.jsonl", (33, 44), 0)), "同路径新文件身份 = 新写者"
+        assert agent_link.record_owner({}, None) is None, "推不出归属时不得退化成 pid 猜测"
+
+    # ------------------------------------------------------------------
+    # 写者存活回收（活跃状态）
+    # ------------------------------------------------------------------
+    def _poll_until(self, mon, predicate, polls: int) -> bool:
+        """最多再跑 polls 拍，返回谓词是否成立（低频探活的真实节拍驱动）。"""
+        for _ in range(polls):
+            mon._poll()
+            if predicate():
+                return True
+        return bool(predicate())
+
+    def test_live_writer_probe_retires_only_confirmed_dead(self, tmp_path, monkeypatch):
+        """活跃写者的存活回收：只有明确已死才撤；判定失败/存活一律保留（无静默 TTL）。
+
+        旧行为下这条路径根本不存在（只有 24h 陈旧文件清理），写者进程死掉后状态会
+        永远停在"忙"——所以这里全程按真实轮询节拍驱动，不依赖新内部状态来制造红。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        polls = int(getattr(mon, "_DEAD_WRITER_PROBE_EVERY_N_POLLS", 40)) + 3
+        try:
+            self._write(bridge, "dsh-101.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            mon._poll()
+            assert mgr._last_raw.get("dsh") == "working"
+
+            # 1) 探活说活着：跑满探活节拍也不撤（文件静默不构成回收理由）
+            monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: True)
+            assert not self._poll_until(mon, lambda: mgr._last_raw.get("dsh") is None, polls)
+            assert mgr._last_raw.get("dsh") == "working"
+
+            # 2) 探活判定失败（None）：保守保留（平台不支持 pid 探活也不许误撤）
+            monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: None)
+            assert not self._poll_until(mon, lambda: mgr._last_raw.get("dsh") is None, polls)
+            assert mgr._last_raw.get("dsh") == "working", "判定失败必须保守保留"
+
+            # 3) 明确已死（只认 False）：撤掉忙态，且不报完成
+            bubbles.clear()
+            sounds.clear()
+            monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: False)
+            assert self._poll_until(mon, lambda: mgr._last_raw.get("dsh") is None, polls), \
+                "写者已确认死亡：忙态必须被回收（否则桌宠永远忙）"
+            assert mgr.any_busy() is False
+            self._pump(app, 1.2)
+            assert self._succeeded(bubbles) == [], f"写者消失不是回合收尾：{bubbles}"
+            assert sounds == []
+            assert not [k for k in mgr._owner_raw if k[0] == "dsh"]
+            assert "inst:bootA" not in mon._converger._scope_keys
+        finally:
+            mgr.shutdown()
+
+    @staticmethod
+    def _refuse_probe(monkeypatch):
+        """把两个平台的探活边界都注入成"权限拒绝"（真分派走哪个分支都已注入）。"""
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(PermissionError(errno.EPERM, "Operation not permitted")))
+        monkeypatch.setattr(agent_link, "_win32_kernel32",
+                            lambda: _FakeKernel32(open_result=0, last_error=5))
+
+    @staticmethod
+    def _confirm_dead_probe(monkeypatch):
+        """把两个平台的探活边界都注入成"没有这个 pid"（确定已死）。"""
+        monkeypatch.setattr(agent_link, "_os_kill_signal_0",
+                            _raiser(ProcessLookupError(errno.ESRCH, "No such process")))
+        monkeypatch.setattr(agent_link, "_win32_kernel32",
+                            lambda: _FakeKernel32(open_result=0, last_error=87))
+
+    def test_permission_denied_probe_keeps_busy_and_pending_writer(self, tmp_path, monkeypatch):
+        """权限拒绝的探活（Win err5 / POSIX EPERM）不得退役活写者：忙态与交互都要留。
+
+        探不动的目标是**活着**的（受保护进程 / 另一个用户 / 更高完整性级别）：把它当死
+        会撤掉用户还在等的审批/问题气泡，还会让桌宠以为这一轮结束了。这里的"确定已死"
+        反证同时证明保留不是"探活压根没跑"。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        polls = int(getattr(mon, "_DEAD_WRITER_PROBE_EVERY_N_POLLS", 40)) + 3
+        try:
+            self._write(bridge, "dsh-101.jsonl",
+                        {"event": "question/requested", "sessionId": "sA", "callId": "qA",
+                         "inst": "bootA", "questions": [{"id": "q1", "question": "A 的问题"}]},
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._refuse_probe(monkeypatch)
+            mon._poll()
+            assert mgr._last_raw.get("dsh") == "working", mgr._last_raw
+            assert len(mgr.pending_interactions_for("dsh")) == 1
+
+            assert not self._poll_until(mon, lambda: mgr.pending_interactions_for("dsh") == {}, polls), \
+                "权限拒绝的探活不得退役写者：判不了就必须保守保留"
+            assert mgr.pending_interactions_for("dsh"), "用户还在等的交互不许被权限拒绝的探活撤掉"
+            assert mgr._last_raw.get("dsh") == "working" and mgr.any_busy() is True, \
+                "等待中的写者在呈现侧就是「忙」：不许被权限拒绝的探活撤成待机"
+            assert resolved == []
+
+            # 反证：同一个写者的边界换成"确定已死"→ 忙/等待态与交互一起退役
+            self._confirm_dead_probe(monkeypatch)
+            assert self._poll_until(mon, lambda: mgr.pending_interactions_for("dsh") == {}, polls), \
+                "确定已死的写者必须被回收（否则桌宠永远在等）"
+            assert mgr._last_raw.get("dsh") is None
+            assert "inst:bootA" not in mon._converger._scope_keys
+        finally:
+            mgr.shutdown()
+
+    def test_owner_file_map_keeps_busy_writers_when_over_capacity(self, tmp_path, monkeypatch):
+        """映射表满时不许淘汰还在忙的写者：否则它的进程死了也探不到，忙态永远回收不了。
+
+        映射表是存活探活的唯一 pid 来源。插件每重载一次就是一个新 boot UUID = 一个新
+        写者（被拒接状态分片的写者照样在这里登记映射），FIFO 淘汰最老条目会把最老登记
+        的**忙写者**挤出表。这里把容量压到 3（白盒）制造同样的挤出现场，再用行为断言
+        收口：映射还在 → 探活拿得到 pid → 忙态被回收。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        capacity = 3
+        polls = int(getattr(mon, "_DEAD_WRITER_PROBE_EVERY_N_POLLS", 40)) + 3
+        monkeypatch.setattr(DshMonitor, "_OWNER_FILE_MAX", capacity)
+        try:
+            # 忙写者最先登记：FIFO 下正是被挤掉的那一个
+            self._write(bridge, "dsh-101.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            mon._poll()
+            assert mgr._last_raw.get("dsh") == "working"
+
+            # 三个安静写者把映射表挤出容量（每个新写者一条映射）
+            for i, pid in enumerate((201, 202, 203)):
+                self._write(bridge, f"dsh-{pid}.jsonl",
+                            {"event": "AgentStatus", "state": "idle", "inst": f"boot{i}"})
+                mon._poll()
+
+            assert "inst:bootA" in mon._owner_files, \
+                "还在忙的写者不许被挤出映射表（它的存活探活全靠这条映射）"
+            assert len(mon._owner_files) <= capacity, f"非活跃条目仍要压回容量内：{mon._owner_files}"
+            assert mgr.any_busy() is True
+
+            # 忙写者的进程死掉（只认确定已死）：映射还在 → 探活能拿到 pid → 忙态回收
+            monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: pid != 101)
+            assert self._poll_until(mon, lambda: not mgr.any_busy(), polls), \
+                "忙写者的映射被挤掉后，它的进程死了也没有 pid 可探——忙态永远回收不了"
+            assert "inst:bootA" not in mon._owner_files
+        finally:
+            mgr.shutdown()
+
+    def test_dead_probe_window_rotates_so_the_ninth_dead_writer_is_recovered(self, tmp_path, monkeypatch):
+        """探活窗口有界但**轮转**：第 9 个死写者必须在有限轮内被探到（不再被饿死）。
+
+        实证缺陷：窗口取候选集**固定前缀**时，8 个"活着但状态卡在忙"的写者长期占住
+        前 8 位（插件重载 = 同进程新 boot UUID，上一代的忙态留在桌宠里、pid 却仍
+        活着），排在窗外的**真死写者**永远进不了窗口，它的忙态再也回收不了——桌宠
+        永远忙。修复后单轮仍 ≤8 个，但游标按轮推进，第 9 个写者第 2 轮必被探到。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = mon._DEAD_WRITER_PROBE_LIMIT
+        cadence = mon._DEAD_WRITER_PROBE_EVERY_N_POLLS
+        probed: list[int] = []
+        monkeypatch.setattr(agent_link, "_bridge_writer_alive",
+                            lambda pid: probed.append(pid) or (pid != 909))
+        try:
+            # 同一个活进程（dsh-500）里先后 8 代插件 boot，每代都把状态留在"忙"
+            self._write(bridge, "dsh-500.jsonl",
+                        *[{"event": "AgentStatus", "state": "working", "inst": f"boot-{i}"}
+                          for i in range(limit)])
+            mon._poll()
+            # 第 9 个写者：文件 dsh-909 的进程已死，状态停在"忙"
+            self._write(bridge, "dsh-909.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "boot-dead"})
+            mon._poll()
+            assert len(mon._converger.owners_needing_liveness()) == limit + 1, "夹具不成立：候选少于窗口+1"
+            assert len(mon._owner_files) == limit + 1
+
+            # 第 1 轮：窗口只有 8 个名额且死写者排在窗外 —— 本轮探不到，但绝不超探
+            probed.clear()
+            mon._dead_probe_tick = 0
+            for _ in range(cadence):
+                mon._poll()
+            assert len(probed) == limit, f"单轮必须 ≤{limit} 个：{probed}"
+            assert set(probed) == {500}, f"本轮只该碰窗口内写者：{probed}"
+            assert ("dsh", "inst:boot-dead") in mgr._owner_raw, "窗外写者本轮不该被回收"
+            assert mgr.any_busy() is True
+
+            # 第 2 轮：游标回卷到窗外 —— 死写者必须在这一轮被探到并退役
+            probed.clear()
+            mon._dead_probe_tick = 0
+            for _ in range(cadence):
+                mon._poll()
+            assert len(probed) == limit, f"单轮必须 ≤{limit} 个：{probed}"
+            assert probed[0] == 909, f"窗口必须轮转（游标回卷到窗外）：{probed}"
+            assert probed.count(500) == limit - 1, probed
+            assert ("dsh", "inst:boot-dead") not in mgr._owner_raw, "第 9 个死写者必须被回收"
+            assert "inst:boot-dead" not in mon._converger._scope_keys
+            assert mgr.any_busy() is True, "其余活写者仍在忙，不得被连带退役"
+        finally:
+            mgr.shutdown()
+
+    def test_dead_probe_cursor_resets_on_stop_start_and_offline(self, tmp_path, monkeypatch):
+        """轮转游标的三个复位点：关监测（begin_stop）/ 重启（start）/ 整体离线。
+
+        游标是"本轮从候选集哪个位置开始"的记忆：不复位就把上一代次的相位带进新
+        代次/新写者表，最坏情况让新表里的死写者白等一整圈才轮到。三个复位点各测
+        一次（离线用真探活路径，不靠内部状态制造红）。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = mon._DEAD_WRITER_PROBE_LIMIT
+        cadence = mon._DEAD_WRITER_PROBE_EVERY_N_POLLS
+        monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: True)
+        try:
+            # 候选数 > 窗口容量才轮转：9 个写者跑一轮，游标必须离开 0
+            for i in range(limit + 1):
+                self._write(bridge, f"dsh-{700 + i}.jsonl",
+                            {"event": "AgentStatus", "state": "working", "inst": f"boot-{i}"})
+            mon._poll()
+            assert len(mon._converger.owners_needing_liveness()) == limit + 1
+            mon._dead_probe_tick = 0
+            for _ in range(cadence):
+                mon._poll()
+            assert mon._dead_probe_cursor == limit, mon._dead_probe_cursor
+
+            # ① 关监测：游标复位
+            mon.begin_stop()
+            assert mon._dead_probe_cursor == 0
+
+            # ② 重启（真 start/真 worker/真 stop）：代次清空，游标也回 0
+            mon._dead_probe_cursor = limit
+            assert mon.start() is True
+            assert mon._dead_probe_cursor == 0, "start 必须复位探活窗口"
+            mon.stop()
+
+            # ③ 整体离线（写者文件镜像被清）：游标随之复位
+            mon._running = True
+            mon._dead_probe_cursor = limit
+            monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
+            monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: False)
+            mon._probe_online()
+            assert mon._online is False and not mon._owner_files
+            assert mon._dead_probe_cursor == 0, "离线清空写者镜像时必须复位游标"
+        finally:
+            mgr.shutdown()
+
+    def test_dead_probe_window_covers_the_whole_registry_within_bounded_rounds(self, tmp_path, monkeypatch):
+        """窗口轮转的覆盖保证：注册表上界 32 个候选时，⌈32/8⌉ = 4 轮内每个都被探到。
+
+        顺序无关（不赌目录枚举顺序）：只断言每轮恰好 8 个候选、4 轮的并集覆盖全部
+        写者 pid——这正是"有限轮必探"的机器可校验形式。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = mon._DEAD_WRITER_PROBE_LIMIT
+        cadence = mon._DEAD_WRITER_PROBE_EVERY_N_POLLS
+        total = mon._converger.SCOPE_REGISTRY_MAX
+        pids = [7000 + i for i in range(total)]
+        probed: list[int] = []
+        monkeypatch.setattr(agent_link, "_bridge_writer_alive",
+                            lambda pid: probed.append(pid) or True)   # 全活：谁都不会被退役
+        try:
+            for i, pid in enumerate(pids):
+                self._write(bridge, f"dsh-{pid}.jsonl",
+                            {"event": "AgentStatus", "state": "working", "inst": f"boot-{i}"})
+            mon._poll()
+            assert len(mon._converger.owners_needing_liveness()) == total
+
+            covered: set[int] = set()
+            rounds = (total + limit - 1) // limit
+            for _round_index in range(rounds):
+                probed.clear()
+                mon._dead_probe_tick = 0
+                for _ in range(cadence):
+                    mon._poll()
+                assert len(probed) == limit, f"单轮必须 ≤{limit} 个：{probed}"
+                covered |= set(probed)
+            assert covered == set(pids), f"有限轮内必须覆盖全部写者：缺 {sorted(set(pids) - covered)}"
+            assert mgr.any_busy() is True, "全活写者不得被探活退役"
+        finally:
+            mgr.shutdown()
+
+    def test_offline_clears_writer_mirrors_so_restart_is_not_forever_busy(self, tmp_path, monkeypatch):
+        """DSH 整体离线清写者镜像；重启后新写者的待机不会再被旧分片压成"永远忙"。"""
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-101.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            mon._poll()
+            assert mgr.any_busy() is True
+
+            # DSH 整体离线（真探活路径：端口与桌面端进程都探不到）
+            monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
+            monkeypatch.setattr(harness_launcher, "desktop_process_running", lambda: False)
+            mon._probe_tick = mon._ONLINE_PROBE_EVERY_N_POLLS - 1
+            mon._poll()
+            assert mgr.any_busy() is False, "offline 后不得还停在上一个写者的忙态"
+            assert mgr._last_raw.get("dsh") is None, "offline 必须清原始状态镜像"
+            assert not mgr._owner_raw, "offline 必须清写者分片"
+            assert not getattr(mon, "_owner_files", {}), "offline 必须清写者→文件镜像"
+
+            # 新 DSH 起来（新 boot 身份）只报待机：不得被旧分片压成忙
+            monkeypatch.setattr(harness_launcher, "is_running", lambda port: True)
+            self._write(bridge, "dsh-202.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootB"})
+            mon._probe_tick = mon._ONLINE_PROBE_EVERY_N_POLLS - 1
+            mon._poll()
+            assert mgr.any_busy() is False, "重启后的新写者不得继承上一代的忙"
+            assert mgr._last_raw.get("dsh") in (None, "idle")
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------------------
+    # 完成提醒不篡改全局忙闲口径
+    # ------------------------------------------------------------------
+    def test_finishing_writer_does_not_flatten_global_busy(self, tmp_path, monkeypatch):
+        """A 的回合收尾照常提醒，但 B 还在忙时不得把整体判成待机。"""
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            assert mgr._last_raw["dsh"] == "working"
+
+            win = mgr.win
+            win.switched.clear()
+            bubbles.clear()
+            # A 实例完整走完一个回合（turn/start + turn/end）：完成提醒该来
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:1", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sA", "step": "turn:1", "inst": "bootA"})
+            mon._poll()
+
+            assert self._wait_until(app, lambda: bool(self._succeeded(bubbles))), \
+                f"A 的真实收尾必须照常提醒：{bubbles}"
+            assert mgr._last_raw["dsh"] == "working", "B 还在忙：不得被 A 的收尾压成待机"
+            assert mgr.any_busy() is True, "还有写者在忙，any_busy 必须为真"
+            assert "idle" not in win.switched, f"不得切待机动画：{win.switched}"
+            assert "dsh" not in mgr._done_pending, "确认已到期弹过，不该还挂着"
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------------------
+    # 注册表满：拒接，而不是并桶互撤
+    # ------------------------------------------------------------------
+    def test_scope_overflow_does_not_let_writers_revoke_each_other(self, tmp_path, monkeypatch):
+        """注册表满时新写者被拒接状态分片；C 的等待绝不能被 D 的 idle 撤掉。"""
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = int(getattr(mon._converger, "SCOPE_REGISTRY_MAX", 32))
+        try:
+            for i in range(limit):
+                self._write(bridge, f"dsh-{700 + i}.jsonl",
+                            {"event": "AgentStatus", "state": "working", "inst": f"boot-busy-{i}"})
+            mon._poll()
+
+            # C 提出问题（注册表满时的新写者）
+            self._write(bridge, "dsh-901.jsonl",
+                        {"event": "question/requested", "sessionId": "sC", "callId": "qC",
+                         "inst": "bootC", "questions": [{"id": "q1", "question": "C 的问题"}]})
+            mon._poll()
+            assert len(mgr.pending_interactions_for("dsh")) == 1
+
+            # D（另一个新写者）回待机：不得撤掉 C 的等待（并桶才会互撤）
+            self._write(bridge, "dsh-902.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootD"})
+            mon._poll()
+            assert mgr.pending_interactions_for("dsh"), "D 的 idle 撤掉了 C 还在等的交互"
+            assert resolved == []
+
+            # 拒接不等于丢归属：C/D 的原始状态各自记在自己名下（不与别人共桶）
+            self._write(bridge, "dsh-901.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootC"})
+            mon._poll()
+            assert ("dsh", "inst:bootC") in mgr._owner_raw
+            assert ("dsh", "inst:bootD") in mgr._owner_raw
+            assert next(iter(mgr.pending_interactions_for("dsh").values()))["owners"] == {"inst:bootC"}
+            # 拒接是可见的：计数 + warning（不是静默丢事件）
+            assert mon._converger._scope_overflow_count >= 1
+            assert len(mon._converger._scope_keys) <= limit, "注册表必须有界"
+            assert "inst:bootC" not in mon._converger._scope_keys, "满员时新写者只能被拒接"
+        finally:
+            mgr.shutdown()
+
+    def test_refused_writer_diagnostic_is_one_per_record_and_throttled(self, tmp_path, monkeypatch, caplog):
+        """被拒写者的诊断：**每条记录一次**（不翻倍）且同类告警节流（不刷屏）。
+
+        实证缺陷：一条记录会经两次准入（摄入侧盖归属的 ``_record_owner`` + 建状态
+        分片的 ``handle_record``），诊断挂在准入本身上就变成每条被拒记录计两次、
+        告警两条，且没有任何节流——被拒写者持续写盘 = 持续刷 warning。修复后计数
+        按记录推进、告警首次立即可见其后每 ``SCOPE_REJECT_LOG_EVERY`` 次汇总一条，
+        而归属（谁写的仍记在谁名下）一字不动。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = mon._converger.SCOPE_REGISTRY_MAX
+        every = SCOPE_REJECT_LOG_EVERY
+        try:
+            for i in range(limit):
+                self._write(bridge, f"dsh-{700 + i}.jsonl",
+                            {"event": "AgentStatus", "state": "working", "inst": f"boot-busy-{i}"})
+            mon._poll()
+            assert mon._converger._scope_overflow_count == 0
+
+            burst = every * 3
+            self._write(bridge, "dsh-901.jsonl",
+                        *[{"event": "AgentStatus", "state": "working", "inst": "boot-new"}
+                          for _ in range(burst)])
+            with caplog.at_level("WARNING"):
+                mon._poll()
+
+            warnings = [r for r in caplog.records if "保守拒接新写者" in r.getMessage()]
+            assert mon._converger._scope_overflow_count == burst, \
+                f"每条被拒记录只该计一次，实为 {mon._converger._scope_overflow_count}"
+            assert len(warnings) == 1 + burst // every, \
+                f"{burst} 条拒接不该有 {len(warnings)} 条告警（必须节流）"
+            assert "inst:boot-new" not in mon._converger._scope_keys
+            assert len(mon._converger._scope_keys) <= limit, "注册表必须有界"
+            # 归属不受影响：被拒写者的记录仍标在它自己名下
+            assert mgr._owner_raw[("dsh", "inst:boot-new")][0] == "working"
+        finally:
+            mgr.shutdown()
+
+    def test_mirrored_full_turn_across_files_notifies_once(self, tmp_path, monkeypatch):
+        """完整镜像（两个写者各写一份 turn/start + turn/end）只提醒一次。
+
+        两份副本先后到达（两个进程各自 flush，间隔可以大于完成冷却）——身份必须相同，
+        否则同一回合会被提醒两次（镜像 start 不该给第二条 end 发一个新 generation）。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sM", "step": "turn:1", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sM", "step": "turn:1", "inst": "bootA"})
+            mon._poll()
+            assert self._wait_until(app, lambda: bool(self._succeeded(bubbles))), bubbles
+            self._pump(app, 0.3)
+            assert len(self._succeeded(bubbles)) == 1, bubbles
+
+            clock[0] += 30.0          # 越过完成冷却：第二次提醒不再被冷却挡住
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "turn/start", "sessionId": "sM", "step": "turn:1", "inst": "bootB"},
+                        {"event": "turn/end", "sessionId": "sM", "step": "turn:1", "inst": "bootB"})
+            mon._poll()
+            self._pump(app, 1.2)
+            assert len(self._succeeded(bubbles)) == 1, \
+                f"同一回合的镜像副本只该提醒一次：{bubbles}"
+            assert sounds.count("done.wav") == 1, sounds
+
+            # 真下一回合（step 变了）照常提醒：镜像去重不得把正常回合也吞了
+            clock[0] += 30.0
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sM", "step": "turn:2", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sM", "step": "turn:2", "inst": "bootA"})
+            mon._poll()
+            assert self._wait_until(
+                app, lambda: len(self._succeeded(bubbles)) == 2), bubbles
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------------------
+    # 完成确认与失败标记按**写者归属**裁决，不按 agent 全局
+    # ------------------------------------------------------------------
+    def test_other_writer_busy_inside_confirm_window_keeps_completion(self, tmp_path, monkeypatch):
+        """A 的完成确认窗内 B 实例回忙：能撤的只有 A 自己。
+
+        确认窗（800ms）的语义是「**这一写者**没有再回忙」。B 的 ``AgentStatus
+        working`` 会把**折叠值**重新变忙，但 A 自己的分片还是终态；拿折叠值撤确认
+        等于让 B 的忙替 A 取消提醒——A 的回合身份已经进了 ``_dsh_turn_ids``，不会
+        重排，这条完成提醒就永久丢了。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            mon._poll()
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:1", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sA", "step": "turn:1", "inst": "bootA"})
+            mon._poll()
+            assert "dsh" in mgr._done_pending, "A 的收尾必须排定完成确认"
+            assert mgr._done_owner.get("dsh") == "inst:bootA", mgr._done_owner
+            bubbles.clear()
+            sounds.clear()
+
+            # 确认窗内 B（另一个写者）回忙
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            assert self._wait_until(app, lambda: bool(self._succeeded(bubbles))), \
+                f"B 的忙替 A 取消了完成确认：{bubbles}"
+            assert sounds.count("done.wav") == 1, sounds
+        finally:
+            mgr.shutdown()
+
+    def test_writer_failure_does_not_swallow_other_writers_success(self, tmp_path, monkeypatch):
+        """A 实例的 execution/failed 不得吞掉 B 实例的成功收尾。
+
+        硬失败标记（``_saw_error``）此前按 agent 整条打：B 的成功收尾在
+        ``_on_dsh_turn_completed`` 的早期闸上被整条 return——既没有完成提醒，
+        B 自己的分片还留在 working（整体永远忙）。失败是**写者自己的**回合事实，
+        只能挡它自己那条收尾。这里 B 在 A 失败**之前**就已经在忙，失败与 B 的
+        turn/end 之间没有新的忙入口（与桥接真实写盘顺序一致）。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"})
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "execution/failed", "sessionId": "sA", "inst": "bootA",
+                         "failureType": "tool_failed", "errorCode": "E_BASH",
+                         "errorMessage": "exit status 1"})
+            mon._poll()
+            assert "dsh" in mgr._saw_error, "硬失败必须按 agent 打标（岛侧翻译仍读它）"
+            bubbles.clear()
+            sounds.clear()
+
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "turn/end", "sessionId": "sB", "step": "turn:B", "inst": "bootB"})
+            mon._poll()
+            assert self._wait_until(app, lambda: bool(self._succeeded(bubbles))), \
+                f"A 的失败吞掉了 B 的成功收尾：{bubbles}"
+            assert mgr._owner_raw.get(("dsh", "inst:bootB"), ("", 0))[0] == "success", \
+                "B 的分片必须落到终态（否则整体永远停在忙）"
+            assert sounds.count("done.wav") == 1, \
+                f"B 的成功收尾不得被 A 的失败标记掐掉音效：{sounds}"
+        finally:
+            mgr.shutdown()
+
+    def test_writer_restart_inside_confirm_window_still_cancels_done(self, tmp_path, monkeypatch):
+        """A 自己在确认窗内开新回合（只有 turn/start）：不得弹假完成。
+
+        「只撤当事人的确认」不能把 800ms 抖动过滤一起撤掉：A 的收尾排定后，A 在窗内
+        用 ``turn/start`` 开新一回合时，**A 自己的分片**还停在 success（turn/start 不
+        写分片），忙只体现在折叠值上。起点记录一到就按归属撤掉本写者的确认（见
+        ``_on_dsh_turn_started``）。本条是第 1 条（B 的忙不撤 A 的确认）的反向守卫。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"},
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:1", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sA", "step": "turn:1", "inst": "bootA"})
+            mon._poll()
+            assert "dsh" in mgr._done_pending, "A 的收尾必须排定完成确认"
+            bubbles.clear()
+            sounds.clear()
+
+            # 确认窗内 A 自己开新回合（桥接真实起点记录；这一拍没有 AgentStatus 分片更新）
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:2", "inst": "bootA"})
+            mon._poll()
+            self._pump(app, 1.2)                    # 跑满确认窗：被取消/作废的确认不得弹
+            assert self._succeeded(bubbles) == [], \
+                f"A 已经开了新回合，不得弹完成口径气泡：{bubbles}"
+            assert "done.wav" not in sounds, sounds
+        finally:
+            mgr.shutdown()
+
+    def test_own_round_start_cancels_own_done_while_other_writer_busy(self, tmp_path, monkeypatch):
+        """A 的确认窗内 B 在忙、A 自己只写 turn/start 开新回合：仍不得弹 A 的假完成。
+
+        起点用**原记录**（turn/start 带 ``inst``）指认当事人，不靠同文本/时间戳：
+        A 一开新回合，它上一轮的完成确认立即作废。此前的实现只在 ``_fire_done``
+        到期时看"折叠值忙有没有别的写者能解释"——B 正忙把这个忙解释掉了，于是 A
+        已经开新回合还弹「已完成本轮任务」（本票修掉的残留）。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootA"},
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:1", "inst": "bootA"},
+                        {"event": "turn/end", "sessionId": "sA", "step": "turn:1", "inst": "bootA"},
+                        {"event": "AgentStatus", "state": "working", "inst": "bootB"})
+            mon._poll()
+            assert mgr._done_owner.get("dsh") == "inst:bootA", mgr._done_owner
+            bubbles.clear()
+            sounds.clear()
+
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:2", "inst": "bootA"})
+            mon._poll()
+            assert "dsh" not in mgr._done_pending, "A 的新回合必须立即作废它自己的确认"
+            self._pump(app, 1.2)
+            assert self._succeeded(bubbles) == [], \
+                f"B 的忙替 A 兜住了新回合，仍弹了假完成：{bubbles}"
+            assert "done.wav" not in sounds, sounds
+        finally:
+            mgr.shutdown()
+
+    def test_other_writer_round_start_keeps_pending_completion(self, tmp_path, monkeypatch):
+        """A 只写 turn/start 开新回合时，B 待定的完成确认不得被误撤。
+
+        B 刚排定完成确认，A（**没有任何 AgentStatus**，只有起点记录）开新回合——摊开
+        到聚合状态上是"整体又忙了"，而 A 的忙在分片账上没有归属：B 的到期判据于是把
+        这个忙当成 B 自己的新回合作废，B 的真实完成被静默吞掉。起点按写者落分片后，
+        这份忙有主，B 的完成照常弹。这是修 A 的假完成时最容易带出来的反向缺陷。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        try:
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "turn/start", "sessionId": "sB", "step": "turn:B1", "inst": "bootB"},
+                        {"event": "turn/end", "sessionId": "sB", "step": "turn:B1", "inst": "bootB"})
+            mon._poll()
+            assert mgr._done_owner.get("dsh") == "inst:bootB", mgr._done_owner
+            bubbles.clear()
+            sounds.clear()
+
+            # 确认窗内 A（另一实例，没有 AgentStatus）用起点开新回合
+            self._write(bridge, "dsh-11.jsonl",
+                        {"event": "turn/start", "sessionId": "sA", "step": "turn:A1", "inst": "bootA"})
+            mon._poll()
+            assert self._wait_until(app, lambda: bool(self._succeeded(bubbles))), \
+                f"A 的新回合吞掉了 B 的完成确认：{bubbles}"
+            assert sounds.count("done.wav") == 1, sounds
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------------------
+    # 交互重登记：归属集合累积，绝不整字典覆盖
+    # ------------------------------------------------------------------
+    def test_reregistered_interaction_keeps_all_owners(self, tmp_path, monkeypatch):
+        """同一 iid 的重登记不得重置归属集合（账本淘汰后的重投）。
+
+        摄入账本是有界的（512 条 / 900s）：长等待里旧条目被挤出后，B 再投同一条
+        请求就走 ``_register_interaction`` 的重登记路径。重登记若整字典覆盖，A 的
+        归属被丢掉——B 一回待机就把 A 还在等的气泡整个撤掉。本用例走真链路：同一条
+        问题先由 A 投递，中间用一条别的记录把账本身份挤出，再由 B 投递。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        question = {"event": "question/requested", "sessionId": "sX", "callId": "qX",
+                    "questions": [{"id": "q1", "question": "同一个问题"}]}
+        try:
+            self._write(bridge, "dsh-11.jsonl", {**question, "inst": "bootA"})
+            mon._poll()
+            pending = mgr.pending_interactions_for("dsh")
+            assert len(pending) == 1, pending
+            first = next(iter(pending.values()))
+            assert first["owners"] == {"inst:bootA"}, first["owners"]
+            alert_id = first["alert_id"]
+
+            # 账本被后续记录挤出（等价于长等待里最近 512 条之外 / 900s TTL 过期）
+            mon._event_ledger.max_entries = 1
+            self._write(bridge, "dsh-33.jsonl",
+                        {"event": "AgentStatus", "state": "working", "inst": "bootZ"})
+            mon._poll()
+
+            self._write(bridge, "dsh-22.jsonl", {**question, "inst": "bootB"})
+            mon._poll()
+            pending = mgr.pending_interactions_for("dsh")
+            assert len(pending) == 1, f"重投递必须就地更新同一条：{pending}"
+            item = next(iter(pending.values()))
+            assert item["alert_id"] == alert_id, "重登记必须复用同一 alert 身份"
+            assert item["owners"] == {"inst:bootA", "inst:bootB"}, \
+                f"重登记重置了已有归属：{item['owners']}"
+
+            # B 回待机：A 还在等，交互必须保留
+            self._write(bridge, "dsh-22.jsonl",
+                        {"event": "AgentStatus", "state": "idle", "inst": "bootB"})
+            mon._poll()
+            assert mgr.pending_interactions_for("dsh"), \
+                "B 回待机撤掉了 A 还在等的交互（重登记丢归属的后果）"
+            assert resolved == [], resolved
+        finally:
+            mgr.shutdown()
+
+    # ------------------------------------------------------------------
+    # 单条 pending 的归属集合有界：满时锁存 overflow，不丢已有归属
+    # ------------------------------------------------------------------
+    def test_pending_owner_set_is_bounded_and_overflow_latches(self, tmp_path, monkeypatch):
+        """归属集合必须有界；满时锁存 overflow，收口收紧到可指认的来源身份。
+
+        ``_on_bridge_owner_attested`` 此前对集合只加不减：同一条合法在途请求被多个
+        写者反复投递（插件重载 = 新 boot 身份）就能把一条 pending 的归属集合堆成
+        任意大。满时既不能丢旧归属（后来的 idle 会误撤 A 还在等的交互），也不能把
+        后来者并进"无主桶"——只能锁存 overflow，并把收口判据收紧到"已记录的当事人
+        + 同一条会话"（单帧清掉整条会把还有人在等的提醒一起撤掉）。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        limit = int(mon._converger.SCOPE_REGISTRY_MAX)
+        question = {"event": "question/requested", "sessionId": "sX", "callId": "qX",
+                    "questions": [{"id": "q1", "question": "同一个问题"}]}
+        try:
+            self._write(bridge, "dsh-11.jsonl", {**question, "inst": "bootA"})
+            mon._poll()
+            pending = mgr.pending_interactions_for("dsh")
+            assert len(pending) == 1, pending
+            iid = next(iter(pending))
+
+            for index in range(10_000):
+                mgr._on_bridge_owner_attested("dsh", {**question, "_scope": f"inst:boot-{index}"})
+            item = mgr._pending_interactions[iid]
+            assert len(item["owners"]) <= limit, f"归属集合无界：{len(item['owners'])}"
+            assert item["owners_overflow"] is True, "满时必须锁存 overflow 标记"
+            assert "inst:bootA" in item["owners"], "已有归属一律保留（不丢旧 owner）"
+
+            # 未知来源的 idle（归属未知的通配口径）不许拿"没记到归属"当"没人在等"
+            mgr._on_agent_state("dsh", "idle", mon._emit_gen)
+            assert mgr.pending_interactions_for("dsh"), "未知 idle 撤掉了 overflow 锁存的交互"
+            # 死亡退役只证明它自己走了，同样不许误撤
+            mgr._on_dsh_scope_retired("inst:bootA", mon._emit_gen)
+            assert mgr.pending_interactions_for("dsh"), "死亡退役误撤了 overflow 锁存的交互"
+            # 合法长等待不吃 TTL（只有无身份的降级提示才按 TTL 收口）
+            mgr._prune_pending_interactions(now=time.monotonic() + 10 ** 6)
+            assert mgr.pending_interactions_for("dsh"), "带身份的 pending 不得被 TTL 收掉"
+            assert resolved == [], resolved
+
+            # 已记录的当事人 + 同一条会话的结束帧仍能收口（否则这条永远撤不掉）
+            mgr._on_interaction_lifecycle(
+                "dsh", {"event": "turn/end", "sessionId": "sX", "_scope": "inst:boot-0"})
+            assert mgr.pending_interactions_for("dsh") == {}, "可信会话结束必须能收口"
+            assert resolved, "收口必须真的关掉常驻气泡"
+        finally:
+            mgr.shutdown()
+
+    def test_overflow_entry_collects_only_by_identified_source(self, tmp_path, monkeypatch):
+        """overflow 锁存后：别 owner / 未知来源 / 缺会话的结束帧都不许收口，resolved 才收。
+
+        那条 pending 的归属集合已经没记全（还有没记下的写者），单个结束帧清掉整条
+        就是把还有人在等的提醒一起撤了。可指认的口径只有两个：**已记录的当事人 +
+        同一条会话**的会话结束帧，和 ``resolved`` 的准确 rpc/call 身份。
+        """
+        mgr, mon, bubbles, alerts, resolved, sounds, clock, app = self._make_rig(tmp_path, monkeypatch)
+        bridge = mon.events_dir
+        question = {"event": "question/requested", "sessionId": "sX", "callId": "qX",
+                    "questions": [{"id": "q1", "question": "同一个问题"}]}
+        try:
+            self._write(bridge, "dsh-11.jsonl", {**question, "inst": "bootA"})
+            mon._poll()
+            iid = next(iter(mgr.pending_interactions_for("dsh")))
+            for index in range(10_000):
+                mgr._on_bridge_owner_attested("dsh", {**question, "_scope": f"inst:boot-{index}"})
+            assert mgr._pending_interactions[iid]["owners_overflow"] is True
+
+            # ① 未知来源（记录没有写者归属）：来源不明就不许替还等着的人做决定
+            mgr._on_interaction_lifecycle("dsh", {"event": "turn/end", "sessionId": "sX"})
+            assert mgr.pending_interactions_for("dsh"), "未知来源的会话结束撤掉了 overflow 条目"
+            # ② 别 owner（没进过归属集合的写者）：一声清掉的是别人还在等的那条
+            mgr._on_interaction_lifecycle(
+                "dsh", {"event": "turn/end", "sessionId": "sX", "_scope": "inst:bootZ"})
+            assert mgr.pending_interactions_for("dsh"), "别 owner 的会话结束撤掉了 overflow 条目"
+            # ③ 已记录的当事人但不带会话（旧帧）：会话未知 = 那条结束帧不指认这条交互
+            mgr._on_interaction_lifecycle(
+                "dsh", {"event": "turn/end", "_scope": "inst:boot-0"})
+            assert mgr.pending_interactions_for("dsh"), "缺会话的结束帧撤掉了 overflow 条目"
+            assert resolved == [], resolved
+
+            # ④ 准确 rpc/call 身份的 resolved 必须收得掉，否则溢出的那条成了永久提醒
+            mgr._on_question_resolved("dsh", {"event": "question/resolved",
+                                              "sessionId": "sX", "callId": "qX"})
+            assert mgr.pending_interactions_for("dsh") == {}, "resolved 收不掉 overflow 条目"
+            assert resolved, "收口必须真的关掉常驻气泡"
+        finally:
+            mgr.shutdown()

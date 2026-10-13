@@ -1392,3 +1392,84 @@ Python 3.11.15（与 CI 同档）· win32 · 16 逻辑核 · 本机**同时在�
   §15.2 的 `+453/−83` 是同一批文件在竞态修复落树**前**的快照。
   **报告本文件自身的行数变化另计、不并入上面的和**（本节每改一次它就变，并进来只会得到一个自引用总数）。
   工作树仍未 commit、未 push。
+
+## 十六、多 DSH 实例串扰修复：三证据（2026-10-12；旧树统一全量门 6774 passed / 18 skipped、真实 exit 0 已由父层核对；探活三态修复后的新全量门尚在跑）
+
+**本节定位**：桥目录里同时有多个写者（同机多 DSH 实例）时的串扰收口——A 的 idle 撤掉 B 的待批/等待、B 的忙被压成待机（假完成、动画切回待机）、同一回合被投递两次完成提醒。只追加本节；§一–§十五 的结论与 §0.1 的数量口径一律不变，也不回填 §0.1。
+
+**状态**：本机聚焦 / 相邻域 / Node 三个门已绿；统一全量门**已出 summary**——**6774 passed / 18 skipped / 19 warnings in 1049.49 s（0:17:29）**（日志 `.scratch/ci243/multi-dsh-final-full.log`，08:35:33 起跑；源码最后写入 08:33:06 早于起跑 ⇒ 该门覆盖当时树上的最终源码）。**日志只有点阵与 summary、不含进程退出码，真实 exit 已由父层核对为 0——只对这门起跑时的那棵树成立**。其后**探活三态修复落树**（`pet/agent_link.py` 改到 09:13），这门随即过期：修复后的统一全量门 `.scratch/ci243/multi-dsh-liveness-final-full.log` **还没跑完**（只到约 6% 的点阵、无 summary）⇒ 本节按「未完待续」记，`6774 / 18` 不挪用。这门绿也只等于「本机同源全量绿」，**仍不记全产品 PASS**（§16.3、§16.5 末两条）。工作树未 commit、未 push（按指令）。
+
+### 16.1 本轮契约（七条；实现落点 + 断言在哪）
+
+| # | 契约 | 实现落点 | 断言 |
+|---|---|---|---|
+| 1 | **bootuuid**：写者归属 = 插件本次启动生成的 UUID（信封 `inst`），不是 pid、也不是 DSH 字段 | `index.js`：`BOOT_ID = randomUUID()`；`writeRecord` 盖在 `...extra` **之后**（调用方同名传参被覆盖）；摄入侧 `agent_link.py::record_owner` | JS 6 条；`test_writer_identity_boot_uuid_beats_pid_reuse` |
+| 2 | **owner 集合独立锁存**：状态 / 审批 / 问题锁存按写者各自持有，对外只出一条折叠态 | `dsh_state.py::_WriterScope`（三字段各带 `seq`）+ `_fold` | `test_writer_idle_and_resolved_do_not_cross_writers`、`test_busy_writer_survives_other_writer_idle_and_bucket_is_isolated`、`test_other_writer_idle_keeps_pending_question` |
+| 3 | **注册表 ≤32，满则拒接、不并桶** | `SCOPE_REGISTRY_MAX = 32`；`admit_owner` 满 → 先界内退役一个**安静**写者；腾不出名额则只拒该写者的状态分片（诊断只在 `handle_record` 那次落一次，64 次汇总） | `test_scope_registry_refuses_new_writer_instead_of_merging`、`test_scope_overflow_does_not_let_writers_revoke_each_other`、`test_scope_registry_reclaims_quiet_writers_within_bounds`、`test_refused_writer_diagnostic_is_one_per_record_and_throttled`、`test_rejected_owner_diagnostic_is_per_record_and_throttled` |
+| 4 | **探活 40 拍一次、单轮 ≤8、窗口轮转** | `_maybe_probe_dead_writers` + `_rotated_probe_window`：游标按本轮取走个数前进回卷，候选集不变时 ⌈n/8⌉ 轮覆盖全部（注册表上界 32 ⇒ 最坏 4 轮） | `test_dead_probe_window_rotates_so_the_ninth_dead_writer_is_recovered`、`test_dead_probe_window_covers_the_whole_registry_within_bounded_rounds`、`test_dead_probe_cursor_resets_on_stop_start_and_offline` |
+| 5 | **deathonlyFalse**：只认明确已死才退役；无 mtime 判定、无 TTL | `_bridge_writer_alive` 三态（True/False/None）**由本模块自守**，不复用 `slot_manager.pid_alive`（后者布尔语义被多处消费，本批**不动它**）：Windows `_probe_writer_pid_windows`（`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`；err `87` → False、err `5`/其余错误码 → None、退出码 `!= STILL_ACTIVE` → False、读不到退出码 → None）；POSIX `_probe_writer_pid_posix`（`kill(pid,0)`；`ESRCH`/超 pid 范围 → False，`EPERM`/`EACCES`/未知 errno → None） | `test_live_writer_probe_retires_only_confirmed_dead`、`test_dead_writer_withdraws_only_its_pending_and_stays_silent`、`test_permission_denied_probe_keeps_busy_and_pending_writer`、`test_own_pid_is_alive_through_real_boundary` |
+| 6 | **offline 清镜像** | `DshMonitor._probe_online` 离线清 `_owner_files` + 探活游标；`AgentLinkManager._reset_owner_mirror("dsh")` 清 `_owner_raw`/`_last_raw`/`_last_applied` | `test_offline_clears_writer_mirrors_so_restart_is_not_forever_busy` |
+| 7 | **doneowner**：完成上下文按当事人写者，不靠篡改全局忙闲 | `_done_owner` 随完成确认排定；`_last_raw` 取折叠值 `_folded_raw_state`（三处共用）；回待机动画多一道「全局仍忙就不切」的闸 | `test_finishing_writer_does_not_flatten_global_busy` |
+
+### 16.2 修改文件说明（当前 `git diff --numstat`：工作树 vs `HEAD = 306a96b`）
+
+**10 个已跟踪文件 `+2106 / −180`**，另 **1 个未跟踪新文件**（不计入上面的和——`git diff` 不列未跟踪文件）。第 9–11 行是同一工作树里的 **CI 门禁/诊断旁批**，不是串扰修复本体。
+
+| 文件 | 增/删 | 改了什么 + 为什么 |
+|---|---|---|
+| `pet/dsh_state.py` | +445 / −94 | 写者 scope 注册表 + 按 owner 分片的状态/审批/问题独立锁存；满员**拒接**（不再并入无主桶——并桶正是互撤本身）+ 界内安静回收；镜像 `turn/start` 判定；`retire_scope` 只撤自身、绝不产 success |
+| `pet/agent_link.py` | +538 / −42 | 摄入侧写者归属（`record_owner` / `_owner_files` 容量 64、**超容量只淘汰非活跃写者**）；低频存活探活（`_bridge_writer_alive` **本模块自守三态**，不改 `slot_manager`）+ 轮转窗口；offline/stop/start 清镜像与游标；完成上下文按当事人（`_done_owner`）；折叠值 `_folded_raw_state` 统一 |
+| `integrations/dsh-pet-bridge/index.js` | +32 / −13 | 插件本次加载生成 boot UUID，写盘唯一出口盖 `inst` 信封字段；`__instanceTest` 暴露纯编码与队列窥视契约入口（不落盘） |
+| `tests/test_agent_link.py` | +690 / −1 | 新增 `TestMultiDshInstanceIsolation` **14 条**端到端：真 `DirGlobTailer` + 真 `_poll` + 真收敛器 + 真 manager + 800 ms QTimer |
+| `tests/test_dsh_state.py` | +285 / −0 | **7 条**纯逻辑回归（无线程、无 Qt，时钟可注入） |
+| `tests/test_dsh_mid_attach_done.py` | +8 / −5 | 两处**前提断言**随契约更新（白盒断言回退到单 tracker；离线前提改为「清镜像」），被测对象未变——见 §16.5 越界条目 |
+| `tests/test_bridge_instance_scope.js` | **+83 / −0（未跟踪新文件）** | 6 条 JS 契约：`inst` 由插件盖、调用方不可伪造、不改既有信封字段、不进嵌套 payload、真入队、文件名 pid 与 `inst` 是两个维度 |
+| `tests/conftest.py` | +41 / −0 | **不是本片改动**（Py_None 采样诊断，另一条线），本轮未触碰 |
+| `.github/workflows/pr-test.yml` | +22 / −10 | bridge 门禁显式清单补新 JS 文件（Node 20 无 glob）；主套件加 `id`，Linux 前缀诊断条件加 `steps.main_suite.outcome == 'failure'`；面包屑回读主套件与前缀两份目录 |
+| `tests/test_ci_workflows.py` | +43 / −14 | 上述 workflow 改动的断言（清单 / 条件 / 双目录回读） |
+| `docs/ACCEPTANCE_TESTS.md` | +2 / −1 | 验收清单同步一行 |
+
+**本报告文件自身的行数变化另计、不并入上面的和**（§16 每改一次它就变，并进来只会得到一个自引用总数；与 §15.5 同口径）。
+
+### 16.3 红 → 绿与三轮门（原始日志在 `.scratch/ci243/`）
+
+- **红**（隔离副本 = `git archive HEAD` + 只放新测试，源码不含修复）：`multi-dsh-RED.log`（08:03）——`test_dsh_state.py` **6 failed / 38 passed**、`TestMultiDshInstanceIsolation` **10 failed**（四类缺陷均为**行为红**：死写者的忙态不回收、"B 还在忙却被 A 的收尾压成待机"、C 的等待被 D 的 idle 撤掉、同一回合镜像投递 `2 == 1`）、新 JS 文件 **6 failed / 0 pass**。
+- **绿**：聚焦族 **430 passed / 3 skipped**（`multi-dsh-focused.log`，119.92 s，08:02）；相邻域 **522 passed**（`multi-dsh-adjacent.log`，69.40 s，08:03；「14 个文件」这个范围数取自 `.scratch/ci243/multi-dsh-evidence.md` §2，日志自身只列有告警的 3 个文件）；Node 八文件（CI 同款清单）**41 passed / 0 failed**（322.9 ms，本节落笔时在树上复跑）；`ruff check pet/ integrations/ tests/` → `All checks passed`（证据文档记载，本轮未复跑）。
+- **时序诚实边界**：聚焦/相邻两门（08:02 / 08:03）**早于**最后一轮修复落树（源码 08:33:06、测试 08:32:46），也早于最后补的 5 条用例（探活窗口轮转 / 有界覆盖 / 游标复位、两层「每条记录只诊断一次」）。那 5 条的红绿只在 `HANDOFF.md` 有散文记载（「5 条红绿实证 / 聚焦 385 passed 3 skipped」），**没有对应日志文件**；隔离副本里该类只有 10 条、`test_dsh_state.py` 44 条（主树现为 14 / 45）。故本节**不把 385p/3s 与那 5 条当已复核数字引用**。
+- **统一全量门（旧树，已结束）**：`.scratch/venv311` 的 `python -m pytest -q --ignore=…`（08:35:33 起跑）写 `multi-dsh-final-full.log`，末行 **6774 passed, 18 skipped, 19 warnings in 1049.49 s (0:17:29)**。源码最后写入时刻 08:33:06 早于起跑时刻，故该门**覆盖**当时树上的最终源码（`6743` 是 §15.3 那棵更早的树的数字，对当前树不再适用）。日志**不含进程退出码**——**真实 exit 已由父层核对为 0**，只对这门起跑时的那棵树成立，也不把 summary 改写成「CI 绿」。探活三态修复（`pet/agent_link.py` 09:13）**晚于**这门 ⇒ 对当前树失效，**修复后的全量门 `multi-dsh-liveness-final-full.log` 尚在跑、未出 summary**，本节按「未完待续」记。
+
+### 16.4 性能来源（单位 + 是否实测 + 方法；探活单列）
+
+| 指标 | 旧 | 新 | 差 | 来源 / 单位 / 方法 |
+|---|---|---|---|---|
+| `handle_record` 同态重复（单写者） | 0.532–0.535 µs/op | 1.645–1.697 µs/op | **+1.1 µs** | µs，实测：`multi-dsh-bench.py`，n=200000，脚本内 3 次取最好、外跑 2 轮 |
+| `handle_record` 3 写者轮转 | 0.681–0.694 µs | 2.827–2.887 µs | **+2.1 µs** | 同上（旧树走无 `owner` 形参路径） |
+| `manager._on_agent_state` 无 owner（旧口径） | 2.201–2.308 µs | 2.304–2.559 µs | **≈0（噪声内）** | µs，实测：`multi-dsh-bench-manager.py`，n=50000，同法 |
+| `manager._on_agent_state` 具名写者（分片+折叠） | 2.220–2.310 µs（旧树是同一条代码路径） | 3.958–4.832 µs | **+1.7–2.6 µs** | 同上（两份日志分别给 3.958–4.016 与 4.347–4.832，本节按区间引用） |
+| `record_owner`（新桥 `inst` / 旧桥游标） | — | 0.265–0.278 / 0.703–0.706 µs | 新增 | µs，实测：`multi-dsh-bench.py` |
+| `TurnCompletionTracker.is_duplicate_start` | — | 0.49 µs | 新增 | µs，**只有 `multi-dsh-evidence.md` 的表里写了这个数，`multi-dsh-bench*.log` 与两个 bench 脚本都没有这一项** ⇒ 只当数量级参考，不当实测引用 |
+| 信封字节 | — | **每条记录 +46 B**（`,"inst":"<36 字符 UUID>"`） | 新增 | **字节**，非流量实测：用同一棵树的字段形状做 `JSON.stringify` 差值算出的常量（UUID 定长 36） |
+| 内存界限 | — | scope 注册表 32（无主桶不受该上限约束 ⇒ 全部 scope 键 ≤33） / 状态分片 ≤32 / `_owner_files` **max(64, 活跃写者数)** / `_owner_raw` 128 / 收尾会话表 512 | 有界 | **条目数，不是字节**；来源是代码常量。`_owner_files` 超容量时**只淘汰非活跃写者**（从最老的开始），全部活跃时**不淘汰**（宁可暂时超容量，也不丢活跃写者的探活线索）⇒ 实际上界是 `max(64, 活跃写者数)`，而活跃写者数又被 scope 上界钉死（≤33）。**没有做每项字节测量，也没有内存增长曲线** |
+
+- **微基准的时点**：`multi-dsh-bench.log` / `-bench-manager.log` 都写于 **08:04**，即**最后一轮修复（轮转窗口、拒接诊断移位、游标复位，落树 08:22–08:33）之前** ⇒ 表里的「新」值是**轮转前**微基准；`handle_record` 与 `admit_owner` 在那一轮被改过，故这几行是**下界性质**的参考值，不是最终形态的数字。
+- **探活耗时（留档实测，替换此前无日志的 11.17/9.86 µs 两个数，那两个数作废不引用）**：
+  `.scratch/ci243/liveness-evidence/{probe.py,run.log,results.json}`，Windows 11 / Python 3.11.15，
+  10000 次/轮 × 3 轮、轮内轮换顺序：新三态探活中位 **6.91 µs**（6.90–7.02），旧 slot 实现
+  **7.22 µs**（7.06–7.52），旧 wrapper **8.26 µs**（8.24–8.57）⇒ 新实现不比旧实现慢（0.957×）。
+  调用计数臂实测每次探活 kernel32 恰 3 次调用；跑完无残留子进程（CIM 快照核对）。附带发现：
+  已回收的死进程在 Windows 上仍可能 `OpenProcess` 成功，判死实际靠 `GetExitCodeProcess` 退出码。
+  频次×个数：每 40 拍一轮（桌宠 1.5 s/拍 ⇒ ≈60 s）、单轮 ≤8 个写者、每个 1 次探活（`_bridge_writer_alive`）；系统调用数来自实现常量——**Windows 3 次**（OpenProcess + GetExitCodeProcess + CloseHandle），**POSIX 1 次**（`kill(pid,0)`），不是 trace 计出来的。
+- **探活系统调用真实性（必须区分）**：**注入依旧是主体**——探活用例大多 `monkeypatch.setattr` 注入 `_os_kill_signal_0` / `_win32_kernel32` 边界（或整个 `_bridge_writer_alive`），测的是三态语义与两条平台路径的分派。**真实边界只有一条**：`test_own_pid_is_alive_through_real_boundary` 对自己 pid 走真 `OpenProcess`/`kill(pid, 0)` 判 `True`（「自己不许被自我退役」的安全前提）。**本机没有对真死进程、也没有对真受保护进程做过端到端探活**：子代理记录里的「真实受保护进程探活 旧 `False` → 新 `None`」没有 scratch 日志，按代理工具记录对待。故本节只声明「语义正确 + 频率有界 + 无新增线程/定时器/网络/磁盘」，**不声明真实探活路径做过端到端**。
+- 无新增系统调用/网络/磁盘/线程的其余部分：桥侧只多一个信封字段（不新增 I/O 出口），消费侧是进程内字典与纯函数。
+
+### 16.5 边界（这就是本节不能写「全产品 PASS」的原因）
+
+- **镜像只对「双侧都是新桥写者」成立（旧混装边界）**：`is_duplicate_start` 要求两侧归属都带 `inst:` 前缀。新桥 + 旧桥（路径+文件身份）**混装**时，同一回合的两份 `turn/end` 仍可能各算一个身份 ⇒ **仍可能两次提醒**；旧桥自身轮转文件也会换 key，故不做镜像判定。此边界**未在真双实例上验证过**。
+- **镜像去重的取舍**：同一会话连续两回合若 `(session, step)` 相同且来自不同写者，第二回合会被当镜像吞掉（不重复提醒）。HANDOFF 记 upstream 真实回合身份（`turn/start data.turn` / `event.seq`）可用于更强判据，但**需最终审裁决后再改**，本片不动。
+- **Linux `None`（Py_None 引用计数）根因未证**：与本轮改动无关，但它仍在同一条候选树上敞着；§十四/§十五 的 Linux 结论**不因本节任何一门而改变**，本节也不据此解释它。
+- **没有真双 DSH 实例端到端**：全部证据是 pytest（真 tailer / 真 poll / 真收敛器 / 真 manager）+ Node 单测；没起过两个真实 DSH 进程，也没有真 OS / GUI 手工验证。
+- **满员拒接的作用域**：只影响该写者的**收敛状态分片**（它的忙/等待不进折叠态）；常驻交互、原始状态归属、生命周期收口照旧。被拒接的写者不参与探活。
+- **越界改动 2 处**（`tests/test_dsh_mid_attach_done.py`）：① 白盒断言回退到 `mon._turn_tracker`（收尾表不再按写者分片）；② 离线前提断言改为「清镜像」。被测对象未变，但确实是本片碰了它。
+- **注释与代码不符（仅注释，行为以代码为准）**：旧记录的「三处」里**两处已修正**——`pet/dsh_state.py:330-334` 的 `SCOPE_REGISTRY_MAX` 注释已改为「先回收界内安静写者；仍无名额则拒接新写者的状态分片，不合并归属」；`pet/agent_link.py:2173-2175` 的 `dsh_scope_retired` 注释已改为「陈旧文件清理**或低频存活探活**确认」。**仍残留一处**：`pet/agent_link.py:2286` 的 `_poll` 内退役注释只写「24h 陈旧文件清理路径」（紧邻的 `_maybe_probe_dead_writers()` 就是存活探活路径）。改后须对这两个文件的聚焦族重跑增量门。
+- **统一全量门（只对旧树成立）**：`.scratch/ci243/multi-dsh-final-full.log` 末行 **6774 passed / 18 skipped / 1049.49 s**（08:35:33 起跑，即源码最后写入 08:33:06 之后）。日志自身不含退出码，**真实 exit = 0 已由父层核对**——但它只覆盖**这门起跑时的那棵树**。**此后任何源码改动都让这门过期**：探活三态修复把 `pet/agent_link.py` 改到 09:13，修复后的统一全量门 `.scratch/ci243/multi-dsh-liveness-final-full.log`（最后一次写入 09:15）**还在跑、只到约 6% 的点阵、没有 summary** ⇒ 按「未完待续」记：`6774 / 18` 不得当作当前树或改后状态的证据，受影响文件须按增量门（聚焦族 + 相邻域）重跑。
+- **探活权限误判：已修（2026-10-12 09:13 落树；`pet/slot_manager.py` 未动）**：旧实现把「探不到」与「确已死」混为一谈——`slot_manager.pid_alive` 对任何探活失败一律 `False`（含 POSIX `os.kill(pid, 0)` 的 `PermissionError`、Windows `OpenProcess` 的 `ERROR_ACCESS_DENIED`），而三态契约要求 `False` 只代表**明确已死**（§16.1 第 5 条）⇒ 权限不足的**活**写者会被判死并退役（旧报告的读码结论，本机未复现）。**修法**：不改 `slot_manager`（其布尔语义被多处消费），让 `_bridge_writer_alive` **本模块自守三态**——Windows `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`：`ERROR_INVALID_PARAMETER(87)` = 没有这个 pid → `False`，`ERROR_ACCESS_DENIED(5)` 及其余错误码 → `None`，句柄打开后退出码 `!= STILL_ACTIVE` → `False`、读不到退出码 → `None`；POSIX `kill(pid,0)`：只有 `ESRCH`（与超出 pid 范围）→ `False`，`EPERM`/`EACCES`/未知 errno → `None`。`None` 一律保守（不清理、不退役、照常轮询），**全程不提权**（不改令牌、不加 `SeDebugPrivilege`）。**证据边界**：三态与全部分支由注入式单测覆盖，真实边界只有一条 `test_own_pid_is_alive_through_real_boundary`（对自己 pid 真探活判 `True`）；子代理记录里另有「真实受保护进程探活 旧 `False` → 新 `None`」，但**无 scratch 日志**，按代理工具记录对待、不作实测引用。修复改了 `pet/agent_link.py` ⇒ 与旧门不是同一棵树，`6774 / 18` 不沿用。

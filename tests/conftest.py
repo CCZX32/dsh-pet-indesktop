@@ -431,6 +431,12 @@ _diag_crumb = None
 # 清扫 fixture 的逐对象取证（见 _diag_sweep）：本轮已写行数 + 每轮上限。
 _diag_sweep_n = 0
 _DIAG_SWEEP_LINES = 12
+# Py_None 引用计数采样（见 _diag_none_sample）：只落行计数 + 上一例取值，无线程。
+_DIAG_NONEREF_LINES = 10
+_DIAG_NONEREF_DROP = 5000
+_diag_none_seen = 0
+_diag_none_last = None
+_diag_none_lines = 0
 
 
 def _diag_open():
@@ -458,6 +464,43 @@ def _diag_note(line):
         _diag_crumb.write(line + '\n')
     except (OSError, ValueError):
         pass
+
+
+def _diag_none_sample(nodeid):
+    """逐测试采样一次 Py_None 引用计数，只在诊断开关打开时被调用（**无线程**）。
+
+    ``none_dealloc`` 只在 None 的 ob_refcnt 掉到 0 时触发，且只可能出现在 CPython
+    ≤3.11（3.12 起 None 是 immortal，同类引用计数损坏被静默——见报告 §5：那是掩盖，
+    不是修复）。落行规则：
+
+    * 第一条（基线）必落；
+    * 之后每 100 例落一条（看趋势）；
+    * 或相对**上一例**下降 ≥ ``_DIAG_NONEREF_DROP`` 立即落一条（逐测试下降，直接
+      指名是哪个测试干的）；
+    * 总行数只对基线与每 100 例的周期行封顶 ``_DIAG_NONEREF_LINES``；下降行**不受**
+      封顶——它是唯一能指名肇事测试的行，被封顶挡掉 = 把诊断本来要的信号自己扔掉。
+    * 落下的每一行都走**双通道**：crumb 照旧，另写一份到 ``sys.__stderr__``（workflow
+      只 ``tail -n 30`` 面包屑，几行历史样本必被尾窗丢掉；stderr 不受该窗口限制）。
+    """
+    global _diag_none_seen, _diag_none_last, _diag_none_lines
+    value = sys.getrefcount(None)
+    _diag_none_seen += 1
+    drop = None if _diag_none_last is None else _diag_none_last - value
+    _diag_none_last = value
+    spike = drop is not None and drop >= _DIAG_NONEREF_DROP
+    if not (spike or drop is None or _diag_none_seen % 100 == 0):
+        return
+    if not spike and _diag_none_lines >= _DIAG_NONEREF_LINES:
+        return
+    _diag_none_lines += 1
+    delta = '' if drop is None else f' d={-drop:+d}'
+    line = f'[none-refcount] {value}{delta} #{_diag_none_seen} {nodeid}'
+    _diag_note(line)
+    if _diag_crumb is not None and sys.__stderr__ is not None:
+        try:
+            print(line, file=sys.__stderr__, flush=True)
+        except (OSError, ValueError):
+            pass
 
 
 def _diag_sweep_reset():
@@ -513,3 +556,9 @@ def pytest_runtest_logreport(report):
                   file=sys.__stderr__, flush=True)
     except (OSError, ValueError):
         pass  # 磁盘满或输出关闭时，保留 pytest 本身的判定和报告。
+    if report.when == 'teardown':
+        # 一例结束采一次 Py_None 计数（threading 0，落行规则见 _diag_none_sample）。
+        try:
+            _diag_none_sample(report.nodeid)
+        except Exception:
+            pass  # 取证绝不能让用例变红
