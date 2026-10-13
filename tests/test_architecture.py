@@ -297,6 +297,13 @@ def test_pure_logic_modules_do_not_import_qt():
         # 是纯几何，度量对象同样注入——收缩逐级触发/逆序恢复这些规则要能在没有
         # 窗口、没有真实字体、没有屏幕的替身上直接验，就必须零 Qt。
         "island_segments.py", "sys_monitor.py", "island_layout.py",
+        # 2026-10-13 加入 workers/protocol 与 workers/launch：worker 子进程只
+        # 导入这两层（协议编解码 + 启动租约/环境隔离），一旦这里沾上 Qt，
+        # 「子进程不背 GUI 依赖」的前提就没了——而它在子进程里是**真**约束，
+        # 不只是偏好（父进程侧另由 tests/test_workers_protocol.py 的
+        # 新进程探针守着）。QProcess 监督对象在 workers/supervisor.py，
+        # 不在本名单内。
+        "workers/protocol.py", "workers/launch.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
