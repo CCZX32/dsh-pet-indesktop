@@ -40,6 +40,8 @@
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
 | `tests/test_modern_settings_rows_topwindow.py` | +118（新） | 监视构造期**真实到达的 `QEvent.Show`**（Qt 只在真把控件显示出来时派发它）——「一个 `SettingRow` 以顶层窗口身份收到 Show」逐字等于用户看到的那个闪烁窗口。两条用例：默认配置、以及「岛指标 + 间隔 + 帧率 + 背景详情行全可见」的真实用户配置形态；另附构造后不变量（全部行有父对象、`SettingRow` 总数 ≥ 100 防空跑）。探针只读取事件、不改行为。 |
+| `tests/test_settings_stale_form_exit.py` | +62 / −76 | 两条真模态 exec 用例（`test_product_confirm_discard_reads_the_real_button_click`、`test_discard_unverified_notice_is_a_real_visible_box`）改为**子进程驱动**（原因与机制见 §六之一）；另拆掉 `test_discard_in_the_settings_process_releases_the_lock_for_the_next_open` 的 10 秒兜底 `app.quit` 定时器泄漏（跑完即 `stop()`，原为静态 `singleShot` 跑完不拆，会落在后面用例的循环里）。 |
+| `tests/settings_realmodal_driver.py` | 新增 | 子进程驱动器：干净 Qt 进程里跑「编辑 → 关窗 → 真确认框点放弃 →（通知框读文本点掉）」，框全是产品原件，结果以 `RESULT {json}` 交父进程断言；音频按 conftest 同规打桩；`os._exit` 避开退出期 Qt 拆除。 |
 
 ### 未改动（明确写出来，避免评审误以为漏了）
 
@@ -134,35 +136,34 @@
 | 既有「放弃未保存改动」族 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_settings_stale_form_exit.py -q` | **1 failed / 49 passed** —— 唯一那条红见 §六之一（既有计时脆弱，非本改动的语义后果）；放进 14 文件批次里是 **2 failed / 341 passed**（同 §六之一 的 A/B 表） |
 | 交付证据纪律 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_pr_report_discipline.py` | 通过 |
 
-### 六之一、一条**既有**用例在本分支上变红（如实登记，未掩盖）
+### 六之一、既有时序脆弱用例：已根治（进程边界化，本 PR 内闭环）
 
-`tests/test_settings_stale_form_exit.py::test_discard_unverified_notice_is_a_real_visible_box`
-在本分支上**必红**（3/3 次；`offscreen` 与真 `windows` 平台各复现）。已定位到**既有**
-时序脆弱，证据如下（`A`＝本分支，`B`＝基线 `47b6bfe`）：
+> 本节前半是当时的诊断登记，后半是最终修法。两条真模态 exec 用例
+> （`test_discard_unverified_notice_is_a_real_visible_box` 与
+> `test_product_confirm_discard_reads_the_real_button_click`）在本分支上曾**必红**——
+> 这是 CI 三端连红的直接原因。
 
-| 实验 | 命令/做法 | 结果 |
-|---|---|---|
-| 同文件、同批次的对照 | 两者各跑 3 遍 `tests/test_settings_stale_form_exit.py` | A：3/3 红（每次只这一条）；B：3/3 绿（两者单跑均约 36s） |
-| **14 文件批次 A/B 交替两轮**（`.scratch/settings-topwindow-flicker/ab-compare.txt`） | 同一组 14 个设置相关文件，base→分支→base→分支 交替跑 | A：**2 failed / 341 passed**（两轮一致：`test_discard_unverified_notice_is_a_real_visible_box` + `test_product_confirm_discard_reads_the_real_button_click`）；B：**343 passed**（两轮一致） |
-| **纯计时扰动对照**（关键） | 在 **B 的代码上**只加一句 `time.sleep(0.03)` 到 `ModernSettingsDialog.__init__`（语义零改动），再跑同一条命令 | **红**（同一条用例、同一种失败） |
-| 事务隔离对照 | 只把 `pet/settings_network.py` 回退到基线（其余不动） | 绿 → 触发点确实在本次改动内 |
-| 另一实现变体的对照 | 不改父对象、只把「对无父行 `setVisible(True)`」改成不调用（等效修掉闪烁，见 `.scratch/settings-topwindow-flicker/settings_network.variantC.py` 的兄弟变体） | 新增回归绿、**该既有用例依旧红** → 不是「传父对象」这一种写法的问题，而是构造耗时变化本身 |
-| 进程内干净复现 | 该用例流程的逐字复刻（`.scratch/settings-topwindow-flicker/test_replica.py`）在**干净进程**里跑 | 通过：`activeModal=QMessageBox`、延迟 400 ms 探针也拿得到框 → 产品行为正常 |
+**根因（Qt 6.9 源码级钉死）**：套件共享进程里，任何一次「事件循环在跑时兑现
+`QCoreApplication.quit()`」都会把 `quitNow` 旗标留在线程数据上
+（`qcoreapplication.cpp:1512` `data->quitNow = true` 并退出所有在跑循环）；此后
+`QEventLoop::exec` 在入口见到旗标**直接返回 -1 且不清旗**（`qeventloop.cpp` exec 入口
+检查）——真模态框"弹了即死"。本 PR 的构造提速（14 个闪窗消失、事件泵时机变化）
+改变了旗标落点：基线上它落在无害时刻，本分支上恰好落进这两条用例的真框 exec。
+对照证据：基线代码 + 一句 `time.sleep(0.03)` 到构造函数（语义零改动）同样红；
+干净进程逐字复刻同一流程通过 → 产品行为本身正常。
 
-**机制（实测结论）**：该用例用 `QTimer.singleShot(0, …)` 在「放弃未保存改动」通知框的
-**嵌套事件循环**里去抓 `app.activeModalWidget()`。在同一文件前序用例留下的**事件循环
-污染态**下（推断为一次悬挂的 `exit()/interrupt`，在下一个嵌套循环里被立刻消费），这个
-0 ms 探针只在「框的循环真的跑起来」时才命中；而**只要构造耗时有一点点变化（无论更快
-还是更慢）**，通知框的那个嵌套循环就可能成为被那条悬挂信号命中的「下一个循环」，于是
-`exec()` 立刻返回（实测 `warning()` 返回 `NoButton`、框被 Hide/Destroy），探针抓空 → 红。
-**干净进程里同一段代码行为正常**，真机用户路径不受影响。
+**为什么不走进程内清旗**：唯一能复位 `quitNow` 的公开路径是 `QCoreApplication.exec`
+进出（`qcoreapplication.cpp:1445/1450`），但它会泵全局事件队列——实测在全套件语境下
+引爆别用例遗留的排队事件/重复触发 `aboutToQuit`（全量套件 28 挂），conftest 也明令
+禁止全局冲刷。两条进程内修法（单拍探针改事件同步轮询、fixture 级清旗）都被这套
+机制否决后，按 AGENTS.md「Qt 回归用真实事件循环和进程边界」改为**子进程方案**：
 
-本 PR **没有**改这条用例，也**没有**做任何「赌时序」的规避（不 sleep、不调参、不改探针）：
-它测的是「放弃未改动时用户真的看得见一条通知」这个产品承诺，本身是对的；红的是
-「用 0 ms 计时器去赌另一个嵌套循环的第一拍」这个**既有的**探针写法 + 前序用例的循环污染。
-**建议的后续（不在本 PR 范围）**：把该探针改成事件同步（例如由被测通知框自己在
-`showEvent` 里回调断言）、或清掉前序用例的循环污染；两者都属独立工单，改在这里会把
-「缺陷修复」和「测试基建」混成一批。
+- `tests/settings_realmodal_driver.py` 在干净子进程里跑完整真框流程（确认框点放弃
+  → 通知框读文本点掉），`RESULT {json}` 交父进程断言；两条用例的断言语义一字未降。
+- 验证：文件 50/50、settings 族组合 422/422（此前必红的组合）、子进程单条约 2.7s。
+- 顺带真修了一个泄漏：`test_discard_in_the_settings_process_…` 的 10 秒兜底
+  `app.quit` 定时器原为静态 `singleShot`，正常跑完不拆，会落在后面用例的循环里——
+  改为句柄式 `QTimer`，`finally` 里 `stop()`。
 
 ## 七、已知限制与后续
 
@@ -179,5 +180,5 @@
 - **配置迁移**：无新增/删除配置键，无迁移。
 - **回滚**：`git revert` 即回到旧行为（闪烁与 2.2 s 构造段一并回来），无落盘残留、无状态
   需要清理。
-- **已知副作用**：§六之一那条既有用例在本分支上会红（原因与证据已登记，非本改动的语义
-  后果）；合并前需要与维护者确认处置口径（本 PR 按任务要求**不合并**）。
+- **已知副作用**：无。§六之一登记的既有时序脆弱已在本次以进程边界化根治（断言语义
+  不降），CI 三端曾因此连红的阻塞解除。
