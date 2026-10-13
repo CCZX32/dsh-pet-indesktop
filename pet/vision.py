@@ -16,7 +16,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # 注意：不在此处顶层 import PIL —— Image/ImageGrab 只在截屏路径
 # （capture_window_rect / capture_screen_bytes）用到，而本模块随 pet.window
@@ -71,7 +73,119 @@ DEFAULT_VISION_MODEL = 'deepseek-v4-flash-vision-exp'
 
 
 class VisionError(RuntimeError):
-    pass
+    """视觉请求失败。
+
+    ``code`` / ``retryable`` 是**跨进程线上契约**需要的两项（worker 子进程把
+    失败如实回报给宿主做熔断与提示）；本进程内的既有调用方照旧只看异常消息，
+    ``str(exc)`` 与加这两项之前逐字相同。
+    """
+
+    #: 固定错误码集合：worker 只许报这几个（不带上游响应体/URL/凭据）。
+    CODES = frozenset(
+        {
+            "vision_authentication_failed",
+            "vision_protocol_unsupported",
+            "vision_rate_limited",
+            "vision_network_failed",
+            "vision_response_invalid",
+            "vision_budget_exhausted",
+        }
+    )
+    #: 该码是否值得重试（宿主据此决定是否计入熔断/是否自动重试）。
+    RETRYABLE = frozenset(
+        {"vision_rate_limited", "vision_network_failed", "vision_response_invalid"}
+    )
+
+    def __init__(self, message: str, *, code: str = "vision_response_invalid") -> None:
+        super().__init__(message)
+        self.code = code if code in self.CODES else "vision_response_invalid"
+        self.retryable = self.code in self.RETRYABLE
+
+
+#: 视觉请求的**可传输**字段集（主机 → worker 子进程）。刻意不含 ``api_key_ref`` /
+#: ``vision_api_key_ref``：钥匙串解析是宿主的事（宿主已经有 Qt/聊天模块），
+#: worker 侧只认已解析好的明文，绝不把凭据解析链拉进子进程。
+_VISION_REQUEST_FIELDS = (
+    "base_url",
+    "chat_path",
+    "model",
+    "vision_model",
+    "vision_same_as_chat",
+    "vision_base_url",
+    "api_key",
+    "vision_api_key",
+    "timeout",
+    "temperature",
+    "max_tokens",
+    "verify_ssl",
+)
+
+
+@dataclass
+class VisionRequestConfig:
+    """视觉请求的纯数据模型（零 Qt、零聊天包依赖）。
+
+    ``pet.chat.models.ProviderConfig`` 是聊天域的真值，但它住在 ``pet.chat``
+    包里——导入即连带 ``pet.chat.service``（Qt）。主动识屏 worker 跑在独立子进程
+    里，只能收这份投影。字段名与 ProviderConfig 完全一致，宿主用
+    ``to_dict(include_secret=True)`` 直接构造，worker 用 :meth:`from_dict` 还原，
+    所以两侧不存在第二套字段命名。
+    """
+
+    base_url: str = ""
+    chat_path: str = "/v1/chat/completions"
+    model: str = ""
+    vision_model: str = ""
+    vision_same_as_chat: bool = True
+    vision_base_url: str = ""
+    api_key: str = ""
+    vision_api_key: str = ""
+    timeout: float = 60.0
+    temperature: float = 0.7
+    max_tokens: int = 2048
+    verify_ssl: bool = True
+
+    @staticmethod
+    def _text(value: Any, default: str = "") -> str:
+        return default if value is None else str(value)
+
+    @staticmethod
+    def _number(value: Any, default: float, *, low: float, high: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(low, min(high, number))
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "VisionRequestConfig":
+        """容错还原：字段缺失/类型不对时回退默认值，绝不抛异常。
+
+        越界值 clamp 到与聊天 provider 同口径的区间（temperature 0~2、
+        timeout 1~600、max_tokens ≥1），避免 worker 侧拿到手改配置后行为分叉。
+        """
+        data = raw if isinstance(raw, dict) else {}
+        return cls(
+            base_url=cls._text(data.get("base_url")),
+            chat_path=cls._text(data.get("chat_path"), "/v1/chat/completions") or "/v1/chat/completions",
+            model=cls._text(data.get("model")),
+            vision_model=cls._text(data.get("vision_model")),
+            vision_same_as_chat=bool(data.get("vision_same_as_chat", True)),
+            vision_base_url=cls._text(data.get("vision_base_url")),
+            api_key=cls._text(data.get("api_key")),
+            vision_api_key=cls._text(data.get("vision_api_key")),
+            timeout=cls._number(data.get("timeout", 60.0), 60.0, low=1.0, high=600.0),
+            temperature=cls._number(data.get("temperature", 0.7), 0.7, low=0.0, high=2.0),
+            max_tokens=int(cls._number(data.get("max_tokens", 2048), 2048, low=1, high=1_000_000)),
+            verify_ssl=bool(data.get("verify_ssl", True)),
+        )
+
+    def to_dict(self, include_secret: bool = True) -> dict[str, Any]:
+        data: dict[str, Any] = {name: getattr(self, name) for name in _VISION_REQUEST_FIELDS}
+        if not include_secret:
+            data.pop("api_key", None)
+            data.pop("vision_api_key", None)
+        return data
 
 
 def resolve_vision_model(p) -> str:
@@ -316,8 +430,10 @@ def _post_vision_request(
     已耗尽，函数直接抛出 VisionError 停止后续重试。
     pet_name: 可选，桌宠角色显示名；用于在 user 文本里追加自我识别提示，
     让模型认出截图角落里的桌宠就是自己，而不是陌生程序。"""
-    # 延迟导入：无 Chat 变体（pet.chat 被排除）下本函数不会被调用
-    from .chat.providers import _make_ssl_context, normalize_chat_endpoint, build_browser_headers
+    # 延迟导入：无 Chat 变体（pet.chat 被排除）下本函数不会被调用。
+    # 传输原语走 pet.http_compat（零业务零凭据）——pet.chat.providers 会连带
+    # pet.chat.__init__（Qt），而本函数在主动识屏 **worker 子进程**里也要跑。
+    from .http_compat import _make_ssl_context, normalize_chat_endpoint, build_browser_headers
     # 视觉独立端点仅在「不同聊天模型」时生效；同聊天模型时强制跟随聊天配置，
     # 否则残留的 GLM 地址会配上 ds 的模型名发出（modelCode 不存在）
     base_url = p.base_url if p.vision_same_as_chat else (p.vision_base_url or p.base_url)
@@ -368,12 +484,15 @@ def _post_vision_request(
         api_key = p.api_key
     else:
         vkey = p.vision_api_key
-        if not vkey and p.vision_api_key_ref:
+        # 独立视觉端点的钥匙串解析是**宿主**的职责：worker 侧的 VisionRequestConfig
+        # 根本没有 vision_api_key_ref 字段，getattr 兜底后这条分支在子进程里不可达
+        # （凭据解析链不进行子进程，也无法把 Qt/聊天包拉进去）。
+        if not vkey and getattr(p, 'vision_api_key_ref', ''):
             from .chat.models import SecretStore
             vkey = SecretStore().get(p.vision_api_key_ref)
         api_key = vkey
         if not api_key:
-            raise VisionError('独立视觉服务未配置 API Key')
+            raise VisionError('独立视觉服务未配置 API Key', code='vision_authentication_failed')
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
     req = urllib.request.Request(
@@ -389,7 +508,7 @@ def _post_vision_request(
         # 一次触发多次重试各自占用额度；预算耗尽则立即停止，不再发起请求。
         if consume_budget is not None:
             if not consume_budget():
-                raise VisionError('每日请求上限已到，今天先陪你到这儿了')
+                raise VisionError('每日请求上限已到，今天先陪你到这儿了', code='vision_budget_exhausted')
         try:
             with urllib.request.urlopen(req, timeout=max(float(p.timeout), 60.0),
                                         context=_make_ssl_context(p.verify_ssl)) as resp:
@@ -409,16 +528,29 @@ def _post_vision_request(
                 last_error = exc
                 time.sleep(2.0)  # 免费视觉模型高峰过载：稍等重试
                 continue
-            raise VisionError(_safe_detail(detail)) from exc
+            # 错误码按 HTTP 状态分类（与聊天侧同口径）；响应体只用于人话提示，
+            # 绝不回传（可能回显凭据）。
+            if exc.code in (401, 403):
+                code = 'vision_authentication_failed'
+            elif exc.code == 429:
+                code = 'vision_rate_limited'
+            elif exc.code in (400, 404, 405, 415, 422):
+                code = 'vision_protocol_unsupported'
+            else:
+                code = 'vision_network_failed'
+            raise VisionError(_safe_detail(detail), code=code) from exc
         except (urllib.error.URLError, OSError) as exc:
             last_error = exc
         if attempt < 2:
             time.sleep(1.0)
     if data is None:
         if isinstance(last_error, urllib.error.HTTPError):
-            raise VisionError('模型当前访问量大（免费档高峰限流），稍后再点一次试试') from last_error
+            raise VisionError(
+                '模型当前访问量大（免费档高峰限流），稍后再点一次试试',
+                code='vision_rate_limited',
+            ) from last_error
         reason = getattr(last_error, 'reason', last_error)
-        raise VisionError(f'网络连接失败：{reason}')
+        raise VisionError(f'网络连接失败：{reason}', code='vision_network_failed') from last_error
 
     choices = data.get('choices') if isinstance(data, dict) else None
     if not choices:

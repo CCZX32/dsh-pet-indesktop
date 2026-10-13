@@ -37,6 +37,25 @@ from pet.proactive import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _pin_in_process_execution(monkeypatch):
+    """本文件断言的是**进程内**识屏管线（``_worker_capture`` 后台线程 + dHash +
+    逐窗字段 + ``_on_frame_ready``）。
+
+    S3 起默认执行位置是 worker 子进程，本文件若不钉住就会「测试还在绿、测的已经
+    不是它说的那条路」——例如那些 monkeypatch ``_worker_capture`` 的用例会变成
+    恒真（worker 模式下根本不走它）。所以这里把执行位置显式钉成进程内：
+    worker 路径的覆盖在 ``tests/test_proactive_worker.py``（真子进程 + 适配器），
+    两套行为各自有主人，谁也不借谁的道。
+
+    钉的是 ``pet.proactive.worker_mode``（唯一读配置决定执行位置的地方），
+    不是配置默认值——``TestEffectiveConfig`` 那几条仍然验证真默认值 ``worker``。
+    """
+    from pet import proactive
+
+    monkeypatch.setattr(proactive, "worker_mode", lambda _raw: proactive.EXECUTION_IN_PROCESS)
+
+
 # ============================================================================
 # 1. 白名单匹配测试
 # ============================================================================

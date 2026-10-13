@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 # 拆分后组件 re-export（维持既有 import 兼容；外部调用点本批不改）
+from .image_hash import hamming_distance, image_dhash
 from .proactive_limiter import (
     DEFAULT_PROACTIVE_CONFIG,
     PRESET_DEFAULTS,
@@ -25,9 +26,18 @@ from .proactive_limiter import (
     effective_proactive_config,
 )
 from .proactive_memory import ProactiveMemory
+from .proactive_worker_status import (
+    EXECUTION_IN_PROCESS,
+    EXECUTION_WORKER,
+    describe as describe_worker_status,
+    worker_mode,
+    write_status as write_worker_status,
+)
 
 __all__ = [
     "DEFAULT_PROACTIVE_CONFIG",
+    "EXECUTION_IN_PROCESS",
+    "EXECUTION_WORKER",
     "PRESET_DEFAULTS",
     "match_process_whitelist",
     "image_dhash",
@@ -39,6 +49,8 @@ __all__ = [
     "idle_satisfied",
     "should_watch",
     "effective_proactive_config",
+    "describe_worker_status",
+    "worker_mode",
     "ProactiveMemory",
     "ProactiveLimiter",
     "ProactiveScreenWatcher",
@@ -82,45 +94,6 @@ def match_process_whitelist(
                 return True
 
     return False
-
-
-def image_dhash(img: Any) -> int:
-    """计算图像的 64 位 dHash（差异哈希）。
-
-    任意通道与尺寸输入先转为灰度 'L'，缩放到 (9, 8)，
-    逐行相邻像素比较（left > right）生成 64 位整数。
-    """
-    # 转换为灰度图像并缩放到 9x8（宽 9，高 8）
-    # 显式使用 NEAREST 采样，兼容各 Pillow 版本
-    try:
-        from PIL import Image
-        resample = getattr(Image, "Resampling", Image).NEAREST
-    except Exception:
-        resample = 0
-    gray = img.convert("L").resize((9, 8), resample)
-    # 获取展平后的像素数据（兼容旧版 getdata 与新版 get_flattened_data）
-    if hasattr(gray, "get_flattened_data"):
-        pixels = list(gray.get_flattened_data())
-    elif hasattr(gray, "getdata"):
-        pixels = list(gray.getdata())
-    else:
-        pixels = list(gray.tobytes())
-
-    diff = 0
-    width = 9
-    for row in range(8):
-        row_offset = row * width
-        for col in range(8):
-            left = pixels[row_offset + col]
-            right = pixels[row_offset + col + 1]
-            diff = (diff << 1) | (1 if left > right else 0)
-
-    return diff
-
-
-def hamming_distance(h1: int, h2: int) -> int:
-    """计算两个哈希值之间的 Hamming 距离（0~64）。"""
-    return bin(h1 ^ h2).count("1")
 
 
 def classify_activity(process: str | None, title: str | None) -> str:
@@ -279,6 +252,16 @@ class ProactiveScreenWatcher:
         self._request_in_flight: bool = False  # 视觉请求进行中：同时只允许一条完整 pipeline
         self._generation: int = 0  # 代次令牌：pause/关闭 时自增，使已派发/排队的任务失效
 
+        # S3：识屏执行位置（worker 子进程 / 进程内）。适配器**惰性**创建——
+        # 进程内模式下连 QObject 都不建（既有测试与用户配置零负担）。故障标记
+        # `_worker_fault` 是「worker 坏了」的唯一真值：置位后不再派发，且**不会**
+        # 退回 `_worker_capture`/`_worker_request_vision` 那条进程内老路（两套
+        # 行为同时活着才是真正的坑）。
+        self._parent_obj = parent_obj
+        self._worker_adapter: Any = None
+        self._worker_fault: str = ""
+        self._execution_mode: str = worker_mode(self.cfg.get("proactive_screen", {}))
+
         state_path = self.cfg.dir / "proactive_screen_state.json"
         self.limiter = ProactiveLimiter(
             state_path, self.cfg.get("proactive_screen", {})
@@ -294,10 +277,14 @@ class ProactiveScreenWatcher:
         return self._timer.isActive()
 
     def apply_config(self) -> None:
-        """根据最新配置更新频控器并决定定时器启停。"""
+        """根据最新配置更新频控器并决定定时器启停（含识屏执行位置的切换）。"""
         raw_cfg = self.cfg.get("proactive_screen", {})
         eff = effective_proactive_config(raw_cfg)
         self.limiter.update_config(eff, dry_run=eff.get("dry_run", False))
+
+        mode = worker_mode(eff)
+        if mode != self._execution_mode:
+            self._switch_execution_mode(mode)
 
         # 仅在 Windows（主动识屏 v1 仅限 Windows）、enabled 为 True 且白名单非空时启动定时器
         # （手册 §5.2 与验收 #3）；非 Windows 即使手改 config 开启 enabled 也不起定时器。
@@ -313,11 +300,150 @@ class ProactiveScreenWatcher:
             and bool(eff["whitelist"])
         )
         if should_run:
+            if mode == EXECUTION_WORKER:
+                self._start_worker_process(eff)
             if not self._timer.isActive():
                 self._timer.start()
         else:
             self._generation += 1  # 关闭 = 作废在飞任务
             self._timer.stop()
+        self.publish_worker_status()
+
+    # ------------------------------------------------ 执行位置（worker / 进程内）
+    def _switch_execution_mode(self, mode: str) -> None:
+        """用户显式切换执行位置：收口旧路径、清故障标记。
+
+        「显式切换」与「故障回退」在这里是两件事：只有本方法能被用户动作触发；
+        worker 故障时 `_worker_fault` 置位并**不**改 `_execution_mode`，所以不会
+        变成"故障后偷偷用进程内跑"——那种两套行为并存的坑正是本片要避免的。
+        """
+        previous = self._execution_mode
+        self._execution_mode = mode
+        self._worker_fault = ""
+        self._generation += 1  # 换执行位置 = 在飞任务一律作废
+        if previous == EXECUTION_WORKER:
+            self._stop_worker_process()
+        self.publish_worker_status()
+
+    def _start_worker_process(self, eff: dict) -> None:
+        """按最新配置启动/配置 worker 子进程（故障未清时不再自动拉起）。"""
+        if self._worker_fault:
+            return
+        adapter = self._ensure_worker_adapter()
+        config = self._worker_config()
+        if adapter.active:
+            if adapter.ready:
+                adapter.configure(config)
+            return
+        adapter.start(config)
+
+    def _worker_config(self) -> dict[str, Any]:
+        """下发给 worker 的截图编码参数——**与进程内路径逐字对齐**。
+
+        进程内路径用 ``vision.MAX_EDGE`` 降采样、quality=70 编码、dHash 在降采样前
+        计算（见 ``_worker_capture``）；worker 的默认值（1280/82）与它不同，
+        不显式下发就会在切换执行位置时悄悄改变发给模型的图与花费。
+        """
+        from . import vision
+
+        return {
+            "max_edge": int(vision.MAX_EDGE),
+            "jpeg_quality": 70,
+            "frame_ttl": 20.0,
+        }
+
+    def _ensure_worker_adapter(self):
+        if self._worker_adapter is not None:
+            return self._worker_adapter
+        from .workers.proactive_screen_adapter import ProactiveScreenWorkerAdapter
+
+        adapter = ProactiveScreenWorkerAdapter(self._parent_obj, budget_checker=self._budget_check)
+        self._attach_worker_adapter(adapter)
+        return adapter
+
+    def _attach_worker_adapter(self, adapter) -> None:
+        """接线一个适配器（信号 → 本观察器的槽）并持有它。
+
+        单独一层是为了让「换一条命令行的适配器」这种测试能在**不绕过接线**的前提下
+        注入（只替换适配器本身，接线逐字走生产代码）。
+        """
+        adapter.capture_ready.connect(self._on_worker_capture_ready)
+        adapter.analysis_ready.connect(self._on_worker_analysis_ready)
+        adapter.request_failed.connect(self._on_worker_request_failed)
+        adapter.state_changed.connect(self._on_worker_state_changed)
+        adapter.failed.connect(self._on_worker_failed)
+        adapter.diagnostic.connect(self._on_worker_diagnostic)
+        self._worker_adapter = adapter
+
+    def _budget_check(self, _kind: str, _generation: int | None) -> bool:
+        """worker 发来的 budget_check 应答：宿主的日额度是唯一真值。"""
+        try:
+            return bool(self.limiter.consume_budget())
+        except Exception:
+            import logging
+
+            logging.exception("主动识屏 worker 额度检查失败")
+            return False
+
+    def _stop_worker_process(self) -> None:
+        adapter = self._worker_adapter
+        if adapter is not None:
+            adapter.stop()
+
+    def shutdown(self) -> None:
+        """进程级收口：停表、作废在飞任务、停 worker 子进程（幂等）。"""
+        self._timer.stop()
+        self._generation += 1
+        self._worker_busy = False
+        self._stop_worker_process()
+        self.publish_worker_status()
+
+    def _on_worker_state_changed(self, state: str) -> None:
+        if state == "fault":
+            self._mark_worker_fault("worker 进入 fault 状态")
+        elif state == "ready":
+            # 重启阶梯把 worker 拉回来了：清掉崩溃标记，恢复派发。
+            self._worker_fault = ""
+        self.publish_worker_status()
+
+    def _on_worker_failed(self, reason: str) -> None:
+        self._mark_worker_fault(str(reason))
+        self.publish_worker_status()
+
+    def _on_worker_diagnostic(self, _stage: str, _detail: object) -> None:
+        self.publish_worker_status()
+
+    def _mark_worker_fault(self, reason: str) -> None:
+        """worker 坏了：如实记录并停派发。**不改执行位置、不退回进程内**。"""
+        first = not self._worker_fault
+        self._worker_fault = str(reason or "worker 故障")
+        self._worker_busy = False
+        if first:
+            import logging
+
+            logging.error(
+                "主动识屏 worker 故障，识屏已停止（未回退进程内执行）：%s",
+                self._worker_fault,
+            )
+
+    def publish_worker_status(self) -> None:
+        """把「当前由谁执行」如实落成跨进程可见的状态快照（设置页据此展示）。"""
+        if self._execution_mode == EXECUTION_IN_PROCESS:
+            snapshot: dict[str, Any] = {"mode": "in_process", "state": "disabled"}
+        elif self._worker_adapter is None:
+            snapshot = {"mode": "auto", "state": "disabled"}
+        else:
+            snapshot = dict(self._worker_adapter.status_snapshot())
+        if self._worker_fault:
+            snapshot["state"] = "fault"
+            snapshot["last_reason"] = self._worker_fault
+        snapshot["execution"] = self._execution_mode
+        try:
+            write_worker_status(self.cfg.dir, snapshot)
+        except Exception:
+            import logging
+
+            logging.debug("写入主动识屏 worker 状态失败", exc_info=True)
 
     def pause(self) -> None:
         """窗口隐藏或活动暂停时停止定时器，并作废在飞/已排队的任务。"""
@@ -407,7 +533,10 @@ class ProactiveScreenWatcher:
         if not ok:
             return
 
-        # G1~G4 全部通过，派发后台 worker 执行 G5（截图 + dHash 计算）
+        # G1~G4 全部通过，派发截图：worker 模式走子进程，进程内模式走后台线程。
+        if self._execution_mode == EXECUTION_WORKER:
+            self._dispatch_worker_capture(info)
+            return
         self._worker_busy = True
         import threading
 
@@ -417,6 +546,25 @@ class ProactiveScreenWatcher:
             daemon=True,
             name="proactive-screen-worker",
         ).start()
+
+    def _dispatch_worker_capture(self, info: dict) -> None:
+        """把 G5（截图 + dHash）派给 worker 子进程。
+
+        三条「不派发」的判据各自含义不同，都不许压成一句"等下次"：
+        - 故障未清：识屏已停（`_worker_fault`，由 `_mark_worker_fault` 置位）；
+        - 还在启动/握手：本 tick 跳过（子进程就绪后自然接上，不是失败）；
+        - `_send` 返回 None（未就绪 / 待答请求已满）：同上。
+        """
+        if self._worker_fault:
+            return
+        adapter = self._worker_adapter
+        if adapter is None or not adapter.ready:
+            return
+        window = {"hwnd": info.get("hwnd"), "pid": info.get("pid")}
+        self._worker_busy = True
+        request_id = adapter.capture_foreground(window, self._generation)
+        if request_id is None:
+            self._worker_busy = False
 
     def _bridge_alive(self) -> bool:
         """桥接 QObject 是否仍存活（窗口销毁后 daemon 线程的 emit 会崩）。"""
@@ -478,6 +626,169 @@ class ProactiveScreenWatcher:
             # 已送达 → 由 _on_frame_ready 的 finally 释放。
             if not emitted:
                 self._worker_busy = False
+
+    # ---------------------------------------------- worker 子进程回包（S3）
+    def _on_worker_capture_ready(self, envelope: dict) -> None:
+        """worker 完成截图+dHash 后的主线程槽。
+
+        与进程内 `_on_frame_ready` 逐条对齐：代数复核 → 开关复核 → dHash 阈值 →
+        频控原子盖章 → dry_run → 先兆 + 记忆 + provider → 派发分析。差别只在
+        「图存在子进程里」：宿主只拿到 frame_id 与 dhash，画面本身不进宿主进程
+        （内存更省，也少一次 MB 级跨线程搬运）。
+        """
+        try:
+            if self._execution_mode != EXECUTION_WORKER or self._worker_fault:
+                self._release_worker_frame(envelope)
+                return
+            if envelope.get("generation") != self._generation:
+                self._release_worker_frame(envelope)
+                return
+            eff = effective_proactive_config(self.cfg.get("proactive_screen", {}))
+            if not eff["enabled"]:
+                self._release_worker_frame(envelope)
+                return
+            result = envelope.get("result")
+            result = result if isinstance(result, dict) else {}
+            frame_id = str(result.get("frame_id") or "")
+            window = result.get("window")
+            window = window if isinstance(window, dict) else {}
+            cur_hash = result.get("dhash")
+            cur_hash = cur_hash if isinstance(cur_hash, int) else None
+
+            threshold = eff.get("change_threshold", 8)
+            if self._last_dhash is not None and cur_hash is not None:
+                if hamming_distance(self._last_dhash, cur_hash) < threshold:
+                    import logging
+
+                    logging.debug(
+                        "主动识屏: 画面变化未达阈值 (dist=%d, thresh=%d)",
+                        hamming_distance(self._last_dhash, cur_hash),
+                        threshold,
+                    )
+                    self._release_worker_frame(envelope)
+                    return
+
+            # G6 严格频控门禁二次确认（原子判定+盖章，多开不互相踩冷却）
+            ok, _reason = self.limiter.try_acquire()
+            if not ok:
+                self._release_worker_frame(envelope)
+                return
+            if cur_hash is not None:
+                self._last_dhash = cur_hash
+
+            proc_name = str(window.get("process", "")).strip()
+            win_title = str(window.get("title", "")).strip()
+            if self.limiter.dry_run:
+                import logging
+
+                logging.info(
+                    "主动识屏 [dry-run 模式]: 条件满足已触发! 前台: %s, 窗口: %s, dHash: %s",
+                    proc_name,
+                    window.get("hwnd"),
+                    hex(cur_hash) if cur_hash is not None else "None",
+                )
+                self._release_worker_frame(envelope)
+                return
+
+            hold = getattr(self.win, "hold_bubble", None)
+            if callable(hold):
+                hold(30.0)
+            if eff.get("pre_cue", True) and hasattr(self.win, "show_bubble"):
+                self.win.show_bubble("让我看看……", duration_ms=2500)
+
+            provider, system_prompt = self._resolve_vision_provider(eff)
+            current_act = classify_activity(proc_name, win_title)
+            last_entry = self.memory.latest()
+            memory_ctx = build_memory_context(last_entry, current_act) or ""
+            adapter = self._worker_adapter
+            if adapter is None:
+                return
+            self._request_in_flight = True
+            request_id = adapter.analyze_frame(
+                frame_id,
+                provider,
+                system_prompt,
+                generation=self._generation,
+                memory_context=memory_ctx,
+                pet_name=self._pet_display_name(),
+            )
+            if request_id is None:
+                self._request_in_flight = False
+                self._release_worker_frame(envelope)
+        finally:
+            self._worker_busy = False
+
+    def _on_worker_analysis_ready(self, envelope: dict) -> None:
+        """worker 完成视觉请求后的主线程槽：冒泡/计费/记忆/会话同步逐条对齐进程内路径。"""
+        try:
+            if envelope.get("generation") != self._generation:
+                return
+            result = envelope.get("result")
+            result = result if isinstance(result, dict) else {}
+            reply = str(result.get("reply") or "")
+            window = result.get("window")
+            window = window if isinstance(window, dict) else {}
+            proc_name = str(window.get("process", "")).strip()
+            win_title = str(window.get("title", "")).strip()
+            current_act = classify_activity(proc_name, win_title)
+            if reply.strip():
+                # 按时长按内容长度缩放：太短读不完。6s 起步，每字 +150ms，封顶 20s
+                duration = max(6000, min(20000, 4000 + len(reply) * 150))
+                self._bridge.bubble_requested.emit(reply, duration)
+                self.limiter.record_success()
+                # 陪伴记忆只存 进程名+活动分类，不落窗口标题（隐私约定与进程内一致）
+                if proc_name or current_act:
+                    self.memory.record(proc_name, "", current_act)
+                import logging
+
+                logging.info(
+                    "主动识屏回复全文: 前台进程=%s 活动=%s | %s",
+                    proc_name, current_act, reply,
+                )
+                self._bridge.reply_synced.emit(build_sync_marker(proc_name, current_act), reply)
+            else:
+                self.limiter.record_failure()
+        finally:
+            self._request_in_flight = False
+
+    def _on_worker_request_failed(self, operation: str, envelope: dict) -> None:
+        """worker 请求失败：如实记日志，并按进程内同口径决定是否计入熔断。"""
+        import logging
+
+        payload = envelope if isinstance(envelope, dict) else {}
+        code = str(payload.get("error_code", ""))
+        logging.warning("主动识屏 worker 请求失败: %s (%s)", operation, code)
+        if operation == "capture_foreground":
+            self._worker_busy = False
+            return
+        # 只有"真的去问过模型"的失败才计入熔断；worker 自己没了不算模型的错。
+        if operation in {"analyze_frame", "manual_look"} and code not in {"worker_unavailable", "worker_stopped"}:
+            if not (payload.get("generation") is not None and payload["generation"] != self._generation):
+                self.limiter.record_failure()
+        self._request_in_flight = False
+
+    def _release_worker_frame(self, envelope: dict) -> None:
+        """让子进程丢掉不再需要的截图（帧只活在前台窗口核对通过的那一小段时间）。"""
+        adapter = self._worker_adapter
+        result = envelope.get("result") if isinstance(envelope, dict) else None
+        frame_id = str((result or {}).get("frame_id") or "") if isinstance(result, dict) else ""
+        if adapter is not None and frame_id:
+            try:
+                adapter.release_frame(frame_id)
+            except Exception:
+                import logging
+
+                logging.debug("释放 worker 截图帧失败", exc_info=True)
+
+    def _pet_display_name(self) -> str:
+        from . import catalog
+
+        try:
+            return self.cfg.character_display_name(
+                str(self.cfg.get("character", catalog.DEFAULT_CHARACTER))
+            )
+        except Exception:
+            return ""
 
     def _on_frame_ready(
         self, img: Any, app_str: str, hwnd: int, cur_hash: int, info: dict | None = None

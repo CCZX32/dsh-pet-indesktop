@@ -3,22 +3,23 @@
 
 依赖方向是本包的硬约束：子进程侧只需要 :mod:`pet.workers.protocol`
 （以及 :mod:`pet.workers.launch` 的 Qt-free 部分），导入本包**不得**把 Qt 拉进
-子进程。因此带 Qt 的 :class:`~pet.workers.supervisor.WorkerSupervisor` 只经
-模块级 ``__getattr__`` 惰性暴露，本文件顶层绝不 import 它。
+子进程。因此带 Qt 的 :class:`~pet.workers.supervisor.WorkerSupervisor` 与
+:mod:`pet.workers.launch` 都只经模块级 ``__getattr__`` 惰性暴露，本文件顶层
+除了 :mod:`pet.workers.protocol` 之外不再 import 任何子模块。
 
-本片（S2）只建框架：没有任何生产调用方，主动识屏 worker 在 S3 接入。
+为什么连 :mod:`~pet.workers.launch` 也要惰性（S3 改动）：子进程的启动路径是
+``python -m pet --worker proactive-screen`` → ``pet.workers.worker_entry``，这会
+**先执行本包 ``__init__``**。顶层导入 ``.launch`` 会连带 ``pet.feature_state_io``
+（S2 实测约 5 ms / 窗口内占比可观），而只想导协议的 worker 一分钱都不该付。
+既有 ``from pet.workers import WorkerLaunch`` 用法经 PEP 562 的 ``__getattr__``
+照旧可用。
+
+S2 建框架（无生产调用方），S3 落下第一个真 worker（主动识屏）与
+``pet/__main__.py`` 的 ``--worker`` 白名单分流。
 """
 
 from __future__ import annotations
 
-from .launch import (
-    HANDOFF_TOKEN_ENV,
-    LaunchLease,
-    WorkerLaunch,
-    WorkerLaunchRejected,
-    isolated_worker_environment,
-    lease_worker_launch,
-)
 from .protocol import (
     MAX_MESSAGE_BYTES,
     MESSAGE_TYPES,
@@ -29,6 +30,17 @@ from .protocol import (
     decode_message,
     encode_message,
 )
+
+#: 惰性导出的名字 → 定义它们的子模块（``__getattr__`` 按需 import）。
+_LAZY_EXPORTS = {
+    "HANDOFF_TOKEN_ENV": ".launch",
+    "LaunchLease": ".launch",
+    "WorkerLaunch": ".launch",
+    "WorkerLaunchRejected": ".launch",
+    "isolated_worker_environment": ".launch",
+    "lease_worker_launch": ".launch",
+    "WorkerSupervisor": ".supervisor",
+}
 
 __all__ = [
     "HANDOFF_TOKEN_ENV",
@@ -50,9 +62,12 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Qt-bearing exports stay lazy so a child import graph never pulls Qt."""
-    if name == "WorkerSupervisor":
-        from .supervisor import WorkerSupervisor
+    """Qt-bearing / heavier exports stay lazy so a child import graph pays little."""
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    from importlib import import_module
 
-        return WorkerSupervisor
-    raise AttributeError(name)
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value  # 缓存：第二次访问不再走 import 机制
+    return value

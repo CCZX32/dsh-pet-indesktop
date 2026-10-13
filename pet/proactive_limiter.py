@@ -46,6 +46,10 @@ DEFAULT_PROACTIVE_CONFIG: dict[str, Any] = {
     "change_threshold": 8,
     "prefer_free_provider": True,
     "pre_cue": True,
+    # S3：识屏在哪执行——"worker"（默认）= 独立子进程（截图+视觉请求都在子进程里），
+    # "in_process" = 旧路径（宿主进程内后台线程）。worker 故障时**不会**自动改用
+    # in_process（那会变成两套行为同时活着），只会停识屏并如实回报状态。
+    "execution": "worker",
 }
 
 

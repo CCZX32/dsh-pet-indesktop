@@ -407,9 +407,8 @@ class SharedProactiveWatcher(ProactiveScreenWatcher):
         pass
 
     def stop_all(self) -> None:
-        """进程级收口：停掉共享定时器并作废在飞任务。"""
-        self._timer.stop()
-        self._generation += 1
+        """进程级收口：停掉共享定时器、作废在飞任务，并停识屏 worker 子进程。"""
+        self.shutdown()
 
 
 class SharedFullscreenWatcher(QObject):
@@ -619,7 +618,9 @@ def _release_qt_lifetimes(subs: "SharedSubsystems") -> None:
         app = QCoreApplication.instance()
         if app is None:
             return
-        for obj in (subs.proactive._bridge, subs.proactive._timer, subs.fs, subs.quiet):
+        for obj in (subs.proactive._bridge, subs.proactive._timer, subs.proactive._worker_adapter, subs.fs, subs.quiet):
+            if obj is None:
+                continue
             try:
                 if obj.parent() is None and obj.thread() is app.thread():
                     obj.setParent(app)

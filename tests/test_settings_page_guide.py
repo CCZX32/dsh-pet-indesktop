@@ -61,7 +61,8 @@ _AUTOMATION_ORDER_WITHOUT_PROACTIVE = [
 
 #: 「主动识屏」四组 → 行键（顺序即组内呈现顺序）。
 _PROACTIVE_GROUPS = (
-    ("主动识屏 · 开关与节奏", ("proactive_enabled", "proactive_preset")),
+    ("主动识屏 · 开关与节奏", ("proactive_enabled", "proactive_execution",
+                          "proactive_worker_status", "proactive_preset")),
     ("主动识屏 · 什么时候看",
      ("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
     ("主动识屏 · 看哪些软件",
@@ -197,7 +198,11 @@ def test_rows_in_layout_order_keeps_rows_outside_any_section():
 
 # --------------------------------------------------------------------- 主动识屏四组
 def test_proactive_rows_are_split_back_into_four_groups(tmp_path, monkeypatch):
-    """15 行拆成 4 组（开关与节奏 / 什么时候看 / 看哪些软件 / 细调（高级）），一个不漏。"""
+    """17 行拆成 4 组（开关与节奏 / 什么时候看 / 看哪些软件 / 细调（高级）），一个不漏。
+
+    S3 起「开关与节奏」多两行：proactive_execution（识屏在哪执行，真设置）与
+    proactive_worker_status（只读状态行）。刻意不新开第五组——四组划分是既有契约，
+    新增行归入语义最近的那一组。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         if not _has_proactive(dialog):
@@ -216,9 +221,9 @@ def test_proactive_rows_are_split_back_into_four_groups(tmp_path, monkeypatch):
         for title, _keys in _PROACTIVE_GROUPS[:3]:
             assert _section(dialog, "自动化与联动", title).advanced is False
 
-        # 15 行全部有主、没有漏进「待分类（开发期）」。
+        # 17 行全部有主、没有漏进「待分类（开发期）」。
         total = sum(len(keys) for _title, keys in _PROACTIVE_GROUPS)
-        assert total == 15, "分组表自身必须覆盖旧页全部 15 行"
+        assert total == 17, "分组表自身必须覆盖旧页全部 17 行"
         for _title, keys in _PROACTIVE_GROUPS:
             for key in keys:
                 assert _page(dialog, "自动化与联动").isAncestorOf(_row(dialog, key))

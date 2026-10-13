@@ -1121,6 +1121,12 @@ class ModernSettingsDialog(QDialog):
         self.pro_free_check = ToggleSwitch(self)
         self.pro_free_check.setChecked(bool(pro["prefer_free_provider"]))
 
+        # S3：识屏执行位置（真设置）+ worker 实际状态（只读）。控件与刷新逻辑
+        # 在 pet/settings_proactive_worker.py（本文件有行数预算，同族先例）。
+        from . import settings_proactive_worker
+
+        settings_proactive_worker.build_controls(self)
+
         self.pro_whitelist_edit = QPlainTextEdit(self)
         self.pro_whitelist_edit.setPlaceholderText("msedge.exe\ntitle:*会议*")
         self.pro_whitelist_edit.setPlainText("\n".join(str(x) for x in pro["whitelist"]))
@@ -1251,6 +1257,9 @@ class ModernSettingsDialog(QDialog):
                 content,
             )
         )
+        from . import settings_proactive_worker
+
+        layout.addWidget(settings_proactive_worker.section(self, content))
         layout.addWidget(
             SettingsSection(
                 "频率参数（自定义预设时生效）",
@@ -1385,6 +1394,7 @@ class ModernSettingsDialog(QDialog):
     def _update_proactive_controls(self, enabled: bool) -> None:
         self._set_setting_rows_visible(
             (
+                "proactive_execution",
                 "proactive_dry_run",
                 "proactive_preset",
                 "proactive_dwell",
@@ -2303,6 +2313,7 @@ class ModernSettingsDialog(QDialog):
         settings_quiet.save_quiet_settings(self)
         settings_weather.save_weather_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
+            from . import settings_proactive_worker
             from .proactive import PRESET_DEFAULTS
 
             pro_data = dict(self.config.get("proactive_screen", {}) or {})
@@ -2333,6 +2344,7 @@ class ModernSettingsDialog(QDialog):
                     "whitelist": [x.strip() for x in self.pro_whitelist_edit.toPlainText().splitlines() if x.strip()],
                 }
             )
+            settings_proactive_worker.apply_to_config(self, pro_data)
             self.config.set("proactive_screen", pro_data)
         self.config.set("autostart_wanted", self.autostart_check.isChecked())
         self.config.set("harness_autostart", self.harness_autostart_check.isChecked())

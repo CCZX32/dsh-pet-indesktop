@@ -6,10 +6,9 @@ Ported from the DLC branch `pet/workers/supervisor.py`.  Host adaptations:
 * the launch-rejection path no longer reaches into the DLC's feature-package
   trust chain (`StateError` / `PackageVerificationError`); fixed reason codes now
   come from :class:`pet.workers.launch.WorkerLaunchRejected`;
-* there is no implicit command: the DLC default (`-m pet --worker <id>`) has no
-  route in this topology yet, and resolving it would boot the desktop pet inside
-  a child.  Callers pass an explicit program/argv or a launch factory.  The
-  `--worker` route arrives with the first real worker (S3).
+* S2 期间刻意没有隐式命令行（当时 `-m pet --worker <id>` 这条路由还不存在）。
+  S3 落下该路由后恢复 DLC 的默认值，见 :meth:`WorkerSupervisor._resolve_command`。
+  握手预算默认值也随真 worker 的启动实测抬到 15s。
 
 This is a GUI-thread object owning a :class:`QProcess`; every native child is
 released through :meth:`WorkerSupervisor._release_process` so a stopped process
@@ -19,6 +18,7 @@ never survives into a later restart or teardown.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 import uuid
 import weakref
@@ -70,7 +70,7 @@ class WorkerSupervisor(QObject):
         arguments: Sequence[str] | None = None,
         launch_factory: Callable[[], WorkerLaunch] | None = None,
         required_capabilities: Sequence[str] = (),
-        handshake_timeout_ms: int = 5000,
+        handshake_timeout_ms: int = 15000,
         heartbeat_interval_ms: int = 5000,
         heartbeat_timeout_ms: int = 15000,
         shutdown_timeout_ms: int = 2000,
@@ -79,13 +79,18 @@ class WorkerSupervisor(QObject):
         restart_backoff_s: Sequence[float] = (0.5, 1.0, 2.0),
     ) -> None:
         super().__init__(parent)
-        if not program and launch_factory is None:
-            raise ValueError("worker command required: pass program/arguments or launch_factory")
         self.worker_id = str(worker_id)
         self.required_capabilities = frozenset(required_capabilities)
         self._launch_factory = launch_factory
         self._launches: dict[QProcess, WorkerLaunch] = {}
-        self.program, self.arguments = self._resolve_command(program, arguments)
+        self.program, self.arguments = self._resolve_command(self.worker_id, program, arguments)
+        # 握手预算（S3 校准）：S2 沿用 DLC 的 5000 ms。但真 worker（还只是 Python
+        # 解释器 + 协议层，冻结版可执行只会更慢）在**满载机器**上冷启动可以越过
+        # 5s——S2 加压复跑实测到过这条线。两边一起做：worker 入口把 hello 排在
+        # 一切导入/初始化之前尽快发出（见 proactive_screen_worker.run），这里把
+        # 默认值抬到 15s。取 15s 的依据：S2 空载冷启动→READY 实测 135 ms，加压
+        # 拉伸约 2-3 倍（该片 §五/§四），15s ≈ 空载的 100 倍余量；再高只会让
+        # 「worker 真的起不来」这种故障晚 10s 才被发现。
         self.handshake_timeout_ms = max(100, int(handshake_timeout_ms))
         self.heartbeat_interval_ms = max(250, int(heartbeat_interval_ms))
         self.heartbeat_timeout_ms = max(self.heartbeat_interval_ms, int(heartbeat_timeout_ms))
@@ -118,16 +123,20 @@ class WorkerSupervisor(QObject):
         _LIVE_SUPERVISORS.add(self)
 
     @staticmethod
-    def _resolve_command(program: str | None, arguments: Sequence[str] | None) -> tuple[str, list[str]]:
-        """Explicit command only — never invent an interpreter route.
+    def _resolve_command(worker_id: str, program: str | None, arguments: Sequence[str] | None) -> tuple[str, list[str]]:
+        """显式命令行优先；否则用本拓扑的子进程专用入口。
 
-        A `-m pet --worker <id>` style default would have to exist as a real
-        child-only entry first; without one it silently boots the desktop pet
-        inside the child process.
+        S2 期间这里刻意**没有**隐式命令行：当时 ``-m pet --worker <id>`` 这条
+        路由还不存在，照搬 DLC 的默认值会把整个桌宠（托盘/窗口/桌宠本体）当 worker
+        拉起来。S3 落下了这条路由（白名单见 ``pet/workers/worker_entry.py``，
+        白名单之外的 id 以退出码 2 拒绝，且分流早于 ``pet.app``），禁令随之解除，
+        恢复 DLC 的默认值。
         """
         if program:
             return str(program), list(arguments or ())
-        return "", []
+        if getattr(sys, "frozen", False):
+            return sys.executable, ["--worker", str(worker_id)]
+        return sys.executable, ["-m", "pet", "--worker", str(worker_id)]
 
     @property
     def state(self) -> str:

@@ -247,6 +247,10 @@ def _default_proactive_screen_data() -> dict:
         "change_threshold": 8,
         "prefer_free_provider": True,
         "pre_cue": True,
+        # S3：识屏执行位置（worker 子进程 / 进程内）。真值与
+        # pet/proactive_limiter.DEFAULT_PROACTIVE_CONFIG 同步，两处都写是因为
+        # config 的默认数据要能独立落盘成 config.json。
+        "execution": "worker",
     }
 
 

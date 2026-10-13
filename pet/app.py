@@ -4668,7 +4668,17 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
             return 1
 
         logging.info("进入事件循环")
-        return app.exec()
+        try:
+            return app.exec()
+        finally:
+            # Worker 子进程的异步收口必须发生在主事件循环**之后**（aboutToQuit
+            # 已跑完）、AppShell/各窗对象**析构之前**：aboutToQuit 单一信号扛不住
+            # QProcess 的写/flush 与 terminate/kill 阶梯，提前析构又会让子进程被
+            # 闷杀而不是走 shutdown 帧 + EOF 的优雅收口。全部 worker 共用一个有界
+            # deadline，不逐个 worker 各等一次。
+            from .workers.supervisor import WorkerSupervisor
+
+            WorkerSupervisor.finish_app_shutdown()
     finally:
         # D4：正常退出（app.exec() 返回前 aboutToQuit 已跑完，各窗位置已落盘）
         # 才释放进程门——比 _on_about_to_quit 内更晚，避免"本地还在收尾、第二

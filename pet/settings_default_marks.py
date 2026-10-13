@@ -53,6 +53,8 @@ _ROW_DEFAULT_PATHS: dict[str, str | tuple[str, float]] = {
     "proactive_through": "proactive_screen.allow_when_mouse_through",
     "proactive_pre_cue": "proactive_screen.pre_cue",
     "proactive_free": "proactive_screen.prefer_free_provider",
+    # 识屏执行位置（worker 子进程 / 进程内）
+    "proactive_execution": "proactive_screen.execution",
     # Agent 联动音效（嵌套 dict）
     "agent_sound_enabled": "agent_link.sound_enabled",
     "agent_sound_volume": ("agent_link.sound_volume", 100),

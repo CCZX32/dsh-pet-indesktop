@@ -238,11 +238,13 @@ def _drain_live_supervisors():
 
 # ---------------------------------------------------------------- 命令与启动门
 
-def test_supervisor_refuses_an_implicit_command():
-    """没有隐式命令行：DLC 的 `-m pet --worker <id>` 默认值在本拓扑不存在，
-    照搬会让子进程把主程序（托盘/窗口/桌宠）当 worker 拉起来。"""
-    with pytest.raises(ValueError, match="worker command required"):
-        WorkerSupervisor("demo-worker")
+def test_supervisor_defaults_to_the_allow_listed_child_route():
+    """S2 期间没有隐式命令行（路由不存在）；S3 落下 `--worker` 白名单分流后恢复
+    DLC 的默认值——白名单外的 id 由 `pet/workers/worker_entry.py` 以退出码 2 拒绝，
+    且分流早于 `pet.app`，不会再把桌宠本体当 worker 拉起来。"""
+    supervisor = WorkerSupervisor("proactive-screen")
+    assert supervisor.program == sys.executable
+    assert supervisor.arguments == ["-m", "pet", "--worker", "proactive-screen"]
 
     supervisor = WorkerSupervisor("demo-worker", program=sys.executable, arguments=["-c", "pass"])
     assert supervisor.program == sys.executable

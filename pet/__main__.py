@@ -107,7 +107,37 @@ def _run_settings(config=None) -> int:
     )
 
 
+def _worker_id(argv) -> str:
+    try:
+        index = argv.index("--worker")
+    except ValueError:
+        return ""
+    if index + 1 >= len(argv):
+        return ""
+    return str(argv[index + 1] or "").strip()
+
+
+def _run_worker(worker_id: str | None = None) -> int:
+    """--worker：内置 worker 子进程入口（不导入 pet.app、不建 QApplication）。
+
+    分流必须**早于** pet.app：识屏/事件采集 worker 一旦把桌面 UI 图（窗口、托盘、
+    素材库、Chat）拉起来，子进程存在的意义就没了。白名单在
+    `pet.workers.worker_entry`（名单外的 id 以退出码 2 拒绝）。
+
+    与 DLC 的区别：DLC 在这里先认领功能包版本租约、失败返回 78。本拓扑没有功能包
+    租约子系统（S2 判定），所以不设租约闸门；交接 token（若由 supervisor 的租约启动
+    下发）在 worker 的 hello 里如实上报 lease_claimed。
+    """
+    from .workers.worker_entry import main as worker_main
+
+    return worker_main(worker_id)
+
+
 def _main() -> int:
+    # Worker 子进程分流排最前：它既不是设置页（不能建 QApplication），也不是主程序
+    # （导入 pet.app 会把整只桌宠拉起来）。见 pet/workers/worker_entry.py。
+    if "--worker" in sys.argv:
+        return _run_worker(_worker_id(sys.argv))
     # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环），
     # 并与两个冻结入口共用 pet.uninstall_cleanup.main——逐步诊断输出、配置目录留痕、
     # 退出码语义只有那一处实现，入口侧不再自己复刻一份。

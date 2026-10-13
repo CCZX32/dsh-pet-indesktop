@@ -36,7 +36,11 @@ def build_automation_domain(dialog, claim: Callable[..., Any], claim_prefix: Cal
     # 代码实际为准，顺序同旧页）；「语音报时」「节日提醒」的同名重组留在对话框里
     # （那两组属「语音」域）。
     proactive_sections = [
-        ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_preset")),
+        # 执行位置两行（S3）：真设置 proactive_execution + 只读状态行
+        # proactive_worker_status。放在「开关与节奏」而不是新开一组——本域
+        # 的四组划分是既有契约（tests/test_settings_page_guide.py）。
+        ("主动识屏 · 开关与节奏", claim("proactive_enabled", "proactive_execution",
+                                    "proactive_worker_status", "proactive_preset")),
         ("主动识屏 · 什么时候看", claim("proactive_require_idle", "proactive_idle_seconds", "proactive_through", "proactive_pre_cue")),
         ("主动识屏 · 看哪些软件", claim("proactive_whitelist", "proactive_whitelist_add", "proactive_memory_clear")),
         ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",

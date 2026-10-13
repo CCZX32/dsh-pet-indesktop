@@ -260,7 +260,12 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 域装配处 `install_mod_domain(self)` 与其注释 4 行 + domain_content 一行。控件/宿主面/
 # 整页装配全在 pet/settings_mod_domain.py（S1a 拆域腾出的正是这块地方），本文件仍只做接线；
 # 按文件约定只随实测校准，不为达标压行。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2401
+# 2026-10-13 上调到 2413（DLC 融合 S3：「主动识屏」新增识屏执行位置，+12）：新控件组
+# 已按本文件的先例整组拆进 pet/settings_proactive_worker.py（控件构造/状态刷新/保存回写，
+# 约 −59 行），本文件只剩三处接线——`build_controls(self)`、一行 `layout.addWidget(section(…))`
+# 与保存时的 `apply_to_config(self, pro_data)`，加各自一次惰性 import。残余的 12 行就是这些
+# 接线本身，继续拆只能把调用点搬来搬去；按约定校准到实测值，不压行宽。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2413
 
 
 def _read(name: str) -> str:
@@ -304,6 +309,18 @@ def test_pure_logic_modules_do_not_import_qt():
         # 新进程探针守着）。QProcess 监督对象在 workers/supervisor.py，
         # 不在本名单内。
         "workers/protocol.py", "workers/launch.py",
+        # 2026-10-13（S3）加入识屏 worker 与它依赖的两个底座：
+        # workers/proactive_screen_worker.py 是**子进程里跑的实现本体**，
+        # screen_entry.py 是独立安装入口，worker_diagnostics.py 是两侧共用的
+        # 诊断白名单；http_compat.py / image_hash.py 是从 pet.chat.providers /
+        # pet.proactive 搬出来的传输原语与 dHash——搬家的唯一理由就是让子进程
+        # 不必为了「发一次视觉请求、算一次 dHash」而导入 pet.chat（Qt）或
+        # pet.config（Qt）。proactive_worker_status.py 是跨进程状态快照。
+        # 机器判据不止这里：tests/test_proactive_worker.py 的真进程探针会在
+        # **解析期**拦截 PySide6/pet.chat/pet.config 并跑完一次真的 HTTP 往返。
+        "http_compat.py", "image_hash.py", "proactive_worker_status.py",
+        "workers/proactive_screen_worker.py", "workers/screen_entry.py",
+        "workers/worker_diagnostics.py",
         # 2026-10-13 加入官方功能包安装信任链（S1c）：验签/清单/指纹/路径边界
         # （plugins/package_trust）、安装状态账本（feature_install_state）、
         # 版本租约（feature_version_lease）、暂存与清单（feature_package_files）、
