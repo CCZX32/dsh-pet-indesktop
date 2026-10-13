@@ -173,15 +173,96 @@ def test_screen_entry_refuses_an_unknown_argument():
 
 def test_screen_entry_probe_is_fail_closed_without_the_frozen_sandbox():
     """探针模式要求原生沙箱确实生效；本拓扑没有该 bundle（冻结态缺口，S4），
-    所以一律 77 退出——**不得**在没有沙箱时跑探针。"""
+    所以一律 77 退出——**不得**在没有沙箱时跑探针。
+
+    S4 起补上第二半：77 **必须带得出原因**。原文只说"一律 77"，于是上游看到的是
+    一个没有内容的 `worker_probe_failed`（DLC 的缺陷登记里 `hello-local` 的准确
+    reason 至今是"待补信息"）。这里断言那行诊断。
+    """
     import io
 
     from pet.workers import screen_entry
 
     assert screen_entry.sandbox_enforced() is False
+    stderr = io.StringIO()
     assert screen_entry.run_screen_worker_entry(
-        ["--feature-package-probe"], source=io.BytesIO(b""), output=io.BytesIO()
+        ["--feature-package-probe"], source=io.BytesIO(b""), output=io.BytesIO(), stderr=stderr
     ) == 77
+    receipt = json.loads(stderr.getvalue().strip())
+    assert receipt == {"schema": 1, "kind": "probe_refused", "reason": "module_missing"}
+
+
+def test_screen_entry_distinguishes_a_missing_probe_module_from_a_disarmed_one(monkeypatch):
+    """「模块根本没有」与「模块在但说沙箱没生效」是两种缺陷，不能混成一句。"""
+    import io
+    import types
+
+    from pet.workers import screen_entry
+
+    assert screen_entry.sandbox_verdict() == "module_missing"
+    disarmed = types.ModuleType("_dsh_probe_native")
+    disarmed.sandbox_enforced = lambda: False
+    monkeypatch.setitem(sys.modules, "_dsh_probe_native", disarmed)
+    assert screen_entry.sandbox_verdict() == "not_enforced"
+    assert screen_entry.sandbox_enforced() is False
+    stderr = io.StringIO()
+    assert screen_entry.run_screen_worker_entry(
+        ["--feature-package-probe"], source=io.BytesIO(b""), output=io.BytesIO(), stderr=stderr
+    ) == 77
+    assert json.loads(stderr.getvalue().strip())["reason"] == "not_enforced"
+
+
+def test_screen_entry_reports_an_unusable_probe_module(monkeypatch):
+    """模块存在但调用炸了（缺 DLL 的典型形态）也是独立的一种原因。"""
+    import types
+
+    from pet.workers import screen_entry
+
+    class Unusable(types.ModuleType):
+        def __getattr__(self, name):
+            raise OSError("DLL load failed while importing _dsh_probe_native")
+
+    monkeypatch.setitem(sys.modules, "_dsh_probe_native", Unusable("_dsh_probe_native"))
+    assert screen_entry.sandbox_verdict() == "module_unusable"
+    assert screen_entry.sandbox_enforced() is False
+
+
+def test_screen_entry_activates_the_frozen_dependency_path_before_anything_else(monkeypatch):
+    """S4 冻结态缺口 #1 的接线：入口第一步就修冻结版依赖目录的长路径查找。
+
+    DLC 原文把这一句放在 ``run_screen_worker_entry`` 的首行；本仓库 S3 移植时
+    漏了它（模块都不存在）。探针分支同样要先走它——``_dsh_probe_native`` 就在
+    那个密封目录里。
+    """
+    import io
+
+    from pet.workers import screen_entry
+
+    calls: list[str] = []
+    monkeypatch.setattr(screen_entry, "activate_frozen_dependency_path", lambda: calls.append("activate") or False)
+    assert screen_entry.run_screen_worker_entry(["--something-else"]) == 78
+    assert calls == ["activate"]
+    calls.clear()
+    assert screen_entry.run_screen_worker_entry(
+        ["--feature-package-probe"], source=io.BytesIO(b""), output=io.BytesIO(), stderr=io.StringIO()
+    ) == 77
+    assert calls == ["activate"]
+
+
+def test_a_broken_frozen_layout_is_not_swallowed(monkeypatch):
+    """布局与 onedir 约定不符是**构建缺陷**：炸出来，不许静默降级成 77。
+
+    这正是原缺陷难以定位的成因——把"构建没带上探针"和"沙箱说没生效"压成同一个
+    退出码，现场只剩一句没有内容的 ``worker_probe_failed``。
+    """
+    from pet.workers import screen_entry
+
+    def broken() -> bool:
+        raise ValueError("frozen_runtime_layout")
+
+    monkeypatch.setattr(screen_entry, "activate_frozen_dependency_path", broken)
+    with pytest.raises(ValueError, match="frozen_runtime_layout"):
+        screen_entry.run_screen_worker_entry([])
 
 
 def test_screen_entry_probe_handshakes_inside_an_enforced_sandbox(monkeypatch):
@@ -189,7 +270,8 @@ def test_screen_entry_probe_handshakes_inside_an_enforced_sandbox(monkeypatch):
 
     from pet.workers import screen_entry
 
-    monkeypatch.setattr(screen_entry, "sandbox_enforced", lambda: True)
+    # S4 起判据是四态 verdict（sandbox_enforced 只是它的布尔投影），所以桩打在 verdict 上。
+    monkeypatch.setattr(screen_entry, "sandbox_verdict", lambda: screen_entry.SANDBOX_ENFORCED)
     output = io.BytesIO()
     code = screen_entry.run_screen_worker_entry(
         ["--feature-package-probe"], source=io.BytesIO(_shutdown_frame()), output=output
@@ -205,7 +287,7 @@ def test_screen_entry_probe_rejects_a_foreign_reply(monkeypatch):
     from pet.workers import screen_entry
     from pet.workers.protocol import build_message, encode_message
 
-    monkeypatch.setattr(screen_entry, "sandbox_enforced", lambda: True)
+    monkeypatch.setattr(screen_entry, "sandbox_verdict", lambda: screen_entry.SANDBOX_ENFORCED)
     foreign = encode_message(build_message("other-worker", "shutdown", {}))
     assert screen_entry.run_screen_worker_entry(
         ["--feature-package-probe"], source=io.BytesIO(foreign), output=io.BytesIO()

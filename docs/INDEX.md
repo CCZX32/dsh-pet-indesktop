@@ -136,6 +136,7 @@
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
+| [`PR-REPORT-DLC-MOD-CENTER-2026-10-13.md`](PR-REPORT-DLC-MOD-CENTER-2026-10-13.md) | **DLC 移植线「MOD 中心 + workers 子进程」六片汇总报告**（分支 `dlc/mod-center-port`，基线 `3ab1048`，89 处文件 `+18791/−308`）：S1a 设置页域拆分、S1b-1/S1b-2 MOD 中心逻辑层与 UI + 设置页「扩展管理」域、S1c 官方功能包信任链闭包（验签/事务/租约，**未接宿主**）、S2 workers 子进程基础设施（`pet-worker/v1` + QProcess 监督 + 启动租约）、S3 主动识屏拆入 worker（**不许静默回退**的三条机器可判规则）、S4 文档与样例 + 冻结态收尾。**ZIP 导入探针缺陷逐环判定**：冻结版 onedir 密封依赖目录的长路径查找**已修复**（`pet/frozen_runtime_paths.py`，修复前/后原始输出在报告 §五-5.1：同一个 `.pyd` 普通拼写报「文件名或扩展名太长」、扩展拼写导入成功）；其上的 LPAC 原生探针沙箱**本仓库不存在**，功能扩展包导入在更上游按 `self_check_sandbox_unavailable` 如实拒绝——「目录可以、ZIP 不行」的差异**没有复现面**。附 cryptography 冻结收集**实测**（四组 PyInstaller Analysis 对照 + 完整入口：54 模块 + 9.9 MB `_rust.pyd`，无需 `--collect-all`；但真实现代里它是从 `--collect-all keyring` 捎带进来的）。 | **改 `pet/workers/`（协议/监督/租约/`screen_entry`/`__main__` 的 `--worker` 分流）、`pet/mod_center_*.py`、`pet/mod_management.py`、`pet/mod_catalog.py`、`pet/settings_mod_domain.py`、`pet/feature_package_*` 或 `pet/plugins/package_trust.py` 之前必读**；动探针沙箱/`_dsh_probe_native`/探针退出码语义、`proactive_screen.execution` 的执行位置选择、或要回答「功能扩展包为什么装不上 / `worker_probe_failed` 到底是什么根因」时必读（报告把缺陷拆成两环，别笼统说"已修复"）。**先例**：修冻结版长路径必须**就地替换** `sys.path` 里的普通拼写，追加在它后面无效（FileFinder stat 成功、`LoadLibrary` 才失败，importlib 不会退到下一条 path）。 |
 | [`PR-REPORT-POST-INTEGRATION-REVIEW-FIXES-2026-10-12.md`](PR-REPORT-POST-INTEGRATION-REVIEW-FIXES-2026-10-12.md) | #247–#251 集成收口 + 终审修复批：集成冲突曾丢功能（#248/#249 被整文件覆盖、INDEX 回退、quick_chat 丢三个 seam），全部补丁级找回；终审 9 项逐条核实（6 真 3 部分真 0 幻觉）后修复——X1 镜像信封按真实形状重做（真实桥日志 213 条实证）、X2 注入过滤改白名单、F1 frameseq 退役四步回收协议（30 clip 探针 30→0）、F2 回合身份按 `(session, sourceTurn)` 有界绑定、F3 收敛信号带代次、F4 error 回合不再误报成功且补呈现链（dsh_state 带 source 解锁存 + agent_link error 分支）、F5 歌词采样不可变令牌、F6 聊天先取 id 再 send（停止按钮 100% 必现缺陷）、X3 排空期关窗落库+复位。每条均红→绿。 | 改 `pet/dsh_state.py` 收敛器/回合身份、`pet/agent_link.py` 呈现管线、`pet/frameseq_clip.py` 生命周期、`pet/music_lyric_controller.py` 采样代次、聊天窗发送/关闭路径，或再遇「重复提醒 / 失败报成功 / 切角色后内存涨 / 歌词错乱 / 停止按钮不变」时必读；**集成多个同文件 PR 前必读**（整文件覆盖解冲突的教训）。 |
 | [`PR-REPORT-CHAT-THINKING-WEB-SEARCH-2026-10-12.md`](PR-REPORT-CHAT-THINKING-WEB-SEARCH-2026-10-12.md) | AI 对话深度思考展示 + 联网搜索 + 思考过程随会话保存：解析被丢弃的 `reasoning_content`（`StreamEvent` 与正文 str 分流，旧调用方不变），按 provider 开关思考/强度（auto 不发参数）；联网=先用**非思考 + tools** 的检索阶段决定搜什么（DeepSeek 思考+tools 要求回传全部历史思维链，故拆开），资料并入 system 后正式回答；引擎百度/DDG（免 Key、互为兜底、人机验证如实报错不绕过）+ 博查/Tavily；不支持 tools 时降级。`ChatMessage.reasoning/activity` 落盘回显、不进上下文。思维链面板 80 ms 合并刷新（1500 增量→243 次，中位 1.84 ms）；开联网每次提问至少 +1 次 API 调用。7 个新设置的准入记录在报告第二节。 | 改 `pet/chat/providers.py` 的流解析/请求参数/检索阶段、`pet/chat/web_search.py` 引擎与解析、AI 设置页「深度思考与联网」分组、`ChatMessage` 落盘字段，或再遇「看不到思考 / 联网不可用 / 人机验证」时必读。 |
 | [`PR-REPORT-CHAT-TIME-AWARENESS-2026-10-12.md`](PR-REPORT-CHAT-TIME-AWARENESS-2026-10-12.md) | AI 对话时间感知：会话里每条消息本就有 `created_at`，但 `build_messages` 只发 role/content，模型不知道现在几点、隔了多久。只在组装请求时附加——system 末尾「当前时间 + 距上条消息间隔」（10 分钟内不提示）、历史**用户**消息加 `[日期 周X 时:分]` 前缀（助手消息不加，防模仿）；不改会话文件、旧会话立即生效。实测组装 8.6→198 µs/次（逐条 `astimezone`，为跨夏令时正确性保留）、40 条历史请求 +620 字符（+31%）。无设置开关（评审需要可补）。 | 改 `pet/chat/prompt.py` 的 `build_messages` 或时间提示词、调整发给模型的历史格式，或再遇「模型不知道时间/隔多久」时必读。 |
@@ -267,6 +268,26 @@
 4. **三份 handover 并存**（`DEV-HANDOVER.md` / `HANDOVER_2026-09.md` / `PROJECT_HANDOFF.md`）— 职能相同（交接），基线各异（`feat/voice-chime` 2026-09-16 / `perf/stage-1` 2026-09-03 / v3.1.1 时期），且都未标注彼此取代关系，读者无法判断该读哪一份。
 5. **`DSH-HUMAN-REQUEST-RESEARCH-2026-09-02.md` 与 `DSH-REQUEST-EVENT-CATALOG.md`** — 后者自述基于前者的调研结果，属"调研 + 速查表"的伴生关系，重叠度可控（一份叙述、一份字段表）。**不建议合并**，但建议在两份文档中互相显式标注"速查看 catalog、背景看 research"以消除歧义。
 6. **`PROACTIVE_SCREEN_PLAN.md` 与 `PROACTIVE_SCREEN_IMPLEMENTATION_MANUAL.md`** — 同一功能的"设计方案"与"实施手册"，内容范围大量重合（技术依据、验收清单），且两份都停留在"未动工"状态。建议合并为一份设计档案。
+
+## MOD 中心与作者文档（`docs/modding/`）
+
+**先读 [`modding/README.md`](modding/README.md) 的「移植基线与现状」**——本仓库当前只交付
+「角色资源」这条腿，功能扩展侧（`pet.mod_api.v1` / 宿主运行时 / 原生探针沙箱）**尚未接入**；
+每篇都带统一的移植基线头，README 有逐项对照表。作者侧样例源码在
+[`examples/mods/`](../examples/mods/README.md)。
+
+| 文档 | 一句话内容 | 何时必读 |
+|---|---|---|
+| [`modding/README.md`](modding/README.md) | MOD 文档总入口：使用者 / 作者两条分流、四类 MOD 对照、**移植基线与现状**（DLC 面 → 本仓库落点，逐项 ✅/❌）、ZIP 探针缺陷的逐环收口口径。 | 第一次接触 MOD 中心、或判断"某个 DLC 能力在本仓库到底有没有"时必读（先读它的「移植基线与现状」，再读具体教程）。 |
+| [`modding/USER-GUIDE.md`](modding/USER-GUIDE.md) | 使用者教程：导入 / 启用 / 更新 / 停用 / 回滚 / 批量删除、项目目录布局、常见问题（含 ZIP 缺陷的现行口径）。 | 改 `pet/mod_management.py` 的托管布局、导入归一或启停语义时；回答"这个包为什么装不上 / 删不掉"时。 |
+| [`modding/CHARACTER-PACKS.md`](modding/CHARACTER-PACKS.md) | 角色素材包（纯内容）教程：清单字段、`videos/` 结构、`body_box` 等。 | **本仓库可用**。改 `pet/catalog.py` / `pet/mod_catalog.py` 的角色包识别与体框时必读。 |
+| [`modding/PERSONA-TEMPLATES.md`](modding/PERSONA-TEMPLATES.md) | 台词 / 人格模板包的格式与放置。 | 改 `pet/persona_phrases.py` 或 `pet/persona_presets/` 的导入格式时必读（另见 [`PERSONA-PHRASES-PRESET-STORAGE-2026-09-08.md`](PERSONA-PHRASES-PRESET-STORAGE-2026-09-08.md)）。 |
+| [`modding/API-V1.md`](modding/API-V1.md) | `pet.mod_api.v1` 薄接口契约：定义与挂载、菜单 / 设置贡献、自有配置与数据、WorkerClient 生命周期。 | **本仓库尚未实现该模块**——写"以后要落地成什么样"或评审宿主运行时设计前必读；不要当成现在能 import 的 API。 |
+| [`modding/COMPATIBILITY.md`](modding/COMPATIBILITY.md) | v1 的稳定边界与影响矩阵：Core 拆包时哪些做法不用重做。 | 决定"什么能进公开接口、什么只能内部用"时。 |
+| [`modding/HOST-ONLY.md`](modding/HOST-ONLY.md) | host-only 功能扩展样例（`hello-local`）的分步教程。 | 接功能扩展宿主、或评估宿主里要不要独立进程时。 |
+| [`modding/HOST-WORKER.md`](modding/HOST-WORKER.md) | host-worker 功能扩展样例（`echo-worker`）的分步教程：握手 / 请求 / 取消 / 退出。 | 同上；另见 [`PR-REPORT-DLC-MOD-CENTER-2026-10-13.md`](PR-REPORT-DLC-MOD-CENTER-2026-10-13.md) 的 S2/S3 片。 |
+| [`modding/AUTHORING-HANDBOOK.md`](modding/AUTHORING-HANDBOOK.md) | 四类 MOD 的字段表、放置位置与接口速查（完整参考，非分流页）。 | 写包清单 / 排错字段时；比 README 更全，先读 README 的基线头。 |
+| [`modding/MOD-CENTER-IMPLEMENTATION-PLAN-2026-10-10.md`](modding/MOD-CENTER-IMPLEMENTATION-PLAN-2026-10-10.md) | DLC 侧 MOD 中心的实施计划与**已知缺陷**原始记录（2026-10-10），已按 S4 口径加移植基线头。 | 追溯 ZIP 探针缺陷的原始报告与 DLC 的排查结论时；**它记的是 DLC 分支的状态**，本仓库现状看 modding/README 与该 PR 报告。 |
 
 ## 插件化与 DLC 分阶段文档
 

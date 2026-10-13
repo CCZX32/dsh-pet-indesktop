@@ -16,10 +16,12 @@
 ``result`` / ``batch_finished`` 四个信号。这条契约由 ``pet.mod_center_controller``
 兑现，测试用桩对象同样能兑现（见 ``tests/test_mod_center_ui.py``）。
 
-**已知缺陷指针（不在本片修）**：「导入 ZIP」在 DLC 侧对**功能扩展**示例包会报
-``worker_probe_failed``（探针沙箱只在冻结版创建），改用「导入目录」正常；角色资源包走
-ZIP 正常。原文见 DLC 分支 ``docs/modding/USER-GUIDE.md`` 的「已知缺陷」节，本线 S4 随
-文档移植；本片只接角色资源，故该缺陷在本仓库不可达——**不表示已修复**。
+**ZIP 导入探针缺陷（S4 收口）**：「导入 ZIP」在 DLC 侧对**功能扩展**示例包会报
+``worker_probe_failed``。S4 的判定是**逐环**的，不笼统说"已修复"：冻结版依赖目录的
+长路径查找已修（``pet/frozen_runtime_paths.py``，before/after 证据见
+``.scratch/dlc-fusion/S4-HANDOFF.md``）；而它上面那层 LPAC 原生探针沙箱在本仓库不存在，
+功能包导入在更上游就按 ``self_check_sandbox_unavailable`` 如实拒绝——详见
+``pet/mod_center_controller.py`` 的同名小节。本片只接角色资源，故该缺陷在本仓库不可达。
 """
 from __future__ import annotations
 

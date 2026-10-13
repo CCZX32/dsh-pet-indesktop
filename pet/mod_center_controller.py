@@ -39,11 +39,24 @@ DLC 原文在 ``.scratch/dlc-fusion/src/mod_center_controller.py``；本文件�
 本身仍未移植——本仓库的宿主面（``pet/settings_mod_domain.py``）目前返回空注册表，
 所以「功能扩展」这一格在真实运行里还不会出现；接回时的落点就是 ``extensions()``。
 
-**已知缺陷指针（不在本片修）**：DLC 侧用 ZIP 导入**功能扩展**示例包会报
-``worker_probe_failed``（探针沙箱只在冻结版创建），改「导入目录」正常；角色资源包走
-ZIP 正常。原文在 DLC 分支 ``docs/modding/USER-GUIDE.md`` 的「已知缺陷」节与
-``.scratch/mod-authoring-v1/HANDOFF.md``；本线 S4 随文档移植原文，ZIP 探针缺陷单列一轮
-（``PLAN.md``「ZIP 导入探针缺陷」）。本文件只按包声明路由，不假装已修。
+**ZIP 导入探针缺陷（S4 收口，逐环判定）**：DLC 侧用 ZIP 导入**功能扩展**示例包会报
+``worker_probe_failed``，处置结果分两半，**不要**笼统表述为"已修复"：
+
+* **可修的那一环已修**——冻结版 onedir 的密封依赖目录查找。
+  ``_dsh_probe_native.pyd`` 只存在于执行文件自己的 ``_internal`` 里；安装路径一长，
+  ``LoadLibrary`` 就以「文件名或扩展名太长」失败，探针永远拿不到沙箱证据。修复在
+  ``pet/frozen_runtime_paths.py``（S4 新增）+ ``pet/workers/screen_entry.py`` 首行接线；
+  before/after 原始输出见 ``.scratch/dlc-fusion/S4-HANDOFF.md``。
+* **筑在其上的那一环在本拓扑不存在**——LPAC 原生探针沙箱与其
+  ``_internal/feature-probe`` 密封 bundle。本仓库没有这条构建流水线，
+  ``FeaturePackageTransactionService`` 因此在更上游就以
+  ``self_check_sandbox_unavailable`` **如实拒绝**功能包导入（``tests/
+  test_feature_package_transactions.py::test_default_selfcheck_fails_closed_without_os_sandbox``
+  是这条纪律的守卫）——所以 ZIP 与「导入目录」两条路在本仓库收敛到同一处拒绝，
+  DLC 报告里的"目录可以、ZIP 不行"这个差异**没有**复现面。
+
+原文在 DLC 分支 ``docs/modding/USER-GUIDE.md`` 的「已知缺陷」节与
+``.scratch/mod-authoring-v1/HANDOFF.md``。本文件只按包声明路由，不假装已修。
 
 宿主面（Host）——本仓库的面：
 

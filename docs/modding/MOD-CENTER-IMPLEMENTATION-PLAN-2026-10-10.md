@@ -1,0 +1,122 @@
+# MOD 管理中心重做、开发教程与兼容基线
+
+> **移植基线（2026-10-13，本仓库分支 `dlc/mod-center-port`）**：本文移植自上游 DLC 分支
+> 的同名文档（分支名与基线 SHA 属仓库内工作档案，见 `.scratch/dlc-fusion/PLAN.md`；
+> 本目录正文不写外部工具名）。文中描述的**功能扩展宿主运行时**在本仓库
+> **尚未接入**（`pet.mod_api.v1`、`pet/feature_management.py`、`pet/local_package_intents.py`、
+> `scripts/build_mod_example.py`、`scripts/build_character_mod_example.py` 都不存在；
+> MOD 中心的 `extensions()` 注册表恒空）。逐项对照与 ZIP 缺陷的处置口径见
+> [README.md 的「移植基线与现状」](README.md#移植基线与现状2026-10-13)。
+
+基线：2026-10-10；用户已批准执行。M00 已提交并核对上游 DLC 远程分支：`0a299612714e5fad55a24a5506dfce938b9eeb1c`。新功能尚未交付，以下为实施合同，不是已完成声明。
+
+入口：[文档索引](../INDEX.md) · [Phase5A 现状](../INDEX.md) · **计划**（上游 DLC 分支 `.scratch/mod-authoring-v1/` 内的档案） · **状态**（上游 DLC 分支 `.scratch/mod-authoring-v1/` 内的档案） · **交接**（上游 DLC 分支 `.scratch/mod-authoring-v1/` 内的档案）。
+
+## 1. 目标、范围与保护边界
+
+保留设置的“扩展管理”入口，替换为本地市场式列表；不做联网商店、账号、评分、下载源或远程自动更新。不改已经验收的 Setup 安装卸载、简易 API 交互、真实安装目录与真实凭据。不删除生成目录，不覆盖 4.2.4 Setup 与鲸鱼图标。
+
+M00 的一次推送授权已使用；本轮新增 MOD 代码、文档与样例不自动提交/推送。检查点包含 159 个文件，生成物、缓存、日志和敏感数据全部排除。
+
+## 2. 列表与操作合同
+
+- 顶部：导入 ZIP、导入目录、搜索；筛选：全部、角色资源、功能扩展。
+- 每行一个包：复选框、名称、版本、类型、状态、纯文本简述；不把历史版本分成多行。
+- 功能操作：启用/停用、设置、更新；角色操作：启用/停用、使用、更新。“更多”收纳删除、完整说明、打开目录、回滚。
+- 可见内置/手动资源标来源；不提供删除内置资源或手动源目录的误导操作。使用分隔线与现有 Qt token；720/1100 宽度操作可换行，无横向滚动。
+- 功能 manifest 可选 name、description；资源包可选 description。旧包回退到 ID 与“作者未提供说明”，说明不解释为富文本。
+- 勾选才出现批量栏：启用、停用、删除；全选限当前筛选，筛选/搜索变化清空选择。批量删除一次确认列明名称/数量，逐包执行并仅汇总一次，失败/等待退出不报成成功。
+
+## 3. 导入、更新、启用与个人数据
+
+选择有效 ZIP/完整包目录后自动识别包类型并导入，不填写 owner/ID、不暴露预检事务界面。功能代码有简短信任提示；现有校验保留，不另造审批或沙箱。
+
+新包默认停用；更新保留旧启停状态；同版本同摘要返回已存在；行内更新必须匹配同一包。业务未启用不等于从未执行校验工厂，作者工厂须无业务副作用。加载中代码不能热更时明示等待自然退出，不强杀。
+
+启用后即时更新 Core 发现、运行入口、角色选择与设置贡献；同时支持独立设置进程。局部更新导航/搜索，不重建窗口，不覆盖其他页面草稿。只对受影响扩展的未保存编辑询问保存/放弃/取消。操作不依赖“保存并退出”。
+
+角色启用只加入可选列表，“使用”只切换当前实例。停用/删除使用中的素材，先让所有受影响实例回退内置角色并释放媒体，再操作；实际来源而不是相同角色 ID 决定是否受影响。失败保留原包，资源状态归资源管理器，不新增统一事务账本。
+
+删除只清理安装副本及受管理历史版本，保留外部 ZIP/目录、配置与聊天等数据，不触碰内置与目录外文件。保留路径、ZIP、兼容性和防误删检查。
+
+## 4. 最小公开契约与样例
+
+新增 `pet.mod_api.v1` 薄门面：功能定义、菜单命令、设置组件、owner 范围配置/数据、Core 简易 API 请求快照、启停与经校验 Worker 启动/消息。通用挂载显式 opt-in，不增加官方 owner/factory 分支，旧 AI/识屏不重复挂载。
+
+运行时保持命令表与 start/stop/close；设置保持 dirty/draft/confirm_save/discard_changes/dispose。不得公开 PetWindow、全局 Config、其他 DLC 私有对象。受信 Python 与独立 Worker 都不宣称沙箱。
+
+教程与样例包括：角色、persona-phrases/v1 台词模板、非官方离线 host-only、离线 Echo host-worker、现有 AI 与识屏两个官方调用链案例。每份含目录、步骤、打包/校验命令、预期与常见错误，官方示例区分公共接口和内部接线。
+
+角色副本 `mod-demo-shenshen` / `深深（MOD 示例）` 在独立测试目录复制原素材并替换一个可见动作；实测来源与原素材摘要不变，不提交整套媒体。
+
+```text
+手动角色：<项目目录>/data/characters/<角色ID>/videos/
+管理角色：<项目目录>/data/content/characters/<角色ID>/versions/<版本>/
+功能扩展：<项目目录>/data/plugins/<功能ID>/versions/<版本>/
+```
+
+无包 manifest 的手动素材不能猜成扩展；台词模板保持现有导入/导出语义，不冒充可卸载包。
+
+## 5. 兼容承诺与风险
+
+后续音乐、语音、Agent 等拆分由 Core 适配已公开 v1，样例冻结为回归；破坏性变化用 v2 并提供 v1 适配和迁移说明。未公开的跨 DLC 能力不鼓励私有 import。本轮交付影响矩阵但不拆更多功能；不保证任意私有 Python 代码永久兼容。
+
+跨进程通知丢失、旧 Python 模块驻留、资源媒体占用、其他设置草稿与设置组件释放是重点风险。无法确认退出/资源释放时保留原项；出现状态损坏或删除边界不明时停止操作，不通过移除边界绕过。
+
+## 6. 实施顺序与验收
+
+| 编号 | 交付门 |
+|---|---|
+| M00 | 当前验收修复验证、显式暂存、正常推送及 SHA 核对（已完成） |
+| M01 | 本设计与五份连续记录落盘；列表、停用导入、即时启用、草稿、批量/角色回退红灯 |
+| M02 | 统一薄管理服务、元数据与资源状态、通用 v1 挂载 |
+| M03 | 新列表、局部设置刷新、独立进程通知与操作反馈 |
+| M04 | 所有教程、可运行样例、角色副本实测、兼容影响矩阵 |
+| M05 | 完整质量门、真实冻结闭环、性能与逐文件报告、新候选 |
+
+质量门：相关测试、全量 pytest、Ruff、git diff --check、受影响真实 Qt/进程时序族 CPU 满负载三遍；自动化使用独立数据根与假服务，不用真实 Key/屏幕。验证 Core 与独立设置同时打开后的新包导入/启用/设置/停用，旧操作失效、无关草稿不变、批量部分失败及资源回退。Windows 720/1100 × 明暗、长描述/空/错误/待退出状态均记录截图。真实冻结 Core 跑到卸载闭环，不以单独 Worker 代替。
+
+候选 Core 4.2.5、AI 1.0.4、识屏 1.0.4；元数据需要新解析器，新包声明相应最低 Core。只有 Worker 输入摘要不变才复用；否则重建。保留旧产物和图标。
+
+证据：docs/PR-REPORT-* 逐文件增删、实测性能、Windows 实机记录，登记 INDEX。原版本恢复通过已核对远程检查点另建工作树或正常反向补丁，不 reset --hard 或覆盖用户改动。
+
+## 7. 连续记录
+
+设计即本文件；计划/交接/状态/工作日志/摘要保存在 `.scratch/mod-authoring-v1/`，只显式纳入 Markdown，生成日志不进 Git。每阶段分别记录 planned、implemented、automated、real-machine、user-confirmed、committed、remote-verified。
+
+## M05 可运行检查点例外（2026-10-10 16:40）
+
+用户明确要求先提交可运行版本，允许把非阻塞小问题留档后尽快收尾。因此本次检查点不把满 CPU 三轮整族压力门改写为通过：识屏短时握手、子宠清理时序、跨进程停用的高负载失败继续记录在交付报告中。它们不阻止当前正常负载的专项、全量文件隔离测试、final4 构建、真实生产 Worker 闭环或 Settings 烟测；若后续要宣称 M05 全部压力门完成，必须针对这些记录单独复验。
+
+## 已知未解决缺陷：ZIP 导入的功能扩展无法完成（2026-10-10）
+
+用户实机报告：**通过 ZIP 导入 `examples/mods` 里的两个示例功能包（`hello-local`、`echo-worker`）时操作未完成，报 `worker_probe_failed`；同一份内容改用「导入目录」可以正常运行。角色资源包（角色 / 动画）走 ZIP 导入正常。** 本轮只记录、不修复。
+
+- 失败发生在**探针阶段**（`pet/feature_package_transactions.py::_continue` 里的 `self_checker.check`），不是打包、校验或落盘阶段：从报错文案看，包已经通过校验并进入候选执行检查。
+- `worker_probe_failed` 只可能来自 host-worker 探针分支（`pet/feature_probe_adapter.py::_run_attempt` 末尾）。host-only 包在探针里走 `worker_status="not_applicable"` 提前返回，**正常不会产生这个 reason**，所以 `hello-local` 的准确原因仍需单独复现确认，不能直接套用 `echo-worker` 的结论。
+- 为什么本地非冻结环境复现不出这个差异：探针沙箱**只在冻结版构建里创建**——`pet/feature_management.py` 要求 `sys.platform == "win32" and sys.frozen and PROBE_BUNDLE_MANIFEST_SHA256`，且 `_internal/feature-probe` bundle 必须存在。开发 / offscreen 下目录与 ZIP 两条路径都只会得到 `self_check_sandbox_unavailable`，差异被掩盖（本轮 offscreen 探针的结果即如此）。
+- 本轮 offscreen 探针的其余结论（作为边界证据保留，**不能用来证明缺陷不存在**）：
+  - 根目录 ZIP 功能包 / 角色包、目录接入：在替换 `self_checker` 桩后导入 + 启用均成功且无差异；
+  - ZIP 内多套一层文件夹：`导入失败：…manifest missing`（`pet/local_package_intents.py::_read_zip_manifest` 只认压缩包根的 `manifest.json`），解压后选内层目录正常——这是另一个独立问题，与本次报告不同。
+- 证据：`.scratch/mod-authoring-v1/repro-zip-enable.json`、`.scratch/mod-authoring-v1/repro-zip-wrapper.json`；脚本 `repro_zip_enable.py`、`repro_zip_wrapper.py`（临时探针，不随产品发布）。
+- 待补信息：`hello-local` 的准确报错 reason、ZIP 与目录同包对比时探针的原始输出、失败是否与「先导入 ZIP 再导入目录」的顺序有关。
+- 规避：功能扩展现阶段用「导入目录」。根因定位与修复**未完成**，不得当成已修复。
+
+### S4 处置（2026-10-13，dsh-pet 分支 `dlc/mod-center-port`）
+
+本节是 DLC 分支 2026-10-10 的**历史记录**，以下为收口结论（逐环，不要笼统合并成"已修复"）：
+
+- **已修复**：冻结版 onedir 的密封依赖目录查找。探针第一步 `import _dsh_probe_native`
+  在长安装路径下会以「文件名或扩展名太长」失败 ⇒ 探针恒 77 ⇒ `worker_probe_failed`。
+  修复落在 `pet/frozen_runtime_paths.py` + `pet/workers/screen_entry.py` 首行接线，
+  修复前/后原始输出见 `.scratch/dlc-fusion/S4-HANDOFF.md` §二-3 与本仓库
+  [`PR-REPORT-DLC-MOD-CENTER-2026-10-13.md`](../PR-REPORT-DLC-MOD-CENTER-2026-10-13.md) §五-5.1。
+- **本仓库不存在该环**：上面的 LPAC 原生探针沙箱与 `_internal/feature-probe` 密封 bundle
+  由 DLC 的原生构建流水线产出；本仓库没有这条流水线，因此功能扩展包导入在**更上游**就以
+  `self_check_sandbox_unavailable` 如实拒绝。**"目录可以、ZIP 不行"这个差异在本仓库没有复现面**
+  （ZIP 与目录在 `preflight_*` 里都被 `feature_packages.stage()` 归一成同一个已解包目录）。
+- 逐环判定表见 [`README.md` 的「ZIP 导入探针缺陷」](README.md#四zip-导入探针缺陷2026-10-10--2026-10-13-收口口径)。
+
+## 完成后的实际使用效果
+
+一个列表管理角色与功能，选择 ZIP/目录即可导入，点启用才运行且设置即时出现；角色启用不换装，“使用”才换当前实例。多选删除只确认一次且保留源包与个人数据。作者有可跑样例与 v1 接口，不随 Core 内部搬家重做。当前限制：仍是本地管理，不提供联网商店，也不承诺已加载任意 Python 代码无重启更新；这些是待完成效果，不代表本设计落盘时已交付。
