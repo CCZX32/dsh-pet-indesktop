@@ -3292,3 +3292,55 @@ def test_play_file_success_keeps_exempt_respect_quiet(tmp_path, monkeypatch):
 
     assert service._current_respect_quiet is False, "交互应答照旧豁免"
     assert service._player.plays == 1
+
+
+def test_resolve_edge_tts_proxy_reads_system_proxy(monkeypatch):
+    """#252：系统代理要传给 edge-tts——aiohttp WSS 不读环境变量（trust_env 默认 False），
+    必须显式传 proxy；读不到代理时返回 None（直连）。"""
+    import pet.voice_chime_service as svc_mod  # noqa: F401
+
+    monkeypatch.setattr("urllib.request.getproxies",
+                        lambda: {"https": "http://127.0.0.1:7890", "http": "http://127.0.0.1:7890"})
+    assert svc_mod._resolve_edge_tts_proxy() == "http://127.0.0.1:7890"
+
+    # 只有 http 键也要认得
+    monkeypatch.setattr("urllib.request.getproxies",
+                        lambda: {"http": "http://127.0.0.1:1080"})
+    assert svc_mod._resolve_edge_tts_proxy() == "http://127.0.0.1:1080"
+
+    monkeypatch.setattr("urllib.request.getproxies", dict)
+    assert svc_mod._resolve_edge_tts_proxy() is None
+
+
+def test_synthesize_passes_proxy_to_communicate(monkeypatch, tmp_path):
+    """#252：合成路径把系统代理显式传给 edge_tts.Communicate。"""
+    import asyncio
+    import types
+
+    import pet.voice_chime_service as svc_mod
+
+    captured: dict = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            captured.update(kwargs)
+
+        async def save(self, path):
+            Path(path).write_bytes(b"fake")
+
+    monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=FakeCommunicate))
+    monkeypatch.setattr("urllib.request.getproxies",
+                        lambda: {"https": "http://127.0.0.1:7890"})
+
+    worker = svc_mod._TTSWorker("文本", "zh-CN-XiaoyiNeural", "+0%", "+0Hz",
+                                tmp_path / "out.mp3", lambda *args: None)
+    asyncio.run(worker._synthesize("zh-CN-XiaoyiNeural"))
+    assert captured.get("proxy") == "http://127.0.0.1:7890"
+
+    # 无系统代理时不传 proxy（直连）
+    captured.clear()
+    monkeypatch.setattr("urllib.request.getproxies", dict)
+    worker2 = svc_mod._TTSWorker("文本", "zh-CN-XiaoyiNeural", "+0%", "+0Hz",
+                                 tmp_path / "out2.mp3", lambda *args: None)
+    asyncio.run(worker2._synthesize("zh-CN-XiaoyiNeural"))
+    assert captured.get("proxy") is None

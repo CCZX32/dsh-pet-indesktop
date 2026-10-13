@@ -53,7 +53,7 @@ class _FakeCommunicate:
     plan: list[str] = ["ok"]
     payload = b"MP3-BYTES"
 
-    def __init__(self, text, voice, rate=None, pitch=None):
+    def __init__(self, text, voice, rate=None, pitch=None, **_kwargs):
         self.voice = voice
 
     async def save(self, path):
@@ -71,7 +71,7 @@ class _FakeCommunicate:
 def _install_fake_edge_tts(monkeypatch, *, live_voices=None):
     module = types.ModuleType("edge_tts")
 
-    async def list_voices():
+    async def list_voices(proxy=None):
         return [{"ShortName": name} for name in (live_voices or [])]
 
     module.list_voices = list_voices
