@@ -202,6 +202,25 @@ _live_voices_at = 0.0
 _voice_lock = threading.Lock()
 
 
+def _resolve_edge_tts_proxy() -> str | None:
+    """edge-tts 使用的系统代理（issue #252）。
+
+    edge-tts 的合成与音色列表走 aiohttp 的 WSS/HTTPS，aiohttp 默认
+    ``trust_env=False``——**不读环境变量里的代理**，直连被拦（403）时不会
+    自动走系统代理。这里从系统设置（Windows 注册表 / 环境变量，经
+    ``urllib.request.getproxies()``）取代理并显式传给 edge-tts。
+    读不到就返回 None（直连，保持原行为）。
+    """
+    try:
+        import urllib.request
+
+        proxies = urllib.request.getproxies()
+    except Exception:  # noqa: BLE001 —— 代理探测失败不该阻断合成
+        return None
+    proxy = proxies.get("https") or proxies.get("http")
+    return proxy or None
+
+
 def _bundled_voices() -> frozenset[str]:
     """内置（随包发布）音色集合——拿不到在线表时的校验集。"""
     return frozenset(value for value, _label in VOICE_OPTIONS)
@@ -226,7 +245,7 @@ def refresh_voice_list(*, force: bool = False, timeout: float = 10.0) -> frozens
     try:
         import edge_tts
 
-        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(), timeout=timeout))
+        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=_resolve_edge_tts_proxy()), timeout=timeout))
         voices = frozenset(str(item.get("ShortName") or "") for item in raw if item)
     except Exception as exc:  # noqa: BLE001 —— 拉不到不是错误，用旧的就够
         logger.debug("拉取在线音色表失败（沿用内置/旧表）：%s", exc)
@@ -461,6 +480,7 @@ class _TTSWorker(threading.Thread):
             voice,
             rate=self._rate,
             pitch=self._pitch,
+            proxy=_resolve_edge_tts_proxy(),
         )
         await communicate.save(str(self._temp_path))
 
