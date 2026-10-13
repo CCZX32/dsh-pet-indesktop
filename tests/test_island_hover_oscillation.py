@@ -204,9 +204,10 @@ def test_side_dock_dead_zone_hover_does_not_oscillate(tmp_path, edge):
         island.deleteLater()
 
 
-def test_dead_zone_peek_retracts_once_the_cursor_leaves(tmp_path):
+@pytest.mark.parametrize("edge", ["left", "right"])
+def test_dead_zone_peek_retracts_once_the_cursor_leaves(tmp_path, edge):
     """反向护栏：光标真的离开可 hover 区之后，必须在下一拍收口（不许永久钉住）。"""
-    island, strip = _docked_island(tmp_path, "left")
+    island, strip = _docked_island(tmp_path, edge)
     try:
         dead = QPoint(strip.center().x(), strip.top() + 2)
         _put_cursor(dead)
@@ -361,13 +362,14 @@ def test_hover_zone_excludes_the_band_below_the_capsule(tmp_path):
         island.deleteLater()
 
 
-def test_derived_strip_rect_is_the_retract_target(tmp_path):
+@pytest.mark.parametrize("edge", ["left", "right"])
+def test_derived_strip_rect_is_the_retract_target(tmp_path, edge):
     """判据的等价前提：滑出时推导出的细条矩形 == 收回后窗口落到的矩形。
 
     等价成立，才有"光标在推导矩形里 → 收回后细条立刻盖住它 → 必然再滑出"这条推
     论；等价一旦被改坏（比如换成按别的锚点推导），判据就成了猜。
     """
-    island, strip = _docked_island(tmp_path, "left")
+    island, strip = _docked_island(tmp_path, edge)
     try:
         dead = QPoint(strip.center().x(), strip.top() + 2)
         _put_cursor(dead)

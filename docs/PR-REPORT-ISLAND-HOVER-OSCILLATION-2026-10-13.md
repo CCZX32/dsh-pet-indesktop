@@ -39,7 +39,7 @@
 ## 二、修改文件说明
 
 `git diff --numstat`：`pet/dynamic_island.py` **+41 / −1**；新增
-`tests/test_island_hover_oscillation.py`（**+387**）。
+`tests/test_island_hover_oscillation.py`（**+389**）。
 
 ### 实现
 
@@ -60,7 +60,7 @@
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_island_hover_oscillation.py` | +387（新文件） | 8 个用例（含一组 left/right 参数化，共 10 例）：死区悬停不振荡（左右各一）、光标真离开后必须收口、可 hover 区覆盖整条细条、上下停靠无死区且照常收回、细条单击（死区）不振荡、非停靠态区=窗口矩形、**判据不是包围盒**（胶囊下缘外 10px 横带不在区内）、**推导细条矩形 == 收回落点** |
+| `tests/test_island_hover_oscillation.py` | +389（新文件） | 8 个用例（3 组 left/right 参数化，共 **12 例**）：死区悬停不振荡（左右各一）、光标真离开后必须收口（左右各一）、可 hover 区覆盖整条细条、上下停靠无死区且照常收回（上下各一）、细条单击（死区）不振荡、非停靠态区=窗口矩形、**判据不是包围盒**（胶囊下缘外 10px 横带不在区内）、**推导细条矩形 == 收回落点**（左右各一） |
 
 测试的光标位置用 `QCursor.setPos()` 直接驱动（offscreen 平台实测可写可回读，见
 `_put_cursor` 里的回读断言）——这是**操作系统边界**（真实鼠标位置没有别的确定性
@@ -203,12 +203,15 @@ python .scratch/island_hover_probe.py left 2.5 3.0   # 见第五节
 
 **⑤ 环境噪声的如实登记（探针有被外部鼠标污染的时候）**：探针的
 "检出外部鼠标干扰 N 次"是逐 tick 判 `QCursor.pos() != 目标` 的结果（写回前读到偏差
-即计数）。本机桌面同时在被人/其它进程使用，有两轮运行 **513/513 与 506/506 tick
-全部偏离**（`SetCursorPos` 写下去立刻被改回去，光标根本不在死区）——那两轮
+即计数）。本机桌面同时在被人/其它进程使用（另有两个 `python -m pytest` 进程在用同一
+个桌面会话），有三轮运行 **513/513、506/506、508/508 tick 全部偏离**（`SetCursorPos`
+写下去立刻被改回去，光标根本不在死区）——那三轮
 （`.scratch/probe-prefix-left.log`、`.scratch/probe-fixed-right.log`）**采不到任何
 有效数据**，本文不引用其结论，只作噪声记录。**可靠运行的判据是干扰计数低且时间线
 自洽**（第一轮与第二轮均是 0 次干扰、第三轮 6 次），`probe_summary.py` 会自动把
-干扰 ≥30 的运行标为"被外部鼠标污染"。
+干扰 ≥30 的运行标为"被外部鼠标污染"。因此**右停靠只有 offscreen 确定性测试覆盖**
+（`test_dead_zone_peek_retracts_once_the_cursor_leaves[right]` 等左右参数化用例），
+实机证据是左停靠。
 
 **⑥ 未做的实机项与原因**：
 
@@ -217,6 +220,8 @@ python .scratch/island_hover_probe.py left 2.5 3.0   # 见第五节
   的用例），再叠一个 topmost 的岛窗口会污染对方的测量。改用**真窗口 + 真光标**的
   探针覆盖同一条代码路径（`DynamicIsland` 的 enter/leave/收回 + 真实 Windows 插件
   的合成事件）；
+- **右停靠未取到干净的实机证据**：光标被外部进程钉在屏幕中部（508/508 tick 偏离），
+  无法把它放到右边缘的 16px 细条里；右停靠由左右参数化的确定性用例覆盖；
 - **未在 macOS / Linux 实机验证**：本机只有 Windows；判据用的是 Qt 的
   `enterEvent`/`leaveEvent`/`QCursor.pos()`，平台无关，但"窗口几何变化时合成
   leave"这件事在三端的确切时机**未验证**（本修复不假设它一定发生，只是保证即使它
@@ -227,16 +232,16 @@ python .scratch/island_hover_probe.py left 2.5 3.0   # 见第五节
 | 门 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `python -m ruff check pet/dynamic_island.py tests/test_island_hover_oscillation.py` | `All checks passed!` |
-| 新回归（红） | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_island_hover_oscillation.py -q`（实现前） | **6 failed / 2 passed**（`_hover_rects` 尚不存在 → `AttributeError`） |
-| 新回归（断言有效性） | 同上，注入缺陷（`if self._cursor_in_hover_zone():` → `if False:`） | **3 failed / 7 passed**，失败正文即振荡帧：`assert not [(False, (0, 294, 110, 56)), (True, (0, 291, 38, 62)), (True, (0, 297, 180, 51)), ...]`（`收回 → 再滑出` 完整一轮），日志 `.scratch/redcheck-injected.log` |
-| 新回归（绿） | 同上，恢复实现 | **10 passed** |
+| 新回归（红·实现缺口） | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_island_hover_oscillation.py -q`（未改动的产品代码 + 最终测试文件） | **10 failed / 2 passed**（`_hover_rects`/`_cursor_in_hover_zone` 尚不存在 → `AttributeError`），日志 `.scratch/redcheck-impl.log` |
+| 新回归（红·行为缺口） | 同上，实现到位但注入缺陷（`if self._cursor_in_hover_zone():` → `if False:`） | **3 failed / 9 passed**，失败正文即振荡帧：`assert not [(False, (0, 294, 110, 56)), (True, (0, 291, 38, 62)), (True, (0, 297, 180, 51)), ...]`（`收回 → 再滑出` 完整一轮；左右两档各一条 + 细条单击一条），日志 `.scratch/redcheck-injected.log` |
+| 新回归（绿） | 同上，恢复实现 | **12 passed**（连跑 3 遍：1.88s / 1.90s / 1.67s，无 flake） |
 | 点名必绿的既有用例 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_dynamic_island_revamp.py tests/test_island_dock_sampling.py -q` | **42 passed**（与改动前基线 42 完全一致；这两份文件手工驱动 `enterEvent(None)`/`leaveEvent(None)`/`_dock_back()`，offscreen 光标默认在 (10,10)，落在细条之外的 y 区间 ⇒ 仍走收回分支） |
-| 灵动岛全族 | `QT_QPA_PLATFORM=offscreen python -m pytest $(ls tests/test_dynamic_island*.py tests/test_island_*.py) -q` | **700 passed**（37 个文件，79s） |
-| 交付证据纪律 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_pr_report_discipline.py -q` | **135 passed**（含对本报告三节标题与 INDEX 登记的校验） |
+| 灵动岛全族 | `QT_QPA_PLATFORM=offscreen python -m pytest $(ls tests/test_dynamic_island*.py tests/test_island_*.py) -q` | **702 passed**（37 个文件，83s，含本批 12 例） |
+| 交付证据纪律 | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_pr_report_discipline.py -q` | **137 passed**（含对本报告三节标题与 INDEX 登记的校验） |
 | 岛相邻域（非岛族但会构造岛/读岛配置） | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_first_batch_features.py tests/test_overlay_geometry_parity.py tests/test_overlay_peripherals.py tests/test_overlay_shell.py tests/test_desktop_pet_features.py -q` | **161 passed** |
 
-**红→绿证据链**：先写测试（红：实现缺口 6 例 / 行为缺口 3 例两段都录了）→ 实现 →
-绿；既有 42 例与全族 700 例在两段之间保持绿。
+**红→绿证据链**：先写测试（红两段都录了——实现缺口 10 failed / 2 passed，行为缺口
+3 failed / 9 passed）→ 实现 → 绿 12 passed；既有 42 例与全族 702 例在两段之间保持绿。
 
 ## 七、已知限制与后续
 
@@ -264,6 +269,6 @@ python .scratch/island_hover_probe.py left 2.5 3.0   # 见第五节
 
 ---
 
-> **纪律测试结果**：`tests/test_pr_report_discipline.py` → **135 passed**（本文件按模板逐字
+> **纪律测试结果**：`tests/test_pr_report_discipline.py` → **137 passed**（本文件按模板逐字
 > 包含「修改文件说明」「性能分析」「实机运行记录」三节，并已在 `docs/INDEX.md` 的
 > 「PR 报告存档」登记）。
