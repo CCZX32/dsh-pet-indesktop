@@ -44,12 +44,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .mod_center_controller import KIND_EXTENSION
 from .mod_management import KIND_RESOURCE, ModSelection
 from .settings_widgets import ResponsiveActionRow, SettingsPopupMenu
 
 ALL_KINDS = "全部"
-#: 功能扩展在 DLC 侧的展示名（本仓库暂不产生该种类的行；筛选按钮随 ``kinds`` 出现）。
-KIND_FEATURE = "功能扩展"
 
 _LONG_TOKEN = re.compile(r"[!-~]{24,}")
 
@@ -199,7 +198,7 @@ class ModCenterWidget(QWidget):
         self.messages = {}
         self.rows = {}
         self.kind = ALL_KINDS
-        self.kinds = tuple(kinds) if kinds is not None else (KIND_RESOURCE, KIND_FEATURE)
+        self.kinds = tuple(kinds) if kinds is not None else (KIND_RESOURCE, KIND_EXTENSION)
         self.setObjectName("modCenter")
         self.setAccessibleName("MOD 管理中心")
         layout = QVBoxLayout(self)

@@ -9,21 +9,41 @@
 窗口（``pet/modern_settings_dialog`` 的 ``parent()``；宿主壳 ``pet/overlay_shell.py``
 的角色切换最终也落在同一个 ``on_switch_character`` 入口上）。
 
-**本片只移植资源侧。** DLC 那版把「功能扩展」（可执行代码包）与「角色资源」放进同一条
-队列，前者的运行闭包是官方功能包安装信任链（``feature_package_transactions`` /
-``feature_install_state`` / ``feature_version_lease`` / ``local_package_intents`` +
-``pet.plugins`` 验签，合计约 3900 行），本仓库没有这些模块，``pet/plugins`` 又属本片
-禁止引入面——范围与判定见 ``.scratch/dlc-fusion/S1b-1-HANDOFF.md`` 的「未落」节。
-因此 :data:`KINDS` 只声明 ``角色资源``；非资源包在导入时按包自己声明的 ``kind`` 如实
-拒绝（不是静默失败，也不是"看起来成功了"）。队列/结果协议（``perform`` /
-``import_source`` / ``result`` / ``batch_finished``）与 DLC 逐位一致，功能扩展侧接回时
-的落点就是这里。
+**本片（S1c）接回功能扩展侧。** DLC 那版把「功能扩展」（可执行代码包）与「角色资源」放进同
+一条队列，靠 ``dialog.feature_managers`` 里每只包一个 ``FeatureManagementManager`` 驱动。
+本仓库没有那套管理器（它的闭包是功能扩展宿主运行时 + 官方功能包安装信任链的一整层），
+所以照 S1b-2 定下的同一手法处理：**控制器只认契约，注册表由宿主提供**。
+
+宿主额外契约（可选能力，缺省 = 没有任何功能扩展）：
+
+``extensions() -> Mapping[str, object]``
+    **GUI 线程**调用：``feature_id -> 扩展管理器``。管理器契约（与 DLC 的
+    ``FeatureManagementManager`` 同名同义，控制器只用这几项）：
+
+    ``service``
+        安装信任链的事务服务（``FeaturePackageTransactionService`` 或同形状）；
+        ``service.inspect()`` 给出 ``active`` / ``enabled`` / ``pending_transaction``，
+        ``service.store.root / "versions" / active`` 是该版本的安装目录。
+    ``submit(action, *args, expected_revision=...) -> bool``
+        接受一个安装/启停/卸载动作（``enable`` / ``disable`` / ``uninstall`` /
+        ``rollback`` / ``apply``）；返回 False = 忙、请稍后重试。
+    ``submit_local_source(source, auto_apply=True, enabled=False) -> bool``
+        导入一个本地包目录/ZIP。
+    ``result_ready`` / ``state_changed`` 信号，及 ``last_result``。
+        前者（``object`` 一个 ``OperationResult`` 参数）驱动:meth:`_feature_finished`
+        的结果映射与忙等重试阶梯；后者转成 ``changed``。
+
+DLC 原文在 ``.scratch/dlc-fusion/src/mod_center_controller.py``；本文件保留同一套队列、
+结果协议与重试阶梯，只把 `managers` 换成宿主给的 `extensions` 注册表。功能扩展的
+**包声明路由**（``local_package_intents.route_local_package``）与 `FeatureManagementManager`
+本身仍未移植——本仓库的宿主面（``pet/settings_mod_domain.py``）目前返回空注册表，
+所以「功能扩展」这一格在真实运行里还不会出现；接回时的落点就是 ``extensions()``。
 
 **已知缺陷指针（不在本片修）**：DLC 侧用 ZIP 导入**功能扩展**示例包会报
 ``worker_probe_failed``（探针沙箱只在冻结版创建），改「导入目录」正常；角色资源包走
 ZIP 正常。原文在 DLC 分支 ``docs/modding/USER-GUIDE.md`` 的「已知缺陷」节与
 ``.scratch/mod-authoring-v1/HANDOFF.md``；本线 S4 随文档移植原文，ZIP 探针缺陷单列一轮
-（``PLAN.md``「ZIP 导入探针缺陷」）。本文件只按包声明拒收非资源包，不假装已修。
+（``PLAN.md``「ZIP 导入探针缺陷」）。本文件只按包声明路由，不假装已修。
 
 宿主面（Host）——本仓库的面：
 
@@ -40,6 +60,8 @@ ZIP 正常。原文在 DLC 分支 ``docs/modding/USER-GUIDE.md`` 的「已知缺
     操作完成后的失效通知：至少写一次 ``mod-catalog.revision`` 令牌
     （``pet.mod_catalog.publish_catalog_change``），进程内宿主再顺手清 catalog 缓存
     （角色体框是 ``lru_cache``，覆盖同名包时不失效就会拿旧框）。
+``extensions() -> Mapping[str, object]``
+    见上；可选，缺省按「没有任何功能扩展」处理。
 """
 from __future__ import annotations
 
@@ -59,12 +81,16 @@ from .mod_management import KIND_RESOURCE, ModEntry, ModOutcome, ResourceMods
 
 _LOG = logging.getLogger(__name__)
 
-#: 本片支持的 MOD 种类。功能扩展侧接入后在这里追加（见模块 docstring）。
-KINDS = (KIND_RESOURCE,)
+#: 功能扩展（可执行代码包）这一格的种类名。DLC 用的就是同一个字面量，MOD 中心 UI
+#: 的筛选按钮直接按 ``KINDS`` 生成，所以这里加一项就等于给 UI 加一个筛选。
+KIND_EXTENSION = "功能扩展"
+
+#: 本片支持的 MOD 种类（顺序即 UI 筛选按钮顺序）。
+KINDS = (KIND_RESOURCE, KIND_EXTENSION)
 
 #: 包声明里表示「角色资源」的种类值（DLC 的 ``manifest.json`` 口径）。
 RESOURCE_MANIFEST_KIND = "content"
-#: 功能扩展包的声明标记：出现任一即判为「本版本接不了」，只读探测、不 import 不执行。
+#: 功能扩展包的声明标记：出现任一即判为「功能扩展」。
 _FEATURE_MANIFEST_MARKERS = ("execution_kind", "format_version", "factory")
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _MANIFEST_NAME = "manifest.json"
@@ -73,6 +99,11 @@ _MANIFEST_NAME = "manifest.json"
 ACTIONS = frozenset({"enable", "disable", "delete", "rollback", "use"})
 #: 需要先确认「没有桌宠正在用这个包」的动作（存储层同样会调放行判据，这里提前问一次）。
 _RELEASING_ACTIONS = frozenset({"disable", "delete", "rollback"})
+#: 忙等重试阶梯（毫秒），与 DLC 逐位一致；两处不同状态各记一次尝试数。
+_RETRY_DELAYS = (100, 250, 500, 1000, 2000)
+#: 事务层报「锁忙」时仍算可重试的原因（DLC 从 ``feature_package_transactions`` 取；
+#: 本仓库把它写死在这里，避免为一个常量把事务层拉进 UI 进程的导入图）。
+_LOCK_BUSY_REASONS = frozenset({"management_lock_busy", "leases_lock_busy", "state_lock_busy", "lock_busy"})
 
 
 @dataclass(frozen=True)
@@ -137,20 +168,37 @@ def declared_manifest(source: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def unsupported_package_message(source: Path) -> str:
-    """非资源包的如实拒绝语；空串 = 交给资源存储层按内容校验。
+def declared_kind(manifest: dict) -> str:
+    """包**自己声明**的种类：``content`` = 角色资源，功能扩展标记出现 = 功能扩展。
 
-    判据只有包**自己声明**的东西（``kind`` 与功能扩展的标记字段），不做猜测：
-    缺 ``kind`` 的手工角色包照样往下走，由 ``pet.mod_management`` 的边界校验回答
-    「是不是一个完整的角色包」。
+    判据只有声明本身，不做猜测：缺 ``kind`` 又没有任何功能扩展标记的手工角色包返回
+    空串，交给 :mod:`pet.mod_management` 的边界校验回答「是不是一个完整的角色包」。
     """
-    manifest = declared_manifest(source)
     kind = manifest.get("kind")
     if isinstance(kind, str) and kind and kind != RESOURCE_MANIFEST_KIND:
-        return "本版本只支持角色资源包；功能扩展包的安装子系统尚未接入。"
+        return kind
     if any(marker in manifest for marker in _FEATURE_MANIFEST_MARKERS):
-        return "本版本只支持角色资源包；功能扩展包的安装子系统尚未接入。"
+        return KIND_EXTENSION
     return ""
+
+
+def unsupported_package_message(source: Path, *, extensions=()) -> str:
+    """非资源包的如实拒绝语；空串 = 交给资源存储层按内容校验。
+
+    ``extensions`` = 已注册的功能扩展 id 集合。一个功能扩展包只有在**声明的 id 已有
+    注册表条目**（即本进程真的能驱动它的安装信任链）时才被路由；否则如实说清是哪一个
+    环节没接上，而不是静默失败。缺 ``kind`` 的手工角色包照样往下走。
+    """
+    manifest = declared_manifest(source)
+    if declared_kind(manifest) != KIND_EXTENSION:
+        kind = manifest.get("kind")
+        if isinstance(kind, str) and kind:
+            return "本版本只支持角色资源包；该包声明的种类是「" + kind[:32] + "」。"
+        return ""
+    declared_id = manifest.get("id")
+    if isinstance(declared_id, str) and declared_id in set(extensions):
+        return ""
+    return "这个包是功能扩展包，但本版本还没有接上它对应的功能扩展宿主：安装子系统未接入。"
 
 
 class ModCenterController(QObject):
@@ -181,23 +229,91 @@ class ModCenterController(QObject):
         super().__init__(parent)
         self.host = host
         self.resources = ResourceMods(host.data_root, prepare_removal=self._may_remove)
+        self.extensions: dict[str, object] = {}
         self.busy = False
         self._queue: deque = deque()
         self._results: list = []
         self._current = None
         self._usage = LiveUsage()
         self._closed = False
+        self._connected: set[str] = set()
+        self._load_retries = 0
+        self._apply_retries = 0
         self._finished.connect(self._resource_finished, Qt.ConnectionType.QueuedConnection)
+        self.connect_extensions()
+
+    # ----------------------------------------------------- 功能扩展注册表
+
+    def connect_extensions(self) -> None:
+        """把宿主给的功能扩展管理器接上结果信号；已接过的按 id 去重。
+
+        DLC 的对应方法是 ``connect_managers``（靠 ``dialog.feature_managers`` 逐个接）。
+        这里同样在每次 ``extensions()`` 之后调用，新增的包（例如刚导入的那一只）当次
+        即可回报结果。**Qt 对象只在属主线程上接**——本方法只在 GUI 线程调用。
+        """
+        for owner, manager in dict(self.extension_managers()).items():
+            if owner in self._connected:
+                continue
+            self._connected.add(owner)
+            self.extensions[owner] = manager
+            ready = getattr(manager, "result_ready", None)
+            if ready is not None:
+                ready.connect(lambda result, owner=owner: self._feature_finished(owner, result))
+            state = getattr(manager, "state_changed", None)
+            if state is not None:
+                state.connect(lambda *_: self.changed.emit())
+
+    def extension_managers(self) -> dict:
+        """宿主提供的 ``feature_id -> 管理器``；宿主答不上来 = 没有功能扩展。"""
+        provider = getattr(self.host, "extensions", None)
+        if provider is None:
+            return {}
+        try:
+            values = provider()
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("Extension registry unavailable")
+            return {}
+        return dict(values) if values else {}
 
     # ------------------------------------------------------------- 清单
 
     def entries(self) -> list[ModEntry]:
+        rows = self._extension_entries()
         try:
-            rows = self.resources.entries()
+            rows.extend(self.resources.entries())
         except (OSError, ValueError, RuntimeError):
             _LOG.exception("MOD catalog unavailable")
-            return []
         return sorted(rows, key=lambda row: (row.kind, row.name.casefold(), row.id))
+
+    def _extension_entries(self) -> list[ModEntry]:
+        """已安装的功能扩展行（与 DLC 同判据：读安装目录里的清单做展示元数据）。"""
+        self.connect_extensions()
+        rows = []
+        for owner, manager in tuple(self.extensions.items()):
+            service = getattr(manager, "service", None)
+            if service is None:
+                continue
+            try:
+                info = service.inspect()
+                if info.active is None:
+                    continue
+                path = service.store.root / "versions" / info.active
+                metadata = declared_manifest(path)
+                rows.append(
+                    ModEntry(
+                        str(owner),
+                        KIND_EXTENSION,
+                        str(metadata.get("name") or owner),
+                        str(info.active),
+                        str(metadata.get("description") or ""),
+                        bool(info.enabled),
+                        path,
+                        pending="等待自然退出后完成操作" if info.pending_transaction else "",
+                    )
+                )
+            except (OSError, ValueError, RuntimeError):
+                _LOG.warning("extension metadata unavailable: %s", owner)
+        return rows
 
     # --------------------------------------------------------- 操作入口
 
@@ -226,7 +342,15 @@ class ModCenterController(QObject):
         except (OSError, ValueError) as exc:
             self.result.emit(expected or "", ModOutcome(False, "导入失败：请选择完整的 MOD ZIP 或包目录。" + str(exc)[:160]))
             return False
-        message = unsupported_package_message(source)
+        self.connect_extensions()
+        manifest = declared_manifest(source)
+        if declared_kind(manifest) == KIND_EXTENSION and manifest.get("id") in self.extensions:
+            owner = str(manifest["id"])
+            if expected is not None and expected != KIND_EXTENSION + ":" + owner:
+                self.result.emit(expected, ModOutcome(False, "导入失败：更新文件不是同一个包。"))
+                return False
+            return self._begin([("import_feature", owner, source)])
+        message = unsupported_package_message(source, extensions=self.extensions)
         if message:
             self.result.emit(expected or "", ModOutcome(False, message))
             return False
@@ -268,6 +392,8 @@ class ModCenterController(QObject):
             self.batch_finished.emit(tuple(self._results))
             return
         self._current = self._queue.popleft()
+        self._load_retries = 0
+        self._apply_retries = 0
         action, entry, source = self._current
         if action == "use":
             # 换装是 GUI 线程的活（要动窗口与素材库），不进后台线程。
@@ -280,12 +406,57 @@ class ModCenterController(QObject):
                 return
             self._background(lambda: self._install(source, entry))
             return
+        if action == "import_feature":
+            self._import_feature(str(entry), source)
+            return
+        if entry.kind == KIND_EXTENSION:
+            self._extension_action(action, entry)
+            return
         if action in _RELEASING_ACTIONS:
             refusal = self._release_refusal(entry)
             if refusal:
                 self._finish(ModOutcome(False, refusal, True))
                 return
         self._background(lambda: self._apply(action, entry))
+
+    def _extension_action(self, action: str, entry: ModEntry) -> None:
+        """把一个动作交给该功能扩展的管理器；管理器忙/答不上来 = 如实拒绝。"""
+        manager = self.extensions.get(entry.id)
+        if manager is None:
+            self._finish(ModOutcome(False, "这个功能扩展已经不可用：请重新打开设置页。"))
+            return
+        submit = getattr(manager, "submit", None)
+        if submit is None:
+            self._finish(ModOutcome(False, "这个功能扩展的管理器不支持该操作。"))
+            return
+        try:
+            if action in ("enable", "disable"):
+                info = manager.service.inspect()
+                accepted = submit("enable", action == "enable", expected_revision=info.revision)
+            else:
+                accepted = submit("uninstall" if action == "delete" else "rollback")
+        except (OSError, ValueError, RuntimeError) as exc:
+            _LOG.warning("extension action refused: %s", entry.id)
+            self._finish(ModOutcome(False, "操作未完成：" + str(exc)[:160]))
+            return
+        if not accepted:
+            self._finish(ModOutcome(False, "该包正在操作，请稍后重试"))
+
+    def _import_feature(self, owner: str, source: Path) -> None:
+        """导入一个本地功能扩展包：走该扩展管理器自己的本地源入口。"""
+        manager = self.extensions.get(owner)
+        submit = getattr(manager, "submit_local_source", None) if manager is not None else None
+        if submit is None:
+            self._finish(ModOutcome(False, "这个功能扩展已经不可用：请重新打开设置页。"))
+            return
+        try:
+            accepted = submit(source, auto_apply=True, enabled=False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            _LOG.warning("extension import refused: %s", owner)
+            self._finish(ModOutcome(False, "导入未完成：" + str(exc)[:160]))
+            return
+        if not accepted:
+            self._finish(ModOutcome(False, "导入未开始；该包可能正在操作中"))
 
     def _import_conflict(self, source: Path) -> str:
         """要替换的包正被使用时的如实拒绝（空串 = 可以继续导入）。
@@ -342,13 +513,129 @@ class ModCenterController(QObject):
             _LOG.exception("MOD notification failed")
         self._finish(outcome)
 
+    # ------------------------------------------------- 功能扩展的结果映射
+
+    def _feature_finished(self, owner: str, result) -> None:
+        """把事务层的 ``OperationResult`` 映射成一行如实的结果（DLC 同款阶梯）。
+
+        - ``awaiting_startup_confirmation`` 算成功（状态已持久、等下次启动确认）；
+        - 锁忙 / 生命周期所有者变化走 100→2000 ms 重试阶梯，超限再如实报；
+        - ``awaiting_release`` 时先问一次「这次事务到底被接受了没有」，
+          **不接受**的就别说成"已保存，等退出"（DLC 原话：never pretend a
+          pre-acceptance wait is already a durable transaction）。
+        """
+        if self._current is None or self._closed:
+            return
+        action, entry, _source = self._current
+        expected = entry if action == "import_feature" else getattr(entry, "id", None)
+        status = getattr(result, "status", None)
+        phase = getattr(result, "phase", None)
+        if owner != expected or (phase == "awaiting_confirmation" and not getattr(result, "reason", None)):
+            return
+        if status in ("completed", "idempotent", "awaiting_startup_confirmation"):
+            manager = self.extensions.get(owner)
+            loaded = getattr(manager, "last_result", None)
+            reason = getattr(loaded, "reason", None) if loaded is not None else getattr(result, "reason", None)
+            if reason in _LOCK_BUSY_REASONS and self._retry_load(owner, result):
+                return
+            if action not in {"delete", "disable"} and loaded is not None and getattr(loaded, "status", None) not in {"completed", "idempotent"}:
+                # 安装状态已持久，但这次加载没走完（例如宿主进了 fault）：两件事分开说，
+                # 不许把"状态存下了"讲成"已经能用"。
+                outcome = ModOutcome(False, "安装状态已保存，但加载未完成：" + str(getattr(loaded, "reason", None) or getattr(loaded, "status", None)))
+            elif getattr(result, "status", None) == "idempotent" and getattr(result, "reason", None) == "same_version_same_digest":
+                outcome = ModOutcome(True, "已存在，不重复导入")
+            else:
+                outcome = ModOutcome(True, {
+                    "import_feature": "已导入；点击启用即可使用",
+                    "enable": "已启用",
+                    "disable": "已停用",
+                    "delete": "已删除安装副本，个人数据保留",
+                    "rollback": "已恢复上一版",
+                }.get(action, "已完成"))
+        elif status == "awaiting_release":
+            if getattr(result, "plan", None) is not None and getattr(result, "reason", None) in {*_LOCK_BUSY_REASONS, "lifecycle_owners_changed"} and self._retry_apply(owner, result):
+                return
+            accepted = self._transaction_accepted(owner, result)
+            outcome = (
+                ModOutcome(False, "等待相关程序自然退出后完成操作", True)
+                if accepted
+                else ModOutcome(False, "操作尚未接受，请自然退出相关程序后重试")
+            )
+        else:
+            outcome = ModOutcome(False, "操作未完成：" + str(getattr(result, "reason", None) or status))
+        self.changed.emit()
+        self._finish(outcome)
+
+    def _transaction_accepted(self, owner: str, result) -> bool:
+        """这次事务是否已落成 pending（唯一权威是安装状态的 ``pending_transaction``）。"""
+        manager = self.extensions.get(owner)
+        service = getattr(manager, "service", None)
+        operation_id = getattr(result, "operation_id", None)
+        if service is None or not operation_id:
+            return False
+        try:
+            return service.inspect().pending_transaction == operation_id
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    def _retry_load(self, owner: str, result) -> bool:
+        """「加载撞锁」的阶梯重试（DLC 的 ``_load_retries``）：返回 True = 已排上。
+
+        管理器自己会在重试期间再试一次加载；这里只是**再问一次**它的结果，
+        不在控制器侧重复提交（DLC 原样）。
+        """
+        if self._load_retries >= len(_RETRY_DELAYS):
+            return False
+        delay = _RETRY_DELAYS[self._load_retries]
+        self._load_retries += 1
+        self._schedule(delay, lambda: self._feature_finished(owner, result))
+        return True
+
+    def _retry_apply(self, owner: str, result) -> bool:
+        """「事务尚未接受」的阶梯重试（DLC 的 ``_apply_retries``）：用同一个 plan 再确认一次。
+
+        为什么必须重试而不是直接报失败：停一个 Worker 可能在"准备"与"接受"之间
+        把 owner 拿掉——状态变了，但**同一份计划与同一个确认令牌**照样是有效的，
+        用户不该因为一次时序碰撞重来一遍。
+        """
+        plan = getattr(result, "plan", None)
+        manager = self.extensions.get(owner)
+        submit = getattr(manager, "submit", None)
+        if plan is None or submit is None or self._apply_retries >= len(_RETRY_DELAYS):
+            return False
+        delay = _RETRY_DELAYS[self._apply_retries]
+        self._apply_retries += 1
+
+        def retry() -> None:
+            if not submit("apply", plan, confirmation_token=plan.confirmation_token):
+                self._feature_finished(owner, result)
+
+        self._schedule(delay, retry)
+        return True
+
+    def _schedule(self, delay_ms: int, callback) -> None:
+        """排一次重试，并再验一次「这格还是同一格」且对象还活着。"""
+        current = self._current
+
+        def guarded() -> None:
+            if self._closed or not shiboken6.isValid(self) or self._current is not current:
+                return
+            callback()
+
+        QTimer.singleShot(delay_ms, guarded)
+
     # ------------------------------------------------------------- 收尾
 
     def _finish(self, outcome: ModOutcome) -> None:
         if self._current is None:
             return
-        _action, entry, _source = self._current
-        key = entry.key if isinstance(entry, ModEntry) else (entry or "")
+        action, entry, _source = self._current
+        if action == "import_feature":
+            key = KIND_EXTENSION + ":" + str(entry)
+        elif isinstance(entry, ModEntry):
+            key = entry.key
+        else:
+            key = entry or ""
         self._results.append((key, outcome))
         self.result.emit(key, outcome)
         self._current = None

@@ -144,6 +144,17 @@ class DialogModHost:
         return LiveUsage(verified=verified, asset_dirs=dirs,
                          character_ids=tuple(dict.fromkeys(ids)))
 
+    def extensions(self) -> dict:
+        """功能扩展注册表（``feature_id -> 管理器``）；本版本恒为空。
+
+        功能扩展的管理器要接上官方功能包安装信任链（``feature_package_transactions``
+        等）与宿主运行时，本仓库尚未接入——**这里如实返回空表**而不是给一个占位管理器：
+        ``ModCenterController`` 见空表就不列「功能扩展」行，导入功能扩展包时给出
+        「宿主未接入」的拒绝语（见 ``pet/mod_center_controller.py`` 的模块 docstring）。
+        接回时把管理器填进这张表即可，控制器侧不用改。
+        """
+        return {}
+
     # ------------------------------------------------------------- 动作
 
     def use_resource(self, entry: ModEntry) -> ModOutcome:

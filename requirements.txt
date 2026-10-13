@@ -18,6 +18,20 @@ tzdata>=2024.1
 # 分析可完整收集（无需 --collect-all）。其农历与节气日已实测校验。
 lunar-python>=1.4.8
 
+# 官方功能包（pet/plugins/package_trust.py）的 Ed25519 签名验证。
+# 许可证 Apache-2.0 OR BSD-3-Clause，与本项目 MIT 相容。
+#
+# 只在「签名发布」这条路上用到：`_valid_signature` 是**惰性 import**，本地用户
+# 自选包（allow_local_packages=True）走的是"用户信任"而非"发布者认证"，
+# 全程不碰它。所以它缺席不会让桌宠本体起不来，只会让**签名包**一律拒绝。
+#
+# 打包期注意（**本机未实测，留给构建片**）：cryptography 是带 Rust 编译产物的
+# 二进制轮，PyInstaller 有自带 hook，但 DLC 上游记录过 Windows 轮会连带拉起
+# USER32；上游的做法是在冻结版另挂一个 libsodium 后端的同策略实现。三个构建
+# 脚本（build_onedir.ps1 / build_linux.sh / build_macos.sh）在打包本功能前
+# 需要实测一次收集结果——现有的 --collect-all 名单里没有它。
+cryptography>=43.0
+
 # 语音报时（pet/voice_chime_service.py）的在线 TTS：edge-tts 走微软免费在线
 # 语音服务合成 mp3 后缓存播放。缺失时服务降级为仅气泡提示（不崩溃），但
 # 打包版用户无法自行 pip 安装——所以在此声明为运行时依赖，并在三个构建

@@ -15,13 +15,13 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pet import catalog
-from pet.mod_center_controller import LiveUsage, ModCenterController, unsupported_package_message
+from pet.mod_center_controller import KIND_EXTENSION, LiveUsage, ModCenterController, declared_manifest, unsupported_package_message
 from pet.mod_management import ModOutcome
 
 app = QApplication.instance() or QApplication([])
@@ -278,8 +278,23 @@ def test_feature_package_is_refused_with_a_truthful_reason(env):
     controller.result.connect(lambda _key, outcome: results.append(outcome))
     assert not controller.import_source(package)
     assert not controller.busy
-    assert "功能扩展" in results[-1].message
+    # 如实报：说清它不是角色资源包、声明的是什么，绝不说成导入成功。
+    assert results[-1].message.startswith("本版本只支持角色资源包")
+    assert "feature" in results[-1].message
+    assert not results[-1].success
     assert not [row for row in controller.entries() if row.managed]
+
+
+def test_a_feature_package_without_a_registered_extension_names_the_missing_half(env):
+    """标记字段存在但没有对应注册表条目时，拒绝语要指向真正的缺口。"""
+    controller, _host = _controller(env)
+    package = _write_package(env[0] / "marker-only", extra={"execution_kind": "host-worker"})
+    results = []
+    controller.result.connect(lambda _key, outcome: results.append(outcome))
+    assert not controller.import_source(package)
+    assert "功能扩展" in results[-1].message
+    assert "未接入" in results[-1].message
+    assert not results[-1].success
 
 
 @pytest.mark.parametrize("declared", [
@@ -292,6 +307,15 @@ def test_declared_non_resource_markers_are_refused(env, declared):
     package = _write_package(env[0] / "pkg", extra=declared)
     assert unsupported_package_message(package)
     assert unsupported_package_message(_zip(package, env[0] / "pkg.zip"))
+
+
+def test_a_registered_extension_id_is_not_refused_by_the_declaration_gate(env):
+    """注册表里有这个 id ⇒ 声明层放行，交给那条信任链自己回答能不能装。"""
+    package = _write_package(env[0] / "known", extra={"execution_kind": "host-worker"})
+    manifest = declared_manifest(package)
+    owner = manifest["id"]
+    assert unsupported_package_message(package, extensions={owner}) == ""
+    assert unsupported_package_message(package, extensions=set()) != ""
 
 
 def test_plain_character_package_is_not_treated_as_a_feature(env):
@@ -381,3 +405,301 @@ def test_close_stops_the_queue(env):
     controller.close()
     controller._next()
     assert not controller.resources._entry("demo").enabled
+
+# ------------------------------------------------------- 功能扩展（注册表由宿主给）
+
+def _result(status, **kwargs):
+    """事务层 ``OperationResult`` 的同形状桩（控制器只按属性读它）。"""
+    fields = {"operation_id": None, "phase": None, "plan": None, "revision": 1, "reason": None}
+    fields.update(kwargs)
+    return type("_Result", (), {"status": status, **fields})()
+
+
+class ExtensionService:
+    """事务服务的同形状桩：``inspect()`` + ``store.root``（控制器只用这两项）。"""
+
+    def __init__(self, root: Path, *, active="1.2.3", enabled=True, pending=None, revision=1):
+        self.store = type("_Store", (), {"root": Path(root)})()
+        self._info = type("_Info", (), {"active": active, "enabled": enabled, "pending_transaction": pending, "revision": revision})()
+
+    def inspect(self):
+        return self._info
+
+
+class ExtensionManager(QObject):
+    """功能扩展管理器的同形状桩：``service`` / ``submit`` / 两个信号 / ``last_result``。
+
+    默认行为照真管理器：接受动作后**异步回报**一条 ``completed`` 结果（经
+    ``result_ready`` 信号回灌）。需要精确控制结果序列的用例把 ``auto_result`` 关掉，
+    自己 emit。
+    """
+
+    result_ready = Signal(object)
+    state_changed = Signal()
+
+    def __init__(self, root: Path, *, service=None):
+        super().__init__()
+        self.service = service or ExtensionService(root)
+        self.submitted: list = []
+        self.imported: list = []
+        self.accepts = True
+        self.auto_result = True
+        self.last_result = None
+
+    def complete(self, result, *, owner="official.demo"):
+        self.last_result = result
+        self.result_ready.emit(result)
+        return True
+
+    def submit(self, action, *args, **kwargs):
+        self.submitted.append((action, args, kwargs))
+        return self.accepts and (self.complete(_result("completed")) if self.auto_result else True)
+
+    def submit_local_source(self, source, *, auto_apply=True, enabled=False):
+        self.imported.append((Path(source), auto_apply, enabled))
+        return self.accepts and (self.complete(_result("completed")) if self.auto_result else True)
+
+
+def _extension_env(env, *, active="1.2.3", enabled=True, pending=None, name="Demo Extension"):
+    """一棵已安装的功能扩展版本目录（清单只作展示元数据）+ 一个注册表条目。"""
+    install_root = env[0] / "extensions-data" / "official.demo"
+    version_dir = install_root / "versions" / active
+    version_dir.mkdir(parents=True, exist_ok=True)
+    (version_dir / "manifest.json").write_text(json.dumps({"name": name, "description": "样例"}), encoding="utf-8")
+    return ExtensionManager(install_root, service=ExtensionService(install_root, active=active, enabled=enabled, pending=pending))
+
+
+class ExtensionHost(Host):
+    def __init__(self, data_root, managers, *, usage=None):
+        super().__init__(data_root, usage)
+        self._managers = dict(managers)
+
+    def extensions(self):
+        return dict(self._managers)
+
+
+def _extension_controller(env, managers):
+    return ModCenterController(ExtensionHost(env[0], managers))
+
+
+def _feature_package(root: Path, *, owner="official.demo", version="1.2.4") -> Path:
+    package = root / "package"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "manifest.json").write_text(
+        json.dumps({"format_version": 2, "execution_kind": "host-only", "id": owner, "version": version, "name": "Demo Extension"}),
+        encoding="utf-8",
+    )
+    return package
+
+
+def _only_extensions(controller):
+    return [row for row in controller.entries() if row.kind == KIND_EXTENSION]
+
+
+def test_kinds_advertises_both_resource_and_extension(env):
+    from pet.mod_center_controller import KINDS, KIND_RESOURCE
+
+    assert KINDS == (KIND_RESOURCE, KIND_EXTENSION)
+    assert _controller(env)[0].kinds == KINDS
+
+
+def test_an_installed_extension_is_listed_with_its_own_kind(env):
+    manager = _extension_env(env, pending="tx-abc")
+    controller = _extension_controller(env, {"official.demo": manager})
+    rows = _only_extensions(controller)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.kind, row.id, row.name, row.version) == (KIND_EXTENSION, "official.demo", "Demo Extension", "1.2.3")
+    assert row.enabled and row.managed
+    assert row.key == KIND_EXTENSION + ":official.demo"
+    assert "等待自然退出" in row.pending
+
+
+def test_an_extension_without_an_installed_version_is_not_listed(env):
+    manager = _extension_env(env)
+    manager.service = ExtensionService(manager.service.store.root, active=None)
+    assert _only_extensions(_extension_controller(env, {"official.demo": manager})) == []
+
+
+def test_importing_a_registered_extension_package_reaches_its_manager(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append((key, outcome)))
+    package = _feature_package(env[0] / "incoming")
+    assert controller.import_source(package) is True
+    pump(lambda: not controller.busy)
+    assert manager.imported == [(package, True, False)]
+    assert results[-1][0] == KIND_EXTENSION + ":official.demo"
+    assert results[-1][1].success and results[-1][1].message == "已导入；点击启用即可使用"
+
+
+def test_updating_an_extension_from_another_packages_row_is_refused(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    assert controller.import_source(_feature_package(env[0] / "incoming"), expected=KIND_EXTENSION + ":official.other") is False
+    assert not manager.imported
+    assert "不是同一个包" in results[-1].message
+
+
+def test_a_busy_extension_manager_is_reported_truthfully(env):
+    manager = _extension_env(env)
+    manager.accepts = False
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller.import_source(_feature_package(env[0] / "incoming"))
+    pump(lambda: not controller.busy)
+    assert not results[-1].success and "正在操作" in results[-1].message
+
+
+@pytest.mark.parametrize("action, expected", [("enable", ("enable", True)), ("disable", ("enable", False))])
+def test_enable_and_disable_route_to_the_extension_manager(env, action, expected):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    assert controller.perform(action, [KIND_EXTENSION + ":official.demo"])
+    action_name, args, kwargs = manager.submitted[0]
+    assert action_name == expected[0] and args[0] is expected[1]
+    assert kwargs["expected_revision"] == 1
+    assert results[-1].success and results[-1].message == ("已启用" if action == "enable" else "已停用")
+
+
+@pytest.mark.parametrize("action, submitted", [("delete", "uninstall"), ("rollback", "rollback")])
+def test_delete_and_rollback_route_to_the_extension_manager(env, action, submitted):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller.perform(action, [KIND_EXTENSION + ":official.demo"])
+    action_name, args, kwargs = manager.submitted[0]
+    assert action_name == submitted and args == () and kwargs == {}
+    assert results[-1].success
+
+
+@pytest.mark.parametrize("pending, accepted", [(None, False), ("tx-1", True)])
+def test_an_awaiting_release_result_is_reported_as_accepted_only_when_the_transaction_is_pending(env, pending, accepted):
+    manager = _extension_env(env)
+    manager.service = ExtensionService(manager.service.store.root, pending=pending)
+    manager.auto_result = False
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller.perform("delete", [KIND_EXTENSION + ":official.demo"])
+    manager.complete(_result("awaiting_release", operation_id="tx-1", reason="version_in_use"))
+    outcome = results[-1]
+    assert not outcome.success and outcome.pending is accepted
+    assert ("等待相关程序自然退出" in outcome.message) is accepted
+
+
+def test_a_lock_busy_load_walks_the_retry_ladder_before_reporting(env):
+    """管理器的「加载」报锁忙时，控制器按阶梯重试；超限才如实报。
+
+    DLC 的重试语义是：安装状态已经落地，但管理器这一次**加载**撞上锁（``last_result``
+    报锁忙）。重试期间管理器自己会再试一次加载，所以这里在重试点上更新
+    ``last_result``，模拟那一次已经成功。
+    """
+    manager = _extension_env(env)
+    manager.auto_result = False
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+
+    def submit(source, *, auto_apply=True, enabled=False):
+        manager.last_result = _result("completed", reason="management_lock_busy")
+        manager.result_ready.emit(_result("completed"))
+        return True
+
+    manager.submit_local_source = submit
+    retries = []
+    original_retry = controller._retry_load
+
+    def spy(owner, result):
+        retries.append(owner)
+        manager.last_result = _result("completed")  # 管理器的下一次加载成功了
+        return original_retry(owner, result)
+
+    controller._retry_load = spy
+    controller.import_source(_feature_package(env[0] / "incoming"))
+    pump(lambda: not controller.busy)
+    assert retries == ["official.demo"]
+    assert results[-1].success
+
+
+def test_a_load_that_did_not_finish_is_not_reported_as_installed(env):
+    """状态存下了、加载没走完 —— 两件事必须分开说。"""
+    manager = _extension_env(env)
+    manager.auto_result = False
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+
+    def submit(source, *, auto_apply=True, enabled=False):
+        manager.last_result = _result("recovery_required", reason="startup_load_failed")
+        manager.result_ready.emit(_result("completed"))
+        return True
+
+    manager.submit_local_source = submit
+    controller.import_source(_feature_package(env[0] / "incoming"))
+    pump(lambda: not controller.busy)
+    assert not results[-1].success
+    assert results[-1].message.startswith("安装状态已保存，但加载未完成")
+    assert "startup_load_failed" in results[-1].message
+
+
+def test_a_result_for_another_owner_is_ignored(env):
+    manager = _extension_env(env)
+    manager.auto_result = False
+    controller = _extension_controller(env, {"official.demo": manager})
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller.import_source(_feature_package(env[0] / "incoming"))
+    manager.complete(_result("completed"))
+    pump(lambda: not controller.busy)
+    assert len(results) == 1
+    manager.result_ready.emit(_result("completed"))  # 队列已空 ⇒ 不产生第二行
+    assert len(results) == 1
+
+
+def test_a_vanished_extension_is_reported_instead_of_silently_doing_nothing(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    entry = _only_extensions(controller)[0]
+    controller.extensions.clear()
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller._begin([("enable", entry, None)])
+    assert not results[-1].success and "已经不可用" in results[-1].message
+
+
+def test_an_extension_manager_that_raises_is_reported_not_swallowed(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    entry = _only_extensions(controller)[0]
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("stub refusal")
+
+    manager.submit = refuse
+    results = []
+    controller.result.connect(lambda key, outcome: results.append(outcome))
+    controller._begin([("disable", entry, None)])
+    assert not results[-1].success and "操作未完成" in results[-1].message
+
+
+def test_extension_and_resource_rows_share_one_queue_and_one_batch(env):
+    manager = _extension_env(env)
+    controller = _extension_controller(env, {"official.demo": manager})
+    controller.import_source(_write_package(env[0] / "char", character_id="demo"))
+    pump(lambda: not controller.busy)
+
+    batches = []
+    controller.batch_finished.connect(lambda rows: batches.append(rows))
+    assert controller.perform("enable", ["角色资源:demo", KIND_EXTENSION + ":official.demo"])
+    pump(lambda: batches)
+    assert [key for key, _outcome in batches[-1]] == ["角色资源:demo", KIND_EXTENSION + ":official.demo"]
+    assert all(outcome.success for _key, outcome in batches[-1])
+    assert manager.submitted[0][0] == "enable"

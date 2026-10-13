@@ -304,6 +304,20 @@ def test_pure_logic_modules_do_not_import_qt():
         # 新进程探针守着）。QProcess 监督对象在 workers/supervisor.py，
         # 不在本名单内。
         "workers/protocol.py", "workers/launch.py",
+        # 2026-10-13 加入官方功能包安装信任链（S1c）：验签/清单/指纹/路径边界
+        # （plugins/package_trust）、安装状态账本（feature_install_state）、
+        # 版本租约（feature_version_lease）、暂存与清单（feature_package_files）、
+        # 探针契约（feature_package_probe）、生命周期/启动许可契约与关闭的
+        # 官方登记表（official_features）——这一层要么在设置页的后台线程里跑，
+        # 要么在启动子进程里跑（tests/_feature_startup_child.py 就是真子进程），
+        # 沾上 Qt 就等于把 GUI 依赖塞进一个不该有窗口的进程。S1b-1 已落的
+        # feature_state_io.py 同一理由，一并在列。
+        "feature_state_io.py", "official_features.py",
+        "feature_install_state.py", "feature_version_lease.py",
+        "feature_lifecycle_contract.py", "feature_startup_contract.py",
+        "feature_package_files.py", "feature_package_probe.py",
+        "feature_package_transactions.py", "feature_package_startup.py",
+        "plugins/package_trust.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

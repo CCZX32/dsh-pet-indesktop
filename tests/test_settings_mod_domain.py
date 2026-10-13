@@ -207,7 +207,7 @@ def test_import_of_a_feature_package_reports_the_truthful_reason(env):
         manifest.update(kind="feature", execution_kind="host-worker")
         (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         assert dialog.mod_controller.import_source(package) is False
-        assert "功能扩展" in dialog.mod_center.summary.text()
+        assert dialog.mod_center.summary.text().startswith("本版本只支持角色资源包")
     finally:
         dialog.close()
 
