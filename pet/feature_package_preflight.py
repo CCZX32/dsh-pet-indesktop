@@ -19,6 +19,8 @@
 * 没有 OS 沙箱——同一个用户、同样的权限、同一份文件系统；
 * 环境变量清理 / 临时目录 / 超时**都不是安全边界**（``pet.feature_package_probe``
   的模块 docstring 已经把这条写死，本模块不推翻它）；
+* 超时只做一件事：杀掉**这次直接起的那个**子进程，不让一个卡住的包拖住安装动作。
+  包代码自己再拉起的进程不在管辖范围（那正是"不是沙箱"的意思），也**不**冒充分级进程树清理；
 * 探针的 ``ok`` **不授权任何执行**。它只在"拒绝"方向有权威（说不行的就是不行），
   说行的那一半仍由宿主进程按完整验签链自己重新回答——子进程的结论永远不当作证据。
 * 子进程只**读**包，绝不调用 Runtime / settings / Worker：不截图、不读凭据、不请求模型。
@@ -241,7 +243,7 @@ class LocalPackageProbe:
                 except subprocess.TimeoutExpired:
                     return ProbeVerdict(False, "probe_timeout")
                 return parse_verdict(verdict_path, returncode=completed.returncode)
-        except (OSError, ValueError):
+        except (OSError, ValueError, subprocess.SubprocessError):
             return ProbeVerdict(False, "probe_unavailable")
 
 
