@@ -74,9 +74,6 @@ CHILD_REASONS = frozenset(
     }
 )
 
-#: 父侧自己产生的原因码（子进程答不上来/不该答）。
-HOST_REASONS = frozenset({"probe_unavailable", "probe_timeout", "probe_failed"})
-
 #: 元信息的保守上界（子进程写回的结构一样要有界）。
 _MAX_CONTRIBUTIONS = 64
 _MAX_TEXT = 256
@@ -104,7 +101,12 @@ class ProbeMetadata:
 
 @dataclass(frozen=True)
 class ProbeVerdict:
-    """一次探针的结论。``reason`` 只会是本模块列的闭集里的值。"""
+    """一次探针的结论。
+
+    ``reason`` 只会是两张闭集里的值：子进程回报的（:data:`CHILD_REASONS`，父侧加
+    ``probe_`` 前缀）与父侧自己产生的（``probe_unavailable`` / ``probe_timeout`` /
+    ``probe_failed``）。子进程的异常文本、stderr、包内路径**都不进**这里。
+    """
 
     ok: bool
     reason: str | None = None
@@ -246,7 +248,6 @@ class LocalPackageProbe:
 __all__ = [
     "CHILD_REASONS",
     "DEFAULT_TIMEOUT",
-    "HOST_REASONS",
     "PROBE_FLAG",
     "PROBE_SCHEMA",
     "LocalPackageProbe",

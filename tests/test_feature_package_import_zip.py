@@ -366,6 +366,26 @@ def test_this_owners_manager_refuses_a_package_for_another_owner(tmp_path):
         center.close()
 
 
+def test_a_zip_in_a_path_with_spaces_and_non_ascii_is_imported(tmp_path):
+    """路径里有空格与中文是 Windows 上的常规现实（安装目录、桌面都在这一类路径下）。
+
+    这条同时压到两段：事务层的暂存/版本目录，以及探针把包路径经 argv 交给子进程的那一段。
+    """
+    center = _center(tmp_path)
+    try:
+        source = tmp_path / "功能 包 目录"
+        _package, archive = build(source, owner=OWNER, name="带空格的包")
+        assert archive.is_file()
+        assert center.import_source(archive) is True
+        assert center.outcome.success is True
+        assert [row.id for row in center.rows()] == [OWNER]
+        context = center.runtime.startup(OWNER).context
+        context.configuration.commit_namespace({"greeting": "ok"}, expected_revision=context.configuration.revision())
+        assert context.configuration.read_namespace() == {"greeting": "ok"}
+    finally:
+        center.close()
+
+
 # ------------------------------------------------- 重复安装与版本解析
 
 def test_reimporting_the_same_zip_is_idempotent(tmp_path):
