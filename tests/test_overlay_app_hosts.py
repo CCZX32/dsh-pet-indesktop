@@ -415,8 +415,13 @@ def test_show_balance_uses_overlay_host(tmp_path, monkeypatch):
         shell.show_balance()
 
         assert shell._balance_busy is True, "余额链路在 overlay 下被提前 return 掉了"
-        app.processEvents()          # 派发 singleShot 的"让我看看余额…"气泡
-        assert "余额" in _bubble_text(overlay)
+        # 全量套件高负载下 singleShot 不一定一轮 processEvents 就派发完（实测 61 分钟
+        # 全量里红过一次，隔离/文件内均绿）：按 PR-MERGE-LESSONS 的纪律轮询给宽预算。
+        deadline = time.monotonic() + 2.0
+        while "余额" not in _bubble_text(overlay):
+            assert time.monotonic() < deadline, "余额气泡始终没出现（不是时序慢，是真没到）"
+            app.processEvents()
+            time.sleep(0.02)
         # 异步结果回填同样走壳（缓存/网络两条路径共用 _show_balance_payload）
         shell._balance_bridge.done.emit(True, {"text": "余额 12.34", "info": {"total": 12.34}})
         assert "12.34" in _bubble_text(overlay)
