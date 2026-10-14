@@ -159,6 +159,37 @@ def test_english_source_asks_for_chinese(monkeypatch):
     assert "中文" in _system_message(calls[0]["body"])
 
 
+@pytest.mark.parametrize("target", ["中文", "English", "日本語"])
+def test_an_explicit_target_reaches_the_system_instruction(monkeypatch, target):
+    """语言行给的目标原样进指令：用户说译什么就译什么。"""
+    calls = _capture(monkeypatch, _FakeResponse(_reply("译文")))
+
+    assert translate_text("你好，世界", _FakeConfig(_provider()), target=target) == "译文"
+
+    assert f"翻译成{target}" in _system_message(calls[0]["body"])
+
+
+def test_an_explicit_target_beats_auto_detection(monkeypatch):
+    """中文源在自动判定下会译英文；用户选了中文就照用户说的（不再自动翻向）。"""
+    calls = _capture(monkeypatch, _FakeResponse(_reply("译文")))
+
+    translate_text("你好，世界", _FakeConfig(_provider()), target="中文")
+
+    system = _system_message(calls[0]["body"])
+    assert "翻译成中文" in system
+    assert "翻译成英文" not in system
+
+
+@pytest.mark.parametrize("target", [None, "", "auto"])
+def test_auto_targets_keep_the_automatic_decision(monkeypatch, target):
+    """``None`` / 空串 / ``"auto"`` 三档都是"跟着内容判"（面板缺省就是 auto）。"""
+    calls = _capture(monkeypatch, _FakeResponse(_reply("译文")))
+
+    translate_text("你好，世界", _FakeConfig(_provider()), target=target)
+
+    assert "翻译成英文" in _system_message(calls[0]["body"])
+
+
 def test_empty_text_is_refused_before_any_request(monkeypatch):
     """空文本没有可翻译的东西：当场报错，一个字节都不发。"""
     calls = _capture(monkeypatch, _FakeResponse(_reply("不该发生")))

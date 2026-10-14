@@ -46,8 +46,13 @@ def _safe_detail(raw: str) -> str:
     return " ".join(raw.split())[:300] or "Provider 请求失败"
 
 
-def translate_text(text: str, config) -> str:
-    """把 ``text`` 翻译成目标语言（自动判定中英方向）。失败抛 :class:`TranslateError`。"""
+def translate_text(text: str, config, *, target: str | None = None) -> str:
+    """把 ``text`` 翻译成目标语言。失败抛 :class:`TranslateError`。
+
+    ``target``：``None``/``"auto"`` = 自动判定（中日韩占多数 → 英文，否则中文）；
+    给具体语言名（"中文"/"English"/"日本語"…）则按用户选择译——选择态来自结果
+    面板的语言行，每次切换都用已识别的原文重翻（不重跑 OCR）。
+    """
     source = str(text or "").strip()
     if not source:
         raise TranslateError("没有可翻译的文字")
@@ -61,7 +66,7 @@ def translate_text(text: str, config) -> str:
         _make_ssl_context, build_browser_headers, normalize_chat_endpoint,
     )
 
-    target = _target_language(source)
+    target = _target_language(source) if target in (None, "", "auto") else str(target)
     endpoint = normalize_chat_endpoint(provider.base_url, provider.chat_path)
     payload = {
         "model": provider.model,

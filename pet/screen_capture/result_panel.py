@@ -25,11 +25,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPalette, QTextOption
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPalette, QPen, QTextOption
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizeGrip,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -132,6 +134,82 @@ def resolve_style(style: str | None, palette=None) -> str:
     return "dark"   # 连调色板都问不到（无 QApplication）：退回本片原有的暗色
 
 
+class _LoadingFish(QWidget):
+    """加载动画：大肥鱼原地摆尾游 + 嘴边泡泡往上冒（项目吉祥物元素，替代干巴巴的
+    三点跳动——实机反馈"要有点特色"）。
+
+    面板是防抢焦点的复用件，动画用自己的 QTimer：``hideEvent``/非 loading 结果
+    都会停掉它，绝不会在面板收起后还占着定时器空转。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("screen-result-loading")
+        self.setFixedHeight(64)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)   # 20fps 足够顺滑又省电
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        self._phase += 0.13
+        self.update()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        self.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        import math
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        phase = self._phase
+        cx, cy = self.width() / 2, self.height() / 2 + 8
+
+        # 泡泡：三个相位错开的小圆，从鱼嘴位置往上升、越来越淡
+        for i in range(3):
+            t = (phase * 0.55 + i / 3.0) % 1.0          # 0..1 循环
+            bubble_x = cx + 26 + math.sin(t * math.pi * 2 + i) * 4
+            bubble_y = cy - 6 - t * 34
+            alpha = int(220 * (1.0 - t * 0.75))
+            painter.setPen(QPen(QColor(22, 119, 232, alpha), 1.4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            r = 2.5 + t * 2.0
+            painter.drawEllipse(QPointF(bubble_x, bubble_y), r, r)
+
+        # 鱼身：椭圆身体 + 摆动的三角尾 + 眼睛，整体随相位轻轻上下浮动
+        bob = math.sin(phase) * 2.2
+        tail_wag = math.sin(phase * 2.0) * 4.0
+        body = QColor("#1677e8")
+        belly = QColor("#7db8f7")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(body)
+        painter.drawEllipse(QPointF(cx, cy + bob), 22.0, 13.0)          # 胖身体
+        painter.setBrush(belly)
+        painter.drawEllipse(QPointF(cx + 2, cy + 5 + bob), 14.0, 7.0)    # 浅肚皮
+        tail = QPainterPath()
+        tail.moveTo(cx - 20, cy + bob)
+        tail.lineTo(cx - 32, cy - 8 + bob + tail_wag)
+        tail.lineTo(cx - 32, cy + 8 + bob + tail_wag)
+        tail.closeSubpath()
+        painter.setBrush(body)
+        painter.drawPath(tail)                                            # 摆尾
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(QPointF(cx + 11, cy - 4 + bob), 3.4, 3.4)     # 眼白
+        painter.setBrush(QColor("#1d2129"))
+        painter.drawEllipse(QPointF(cx + 12, cy - 4 + bob), 1.7, 1.7)     # 眼珠
+        painter.end()
+
+
 @dataclass(frozen=True)
 class ScreenResult:
     """一次截图动作的结果（展示层的唯一输入模型）。
@@ -153,6 +231,11 @@ class ScreenResult:
     secondary_label: str = ""
     force_panel: bool = False
     image: object = None
+    #: 翻译结果专用：面板底部出「译为」语言行（切换即重翻，回调由编排层注入）。
+    language_selector: bool = False
+    #: 过程态占位卡片（"正在识别/翻译"）：True 时正文区摆跳动三点动画，
+    #: 不摆文字（实机反馈：等待文字说明看着像卡死，动画才像"在跑"）。
+    loading: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -219,6 +302,7 @@ class ScreenResultPanel(QFrame):
         self._escape_installed = False
         self._on_continue_ask = None  # show_result 注入的"继续提问"回调
         self._continue_image = None
+        self._on_language_change = None  # show_result 注入的语言行回调
         self._build()
         self._grip = QSizeGrip(self)
         self._grip.setObjectName("screen-result-grip")
@@ -267,6 +351,11 @@ class ScreenResultPanel(QFrame):
         self._primary_view = self._make_view(_PRIMARY_MIN_H, _PRIMARY_MAX_H)
         layout.addWidget(self._primary_view)
 
+        # 加载动画（过程态占位卡片的正文区；出结果即收起停表）
+        self._loading = _LoadingFish(self)
+        self._loading.setVisible(False)
+        layout.addWidget(self._loading)
+
         self._divider = QFrame()
         self._divider.setObjectName("screen-result-divider")
         self._divider.setFrameShape(QFrame.Shape.HLine)
@@ -280,6 +369,26 @@ class ScreenResultPanel(QFrame):
         self._secondary_view = self._make_view(_SECONDARY_MIN_H, _SECONDARY_MAX_H)
         self._secondary_view.setVisible(False)
         layout.addWidget(self._secondary_view)
+
+        # 翻译语言行（仅翻译结果出现）：自动检测 / 中文 / English / 日本語
+        self._lang_row = QFrame()
+        self._lang_row.setObjectName("screen-result-langrow")
+        lang_layout = QHBoxLayout(self._lang_row)
+        lang_layout.setContentsMargins(0, 0, 0, 0)
+        lang_layout.setSpacing(6)
+        lang_label = QLabel("译为")
+        lang_label.setObjectName("screen-result-slot")
+        lang_layout.addWidget(lang_label)
+        self._lang_combo = QComboBox()
+        self._lang_combo.setObjectName("screen-result-lang")
+        for key, label in (("auto", "自动检测"), ("中文", "中文"),
+                           ("English", "English"), ("日本語", "日本語")):
+            self._lang_combo.addItem(label, key)
+        self._lang_combo.currentIndexChanged.connect(self._language_changed)
+        lang_layout.addWidget(self._lang_combo)
+        lang_layout.addStretch(1)
+        self._lang_row.setVisible(False)
+        layout.addWidget(self._lang_row)
 
         # 底部「继续提问」入口（有图可带时才出现；豆包式结果卡续聊的等价物）
         self._continue_btn = QPushButton("继续提问…")
@@ -336,6 +445,15 @@ class ScreenResultPanel(QFrame):
             }}
             QPushButton#screen-result-continue:hover {{
                 color: #1677e8; border-color: #1677e8;
+            }}
+            QComboBox#screen-result-lang {{
+                background: {colors["button"]}; color: {colors["text"]};
+                border: 1px solid {colors["border"]}; border-radius: 6px;
+                padding: 2px 8px; font-size: 12px;
+            }}
+            QComboBox#screen-result-lang QAbstractItemView {{
+                background: {colors["surface"]}; color: {colors["text"]};
+                border: 1px solid {colors["border"]};
             }}
             QSizeGrip#screen-result-grip {{ background: transparent; }}
         """)
@@ -395,14 +513,30 @@ class ScreenResultPanel(QFrame):
             return
         callback(self._continue_image, self._primary_view.toPlainText())
 
+    def _language_changed(self, _index: int) -> None:
+        callback = self._on_language_change
+        if callback is None:
+            return
+        callback(self._lang_combo.currentData())
+
+    def language_row(self) -> QWidget:
+        """「译为」语言行（测试断言用；产品代码不碰）。"""
+        return self._lang_row
+
+    def language_combo(self) -> QComboBox:
+        return self._lang_combo
+
     # ---------------------------------------------------------------- 展示
     def show_result(self, result: ScreenResult, anchor: QWidget | None = None,
-                    on_continue_ask=None, below=None) -> None:
+                    on_continue_ask=None, below=None, on_language_change=None) -> None:
         """换内容 + 定位 + 显示（复用同一件面板，不重复造窗）。
 
         ``on_continue_ask``：签名 ``(image, recognized_text) -> None``——面板底部
         「继续提问…」的回调（由编排层注入，把图带进问答浮窗）。``result.image``
         为空时入口不出现（没有上下文的"继续问"是空转）。
+
+        ``on_language_change``：签名 ``(target) -> None``——翻译语言行的回调。
+        只在 ``result.language_selector`` 为真且回调存在时出现该行。
 
         ``below``：采集选区（SelectionRect 或矩形）——给定时面板落在选区正下方
         （实机反馈：落在屏幕角落视线要来回跳），缺省维持锚/屏幕边的旧定位。
@@ -414,6 +548,15 @@ class ScreenResultPanel(QFrame):
 
         self._primary_label.setText(str(result.primary_label))
         self._primary_label.setVisible(bool(result.primary_label))
+        # 加载态：复制/语言行/继续提问收起；正文槽有内容就留着（翻译第二段：
+        # 原文已就位，动画摆在下面表示"还在跑"），空正文就只有动画。
+        loading = bool(result.loading)
+        self._loading.setVisible(loading)
+        if loading:
+            self._loading.start()
+        else:
+            self._loading.stop()
+        self._copy_btn.setVisible(not loading)
         # 空正文（引擎缺席/没认到字）不占地方：面板只剩标题栏与状态说明
         self._primary_view.setVisible(bool(result.primary.strip()))
         # 双语对照位只在真有译文时出现（翻译引擎接入前不占地方）；译文槽的
@@ -426,10 +569,20 @@ class ScreenResultPanel(QFrame):
         self._copy_secondary_btn.setVisible(bilingual)
         self._copy_btn.setText("复制原文" if bilingual else "复制")
 
-        # 「继续提问」只在有图可带时出现（复制图像/纯状态结果没有下文可续）。
-        self._on_continue_ask = on_continue_ask if result.image is not None else None
+        # 「继续提问」只在有图可带且非加载态时出现（复制/纯状态/加载中都没有下文可续）。
+        self._on_continue_ask = (
+            on_continue_ask if (result.image is not None and not loading) else None
+        )
         self._continue_btn.setVisible(self._on_continue_ask is not None)
         self._continue_image = result.image
+        # 加载态不摆"正在识别…"这类文字（实机反馈：动画即可，文字像卡死说明）
+        self._status.setVisible(bool(result.status) and not loading)
+
+        # 翻译语言行：翻译结果且编排层给了重翻回调才出现；过程态/其它结果不出现。
+        self._on_language_change = (
+            on_language_change if (result.language_selector and not loading) else None
+        )
+        self._lang_row.setVisible(self._on_language_change is not None)
 
         self.show_near(anchor, below=below)
         self.show()

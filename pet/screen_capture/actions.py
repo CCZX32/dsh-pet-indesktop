@@ -318,13 +318,15 @@ class ScreenCapturePresenter:
 
     def __init__(self, *, island=None, bubble=None,
                  panel_factory=ScreenResultPanel, panel_parent=None,
-                 style: str | None = None, continue_ask=None) -> None:
+                 style: str | None = None, continue_ask=None,
+                 language_change=None) -> None:
         self._island = island
         self._bubble = bubble
         self._panel_factory = panel_factory
         self._panel_parent = panel_parent
         self._style = style
         self._continue_ask = continue_ask   # 「继续提问」回调 (image, text)；None=不提供
+        self._language_change = language_change  # 翻译语言行回调 (target)；None=不提供
         self._panel: ScreenResultPanel | None = None
 
     # ------------------------------------------------------------ 对外
@@ -336,8 +338,12 @@ class ScreenCapturePresenter:
         """结果落地：岛永远拿到一句短文案；长结果/双语结果/强制件再开面板。
 
         ``below``：采集选区——面板落在选区正下方（实机反馈：角落要来回跳视线）。
+
+        例外：过程态卡片（``result.loading``）**不往岛/气泡推**——它没有内容可推，
+        推过去就是一条空消息把岛上正在说的话刷没（round 3 实机观感修正）。
         """
-        self._notify(result.summary or result.status, "reply")
+        if not result.loading:
+            self._notify(result.summary or result.status, "reply")
         long_text = len(result.primary.strip()) > SHORT_RESULT_LIMIT
         if not (result.force_panel or long_text or result.secondary.strip()):
             return None
@@ -345,7 +351,8 @@ class ScreenCapturePresenter:
         if panel is None:
             return None
         panel.show_result(result, self.island_widget(),
-                          on_continue_ask=self._continue_ask, below=below)
+                          on_continue_ask=self._continue_ask, below=below,
+                          on_language_change=self._language_change)
         return panel
 
     def panel(self) -> ScreenResultPanel | None:
@@ -448,6 +455,7 @@ class ScreenCaptureActions(QObject):
         self._pending: tuple[Callable, Callable] | None = None
         self._last_image = None   # 最近一次截下的选区图（「继续提问」的上下文）
         self._last_selection = None   # 选区位置（结果面/问答窗跟到选区下方）
+        self._last_ocr_source = ""    # 最近一次翻译链路的原文（语言行切换直接重翻）
         self._stage_done.connect(self._on_stage_done)
         # 两处连接的**判据**不同，别混着读（2026-10-13 交叉审查 nit 要的就是这条区分）：
         #
@@ -579,7 +587,12 @@ class ScreenCaptureActions(QObject):
                 title=TITLE_OCR, status=OCR_PENDING_REASON, force_panel=True,
             ))
             return
-        self.status("正在本地识别文字…")
+        # 秒级等待不能白屏：先把卡片弹出来摆着"正在识别"（实机反馈：中间什么都没
+        # 有像在卡死）。过程态只占位、不发 result_ready、不收 busy。
+        self._show_progress(ScreenResult(
+            title=TITLE_OCR, force_panel=True, loading=True,
+            image=self._last_image,
+        ))
         self._submit(lambda: engine(image),
                      self._on_ocr_done,
                      functools.partial(self._on_stage_error, stage="本地识别"))
@@ -599,20 +612,65 @@ class ScreenCaptureActions(QObject):
     def _run_translate(self, image) -> None:
         ocr = self._ocr if self._ocr is not None else resolve_ocr_engine()
         translator = self._translator if self._translator is not None else self._build_translator()
+        self._show_progress(ScreenResult(
+            title=TITLE_TRANSLATE, force_panel=True, loading=True,
+            image=self._last_image,
+        ))
 
-        def work() -> tuple[str, str]:
-            source = str(ocr(image) or "").strip() if ocr is not None else ""
-            if not source:
-                return "", ""   # 没识别到文字就不空转翻译（省一次网络往返）
-            translated = (
-                str(translator(image, source) or "").strip() if translator is not None else ""
-            )
-            return source, translated
+        def work_ocr() -> str:
+            return str(ocr(image) or "").strip() if ocr is not None else ""
 
-        self.status("正在翻译…" if translator is not None else "正在识别原文…")
         self._submit(
-            work,
-            functools.partial(self._on_translate_done, translator=translator is not None),
+            work_ocr,
+            lambda source: self._on_translate_source(source, translator, image),
+            functools.partial(self._on_stage_error, stage="翻译"),
+        )
+
+    def _on_translate_source(self, source: str, translator, image) -> None:
+        """原文到手：先摆上面板（等待不再白屏），再发翻译请求。"""
+        source = str(source or "").strip()
+        if not source:
+            self._finish()
+            self._emit_result(ScreenResult(
+                title=TITLE_TRANSLATE, status="没有识别到文字，无可翻译",
+                force_panel=True, image=self._last_image,
+            ))
+            return
+        self._last_ocr_source = source   # 语言行切换时拿它直接重翻，不重跑 OCR
+        if translator is None:
+            self._finish()
+            self._emit_result(ScreenResult(
+                title=TITLE_TRANSLATE, primary=source, force_panel=True,
+                status=TRANSLATION_UNAVAILABLE_REASON, primary_label="原文",
+                image=self._last_image,
+            ))
+            return
+        self._show_progress(ScreenResult(
+            title=TITLE_TRANSLATE, primary=source, primary_label="原文",
+            force_panel=True, loading=True, image=self._last_image,
+        ))
+        self._submit(
+            lambda: str(translator(image, source) or "").strip(),
+            lambda translated: self._on_translate_done((source, translated), translator=True),
+            functools.partial(self._on_stage_error, stage="翻译"),
+        )
+
+    def _retranslate(self, target: str) -> None:
+        """语言行切换：用缓存的原文直接重翻（OCR 不重跑），面板原地更新。"""
+        source = self._last_ocr_source
+        if not source or self._busy or self._config is None:
+            return
+        self._show_progress(ScreenResult(
+            title=TITLE_TRANSLATE, primary=source, primary_label="原文",
+            force_panel=True, loading=True, image=self._last_image,
+        ))
+        from .translate import translate_text
+
+        config = self._config
+        self._submit(
+            lambda: translate_text(source, config, target=target),
+            lambda translated: self._on_translate_done((source, str(translated or "").strip()),
+                                                       translator=True),
             functools.partial(self._on_stage_error, stage="翻译"),
         )
 
@@ -633,6 +691,7 @@ class ScreenCaptureActions(QObject):
             title=TITLE_TRANSLATE, primary=source, secondary=translated,
             force_panel=True, status=status, primary_label="原文" if translated else "",
             image=self._last_image,
+            language_selector=bool(translated),
         ))
 
     def _run_ask(self, image) -> None:
@@ -746,6 +805,14 @@ class ScreenCaptureActions(QObject):
         self._presenter.show(result, below=self._last_selection)
         self.result_ready.emit(result)
 
+    def _show_progress(self, result: ScreenResult) -> None:
+        """过程态也上面板（识别/翻译这种秒级等待不许白屏干等）。
+
+        与 ``_emit_result`` 的区别：不占 busy、不发 ``result_ready``（不是结果，
+        是"正在跑"的占位卡片，最终结果来了原地换内容——面板是复用件）。
+        """
+        self._presenter.show(result, below=self._last_selection)
+
     def status(self, text: str) -> None:
         self._presenter.status(text)
 
@@ -784,6 +851,7 @@ class ScreenCaptureActions(QObject):
             panel_parent=_host_dialog_parent(host),
             style=_host_theme(host),
             continue_ask=self._continue_ask,
+            language_change=self._retranslate,
         )
 
     def _build_translator(self):

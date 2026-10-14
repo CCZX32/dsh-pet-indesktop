@@ -35,7 +35,13 @@ from PySide6.QtGui import (  # noqa: E402
     QPainter,
     QPalette,
 )
-from PySide6.QtWidgets import QApplication, QSizeGrip, QWidget  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QComboBox,
+    QLabel,
+    QSizeGrip,
+    QWidget,
+)
 
 from pet.screen_capture.result_panel import (  # noqa: E402
     SHORT_RESULT_LIMIT,
@@ -296,34 +302,41 @@ def test_empty_result_renders_without_crashing():
 
 
 def test_panel_height_tracks_the_content():
-    """定高按内容实测：一行不撑满、多行更高、超长封顶（滚动条接管）。
+    """定高按内容实测，**复用同一件**照样跟随：涨、封顶、落都钉住。
 
-    2026-10-14 起面板有一个**最小高度**（``QSizeGrip`` 要抓得住一个像样的窗口），
-    所以"空结果比一行结果矮"这条老断言不再成立：地板以下的一切都停在地板上。
-    断言改成"地板以内的都等于地板、地板以上按内容长"。
+    面板是复用件（presenter 只造一件，每张结果原地换内容），所以这条必须在
+    **同一个实例**上量——"每次换张新的量一量"会把复用路径整个漏掉。
+
+    2026-10-14 起面板有最小高度（``QSizeGrip`` 要抓得住一个像样的窗口），所以
+    "空结果比一行结果矮"这条老断言不再成立：地板以下的一切都停在地板上。
 
     （无裁切由同一份度量保证，视觉证据是离屏截图 probe_panel_ocr.png：
     四行中文完整可见、没有滚动条。）
 
-    **每条都用一个新面板量**：复用同一件面板时的定高有缺陷（第一张是短结果就会
-    锁死，见文件末尾「已知产品缺陷」），不在这里假装它没问题。
+    历史：这条曾经真红过——首张结果是矮结果时，实例被钉死在 140 px，后面的长文本
+    只能靠滚动条读（``show_near`` 的 ``_applying_size`` 挡不住首次 show 的补投递
+    resize，排版尺寸被当成了"用户拉的尺寸"）。现在那一环已修好，这条用例连
+    "再换回短结果要收回去"一起钉住，防止再退回去。
     """
-    def _height(result: ScreenResult) -> int:
-        panel = ScreenResultPanel()
-        panel.show_result(result)
-        height = panel.height()
-        panel.close_panel()
-        return height
+    panel = ScreenResultPanel()
+    floor = panel.minimumHeight()
 
-    floor = ScreenResultPanel().minimumHeight()
-    empty_h = _height(ScreenResult(title="截图提取文字", status="本地文字识别引擎尚未接入"))
-    one_line_h = _height(ScreenResult(title="截图提取文字", primary="一行文字"))
-    many_lines_h = _height(ScreenResult(title="截图提取文字", primary="行\n" * 8))
-    capped_h = _height(ScreenResult(title="截图问答", primary="答" * 4000))
+    panel.show_result(ScreenResult(title="截图提取文字", status="本地文字识别引擎尚未接入"))
+    empty_h = panel.height()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="一行文字"))
+    one_line_h = panel.height()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="行\n" * 8))
+    many_lines_h = panel.height()
+    panel.show_result(ScreenResult(title="截图问答", primary="答" * 4000))
+    capped_h = panel.height()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="一行文字"))
+    shrunk_h = panel.height()
 
     assert empty_h == one_line_h == floor, "地板以内的短内容都停在最小高度"
     assert one_line_h < many_lines_h <= capped_h
     assert capped_h <= 240 + 120            # 上限附近，不无限拉高
+    assert shrunk_h == one_line_h, "复用同一件时尺寸没跟着内容收回来"
+    panel.close_panel()
 
 
 def test_the_continue_button_needs_an_image_and_hands_it_over_with_the_text(qapp):
@@ -346,6 +359,162 @@ def test_the_continue_button_needs_an_image_and_hands_it_over_with_the_text(qapp
     panel.continue_button().click()
 
     assert seen == [(image, "识别到的文字")]
+    panel.close_panel()
+
+
+# ------------------------------------------------- 渐进式结果卡片（2026-10-14 round 3）
+
+
+def _loading(panel):
+    """面板上的加载动画控件（objectName 固定；画的**内容**随美术迭代）。
+
+    曾经是三点跳动，现在是项目吉祥物的小鱼摆尾——所以用例只钉"这个控件在、
+    计时器在跑、它真的画了东西"，不钉具体形状。
+    """
+    area = panel.findChild(QWidget, "screen-result-loading")
+    assert area is not None, "面板上没有加载动画控件"
+    return area
+
+
+def test_a_loading_result_shows_the_animation_and_hides_the_actions(qapp):
+    """过程态卡片：正文区摆加载动画，复制/语言行/状态文字一律收起。
+
+    实机反馈"等待白屏像卡死"：等待期间要给"在跑"的信号，而不是一句文案。
+    """
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图翻译", status="正在翻译…", force_panel=True,
+                                   loading=True, language_selector=True),
+                      on_language_change=lambda _target: None)
+
+    animation = _loading(panel)
+    assert animation.isVisibleTo(panel) is True
+    assert animation._timer.isActive() is True, "过程态的动画必须真的在跑"
+    assert panel.copy_button().isVisibleTo(panel) is False
+    assert panel.language_row().isVisibleTo(panel) is False
+    status = panel.findChild(QLabel, "screen-result-status")
+    assert status.isVisibleTo(panel) is False, "文案位让给动画（有字也不摆）"
+    assert panel.continue_button().isVisibleTo(panel) is False
+    panel.close_panel()
+
+
+def test_a_loading_result_actually_paints_something(qapp):
+    """不只是摆了个空控件：动画真的画在面板上（否则"等待白屏"照旧）。
+
+    只断"控件可见 + 计时器在跑"会漏掉"画了个空白"这种失败——那时动画是个空框，
+    用户看到的仍是白屏，正是本轮要解决的问题。（实测踩到过：美术换了一版动画，
+    ``paintEvent`` 里用了一个没 import 的符号，控件在、计时器在跑、一个像素没画。）
+    """
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", force_panel=True, loading=True))
+    panel.show()
+
+    canvas = _render(panel, background=QColor(255, 255, 255))
+    area = _loading(panel).geometry()
+    pixels = [canvas.pixelColor(x, y).getRgb()
+              for x in range(area.x(), area.x() + area.width())
+              for y in range(area.y(), area.y() + area.height())]
+
+    assert any(pixel != (255, 255, 255, 255) for pixel in pixels), "动画区是一片空白"
+    accent = QColor("#1677e8").getRgb()
+    assert any(pixel[:3] == accent[:3] for pixel in pixels), "没画出产品的 accent 色"
+    panel.close_panel()
+
+
+def test_a_loading_result_keeps_the_primary_text_it_already_has(qapp):
+    """翻译第二段：原文已就位就留着（只是复制按钮收起），动画摆在它下面。"""
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图翻译", primary="Hello world",
+                                   primary_label="原文", force_panel=True, loading=True))
+
+    assert panel.primary_text() == "Hello world"
+    assert panel.primary_text() != ""
+    assert _loading(panel).isVisibleTo(panel) is True
+    panel.close_panel()
+
+
+def test_the_terminal_result_stops_and_hides_the_animation(qapp):
+    """终态到了：动画停下来并收起（留着滴答就是白耗电）。"""
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", force_panel=True, loading=True))
+    animation = _loading(panel)
+    assert animation._timer.isActive() is True
+
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字",
+                                   force_panel=True))
+
+    assert animation.isVisibleTo(panel) is False
+    assert animation._timer.isActive() is False, "出结果还在后台滴答"
+    assert panel.copy_button().isVisibleTo(panel) is True
+    panel.close_panel()
+
+
+def test_hiding_the_panel_stops_the_animation(qapp):
+    """面板收起（Esc / 继续提问 / 手动关）时定时器必须停：不留后台空转。"""
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", force_panel=True, loading=True))
+    animation = _loading(panel)
+    assert animation._timer.isActive() is True
+
+    panel.close_panel()
+
+    assert animation._timer.isActive() is False
+
+
+# ------------------------------------------------------------ 语言行（round 3）
+
+
+def test_the_language_row_needs_both_the_flag_and_a_callback(qapp):
+    """「译为」语言行：只有翻译结果（``language_selector``）**且**编排层给了回调才出现。"""
+    panel = ScreenResultPanel()
+    translated = ScreenResult(title="截图翻译", primary="Hello world",
+                              secondary="你好，世界", language_selector=True,
+                              force_panel=True)
+
+    panel.show_result(translated)
+    assert panel.language_row().isVisibleTo(panel) is False, "没有回调就没有可切换的目标"
+
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字",
+                                   force_panel=True),
+                      on_language_change=lambda _target: None)
+    assert panel.language_row().isVisibleTo(panel) is False, "不是翻译结果就不出语言行"
+
+    panel.show_result(translated, on_language_change=lambda _target: None)
+    assert panel.language_row().isVisibleTo(panel) is True
+    combo = panel.language_combo()
+    assert isinstance(combo, QComboBox)
+    assert [combo.itemData(index) for index in range(combo.count())] == [
+        "auto", "中文", "English", "日本語"]
+    assert combo.currentData() == "auto", "缺省是自动检测"
+    panel.close_panel()
+
+
+def test_switching_the_language_reports_the_key(qapp):
+    """切换语言行 = 换翻译目标：回调拿到的是 combo 的 ``currentData``（key）。"""
+    seen: list[str] = []
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图翻译", primary="Hello world",
+                                   secondary="你好，世界", language_selector=True,
+                                   force_panel=True),
+                      on_language_change=seen.append)
+
+    combo = panel.language_combo()
+    combo.setCurrentIndex(2)          # English
+
+    assert seen == ["English"]
+    assert combo.currentData() == "English"
+    panel.close_panel()
+
+
+def test_the_language_row_hides_while_loading(qapp):
+    """重翻时（过程态）语言行收起：正在跑的时候不给用户再切一次的机会。"""
+    seen: list[str] = []
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图翻译", primary="Hello world",
+                                   language_selector=True, force_panel=True, loading=True),
+                      on_language_change=seen.append)
+
+    assert panel.language_row().isVisibleTo(panel) is False
+    assert _loading(panel).isVisibleTo(panel) is True
     panel.close_panel()
 
 
@@ -410,7 +579,8 @@ def test_a_size_the_user_pulled_survives_the_next_result(qapp):
     """grip 拉过的尺寸在下一张结果上沿用——面板是复用件，不该没收用户的调整。
 
     ``QSizeGrip`` 拖完的结果就是一次 ``resize()``，所以这里直接 ``resize`` 模拟。
-    注意这条**不区分**"用户拉的"与"排版自己算的"（见文件末尾「已知产品缺陷」）。
+    反过来那一半由 ``test_panel_height_tracks_the_content`` 钉住：**排版自己算出来的
+    尺寸不许被记成"用户拉的"**（记错了实例就被钉死在首张的尺寸上）。
     """
     panel = ScreenResultPanel()
     panel.show_result(ScreenResult(title="截图提取文字", primary="第一张"))
@@ -499,48 +669,3 @@ def test_the_card_is_a_rounded_translucent_corner(qapp):
     assert canvas.pixelColor(0, 0).getRgb() == (255, 0, 255, 255), "角上被涂实了，圆角没成形"
     assert canvas.pixelColor(panel.width() // 2, panel.height() // 2).getRgb() != (255, 0, 255, 255)
     panel.close_panel()
-
-
-# ------------------------------------------------------------ 已知产品缺陷（未修）
-#
-# **面板实例的"内容定高"在第一张结果是短结果时会永久冻在 140 px**
-# （round 2 之后复验仍在；按纪律没有动产品代码，只把结论写在这里）。
-#
-# 症状（2026-10-14 复验，offscreen 实测）：
-#
-#     新面板 → 第一张短结果 → 此后任何内容都停在 140 px（短/长/多行 = 140/140/140）
-#     新面板 → 第一张长结果 → 此后正常跟随内容（长/短/多行 = 299/140/206）
-#
-# 也就是"第一张够高就没事、第一张矮就锁死"——而第一张是短结果恰恰是常见情形
-# （"没有识别到文字"、一行结果），用户于是看到后面的长文本被压进 140 px 窄带、
-# 只能靠滚动条读。
-#
-# 机理（``pet/screen_capture/result_panel.py``）：``show_near`` 用
-# ``_applying_size`` 把"程序化排版"的 ``resize()`` 挡在用户尺寸记忆之外，但面板
-# 在**首次 show() 之前**是未创建状态的顶层窗口，那时 ``resize()`` 的
-# ``QResizeEvent`` 被 Qt 挂起，直到 ``show()``（``show_near`` 早已返回、
-# ``_applying_size`` 已复位）才投递——于是首张结果的排版尺寸被当成"用户拉的尺寸"
-# 记进 ``_user_size``（实测 ``QSize(300, 140)``），此后 ``show_near`` 的
-# ``max(140, min(_user_size.height, avail))`` 覆盖了内容定高。只有首张算出来的
-# 高度与窗口当时的实际高度相同（都被 140 的地板压住）时才会被记下来，这就是
-# "条件性"的来源。
-#
-# 复现（offscreen，不需要产品改动）::
-#
-#     QT_QPA_PLATFORM=offscreen python -c "
-#     from PySide6.QtWidgets import QApplication
-#     from pet.screen_capture.result_panel import ScreenResult, ScreenResultPanel
-#     app = QApplication([])
-#     for first, second in (('短', '答' * 4000), ('答' * 4000, '短')):
-#         p = ScreenResultPanel()
-#         p.show_result(ScreenResult(title='t', primary=first));  print(p.height(), end=' ')
-#         p.show_result(ScreenResult(title='t', primary=second)); print(p.height(), p._user_size)
-#     "
-#     # 短 → 长:  140 140 QSize(300, 140)   ← 冻住（应 140 300）
-#     # 长 → 短:  299 140 None             ← 正常
-#
-# 修法方向（留给出产品改动的人定）：把"用户尺寸"的判定挪到事件之外（例如只在
-# ``QSizeGrip`` 的 ``mouseReleaseEvent`` 或显式入口上记），或者让"首次 show 的
-# 补投递"不参与记忆。修好后 ``test_panel_height_tracks_the_content`` 里
-# "每条都用一个新面板量"的注释与 ``test_a_size_the_user_pulled_survives_the_next_result``
-# 的说明可以一并收紧（那时才谈得上"复用同一件也跟随内容"）。

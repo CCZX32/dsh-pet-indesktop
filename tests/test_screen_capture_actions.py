@@ -173,8 +173,28 @@ class _FakePanel:
         self.closes += 1
 
 
+def _loading_cards(presenter) -> list[ScreenResult]:
+    """过程态卡片（"正在跑"的占位，不是结果）。"""
+    return [result for result in presenter.results if result.loading]
+
+
+def _finals(presenter) -> list[ScreenResult]:
+    """终态结果（过程态卡片不算——它只是等待期间摆着的那张）。"""
+    return [result for result in presenter.results if not result.loading]
+
+
+def _final(presenter) -> ScreenResult:
+    finals = _finals(presenter)
+    assert finals, f"没有任何终态结果（presenter 只收到 {len(presenter.results)} 张过程态）"
+    return finals[-1]
+
+
 class _RecordingPresenter:
-    """结果落点替身：状态/结果照收，同时记下每一张结果该落在哪个选区下方。"""
+    """结果落点替身：状态/结果照收，同时记下每一张结果该落在哪个选区下方。
+
+    ``results`` 里**过程态与终态都在**（``loading`` 区分）：presenter 的调用序列
+    本身就是契约的一部分（实机反馈"等待白屏像卡死"就是靠过程态解决的）。
+    """
 
     def __init__(self, *, panel=None) -> None:
         self.statuses: list[str] = []
@@ -252,8 +272,8 @@ def test_ocr_action_feeds_the_selection_to_the_local_engine_and_shows_it(monkeyp
     _start(ACTION_OCR, ocr=fake_ocr, presenter=presenter)
 
     assert len(seen) == 1 and isinstance(seen[0], QImage)
-    assert len(presenter.results) == 1
-    result = presenter.results[0]
+    assert len(_finals(presenter)) == 1
+    result = _final(presenter)
     assert result.title == "截图提取文字"
     assert result.primary == "识别到的文字"
     assert result.secondary == ""
@@ -270,10 +290,34 @@ def test_ocr_action_reports_an_honest_reason_when_no_engine_is_wired(monkeypatch
 
     assert action.run() is True
     assert action.busy is False
-    assert len(presenter.results) == 1
-    result = presenter.results[0]
+    assert _loading_cards(presenter) == [], "引擎都不在，没有等待可言，不该先摆过程态"
+    assert len(_finals(presenter)) == 1
+    result = _final(presenter)
     assert result.primary == ""
     assert "尚未接入" in result.status
+
+
+def test_ocr_action_shows_a_loading_card_before_the_result():
+    """秒级等待不许白屏（实机反馈"中间什么都没有像卡死"）：过程态卡片先摆着。
+
+    过程态 = ``ScreenResult(loading=True)``：**不发 result_ready**（它不是结果，
+    只是"正在跑"的占位——最终结果来了原地换内容，面板是复用件）。
+    """
+    presenter = _RecordingPresenter()
+    action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                           ocr=lambda _img: "识别到的文字", presenter=presenter)
+    ready: list[ScreenResult] = []
+    action.result_ready.connect(ready.append)
+
+    assert action.run() is True
+
+    cards = presenter.results
+    assert len(cards) == 2, f"应是「过程态 → 终态」两张，实际 {len(cards)}"
+    assert cards[0].loading is True and cards[0].title == "截图提取文字"
+    assert cards[0].primary == "" and cards[0].status == "", "过程态不摆文字（文案位给动画）"
+    assert cards[1].loading is False and cards[1].primary == "识别到的文字"
+    assert ready == [cards[1]], "过程态不许发 result_ready（它不是结果）"
+    assert action.busy is False
 
 
 # ------------------------------------------------------------------ 翻译
@@ -291,12 +335,13 @@ def test_translate_action_keeps_the_source_and_says_the_service_is_unavailable()
     _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world", translator=None,
            presenter=presenter)
 
-    result = presenter.results[0]
+    result = _final(presenter)
     assert result.title == "截图翻译"
     assert result.primary == "Hello world"      # 原文照旧拿得到
     assert result.secondary == ""               # 没有翻译器就不摆假译文
     assert result.status == actions_mod.TRANSLATION_UNAVAILABLE_REASON
-    assert result.primary_label == ""
+    assert result.primary_label == "原文"       # 原文先摆出来，不是只剩一句状态
+    assert result.language_selector is False, "没有译文就没有可切换的语言行"
 
 
 def test_translate_action_fills_both_bilingual_slots_with_an_engine():
@@ -311,9 +356,10 @@ def test_translate_action_fills_both_bilingual_slots_with_an_engine():
            presenter=presenter)
 
     assert calls and calls[0][1] == "Hello world"
-    result = presenter.results[0]
+    result = _final(presenter)
     assert result.primary == "Hello world"
     assert result.secondary == "你好，世界"
+    assert result.language_selector is True, "有译文就该给「译为」语言行"
 
 
 def test_the_translation_engine_is_the_configured_chat_model(monkeypatch):
@@ -337,7 +383,7 @@ def test_the_translation_engine_is_the_configured_chat_model(monkeypatch):
     _start(ACTION_TRANSLATE, host=host, ocr=lambda _img: "你好，世界", presenter=presenter)
 
     assert seen == [("你好，世界", config)]
-    result = presenter.results[0]
+    result = _final(presenter)
     assert result.primary == "你好，世界"
     assert result.secondary == "Hello world"
     assert "已翻译" in result.status
@@ -353,10 +399,12 @@ def test_translate_action_does_not_spin_the_engine_on_an_empty_recognition():
            presenter=presenter)
 
     assert calls == [], "原文是空的还去调翻译＝白花一次网络往返"
-    result = presenter.results[0]
+    assert len(_loading_cards(presenter)) == 1, "识别阶段的过程态照旧要摆（等待不白屏）"
+    result = _final(presenter)
     assert result.primary == "" and result.secondary == ""
     assert result.status == "没有识别到文字，无可翻译"
     assert result.primary_label == ""
+    assert result.language_selector is False
 
 
 def test_translate_action_reports_an_empty_translation_honestly():
@@ -366,11 +414,79 @@ def test_translate_action_reports_an_empty_translation_honestly():
     _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world",
            translator=lambda _img, _src: "   ", presenter=presenter)
 
-    result = presenter.results[0]
+    result = _final(presenter)
     assert result.primary == "Hello world"
     assert result.secondary == ""
     assert result.status == "没有拿到译文"
     assert result.primary_label == ""
+    assert result.language_selector is False, "没拿到译文就没有语言行"
+
+
+def test_translate_action_shows_the_source_before_the_translation():
+    """两段式：识别中也摆卡片，原文一到就先上卡片（带原文），再跑翻译。
+
+    三段序列本身就是"等待不白屏"的实现：用户先看到"在识别"，再看到"原文已就位、
+    正在翻译"，最后才是双语终态。
+    """
+    presenter = _RecordingPresenter()
+
+    _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world",
+           translator=lambda _img, _src: "你好，世界", presenter=presenter)
+
+    cards = presenter.results
+    assert len(cards) == 3, f"应是「识别中 → 翻译中(带原文) → 终态」三张，实际 {len(cards)}"
+    assert cards[0].loading is True and cards[0].primary == ""
+    assert cards[1].loading is True, "翻译阶段也要摆过程态"
+    assert cards[1].primary == "Hello world" and cards[1].primary_label == "原文"
+    assert cards[2].loading is False
+    assert (cards[2].primary, cards[2].secondary) == ("Hello world", "你好，世界")
+
+
+def test_retranslate_reuses_the_cached_source_and_never_reruns_ocr(monkeypatch):
+    """语言行切换：用缓存的原文直接重翻（**OCR 不重跑**），面板原地更新成新译文。
+
+    "OCR 不重跑"是这条链路的全部意义：重新识别既慢、又可能给出另一段原文——用户
+    只是换了个目标语言，却拿到"另一张图"的翻译。
+    """
+    from pet.screen_capture import translate as translate_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        translate_mod, "translate_text",
+        lambda text, config, *, target=None: calls.append((text, target)) or f"[{target}] 你好")
+
+    host = _FakeHost()
+    host.cfg = {"context_menu_appearance": {"theme": "light"}}
+    ocr_calls: list = []
+    presenter = _RecordingPresenter()
+    action = ScreenCaptureActions(
+        host, controller=_FakeController(action=ACTION_TRANSLATE),
+        ocr=lambda img: ocr_calls.append(img) or "Hello world",
+        presenter=presenter, run_inline=True)
+
+    assert action.run() is True
+    assert calls == [("Hello world", None)], "首轮走自动判定（不传 target）"
+
+    action._retranslate("日本語")
+
+    assert len(ocr_calls) == 1, "切语言不许重跑 OCR"
+    assert calls == [("Hello world", None), ("Hello world", "日本語")]
+    result = _final(presenter)
+    assert result.primary == "Hello world"
+    assert result.secondary == "[日本語] 你好"
+    assert result.language_selector is True
+    assert action.busy is False
+
+
+def test_retranslate_does_nothing_without_a_cached_source():
+    """还没有原文可复用（没翻译过）时不许空跑：一张卡片都不摆、一次请求都不发。"""
+    presenter = _RecordingPresenter()
+    action = _make_actions(controller=_FakeController(action=ACTION_TRANSLATE),
+                           presenter=presenter)
+
+    action._retranslate("English")
+
+    assert presenter.results == []
 
 
 # ------------------------------------------------------------------ 复制图像
@@ -463,7 +579,7 @@ def test_ask_action_reports_an_honest_reason_when_the_channel_is_unavailable():
 
     assert action.run() is True
 
-    result = presenter.results[0]
+    result = _final(presenter)
     assert result.title == "截图问答"
     assert result.primary == ""
     assert "不可用" in result.status
@@ -476,8 +592,8 @@ def test_ask_action_reports_it_when_the_dialog_itself_breaks():
     presenter = _RecordingPresenter()
     action = _start(ACTION_ASK, ask_dialog=_FakeAskDialog(fail=True), presenter=presenter)
 
-    assert len(presenter.results) == 1
-    result = presenter.results[0]
+    assert len(_finals(presenter)) == 1
+    result = _final(presenter)
     assert result.force_panel is True
     assert "浮窗炸了" in result.status
     assert action.busy is False
@@ -536,7 +652,7 @@ def test_ocr_result_carries_the_selection_image_for_the_continue_entry():
     presenter = _RecordingPresenter()
     _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
 
-    result = presenter.results[0]
+    result = _final(presenter)
     assert isinstance(result.image, QImage)
 
 
@@ -580,7 +696,9 @@ def test_the_result_panel_follows_the_selection_it_came_from():
 
     _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
 
-    assert presenter.belows == [_SELECTION]
+    assert len(presenter.belows) == 2, "过程态与终态都要摆（都在同一次等待里）"
+    assert all(below == _SELECTION for below in presenter.belows), (
+        "过程态卡片也要落在同一个选区下方——否则等待期间它先跳到角落、出结果再跳回来")
 
 
 def test_the_ask_dialog_follows_the_selection_it_came_from():
@@ -790,7 +908,7 @@ def test_blocking_stages_run_off_the_gui_thread_and_report_back_on_it():
     assert done.is_set(), "后台线程的结果没有回到 GUI 线程"
     assert action.busy is False
     assert worker_names and worker_names[0] != main_thread
-    assert presenter.results[0].primary == "识别到的文字"
+    assert _final(presenter).primary == "识别到的文字"
 
 
 def test_empty_result_and_recognition_failure_say_different_things():
@@ -808,7 +926,7 @@ def test_empty_result_and_recognition_failure_say_different_things():
 
     assert empty_action.run() is True
 
-    empty_status = empty_presenter.results[-1].status
+    empty_status = _final(empty_presenter).status
     assert "没有识别到文字" in empty_status
     assert empty_failures == [], "没认到字不是失败，不许报错"
 
@@ -854,7 +972,7 @@ def test_ocr_action_hands_the_local_engine_back_when_the_session_ends():
            presenter=presenter)
 
     assert len(release.calls) == 1, "一次会话收口恰好归还一次"
-    assert presenter.results, "归还发生在收口里，但结果照样要交付"
+    assert _finals(presenter), "归还发生在收口里，但结果照样要交付"
 
 
 def test_copy_action_also_hands_the_local_engine_back():
@@ -891,7 +1009,7 @@ def test_release_failure_never_breaks_a_delivered_result():
     _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", release=boom,
            presenter=presenter)
 
-    assert presenter.results[0].primary == "识别到的文字"
+    assert _final(presenter).primary == "识别到的文字"
 
 
 def test_release_does_not_block_the_gui_thread_or_the_result():
@@ -919,7 +1037,7 @@ def test_release_does_not_block_the_gui_thread_or_the_result():
         time.sleep(0.005)
     assert done.is_set(), "归还没有在预算内发生"
     assert worker_names[0] != main_thread, "归还跑在了 GUI 线程上"
-    assert presenter.results[0].primary == "识别到的文字"
+    assert _final(presenter).primary == "识别到的文字"
 
 
 def test_release_seam_matches_the_engine_module_contract():
@@ -935,7 +1053,7 @@ def test_missing_release_entry_is_tolerated(monkeypatch):
     presenter = _RecordingPresenter()
     _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
 
-    assert presenter.results[0].primary == "识别到的文字"
+    assert _final(presenter).primary == "识别到的文字"
 
 
 # ------------------------------------------------------------------ seam 契约
