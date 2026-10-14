@@ -3,8 +3,9 @@
 
 门只回答三件事，每一件都要机器可判：
 
-1. **清单**：有界路由读得出 id / version / platforms / execution_kind；
-2. **验签**：完整验签链（结构、兼容性、路径边界、逐文件摘要与指纹、祖先快照）；
+1. **清单完整性**：有界路由读得出 id / version / platforms / execution_kind；
+2. **摘要校验**：完整校验链（结构、兼容性、路径边界、逐文件摘要与指纹、祖先快照）
+   ——本地用户自选包按显式用户信任校验，**不做发布者认证**；
 3. **装前子进程预检**：真起一个子进程把包装一次，读回 ``create_host()`` 的说法。
 
 材料与 D3 同一份：包由 ``scripts.build_mod_example`` 真打（真 manifest、真 SHA-256
@@ -264,7 +265,7 @@ class TestRejections:
         assert report["feature_id"] == "official.ai-chat"
 
     def test_tampered_payload_is_rejected(self, package):
-        """打包之后动过字节：路由只看清单，拦不住它，验签那一环必须拦住。"""
+        """打包之后动过字节：路由只看清单，拦不住它，摘要校验那一环必须拦住。"""
         built, _zip = package
         target = built / "host" / "factory.py"
         target.write_text(target.read_text("utf-8") + "\n# tampered\n", "utf-8")

@@ -242,7 +242,7 @@ def test_the_probe_refuses_bytes_that_changed_after_verification(tmp_path):
     """父进程验过之后字节又变了：子进程按**当下磁盘**重新验，对不上就拒。
 
     这条同时说明了"探针说行"为什么不能被当授权：它每次只看它自己那一刻的字节，
-    真正的执行授权仍由宿主按完整验签链给。
+    真正的执行授权仍由宿主按同一套完整校验链给。
     """
     package, _archive = build(tmp_path / "pkg")
     verifier = _verifier()

@@ -79,7 +79,7 @@ class TestBuildEntry:
         assert names == ["host/__init__.py", "host/factory.py", "host/settings.py", "manifest.json"]
 
     def test_manifest_inventory_covers_every_shipped_byte(self, tmp_path):
-        """清单里的 files 就是包的全部字节：多一个少一个都会被验签链拒。"""
+        """清单里的 files 就是包的全部字节：多一个少一个都会被校验链拒。"""
         assert _run_builder(str(BUILDER), "examples/mods/hello-local", str(tmp_path / "out")).returncode == 0
         manifest = json.loads((tmp_path / "out" / "manifest.json").read_text("utf-8"))
         listed = set(manifest["files"])
@@ -88,7 +88,7 @@ class TestBuildEntry:
         assert manifest["platforms"] == [sys.platform]
 
     def test_check_runs_the_preflight_probe(self, tmp_path):
-        """``--check`` 是发布前自检：清单 + 验签 + 装前子进程预检，一条命令。"""
+        """``--check`` 是发布前自检：清单完整性 + 摘要校验 + 装前子进程预检，一条命令。"""
         assert _run_builder(str(BUILDER), "examples/mods/hello-local", str(tmp_path / "out")).returncode == 0
         result = _run_builder(str(BUILDER), str(tmp_path / "out"), "--check")
         assert result.returncode == 0, result.stderr
