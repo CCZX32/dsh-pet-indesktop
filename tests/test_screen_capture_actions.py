@@ -390,6 +390,11 @@ def test_copy_action_puts_the_selection_image_on_the_clipboard(qapp):
     assert image.isNull() is False, "剪贴板里没有图"
     assert (image.width(), image.height()) == (8, 8)
     assert image.pixelColor(0, 0).getRgb()[:3] == (0x20, 0x30, 0x40)
+    # Electron 系应用（Kimi/微信/浏览器）对纯 DIB 的转换会软化/偏色：
+    # 剪贴板必须同时带无损 PNG 供它们优先取用（PixPin 粘出来清晰就靠这条）。
+    formats = clipboard.mimeData().formats()
+    assert "image/png" in formats, f"剪贴板缺 image/png 格式（只有 {formats}）"
+    assert bytes(clipboard.mimeData().data("image/png")).startswith(b"\x89PNG")
     assert ocr_calls == [], "复制是纯本地动作，不许顺手跑引擎"
     assert presenter.results == [], "复制不是「结果」，是一句状态"
     assert any("已复制到剪贴板" in text for text in presenter.statuses)
@@ -401,6 +406,9 @@ def test_copy_failure_is_reported_honestly(qapp, monkeypatch):
     """剪贴板写不进去（被别的程序占着）＝如实说失败，绝不假装"已复制"。"""
     class _BrokenClipboard:
         def setImage(self, _image):  # noqa: N802 - 对齐 Qt 命名
+            raise RuntimeError("剪贴板被占用")
+
+        def setMimeData(self, _mime):  # noqa: N802 - 对齐 Qt 命名
             raise RuntimeError("剪贴板被占用")
 
     monkeypatch.setattr(QApplication, "clipboard", staticmethod(lambda: _BrokenClipboard()))

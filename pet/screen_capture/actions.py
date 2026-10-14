@@ -539,15 +539,31 @@ class ScreenCaptureActions(QObject):
     # ---------------------------------------------------------------- 四条链路
 
     def _run_copy(self, image) -> None:
-        """复制图像：纯本地，裁出的选区图直接进系统剪贴板。"""
+        """复制图像：纯本地，裁出的选区图进系统剪贴板。
+
+        剪贴板同时塞 PNG 字节与 Qt 图像：``setImage`` 单写在 Windows 上只落
+        ``CF_DIB`` 位图（实测 ``mimeData().formats() == ['application/x-qt-image']``），
+        Electron 系应用（Kimi/微信/浏览器）对 DIB 的转换常出软化/偏色；显式带一份
+        ``image/png`` 让它们优先取无损 PNG——PixPin 等工具粘出来清晰靠的就是这条。
+        """
         self._finish()
         try:
+            from PySide6.QtCore import QBuffer, QIODevice
             from PySide6.QtWidgets import QApplication
 
             clipboard = QApplication.clipboard()
             if clipboard is None:
                 raise RuntimeError("剪贴板不可用")
-            clipboard.setImage(image)
+            from PySide6.QtCore import QMimeData
+
+            mime = QMimeData()
+            mime.setImageData(image)
+            buffer = QBuffer()
+            if buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+                if image.save(buffer, "PNG"):
+                    mime.setData("image/png", bytes(buffer.data()))
+                buffer.close()
+            clipboard.setMimeData(mime)
         except Exception as exc:
             log.exception("快速识屏：写入剪贴板失败")
             self.status(f"没能复制（{exc}）")
