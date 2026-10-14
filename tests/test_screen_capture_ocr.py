@@ -175,12 +175,17 @@ FAKE_MODEL_MISSING = (
 FAKE_UNAVAILABLE = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_UNAVAILABLE})\n"
 FAKE_LOAD_FAILED = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_LOAD_FAILED})\n"
 FAKE_REC_FAILED = _FAKE_HEAD + f"sys.exit({ocr_worker.EXIT_RECOGNIZE_FAILED})\n"
+#: 模拟崩溃统一用 42：一个三端都原样存活的"不属于任何语义"的异常码。
+#: 不能用访问违例码 3221225477（0xC0000005）——POSIX 只留低 8 位（0x05，正好撞
+#: EXIT_UNAVAILABLE 的语义），Windows  runner 上还有符号/截断差异；这些平台特性
+#: 的格式化由 interpret 的参数化用例（3221225477 / -1073741819）在纯函数层钉死，
+#: 子进程层只验"未知异常码会被点名+按 stage 归类"这件事本身。
 #: 崩溃前一条 stage 记录都没有：宿主只能说"启动或读图那一段"。
-FAKE_CRASH_NO_STAGE = _FAKE_HEAD + "sys.exit(3221225477)\n"
+FAKE_CRASH_NO_STAGE = _FAKE_HEAD + "sys.exit(42)\n"
 #: 已经读过帧（stage=frame-read），说明崩在模型加载那一段。
-FAKE_CRASH_LOADING = _FAKE_HEAD + _record({"stage": "frame-read"}) + "sys.exit(3221225477)\n"
+FAKE_CRASH_LOADING = _FAKE_HEAD + _record({"stage": "frame-read"}) + "sys.exit(42)\n"
 #: 崩溃前已经写过 stage=loaded：引擎起来了，崩在识别里。
-FAKE_CRASH_LATE = _FAKE_HEAD + _record({"stage": "loaded"}) + "sys.exit(3221225477)\n"
+FAKE_CRASH_LATE = _FAKE_HEAD + _record({"stage": "loaded"}) + "sys.exit(42)\n"
 #: Windows 上 TerminateProcess 的落码就是 1：绝不能被当成"图里没有文字"。
 FAKE_KILLED = _FAKE_HEAD + "sys.exit(1)\n"
 FAKE_HANG = _FAKE_HEAD + "import time\ntime.sleep(120)\n"
@@ -548,7 +553,7 @@ def test_a_crash_without_any_stage_record_still_names_the_exit_code():
         engine.recognize(_blank())
 
     message = str(excinfo.value)
-    assert "3221225477" in message, "退出码必须带出来，否则没人能定位"
+    assert "42" in message, "退出码必须带出来，否则没人能定位"
     assert "启动或读取图像" in message
 
 
