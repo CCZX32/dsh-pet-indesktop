@@ -137,6 +137,31 @@ def _close_with_escape(dialog, app) -> None:
     app.processEvents()
 
 
+def _run_realmodal_driver(tmp_path, mode: str) -> dict:
+    """在干净子进程里跑真模态框流程（驱动器：tests/settings_realmodal_driver.py）。
+
+    主套件共享进程里的 quitNow 残留会让真模态 exec 进入即 -1 秒退（qtbase 6.9
+    qeventloop.cpp / qcoreapplication.cpp:1512），进程内清旗又必须泵全局事件队列
+    （conftest 明令禁止的全局冲刷）——所以真框验证走进程边界（AGENTS.md：Qt 回归
+    用真实事件循环和进程边界），子进程里 Qt 状态干净、防卡桩为零，框全是产品原件。
+    """
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    proc = subprocess.run(
+        [sys.executable,
+         str(Path(__file__).parent / "settings_realmodal_driver.py"),
+         mode, str(tmp_path), str(SLOT)],
+        capture_output=True, text=True, timeout=120, env=env)
+    assert proc.returncode == 0, f"驱动器异常退出 {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
+    lines = [line[len("RESULT "):] for line in proc.stdout.splitlines()
+             if line.startswith("RESULT ")]
+    assert len(lines) == 1, f"驱动器必须恰好打一行 RESULT:\n{proc.stdout}\n{proc.stderr}"
+    return json.loads(lines[0])
+
+
 # ------------------------------------------------------------ 1. 死路消失
 def test_rebuilt_pet_keeps_the_draft_by_default_and_can_still_be_closed(
         tmp_path, app, monkeypatch):
@@ -293,46 +318,22 @@ def test_x_close_offers_the_same_discard_exit(tmp_path, app, monkeypatch):
         _drop(dialog)
 
 
-def test_product_confirm_discard_reads_the_real_button_click(tmp_path, app, monkeypatch):
-    """**产品真实**的 ``confirm_discard_unsaved``：真 exec + 真点按钮。
+def test_product_confirm_discard_reads_the_real_button_click(tmp_path):
+    """**产品真实**的 ``confirm_discard_unsaved``：真 exec + 真点按钮（干净子进程）。
 
-    其余用例为了能断言文案而替掉了 ``exec``；这一条不替——用 QTimer 找到那个模态框、
-    点它的「放弃未保存的改动并关闭」，证明替身之外的那段接线（``exec`` → ``clickedButton()``
-    → 关窗）同样成立，也证明按钮文案与它真正绑定的动作没有错位。
+    其余用例为了能断言文案而替掉了 ``exec``；这一条不替——真框、真按钮、真点击，
+    证明 ``exec`` → ``clickedButton()`` → 关窗这段接线成立，按钮文案与动作没有错位。
+    子进程化的原因见 ``_run_realmodal_driver``：套件共享进程的 quitNow 残留会让
+    真模态 exec 秒退，这不是产品缺陷，是测试进程级污染，只能进程边界隔开。
     """
-    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QDialog
 
-    _main_config(tmp_path)
-    _profile_exists(tmp_path, {"scale": 0.8})
-    dialog = _dialog(tmp_path)
-    finished: list = []
-    dialog.finished.connect(lambda code: finished.append(int(code)))
-    clicked: list = []
+    result = _run_realmodal_driver(tmp_path, "confirm-discard")
 
-    def click_discard():
-        box = app.activeModalWidget()
-        if box is None:
-            return
-        for button in box.buttons():
-            if button.text() == DISCARD_LABEL:
-                clicked.append(True)
-                button.click()
-                return
-        box.reject()          # 找不到目标按钮：收框让断言红，绝不挂死
-
-    monkeypatch.setattr(settings_close_flow, "confirm_discard_unsaved", _REAL_CONFIRM_DISCARD)
-    try:
-        dialog.scale_combo.setCurrentIndex(dialog.scale_combo.findData(1.0))
-        _rebuild_pet(tmp_path)
-        QTimer.singleShot(0, click_discard)
-        _close_with_escape(dialog, app)
-
-        assert clicked == [True], "真框里必须有一个可点的「放弃未保存的改动并关闭」"
-        assert finished == [int(QDialog.DialogCode.Rejected)], "点了放弃就必须关窗"
-        assert pet_profiles.read_slot_profile(_config_dir(tmp_path), SLOT).value("scale") == pytest.approx(0.8)
-    finally:
-        _drop(dialog)
+    assert result["clicked"] == [DISCARD_LABEL], "真框里必须有一个可点的「放弃未保存的改动并关闭」"
+    assert result["finished"] == int(QDialog.DialogCode.Rejected), "点了放弃就必须关窗"
+    assert len(result["boxes"]) == 1, "一次关闭只弹一个确认框"
+    assert result["disk_scale"] == pytest.approx(0.8)
 
 
 def test_corrupt_profile_with_a_written_global_half_is_described_honestly(
@@ -694,8 +695,17 @@ def test_discard_in_the_settings_process_releases_the_lock_for_the_next_open(
         problems.append("设置对话框没出现")
 
     QTimer.singleShot(0, drive)
-    QTimer.singleShot(10000, app.quit)   # 兜底：绝不挂死在事件循环里（真挂住会在断言处红）
-    assert entry._exec_settings(app, config) == 0
+    watchdog = QTimer(app)
+    watchdog.setSingleShot(True)
+    watchdog.setInterval(10000)
+    watchdog.timeout.connect(app.quit)   # 兜底：绝不挂死在事件循环里（真挂住会在断言处红）
+    watchdog.start()
+    try:
+        assert entry._exec_settings(app, config) == 0
+    finally:
+        # app 是进程级单例：正常跑完必须拆雷，否则 10s 后这一发 quit 会落在后面
+        # 用例的模态 exec 里（曾把 test_discard_unverified_notice 的通知框打没）。
+        watchdog.stop()
     assert problems == []
     assert len(seen) == 1
     assert pet_profiles.read_slot_profile(_config_dir(tmp_path), SLOT).value("scale") == pytest.approx(0.8)
@@ -1197,47 +1207,23 @@ def test_discard_reports_when_the_disk_could_not_be_re_read(tmp_path, app, monke
         _drop(dialog)
 
 
-def test_discard_unverified_notice_is_a_real_visible_box(tmp_path, app, monkeypatch):
-    """那条诊断是**真的弹出来**的（真 exec、真点掉），不是只写日志。
+def test_discard_unverified_notice_is_a_real_visible_box(tmp_path):
+    """那条诊断是**真的弹出来**的（真确认框 + 真通知框、真点掉），不是只写日志。
 
-    其余用例里 ``QMessageBox.warning`` 是 conftest 的防卡桩；这一条把它换回产品原件，
-    用 QTimer 打开着的那只模态框读文本、点掉，证明"可见诊断"这条承诺真的兑现在界面上。
+    其余用例里 ``QMessageBox.warning`` 是 conftest 的防卡桩；这一条在干净子进程里
+    跑产品原件（连确认框也是真的），证明"可见诊断"这条承诺真的兑现在界面上。
+    子进程化的原因见 ``_run_realmodal_driver``。
     """
-    from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QMessageBox
+    result = _run_realmodal_driver(tmp_path, "unverified-notice")
 
-    shared, main = _shared_route(tmp_path)
-    _profile_exists(tmp_path, {"scale": 0.8})
-    dialog = _shared_dialog(shared)
-    main_path = Path(main.path)
-    seen: list = []
-    _answer_with(monkeypatch, discard=True, seen=seen)
-    observed: list = []
-
-    def read_and_close():
-        box = app.activeModalWidget()
-        if box is None:
-            return
-        observed.append((box.windowTitle(), box.text()))
-        box.accept()          # 通知框：点掉即可
-
-    monkeypatch.setattr(QMessageBox, "warning", _REAL_WARNING)
-    try:
-        dialog.pet_opacity_spin.setValue(35)
-        main_path.write_text('{ "pet_opacity": 55, broken', encoding="utf-8")
-        QTimer.singleShot(0, read_and_close)
-        _close_with_escape(dialog, app)
-
-        assert len(seen) == 1
-        assert observed, "放弃没能核对磁盘时，用户手上必须真的出现一个说明框"
-        title, text = observed[0]
-        # 标题不能单独当判据：macOS 的 QMessageBox 走系统原生对话框，``windowTitle()``
-        # 在那边恒为空（仓库既有结论见 tests/test_harness_lifecycle.py）。「没能核对磁盘」
-        # 这句话标题与正文都说了，按标题+正文拼起来的可见文案钉。
-        assert "磁盘" in "\n".join(observed[0])
-        assert "已经作废" in text and str(main_path) in text
-    finally:
-        _drop(dialog)
+    assert result["clicked"] == [DISCARD_LABEL], "确认真框里点了「放弃未保存的改动并关闭」"
+    assert len(result["boxes"]) == 2, "先确认框、后通知框，各一个"
+    notice = result["boxes"][1]
+    # 标题不能单独当判据：macOS 的 QMessageBox 走系统原生对话框，``windowTitle()``
+    # 在那边恒为空（仓库既有结论见 tests/test_harness_lifecycle.py）。「没能核对磁盘」
+    # 这句话标题与正文都说了，按标题+正文拼起来的可见文案钉。
+    assert "磁盘" in "\n".join((notice["title"], notice["text"]))
+    assert "已经作废" in notice["text"] and result["main_path"] in notice["text"]
 
 
 # ------------------------------------------------------------ 9. 设置窗挡住不可逆收口（ops P3-c）

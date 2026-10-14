@@ -52,6 +52,7 @@ from .shared import (
     add_quiet_mode_menu,
     add_quit,
     add_return_corner,
+    add_screen_capture_menu,
     add_spawn_pet,
     add_submenu,
     add_network_info,
@@ -65,6 +66,7 @@ from .shared import (
 
 ACTION_LABELS = {
     "ojingjing": "厉害了我的鲸", "chat": "AI 对话", "look_screen": "看看屏幕",
+    "screen_capture": "截图提问",
     "animations_hub": "播放动画", "character": "切换角色", "playback_speed": "播放速率",
     "size": "大小", "drag_physics": "拖动物理", "no_move": "不移动",
     "on_top": "窗口置顶", "autostart": "开机自启",
@@ -97,6 +99,7 @@ Enablement = Callable[[object], bool]
 
 ACTION_ICONS = {
     "ojingjing": "pet", "chat": "chat", "look_screen": "screen",
+    "screen_capture": "size",
     "animations_hub": "play", "character": "character", "playback_speed": "speed",
     "size": "size", "drag_physics": "physics", "no_move": "pause",
     "on_top": "pin", "autostart": "autostart",
@@ -288,6 +291,11 @@ class MenuActionRegistry:
             ),
             "chat": MenuActionSpec(_build_chat, _callback_available("on_open_chat")),
             "look_screen": MenuActionSpec(add_look_screen, _callback_available("on_look_screen")),
+            # 「截图」单一入口（框选识屏）：动作在覆盖层松手后的动作条上选，
+            # 注册表这一层只表达"宿主有没有这套面"。
+            "screen_capture": MenuActionSpec(
+                add_screen_capture_menu, _callback_available("on_screen_capture")
+            ),
             "animations_hub": MenuActionSpec(_build_animations),
             "character": MenuActionSpec(lambda menu, pet: build_character_menu(menu, pet)),
             "playback_speed": MenuActionSpec(lambda menu, pet: build_speed_menu(menu, pet)),

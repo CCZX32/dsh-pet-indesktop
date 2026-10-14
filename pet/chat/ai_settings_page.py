@@ -252,10 +252,10 @@ class _AiSettingsPage(QWidget):
             ),
         ], self))
         vision_rows = [
-            SettingRow("vision_same", "视觉模型复用聊天模型", "开启后自动选择兼容的视觉模型，用于“看看屏幕”。", self.vision_same),
-            SettingRow("vision_model", "视觉模型", "关闭复用后使用的多模态模型标识；留空则自动推导。", self.vision_model),
-            SettingRow("vision_url", "视觉 API 地址", "留空复用聊天服务地址。", self.vision_url),
-            SettingRow("vision_key", "视觉 API Key", "留空复用聊天服务凭据。", self.vision_key),
+            SettingRow("vision_same", "视觉模型复用聊天模型", "开启后自动选择兼容的视觉模型，用于“看看屏幕”。", self.vision_same, parent=self),
+            SettingRow("vision_model", "视觉模型", "关闭复用后使用的多模态模型标识；留空则自动推导。", self.vision_model, parent=self),
+            SettingRow("vision_url", "视觉 API 地址", "留空复用聊天服务地址。", self.vision_url, parent=self),
+            SettingRow("vision_key", "视觉 API Key", "留空复用聊天服务凭据。", self.vision_key, parent=self),
         ]
         root.addWidget(SettingsSection("视觉能力", vision_rows, self))
         self._vision_override_rows = vision_rows[1:]
@@ -279,26 +279,35 @@ class _AiSettingsPage(QWidget):
         root.addStretch(1)
 
     def appearance_rows(self) -> list[SettingRow]:
-        """Controls visually owned by the Appearance page, persisted with AI settings."""
+        """Controls visually owned by the Appearance page, persisted with AI settings.
+
+        行建在 ``_AiSettingsPage`` 上（``parent=self``）：下面那句
+        ``_update_background_visibility`` 在返回之前就按当前背景值决定详情行显隐——
+        无父控件的 ``setVisible(True)`` 会当场开出一个顶层窗口（用户看到的无标题
+        小窗），进卡片之前无人回收。
+        """
         rows = [
             SettingRow(
                 "chat_ui_style", "对话窗口",
                 "肥鱼版 DeepSeek 提供宽屏现代体验；肥鱼牌小手机保留紧凑经典体验。",
                 self.chat_ui_style,
+                parent=self,
             ),
             SettingRow(
                 "chat_background", "对话背景",
                 "肥鱼版 DeepSeek 与肥鱼牌小手机均支持纯色、内置主题或自定义图片。",
                 self.background_select,
+                parent=self,
             ),
-            SettingRow("chat_background_file", "自定义背景图片", "支持常见图片格式，使用绝对路径。", self.background_picker),
-            SettingRow("chat_background_opacity", "图片不透明度", "调节背景图可见强度；消息卡片会独立保证正文可读。", self.background_opacity),
-            SettingRow("chat_background_fill", "填充方式", "选择裁剪铺满、完整显示或拉伸铺满窗口；仅「填充裁剪」支持自定义取景。", self.background_fill),
-            SettingRow("chat_bg_crops", "裁切取景", "拖拽移动 + 滚轮缩放选区，决定背景取哪一块；不裁则按主题默认主体取景。", self.background_crop_btn),
+            SettingRow("chat_background_file", "自定义背景图片", "支持常见图片格式，使用绝对路径。", self.background_picker, parent=self),
+            SettingRow("chat_background_opacity", "图片不透明度", "调节背景图可见强度；消息卡片会独立保证正文可读。", self.background_opacity, parent=self),
+            SettingRow("chat_background_fill", "填充方式", "选择裁剪铺满、完整显示或拉伸铺满窗口；仅「填充裁剪」支持自定义取景。", self.background_fill, parent=self),
+            SettingRow("chat_bg_crops", "裁切取景", "拖拽移动 + 滚轮缩放选区，决定背景取哪一块；不裁则按主题默认主体取景。", self.background_crop_btn, parent=self),
             SettingRow(
                 "modern_chat_card_opacity", "消息卡片不透明度",
                 "调节肥鱼版 DeepSeek 消息卡片透出背景的程度。",
                 self.message_card_opacity,
+                parent=self,
             ),
         ]
         self._background_file_row = rows[-5]

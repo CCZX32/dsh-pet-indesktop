@@ -75,9 +75,15 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -FeaturePackag
 
 构建在 Qt runtime 复制之后、中文编码自检之前自动执行 `python scripts\slim_bundle.py`：
 
-- **移除白名单**：Qt Quick/QML 栈（`Qt6Quick` / `Qt6Qml*`）、`Qt6VirtualKeyboard` + 平台输入法插件、`Qt6OpenGL`、`Qt6Pdf` + `qpdf.dll` 图像插件、`opengl32sw.dll`、非中英 `*.qm` 翻译（保留 12 个中英）、PIL `_avif` 扩展 —— 合计 124 文件 / 53 MB；
+- **移除白名单**：Qt Quick/QML 栈（`Qt6Quick` / `Qt6Qml*`）、`Qt6VirtualKeyboard` + 平台输入法插件、`Qt6OpenGL`、`Qt6Pdf` + `qpdf.dll` 图像插件、`opengl32sw.dll`、非中英 `*.qm` 翻译（保留 12 个中英）、PIL `_avif` 扩展、OpenCV 的 FFMPEG 视频后端（`_internal/cv2/opencv_videoio_ffmpeg*.dll`，本机实测 28 MB —— 本地 OCR 只用 cv2 的图像算子，不碰视频 I/O；删掉后冻结包 OCR 实测照常认出文字，见下文「随包的本地 OCR 模型」）—— 合计 125 文件 / 81 MB；
 - **安全校验**：移除前做依赖闭包校验（pefile 反向 import 检测，保留的二进制若仍引用待删文件即中止）与必需清单校验（核心运行文件齐全），任一失败即中止构建；
 - **效果**：onedir 目录 309 MB → 256 MB，portable zip 176.2 MB → 146.5 MB（−12.8%）；
+  **注意口径**：上表与这组数字都是 **2026-09 的实测**（当时的包体还没有本地 OCR 的
+  numpy / cv2 依赖）。本地 OCR 把它们带回包之后，产品变体**没有重测过**体积；
+  手边有实测数字的是 OCR 探针包（2026-10-13，`--console` 最小依赖，不是产品变体）：
+  `du -sm` 334 MB，删掉那一个 OpenCV 视频后端（28 MB）后 306 MB，移除清单命中
+  100 项、违例 0（证据：`.scratch/screen-capture/build_ocr_hidden.out`）。
+  产品变体下次出包时应该顺手量一遍并回填这里，而不是继续引用 2026-09 的数字；
 - 后续需要完整 Qt 栈（例如启用 QML 界面）时加 `-SkipSlim`；
 - 冒烟建议：把配置切到 `voice_chime_schedule=every_minute` 启动 exe，确认 `%APPDATA%\dsh-pet-standalone-<variant>\voice_chime_cache` 新增 mp3（edge-tts 合成落盘），验证完恢复配置。
 
@@ -114,6 +120,67 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -FeaturePackag
   然后 `python scripts/verify_presentmon.py` 自证；许可文本从同一 release 的源码树取
   `LICENSE.txt`。构建过程本身**不联网**：仓库带二进制，CI 与干净克隆才能离线复现，
   这也是本仓库对「构建必需二进制」的既有处置方式（同 `assets/icon.ico`）。
+
+### 随包的本地 OCR 模型：`resources/rapidocr_models/`
+
+「截图提取文字」（快速识屏）走**随包**的三个 ONNX 模型，加载路径上没有任何下载分支：
+
+| 文件 | 说明 |
+|---|---|
+| `resources/rapidocr_models/PP-OCRv6_det_small.onnx` | 文本检测（9.5 MiB），sha256 `090f04ab…f94f` |
+| `resources/rapidocr_models/PP-OCRv6_rec_small.onnx` | 文本识别（20.2 MiB），sha256 `6f327246…4884` |
+| `resources/rapidocr_models/ch_ppocr_mobile_v2.0_cls_mobile.onnx` | 方向分类（0.6 MiB），sha256 `e47acedf…215c` |
+| `resources/rapidocr_models/LICENSE.txt`、`MODEL_LICENSES.md` | 上游 Apache-2.0 全文与模型许可/出处声明（逐字节拷贝，随模型进包） |
+| `resources/rapidocr_models/NOTICE.md` | 本目录的出处与许可说明（本项目编写） |
+
+三个 ONNX 合计 **30.3 MiB / 31.7 MB**（31 749 509 字节，2026-10-13 实测；
+`du -sm` 报 31 MB），加上许可证与说明三份文本共 22 659 字节。
+
+- **三端都带**：`--add-data "resources/rapidocr_models;…"` 写在三个构建脚本里
+  （`build_onedir.ps1` / `build_linux.sh` / `build_macos.sh`），四个变体都有。
+- **引擎模块本身还要 hidden-import**（2026-10-13 交叉审查 B1）：截图的引擎走的是
+  **动态 seam**——`pet/screen_capture/actions.py::_resolve_engine` 用 `importlib` 按
+  字符串（`OCR_MODULE = "ocr"`）解析 `pet.screen_capture.ocr`，仓库 `pet/` 下没有一处
+  静态 import 指向它，PyInstaller 的静态分析从入口摸不到。少了这条参数，模型与配置
+  都在包里、**引擎模块不在**：冻结包里解析不出引擎，产品不崩，只是右键
+  「截图 → 提取文字」永远置灰（本机实测：不带那条参数的包 `ocr_engine_available()`
+  为假，带上的包认出字，见 `.scratch/screen-capture/build_ocr_hidden.out`）。
+  三个构建脚本因此都带 `--hidden-import pet.screen_capture.ocr`
+  （守卫：`tests/test_screen_capture_packaging.py`）。
+  **它还决定整条依赖链在不在包里**：`rapidocr` / `cv2` / `numpy` / `onnxruntime` 都是
+  靠 `ocr.py` 的静态 import 才进图的。OCR 探针包实测：不带的产物 200 MB（本地 OCR
+  整条链都不在，却还扛着 31 MB 用不上的模型），带上的 334 MB——**这条 hidden-import
+  是本地 OCR 在冻结包里是否存在的那一个开关**；本地 OCR 在包里的边际体积 ≈ 134 MB
+  （含 31 MB 模型；探针包口径，非产品变体）。
+- **还要带 rapidocr 的两份配置数据**：`config.yaml` / `default_models.yaml` 从已装的
+  `rapidocr` 包里显式取（构建脚本用 `python -c "import rapidocr; …"` 解析包目录），
+  落点 `_internal/rapidocr/`（macOS 的 `.app` 按 bundle 规范落在 `Contents/Resources/`
+  下同名路径——产物侧的门按"存在性"找这两处，不按平台猜）。不这么做的话冻结包里引擎
+  连构造都失败（2026-10-13 实测）；
+  而用 `--collect-data rapidocr` 会把它 wheel 自带的同一批 30.3 MiB 模型**再收一份**，
+  所以只补这两份 yaml。
+- **判据只有一份，来自 `pet/screen_capture/ocr.py`**（`MODEL_FILES` / `MODEL_SHA256` /
+  `MODEL_RELATIVE_DIR`）**与 `actions.py` 的 seam**（`OCR_MODULE`，脚本用
+  `required_bundle_modules()` 现算，不抄第二份字面量）。缺件或换版不会让程序崩，
+  只会让识别静默变差（错字/漏行）或直接报「请重新安装」，所以必须在打包阶段拦住。
+- **两道门 × 三端的实际接线**（`scripts/verify_rapidocr_models.py`）：
+  1. **构建前**：`python scripts/verify_rapidocr_models.py` 校验源目录里的三个模型
+     （三端都有，排在 PyInstaller 之前）；
+  2. **产物里**：`python scripts/verify_rapidocr_models.py --app-dir <产物根>` 从**产物**
+     里判三件事——引擎模块在不在产物的模块图里（读内嵌 PYZ 的 TOC，读不出来即判失败）、
+     模型在不在且 sha256 对不对、rapidocr 的两份配置在不在。三端脚本都调了它
+     （Windows 在 `build_onedir.ps1`，Linux/macOS 在各自 shell 脚本里）。
+  **真机跑过的只有 Windows**：`--app-dir` 在 Windows 上实测过（正例与反例都跑过，
+  见 `.scratch/screen-capture/build_ocr_hidden.out`）；Linux/macOS 那一行是按同一份
+  实现接的线，**从未在本机构建或运行过**（本机是 Windows），别把它当作已验证。
+- **`numpy` / `cv2` 不再是「构建机环境污染」**：本地 OCR 直接 import numpy、rapidocr
+  直接 import cv2，两者都是随包依赖（`requirements.txt` 已声明）。构建脚本的
+  `--exclude-module` 与 `slim_bundle.py` 的 `FORBIDDEN_GLOBS` 里的 numpy 条目都已删除
+  ——留着会让**每一次**构建红在一个完全正常的产物上；而排除它们曾让冻结包的 OCR
+  全线不可用（2026-10-13 实测，v3 变体）。
+- **升级模型**：换文件后同时改 `pet/screen_capture/ocr.py` 的 `MODEL_FILES` /
+  `MODEL_SHA256`、本节的表格与 `THIRD_PARTY_NOTICES.md` 第 7 节。文件名自带版本号
+  （`PP-OCRv6_*`）就是为了不让「同名不同版」成为静默替换。
 
 ### 游戏帧率的采集权限（不随包分发任何提权组件）
 
@@ -170,7 +237,15 @@ E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-gif /DMyAppExeN
 5. `_internal\resources\presentmon\` 下有采集后端与它的 `LICENSE.txt`（构建期已自动校验
    名称 / sha256 / x86-64，见上面「随包分发的第三方二进制」）
 6. `_internal\resources\` 下**没有** `fps-helper\`（提权助手已归档，不随包）
-7. **FPS 开关打开、当前账户不在 `Performance Log Users` 组时**：岛上那段不显示任何数字，
+7. `_internal\resources\rapidocr_models\` 下有三个 `.onnx` 与 `LICENSE.txt` /
+   `MODEL_LICENSES.md`，`_internal\rapidocr\` 下有 `config.yaml` /
+   `default_models.yaml`（构建期已自动校验模型名称 / sha256，见上面「随包的本地 OCR 模型」）；
+   点一次「截图 → 提取文字」应能认出选区里的文字。
+   **注意**：上面那三样是**资源**，看得见；第二件致命的东西是**引擎模块本身**
+   （`pet.screen_capture.ocr`，动态 seam 的目标，只在产物内嵌的 PYZ 里，目录里看不到），
+   它由 `verify_rapidocr_models.py --app-dir` 从模块图里读出来判——手工冒烟时如果
+   「提取文字」是灰的，先跑这条门，别再去看模型目录（模型全在也照样会灰）
+8. **FPS 开关打开、当前账户不在 `Performance Log Users` 组时**：岛上那段不显示任何数字，
    而是采集链路自己的权限原文；设置页帧率段出现「授予采集权限…」按钮
    （本机没有验证过真实加组后的采集，见上面「游戏帧率的采集权限」）
 
