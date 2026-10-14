@@ -79,6 +79,11 @@ _SETTLED = frozenset({"completed", "idempotent", "awaiting_startup_confirmation"
 #: （更新 / 回滚）——``FeaturePackageBinding`` 明确拒绝换版本复用，宿主 pin 也必须先释放。
 _RELEASING_KINDS = frozenset({"uninstall", "rollback", "upgrade"})
 
+#: 安装状态**干净读到**的样子（``FeatureInstallStateStore.read`` 的 status：三个正常态）。
+#: 其余取值（``lock_busy`` / ``io_error`` / ``recovery_required`` / ``corrupt`` …）都算
+#: "没读实"——见 :meth:`FeatureManagementManager._transaction_accepted`。
+_CLEAN_STATE_READ = frozenset({"uninstalled", "enabled", "disabled"})
+
 
 @dataclass(frozen=True)
 class LocalUserTrustSelfChecker:
@@ -234,6 +239,26 @@ class FeatureManagementManager(QObject):
             self.host.fault(self.owner, "startup_load_failed")
             return self._result("recovery_required", reason="startup_load_failed")
 
+    def _transaction_accepted(self) -> bool:
+        """事务是否**已经被接受**（``state.pending_transaction`` 是唯一权威）。
+
+        只有**干净读到**的安装状态才算数：读不出来、或读到的是恢复态（``recovery_required``
+        / ``corrupt``）都按"已接受"处理。这一问只有一个用途——决定要不要把当前落盘的版本
+        装回宿主，而装回一旦走错路就会把宿主打成 ``fault``（见 ``_sync_host``），所以宁可
+        少做一件事，也不做错一件。
+
+        读的是 ``store.read()`` 而不是 ``service.inspect()``：后者会把"状态没读出来"一并
+        报成 ``pending_transaction is None``，正好与本方法的 fail-closed 方向相反。
+        """
+        try:
+            result = self.service.store.read()
+        except Exception:
+            _LOG.exception("feature install state unreadable: %s", self.owner)
+            return True
+        if result.state is None or result.status not in _CLEAN_STATE_READ:
+            return True
+        return result.state.pending_transaction is not None
+
     # --------------------------------------------------------- 命令入口
 
     def submit(self, command: str, value=None, *, confirmation_token=None, expected_revision=None, auto_apply=None) -> bool:
@@ -262,6 +287,12 @@ class FeatureManagementManager(QObject):
         if action is None:
             self.result_ready.emit(self._result("rejected", reason="management_command_invalid"))
             return False
+        if command == "apply":
+            # 控制器对"事务尚未接受"的失败会用**同一个 plan** 再确认一次
+            # （``ModCenterController._retry_apply``）。重试必须跑在与第一段相同的
+            # **已交还**状态下，否则 ``_sync_host`` 为 M2 装回的那份绑定会把自己的
+            # 版本 pin 带上，把重试永远挡在 ``version_in_use`` 上（见 ``_rearm_apply``）。
+            action = self._rearm_apply(value, action)
         self._auto_apply_requested = bool(command in ("uninstall", "rollback") if auto_apply is None else auto_apply)
         # 只有"准备元数据 / 接受新版本"这几条会因为别的进程短暂持锁而值得原样重试；
         # enable=True 同理（要重新验签活动版本）。其余一律如实回报。
@@ -405,6 +436,27 @@ class FeatureManagementManager(QObject):
         _LOG.warning("feature host refused to release: %s", self.owner)
         return False
 
+    def _rearm_apply(self, plan, action):
+        """GUI 线程：重跑一段``apply``之前把宿主**重新交还**（拿不动就如实回报）。
+
+        控制器的重试阶梯（``_retry_apply``）用同一个 plan 再确认一次，而重试要跑在与
+        第一段相同的**已交还**状态下：``_sync_host`` 为 M2 装回的那份绑定会重新占住
+        版本 pin，重试于是被本进程自己挡在 ``version_in_use`` 上——而且重试超时也解不开
+        （挡路的不是别的程序，是这只桌宠自己）。交还之后照常走事务：这一趟要还是没落定，
+        ``_sync_host`` 会再装回一次。
+
+        宿主要是在这个当口拒绝交还（面板里有未保存草稿），就当这一趟本来就不该跑：
+        如实回报 ``unsaved_settings``，不进事务。
+        """
+        kind = getattr(plan, "kind", None)
+        if not self._release_host(kind):
+            return lambda: self._result("rejected", reason="unsaved_settings")
+        # 与第一段（``_deliver`` 的自动续跑那一段）同一口径：绑定已经交还出去了，这一趟
+        # 要还是没落定，就得靠 ``_sync_host`` 装回来。非交还类（``install``）本来没交还
+        # 过，装回也就无从谈起。
+        self._released_for_apply = kind in _RELEASING_KINDS
+        return action
+
     def _sync_host(self, result) -> None:
         """GUI 线程：把**已经落盘**的状态落到宿主，并把装载结果记进 ``last_result``。
 
@@ -418,7 +470,15 @@ class FeatureManagementManager(QObject):
                 # ——把它重新装回宿主：用户看到的应当是"这次操作失败"，而不是"失败 +
                 # 菜单不见了，重启才回来"。
                 self._released_for_apply = False
-                self._record_load(self._load_current())
+                if self._transaction_accepted():
+                    # 事务已经被接受（``state.pending_transaction`` 是唯一权威）：落盘的
+                    # active 已经指向候选版本，装回会走 ``load_pending`` 的启动确认路，
+                    # 而本进程不是那个启动方（``startup_permit`` 以 ``not_awaiting_startup``
+                    # 拒绝）——"装回"于是变成一次带假理由的 ``host.fault``。这种局面交给
+                    # 启动确认那条路，这里只如实回报事务的结论。
+                    self.last_result = result
+                else:
+                    self._record_load(self._load_current())
                 return
             self.last_result = result
             return

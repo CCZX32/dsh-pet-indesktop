@@ -87,7 +87,7 @@ MOD 中心**分片移植**，落地面如下——判定依据是分支上的六
 | 探针契约（策略 / 结果 / transcript 校验） | ✅ 已落地 | `pet/feature_package_probe.py` |
 | 原生探针沙箱（LPAC 启动器 + 密封 bundle） | ❌ 未移植（**本拓扑不做**，见下） | 默认 fail-closed 那一半不变；本地导入走"显式用户信任 + 装前子进程预检" |
 | 本地包装前预检（子进程，元信息 + 失败检查） | ✅ 已落地（**不是沙箱**） | `pet/feature_package_preflight.py`（D3） |
-| 作者侧打包入口 + 发布前自检 | ✅ 已落地（D4）：构建入口产目录 + ZIP，自检走"清单 + 验签 + 装前子进程预检" | `scripts/build_mod_example.py`、`scripts/verify_feature_package.py` |
+| 作者侧打包入口 + 发布前自检 | ✅ 已落地（D4）：构建入口产目录 + ZIP，自检走"清单完整性 + 摘要校验 + 装前子进程预检" | `scripts/build_mod_example.py`、`scripts/verify_feature_package.py` |
 | 随包携带功能包的构建门（三端两道门 + `<app>/features/`） | ✅ 接线已落地（D4）；**产品运行期还没有读那个目录的地方**（Setup 选装 / 便携未做） | `scripts/build_{onedir.ps1,linux.sh,macos.sh}`、`docs/ONEDIR_PACKAGING.md` |
 | 功能扩展宿主运行时（`pet.mod_api.v1` / `pet/feature_management.py` / `pet/local_package_intents.py`） | ✅ 已落地并已接入 MOD 中心（D2/D3） | `pet/feature_management.py`、`pet/mod_runtime.py`、`pet/mod_menu.py`、`pet/settings_mod_panel.py`、`pet/plugins/{feature_host,feature_packages,package_binding}.py` |
 | 官方功能包（`official.ai-chat` / `official.screen-understanding`）的安装链 | ❌ 未落地（官方 ID 在本地导入处按保留 ID 拒绝） | `pet/official_features.py`、`pet/mod_center_controller.py` |
@@ -107,7 +107,8 @@ tarball + MSVC + 官方 libsodium + AppContainer canary，本仓库没有也不�
 > **不是沙箱**。导入即代表你信任它的来源。
 
 探针**只在拒绝方向有权威**（包装不起来、owner 对不上 ⇒ 装之前就拒，状态与版本目录都不动），
-说行的那一半仍由宿主按完整验签链重新回答。
+说行的那一半仍由宿主按同一套完整校验链（清单完整性 + 摘要 + 版本与身份核对）自己重新回答
+——同样是显式用户信任，不是发布者认证。
 
 **因此**：本目录里凡描述「功能扩展」的教程（`API-V1.md` / `HOST-ONLY.md` /
 `HOST-WORKER.md` / `AUTHORING-HANDBOOK.md` 的功能扩展部分 / `COMPATIBILITY.md`）

@@ -291,3 +291,13 @@ class TestTheChainDoesNotClaimPublisherAuthentication:
         for path in (MODDING_README, ROOT / "docs" / "modding" / "AUTHORING-HANDBOOK.md"):
             text = path.read_text(encoding="utf-8")
             assert "不做发布者认证" in text, path.name
+
+    def test_the_author_facing_readme_never_says_the_chain_verifies_signatures(self):
+        """作者面 README 提到这条链时不许出现"验签"（本地口径下 ``manifest.sig`` 被忽略）。
+
+        定向规则，只钉这一份文档：``PORT-STATUS.md`` 与 ``pet/plugins/package_trust.py``
+        里描述**那条链自己**做什么的地方（"重新验签/指纹对账"）措辞是对的——它们说的是
+        安装链按同一套判据重算，不是说发布者已被认证，别一起误伤。
+        """
+        assert "验签" not in MODDING_README.read_text(encoding="utf-8"), "作者面 README 仍在声称验签"
+        assert self.CLAIM in MODDING_README.read_text(encoding="utf-8"), "README 没有给出这条链真正做的那三件事"

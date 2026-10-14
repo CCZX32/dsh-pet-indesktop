@@ -328,6 +328,26 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 | m2 | 预检不可取消（父侧不持有句柄），只能等 `timeout` | 30 s 单次上限已经有界；取消要父侧留句柄 + 事务层接口，与"装前预检要不要并发"一起做。归属：Phase 4B-5 |
 | m4 | 构建机在预检阶段执行包代码（`create_host()`），构建机上没有告警/文档 | 门与产品口径一致地**不声称隔离**（`pet/feature_package_preflight.py` 模块 docstring 已写死"不是沙箱"）；缺的是构建脚本侧一句告警。归属：构建脚本文案批次 |
 
+### 八之二、修复轮：复审提出的三条 + M3 补漏（同日）
+
+上面那批的**复审判**又提了三条（N1/N2/N3）与一处 M3 漏改；N1/N2 是同一处代码（M2 的
+"装回"）在两段式**不同阶段**上的两种伤害，N3 是 m5 那条修复的收口缺口。
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| N1 | M2 的装回把控制器的 apply 重试阶梯打断了：装回重新占上本进程的版本 pin，而重试阶梯（`ModCenterController._retry_apply`：`management_lock_busy` 等可重试 reason）恰好要在**已交还**状态下才走得通——重试被自己挡在 `version_in_use` 上（`feature_package_transactions.py:838-845`），重试到超时也解不开，用户拿到"等待相关程序自然退出后完成操作"而挡路的正是他自己这只桌宠 | ✅ 修：`submit("apply", …)`（只有控制器的重试走这条入口）先把宿主**重新交还**再进事务（`FeatureManagementManager._rearm_apply`），交还后 `_released_for_apply` 照旧置位，这一趟再失败就再装回一次。用例：`tests/test_feature_apply_retry_ladder.py::test_the_retry_ladder_finishes_the_delete_after_releasing_the_restored_binding`（真事务层 + 真宿主 + 真控制器；先持住操作锁制造可重试失败，再放开。改前：删除永远做不完；改后：阶梯做完删除，且失败当场装回那一半仍成立） |
+| N2 | M2 只覆盖"接受前失败"：事务在 `state_pending` **之后**失败时（`:827-845`、`:902-916`），落盘 active 已经指向候选版本，装回会走进 `load_pending` 的启动确认路，而本进程不是启动方（`startup_permit` 以 `not_awaiting_startup` 拒绝）——"装回"于是变成一次带假理由的 `host.fault("startup_load_failed")` | ✅ 修：只在事务**未被接受**时装回（`FeatureManagementManager._transaction_accepted`：`service.inspect().pending_transaction` 是唯一权威；读不出状态时按"已接受"处理，宁可少做不许做错）。用例：`tests/test_feature_apply_retry_ladder.py::test_an_accepted_transaction_is_never_loaded_back_into_the_host`（同一条真链路；另一个占用者全程不放租约，事务先接受再卡住。改前 `last_result == recovery_required/startup_load_failed` 且 `host.state == "fault"`，改后如实回报事务结论） |
+| N3 | m5 的"待补拉"只在 `ProactiveScreenAdapter.stop()` 里作废，而退出收口两条路径（`WorkerSupervisor.finish_app_shutdown`、`WorkerSupervisor._shutdown_live_for_tests`）**直接**调 `supervisor.stop()`：进程停定后适配器照常补拉，在整只桌宠正在退出的当口又拉起一个 worker 子进程 | ✅ 修：作废挂在 supervisor 的通知上而不是某个调用方上——新增 `WorkerSupervisor.stop_requested` 信号（在重入闸**之前**广播），适配器连上它清 `_pending_start`；`finish_app_shutdown` 收口时对每个 supervisor 一律调一次 `stop()`（本身幂等，这一次是为了把作废广播出去）。用例：`tests/test_proactive_worker_adapter.py::test_an_exit_drain_never_takes_up_a_pending_start`（两条路径各一条参数，真子进程；改前收口后又拉起一个 worker，改后 `state == "stopped"` 且进程为空），m5 那条"隐藏→恢复要补拉"的用例同时保持绿 |
+| M3 补漏 | 作者面文案只改了一部分：`docs/modding/README.md` 仍写着"清单 + 验签 + 装前子进程预检"与"宿主按完整验签链重新回答" | ✅ 修：两处都改成与门一致的口径（"清单完整性 + 摘要校验 + 装前子进程预检"／"宿主按同一套完整校验链（清单完整性 + 摘要 + 版本与身份核对）自己重新回答——同样是显式用户信任，不是发布者认证"）。守卫扩到这份 README：`tests/test_feature_packaging_wiring.py::TestTheChainDoesNotClaimPublisherAuthentication::test_the_author_facing_readme_never_says_the_chain_verifies_signatures`（定向规则：只钉作者面 README；`PORT-STATUS.md` 与 `pet/plugins/package_trust.py` 里描述那条链自己做什么的"验签/指纹对账"措辞是对的，不误伤） |
+
+**缓做（复审第二轮的 N4/N5/N6，本轮不改，登记在此）**：
+
+| 编号 | 问题 | 缓的理由 / 归属 |
+|---|---|---|
+| N4 | `build_mod_example.py` 的标准产出是"同名目录 + 同名 ZIP"，两份一起放进同一个发布根会被门判 `bundle_duplicate_id`（这是 m3 的设计意图），缺的是作者文档一句 | ✅ 文档这一半本轮补了：`docs/modding/AUTHORING-HANDBOOK.md` §打包与自检 加"发布根里每个 owner 只放一种形态"（并写明门在复制之前就中止）。行为不改——判据本身正确，只是要作者别把两份都拷进发布根 |
+| N5 | 补拉（STOPPING 窗口里那一半）会让 `state_changed` 出现乱序：订阅者若按"每一次状态变化"做增量推断会看到 `stopping → stopped → starting → handshaking → ready` 里夹着一次迟到的事件 | 订阅者读的是快照（`status_snapshot()` / `state`），乱序不影响它们；要修得给补拉一条"代次"语义（迟到的旧代次事件直接丢），属状态机精修。归属：proactive worker 状态机片 |
+| N6 | B1 的守卫在**源码解释器**下跑入口，覆盖不到 windowed 冻结包的 stdio（冻结版 `--worker` / `--feature-package-probe` 的管道行为只在 onedir 产物里才真实） | 需要一份真冻结产物（`build_onedir` 的 windowed exe）才能测；本机没有随包分发的探针 bundle，属"冻结包实测待办"。归属：Phase 4B-5 冻结构建片（与 host-worker 真实冻结构建同批） |
+
 **本轮顺带发现的既有问题（不在盲审清单里，本轮未修）**：`tests/test_proactive.py` +
 `tests/test_proactive_worker.py` + `tests/test_proactive_worker_adapter.py` **三个文件一起**跑，
 会在 `test_adapter_drives_the_real_worker_over_the_default_command` 处触发 Windows 访问违规

@@ -51,6 +51,12 @@ class WorkerSupervisor(QObject):
     ready = Signal()
     failed = Signal(str)
     diagnostic = Signal(str, object)
+    #: 每次 ``stop()``（含 STOPPING 期间的重入调用）都广播一次：属主的"待补拉"要作废。
+    #: 适配器自己的 ``stop()`` 会顺手清掉那个标记，但退出收口——
+    #: :meth:`finish_app_shutdown` 与 :meth:`_shutdown_live_for_tests`——**直接**调
+    #: ``stop()``，不经过适配器；不作废的话，进程停定（STOPPED）时适配器会照常补拉，
+    #: 在整只桌宠正在退出的当口又拉起一个 worker 子进程。
+    stop_requested = Signal()
 
     DISABLED = "disabled"
     STARTING = "starting"
@@ -360,6 +366,8 @@ class WorkerSupervisor(QObject):
         # 重入闸：第一次 stop 已经发过 shutdown 帧、关过写通道并起了终止阶梯。再进来只会
         # 把关闭预算重新计时（进程反而拖得更久）并重复发帧——STOPPING 期间的这个调用是
         # 幂等的空操作。``_requested_stop`` 在这里必然已经是 True（只有 stop 会置位）。
+        # 广播在闸门**之前**：重入那次调用同样要作废待补拉（退出收口正是这个形状）。
+        self.stop_requested.emit()
         if self._state == self.STOPPING:
             return
         self._requested_stop = True
@@ -659,8 +667,9 @@ class WorkerSupervisor(QObject):
         deadline.timeout.connect(loop.quit)
         for item in supervisors:
             item.state_changed.connect(check)
-            if not item._requested_stop:
-                item.stop()
+            # 一律调一次（含已经在 STOPPING 的那些）：`stop()` 本身幂等，而这一次调用还要
+            # 把"待补拉"作废广播出去——应用正在退出，进程停定之后不该再拉起新的 worker。
+            item.stop()
         try:
             if not drained():
                 deadline.start(max(1, int(timeout_ms)))

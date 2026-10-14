@@ -897,3 +897,40 @@ def test_a_start_during_the_shutdown_stair_is_taken_up_when_it_settles(tmp_path)
     finally:
         adapter.stop()
         assert _wait_until(lambda: adapter.state == "stopped", timeout=30.0)
+
+
+@pytest.mark.parametrize("drain", ["finish_app_shutdown", "_shutdown_live_for_tests"])
+def test_an_exit_drain_never_takes_up_a_pending_start(tmp_path, drain):
+    """退出收口不许把 STOPPING 期间记下的那次 start 补起来（停就是停）。
+
+    上面那条用例的前提是"用户还在用"（隐藏→恢复），所以补拉是对的。退出是另一回事：
+    ``WorkerSupervisor.finish_app_shutdown()``（``app.exec()`` 之后、对象析构之前那台
+    泵）与 ``WorkerSupervisor._shutdown_live_for_tests()``（pytest 收口）都**直接**调
+    ``supervisor.stop()``，绕过适配器的 ``stop()``——而 ``_pending_start`` 只在适配器
+    那一侧作废。于是进程停定（STOPPED）时适配器照常补拉，在整只桌宠正在退出的当口
+    又拉起一个 worker 子进程。
+    """
+    from pet.workers.supervisor import WorkerSupervisor
+
+    script = tmp_path / "slow_worker.py"
+    script.write_text(_FAKE_WORKER_SOURCE, encoding="utf-8")
+    adapter = _adapter(mode="auto", program=sys.executable, arguments=[str(script)])
+    try:
+        assert adapter.start({"max_edge": 640}) is True
+        assert _wait_until(lambda: adapter.ready, timeout=30.0), adapter.state
+        adapter.stop()
+        assert adapter.state == "stopping", "子进程还在退：这正是会丢掉 start 的那个窗口"
+        assert adapter.start({"max_edge": 640}) is False
+        generation = adapter.generation
+
+        getattr(WorkerSupervisor, drain)()
+        # 收口返回后把事件都派完，给"补拉"留出机会（它是同步接在 STOPPED 上的）
+        for _ in range(10):
+            _APP.processEvents()
+            time.sleep(0.02)
+
+        assert adapter.state == "stopped", f"{drain} 收口后又拉起了一个 worker"
+        assert adapter.generation == generation
+        assert adapter.supervisor.process is None
+    finally:
+        adapter.stop()

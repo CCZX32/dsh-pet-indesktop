@@ -107,6 +107,7 @@ class ProactiveScreenWorkerAdapter(QObject):
             required_capabilities=("foreground.read", "screenshot.capture", "vision.request", "logging.write"),
         )
         self.supervisor.state_changed.connect(self._on_state_changed)
+        self.supervisor.stop_requested.connect(self._on_stop_requested)
         self.supervisor.response_received.connect(self._on_response)
         self.supervisor.request_received.connect(self._on_request)
         self.supervisor.diagnostic.connect(self._on_diagnostic)
@@ -350,6 +351,16 @@ class ProactiveScreenWorkerAdapter(QObject):
         )
 
     # -------------------------------------------------------------- lifecycle
+    def _on_stop_requested(self) -> None:
+        """supervisor 被要求停：显式停优先于待补拉（停就是停）。
+
+        适配器自己的 ``stop()`` 也会清这个标记，但退出收口那两条路径
+        （``WorkerSupervisor.finish_app_shutdown`` / ``_shutdown_live_for_tests``）
+        直接调 ``supervisor.stop()``，不经过适配器——所以作废这件事挂在 supervisor 的
+        通知上，而不是挂在某一个调用方上。
+        """
+        self._pending_start = False
+
     def _on_state_changed(self, state: str) -> None:
         if state in {"crashed", "fault", "stopping", "stopped"}:
             self._fail_pending("worker_unavailable")

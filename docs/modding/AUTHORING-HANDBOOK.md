@@ -152,6 +152,10 @@ python -X utf8 scripts/verify_feature_package.py --bundle-root .scratch/my-mods/
 信任**校验，这道门不做发布者认证：`manifest.sig` 存在也只被忽略（`signature_ignored` 告警，
 `trust_status` 是 `local_user`）。
 
+**发布根里每个 owner 只放一种形态**：`--bundle-root` 指的那个目录下，同一个 owner 同时有目录
+和 ZIP（打包入口的标准产出恰恰是这两份）会被判 `bundle_duplicate_id` 并**在复制之前中止构建**
+——随包携带时以谁为准说不清，所以别把两份都拷进同一个发布根。
+
 > 门的退出码就是它的结论：0 = 过，1 = 拒（原因码在 stdout/stderr 与 `--json` 里）。
 > `--target-platform` 是**目标平台**（默认本机）：构建脚本按产物平台传，为别的平台声明的包
 > 在那里会被点名拒绝（`platform_mismatch`）。
