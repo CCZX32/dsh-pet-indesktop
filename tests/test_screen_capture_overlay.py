@@ -598,7 +598,9 @@ def test_selection_area_stays_bright_while_the_rest_is_dimmed(qapp):
     canvas = _render(overlay)
 
     dimmed_white = round(255 * (1 - DIM_ALPHA / 255))
-    inside = canvas.pixelColor(100, 60)
+    # 探针点选选区右下角：左上会被尺寸标签占、下方边缘可能被动作条占（小屏翻上缘），
+    # 这两处"覆盖层 chrome"的占地随字体/屏尺寸变，探针必须落在它们永远够不到的地方。
+    inside = canvas.pixelColor(140, 85)
     outside = canvas.pixelColor(10, 10)
     assert inside.red() >= 250                       # 选区内保持原样
     assert abs(outside.red() - dimmed_white) <= 6    # 选区外按 DIM_ALPHA 压暗
