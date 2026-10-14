@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pet.plugins.events import CoreEvent, CoreEventBus, ScopedEventBus
+from pet.plugins.feature_host import FeatureDefinition, FeatureHost
 
 
 def _boom(event):
@@ -194,3 +195,94 @@ def test_scoped_event_bus_publishes_through_the_shared_bus():
     ScopedEventBus(bus, "listener").subscribe("test.event", lambda event: seen.append(event.source))
     ScopedEventBus(bus, "speaker").publish(CoreEvent.now("test.event", "speaker"))
     assert seen == ["speaker"]
+
+
+# ==================================================================
+# FeatureHost 生命周期接线：订阅清理、故障隔离、生命周期事件
+# ==================================================================
+
+OWNER = "sample.feature"
+
+
+def _definition(owner=OWNER, *, runtime_factory=None):
+    return FeatureDefinition(
+        owner,
+        (),
+        lambda *_args, **_kwargs: None,
+        runtime_factory=runtime_factory,
+    )
+
+
+def _host_with_owner(*, enabled=True):
+    host = FeatureHost()
+    host.provide(_definition(), enabled=enabled)
+    return host
+
+
+def test_a_host_shares_an_injected_bus():
+    bus = CoreEventBus()
+    host = FeatureHost(events=bus)
+    assert host.events is bus
+
+
+def test_the_event_bus_facade_requires_a_configurable_owner():
+    host = FeatureHost()
+    with pytest.raises(PermissionError):
+        host.event_bus(OWNER)
+    host.provide(_definition(), enabled=False)
+    assert isinstance(host.event_bus(OWNER), ScopedEventBus)
+
+
+def test_disable_fault_and_remove_each_clear_the_owners_subscriptions():
+    transitions = (
+        lambda host: host.disable(OWNER),
+        lambda host: host.fault(OWNER, "boom"),
+        lambda host: host.remove(OWNER),
+    )
+    for transition in transitions:
+        host = _host_with_owner()
+        host.event_bus(OWNER).subscribe("test.event", lambda event: None)
+        assert len(host.events.subscriptions(owner=OWNER)) == 1
+        transition(host)
+        assert host.events.subscriptions(owner=OWNER) == ()
+
+
+def test_fault_and_remove_clear_subscriptions_even_when_already_disabled():
+    transitions = (
+        lambda host: host.fault(OWNER, "boom"),
+        lambda host: host.remove(OWNER),
+    )
+    for transition in transitions:
+        host = _host_with_owner(enabled=False)
+        host.event_bus(OWNER).subscribe("test.event", lambda event: None)
+        transition(host)
+        assert host.events.subscriptions(owner=OWNER) == ()
+
+
+def test_an_event_callback_failure_faults_the_owner():
+    host = _host_with_owner()
+    host.event_bus(OWNER).subscribe("test.event", _boom)
+    host.events.publish(CoreEvent.now("test.event", "core.test"))
+    assert host.state(OWNER) == "fault"
+    assert host.diagnostics()[OWNER] == "event_callback_failed"
+    assert host.events.subscriptions(owner=OWNER) == ()
+
+
+def test_a_faulting_callback_from_an_unknown_owner_is_only_logged(caplog):
+    host = _host_with_owner()
+    host.events.subscribe("test.event", _boom, owner="core.test")
+    with caplog.at_level("WARNING", logger="pet.plugins.feature_host"):
+        host.events.publish(CoreEvent.now("test.event", "core.test"))
+    assert host.state(OWNER) == "enabled"
+    assert host.diagnostics() == {}
+
+
+def test_lifecycle_changes_are_published_on_the_bus():
+    host = FeatureHost()
+    seen = []
+    host.events.subscribe("feature.lifecycle.changed", seen.append, owner="core.test")
+    host.provide(_definition(), enabled=False)
+    host.enable(OWNER)
+    host.disable(OWNER)
+    assert [(event.payload["owner"], event.payload["state"]) for event in seen] == [(OWNER, "enabled"), (OWNER, "disabled")]
+    assert all(event.source == "core.feature_host" for event in seen)

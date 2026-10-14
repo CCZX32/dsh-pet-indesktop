@@ -2,6 +2,11 @@
 
 The host owns state and leases, never feature UI objects or persisted settings.
 A settings-only process can register factories without attaching runtime commands.
+
+宿主还持有一棵进程级 :class:`CoreEventBus`（Phase 2 内核移植）：owner 的订阅随
+``disable`` / ``fault`` / ``remove`` 按 owner 清理，事件回调异常按
+``event_callback_failed`` 把该 owner 打成 fault（与执行转换失败同口径），
+状态转换同时以 ``feature.lifecycle.changed`` 发布到总线。
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from typing import Any, Callable
 
 from .capabilities import CapabilitySet
 from .contributions import Contribution, ContributionBatch, ContributionHandle, ContributionRegistry
+from .events import CoreEvent, CoreEventBus, ScopedEventBus, Subscription
 from .ports import CommandRegistry
 
 _LOG = logging.getLogger(__name__)
@@ -31,8 +37,10 @@ class FeatureDefinition:
 
 
 class FeatureHost:
-    def __init__(self, registry: ContributionRegistry | None = None):
+    def __init__(self, registry: ContributionRegistry | None = None, *, events: CoreEventBus | None = None):
         self.registry = registry or ContributionRegistry(CommandRegistry())
+        self._events = events or CoreEventBus()
+        self._events.set_error_handler(self._handle_event_error)
         self._definitions: dict[str, FeatureDefinition] = {}
         self._states: dict[str, str] = {}
         self._bindings: dict[tuple[str, str], tuple[dict[str, Callable], Callable]] = {}
@@ -70,6 +78,29 @@ class FeatureHost:
 
     def owners(self) -> tuple[str, ...]:
         return tuple(o for o in self._definitions if self.configurable(o))
+
+    @property
+    def events(self) -> CoreEventBus:
+        """宿主侧的事件总线入口（发布 / 诊断快照）；feature 作者走 :meth:`event_bus`。"""
+        return self._events
+
+    def event_bus(self, owner: str) -> ScopedEventBus:
+        """一个 owner 的事件门面：订阅与清理都被钉在这个 owner 上。"""
+        self.registry.check_thread()
+        if not self.configurable(owner):
+            raise PermissionError("feature is not available")
+        return ScopedEventBus(self._events, owner)
+
+    def _handle_event_error(self, subscription: Subscription, event: CoreEvent, exc: Exception) -> None:
+        """事件回调异常 = 该 owner 的运行期故障；不认识的 owner（宿主自身）只记日志。
+
+        总线在调用本处理器前已摘除故障订阅，因此 fault → 生命周期事件的重入
+        派发不会再踩到同一个回调（递归线性收敛，不需要额外闸门）。
+        """
+        del event, exc  # 细节已随总线日志记录；宿主侧诊断只留固定码
+        _LOG.warning("feature event callback failed: %s", subscription.owner)
+        if subscription.owner in self._definitions:
+            self.fault(subscription.owner, "event_callback_failed")
 
     def diagnostics(self) -> dict[str, str]:
         return dict(self._diagnostics)
@@ -155,6 +186,9 @@ class FeatureHost:
                 callback(owner, self.state(owner))
             except Exception:
                 _LOG.exception("feature contribution observer failed")
+        self._events.publish(
+            CoreEvent.now("feature.lifecycle.changed", "core.feature_host", {"owner": owner, "state": self.state(owner)})
+        )
 
     def bind_execution(self, owner: str, stop: Callable, resume: Callable) -> Callable[[], None]:
         """Host-owned runtime, independent of the number of window menus."""
@@ -240,6 +274,7 @@ class FeatureHost:
                 stop()
             except Exception:
                 _LOG.exception("feature stop failed")
+        self._events.clear_owner(owner)
         self._notify(owner)
 
     def enable(self, owner: str) -> None:
@@ -280,6 +315,7 @@ class FeatureHost:
                 return False
         self.disable(owner)
         self._states[owner] = "absent"
+        self._events.clear_owner(owner)
         self.registry.revoke_owner(owner)
         self._definitions.pop(owner, None)
         self._bindings = {key: value for key, value in self._bindings.items() if key[0] != owner}
@@ -297,5 +333,6 @@ class FeatureHost:
         self.disable(owner)
         self._states[owner] = "fault"
         self._diagnostics[owner] = reason
+        self._events.clear_owner(owner)
         self.registry.revoke_owner(owner)
         self._notify(owner)
