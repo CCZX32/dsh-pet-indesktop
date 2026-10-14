@@ -5,7 +5,9 @@
 > 本目录移植自上游 DLC 分支的 `docs/modding/`（分支名与基线 SHA 属仓库内工作档案，
 > 见 `.scratch/dlc-fusion/PLAN.md`；本目录正文不写外部工具名），**逐字保留**其作者
 > 契约文本，只做两件事：改掉指向 DLC 分支才有的文件链接、按本仓库的落地现状写明
-> 「哪些已经能跑、哪些还没接」。**本仓库当前只落地了「角色资源」这条腿**——请先读
+> 「哪些已经能跑、哪些还没接」。**本仓库当前两条腿都在**：「角色资源」（一直可用）与
+> 「第三方本地功能扩展」（D2/D3 起可构建、导入、启停、卸载、重装；官方包 `official.*`
+> 安装链与 host-worker 真实冻结构建仍未落地）——请先读
 > 下面的[「移植基线与现状」](#移植基线与现状2026-10-13)，再读各篇教程。
 >
 > ZIP 导入缺陷的处置口径见同一节（[§四](#四zip-导入探针缺陷2026-10-10--2026-10-13-收口口径)），
@@ -35,14 +37,14 @@
 |---|---|---|---|
 | 角色素材包（纯内容，不执行代码） | 换角色、替换 / 新增动画 | [角色素材教程](CHARACTER-PACKS.md) | ✅ |
 | 台词 / 人格模板 | 只改台词与口吻，不做可卸载功能包 | [台词模板教程](PERSONA-TEMPLATES.md) | ✅（素材侧） |
-| 功能扩展 · host-only | 增加菜单与设置，不需要独立进程 | [host-only 样例](HOST-ONLY.md) | ❌ 宿主未接入 |
-| 功能扩展 · host-worker | 在独立进程里跑耗时任务 | [Echo Worker 样例](HOST-WORKER.md) | ❌ 宿主未接入 |
+| 功能扩展 · host-only | 增加菜单与设置，不需要独立进程 | [host-only 样例](HOST-ONLY.md) | ✅ 宿主已接入（D2/D3） |
+| 功能扩展 · host-worker | 在独立进程里跑耗时任务 | [Echo Worker 样例](HOST-WORKER.md) | ⚠️ 宿主已接入（源码态）；真实冻结构建未落地 |
 
 四类 MOD 的**字段表、放置位置和接口速查**见 [MOD 制作手册与注意事项](AUTHORING-HANDBOOK.md)——本页只做分流，手册才是完整参考。
 
 ## 三、接口文档
 
-- [pet.mod_api.v1 接口基线](API-V1.md)：定义与挂载、菜单与设置协议、自有配置 / 数据、Core 简易 API、WorkerClient 生命周期与边界。**本仓库尚未实现该模块**，本文是待落地契约的权威描述。
+- [pet.mod_api.v1 接口基线](API-V1.md)：定义与挂载、菜单与设置协议、自有配置 / 数据、Core 简易 API、WorkerClient 生命周期与边界。**本仓库已实现该模块并接入 MOD 中心（D2/D3）**，本文是该接口的权威描述。
 - [兼容承诺与影响矩阵](COMPATIBILITY.md)：v1 的稳定边界，以及以后 Core 拆包时哪些做法不用重做。
 - 两个官方 DLC 案例（DLC 分支的 `OFFICIAL-DLC.md`）：**AI 1.0.4（host-only）** 与 **识屏 1.0.4（host-worker）** 的生命周期与端口设计参考。本仓库没有 DLC 的独立安装形态，故该篇**未移植**；可对照本仓库的 [PROACTIVE_SCREEN_IMPLEMENTATION_MANUAL.md](../PROACTIVE_SCREEN_IMPLEMENTATION_MANUAL.md) 与 `pet/workers/` 阅读。
 
