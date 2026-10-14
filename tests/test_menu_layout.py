@@ -534,7 +534,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         "厉害了我的鲸",
         "AI 对话",
         "看看屏幕",
-        "截图",
+        "截图提问",
         "播放动画",
         "切换角色",
         "播放速率",
@@ -562,7 +562,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
     expected_rendered = [
         "厉害了我的鲸", "|",
-        "AI 对话", "看看屏幕", "截图", "|",
+        "AI 对话", "看看屏幕", "截图提问", "|",
         "播放动画", "切换角色", "播放速率", "大小", "音乐", "|",
         "桌宠控制", "快捷启动", "|",
         "工具与帮助", "Agent 联动", "|",

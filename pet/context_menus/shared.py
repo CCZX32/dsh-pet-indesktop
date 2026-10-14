@@ -917,7 +917,7 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
 
 #: 「截图」入口名。置灰理由的真值在 ``pet/screen_capture/reasons.py``
 #: （动作条「翻译」按钮的 tooltip 与结果浮层状态行共用一份）。
-SCREEN_CAPTURE_LABEL = "截图"
+SCREEN_CAPTURE_LABEL = "截图提问"
 
 
 def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
@@ -933,7 +933,7 @@ def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
     callback = getattr(pet, "on_screen_capture", None)
     if not callable(callback):
         return None  # 宿主没接这套面（纯桌宠变体）= 能力不可用，整组不出现
-    return add_action(menu, SCREEN_CAPTURE_LABEL, "screen" if icons else None,
+    return add_action(menu, SCREEN_CAPTURE_LABEL, "size" if icons else None,
                       callback, close_on_trigger=True)
 
 

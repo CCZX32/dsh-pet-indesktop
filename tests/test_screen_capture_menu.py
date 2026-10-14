@@ -107,7 +107,7 @@ def _screen_capture_action(pet=None):
     menu = QMenu()
     populate_context_menu(menu, pet or _FakePet())
     action = next(
-        (item for item in menu.actions() if item.text() == "截图"), None
+        (item for item in menu.actions() if item.text() == "截图提问"), None
     )
     assert action is not None, "截图入口没出现在右键菜单上"
     assert action.menu() is None, "单一选项不该再套一层子菜单"
@@ -116,8 +116,8 @@ def _screen_capture_action(pet=None):
 
 def test_registry_registers_the_screen_capture_group():
     assert "screen_capture" in registry_mod.MENU_ACTIONS.ids
-    assert registry_mod.ACTION_LABELS["screen_capture"] == "截图"
-    assert registry_mod.ACTION_ICONS["screen_capture"] == "screen"
+    assert registry_mod.ACTION_LABELS["screen_capture"] == "截图提问"
+    assert registry_mod.ACTION_ICONS["screen_capture"] == "size"
 
 
 def test_default_layout_puts_the_group_right_after_look_screen():
@@ -159,7 +159,7 @@ def test_the_single_leaf_starts_a_selection_and_routes_to_the_host():
     pet = _FakePet()
     leaf = _screen_capture_action(pet)
 
-    assert leaf.text() == "截图"
+    assert leaf.text() == "截图提问"
     assert leaf.isEnabled() is True
     leaf.trigger()
     assert pet.calls == ["capture"]
@@ -205,7 +205,7 @@ def test_group_is_hidden_when_the_host_has_no_screen_capture_surface():
     """宿主没接这套回调（纯桌宠变体）= 能力不可用 → 整组不出现。"""
     menu = QMenu()
     populate_context_menu(menu, _FakePet(surfaces=False))
-    assert "截图" not in [action.text() for action in menu.actions()]
+    assert "截图提问" not in [action.text() for action in menu.actions()]
 
 
 def test_real_hosts_expose_the_single_entry():

@@ -66,7 +66,7 @@ from .shared import (
 
 ACTION_LABELS = {
     "ojingjing": "厉害了我的鲸", "chat": "AI 对话", "look_screen": "看看屏幕",
-    "screen_capture": "截图",
+    "screen_capture": "截图提问",
     "animations_hub": "播放动画", "character": "切换角色", "playback_speed": "播放速率",
     "size": "大小", "drag_physics": "拖动物理", "no_move": "不移动",
     "on_top": "窗口置顶", "autostart": "开机自启",
@@ -99,7 +99,7 @@ Enablement = Callable[[object], bool]
 
 ACTION_ICONS = {
     "ojingjing": "pet", "chat": "chat", "look_screen": "screen",
-    "screen_capture": "screen",
+    "screen_capture": "size",
     "animations_hub": "play", "character": "character", "playback_speed": "speed",
     "size": "size", "drag_physics": "physics", "no_move": "pause",
     "on_top": "pin", "autostart": "autostart",
