@@ -1,21 +1,27 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」三个动作的编排：截图 → 引擎 → 展示（本片的全部产品面）。
+"""「快速识屏」的编排：截图 → 框选动作条选动作 → 引擎/出口（本片的产品面）。
 
-三条链路的差别只在中间那一步，前后两端共用同一套收口：
+框选后由覆盖层动作条给出动作（对齐主流截图工具：松手 → 选做什么），四条链路
+的差别只在中间那一步，前后两端共用同一套收口：
 
-    截图提取文字：capture → 本地 OCR            → 结果浮层（可复制，纯本地）
-    截图翻译    ：capture → OCR(原文) + 翻译引擎 → 结果浮层（双语对照位）
-    截图问答    ：capture → 显式确认 → vision/chat 通道 → 岛 / 结果浮层
+    提取文字：capture → 本地 OCR            → 结果浮层（可复制，纯本地）
+    翻译    ：capture → OCR(原文) + 翻译引擎 → 结果浮层（双语对照位；引擎后续片）
+    复制图像：capture → 系统剪贴板           → 岛/气泡一句状态（纯本地）
+    截图问答：capture → 打开问答浮窗          → 图进输入栏，用户自己打字发问、可多轮
+              （不弹系统确认框：发不发送、发什么，都由用户在浮窗里亲手点「发送」
+              决定——打开窗口本身一个字节都不发）
 
 为什么编排单独立一层（而不是塞进窗口类）：宿主有两条（``PetWindow`` 单窗拓扑与
 ``OverlayShell`` sprite 拓扑），窗口类里各写一遍必然漂移；这里只认一个 duck-typed
 宿主面（``cfg`` / ``show_bubble`` / ``proactive_watcher`` / ``screen_capture_island``），
-两条宿主各自只挂三个零参回调。整个文件不 import 任何窗口模块。
+两条宿主各自只挂一个零参回调。整个文件不 import 任何窗口模块。
 
 五条纪律（每条都有对应用例）：
 
-1. **隐私红线**：提取文字纯本地（不确认、不联网）；问答把像素发出本机之前
-   **必须**过一次显式确认，拒绝即丢图（不缓存、不留观感上的"稍后再发"）。
+1. **隐私红线**：提取文字/复制图像纯本地（不联网）；问答的像素只在用户在问答浮窗里
+   亲手点「发送」时才离开本机——浮窗本身即确认面（发送与否、发送什么内容都由用户
+   在发送前看得见、改得了），不再叠一层系统 Yes/No 对话框（2026-10-14 实机反馈：
+    modal 确认框突兀且与操作条语义重复）。
 2. **物理隔离**：采集会话期间暂停主动识屏 watcher，会话结束**只恢复到此前配置
    允许的状态**——此前没在跑就不许被这次截图唤醒（对称，不是无条件 resume）。
 3. **失败也收口**：采集中途取消/失败/引擎抛错，watcher 与 busy 位都必须回到起点，
@@ -40,9 +46,9 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, Signal
 
 from .controller import ScreenCaptureController, _weak_slot
+from .overlay import ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE
 from .reasons import OCR_PENDING_REASON, TRANSLATION_PENDING_REASON
 from .result_panel import SHORT_RESULT_LIMIT, ScreenResult, ScreenResultPanel
-from .vision_bridge import ChatVisionChannel
 
 # ``_weak_slot``：slice-1 的 Qt 生命周期小工具（信号槽只持弱引用，避免
 # ``controller ↔ actions`` 引用环把 Qt 销毁推到解释器退出期）。同包内复用一份，
@@ -52,6 +58,7 @@ log = logging.getLogger("dsh-pet-standalone")
 
 __all__ = [
     "ACTION_ASK",
+    "ACTION_COPY",
     "ACTION_OCR",
     "ACTION_TRANSLATE",
     "ACTIONS",
@@ -60,7 +67,6 @@ __all__ = [
     "ScreenCaptureActions",
     "ScreenCapturePresenter",
     "actions_for",
-    "confirm_cloud_send",
     "ocr_engine_available",
     "resolve_ocr_engine",
     "resolve_ocr_release",
@@ -68,10 +74,7 @@ __all__ = [
     "translation_engine_available",
 ]
 
-ACTION_OCR = "ocr"
-ACTION_TRANSLATE = "translate"
-ACTION_ASK = "ask"
-ACTIONS = (ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK)
+ACTIONS = (ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY)
 
 TITLE_OCR = "截图提取文字"
 TITLE_TRANSLATE = "截图翻译"
@@ -148,33 +151,6 @@ def ocr_engine_available() -> bool:
 
 def translation_engine_available() -> bool:
     return resolve_translator() is not None
-
-
-def confirm_cloud_send(purpose: str, parent=None) -> bool:
-    """显式确认：把选区像素发到云端 AI 服务之前问一次（设计红线）。
-
-    **失败即不发**：拿不到用户明确的"是"（点了否、关掉对话框、弹窗失败）一律按
-    拒绝处理。用静态 ``QMessageBox.question`` 而不是自造对话框：默认按钮是「否」，
-    且在无人值守环境（测试/CI 已全局打桩返回 No）不会把进程挂住。
-    """
-    from PySide6.QtWidgets import QMessageBox
-
-    why = {
-        ACTION_ASK: "让 AI 看图并回答这次提问",
-    }.get(str(purpose), "完成这次操作")
-    text = (
-        f"要把框选的这块图发到你在设置里配置的 AI 服务，{why}吗？\n\n"
-        "截图全程只在内存里处理、不会存到磁盘；但内容会发送到该服务。\n"
-        "点「否」则什么都不会发出去。"
-    )
-    answer = QMessageBox.question(
-        parent,
-        "发送截图到 AI 服务",
-        text,
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        QMessageBox.StandardButton.No,
-    )
-    return answer == QMessageBox.StandardButton.Yes
 
 
 # ---------------------------------------------------------------- watcher 隔离
@@ -324,12 +300,13 @@ class ScreenCapturePresenter:
 
     def __init__(self, *, island=None, bubble=None,
                  panel_factory=ScreenResultPanel, panel_parent=None,
-                 style: str | None = None) -> None:
+                 style: str | None = None, continue_ask=None) -> None:
         self._island = island
         self._bubble = bubble
         self._panel_factory = panel_factory
         self._panel_parent = panel_parent
         self._style = style
+        self._continue_ask = continue_ask   # 「继续提问」回调 (image, text)；None=不提供
         self._panel: ScreenResultPanel | None = None
 
     # ------------------------------------------------------------ 对外
@@ -346,7 +323,7 @@ class ScreenCapturePresenter:
         panel = self.panel()
         if panel is None:
             return None
-        panel.show_result(result, self.island_widget())
+        panel.show_result(result, self.island_widget(), on_continue_ask=self._continue_ask)
         return panel
 
     def panel(self) -> ScreenResultPanel | None:
@@ -411,11 +388,14 @@ class ScreenCapturePresenter:
 
 
 class ScreenCaptureActions(QObject):
-    """三个截图动作的编排宿主（一次一条，宿主长期持有）。
+    """截图动作的编排宿主（一次一条，宿主长期持有）。
 
-    依赖全部可注入（``controller`` / ``ocr`` / ``translator`` / ``ask`` /
-    ``confirm`` / ``presenter`` / ``watcher``），默认走真实实现；测试用假件即可
-    在 offscreen 下把三条链路与所有出口钉死。
+    菜单只负责"开始框选"（``run()``）；具体做什么由覆盖层动作条在松手后决定，
+    经 ``controller.captured`` 的第三个参数带回来分发（``_on_captured``）。
+
+    依赖全部可注入（``controller`` / ``ocr`` / ``translator`` / ``ask_dialog`` /
+    ``presenter`` / ``watcher``），默认走真实实现；测试用假件即可在 offscreen 下
+    把四条链路与所有出口钉死。
 
     ``watcher`` 传的是**取用回调的原料**：注入替身时它被包成"每次都返回这一个"的
     回调，不注入时用的是"每次从宿主现取"（见 :class:`_WatcherGate`）。
@@ -427,15 +407,14 @@ class ScreenCaptureActions(QObject):
     _stage_done = Signal(object, object)   # 私有：后台线程 → GUI 线程
 
     def __init__(self, host=None, *, controller=None, ocr=None, translator=None,
-                 ask=None, confirm=None, presenter=None, watcher=None, release=None,
+                 ask_dialog=None, presenter=None, watcher=None, release=None,
                  run_inline: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._host = host
         self._config = _host_config(host)
         self._ocr = ocr
         self._translator = translator
-        self._ask = ask
-        self._confirm = confirm
+        self._ask_dialog = ask_dialog
         self._release = release
         self._run_inline = bool(run_inline)
         self._watcher_gate = _WatcherGate(
@@ -444,8 +423,8 @@ class ScreenCaptureActions(QObject):
         self._presenter = presenter if presenter is not None else self._default_presenter()
         self._controller = controller if controller is not None else ScreenCaptureController(self)
         self._busy = False
-        self._action = ""
         self._pending: tuple[Callable, Callable] | None = None
+        self._last_image = None   # 最近一次截下的选区图（「继续提问」的上下文）
         self._stage_done.connect(self._on_stage_done)
         # 两处连接的**判据**不同，别混着读（2026-10-13 交叉审查 nit 要的就是这条区分）：
         #
@@ -468,18 +447,17 @@ class ScreenCaptureActions(QObject):
 
     # ---------------------------------------------------------------- 入口
 
-    def run(self, action: str) -> bool:
-        """启动一次动作；已在采集中或 host 不支持时返回 False。"""
-        key = str(action)
-        if key not in ACTIONS:
-            raise ValueError(f"未知的截图动作 {action!r}（可选：{', '.join(ACTIONS)}）")
+    def run(self) -> bool:
+        """开始一次框选；已在采集中或 host 不支持时返回 False。
+
+        动作不在入口定死：松手后覆盖层动作条给出动作，随 ``captured`` 带回。
+        """
         if self._busy:
-            log.debug("快速识屏：上一轮还没收口，忽略本次触发 (%s)", key)
+            log.debug("快速识屏：上一轮还没收口，忽略本次触发")
             self.status("上一张还没看完呢…")
             return False
 
         self._busy = True
-        self._action = key
         self._watcher_gate.pause()
         try:
             started = bool(self._controller.start())
@@ -502,16 +480,19 @@ class ScreenCaptureActions(QObject):
 
     # ------------------------------------------------------------ 采集回调
 
-    def _on_captured(self, image, _selection) -> None:
+    def _on_captured(self, image, _selection, action) -> None:
         if not self._busy:
             log.debug("快速识屏：忽略迟到的采集结果")
             return
         # 采集期到这一刻结束：窗口已还原、冻结帧已裁出，watcher 可以回岗。
         self._watcher_gate.restore()
-        if self._action == ACTION_OCR:
+        self._last_image = image   # 「继续提问」要把它带进问答浮窗（纯内存）
+        if action == ACTION_OCR:
             self._run_ocr(image)
-        elif self._action == ACTION_TRANSLATE:
+        elif action == ACTION_TRANSLATE:
             self._run_translate(image)
+        elif action == ACTION_COPY:
+            self._run_copy(image)
         else:
             self._run_ask(image)
 
@@ -531,7 +512,24 @@ class ScreenCaptureActions(QObject):
         self.status(f"这张没截成（{reason}）")
         self.failed.emit(str(reason))
 
-    # ---------------------------------------------------------------- 三条链路
+    # ---------------------------------------------------------------- 四条链路
+
+    def _run_copy(self, image) -> None:
+        """复制图像：纯本地，裁出的选区图直接进系统剪贴板。"""
+        self._finish()
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            clipboard = QApplication.clipboard()
+            if clipboard is None:
+                raise RuntimeError("剪贴板不可用")
+            clipboard.setImage(image)
+        except Exception as exc:
+            log.exception("快速识屏：写入剪贴板失败")
+            self.status(f"没能复制（{exc}）")
+            self.failed.emit(str(exc))
+            return
+        self.status("已复制到剪贴板")
 
     def _run_ocr(self, image) -> None:
         engine = self._ocr if self._ocr is not None else resolve_ocr_engine()
@@ -555,6 +553,7 @@ class ScreenCaptureActions(QObject):
         self._emit_result(ScreenResult(
             title=TITLE_OCR, primary=value, force_panel=True,
             status=f"本地识别 · {len(value)} 字",
+            image=self._last_image,
         ))
 
     def _run_translate(self, image) -> None:
@@ -589,36 +588,30 @@ class ScreenCaptureActions(QObject):
         self._emit_result(ScreenResult(
             title=TITLE_TRANSLATE, primary=source, secondary=translated,
             force_panel=True, status=status, primary_label="原文" if translated else "",
+            image=self._last_image,
         ))
 
     def _run_ask(self, image) -> None:
-        if not self._confirm_send(ACTION_ASK):
-            self._finish()
-            self.status("已取消，这张图没有发出去")
-            return
-        channel = self._ask if self._ask is not None else self._build_ask_channel()
-        if channel is None:
-            self._finish()
+        """截图问答：打开问答浮窗（图进输入栏），发送与否由用户在浮窗里决定。
+
+        采集会话到这里就收口了——浮窗是独立生命周期的对话面，不占 busy 位；
+        真正发请求的是浮窗自己（用户点「发送」那一刻），见 ``ask_dialog.py``。
+        """
+        self._finish()
+        dialog = self._get_ask_dialog()
+        if dialog is None:
             self._emit_result(ScreenResult(
                 title=TITLE_ASK, status="AI 对话通道不可用（未配置或已关闭）",
                 force_panel=True,
             ))
             return
-        self.status("正在看图…")
-        self._submit(lambda: channel(image),
-                     self._on_ask_done,
-                     functools.partial(self._on_stage_error, stage="看图"))
-
-    def _on_ask_done(self, reply) -> None:
-        self._finish()
-        value = str(reply or "").strip()
-        if not value:
-            self._emit_result(ScreenResult(title=TITLE_ASK, status="模型没说话，再试一次？",
-                                           force_panel=True))
-            return
-        self._emit_result(ScreenResult(
-            title=TITLE_ASK, primary=value, status="来自你在设置里配置的 AI 服务",
-        ))
+        try:
+            dialog.start_with_image(image)
+        except Exception as exc:
+            log.exception("快速识屏：问答浮窗打开失败")
+            self._emit_result(ScreenResult(
+                title=TITLE_ASK, status=f"问答窗没能打开（{exc}）", force_panel=True,
+            ))
 
     def _on_stage_error(self, message, *, stage: str) -> None:
         self._finish()
@@ -671,7 +664,6 @@ class ScreenCaptureActions(QObject):
 
     def _finish(self) -> None:
         self._busy = False
-        self._action = ""
         self._pending = None
         # 「用完就丢」的调用点：本方法是**所有**出口的唯一收口（成功交付 / 取消 /
         # 失败 / 引擎缺席），所以这里放一次就覆盖了全部终态，不必在每条链路上
@@ -713,6 +705,23 @@ class ScreenCaptureActions(QObject):
     def status(self, text: str) -> None:
         self._presenter.status(text)
 
+    def _continue_ask(self, image, recognized_text: str) -> None:
+        """结果面板的「继续提问…」：把这张图（+ 已识别文字）带进问答浮窗。"""
+        dialog = self._get_ask_dialog()
+        if dialog is None:
+            self._emit_result(ScreenResult(
+                title=TITLE_ASK, status="AI 对话通道不可用（未配置或已关闭）",
+                force_panel=True,
+            ))
+            return
+        try:
+            dialog.start_with_image(image, context_text=recognized_text)
+        except Exception as exc:
+            log.exception("快速识屏：问答浮窗打开失败")
+            self._emit_result(ScreenResult(
+                title=TITLE_ASK, status=f"问答窗没能打开（{exc}）", force_panel=True,
+            ))
+
     # ---------------------------------------------------------------- 依赖
 
     def _default_presenter(self) -> ScreenCapturePresenter:
@@ -726,30 +735,29 @@ class ScreenCaptureActions(QObject):
             panel_factory=ScreenResultPanel,
             panel_parent=_host_dialog_parent(host),
             style=_host_theme(host),
+            continue_ask=self._continue_ask,
         )
 
-    def _confirm_send(self, purpose: str) -> bool:
-        """云端发送确认；确认环节本身出错时**按拒绝处理**（fail-closed）。"""
-        confirm = self._confirm
-        if confirm is None:
-            confirm = functools.partial(
-                confirm_cloud_send, parent=_host_dialog_parent(self._host),
-            )
-            self._confirm = confirm
-        try:
-            return bool(confirm(purpose))
-        except Exception:
-            log.exception("快速识屏：发送确认环节失败，按拒绝处理")
-            return False
-
-    def _build_ask_channel(self):
+    def _get_ask_dialog(self):
+        """问答浮窗（懒造 + 复用）：配置面不可用返回 None（如实上报，不静默）。"""
+        dialog = self._ask_dialog
+        if dialog is not None:
+            return dialog
         if self._config is None:
             return None
         try:
-            return ChatVisionChannel(self._config)
+            from .ask_dialog import ScreenAskDialog
+
+            dialog = ScreenAskDialog(
+                self._config,
+                parent=_host_dialog_parent(self._host),
+                style=_host_theme(self._host),
+            )
         except Exception:
-            log.exception("快速识屏：问答通道构建失败")
+            log.exception("快速识屏：问答浮窗创建失败")
             return None
+        self._ask_dialog = dialog
+        return dialog
 
 
 # ---------------------------------------------------------------- 宿主接线

@@ -5,8 +5,8 @@
 里找到对应的顺序断言）::
 
     hide 自家窗口 → 等一帧合成 → 抓冻结帧 → 建覆盖层并显示 → 用户框选
-        ├─ Enter：裁选区 → sRGB 8-bit → 关覆盖层 → 还原窗口 → captured(图, 选区)
-        ├─ Esc  ：关覆盖层 → 还原窗口 → cancelled("esc")
+        ├─ 动作条/Enter：裁选区 → sRGB 8-bit → 关覆盖层 → 还原窗口 → captured(图, 选区, 动作)
+        ├─ Esc/取消 ：关覆盖层 → 还原窗口 → cancelled(理由)
         └─ 任一步失败：关覆盖层 → 还原窗口 → failed(理由)
 
 四个刻意的顺序取舍：
@@ -41,13 +41,16 @@ import weakref
 from PySide6.QtCore import QObject, Signal
 
 from .host import WindowHider, visible_top_level_windows
-from .overlay import SelectionOverlay
+from .overlay import ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE, SelectionOverlay
 from .pixels import crop_selection, grab_screen_image, to_srgb8
 from .session import CapturePhase, CaptureSession, SelectionRect
 
 log = logging.getLogger("dsh-pet-standalone")
 
 __all__ = ["ScreenCaptureController", "settle_before_grab"]
+
+#: 覆盖层可能上报的动作闭集（翻译的按钮恒置灰不会到，但信号面不信 UI 层的保证）。
+_VALID_ACTIONS = frozenset({ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY})
 
 #: hide 与 grab 之间等一帧的上限（ms）。DwmFlush 正常只花一个合成周期（60 Hz ≈ 17 ms），
 #: 兜底那条路按屏幕刷新率算；上限存在的意义是别让一次抓屏卡在"等一个等不到的帧"上。
@@ -183,12 +186,12 @@ class ScreenCaptureController(QObject):
 
     依赖全部可注入（``hider`` / ``grabber`` / ``overlay_factory`` / ``screen`` /
     ``settler``），默认走真实实现；测试用假宿主即可在 offscreen 下把顺序与异常
-    出口钉死。覆盖层只需要提供 ``selection_confirmed`` / ``selection_cancelled``
+    出口钉死。覆盖层只需要提供 ``action_requested`` / ``selection_cancelled``
     两个信号与 ``show()`` / ``close()``，不要求是 ``SelectionOverlay``。
     """
 
-    captured = Signal(object, object)   # (QImage 选区像素, SelectionRect 逻辑选区)
-    cancelled = Signal(str)             # 用户取消（本片只有 "esc"）
+    captured = Signal(object, object, object)   # (QImage 选区像素, SelectionRect 逻辑选区, 动作 id)
+    cancelled = Signal(str)             # 用户取消（"esc" / "toolbar"）
     failed = Signal(str)                # 采集失败理由（含阶段前缀，便于定位）
 
     def __init__(self, parent=None, *, session=None, hider=None, grabber=None,
@@ -247,7 +250,7 @@ class ScreenCaptureController(QObject):
             # 两处连接都走弱引用槽（同 ``destroyed`` 那条）：直连宿主方法会形成
             # controller↔overlay 引用环，把 Qt 对象的销毁推到解释器退出期——那条路径
             # 实测以原生崩溃收场。全模块统一一种连接形态，不靠记性区分哪条安全。
-            overlay.selection_confirmed.connect(_weak_slot(self, "_on_confirmed"))
+            overlay.action_requested.connect(_weak_slot(self, "_on_action"))
             overlay.selection_cancelled.connect(_weak_slot(self, "_on_cancelled"))
             # 覆盖层被 Qt 直接销毁（异常退出/被系统回收）时没有 Esc/Enter 信号可等，
             # 不接这一手就永远停在 selecting——窗口留在隐藏态，桌宠凭空消失。
@@ -276,9 +279,12 @@ class ScreenCaptureController(QObject):
 
     # ---------------------------------------------------------------- 回调
 
-    def _on_confirmed(self, selection) -> None:
+    def _on_action(self, action, selection) -> None:
         if self._session.phase is not CapturePhase.SELECTING:
-            log.debug("快速识屏：忽略迟到或重复的确认信号")
+            log.debug("快速识屏：忽略迟到或重复的动作信号")
+            return
+        if str(action) not in _VALID_ACTIONS:
+            self._abort(f"unknown-action:{action}")
             return
         if not isinstance(selection, SelectionRect) or selection.is_empty:
             self._abort("empty-selection")
@@ -294,7 +300,7 @@ class ScreenCaptureController(QObject):
 
         self._session.confirm(selection)
         self._teardown()
-        self.captured.emit(image, selection)
+        self.captured.emit(image, selection, str(action))
 
     def _on_cancelled(self, reason) -> None:
         if self._session.phase is not CapturePhase.SELECTING:

@@ -7,8 +7,8 @@
 不新开 HTTP 路径、不自己拼 payload、不碰密钥存储。
 
 隐私（与 ``pet/vision.py`` 同一约定）：图像全程只在内存里，不落盘；发出去的
-唯一出口是用户自己配置的聊天/视觉 API，且**调用方必须在调用本通道之前**做过
-显式确认（见 ``actions.confirm_cloud_send``）。
+唯一出口是用户自己配置的聊天/视觉 API，且**发送动作只发生在问答浮窗里用户
+亲手点「发送」那一刻**（浮窗本身即确认面：发不发、发什么，用户都看得见）。
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from PySide6.QtGui import QImage
 
 log = logging.getLogger("dsh-pet-standalone")
 
-__all__ = ["SELECTION_PROMPT", "ChatVisionChannel", "image_to_jpeg_bytes",
-           "resolve_chat_context"]
+__all__ = ["SELECTION_PROMPT", "ChatVisionChannel", "VisionConversation",
+           "image_to_jpeg_bytes", "resolve_chat_context"]
 
 #: 框选区域的问题文本：默认那条「这是主人当前的屏幕截图，回应一两句」是给
 #: **整屏**看的（重在陪伴式反应），对一块被框选的图文不对题，所以问答通道自带
@@ -101,3 +101,67 @@ class ChatVisionChannel:
         return vision_mod.ask_about_screen(
             payload, app_info, system_prompt, provider, user_text=self._prompt,
         )
+
+
+class VisionConversation:
+    """截图问答浮窗的多轮会话：首条用户消息带图，后续轮次纯文本，历史自持。
+
+    与一次性通道（``ChatVisionChannel``）的区别只在组包：图只在第一轮出现
+    （之后的轮次引用的是同一段历史，模型看得到上下文），system 用人设那份
+    （``resolve_chat_context`` 同一口径）。
+
+    ``ask`` 是**同步阻塞**的（超时/重试口径与 ``vision.ask_about_screen`` 相同）；
+    调用方（问答浮窗）负责放后台线程。
+
+    隐私不变量：图只在 :meth:`start` 时编码进内存（JPEG bytes），不落盘；
+    每次 ``ask`` 发出的内容 = system + 历史 + 本轮文字——调用方（浮窗）把每一次
+    发送都呈现在消息列表里，用户看得见自己发出去过什么。
+    """
+
+    def __init__(self, config) -> None:
+        self._provider, self._system_prompt = resolve_chat_context(config)
+        self._jpeg: bytes | None = None
+        self._context_text = ""
+        self._history: list[dict] = []
+
+    def start(self, image: QImage, context_text: str = "") -> None:
+        """开新会话：换图即清空历史（旧历史配新图是语义错乱）。
+
+        ``context_text``：随首轮一起发出的参考资料（现在是 OCR 已识别出的文字——
+        图小字糊时它能救场），只进首轮用户消息，不占后续轮次。
+        """
+        from .. import vision as vision_mod
+
+        self._jpeg = image_to_jpeg_bytes(
+            image, max_edge=vision_mod.MAX_EDGE, quality=vision_mod.JPEG_QUALITY,
+        )
+        self._context_text = str(context_text or "").strip()[:4000]
+        self._history = []
+
+    @property
+    def ready(self) -> bool:
+        return self._jpeg is not None
+
+    def ask(self, text: str) -> str:
+        """发一轮：首轮把图一起带上，之后纯文本。返回模型答复（同步阻塞）。"""
+        import base64
+
+        from .. import vision as vision_mod
+
+        if self._jpeg is None:
+            raise RuntimeError("会话还没有图（先 start）")
+        question = str(text or "").strip() or SELECTION_PROMPT
+        if not self._history:
+            if self._context_text:
+                question += f"\n\n（附图的文字识别参考：{self._context_text}）"
+            b64 = base64.b64encode(self._jpeg).decode("ascii")
+            self._history.append({"role": "user", "content": [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]})
+        else:
+            self._history.append({"role": "user", "content": question})
+        messages = [{"role": "system", "content": self._system_prompt}, *self._history]
+        reply = str(vision_mod.post_vision_messages(messages, self._provider) or "").strip()
+        self._history.append({"role": "assistant", "content": reply})
+        return reply

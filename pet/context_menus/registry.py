@@ -291,10 +291,10 @@ class MenuActionRegistry:
             ),
             "chat": MenuActionSpec(_build_chat, _callback_available("on_open_chat")),
             "look_screen": MenuActionSpec(add_look_screen, _callback_available("on_look_screen")),
-            # 「截图」三合一一组（提取文字/翻译/问答）：组内三叶的可用性由建造器
-            # 逐条判并写明原因，注册表这一层只表达"宿主有没有这套面"。
+            # 「截图」单一入口（框选识屏）：动作在覆盖层松手后的动作条上选，
+            # 注册表这一层只表达"宿主有没有这套面"。
             "screen_capture": MenuActionSpec(
-                add_screen_capture_menu, _callback_available("on_screen_capture_ocr")
+                add_screen_capture_menu, _callback_available("on_screen_capture")
             ),
             "animations_hub": MenuActionSpec(_build_animations),
             "character": MenuActionSpec(lambda menu, pet: build_character_menu(menu, pet)),

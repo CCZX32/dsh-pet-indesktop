@@ -1,24 +1,33 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」框选覆盖层：铺满目标屏、画冻结帧、拖框、Esc/Enter。
+"""「快速识屏」框选覆盖层：铺满目标屏、画冻结帧、拖框、松手出操作条。
 
-视觉契约（"真截屏体验"就靠这三笔）：
+视觉契约（"真截屏体验"就靠这几笔）：
 
 - 底图 = 冻结帧（用户看到的是静止画面，不是身后的实时桌面）；
-- 非选区压暗 ``DIM_ALPHA``，选区内保持原样；
-- 选区描 1px 边框（``BORDER_COLOR``），提示"这块会被截走"。
+- 非选区轻压暗 ``DIM_ALPHA``——压暗是为了衬托选区，**不是遮住内容**：
+  用户要先看得清屏幕，才知道该框哪块（2026-10-14 实机反馈：110 在 HDR 屏上
+  被 SDR 提亮补偿抬成一层白雾，字都读不清，调到 80）；
+- 选区描白色虚线框 + 左上角尺寸标签，松手后下方浮出动作条——
+  交互对齐主流截图工具（框完松手 → 选做什么），不再要求"拖完再按 Enter"。
 
 交互契约：
 
 - 左键拖拽出选区，反向拖拽照常（归一化交给 ``normalize_drag``）；
-- ``Esc`` 取消（``selection_cancelled("esc")``）、``Enter`` 确认
-  （``selection_confirmed(SelectionRect)``）；
-- **没有框住任何东西时 Enter 无效**：空选区进下游纯属浪费，在这里就挡住。
-  比 ``MIN_SELECTION_SIDE`` 更小的拖拽**等于没框**——1~2 px 的抖动（按下时手滑）
-  在旧口径下会换来"确认成功"，然后下游拿着几个像素去识别，用户看到的是
+- 松手且选区可用 → 选区钉住、动作条出现（提取文字 / 翻译 / 截图问答 /
+  复制图像 / 取消）；在空白处重新按下 = 丢弃旧选区重框，动作条收起；
+- ``Esc`` 全程取消（``selection_cancelled("esc")``），``Enter`` = 默认动作
+  （提取文字）；动作条点「取消」= ``selection_cancelled("toolbar")``；
+- **没有框住任何东西时动作条不出现、Enter 无效**：空选区进下游纯属浪费，
+  在这里就挡住。比 ``MIN_SELECTION_SIDE`` 更小的拖拽**等于没框**——1~2 px 的
+  抖动在旧口径下会换来"确认成功"，然后下游拿着几个像素去识别，用户看到的是
   "没有识别到文字"：一次完整会话白跑，还查不出为什么。所以门槛卡在交互层。
-- **记住上次选区**：同一块屏（尺寸相同）上再次框选时，上次确认过的那块预先
-  画出来并可直接 Enter 复用（"盯着同一个小区域反复截"是高频用法）。跨屏不共用
-  ——尺寸变了旧坐标就没有意义；取消不算记住，没确认过的东西不该被当成默认值。
+- **记住上次选区**：同一块屏（尺寸相同）上再次框选时，上次用过的那块预先
+  画出来、动作条直接待命（"盯着同一个小区域反复截"是高频用法）。跨屏不共用
+  ——尺寸变了旧坐标就没有意义；取消不算记住，没动过作的东西不该被当成默认值。
+
+动作条的可用性：「翻译」引擎未接入，恒置灰并带原因 tooltip（文案真值在
+``reasons.py``，与结果浮层状态行同一份）。其余动作不在这一层判可用——引擎缺席
+这类事只有真跑才知道，动作的诚实报错由编排层负责（见 ``actions.py``）。
 
 本片覆盖层是**独占**的：它铺满整屏并置顶，期间不处理"鼠标穿透到非选区"的
 需求（那是后续片；先保证"框选期间点不到别的"这个可预期的行为）。
@@ -28,22 +37,42 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen,
+)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QWidget
 
+from .reasons import TRANSLATION_PENDING_REASON
 from .session import SelectionRect, normalize_drag
 
 log = logging.getLogger("dsh-pet-standalone")
 
-__all__ = ["DIM_ALPHA", "BORDER_COLOR", "MIN_SELECTION_SIDE", "SelectionMemory",
-           "SelectionOverlay", "shared_selection_memory"]
+__all__ = ["ACTION_ASK", "ACTION_COPY", "ACTION_OCR", "ACTION_TRANSLATE",
+           "DIM_ALPHA", "MIN_SELECTION_SIDE", "SelectionMemory", "SelectionOverlay",
+           "shared_selection_memory"]
 
-#: 非选区压暗强度（0-255）。定 110 的依据：白底 (255) 压到约 145，选中区
-#: 与未选中区的差异一眼可辨，又不至于看不清底下内容该不该框。
-DIM_ALPHA = 110
-BORDER_COLOR = QColor(64, 176, 255)
-BORDER_WIDTH = 1
+#: 覆盖层动作条的动作 id（编排层 ``actions.py`` 按同一份字符串分发）。
+ACTION_OCR = "ocr"
+ACTION_TRANSLATE = "translate"
+ACTION_ASK = "ask"
+ACTION_COPY = "copy"
+
+#: 非选区压暗强度（0-255）。80 的依据：选区内外一眼可分，底下内容照常可读
+#: （用户要看着内容决定框哪）；HDR 桌面会对 SDR 内容做感知提亮，压得再重
+#: 也会被抬回来一截，压太重反而只剩"雾"。
+DIM_ALPHA = 80
+
+#: 选区描边：白色虚线 + 深色实线垫底（亮/暗内容上都立得住）。
+_BORDER_LIGHT = QColor(255, 255, 255, 235)
+_BORDER_DARK = QColor(0, 0, 0, 130)
+
+#: 尺寸标签与动作条的视觉令牌（深色 pill、白字——压在冻结帧的任意内容上都可读）。
+_CHIP_BG = QColor(24, 26, 30, 215)
+_CHIP_FG = QColor(255, 255, 255, 240)
+_CHIP_RADIUS = 6.0
+_BAR_GAP = 8           # 动作条与选区的间距（逻辑像素）
+_LABEL_GAP = 6         # 尺寸标签与选区的间距
 
 #: 选区的最小边长（逻辑像素）。8 的依据：截 8×8 一块进去，OCR 必然什么都读不出来
 #: （连一个字符都放不下），所以它只可能是误触；而真正想框小图标/小按钮的用户，
@@ -52,7 +81,7 @@ MIN_SELECTION_SIDE = 8
 
 
 class SelectionMemory:
-    """上次确认过的选区（按屏幕尺寸分槽），跨覆盖层实例存活。
+    """上次用过动作的选区（按屏幕尺寸分槽），跨覆盖层实例存活。
 
     覆盖层是**每次采集现造**的对象（``controller`` 的 ``overlay_factory``），
     所以"记住上次"这件事只能存在它外面。按逻辑宽高分槽而不是只存一份：多屏
@@ -90,6 +119,64 @@ def shared_selection_memory() -> SelectionMemory:
     return _SHARED_MEMORY
 
 
+class _ActionBar(QFrame):
+    """选区动作条：松手后浮在选区下方的 pill（子控件，事件不落到覆盖层）。
+
+    只负责展示与转发点击——动作是否可用、点了之后干什么，都不是这一层的事
+    （可用性见模块 docstring，分发在 ``controller``/``actions``）。
+    """
+
+    triggered = Signal(str)   # 动作 id（含 "cancel"）
+
+    _BUTTONS = (
+        (ACTION_OCR, "提取文字", "edit"),
+        (ACTION_TRANSLATE, "翻译", ""),
+        (ACTION_ASK, "截图问答", "chat"),
+        (ACTION_COPY, "复制图像", "copy"),
+        ("cancel", "取消", "exit"),
+    )
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("screen-capture-action-bar")
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+        for action_id, label, icon_name in self._BUTTONS:
+            button = QPushButton(label, self)
+            button.setObjectName(f"screen-capture-action-{action_id}")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            if icon_name:
+                from ..context_menus.icons import vector_widget_icon
+
+                button.setIcon(vector_widget_icon(button, icon_name, 13))
+            if action_id == ACTION_TRANSLATE:
+                # 引擎是后续片：留位置、置灰、写明原因（与菜单置灰同一口径）。
+                button.setEnabled(False)
+                button.setToolTip(TRANSLATION_PENDING_REASON)
+            button.clicked.connect(
+                lambda _checked=False, aid=action_id: self.triggered.emit(aid))
+            layout.addWidget(button)
+        self.setStyleSheet(
+            "#screen-capture-action-bar {"
+            "  background: rgba(250, 250, 252, 245);"
+            "  border: 1px solid rgba(0, 0, 0, 60);"
+            "  border-radius: 8px;"
+            "}"
+            "#screen-capture-action-bar QPushButton {"
+            "  background: transparent; border: none; border-radius: 5px;"
+            "  color: #1d2129; font-size: 12px; padding: 4px 10px;"
+            "}"
+            "#screen-capture-action-bar QPushButton:hover {"
+            "  background: rgba(0, 0, 0, 18);"
+            "}"
+            "#screen-capture-action-bar QPushButton:disabled {"
+            "  color: rgba(29, 33, 41, 90);"
+            "}"
+        )
+
+
 class SelectionOverlay(QWidget):
     """整屏框选层。
 
@@ -99,8 +186,8 @@ class SelectionOverlay(QWidget):
     "上次选区"的存放处（默认走进程内共享的那一份），测试注入自己的实例即可隔离。
     """
 
-    selection_confirmed = Signal(object)   # SelectionRect
-    selection_cancelled = Signal(str)      # 取消理由
+    action_requested = Signal(str, object)  # (动作 id, SelectionRect)
+    selection_cancelled = Signal(str)       # 取消理由（"esc" / "toolbar"）
 
     def __init__(self, frame: QImage | None = None, screen=None, parent=None,
                  *, memory: SelectionMemory | None = None) -> None:
@@ -121,9 +208,15 @@ class SelectionOverlay(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setMouseTracking(True)
         self._apply_screen_geometry()
-        # 预选上次确认的那块（同尺寸屏幕才会命中，见 SelectionMemory）。刻意放在
-        # 几何就位之后：校验"还在屏内"要用到本层自己的尺寸。
+        self._action_bar = _ActionBar(self)
+        self._action_bar.triggered.connect(self._on_action_triggered)
+        self._action_bar.hide()
+        # 预选上次用过的那块（同尺寸屏幕才会命中，见 SelectionMemory）。刻意放在
+        # 几何就位之后：校验"还在屏内"要用到本层自己的尺寸。命中即待选状态，
+        # 动作条直接摆出来（不用先拖一下才能点）。
         self._selection = self._remembered()
+        if self._usable(self._selection):
+            self._show_action_bar()
 
     # ------------------------------------------------------------ 只读视图
 
@@ -135,6 +228,10 @@ class SelectionOverlay(QWidget):
 
     def current_selection(self) -> SelectionRect | None:
         return self._selection
+
+    def action_bar(self) -> QWidget:
+        """动作条（测试与定位探针用；产品代码不碰它）。"""
+        return self._action_bar
 
     def _remembered(self) -> SelectionRect | None:
         """该尺寸屏幕上的上次选区；不在屏内（换分辨率/显示器后）就当没记过。
@@ -191,9 +288,11 @@ class SelectionOverlay(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             event.ignore()
             return
+        # 空白处按下 = 丢弃旧选区重框（动作条收起；条是子控件，点它不会走到这里）。
         self._dragging = True
         self._anchor = QPoint(round(event.position().x()), round(event.position().y()))
         self._selection = None
+        self._action_bar.hide()
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -214,15 +313,58 @@ class SelectionOverlay(QWidget):
                 round(event.position().x()), round(event.position().y()))
         self._anchor = None
         # 拖到太小（含原地点击）等于**没框住东西**：把选区清成 None，让画面
-        # 如实显示"还没选"，Enter 自然也就无效（见 keyPressEvent）。保留一个
-        # 1 px 的亮框反而在骗用户"选好了"。
+        # 如实显示"还没选"，动作条与 Enter 自然也就无效。保留一个 1 px 的亮框
+        # 反而在骗用户"选好了"。
         if not self._usable(self._selection):
             self._selection = None
         self.update()
+        if self._usable(self._selection):
+            self._show_action_bar()
 
     def _normalize(self, x0: int, y0: int, x1: int, y1: int) -> SelectionRect:
         """一次拖拽的起止点 → 钳制在屏内的选区（拖拽中途的预览也走它）。"""
         return normalize_drag(x0, y0, x1, y1, bounds=self._screen_size())
+
+    # ---------------------------------------------------------------- 动作条
+
+    def _show_action_bar(self) -> None:
+        """把动作条摆到选区下缘（放不下就翻上缘），横向右对齐并钳在屏内。"""
+        selection = self._selection
+        if not self._usable(selection):
+            return
+        bar = self._action_bar
+        bar.adjustSize()
+        size = bar.sizeHint()
+        if size.width() <= 0 or size.height() <= 0:
+            size = QSize(320, 36)
+        width, height = self._screen_size()
+        if size.width() > width:   # 窄屏（含 offscreen 假屏）：条宽钳进屏内
+            size = QSize(width, size.height())
+        x = selection.x + selection.width - size.width()
+        y = selection.y + selection.height + _BAR_GAP
+        if y + size.height() > height:  # 下方放不下 → 翻到选区上缘内侧
+            y = selection.y - size.height() - _BAR_GAP
+        if y < 0:                        # 选区贴顶 → 放到选区内底部
+            y = max(0, selection.y + selection.height - size.height() - _BAR_GAP)
+        x = max(0, min(x, width - size.width()))
+        bar.setGeometry(x, y, size.width(), size.height())
+        bar.show()
+        bar.raise_()
+
+    def _on_action_triggered(self, action: str) -> None:
+        if action == "cancel":
+            self.selection_cancelled.emit("toolbar")
+            return
+        self._confirm_with(action)
+
+    def _confirm_with(self, action: str) -> None:
+        """确认一条动作：记住选区（用过的才配当默认值）→ 上报编排层。"""
+        selection = self._selection
+        if not self._usable(selection):
+            log.debug("快速识屏：空选区或过小选区忽略动作 (%s)", action)
+            return
+        self._memory.remember(self._screen_size(), selection)
+        self.action_requested.emit(action, selection)
 
     # ---------------------------------------------------------------- 键盘
 
@@ -232,13 +374,8 @@ class SelectionOverlay(QWidget):
             self.selection_cancelled.emit("esc")
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            selection = self._selection
-            if not self._usable(selection):
-                # 空/过小的选区不确认：留在覆盖层上等用户真的框一下或按 Esc。
-                log.debug("快速识屏：空选区或过小选区忽略 Enter")
-                return
-            self._memory.remember(self._screen_size(), selection)
-            self.selection_confirmed.emit(selection)
+            # Enter = 默认动作（提取文字）。空选区在这里挡住，与动作条同一条门槛。
+            self._confirm_with(ACTION_OCR)
             return
         super().keyPressEvent(event)
 
@@ -269,7 +406,34 @@ class SelectionOverlay(QWidget):
         ):
             if strip.width() > 0 and strip.height() > 0:
                 painter.fillRect(strip, QColor(0, 0, 0, DIM_ALPHA))
-        painter.setPen(BORDER_COLOR)
-        for _ in range(BORDER_WIDTH):
-            painter.drawRect(hole.adjusted(0, 0, -1, -1))
+
+        # 描边：深色实线垫底 + 白色虚线——亮色内容与压暗区两侧都看得清。
+        painter.setPen(QPen(_BORDER_DARK, 3))
+        painter.drawRect(hole.adjusted(0, 0, -1, -1))
+        dash = QPen(_BORDER_LIGHT, 1.4, Qt.PenStyle.DashLine)
+        painter.setPen(dash)
+        painter.drawRect(hole.adjusted(0, 0, -1, -1))
+
+        self._paint_size_label(painter, hole)
         painter.end()
+
+    def _paint_size_label(self, painter: QPainter, hole: QRect) -> None:
+        """选区左上方的尺寸标签（W × H）；贴顶时收进选区内侧。"""
+        text = f"{hole.width()} × {hole.height()}"
+        metrics = painter.fontMetrics()
+        text_w = metrics.horizontalAdvance(text)
+        pad_x, pad_y = 8, 4
+        chip_w = text_w + 2 * pad_x
+        chip_h = metrics.height() + 2 * pad_y
+        x = hole.left()
+        y = hole.top() - chip_h - _LABEL_GAP
+        if y < 0:
+            y = hole.top() + _LABEL_GAP
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addRoundedRect(float(x), float(y), float(chip_w), float(chip_h),
+                            _CHIP_RADIUS, _CHIP_RADIUS)
+        painter.fillPath(path, _CHIP_BG)
+        painter.setPen(_CHIP_FG)
+        painter.drawText(QRect(x, y, chip_w, chip_h), Qt.AlignmentFlag.AlignCenter, text)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)

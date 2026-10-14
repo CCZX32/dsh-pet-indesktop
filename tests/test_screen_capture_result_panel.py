@@ -1,29 +1,41 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」结果浮层：可复制、Esc 可关、贴边、不抢焦点（offscreen）。
+"""「快速识屏」结果浮层：可复制、Esc 可关、可拖可缩、贴边、不抢焦点（offscreen）。
 
-面板是三条截图链路共同的落点，它的契约只有四条，逐条都有对应用例：
+面板是四条截图链路共同的落点，它的契约有五条，逐条都有对应用例：
 
 1. **可复制**：OCR 文本 / 问答答复靠鼠标点按钮进剪贴板——面板是
    ``WS_EX_NOACTIVATE``（``WindowDoesNotAcceptFocus``）窗，用户没法用
-   Ctrl+C，复制入口必须是一个鼠标可点的按钮；
+   Ctrl+C，复制入口必须是一个鼠标可点的按钮（主按钮是 accent 蓝）；
 2. **Esc 可关**：同上，面板拿不到键盘焦点，Esc 只能走应用级过滤器；而过滤器
    **绝不吞事件**（返回 False），所以"关面板"永远不挡主人的其它 Esc 语义；
 3. **贴边**：锚在岛旁，越界夹回当刻可用几何——不许跑到屏幕外；
 4. **不抢焦点**：显示本身不得激活窗口（``WA_ShowWithoutActivating``），
-   否则用户正在打的字会被截断。
+   否则用户正在打的字会被截断；
+5. **可拖动 / 可缩放**（2026-10-14 实机反馈后加的）：标题栏拖动 + 右下角
+   ``QSizeGrip``；用户调过的尺寸/位置是他要的，复用同一件面板时不许被排版没收。
 
 纪律：offscreen，同步直调，不 sleep 赌时序。
 """
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QPalette  # noqa: E402
-from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor,
+    QGuiApplication,
+    QImage,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPalette,
+)
+from PySide6.QtWidgets import QApplication, QSizeGrip, QWidget  # noqa: E402
 
 from pet.screen_capture.result_panel import (  # noqa: E402
     SHORT_RESULT_LIMIT,
@@ -41,6 +53,38 @@ def qapp():
 
 def _escape_event() -> QKeyEvent:
     return QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+
+
+def _drag(widget, start, end) -> None:
+    """按住 ``start`` 拖到 ``end``（局部坐标；全局坐标 = 窗口位置 + 局部坐标）。
+
+    真实现读的是 ``event.globalPosition()``，所以这里必须把两套坐标都给对：
+    只给局部坐标的话"按下点"与"窗口位置"的差值算错，一次拖拽会跳着走。
+    """
+    origin = widget.pos()
+
+    def _pos(local):
+        return QPointF(origin.x() + local[0], origin.y() + local[1])
+
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(*start), _pos(start),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    move = QMouseEvent(QEvent.Type.MouseMove, QPointF(*end), _pos(end),
+                       Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier)
+    release = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(*end), _pos(end),
+                          Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                          Qt.KeyboardModifier.NoModifier)
+    widget.mousePressEvent(press)
+    widget.mouseMoveEvent(move)
+    widget.mouseReleaseEvent(release)
+
+
+def _style_rule(stylesheet: str, selector: str) -> str:
+    """从 QSS 里抠出某个选择器的规则体（按选择器断言，不比对整份样式表）。"""
+    match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", stylesheet)
+    assert match is not None, f"样式表里没有 {selector} 的规则"
+    return match.group(1)
 
 
 def test_result_summary_is_bounded_to_the_island_line():
@@ -81,6 +125,20 @@ def test_copy_button_puts_the_primary_text_on_the_clipboard():
     # 空文本不冒充成功（否则用户以为复制到了，粘出来却是上一次的内容）
     panel.show_result(ScreenResult(title="截图提取文字", primary="   "))
     assert panel.copy_primary() is False
+    panel.close_panel()
+
+
+def test_copy_is_the_accent_button(qapp):
+    """复制是面板的主按钮：accent 蓝（与图里/问答浮窗同一支 #1677e8）。
+
+    只比对"有背景色"是不够的——读 QSS 里**那条规则**，才不会因为别处
+    也出现过同一个色值而自证通过。
+    """
+    panel = ScreenResultPanel()
+    rule = _style_rule(panel.styleSheet(), "QPushButton#screen-result-copy")
+
+    assert "#1677e8" in rule
+    assert panel.copy_button().objectName() == "screen-result-copy"
     panel.close_panel()
 
 
@@ -195,26 +253,56 @@ def test_empty_result_renders_without_crashing():
 
 
 def test_panel_height_tracks_the_content():
-    """定高按内容实测：空的比一行矮、多行的更高、超长封顶（滚动条接管）。
+    """定高按内容实测：一行不撑满、多行更高、超长封顶（滚动条接管）。
+
+    2026-10-14 起面板有一个**最小高度**（``QSizeGrip`` 要抓得住一个像样的窗口），
+    所以"空结果比一行结果矮"这条老断言不再成立：地板以下的一切都停在地板上。
+    断言改成"地板以内的都等于地板、地板以上按内容长"。
 
     （无裁切由同一份度量保证，视觉证据是离屏截图 probe_panel_ocr.png：
     四行中文完整可见、没有滚动条。）
+
+    **每条都用一个新面板量**：面板是复用件，而"复用同一件时的定高"是产品缺陷
+    （见文件末尾「已知产品缺陷」），不在这里假装它没问题。
     """
-    panel = ScreenResultPanel()
-    panel.show_result(ScreenResult(title="截图提取文字", status="本地文字识别引擎尚未接入"))
-    empty_h = panel.height()
+    def _height(result: ScreenResult) -> int:
+        panel = ScreenResultPanel()
+        panel.show_result(result)
+        height = panel.height()
+        panel.close_panel()
+        return height
 
-    panel.show_result(ScreenResult(title="截图提取文字", primary="一行文字"))
-    one_line_h = panel.height()
+    floor = ScreenResultPanel().minimumHeight()
+    empty_h = _height(ScreenResult(title="截图提取文字", status="本地文字识别引擎尚未接入"))
+    one_line_h = _height(ScreenResult(title="截图提取文字", primary="一行文字"))
+    many_lines_h = _height(ScreenResult(title="截图提取文字", primary="行\n" * 8))
+    capped_h = _height(ScreenResult(title="截图问答", primary="答" * 4000))
 
-    panel.show_result(ScreenResult(title="截图提取文字", primary="行\n" * 8))
-    many_lines_h = panel.height()
-
-    panel.show_result(ScreenResult(title="截图问答", primary="答" * 4000))
-    capped_h = panel.height()
-
-    assert empty_h < one_line_h < many_lines_h <= capped_h
+    assert empty_h == one_line_h == floor, "地板以内的短内容都停在最小高度"
+    assert one_line_h < many_lines_h <= capped_h
     assert capped_h <= 240 + 120            # 上限附近，不无限拉高
+
+
+def test_the_continue_button_needs_an_image_and_hands_it_over_with_the_text(qapp):
+    """「继续提问…」是把结果卡接回问答浮窗的入口（图 + 已识别文字）。
+
+    两条都要钉：没有图时**不出现**（没有上下文的"继续问"是空转），有图时点了
+    要把（图, 正文）原样交出去——面板自己不打开浮窗，那是编排层的事。
+    """
+    seen: list[tuple] = []
+    panel = ScreenResultPanel()
+    image = QImage(12, 9, QImage.Format.Format_RGB32)
+    image.fill(QColor(1, 2, 3))
+
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字"))
+    assert panel.continue_button().isVisibleTo(panel) is False
+
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字", image=image),
+                      on_continue_ask=lambda img, text: seen.append((img, text)))
+    assert panel.continue_button().isVisibleTo(panel) is True
+    panel.continue_button().click()
+
+    assert seen == [(image, "识别到的文字")]
     panel.close_panel()
 
 
@@ -232,6 +320,63 @@ def test_close_panel_detaches_the_escape_filter_and_can_be_reused():
     assert panel.primary_text() == "第二次"
     assert panel.eventFilter(panel, _escape_event()) is False
     assert panel.isVisible() is False
+    panel.close_panel()
+
+
+# ------------------------------------------------------- 拖动 / 缩放（2026-10-14）
+
+
+def test_panel_has_a_translucent_background_and_a_size_grip():
+    """真圆角靠"透明窗口 + paintEvent 手画的圆角卡片"；缩放入口是右下角的 ``QSizeGrip``。"""
+    panel = ScreenResultPanel()
+
+    assert panel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+    grip = panel.findChild(QSizeGrip)
+    assert grip is not None, "面板右下角没有可抓的缩放手柄"
+    assert grip.isVisibleTo(panel) is True
+    panel.close_panel()
+
+
+def test_the_title_bar_drags_the_panel(qapp):
+    """标题栏按下即可拖动整块面板（标题/状态标签对鼠标透明，事件落到面板本体）。"""
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="内容"))
+    panel.show()
+    before = panel.pos()
+
+    _drag(panel, (12, 10), (60, 40))
+
+    assert panel.pos() - before == QPoint(48, 30)
+    panel.close_panel()
+
+
+def test_the_panel_has_no_maximum_width_cap(qapp):
+    """``_MAX_WIDTH`` 上限取消：用户把面板拉宽不该被悄悄夹回去。"""
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="内容"))
+    panel.show()
+
+    panel.resize(700, 200)
+
+    assert panel.maximumWidth() > 700, "宽度又被写死上限了"
+    assert panel.width() == 700
+    panel.close_panel()
+
+
+def test_a_size_the_user_pulled_survives_the_next_result(qapp):
+    """grip 拉过的尺寸在下一张结果上沿用——面板是复用件，不该没收用户的调整。
+
+    ``QSizeGrip`` 拖完的结果就是一次 ``resize()``，所以这里直接 ``resize`` 模拟。
+    注意这条**不区分**"用户拉的"与"排版自己算的"（见文件末尾「已知产品缺陷」）。
+    """
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="第一张"))
+    panel.show()
+    panel.resize(420, 260)
+
+    panel.show_result(ScreenResult(title="截图问答", primary="第二张更长的内容" * 20))
+
+    assert (panel.width(), panel.height()) == (420, 260)
     panel.close_panel()
 
 
@@ -263,13 +408,85 @@ def test_style_follows_the_host_palette_unless_it_is_pinned(qapp):
 
 
 def test_light_panel_is_reachable_and_renders_the_light_palette(qapp):
+    """真圆角 + 主题：卡片是**画出来**的，所以按渲染像素验，不按样式表验。
+
+    （``WA_TranslucentBackground`` 一开，QSS 的 ``background`` 不再落像素——
+    卡片底色/描边改由 ``paintEvent`` 手画。写样式表字符串的那版断言曾自证通过，
+    实际屏幕上是什么颜色它一句话也没说。）
+    """
     light = ScreenResultPanel(style="light")
     dark = ScreenResultPanel(style="dark")
 
     assert light.style == "light" and dark.style == "dark"
-    assert "#ffffff" in light.styleSheet()
-    assert "#1c1e26" in dark.styleSheet()
+    assert light.styleSheet() != dark.styleSheet()
 
     light.show_result(ScreenResult(title="截图提取文字", primary="浅色宿主上的结果"))
     assert light.primary_text() == "浅色宿主上的结果"
+
+    assert _card_color(light) == QColor("#ffffff").getRgb()
+    assert _card_color(dark) == QColor("#1c1e26").getRgb()
     light.close_panel()
+    dark.close_panel()
+
+
+def _render(widget, background: QColor | None = None) -> QImage:
+    canvas = QImage(widget.size(), QImage.Format.Format_ARGB32)
+    canvas.fill(background if background is not None else QColor(0, 0, 0, 0))
+    painter = QPainter(canvas)
+    widget.render(painter, QPoint(0, 0))
+    painter.end()
+    return canvas
+
+
+def _card_color(panel) -> tuple:
+    return _render(panel).pixelColor(panel.width() // 2, panel.height() // 2).getRgb()
+
+
+def test_the_card_is_a_rounded_translucent_corner(qapp):
+    """角上必须是透的：圆角靠"窗口透明 + 手画圆角矩形"成立。
+
+    不透明背景会把圆角吃成直角白盒（实机"白盒"观感之源），所以这条按像素验：
+    角落留得住底下画布的底色、中间是卡片色。
+    """
+    panel = ScreenResultPanel(style="dark")
+    panel.show_result(ScreenResult(title="截图提取文字", primary="内容"))
+
+    canvas = _render(panel, background=QColor(255, 0, 255))
+
+    assert canvas.pixelColor(0, 0).getRgb() == (255, 0, 255, 255), "角上被涂实了，圆角没成形"
+    assert canvas.pixelColor(panel.width() // 2, panel.height() // 2).getRgb() != (255, 0, 255, 255)
+    panel.close_panel()
+
+
+# ------------------------------------------------------------ 已知产品缺陷（未修）
+#
+# **面板复用时的"内容定高"是坏的**（发现于本片测试适配，按纪律没有动产品代码）。
+#
+# 症状：一个 ``ScreenResultPanel`` 实例只在**第一张**结果上按内容定高；此后每张
+# 结果都停在第一张算出来的尺寸上。头一张是空结果（或一行短结果）时，面板永远
+# 140 px 高——长文与问答答复被压进一条 140 px 的窄带里，只靠滚动条看；头一张是
+# 超长文本时，面板又永远 ~300 px 高，短结果留一大片空白。
+#
+# 机理（``pet/screen_capture/result_panel.py``）：``show_near`` 用
+# ``_applying_size`` 把"程序化排版"的 ``resize()`` 挡在用户尺寸记忆之外，但面板
+# 在**首次 show() 之前**是未创建状态的顶层窗口，那时 ``resize()`` 的
+# ``QResizeEvent`` 被 Qt 挂起，直到 ``show()``（``show_near`` 早就返回、
+# ``_applying_size`` 已复位）才投递——于是首张结果的排版尺寸被当成"用户拉的尺寸"
+# 记进 ``_user_size``，此后 ``show_near`` 一律用它覆盖内容定高。
+#
+# 复现（offscreen，不需要产品改动）::
+#
+#     QT_QPA_PLATFORM=offscreen python -c "
+#     from PySide6.QtWidgets import QApplication
+#     from pet.screen_capture.result_panel import ScreenResult, ScreenResultPanel
+#     app = QApplication([]); p = ScreenResultPanel()
+#     p.show_result(ScreenResult(title='t', primary='答' * 4000)); print(p.height())  # 301
+#     p.show_result(ScreenResult(title='t', primary='短'));        print(p.height())  # 301（应为 ~140）
+#     p.show_result(ScreenResult(title='t', primary='行\n' * 8));  print(p.height())  # 301（应为 ~200）
+#     "
+#
+# 修法方向（留给出产品改动的人定）：把"用户尺寸"的判定挪到事件之外（例如只在
+# ``QSizeGrip`` 的 ``mouseReleaseEvent`` / 非 ``_applying_size`` 的**显式**入口上记），
+# 或者在同一事件循环轮次里区分"首次 show 的补投递"。修好后本文件末尾那条
+# "新面板量"的注释与 ``test_a_size_the_user_pulled_survives_the_next_result``
+# 的说明可一并收紧。

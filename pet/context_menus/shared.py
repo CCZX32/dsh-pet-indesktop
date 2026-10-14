@@ -19,10 +19,6 @@ from PySide6.QtWidgets import QMenu
 from .. import autostart as autostart_mod
 from .. import catalog
 from ..harness_launcher import launch_harness_gui
-from ..screen_capture.reasons import (
-    OCR_PENDING_REASON,
-    TRANSLATION_PENDING_REASON,
-)
 from ..updater import QUARK_PAN_URL as QUARK_PAN_URL, REPO_URL as REPO_URL
 from .icons import fitted_pet_pixmap_icon, pet_avatar_menu_icon, vector_menu_icon
 from .menu_styles.common import inherit_menu_style
@@ -919,62 +915,30 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
     return action
 
 
-#: 「截图」入口的三条叶子各自的不可用说明（Runtime Disabled 口径：留位置、
-#: 置灰、写明原因）。文案的**真值在 ``pet/screen_capture/reasons.py``**：同一句
-#: "没有引擎"既写在这里的 tooltip 上、也写在动作的结果浮层状态行上，两处各写一份
-#: 字面量就会漂成"菜单说 A、点下去说 B"。
-#:
-#: 这个 import 放在模块级是安全的：``reasons`` 是**零 import** 的纯字面量模块
-#: （不引 Qt、不引下面的截图栈），实测加载代价 ≈ 0.0 ms；真正要避开的是整条截图栈
-#: （控制器/覆盖层/结果浮层），那一条仍然在 ``add_screen_capture_menu`` 里延迟 import。
+#: 「截图」入口名。置灰理由的真值在 ``pet/screen_capture/reasons.py``
+#: （动作条「翻译」按钮的 tooltip 与结果浮层状态行共用一份）。
 SCREEN_CAPTURE_LABEL = "截图"
-SCREEN_CAPTURE_OCR_DISABLED_REASON = OCR_PENDING_REASON
-SCREEN_CAPTURE_TRANSLATE_DISABLED_REASON = TRANSLATION_PENDING_REASON
 
 
 def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True) -> QMenu | None:
-    """「截图」子菜单：提取文字 / 翻译 / 问答（本片唯一的产品入口）。
+    """「截图」子菜单：单一入口「框选识屏…」。
 
-    整组挂在**一个** id（``screen_capture``）上：菜单模板与用户自己编排过的布局
-    里只会出现这一个 id，日后给这组加叶子不必再让老布局迁移（同 ``quiet_mode``
-    / ``add_proactive_menu`` 的既有口径）。
+    交互模型（2026-10-14 实机反馈后重做）：菜单只负责**开始框选**；框完松手，
+    覆盖层动作条给出「提取文字 / 翻译 / 截图问答 / 复制图像 / 取消」由用户当场选
+    ——不再让菜单层预先押注用户想干什么，也就不再需要三条叶子各自的可用性判断
+    （动作条上「翻译」恒置灰带原因，引擎缺席由动作结果如实报错）。
 
-    三条叶子的可用性各自判、各自说明：
+    整组仍挂在**一个** id（``screen_capture``）上：菜单模板与用户自己编排过的
+    布局里只会出现这一个 id，叶子形态变化不必让老布局迁移。
 
-    - 「提取文字」看本地 OCR 引擎在不在（纯本地，与聊天能力无关）；
-    - 「翻译」看翻译引擎在不在（本片恒不在：入口与双语对照位先就位）；
-    - 「问答」要聊天能力，没有就**整条不出现**（能力不可用不等于运行时停用）。
-
-    置灰必须写进 tooltip 而不是靠 ``populate`` 兜底：注册表的 enabled 只能表达
-    整组，组内三叶的真值在这里。
-
-    ``screen_capture.actions`` 在**函数内** import：菜单模块在启动期就被装载，
-    而整条截图栈（控制器/覆盖层/结果浮层）只有真开菜单时才用得上。
+    截图栈（控制器/覆盖层/编排件）仍只有真触发时才装载——本函数不再 import
+    ``screen_capture.actions``，叶子的可延迟到回调点（``actions_for`` 内部）。
     """
-    callback = getattr(pet, "on_screen_capture_ocr", None)
+    callback = getattr(pet, "on_screen_capture", None)
     if not callable(callback):
         return None  # 宿主没接这套面（纯桌宠变体）= 能力不可用，整组不出现
-    from ..screen_capture import actions as screen_capture_actions
-
     submenu = add_submenu(menu, SCREEN_CAPTURE_LABEL, "screen" if icons else None)
-
-    def _leaf(label: str, handler, *, available: bool, reason: str = ""):
-        if not callable(handler):
-            return None
-        action = add_action(submenu, label, None, handler, close_on_trigger=True)
-        if not available:
-            action.setEnabled(False)
-            action.setToolTip(reason)
-        return action
-
-    _leaf("提取文字", getattr(pet, "on_screen_capture_ocr", None),
-          available=screen_capture_actions.ocr_engine_available(),
-          reason=SCREEN_CAPTURE_OCR_DISABLED_REASON)
-    _leaf("翻译", getattr(pet, "on_screen_capture_translate", None),
-          available=screen_capture_actions.translation_engine_available(),
-          reason=SCREEN_CAPTURE_TRANSLATE_DISABLED_REASON)
-    if callable(getattr(pet, "on_open_chat", None)):
-        _leaf("问答", getattr(pet, "on_screen_capture_ask", None), available=True)
+    add_action(submenu, "框选识屏…", None, callback, close_on_trigger=True)
     return submenu
 
 

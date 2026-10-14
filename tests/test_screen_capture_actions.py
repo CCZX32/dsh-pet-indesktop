@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
-"""「快速识屏」三个动作的编排（假 OCR / 假视觉通道 / 假采集闭环，offscreen）。
+"""「快速识屏」四条动作链路的编排（假 OCR / 假问答浮窗 / 假采集闭环，offscreen）。
 
-本片的产品面只有三件事：**采集 → 引擎 → 展示**。三条链路的差别全在中间那一步：
+产品面是**采集 → 框选选动作 → 引擎/出口**。动作不在入口定死：覆盖层动作条在松手
+后给出动作，随 ``captured`` 的第三个参数回到这里分发。四条链路的差别只在中间那步：
 
 | 动作 | 中间那一步 | 隐私口径 |
 |---|---|---|
 | 提取文字 | 本地 OCR | 纯本地，绝不联网、不确认 |
 | 翻译 | OCR（原文）+ 翻译引擎（译文，后续片） | 引擎缺席时如实说明，不留假结果 |
-| 问答 | 确认 → vision/chat 通道 | **发云端前必须显式确认**，拒绝即丢图 |
+| 复制图像 | 系统剪贴板 | 纯本地 |
+| 截图问答 | 打开问答浮窗（图进输入栏） | **发端点在浮窗里**：用户亲手点「发送」才出网 |
+
+问答那条的确认环节 2026-10-14 前移了：以前是"框选 → 系统 Yes/No → 直接发图拿答案"，
+现在框选只打开浮窗，发不发、发什么，都由用户在浮窗里决定（浮窗即确认面）。所以本
+文件不再有"拒绝确认"用例——那条语义搬到了 ``test_screen_capture_ask_dialog.py``
+（不点发送就不联网），这里留下的是编排层仍然欠的两条：**打开浮窗一个字节都不发**、
+**浮窗打不开就如实报错**（绝不退化成"静默成功"或"直接发出去"）。
 
 另有两条横切纪律，逐条有用例：
 
@@ -15,8 +23,9 @@
   允许的状态"——此前没在跑就不许被这次截图唤醒（对称，不是无条件 resume）；
 - **一次一条**：已经在采集中时第二次触发被拒，不许叠第二层覆盖层。
 
-纪律：offscreen，假宿主同步直调；唯一涉及真线程的用例走 ``QSignalSpy.wait``
-（宽预算、事件同步），不 sleep 赌时序。
+纪律：offscreen，假宿主同步直调；唯一涉及真线程的用例走事件同步 + 宽预算
+（``QSignalSpy.wait`` 在"信号已先到"时会返回 False，那是个会随线程调度翻面的假红），
+不 sleep 赌时序。
 """
 
 from __future__ import annotations
@@ -35,6 +44,7 @@ from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 from pet.screen_capture import actions as actions_mod  # noqa: E402
 from pet.screen_capture.actions import (  # noqa: E402
     ACTION_ASK,
+    ACTION_COPY,
     ACTION_OCR,
     ACTION_TRANSLATE,
     ScreenCaptureActions,
@@ -58,15 +68,23 @@ def _image() -> QImage:
 
 
 class _FakeController(QObject):
-    """假采集闭环：按脚本把三条出口之一发出来（同步，钉死顺序）。"""
+    """假采集闭环：按脚本把三条出口之一发出来（同步，钉死顺序）。
 
-    captured = Signal(object, object)
+    ``action`` 就是覆盖层动作条上那一下选择（默认等价于按 Enter 的提取文字）；
+    真控制器只放行这一组闭集（见 ``test_screen_capture_controller.py``），这里放开
+    是为了能单独验编排层的分发表。
+    """
+
+    captured = Signal(object, object, object)
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, *, mode: str = "captured") -> None:
+    def __init__(self, *, mode: str = "captured", action: str = ACTION_OCR,
+                 reason: str = "esc") -> None:
         super().__init__()
         self.mode = mode
+        self.action = action
+        self.reason = reason
         self.starts = 0
         self.emit_on_start = True
 
@@ -81,11 +99,31 @@ class _FakeController(QObject):
     def emit(self) -> None:
         image = _image()
         if self.mode == "captured":
-            self.captured.emit(image, object())
+            self.captured.emit(image, object(), self.action)
         elif self.mode == "cancelled":
-            self.cancelled.emit("esc")
+            self.cancelled.emit(self.reason)
         else:
             self.failed.emit("grab-empty")
+
+
+class _FakeAskDialog:
+    """问答浮窗替身：记录"被打开过、收到哪张图、带没带上下文"。
+
+    （发送与否不归编排层管——浮窗自己负责，见 ``test_screen_capture_ask_dialog.py``。）
+    """
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple] = []      # [(图, 上下文文字)]
+        self.fail = fail
+
+    def start_with_image(self, image, context_text: str = "") -> None:
+        if self.fail:
+            raise RuntimeError("浮窗炸了")
+        self.calls.append((image, str(context_text)))
+
+    @property
+    def images(self) -> list:
+        return [image for image, _text in self.calls]
 
 
 class _FakeWatcher:
@@ -163,6 +201,14 @@ def _make_actions(**kwargs) -> ScreenCaptureActions:
     return ScreenCaptureActions(host, controller=controller, presenter=presenter, **kwargs)
 
 
+def _start(action: str, **kwargs) -> ScreenCaptureActions:
+    """跑一轮：假闭环按动作条的选择 ``action`` 收口（＝旧用例里的 ``run(ACTION_X)``）。"""
+    kwargs.setdefault("controller", _FakeController(action=action))
+    obj = _make_actions(**kwargs)
+    assert obj.run() is True
+    return obj
+
+
 # ------------------------------------------------------------------ 提取文字
 
 
@@ -174,8 +220,7 @@ def test_ocr_action_feeds_the_selection_to_the_local_engine_and_shows_it(monkeyp
         seen.append(image)
         return "识别到的文字"
 
-    action = _make_actions(ocr=fake_ocr, presenter=presenter)
-    assert action.run(ACTION_OCR) is True
+    _start(ACTION_OCR, ocr=fake_ocr, presenter=presenter)
 
     assert len(seen) == 1 and isinstance(seen[0], QImage)
     assert len(presenter.results) == 1
@@ -191,9 +236,10 @@ def test_ocr_action_reports_an_honest_reason_when_no_engine_is_wired(monkeypatch
     """引擎缺席不许冒充成功：如实说明 + 不编结果（切片 2 落地前就是这个态）。"""
     monkeypatch.setattr(actions_mod, "resolve_ocr_engine", lambda: None)
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=None, presenter=presenter)
+    action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                           ocr=None, presenter=presenter)
 
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
     assert action.busy is False
     assert len(presenter.results) == 1
     result = presenter.results[0]
@@ -207,10 +253,10 @@ def test_ocr_action_reports_an_honest_reason_when_no_engine_is_wired(monkeypatch
 def test_translate_action_keeps_the_source_and_says_the_engine_is_pending(monkeypatch):
     monkeypatch.setattr(actions_mod, "resolve_translator", lambda: None)
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "Hello world", translator=None,
-                           presenter=presenter)
 
-    assert action.run(ACTION_TRANSLATE) is True
+    _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world", translator=None,
+           presenter=presenter)
+
     result = presenter.results[0]
     assert result.title == "截图翻译"
     assert result.primary == "Hello world"      # 原文照旧拿得到
@@ -226,95 +272,208 @@ def test_translate_action_fills_both_bilingual_slots_with_an_engine():
         return "你好，世界"
 
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "Hello world", translator=fake_translate,
-                           presenter=presenter)
+    _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world", translator=fake_translate,
+           presenter=presenter)
 
-    assert action.run(ACTION_TRANSLATE) is True
     assert calls and calls[0][1] == "Hello world"
     result = presenter.results[0]
     assert result.primary == "Hello world"
     assert result.secondary == "你好，世界"
 
 
+# ------------------------------------------------------------------ 复制图像
+
+
+def test_copy_action_puts_the_selection_image_on_the_clipboard(qapp):
+    """复制图像：框到的那块图直接进系统剪贴板，纯本地、不惊动任何引擎。"""
+    ocr_calls: list[object] = []
+    presenter = _RecordingPresenter()
+    clipboard = QApplication.clipboard()
+    clipboard.clear()
+
+    action = _start(ACTION_COPY, ocr=lambda img: ocr_calls.append(img) or "x",
+                    presenter=presenter)
+
+    image = clipboard.image()
+    assert image.isNull() is False, "剪贴板里没有图"
+    assert (image.width(), image.height()) == (8, 8)
+    assert image.pixelColor(0, 0).getRgb()[:3] == (0x20, 0x30, 0x40)
+    assert ocr_calls == [], "复制是纯本地动作，不许顺手跑引擎"
+    assert presenter.results == [], "复制不是「结果」，是一句状态"
+    assert any("已复制到剪贴板" in text for text in presenter.statuses)
+    assert action.busy is False
+    clipboard.clear()
+
+
+def test_copy_failure_is_reported_honestly(qapp, monkeypatch):
+    """剪贴板写不进去（被别的程序占着）＝如实说失败，绝不假装"已复制"。"""
+    class _BrokenClipboard:
+        def setImage(self, _image):  # noqa: N802 - 对齐 Qt 命名
+            raise RuntimeError("剪贴板被占用")
+
+    monkeypatch.setattr(QApplication, "clipboard", staticmethod(lambda: _BrokenClipboard()))
+    presenter = _RecordingPresenter()
+    failures: list[str] = []
+    action = _make_actions(controller=_FakeController(action=ACTION_COPY),
+                           presenter=presenter)
+    action.failed.connect(failures.append)
+
+    assert action.run() is True
+
+    assert failures == ["剪贴板被占用"]
+    assert any("没能复制" in text for text in presenter.statuses)
+    assert all("已复制" not in text for text in presenter.statuses), "失败不许冒充成功"
+    assert action.busy is False
+
+
 # ------------------------------------------------------------------ 问答
 
 
-def test_ask_action_confirms_before_sending_pixels_to_the_cloud():
-    order: list[str] = []
-    seen: list[object] = []
-
-    def fake_confirm(purpose: str) -> bool:
-        order.append(f"confirm:{purpose}")
-        return True
-
-    def fake_ask(image):
-        order.append("ask")
-        seen.append(image)
-        return "我看这块区域像是一段代码。"
-
+def test_ask_action_opens_the_dialog_and_hands_it_the_selection_image():
+    """打开浮窗一个字节都不发：发端点在浮窗里（用户点「发送」那一刻）。"""
+    dialog = _FakeAskDialog()
     presenter = _RecordingPresenter()
-    action = _make_actions(ask=fake_ask, confirm=fake_confirm, presenter=presenter)
+    action = _start(ACTION_ASK, ask_dialog=dialog, presenter=presenter)
 
-    assert action.run(ACTION_ASK) is True
-    assert order == ["confirm:ask", "ask"]       # 先确认、后发图，顺序是红线
-    assert len(seen) == 1
+    assert len(dialog.images) == 1 and isinstance(dialog.images[0], QImage)
+    assert presenter.results == [], "答案在浮窗里，不是一次性的结果面"
+    assert action.busy is False
+
+
+def test_ask_action_does_not_hold_the_busy_slot_while_the_dialog_is_open():
+    """浮窗是独立生命周期的对话面：采集收口就把 busy 交还，还能再框一块。"""
+    controller = _FakeController(action=ACTION_ASK)
+    dialog = _FakeAskDialog()
+    action = _make_actions(controller=controller, ask_dialog=dialog)
+
+    assert action.run() is True
+    assert action.busy is False
+
+    controller.starts = 0                   # 上一轮已收口，假件按"允许下一轮"复位
+    assert action.run() is True
+    assert len(dialog.images) == 2
+
+
+def test_ask_action_reports_an_honest_reason_when_the_channel_is_unavailable():
+    """浮窗建不起来（宿主没有配置面）＝如实上报，不许静默什么也不做。"""
+    presenter = _RecordingPresenter()
+    action = _make_actions(controller=_FakeController(action=ACTION_ASK),
+                           presenter=presenter)
+    assert action._get_ask_dialog() is None, "宿主没有配置面时不该硬造一个浮窗"
+
+    assert action.run() is True
+
     result = presenter.results[0]
     assert result.title == "截图问答"
-    assert result.primary == "我看这块区域像是一段代码。"
-
-
-def test_ask_action_declines_and_drops_the_selection_without_touching_the_channel():
-    calls: list[str] = []
-    presenter = _RecordingPresenter()
-    action = _make_actions(
-        ask=lambda _img: calls.append("ask") or "不该发生",
-        confirm=lambda _purpose: False,
-        presenter=presenter,
-    )
-
-    assert action.run(ACTION_ASK) is True
-    assert calls == []                            # 拒绝 = 一个像素都没出去
-    assert presenter.results == []
-    assert any("取消" in text for text in presenter.statuses)
+    assert result.primary == ""
+    assert "不可用" in result.status
+    assert result.force_panel is True
     assert action.busy is False
 
 
-def test_ask_action_fails_closed_when_the_confirm_dialog_itself_breaks():
-    """确认环节自己炸了（父窗没了/弹窗失败）＝ 不发：隐私门只认明确的"是"。"""
-    calls: list[str] = []
-
-    def broken_confirm(_purpose: str) -> bool:
-        raise RuntimeError("弹窗失败")
-
+def test_ask_action_reports_it_when_the_dialog_itself_breaks():
+    """浮窗自己炸了（配置坏了/父窗没了）＝把原因给用户看，绝不退化成静默成功。"""
     presenter = _RecordingPresenter()
-    action = _make_actions(
-        ask=lambda _img: calls.append("ask") or "不该发生",
-        confirm=broken_confirm,
-        presenter=presenter,
-    )
+    action = _start(ACTION_ASK, ask_dialog=_FakeAskDialog(fail=True), presenter=presenter)
 
-    assert action.run(ACTION_ASK) is True
-    assert calls == []
-    assert presenter.results == []
-    assert any("取消" in text for text in presenter.statuses)
+    assert len(presenter.results) == 1
+    result = presenter.results[0]
+    assert result.force_panel is True
+    assert "浮窗炸了" in result.status
     assert action.busy is False
+
+
+def test_an_unknown_action_still_lands_on_an_explicit_branch():
+    """兜底：漏进来的动作 id 落到问答（打开浮窗＝什么都不发的安全面），不许静默丢弃。
+
+    真控制器在门口就把闭集之外的动作挡掉了
+    （``test_screen_capture_controller.py::test_an_unknown_action_aborts_instead_of_flowing_downstream``），
+    这条钉的是 `else` 分支本身的存在——它一旦被删掉，漏进来的动作会变成"点了没反应"。
+    """
+    dialog = _FakeAskDialog()
+    action = _start("copy-typo", ask_dialog=dialog)
+
+    assert len(dialog.images) == 1
+
+
+def test_continue_ask_opens_the_dialog_with_the_image_and_the_recognized_text():
+    """结果面板「继续提问…」的落点：同一张图 + 已识别文字一起进浮窗（上下文只进首轮）。"""
+    image = _image()
+    dialog = _FakeAskDialog()
+    action = _make_actions(controller=_FakeController(), ask_dialog=dialog)
+
+    action._continue_ask(image, "识别到的文字")
+
+    assert dialog.calls == [(image, "识别到的文字")]
+
+
+def test_ocr_result_carries_the_selection_image_for_the_continue_entry():
+    """提取文字的结果必须带着那张图：不带图，面板底部的「继续提问…」就没上下文可续。"""
+    presenter = _RecordingPresenter()
+    _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
+
+    result = presenter.results[0]
+    assert isinstance(result.image, QImage)
+
+
+def test_the_continue_button_on_the_real_panel_reaches_the_ask_dialog():
+    """端到端（真实面板，offscreen）：结果面板底部「继续提问…」→ 浮窗。
+
+    串起四层：OCR 结果带图 → 真实面板露出入口 → 点它 → 编排层把（图, 文字）
+    交给问答浮窗。这条链路上任何一处断掉，用户看到的是"点了没反应"。
+    """
+    dialog = _FakeAskDialog()
+    action = ScreenCaptureActions(
+        _FakeHost(island=_FakeIsland()),
+        controller=_FakeController(action=ACTION_OCR),
+        ocr=lambda _img: "识别到的文字", ask_dialog=dialog, run_inline=True)
+
+    assert action.run() is True
+
+    panel = action._presenter.panel()
+    assert isinstance(panel, ScreenResultPanel)
+    assert panel.continue_button().isVisibleTo(panel) is True, "有图却没有「继续提问」入口"
+    panel.continue_button().click()
+
+    assert len(dialog.calls) == 1
+    image, context_text = dialog.calls[0]
+    assert isinstance(image, QImage) and context_text == "识别到的文字"
+    panel.close_panel()
+
+
+def test_default_ask_dialog_is_built_from_the_host_config():
+    """端到端：不注入替身时默认造真浮窗（宿主配置面在就造得出来），且是复用件。"""
+    from pet.screen_capture.ask_dialog import ScreenAskDialog
+
+    host = _FakeHost()
+    host.cfg = {"context_menu_appearance": {"theme": "light"}}
+    action = ScreenCaptureActions(host, controller=_FakeController(action=ACTION_ASK),
+                                  run_inline=True)
+
+    dialog = action._get_ask_dialog()   # 私有入口：这里要验的正是"默认装配"这一层
+
+    assert isinstance(dialog, ScreenAskDialog)
+    assert action._get_ask_dialog() is dialog, "浮窗是复用件，不是每次现造一个"
+    dialog.close()
 
 
 # ------------------------------------------------------------------ 失败/取消
 
 
-def test_cancel_restores_the_watcher_and_never_runs_the_engine():
+@pytest.mark.parametrize("reason", ["esc", "toolbar"])
+def test_cancel_restores_the_watcher_and_never_runs_the_engine(reason):
+    """Esc 与动作条「取消」是同一条收口（理由不同，账一样）。"""
     watcher = _FakeWatcher(running=True)
     ocr_calls: list[object] = []
     presenter = _RecordingPresenter()
     action = _make_actions(
-        controller=_FakeController(mode="cancelled"),
+        controller=_FakeController(mode="cancelled", reason=reason),
         ocr=lambda img: ocr_calls.append(img) or "x",
         watcher=watcher,
         presenter=presenter,
     )
 
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
     assert ocr_calls == []
     assert presenter.results == []
     assert any("取消" in text for text in presenter.statuses)
@@ -334,7 +493,7 @@ def test_capture_failure_is_reported_and_the_watcher_comes_back():
     failures: list[str] = []
     action.failed.connect(failures.append)
 
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
     assert failures == ["grab-empty"]
     assert presenter.results == []
     assert watcher.pauses == 1 and watcher.resumes == 1
@@ -352,7 +511,7 @@ def test_start_exception_still_restores_the_watcher():
     action = _make_actions(controller=_RaisingController(), watcher=watcher,
                            presenter=presenter)
 
-    assert action.run(ACTION_OCR) is False
+    assert action.run() is False
     assert watcher.pauses == 1 and watcher.resumes == 1
     assert action.busy is False
 
@@ -362,9 +521,9 @@ def test_second_trigger_while_capturing_is_refused():
     controller.emit_on_start = False      # 停在"采集中"
     action = _make_actions(controller=controller, ocr=lambda _img: "x")
 
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
     assert action.busy is True
-    assert action.run(ACTION_ASK) is False   # 不许叠第二层覆盖层
+    assert action.run() is False             # 不许叠第二层覆盖层：动作还没选呢
     assert controller.starts == 1
 
     controller.emit()                        # 收口后可以再来一次
@@ -377,23 +536,26 @@ def test_second_trigger_while_capturing_is_refused():
 def test_watcher_pause_restore_is_symmetric_with_the_previous_state():
     """恢复走 ``resume()``（= 按配置重评估）；此前没在跑的绝不被这次截图唤醒。"""
     running = _FakeWatcher(running=True)
-    action = _make_actions(watcher=running, ocr=lambda _img: "x")
-    assert action.run(ACTION_OCR) is True
+    action = _make_actions(controller=_FakeController(), watcher=running,
+                           ocr=lambda _img: "x")
+    assert action.run() is True
     assert running.pauses == 1
     assert running.resumes == 1
     assert running.apply_configs == 1     # 恢复 = 重评估配置，不是无条件重启
     assert running.running is True
 
     paused = _FakeWatcher(running=False, allowed=False)
-    action = _make_actions(watcher=paused, ocr=lambda _img: "x")
-    assert action.run(ACTION_OCR) is True
+    action = _make_actions(controller=_FakeController(), watcher=paused,
+                           ocr=lambda _img: "x")
+    assert action.run() is True
     assert paused.pauses == 1
     assert paused.resumes == 0
     assert paused.apply_configs == 0
     assert paused.running is False
 
-    action = _make_actions(watcher=None, ocr=lambda _img: "x")
-    assert action.run(ACTION_OCR) is True     # watcher 缺席也不许炸
+    action = _make_actions(controller=_FakeController(), watcher=None,
+                           ocr=lambda _img: "x")
+    assert action.run() is True     # watcher 缺席也不许炸
 
 
 def test_watcher_is_resolved_again_for_every_session(monkeypatch):
@@ -410,12 +572,12 @@ def test_watcher_is_resolved_again_for_every_session(monkeypatch):
 
     controller = _FakeController()          # 假闭环只允许"进入"一次（模拟真实的一次触发）
     action = _make_actions(controller=controller, watcher=None, ocr=lambda _img: "x")
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
     assert (first.pauses, first.resumes) == (1, 1)
 
     current["watcher"] = second             # 第二轮之前换了当值的 watcher
     controller.starts = 0                   # 上一轮已收口，假件按"允许下一轮"复位
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
 
     assert (second.pauses, second.resumes) == (1, 1)
     assert (first.pauses, first.resumes) == (1, 1), "换掉之后不该再动上一个"
@@ -453,20 +615,21 @@ def test_watcher_gate_tolerates_a_broken_provider():
 
 
 def test_blocking_stages_run_off_the_gui_thread_and_report_back_on_it():
+    """阻塞的那一步（引擎/网络）不许压在 GUI 线程上；结果经信号回到 GUI 线程。"""
     main_thread = threading.current_thread().name
     worker_names: list[str] = []
     done = threading.Event()
 
-    def fake_ask(image):
+    def fake_ocr(image):
         worker_names.append(threading.current_thread().name)
-        return "答"
+        return "识别到的文字"
 
     presenter = _RecordingPresenter()
-    action = _make_actions(ask=fake_ask, confirm=lambda _p: True, presenter=presenter,
-                           run_inline=False)
+    action = _make_actions(controller=_FakeController(action=ACTION_OCR), ocr=fake_ocr,
+                           presenter=presenter, run_inline=False)
     action.result_ready.connect(lambda _result: done.set())
 
-    assert action.run(ACTION_ASK) is True
+    assert action.run() is True
     # 事件同步 + 宽预算（不用 QtTest 的 wait：它在"信号已先到"时返回 False，
     # 那是个会随线程调度翻面的假红）。CI runner 是新开机的慢机器，预算给足。
     deadline = time.monotonic() + 10.0
@@ -476,7 +639,7 @@ def test_blocking_stages_run_off_the_gui_thread_and_report_back_on_it():
     assert done.is_set(), "后台线程的结果没有回到 GUI 线程"
     assert action.busy is False
     assert worker_names and worker_names[0] != main_thread
-    assert presenter.results[0].primary == "答"
+    assert presenter.results[0].primary == "识别到的文字"
 
 
 def test_empty_result_and_recognition_failure_say_different_things():
@@ -487,11 +650,12 @@ def test_empty_result_and_recognition_failure_say_different_things():
       文字。这时候说"没有识别到文字"就是撒谎，用户会一直换图试。
     """
     empty_presenter = _RecordingPresenter()
-    empty_action = _make_actions(ocr=lambda _img: "   ", presenter=empty_presenter)
+    empty_action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                                 ocr=lambda _img: "   ", presenter=empty_presenter)
     empty_failures: list[str] = []
     empty_action.failed.connect(empty_failures.append)
 
-    assert empty_action.run(ACTION_OCR) is True
+    assert empty_action.run() is True
 
     empty_status = empty_presenter.results[-1].status
     assert "没有识别到文字" in empty_status
@@ -501,11 +665,12 @@ def test_empty_result_and_recognition_failure_say_different_things():
         raise RuntimeError("缺少本地 OCR 模型文件 PP-OCRv6_det_small.onnx")
 
     broken_presenter = _RecordingPresenter()
-    broken_action = _make_actions(ocr=broken, presenter=broken_presenter)
+    broken_action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                                  ocr=broken, presenter=broken_presenter)
     broken_failures: list[str] = []
     broken_action.failed.connect(broken_failures.append)
 
-    assert broken_action.run(ACTION_OCR) is True
+    assert broken_action.run() is True
 
     broken_status = broken_presenter.statuses[-1]
     assert "识别失败" in broken_status
@@ -534,14 +699,19 @@ def test_ocr_action_hands_the_local_engine_back_when_the_session_ends():
     """交付后必须归还引擎：这是「用完就丢」在编排层的唯一落点。"""
     release = _recording_release()
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "识别到的文字", release=release,
-                           presenter=presenter)
-
-    assert action.run(ACTION_OCR) is True
+    _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", release=release,
+           presenter=presenter)
 
     assert len(release.calls) == 1, "一次会话收口恰好归还一次"
     assert presenter.results, "归还发生在收口里，但结果照样要交付"
-    assert action.busy is False
+
+
+def test_copy_action_also_hands_the_local_engine_back():
+    """复制出口同样是会话结束：归还点落在唯一的收口里，哪条链路都不例外。"""
+    release = _recording_release()
+    _start(ACTION_COPY, release=release)
+
+    assert len(release.calls) == 1
 
 
 def test_cancelled_and_failed_sessions_also_hand_the_engine_back():
@@ -556,7 +726,7 @@ def test_cancelled_and_failed_sessions_also_hand_the_engine_back():
         action = _make_actions(controller=controller, release=release,
                               presenter=_RecordingPresenter())
 
-        assert action.run(ACTION_OCR) is True
+        assert action.run() is True
         assert action.busy is False
         assert len(release.calls) == 1, f"{mode} 出口没有归还引擎"
 
@@ -567,10 +737,8 @@ def test_release_failure_never_breaks_a_delivered_result():
         raise RuntimeError("释放炸了")
 
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "识别到的文字", release=boom,
-                           presenter=presenter)
-
-    assert action.run(ACTION_OCR) is True
+    _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", release=boom,
+           presenter=presenter)
 
     assert presenter.results[0].primary == "识别到的文字"
 
@@ -587,11 +755,12 @@ def test_release_does_not_block_the_gui_thread_or_the_result():
         return True
 
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "识别到的文字", release=release,
+    action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                           ocr=lambda _img: "识别到的文字", release=release,
                            presenter=presenter, run_inline=False)
     action.result_ready.connect(lambda _result: None)
 
-    assert action.run(ACTION_OCR) is True
+    assert action.run() is True
 
     deadline = time.monotonic() + 10.0
     while not done.is_set() and time.monotonic() < deadline:
@@ -613,9 +782,7 @@ def test_missing_release_entry_is_tolerated(monkeypatch):
     """旧版引擎没有释放入口时：不还而已，识别链路照常交付。"""
     monkeypatch.setattr(actions_mod, "resolve_ocr_release", lambda: None)
     presenter = _RecordingPresenter()
-    action = _make_actions(ocr=lambda _img: "识别到的文字", presenter=presenter)
-
-    assert action.run(ACTION_OCR) is True
+    _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
 
     assert presenter.results[0].primary == "识别到的文字"
 
@@ -632,6 +799,15 @@ def test_ocr_seam_matches_the_engine_module_contract():
     engine = pytest.importorskip("pet.screen_capture.ocr")
     assert callable(getattr(engine, actions_mod.OCR_ENTRY, None))
     assert actions_mod.ocr_engine_available() is True
+
+
+def test_actions_tuple_is_the_dispatch_closed_set():
+    """分发表的闭集：四个动作都在，且就是覆盖层动作条那一组 id（同一批对象）。"""
+    from pet.screen_capture import overlay as overlay_mod
+
+    assert actions_mod.ACTIONS == (ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY)
+    assert actions_mod.ACTION_COPY is overlay_mod.ACTION_COPY
+    assert actions_mod.ACTION_OCR is overlay_mod.ACTION_OCR
 
 
 # ------------------------------------------------------------------ 展示落点

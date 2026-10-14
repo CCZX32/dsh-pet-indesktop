@@ -25,8 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QFontMetrics, QGuiApplication, QPalette, QTextOption
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPalette, QTextOption
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSizeGrip,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -110,6 +111,10 @@ class ScreenResult:
     ``primary`` = 主文本（OCR 文字 / 问答答复 / 翻译原文），``secondary`` =
     双语对照的第二槽（译文，留给后续片的翻译引擎），``status`` = 一句话口径
     （"本地识别 · 12 字" / "翻译引擎将在后续片接入"），写在标题右侧。
+
+    ``image`` = 这次截下的选区图（纯内存，不落盘）：非空时面板底部出现
+    「继续提问…」入口——把图（与已识别文字）带进问答浮窗接着聊（豆包式
+    "结果卡底部继续问"的等价物：我们的面板是防抢焦点窗，输入落在问答浮窗里）。
     """
 
     title: str
@@ -119,6 +124,7 @@ class ScreenResult:
     primary_label: str = ""
     secondary_label: str = ""
     force_panel: bool = False
+    image: object = None
 
     @property
     def is_empty(self) -> bool:
@@ -142,6 +148,15 @@ class ScreenResultPanel(QFrame):
     ``None``（缺省）/ ``"system"`` 跟着宿主调色板走。**缺省不再是写死的暗色**：
     写死的那一版让 ``_STYLES["light"]`` 成了死代码（浅色宿主上永远弹一块深色
     浮层），现在宿主主题由调用方（``ScreenCapturePresenter``）从配置里读出来传进来。
+
+    可调性（2026-10-14 实机反馈"太丑、不能调"后加的）：
+
+    - **真圆角**：``WA_TranslucentBackground`` 打开 + ``paintEvent`` 手画卡片
+      （实测：透明背景窗口上 QSS 的 ``background`` 不落像素，只能靠画）；
+      （之前不透明背景把 ``border-radius`` 吃成了直角白盒）；
+    - **可拖动**：按住标题栏区域拖（标题/状态标签对鼠标透明，事件落到面板上）；
+    - **可缩放**：右下角 ``QSizeGrip``；用户拉过的尺寸在本实例上记住
+      （面板是复用件，下一张结果沿用你调好的大小——只记进程内，不碰配置）。
     """
 
     def __init__(self, parent: QWidget | None = None, *, style: str | None = None) -> None:
@@ -150,27 +165,42 @@ class ScreenResultPanel(QFrame):
         self._palette = _STYLES[self._style]
         self.setObjectName("screen-result-panel")
         self.setWindowTitle("")
+        self.setFrameShape(QFrame.Shape.NoFrame)  # 卡片由 paintEvent 手画（见下）
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        # 真圆角靠透明背景 + paintEvent 手画卡片；不透明会把圆角吃成直角
+        # （实机"白盒"观感之源），而透明窗上 QSS 又不画自身背景（A/B 实测）。
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         # 显示不激活：主人正在打字时不许把焦点抢过来
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         if hasattr(Qt.WidgetAttribute, "WA_MacAlwaysShowToolWindow"):
             self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
-        self.setMinimumWidth(_MIN_WIDTH)
-        self.setMaximumWidth(_MAX_WIDTH)
+        self.setMinimumSize(_MIN_WIDTH, 140)
+        self._user_size = None       # 用户用 grip 拉过的尺寸（QSize；进程内记忆）
+        self._drag_offset: QPoint | None = None
+        self._applying_size = False  # 预留：程序化排版的同步标记
+        # 首次 show() 前的 resize 事件会被 Qt 挂起到显示那一刻才投递（那时
+        # _applying_size 早复位了），所以"程序化尺寸"要靠值比对而不是旗标——
+        # 否则第一张结果的排版尺寸会被误记成用户尺寸，之后每张结果都被钉死在
+        # 第一张的高度上（2026-10-14 测试适配期发现的真实缺陷）。
+        self._last_programmatic_size = None
         self._escape_installed = False
+        self._on_continue_ask = None  # show_result 注入的"继续提问"回调
+        self._continue_image = None
         self._build()
+        self._grip = QSizeGrip(self)
+        self._grip.setObjectName("screen-result-grip")
+        self._grip.resize(16, 16)
 
     # ---------------------------------------------------------------- 构建
     def _build(self) -> None:
         colors = self._palette
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setContentsMargins(16, 13, 16, 14)
         layout.setSpacing(8)
 
         header = QHBoxLayout()
@@ -178,9 +208,12 @@ class ScreenResultPanel(QFrame):
         self._title = QLabel("")
         self._title.setObjectName("screen-result-title")
         self._title.setWordWrap(False)
+        # 标题栏同时是拖拽把手：标签对鼠标透明，按下/拖动落到面板本体上。
+        self._title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         header.addWidget(self._title)
         self._status = QLabel("")
         self._status.setObjectName("screen-result-status")
+        self._status.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         header.addWidget(self._status)
         header.addStretch(1)
         self._copy_btn = QPushButton("复制")
@@ -220,12 +253,14 @@ class ScreenResultPanel(QFrame):
         self._secondary_view.setVisible(False)
         layout.addWidget(self._secondary_view)
 
+        # 底部「继续提问」入口（有图可带时才出现；豆包式结果卡续聊的等价物）
+        self._continue_btn = QPushButton("继续提问…")
+        self._continue_btn.setObjectName("screen-result-continue")
+        self._continue_btn.setVisible(False)
+        self._continue_btn.clicked.connect(self._continue_ask)
+        layout.addWidget(self._continue_btn)
+
         self.setStyleSheet(f"""
-            QFrame#screen-result-panel {{
-                background: {colors["surface"]};
-                border: 1px solid {colors["border"]};
-                border-radius: 12px;
-            }}
             QLabel#screen-result-title {{
                 color: {colors["text"]}; font-size: 13px; font-weight: 600;
             }}
@@ -235,15 +270,46 @@ class ScreenResultPanel(QFrame):
             QPlainTextEdit {{
                 background: transparent; color: {colors["text"]};
                 border: none; font-size: 13px;
+                selection-background-color: #1677e8;
             }}
+            QPlainTextEdit QScrollBar:vertical {{
+                background: transparent; width: 8px; margin: 2px;
+            }}
+            QPlainTextEdit QScrollBar::handle:vertical {{
+                background: {colors["border"]}; border-radius: 4px; min-height: 24px;
+            }}
+            QPlainTextEdit QScrollBar::handle:vertical:hover {{
+                background: {colors["hint"]};
+            }}
+            QPlainTextEdit QScrollBar::add-line:vertical,
+            QPlainTextEdit QScrollBar::sub-line:vertical {{ height: 0; }}
+            QPlainTextEdit QScrollBar::add-page:vertical,
+            QPlainTextEdit QScrollBar::sub-page:vertical {{ background: transparent; }}
             QFrame#screen-result-divider {{ background: {colors["divider"]}; border: none; }}
             QPushButton {{
                 background: {colors["button"]}; color: {colors["text"]};
                 border: 1px solid {colors["border"]}; border-radius: 7px;
-                padding: 3px 10px; font-size: 12px;
+                padding: 3px 12px; font-size: 12px;
             }}
             QPushButton:hover {{ border-color: {colors["hint"]}; }}
-            QPushButton#screen-result-close {{ padding: 0; font-size: 14px; }}
+            QPushButton#screen-result-copy {{
+                background: #1677e8; border-color: #1677e8; color: #ffffff;
+            }}
+            QPushButton#screen-result-copy:hover {{ background: #3d8ef0; }}
+            QPushButton#screen-result-close {{
+                padding: 0; font-size: 14px; border: none; background: transparent;
+                color: {colors["hint"]};
+            }}
+            QPushButton#screen-result-close:hover {{ color: {colors["text"]}; }}
+            QPushButton#screen-result-continue {{
+                background: transparent; color: {colors["hint"]};
+                border: 1px dashed {colors["border"]}; border-radius: 8px;
+                padding: 5px 10px; font-size: 12px; text-align: center;
+            }}
+            QPushButton#screen-result-continue:hover {{
+                color: #1677e8; border-color: #1677e8;
+            }}
+            QSizeGrip#screen-result-grip {{ background: transparent; }}
         """)
 
     def _make_view(self, min_h: int, max_h: int) -> QPlainTextEdit:
@@ -291,9 +357,25 @@ class ScreenResultPanel(QFrame):
     def close_button(self) -> QPushButton:
         return self._close_btn
 
+    def continue_button(self) -> QPushButton:
+        """「继续提问…」入口（测试断言用；产品代码不碰）。"""
+        return self._continue_btn
+
+    def _continue_ask(self) -> None:
+        callback = self._on_continue_ask
+        if callback is None or self._continue_image is None:
+            return
+        callback(self._continue_image, self._primary_view.toPlainText())
+
     # ---------------------------------------------------------------- 展示
-    def show_result(self, result: ScreenResult, anchor: QWidget | None = None) -> None:
-        """换内容 + 定位 + 显示（复用同一件面板，不重复造窗）。"""
+    def show_result(self, result: ScreenResult, anchor: QWidget | None = None,
+                    on_continue_ask=None) -> None:
+        """换内容 + 定位 + 显示（复用同一件面板，不重复造窗）。
+
+        ``on_continue_ask``：签名 ``(image, recognized_text) -> None``——面板底部
+        「继续提问…」的回调（由编排层注入，把图带进问答浮窗）。``result.image``
+        为空时入口不出现（没有上下文的"继续问"是空转）。
+        """
         self._title.setText(str(result.title))
         self._status.setText(str(result.status))
         self._primary_view.setPlainText(str(result.primary))
@@ -313,24 +395,41 @@ class ScreenResultPanel(QFrame):
         self._copy_secondary_btn.setVisible(bilingual)
         self._copy_btn.setText("复制原文" if bilingual else "复制")
 
+        # 「继续提问」只在有图可带时出现（复制图像/纯状态结果没有下文可续）。
+        self._on_continue_ask = on_continue_ask if result.image is not None else None
+        self._continue_btn.setVisible(self._on_continue_ask is not None)
+        self._continue_image = result.image
+
         self.show_near(anchor)
         self.show()
         self.raise_()
 
     def show_near(self, anchor: QWidget | None = None) -> None:
-        """贴边定位：优先锚（岛）左边，放不下换右边，再放不下就贴屏幕边。"""
+        """贴边定位：优先锚（岛）左边，放不下换右边，再放不下就贴屏幕边。
+
+        用户用 grip 拉过尺寸后（``_user_size`` 非 None）沿用用户的大小——面板是
+        复用件，"每张结果都重置回默认大小"会把用户刚调好的布局没收掉。
+        """
         available = self._available_geometry(anchor)
         width = min(self.sizeHint().width(), available.width())
         width = max(width, min(_MIN_WIDTH, available.width()))
-        self.resize(width, self.height())
-        # 文本槽按内容实测高度（上下限之间）：一行结果不该撑出满高面板，
-        # 一行也放不下时由各自的滚动条接住。
-        self._fit_view_height(self._primary_view, _PRIMARY_MIN_H, _PRIMARY_MAX_H, width)
-        self._fit_view_height(self._secondary_view, _SECONDARY_MIN_H, _SECONDARY_MAX_H,
-                              width)
-        self.adjustSize()
-        height = min(self.sizeHint().height(), available.height())
-        self.resize(width, height)
+        self._applying_size = True
+        try:
+            self.resize(width, self.height())
+            # 文本槽按内容实测高度（上下限之间）：一行结果不该撑出满高面板，
+            # 一行也放不下时由各自的滚动条接住。
+            self._fit_view_height(self._primary_view, _PRIMARY_MIN_H, _PRIMARY_MAX_H, width)
+            self._fit_view_height(self._secondary_view, _SECONDARY_MIN_H, _SECONDARY_MAX_H,
+                                  width)
+            self.adjustSize()
+            height = min(self.sizeHint().height(), available.height())
+            if self._user_size is not None:
+                width = max(_MIN_WIDTH, min(self._user_size.width(), available.width()))
+                height = max(140, min(self._user_size.height(), available.height()))
+            self._last_programmatic_size = QSize(width, height)
+            self.resize(width, height)
+        finally:
+            self._applying_size = False
 
         if anchor is not None:
             geo = anchor.frameGeometry()
@@ -404,6 +503,57 @@ class ScreenResultPanel(QFrame):
         """收口：藏起来 + 摘掉 Esc 过滤器（复用件，下一次展示重新装）。"""
         self._detach_escape_filter()
         self.hide()
+
+    # ------------------------------------------------------------ 拖动与缩放
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        # 透明背景窗口上 QSS 不画自身背景（实测 A/B：WA_TranslucentBackground 一开，
+        # background/background-color 都不落像素）——卡片圆角矩形只能手画。
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        path = QPainterPath()
+        path.addRoundedRect(float(rect.x()), float(rect.y()),
+                            float(rect.width()), float(rect.height()), 14.0, 14.0)
+        painter.fillPath(path, QColor(self._palette["surface"]))
+        painter.setPen(QColor(self._palette["border"]))
+        painter.drawPath(path)
+        painter.end()
+        super().paintEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().resizeEvent(event)
+        self._grip.move(self.width() - 16, self.height() - 16)
+        # 程序化排版（show_near）不记；只有 grip/WM 拉出来的才算用户尺寸。
+        # 首次显示前的尺寸事件是延迟投递的，单靠 _applying_size 旗标挡不住，
+        # 必须再比对一次值（延迟事件被 Qt 合并成最后一次排版的尺寸）。
+        if self._applying_size:
+            return
+        if self._last_programmatic_size is not None and event.size() == self._last_programmatic_size:
+            return
+        self._user_size = event.size()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        # 面板本体（标题栏/留白）上的按下 = 拖动起点；子控件（按钮/文本槽/grip）
+        # 的事件根本到不了这里，不用排除。
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_offset is not None:
+            self._drag_offset = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     # ------------------------------------------------------------ Esc 过滤器
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)

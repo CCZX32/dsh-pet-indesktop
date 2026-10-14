@@ -8,6 +8,11 @@ bug 不是画错，而是：
 - 中途失败（抓帧拿到空图、选区越界）后**窗口没还**——用户的桌宠从此消失；
 - 还没还原就先通知下游——下游弹窗时桌宠还在"消失"状态；
 - 重复触发时二次隐藏把第一次的账冲掉。
+
+动作（提取文字 / 翻译 / 截图问答 / 复制图像）**不在入口定死**：覆盖层动作条在
+松手后给出来，随 ``captured`` 的第三个参数原样带回编排层。控制器只做一件事——
+不认识的动作**在门口挡住**（``unknown-action:...``），不让它流到下游分发表里
+被 else 兜成一个"看起来能跑"的动作。
 """
 
 from __future__ import annotations
@@ -21,6 +26,12 @@ from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from pet.screen_capture.controller import ScreenCaptureController  # noqa: E402
+from pet.screen_capture.overlay import (  # noqa: E402
+    ACTION_ASK,
+    ACTION_COPY,
+    ACTION_OCR,
+    ACTION_TRANSLATE,
+)
 from pet.screen_capture.pixels import SRGB8_FORMAT  # noqa: E402
 from pet.screen_capture.session import CapturePhase, SelectionRect  # noqa: E402
 
@@ -62,8 +73,10 @@ class _FakeHider:
 
 
 class _FakeOverlay(QObject):
-    selection_confirmed = Signal(object)
-    selection_cancelled = Signal(str)
+    """假覆盖层：按新契约只提供两个信号（``action_requested`` / ``selection_cancelled``）。"""
+
+    action_requested = Signal(str, object)   # (动作 id, SelectionRect)
+    selection_cancelled = Signal(str)        # 取消理由（"esc" / "toolbar"）
 
     def __init__(self, frame, screen, log) -> None:
         super().__init__()
@@ -79,6 +92,13 @@ class _FakeOverlay(QObject):
     def close(self) -> None:  # noqa: D102
         self.closed = True
         self._log.append("overlay.close")
+
+    def pick(self, action, selection) -> None:  # noqa: D102
+        """等价于用户在动作条上选了 ``action``（或按了 Enter = ocr）。"""
+        self.action_requested.emit(action, selection)
+
+    def cancel(self, reason: str = "esc") -> None:  # noqa: D102
+        self.selection_cancelled.emit(reason)
 
 
 def _frame(width: int = 60, height: int = 60, *, dpr: float = 1.0) -> QImage:
@@ -138,9 +158,15 @@ class _Setup:
         self.controller.cancelled.connect(self.cancelled.append)
         self.controller.failed.connect(self.failed.append)
 
-    def _on_captured(self, image, selection):
+    def _on_captured(self, image, selection, action):
         self.log.append("captured")
-        self.captured.append((image, selection))
+        self.captured.append((image, selection, action))
+
+    # 便捷入口：本轮已创建的覆盖层（用例里读起来不至于满屏下标）
+
+    @property
+    def overlay(self) -> _FakeOverlay:
+        return self.overlays[-1]
 
 
 # ------------------------------------------------------------------ 正常闭环
@@ -153,17 +179,18 @@ def test_happy_path_order_and_payload(qapp):
     assert setup.log[:3] == ["hide", "grab", "overlay.create"]
     assert setup.log[3] == "overlay.show"
     assert setup.controller.phase is CapturePhase.SELECTING
-    assert setup.overlays[0].frame is setup.frames[0]  # 覆盖层画的就是刚冻的那一帧
+    assert setup.overlay.frame is setup.frames[0]  # 覆盖层画的就是刚冻的那一帧
 
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(10, 10, 20, 20))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(10, 10, 20, 20))
 
     # 还原必须早于通知下游：下游弹窗时桌宠不该还在"消失"状态
     assert setup.log.index("restore") < setup.log.index("captured")
     assert setup.log[-3:] == ["overlay.close", "restore", "captured"]
     assert setup.cancelled == [] and setup.failed == []
 
-    image, selection = setup.captured[0]
+    image, selection, action = setup.captured[0]
     assert selection == SelectionRect(10, 10, 20, 20)
+    assert action == ACTION_OCR
     assert image.format() == SRGB8_FORMAT
     assert (image.width(), image.height()) == (20, 20)
     assert image.pixelColor(0, 0).getRgb() == (220, 30, 30, 255)
@@ -174,20 +201,46 @@ def test_fractional_dpr_crops_device_pixels(qapp):
     setup = _Setup(dpr=1.5)
     setup.controller.start()
 
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(4, 4, 8, 8))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(4, 4, 8, 8))
 
-    image, _ = setup.captured[0]
+    image, _, _ = setup.captured[0]
     assert (image.width(), image.height()) == SelectionRect(4, 4, 8, 8).device_rect(1.5)[2:]
+
+
+@pytest.mark.parametrize("action", [ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY])
+def test_every_action_bar_choice_rides_along_untouched(qapp, action):
+    """动作条的四个动作控制器一律原样带回（分发在编排层，不在这里猜）。"""
+    setup = _Setup()
+    setup.controller.start()
+
+    setup.overlay.pick(action, SelectionRect(1, 1, 5, 5))
+
+    assert len(setup.captured) == 1
+    assert setup.captured[0][2] == action
+    assert setup.failed == []
 
 
 def test_user_cancel_restores_windows(qapp):
     setup = _Setup()
     setup.controller.start()
 
-    setup.overlays[0].selection_cancelled.emit("esc")
+    setup.overlay.cancel("esc")
 
     assert setup.cancelled == ["esc"]
     assert setup.captured == [] and setup.failed == []
+    assert setup.log[-2:] == ["overlay.close", "restore"]
+    assert setup.controller.phase is CapturePhase.IDLE
+
+
+def test_toolbar_cancel_carries_its_own_reason(qapp):
+    """动作条「取消」与 Esc 走同一条收口，但理由要能区分（排查时看得到用户从哪退出）。"""
+    setup = _Setup()
+    setup.controller.start()
+
+    setup.overlay.cancel("toolbar")
+
+    assert setup.cancelled == ["toolbar"]
+    assert setup.failed == []
     assert setup.log[-2:] == ["overlay.close", "restore"]
     assert setup.controller.phase is CapturePhase.IDLE
 
@@ -197,9 +250,36 @@ def test_overlay_is_closed_before_windows_come_back(qapp):
     setup = _Setup()
     setup.controller.start()
 
-    setup.overlays[0].selection_cancelled.emit("esc")
+    setup.overlay.cancel("esc")
 
     assert setup.log.index("overlay.close") < setup.log.index("restore")
+
+
+# ---------------------------------------------- 不认识的动作挡在门口（新增契约）
+
+
+def test_an_unknown_action_aborts_instead_of_flowing_downstream(qapp):
+    """覆盖层报到不认识的动作 id = 契约破裂，宁可失败也不许瞎猜一个动作执行。"""
+    setup = _Setup()
+    setup.controller.start()
+
+    setup.overlay.pick("delete-everything", SelectionRect(1, 1, 5, 5))
+
+    assert setup.captured == []
+    assert setup.failed == ["unknown-action:delete-everything"]
+    assert setup.log[-1] == "restore"
+    assert setup.controller.phase is CapturePhase.IDLE
+
+
+def test_an_unknown_action_is_aborted_before_the_crop(qapp):
+    """挡在裁剪之前：连像素都不必动（下游拿不到东西，也就没有"偷偷执行"的余地）。"""
+    setup = _Setup()
+    setup.controller.start()
+
+    setup.overlay.pick("", SelectionRect(1, 1, 5, 5))
+
+    assert setup.failed == ["unknown-action:"]
+    assert setup.controller.phase is CapturePhase.IDLE
 
 
 # ------------------------------------------------------------------ 失败出口
@@ -241,7 +321,7 @@ def test_empty_selection_from_overlay_is_not_captured(qapp):
     setup = _Setup()
     setup.controller.start()
 
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(5, 5, 0, 0))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(5, 5, 0, 0))
 
     assert setup.captured == []
     assert setup.failed == ["empty-selection"]
@@ -253,7 +333,7 @@ def test_crop_failure_is_reported_and_restored(qapp):
     setup = _Setup()
     setup.controller.start()
 
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(500, 500, 20, 20))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(500, 500, 20, 20))
 
     assert setup.captured == []
     assert setup.failed and setup.failed[0].startswith("crop-failed")
@@ -277,34 +357,36 @@ def test_second_start_while_covering_is_refused(qapp):
 def test_controller_recovers_after_cancel(qapp):
     setup = _Setup()
     setup.controller.start()
-    setup.overlays[0].selection_cancelled.emit("esc")
+    setup.overlay.cancel("esc")
 
     assert setup.controller.start() is True
 
     assert setup.log.count("hide") == 2
     assert len(setup.overlays) == 2
-    setup.overlays[1].selection_confirmed.emit(SelectionRect(1, 1, 5, 5))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(1, 1, 5, 5))
     assert len(setup.captured) == 1
 
 
-def test_double_confirmation_does_not_emit_twice(qapp):
+def test_double_action_request_does_not_emit_twice(qapp):
+    """双击/重复上报只算一次：第二次那条在 phase 检查上被丢掉。"""
     setup = _Setup()
     setup.controller.start()
 
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(1, 1, 5, 5))
-    setup.overlays[0].selection_confirmed.emit(SelectionRect(1, 1, 5, 5))
+    setup.overlay.pick(ACTION_OCR, SelectionRect(1, 1, 5, 5))
+    setup.overlay.pick(ACTION_COPY, SelectionRect(1, 1, 5, 5))
 
     assert len(setup.captured) == 1
+    assert setup.captured[0][2] == ACTION_OCR
 
 
 def test_overlay_destroyed_while_covering_still_restores_windows(qapp):
-    """覆盖层被 Qt 直接销毁时没有 Esc/Enter 可等；必须自己收口还窗口。"""
+    """覆盖层被 Qt 直接销毁时没有 Esc/动作可等；必须自己收口还窗口。"""
     import shiboken6
 
     setup = _Setup()
     setup.controller.start()
 
-    shiboken6.delete(setup.overlays[0])
+    shiboken6.delete(setup.overlay)
 
     assert setup.failed and setup.failed[0].startswith("overlay-destroyed")
     assert setup.captured == [] and setup.cancelled == []
@@ -317,7 +399,7 @@ def test_restore_failure_does_not_wedge_the_controller(qapp):
     setup = _Setup(fail_restore=True)
     setup.controller.start()
 
-    setup.overlays[0].selection_cancelled.emit("esc")
+    setup.overlay.cancel("esc")
 
     assert setup.cancelled == ["esc"]
     assert setup.controller.phase is CapturePhase.IDLE

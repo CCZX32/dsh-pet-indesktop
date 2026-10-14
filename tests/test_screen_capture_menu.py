@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
-"""「截图」右键菜单接线：注册项、模板位置、三条文案与可用性（offscreen）。
+"""「截图」右键菜单接线：注册项、模板位置、单一入口与可用性（offscreen）。
 
-菜单是本片唯一的产品入口（全局热键是后续片），所以这里钉死三件事：
+交互模型在 2026-10-14 重做过：菜单只负责**开始框选**，框完松手由覆盖层动作条
+决定做什么。所以这里钉死四件事：
 
 1. **它真的在树上**：注册表有 ``screen_capture`` 这一项、默认模板把它排在
    「看看屏幕」之后（都是屏幕类入口），老用户布局（模板里没这个节点）也会被
    合并策略补上——不然"升级后入口不见了"；
-2. **三条叶子各自的可用性如实**：本地 OCR 引擎没接上就置灰 + 写明原因
-   （``CONTEXT.md`` 的 Runtime Disabled：留位置、解释原因，不是消失）；
-   没有聊天能力时「问答」整条不出现（Capability Unavailable）；
-3. **点击路由到宿主**：三条叶子各自打到 ``on_screen_capture_ocr / _translate /
-   _ask``，名字对不上就是"入口在、点了没反应"。
+2. **只有一个叶子**「框选识屏…」：不再有"提取文字/翻译/问答"三条（那三个选择
+   挪到了动作条上，菜单不该预先替用户押注）；
+3. **入口不押注引擎**：以前三条叶子各自判可用性、各写置灰原因，现在无论引擎在
+   不在都是同一个可点的叶子（置灰与原因搬到了动作条的「翻译」按钮上）；
+4. **点击路由到宿主**：打到 ``on_screen_capture``。宿主没有这个面（纯桌宠变体）
+   ＝能力不可用，整组不出现；名字对不上就是"入口在、点了没反应"，而只比对菜单
+   树的用例抓不到，所以另有一条直查两个真实宿主的用例。
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 from pet import menu_layout  # noqa: E402
 from pet.context_menu import populate_context_menu  # noqa: E402
 from pet.context_menus import registry as registry_mod  # noqa: E402
-from pet.context_menus import shared as shared_mod  # noqa: E402
 from pet.screen_capture import actions as actions_mod  # noqa: E402
 
 
@@ -64,11 +66,14 @@ class _FakeConfig:
 
 
 class _FakePet:
-    """只提供截图三入口的宿主替身（其余菜单项靠 ``__getattr__`` 兜底）。
+    """只提供截图入口的宿主替身（其余菜单项靠 ``__getattr__`` 兜底）。
 
     数值/清单属性照抄 ``tests/test_menu_layout.py`` 的 FakePet：默认菜单的其它
     建造器（播放速率 / 动画分类 / 大小 / 桌宠控制）会读它们，替身缺一个就会在
     别处先炸，测不到本片要验的东西。
+
+    ``chat=False`` 模拟"没有聊天能力"的宿主——注意它现在**只影响聊天入口**：
+    截图入口只有一个面，不再随聊天能力有无而增删叶子。
     """
 
     playback_speed = scale = 1.0
@@ -80,12 +85,8 @@ class _FakePet:
         self.cfg = _FakeConfig()
         self.calls: list[str] = []
         if surfaces:
-            self.on_screen_capture_ocr = lambda: self.calls.append("ocr")
-            self.on_screen_capture_translate = lambda: self.calls.append("translate")
-            # 无聊天能力时宿主给的问答回调是 None（与 PetWindow/SpriteMenuFacade 同形）
-            self.on_screen_capture_ask = (
-                (lambda: self.calls.append("ask")) if chat else None
-            )
+            self.on_screen_capture = lambda: self.calls.append("capture")
+        self.on_open_chat = (lambda: None) if chat else None
 
     def icon_pixmap(self, size: int = 64):
         from PySide6.QtGui import QPixmap
@@ -95,8 +96,9 @@ class _FakePet:
         return pixmap
 
     def __getattr__(self, name):
-        if name.startswith("on_screen_capture_"):
-            raise AttributeError(name)   # 宿主没接这套面
+        # 宿主没接这套面：三级入口名字一个都不许被兜底成一个假回调。
+        if name == "on_screen_capture" or name.startswith("on_screen_capture_"):
+            raise AttributeError(name)
         return lambda *args, **kwargs: None
 
 
@@ -108,8 +110,14 @@ def _screen_capture_menu(pet=None) -> QMenu:
     )
     assert action is not None, "截图子菜单没出现在右键菜单上"
     submenu = action.menu()
-    assert submenu is not None, "截图必须是子菜单（三个功能挂它下面）"
+    assert submenu is not None, "截图必须是子菜单（入口挂它下面）"
     return submenu
+
+
+def _only_leaf(submenu: QMenu):
+    leaves = [action for action in submenu.actions() if not action.isSeparator()]
+    assert len(leaves) == 1, f"截图子菜单应该是单一入口，实际有 {len(leaves)} 条"
+    return leaves[0]
 
 
 def test_registry_registers_the_screen_capture_group():
@@ -150,52 +158,49 @@ def test_saved_user_layout_gets_the_new_entry_merged_in(tmp_path):
     assert ids.index("screen_capture") == ids.index("look_screen") + 1
 
 
-def test_three_leaves_are_reachable_with_their_own_callbacks(monkeypatch):
-    monkeypatch.setattr(actions_mod, "ocr_engine_available", lambda: True)
-    monkeypatch.setattr(actions_mod, "translation_engine_available", lambda: True)
+# ------------------------------------------------------------------ 单一入口
+
+
+def test_the_single_leaf_starts_a_selection_and_routes_to_the_host():
     pet = _FakePet()
-    submenu = _screen_capture_menu(pet)
-    labels = [action.text() for action in submenu.actions() if not action.isSeparator()]
-    assert labels == ["提取文字", "翻译", "问答"]
+    leaf = _only_leaf(_screen_capture_menu(pet))
 
-    for label in labels:
-        action = next(item for item in submenu.actions() if item.text() == label)
-        assert action.isEnabled() is True
-        action.trigger()
-    assert pet.calls == ["ocr", "translate", "ask"]
+    assert leaf.text() == "框选识屏…"
+    assert leaf.isEnabled() is True
+    leaf.trigger()
+    assert pet.calls == ["capture"]
 
 
-def test_leaves_explain_why_they_are_greyed_out_before_the_engines_land(monkeypatch):
-    """引擎/通道没到位时留位置 + 写明原因，绝不假装能做（点了没反应是缺陷）。"""
+def test_the_leaf_does_not_gate_on_the_engines(monkeypatch):
+    """引擎在不在都是同一个可点的叶子：动作（与"能不能做"）在松手后才定。
+
+    打桩是**刻意的**：菜单这一层不该再问引擎可用性。哪天有人把这条依赖加回来，
+    叶子会重新置灰、这条就红——这正是本用例要拦住的回归。
+    """
     monkeypatch.setattr(actions_mod, "ocr_engine_available", lambda: False)
     monkeypatch.setattr(actions_mod, "translation_engine_available", lambda: False)
-    submenu = _screen_capture_menu()
-    leaves = {action.text(): action for action in submenu.actions() if not action.isSeparator()}
+    pet = _FakePet()
+    leaf = _only_leaf(_screen_capture_menu(pet))
 
-    assert leaves["提取文字"].isEnabled() is False
-    assert "尚未接入" in leaves["提取文字"].toolTip()
-    assert leaves["翻译"].isEnabled() is False
-    assert "后续片" in leaves["翻译"].toolTip()
-    # 「问答」不依赖本地引擎：通道在就可用
-    assert leaves["问答"].isEnabled() is True
-
-
-def test_leaves_turn_enabled_once_the_engines_are_wired(monkeypatch):
-    monkeypatch.setattr(actions_mod, "ocr_engine_available", lambda: True)
-    monkeypatch.setattr(actions_mod, "translation_engine_available", lambda: True)
-    submenu = _screen_capture_menu()
-    leaves = [action for action in submenu.actions() if not action.isSeparator()]
-    assert [action.isEnabled() for action in leaves] == [True, True, True]
-    # 可用态不再挂"为什么用不了"的说明（QAction 的 tooltip 缺省回落到文案本身）
-    assert all("尚未接入" not in action.toolTip() for action in leaves)
-    assert all("后续片" not in action.toolTip() for action in leaves)
+    assert leaf.isEnabled() is True
+    assert "尚未接入" not in leaf.toolTip()
+    assert "后续片" not in leaf.toolTip()
+    leaf.trigger()
+    assert pet.calls == ["capture"]
 
 
-def test_ask_leaf_disappears_without_a_chat_capability():
-    """能力不可用 = 整条不出现（无聊天变体下不许留个点了没反应的问答）。"""
-    submenu = _screen_capture_menu(_FakePet(chat=False))
-    labels = [action.text() for action in submenu.actions() if not action.isSeparator()]
-    assert labels == ["提取文字", "翻译"]
+def test_the_entry_survives_without_a_chat_capability():
+    """没有聊天能力时入口照样在：能不能问答是运行时的事，不拿它删入口。
+
+    （旧契约里「问答」叶子在无聊天能力时整条消失；单一入口之后"整组出不出现"
+    只取决于宿主有没有 ``on_screen_capture`` 这一个面。问答通道不可用时如实
+    报一句在结果浮层上——见 ``test_screen_capture_actions.py``。）
+    """
+    pet = _FakePet(chat=False)
+    leaf = _only_leaf(_screen_capture_menu(pet))
+
+    leaf.trigger()
+    assert pet.calls == ["capture"]
 
 
 def test_group_is_hidden_when_the_host_has_no_screen_capture_surface():
@@ -205,39 +210,24 @@ def test_group_is_hidden_when_the_host_has_no_screen_capture_surface():
     assert "截图" not in [action.text() for action in menu.actions()]
 
 
-def test_real_hosts_expose_the_three_entries():
-    """三条入口在两个真实宿主上都接了线（只查菜单树会漏：两边同时缺也"自证"通过）。
+def test_real_hosts_expose_the_single_entry():
+    """入口在两个真实宿主上都接了线（只查菜单树会漏：两边同时缺也"自证"通过）。
 
     单窗拓扑 = ``PetWindow``；sprite 拓扑 = ``OverlayShell``（``SpriteMenuFacade``
-    只是每次右键重建的转发面，真正的长期宿主是壳）。三个名字缺任何一个，
+    只是每次右键重建的转发面，真正的长期宿主是壳）。``on_screen_capture`` 缺了，
     菜单上那组就会因为"能力不可用"整组消失，而只比对菜单树的用例抓不到。
+
+    **顺带钉旧名字必须死透**：三个老回调（``on_screen_capture_ocr`` / ``_translate``
+    / ``_ask``）只要还留一个，宿主→动作的连接就还停在旧契约上（菜单照旧能用，
+    静默地少调一层）。
     """
     from pet.overlay_shell import OverlayShell
     from pet.sprite_menu_facade import SpriteMenuFacade
     from pet.window import PetWindow
 
-    names = ("on_screen_capture_ocr", "on_screen_capture_translate", "on_screen_capture_ask")
+    retired = ("on_screen_capture_ocr", "on_screen_capture_translate", "on_screen_capture_ask")
     for host in (PetWindow, OverlayShell, SpriteMenuFacade):
-        for name in names:
-            assert isinstance(getattr(host, name, None), property), (
-                f"{host.__name__}.{name} 没接线")
-
-
-def test_disabled_reason_constants_are_shared_with_the_builder():
-    """置灰原因只有一份真值（注册表/建造器不再各写一套文案）。"""
-    assert "尚未接入" in shared_mod.SCREEN_CAPTURE_OCR_DISABLED_REASON
-    assert "后续片" in shared_mod.SCREEN_CAPTURE_TRANSLATE_DISABLED_REASON
-
-
-def test_menu_and_panel_read_the_same_reason_objects():
-    """菜单 tooltip 与结果浮层状态行必须是**同一个字符串**，不是两份同文复印件。
-
-    两份字面量的下场：改一处漏一处 → 菜单说"引擎尚未接入"，点下去浮层说的是另一句。
-    所以这里断的是身份（``is``）而不是"内容相等"。
-    """
-    assert shared_mod.SCREEN_CAPTURE_OCR_DISABLED_REASON is actions_mod.OCR_PENDING_REASON
-    assert (shared_mod.SCREEN_CAPTURE_TRANSLATE_DISABLED_REASON
-            is actions_mod.TRANSLATION_PENDING_REASON)
-    from pet.screen_capture import reasons
-
-    assert reasons.OCR_PENDING_REASON is actions_mod.OCR_PENDING_REASON
+        assert isinstance(getattr(host, "on_screen_capture", None), property), (
+            f"{host.__name__}.on_screen_capture 没接线")
+        for name in retired:
+            assert not hasattr(host, name), f"{host.__name__}.{name} 是旧契约的残留"

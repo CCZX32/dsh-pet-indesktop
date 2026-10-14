@@ -3517,19 +3517,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         return actions_for(self)
 
     @property
-    def on_screen_capture_ocr(self):
-        """「截图 → 提取文字」：采集 → 本地 OCR → 结果浮层（纯本地，不联网）。"""
-        return lambda: self._screen_capture().run("ocr")
-
-    @property
-    def on_screen_capture_translate(self):
-        """「截图 → 翻译」：本片只接通道（原文 + 双语对照位），引擎是后续片。"""
-        return lambda: self._screen_capture().run("translate")
-
-    @property
-    def on_screen_capture_ask(self):
-        """「截图 → 问答」：采集 → 显式确认 → vision/chat 通道 → 岛／结果浮层。"""
-        return lambda: self._screen_capture().run("ask")
+    def on_screen_capture(self):
+        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。"""
+        return lambda: self._screen_capture().run()
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         if self._context_menu_suppressed:

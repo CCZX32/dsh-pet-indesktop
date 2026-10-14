@@ -595,21 +595,13 @@ class SpriteMenuFacade:
 
     # ---------------------------------------------------------------- 截图（快速识屏）
     #
-    # 三条入口一律**转发到壳**（``OverlayShell.on_screen_capture_*``）：截图编排件
+    # 入口一律**转发到壳**（``OverlayShell.on_screen_capture``）：截图编排件
     # 要活得比菜单久（一次采集会话横跨菜单关闭），而本 facade 每次右键都重建，
     # 不能当宿主——宿主是壳（见 ``overlay_shell._screen_capture``）。
     @property
-    def on_screen_capture_ocr(self):
-        """「截图 → 提取文字」：转发到壳的入口。"""
-        return getattr(self._shell, "on_screen_capture_ocr", None)
-
-    @property
-    def on_screen_capture_translate(self):
-        return getattr(self._shell, "on_screen_capture_translate", None)
-
-    @property
-    def on_screen_capture_ask(self):
-        return getattr(self._shell, "on_screen_capture_ask", None)
+    def on_screen_capture(self):
+        """「截图 → 框选识屏」：转发到壳的入口。"""
+        return getattr(self._shell, "on_screen_capture", None)
 
     # ---------------------------------------------------------------- 主动识屏
     def _proactive_watcher(self):
