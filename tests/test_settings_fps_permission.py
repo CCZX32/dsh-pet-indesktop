@@ -179,7 +179,7 @@ def test_close_dialog_mid_grant_then_reopen(tmp_path, monkeypatch):
 
     def slow():
         calls.append(1)
-        gate.wait(5)
+        gate.wait(30)  # 宽预算：慢 CI/重负载下两次对话框构造可能超过 5s（守"只跑一个"，不守速度）
         fps_permission.mark_granted()
         return fps_permission.GrantResult("ok")
 

@@ -104,6 +104,36 @@ def test_entries_can_exclude_unmanaged_packages(tmp_path):
     assert resources.entries(include_unmanaged=False) == []
 
 
+def test_listing_uses_shallow_scan_while_install_still_scans_deep(tmp_path):
+    """frameseq/ 可能有数万帧文件（本机 25530 个），列表浅扫不递归它——否则设置窗
+    构造实测 0.5s → 5.4s。浅扫只看顶层 + videos/ 子树；安装/启用仍走全树深扫。"""
+    external = tmp_path / "external"
+    package = external / "demo"
+    (package / "videos").mkdir(parents=True)
+    (package / "videos" / "idle.webm").write_bytes(b"video")
+    (package / "frameseq").mkdir()
+    try:
+        (package / "frameseq" / "link.webm").symlink_to("link-target.webm")
+    except OSError:
+        pytest.skip("本平台不允许创建符号链接")
+    resources = ResourceMods(tmp_path / "data", character_roots=[("external", external)])
+
+    assert [row.id for row in resources.entries()] == ["resource:external:demo"]
+    with pytest.raises(ModError, match="符号链接"):
+        mod_management._read_package(package)  # 默认 deep=True：全树校验依旧
+
+
+def test_listing_still_refuses_executables_inside_videos(tmp_path):
+    """浅扫的边界：videos/ 子树里的可执行文件在列表阶段照样拒。"""
+    external = tmp_path / "external"
+    package = external / "demo"
+    (package / "videos").mkdir(parents=True)
+    (package / "videos" / "idle.webm").write_bytes(b"video")
+    (package / "videos" / "evil.exe").write_bytes(b"MZ")
+    resources = ResourceMods(tmp_path / "data", character_roots=[("external", external)])
+    assert resources.entries() == []
+
+
 def test_a_directory_without_videos_is_not_offered(tmp_path):
     builtin = tmp_path / "builtin"
     (builtin / "notacandidate" / "notes").mkdir(parents=True)

@@ -162,11 +162,24 @@ def _video_files(root: Path) -> list[Path]:
     return [path for path in videos.rglob("*") if path.is_file() and path.suffix.lower() in _VIDEO_SUFFIXES]
 
 
-def _read_package(root: Path, *, character_id: str | None = None) -> _CharacterPackage:
-    """Validate one character package directory, or refuse it with a reason."""
+def _read_package(root: Path, *, character_id: str | None = None,
+                  deep: bool = True) -> _CharacterPackage:
+    """Validate one character package directory, or refuse it with a reason.
+
+    ``deep=False`` 是列表浅读：符号链接/可执行文件扫描只看顶层与 ``videos/`` 子树，
+    不递归整包——``frameseq/`` 里可能有数万个帧文件（本机 25530 个），全树 rglob
+    实测要 4.5–5.4 秒，会让设置窗打开慢十倍。安装/启用/回滚仍走 deep=True 的全量校验。
+    """
     if not root.is_dir():
         raise ModError("无效的角色资源包：不是目录")
-    for path in root.rglob("*"):
+    if deep:
+        scan = list(root.rglob("*"))
+    else:
+        scan = list(root.iterdir())
+        videos_dir = root / "videos"
+        if videos_dir.is_dir():
+            scan.extend(videos_dir.rglob("*"))
+    for path in scan:
         if path.is_symlink():
             raise ModError(f"角色包内不允许符号链接：{path.name}")
         if path.is_file() and path.suffix.lower() in _EXECUTABLE_SUFFIXES:
@@ -301,7 +314,8 @@ class ResourceMods:
                 if not character.is_dir():
                     continue
                 try:
-                    package = _read_package(character, character_id=character.name)
+                    package = _read_package(character, character_id=character.name,
+                                            deep=False)
                 except (ModError, OSError) as exc:
                     _LOG.warning("MOD discovery skipped %s: %s", character, exc)
                     continue
@@ -341,7 +355,8 @@ class ResourceMods:
                 if not character.is_dir() or not _video_files(character):
                     continue
                 try:
-                    package = _read_package(character, character_id=character.name)
+                    package = _read_package(character, character_id=character.name,
+                                            deep=False)
                 except (ModError, OSError) as exc:
                     _LOG.warning("MOD discovery skipped %s: %s", character, exc)
                     continue
