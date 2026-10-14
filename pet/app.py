@@ -1357,6 +1357,8 @@ class AppShell:
         self._config_reload_timer = None
         self._settings_watch_timer = None
         self._last_config_signature = None
+        self._catalog_reload_timer = None
+        self._last_catalog_revision = None
         from . import pet_profiles
         from .settings_slot_config import SlotRoutedConfig
         from types import SimpleNamespace
@@ -2083,6 +2085,8 @@ class AppShell:
         """设置进程存活轮询：崩溃/漏事件时兜底解除气泡抑制；顺带消费指令。"""
         # 4.4a：D12 指令消费的轮询兜底（目录 watcher 漏事件/网络盘等场景）。
         self._consume_settings_command()
+        # MOD 修订令牌的轮询兜底：与指令通道同一节奏（3s），只在设置进程存活期跑。
+        self._arm_catalog_reload_if_changed()
         self._refresh_legacy_profile_if_changed()
         if not bool(getattr(self, "_settings_child_active", False)):
             return
@@ -2246,6 +2250,11 @@ class AppShell:
         self._config_reload_timer.setSingleShot(True)
         self._config_reload_timer.setInterval(300)
         self._config_reload_timer.timeout.connect(self._on_config_change_debounced)
+        self._catalog_reload_timer = QTimer()
+        self._catalog_reload_timer.setSingleShot(True)
+        self._catalog_reload_timer.setInterval(300)
+        self._catalog_reload_timer.timeout.connect(self._on_catalog_change_debounced)
+        self._last_catalog_revision = self._catalog_revision()
         self._settings_watch_timer = QTimer()
         self._settings_watch_timer.setInterval(3000)
         self._settings_watch_timer.timeout.connect(self._poll_settings_process)
@@ -2284,6 +2293,46 @@ class AppShell:
         if timer is not None:
             timer.start()
 
+    # ---------------------------------------------------- MOD 账本跨进程收敛
+    # 独立设置进程启停/导入 MOD 后只落一枚修订令牌（``mod-catalog.revision``，
+    # 见 ``feature_management._deliver`` 里的 ``publish_catalog_change``）。
+    # 主进程这边的消费走**现有** config 目录 watcher + 轮询兜底，不另装
+    # ``ModCatalogMonitor``：它的监视集（数据根 + 修订文件）是这个 watcher 的
+    # 子集，粗粒度戳记还会把每次 config 保存都点成一次收敛；权威的"有操作落定"
+    # 信号就是令牌本身——以它为触发，收敛永远不会发生在对方事务的半路上。
+    def _catalog_revision(self):
+        """MOD 修订令牌的当前内容（缺失/读不出 = None）。"""
+        from .mod_catalog import REVISION_FILENAME
+
+        try:
+            return (self.config.dir / REVISION_FILENAME).read_bytes()
+        except OSError:
+            return None
+
+    def _arm_catalog_reload_if_changed(self) -> None:
+        """令牌变了才重启收敛去抖窗口（300ms 合并一次操作链的多次落盘）。"""
+        if self._catalog_revision() == getattr(self, "_last_catalog_revision", None):
+            return
+        timer = getattr(self, "_catalog_reload_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _on_catalog_change_debounced(self) -> None:
+        """去抖后把功能扩展宿主收敛到落盘账本（重新发现 owner + 启停对齐）。
+
+        采样/记录口径与 ``_on_config_change_debounced`` 相同：先采样、finally 记
+        **采样值**——收敛期间对方又落定的一次操作不会被算成"已收敛"。
+        """
+        sampled = self._catalog_revision()
+        runtime = getattr(self, "feature_runtime", None)
+        try:
+            if runtime is not None:
+                runtime.refresh_catalog()
+        except Exception:
+            logging.exception("MOD 账本变更收敛失败")
+        finally:
+            self._last_catalog_revision = sampled
+
     def _on_config_file_changed(self, path: str) -> None:
         if Path(path).name != self.config.path.name:
             return  # 只认本配置文件的 basename（同目录还有 settings.lock 等）
@@ -2299,6 +2348,8 @@ class AppShell:
         self._refresh_legacy_profile_if_changed()
         # 4.4a：D12 指令通道的目录侧消费（原子 os.replace 会在目录里产生事件）。
         self._consume_settings_command()
+        # MOD 修订令牌变动 → 收敛功能扩展宿主（设置进程改账本后唯一通知）。
+        self._arm_catalog_reload_if_changed()
         if self._config_signature() != getattr(self, "_last_config_signature", None):
             self._arm_config_reload()
         # 锁文件出现 = 设置进程已起来（启动窗口结束）；锁文件消失 = 设置进程
@@ -2336,7 +2387,7 @@ class AppShell:
                 except (RuntimeError, TypeError):
                     pass
             self._config_watcher = None
-        for name in ("_config_reload_timer", "_settings_watch_timer"):
+        for name in ("_config_reload_timer", "_settings_watch_timer", "_catalog_reload_timer"):
             timer = getattr(self, name, None)
             if timer is None:
                 continue

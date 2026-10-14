@@ -370,3 +370,81 @@ def test_unreadable_owner_character_is_reported_as_unverified(env, monkeypatch):
         assert usage.asset_dirs == ()
     finally:
         dialog.close()
+
+
+# ------------------------------------------- overlay 拓扑：子宠占用（M2 回归）
+
+def test_spawned_pet_occupancy_comes_from_the_active_set(env, monkeypatch):
+    """overlay 拓扑：子宠不写 runtime marker，占用判据要读持久化活跃集合 + 槽档案。
+
+    实证过的缺陷：只有主 sprite 写 marker（几何避让用），spawn 的子宠不写——
+    slot0=shenshen 有 marker、slot1=demo 无 marker 时，demo 的包能被停用/删除。
+    活跃身份真值在版本化的 ``overlay-active-pets.json``（生成/退出时原子落盘）。
+    """
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "overlay")
+    data_root = env
+    marker = _write_runtime_marker(data_root)  # 主 sprite（slot0）的几何标记
+    assert pet_profiles.write_profile_settings(data_root, 0, {"character": "shenshen"}).ok
+    assert pet_profiles.write_profile_settings(data_root, 1, {"character": "demo"}).ok
+    assert pet_profiles.save_active_set(data_root, [0, 1]).ok
+    dialog = _dialog(env)
+    try:
+        usage = dialog.mod_host.live_usage()
+        assert usage.verified is True
+        assert "shenshen" in usage.character_ids
+        assert "demo" in usage.character_ids, "子宠（slot1=demo，无 marker）必须算占用"
+
+        # 子宠正在用的角色包：停用必须被拒（先换装才放得行动文件）
+        source = _write_package(env.parent / "source")
+        controller = dialog.mod_controller
+        controller.import_source(source)
+        pump(lambda: not controller.busy)
+        controller.perform("enable", ["角色资源:demo"])
+        pump(lambda: not controller.busy)
+        results = []
+        controller.result.connect(lambda _key, outcome: results.append(outcome))
+        assert controller.perform("disable", ["角色资源:demo"])
+        pump(lambda: not controller.busy)
+        assert not results[-1].success and "正在使用" in results[-1].message
+        assert controller.resources._entry("demo").enabled
+    finally:
+        dialog.close()
+        marker.unlink(missing_ok=True)
+
+
+def test_legacy_topology_keeps_markers_as_the_only_occupancy_source(env, monkeypatch):
+    """legacy（单窗）拓扑：marker 是唯一来源，活跃集合里留存的子宠身份不挡操作。
+
+    捕获模式只起 slot0，多余的子宠身份被**拒绝复活但不改盘**——活跃集合文件里
+    仍留着 slot1。这条拓扑下它没有在跑，不许据此拦下 demo 包的停用。
+    """
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")
+    data_root = env
+    marker = _write_runtime_marker(data_root)
+    assert pet_profiles.write_profile_settings(data_root, 0, {"character": "shenshen"}).ok
+    assert pet_profiles.write_profile_settings(data_root, 1, {"character": "demo"}).ok
+    assert pet_profiles.save_active_set(data_root, [0, 1]).ok
+    dialog = _dialog(env)
+    try:
+        usage = dialog.mod_host.live_usage()
+        assert usage.verified is True
+        assert "shenshen" in usage.character_ids
+        assert "demo" not in usage.character_ids, "legacy 下没在跑的留存身份不算占用"
+    finally:
+        dialog.close()
+        marker.unlink(missing_ok=True)
+
+
+def test_unreadable_active_set_is_reported_as_unverified(env, monkeypatch):
+    """overlay 拓扑下活跃集合读不出 = 答不上来「谁在用」：按可能在用拒绝。"""
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "overlay")
+    data_root = env
+    marker = _write_runtime_marker(data_root)
+    (data_root / "overlay-active-pets.json").write_text("{broken", encoding="utf-8")
+    dialog = _dialog(env)
+    try:
+        usage = dialog.mod_host.live_usage()
+        assert usage.verified is False
+    finally:
+        dialog.close()
+        marker.unlink(missing_ok=True)

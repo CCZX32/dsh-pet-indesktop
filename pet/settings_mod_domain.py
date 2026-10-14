@@ -21,14 +21,18 @@ test_architecture.py``）没有余量，本域的主体是「谁能动活桌宠�
                             而设置窗是它的子窗口，当场换=把设置窗一起销毁；见
                             ``DialogModHost.use_resource``）；没有窗口（独立设置进程、
                             overlay 壳没有 PetWindow）⇒ 按钮置灰并说明从右键菜单换装
-「谁在用这个包」（放行判据） 活桌宠 = runtime 标记文件（``slot_manager``，pid 探活）；
+「谁在用这个包」（放行判据） 活桌宠 = runtime 标记文件（``slot_manager``，pid 探活）
+                            + **overlay 拓扑**再并入持久化活跃集合
+                            （``overlay-active-pets.json``，版本化：子宠是进程内
+                            sprite，不写 marker，它们是这条拓扑的唯一身份真值）；
                             逐只读它自己的档案角色，编辑中的那只读设置页自己的配置
 动文件的动作                停用/删除/回滚/替换旧版本先问放行判据；答不上来就**拒绝**，
                             不猜（DLC 的 IPC 判据同样是"问不到就拒绝"）
 =========================  ============================================================
 
 两条腿是互补的：窗口给得出**素材目录**（精确到"这个包正被渲染"），运行时标记 + 档案
-给得出**角色 id**（独立设置进程唯一读得到的东西）。
+给得出**角色 id**（独立设置进程唯一读得到的东西）。legacy（单窗）拓扑没有活跃集合
+语义——那边 marker 就是唯一来源，留存的子宠身份并没有在跑，不参与判据。
 """
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from . import catalog
+from . import overlay_settings_command
 from .mod_catalog import publish_catalog_change
 from .mod_center_controller import LiveUsage, ModCenterController
 from .mod_center_ui import ModCenterWidget
@@ -89,6 +94,23 @@ def _slot_character(data_root: Path, slot: int) -> str:
         return ""
     value = profile.value("character")
     return str(value or "")
+
+
+def _active_set_slots(data_root: Path) -> tuple[int, ...] | None:
+    """持久化活跃集合的槽位（overlay 拓扑下「谁在跑」的权威身份源）；读不出 = None。
+
+    overlay 壳里只有主 sprite 写 runtime 标记（几何避让），spawn 的子宠不写——
+    它们的存在只落在版本化的 ``overlay-active-pets.json``（生成/退出时原子落盘）。
+    文件损坏/版本不认识一律答 None：占用判据宁可拒绝也不猜。
+    """
+    from . import pet_profiles
+
+    try:
+        active = pet_profiles.load_active_set(data_root)
+    except Exception:  # 读活跃集合不该炸设置页：答不上来即可
+        _LOG.debug("MOD 判定：读活跃集合失败", exc_info=True)
+        return None
+    return tuple(active.slots) if active.ok else None
 
 
 class DialogModHost:
@@ -223,6 +245,15 @@ class DialogModHost:
         """派发前快照（**GUI 线程**调用，此后工作线程只读）。"""
         live = _live_slots(self.data_root)
         dirs = self._window_asset_dirs()
+        if overlay_settings_command.is_overlay_topology() and live:
+            # overlay 拓扑：子宠是进程内 sprite，不写 runtime marker——它们的活跃
+            # 身份真值在持久化活跃集合。有活进程（marker 判活）才并入：进程不在了，
+            # 残留清单不该挡操作。legacy 拓扑不读它（那边 marker 就是唯一来源，
+            # 留存的子宠身份并没有在跑）。
+            persisted = _active_set_slots(self.data_root)
+            if persisted is None:
+                return LiveUsage(verified=False)  # 活跃身份读不出：按「可能在用」拒绝
+            live = sorted(set(live).union(persisted))
         if not live and not dirs:
             return LiveUsage(verified=True)  # 没人在跑：动文件伤不到活桌宠
         ids = [_slot_character(self.data_root, slot) for slot in live]

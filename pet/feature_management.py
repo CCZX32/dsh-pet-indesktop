@@ -524,6 +524,19 @@ class FeatureManagementManager(QObject):
 
     # ------------------------------------------------------------- 收口
 
+    def refresh_from_ledger(self) -> None:
+        """**GUI 线程**：把宿主收敛到**当前落盘**的安装状态（跨进程变更的消费侧）。
+
+        独立设置进程改完账本只落一枚修订令牌（``mod_catalog.publish_catalog_change``），
+        本进程的宿主不会自己知道。这里复用 ``load_current`` 的既有决策链：
+        被打断的事务照启动口径重放、未安装就空转、已有绑定走 ``refresh_authorization``
+        按 ``state.enabled`` 启停宿主——那边停了，这边的 Runtime 也得停。
+        本进程自己的事务在途时不插一手：那条路自己会经 ``_deliver`` 收口。
+        """
+        if self._closed.is_set() or self.busy:
+            return
+        self._record_load(self._load_current())
+
     def close(self) -> None:
         if self._closed.is_set():
             return
@@ -611,6 +624,22 @@ class LocalFeatureRuntime:
             return None
         self.attach(route.feature_id)
         return route.feature_id
+
+    # --------------------------------------------------------- 跨进程收敛
+
+    def refresh_catalog(self) -> None:
+        """**GUI 线程**：MOD 账本被**别的进程**改过后，把本宿主收敛到落盘状态。
+
+        消费侧触发源是修订令牌（``mod_catalog.publish_catalog_change``，操作落盘后
+        写 ``mod-catalog.revision``）：重新按账本发现 owner（那边新装的包不用重启
+        就在这里出现），再让每个既有管理器按落盘状态刷新授权（那边停用的，这边的
+        Runtime 停掉）。全程幂等：本进程自己事务落盘同样会写令牌，再来一遍只是
+        一次无害的重复读。
+        """
+        for owner in discover_local_feature_ids(self.config):
+            self.attach(owner)
+        for manager in tuple(self.managers.values()):
+            manager.refresh_from_ledger()
 
     # ------------------------------------------------------------- 宿主面
 
