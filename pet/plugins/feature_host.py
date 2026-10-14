@@ -34,6 +34,8 @@ class FeatureDefinition:
     worker_launch_factory: Callable | None = None
     allow_in_process: bool = True
     mount_contract: str = ""
+    #: 启用前必须先处于 enabled 的 owner（上游 manifest.dependencies 的等价物）。
+    dependencies: tuple[str, ...] = ()
 
 
 class FeatureHost:
@@ -279,8 +281,13 @@ class FeatureHost:
         self._notify(owner)
 
     def enable(self, owner: str) -> None:
+        self._enable(owner, ())
+
+    def _enable(self, owner: str, path: tuple[str, ...]) -> None:
         self.registry.check_thread()
         if self.state(owner) != "disabled":
+            return
+        if not self._dependencies_available(owner, path):
             return
         created = []
         try:
@@ -295,6 +302,31 @@ class FeatureHost:
         self._states[owner] = "enabled"
         self._execution_transition(owner, running=True)
         self._notify(owner)
+
+    def _dependencies_available(self, owner: str, path: tuple[str, ...]) -> bool:
+        """启用前把声明的依赖深度优先启用（上游 ``_enable_recursive`` 的等价物）。
+
+        失败关闭：缺依赖 / 依赖 fault / 依赖环都只落诊断并保持 ``disabled``——
+        不借 :meth:`fault`，因为这里的 fault 会连贡献注册一起撤掉，比"没启用
+        起来"重得多（与上游把记录打成 fault 是一处有意的语义分歧）。
+        """
+        stack = (*path, owner)
+        for dependency in self._definitions[owner].dependencies:
+            if dependency in stack:
+                self._diagnostics[owner] = "dependency_cycle"
+                return False
+            state = self.state(dependency)
+            if state == "enabled":
+                continue
+            if state != "disabled":
+                self._diagnostics[owner] = "dependency_missing" if state == "absent" else "dependency_faulted"
+                return False
+            self._enable(dependency, stack)
+            if self.state(dependency) != "enabled":
+                # 依赖自己已留下更具体的诊断（cycle/missing/faulted），不覆盖。
+                self._diagnostics.setdefault(owner, "dependency_unavailable")
+                return False
+        return True
 
     def remove(self, owner: str) -> bool:
         """撤回一个 owner 在宿主里的**全部**痕迹（幂等）；False = 被 ``before_remove`` 否决。

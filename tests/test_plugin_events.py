@@ -204,12 +204,13 @@ def test_scoped_event_bus_publishes_through_the_shared_bus():
 OWNER = "sample.feature"
 
 
-def _definition(owner=OWNER, *, runtime_factory=None):
+def _definition(owner=OWNER, *, dependencies=(), runtime_factory=None):
     return FeatureDefinition(
         owner,
         (),
         lambda *_args, **_kwargs: None,
         runtime_factory=runtime_factory,
+        dependencies=dependencies,
     )
 
 
@@ -329,3 +330,68 @@ def test_the_v1_facade_exports_the_event_types():
 
     assert v1.CoreEvent is CoreEvent
     assert v1.ScopedEventBus is ScopedEventBus
+
+
+# ==================================================================
+# FeatureDefinition.dependencies：启用期依赖拓扑（上游 PluginRegistry 等价物）
+# ==================================================================
+
+
+def test_definition_declares_no_dependencies_by_default():
+    assert _definition().dependencies == ()
+
+
+def test_enable_resolves_dependencies_before_the_dependent():
+    host = FeatureHost()
+    transitions = []
+    host.subscribe(lambda owner, state: transitions.append((owner, state)))
+    host.provide(_definition("sample.child", dependencies=("sample.base",)), enabled=False)
+    host.provide(_definition("sample.base"), enabled=False)
+    host.enable("sample.child")
+    assert transitions == [("sample.base", "enabled"), ("sample.child", "enabled")]
+    assert host.enabled("sample.base") and host.enabled("sample.child")
+
+
+def test_an_already_enabled_dependency_is_reused():
+    host = FeatureHost()
+    host.provide(_definition("sample.base"), enabled=True)
+    host.provide(_definition("sample.child", dependencies=("sample.base",)), enabled=False)
+    host.enable("sample.child")
+    assert host.enabled("sample.child")
+
+
+def test_enable_with_a_missing_dependency_is_refused_and_diagnosed():
+    host = FeatureHost()
+    host.provide(_definition(dependencies=("sample.ghost",)), enabled=False)
+    host.enable(OWNER)
+    assert host.state(OWNER) == "disabled"
+    assert host.diagnostics()[OWNER] == "dependency_missing"
+
+
+def test_enable_with_a_faulted_dependency_is_refused_and_diagnosed():
+    host = FeatureHost()
+    host.provide(_definition("sample.base"), enabled=True)
+    host.fault("sample.base", "boom")
+    host.provide(_definition("sample.child", dependencies=("sample.base",)), enabled=False)
+    host.enable("sample.child")
+    assert host.state("sample.child") == "disabled"
+    assert host.diagnostics()["sample.child"] == "dependency_faulted"
+
+
+def test_a_dependency_cycle_is_refused_on_both_sides():
+    host = FeatureHost()
+    host.provide(_definition("sample.a", dependencies=("sample.b",)), enabled=False)
+    host.provide(_definition("sample.b", dependencies=("sample.a",)), enabled=False)
+    host.enable("sample.a")
+    assert host.state("sample.a") == "disabled"
+    assert host.state("sample.b") == "disabled"
+    assert host.diagnostics()["sample.b"] == "dependency_cycle"
+    assert host.diagnostics()["sample.a"] == "dependency_unavailable"
+
+
+def test_a_self_dependency_is_a_cycle():
+    host = FeatureHost()
+    host.provide(_definition(dependencies=(OWNER,)), enabled=False)
+    host.enable(OWNER)
+    assert host.state(OWNER) == "disabled"
+    assert host.diagnostics()[OWNER] == "dependency_cycle"
