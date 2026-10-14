@@ -53,11 +53,17 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -FeaturePackag
 - **两道门，判据只有一份**：`python scripts/verify_feature_package.py --bundle-root <包根>`
   在 PyInstaller **之前**验源包根、在产物里再验一次拷贝（与 `verify_presentmon.py` 同款
   两道门的理由：`Copy-Item`/`cp` 出的那一份截断或漏件，运行期看不出来）。门做三件事——
-  清单、验签（结构/兼容性/路径边界/逐文件摘要）、**装前子进程预检**；`--target-platform`
-  传**产物平台**（`win32` / `linux` / `darwin`），所以为别的平台声明的包在这里就会被点名拒绝。
+  清单完整性、摘要校验（结构/兼容性/路径边界/逐文件摘要）、**装前子进程预检**；
+  `--target-platform` 传**产物平台**（`win32` / `linux` / `darwin`），所以为别的平台声明的
+  包在这里就会被点名拒绝。本地用户自选包按**显式用户信任**校验，这道门不做发布者认证
+  （`manifest.sig` 存在也只被忽略，报告里给 `signature_ignored` 告警，`trust_status` 是
+  `local_user`）。
 - **包根的候选不猜**：根下**每个直接子目录**与**每个 `*.zip`** 都算一份候选（点开头的条目
   除外），没有 `manifest.json` 的子目录被如实报成 `route_rejected`；根下一条候选都找不到
   按失败处理（`bundle_empty`）——"根给错了"比"没坏包"更常见。
+- **复制范围 = 验证范围**：构建脚本把包根**整目录**复制进产物，所以根里不许留非候选条目
+  （点开头的、非 ZIP 的文件，`bundle_stray_entry`），也不许同一个 owner 有两份包
+  （`bundle_duplicate_id`）——两条都在复制**之前**中止构建。要带别的文件，就先打成包。
 - **诚实边界**：`<app>\features\` 是设计文档里"旁置 packages 根"在 onedir 树上的落法，
   **产品运行期今天没有读它的地方**——已安装的功能包住在用户配置根
   （`%APPDATA%\<变体名>\plugins\<owner>\`），安装/启停走 MOD 中心那条链

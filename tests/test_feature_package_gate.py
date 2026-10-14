@@ -135,7 +135,7 @@ class TestAcceptance:
         assert "验签" not in result.stdout
 
     def test_relative_source_path_is_accepted(self, tmp_path):
-        """作者文档与构建脚本给的都是**相对路径**（``.scratch/…``）；验签链要求绝对路径，
+        """作者文档与构建脚本给的都是**相对路径**（``.scratch/…``）；校验链要求绝对路径，
         门必须自己归一——否则门在真实用法下对每一份包都报"路径穿越"。"""
         built, _zip = build(tmp_path / "pkg")
         result = _run_in(tmp_path, "--json", built.relative_to(tmp_path).as_posix())
@@ -179,6 +179,39 @@ class TestBundleRoot:
         payload = _json_run("--bundle-root", str(root))
         assert payload["_exit"] == 1
         assert "bundle_empty" in payload["problems"][0]
+
+    def test_a_stray_entry_fails_the_bundle(self, tmp_path):
+        """构建脚本把这个根**整目录**复制进产物：门没验的字节不许被一起带走。
+
+        候选的判据是"每个直接子目录 + 每个 ``*.zip``（点开头除外）"，其余条目（点开头的、
+        非 ZIP 的文件）门从不验——所以它们一旦留在根里，复制范围就大于验证范围。
+        """
+        root = tmp_path / "release"
+        root.mkdir(parents=True)
+        built, _zip = build(tmp_path / "work")
+        shutil.copytree(built, root / "hello-local")
+        (root / "README.md").write_text("notes\n", encoding="utf-8")
+        (root / ".DS_Store").write_bytes(b"\x00")
+        payload = _json_run("--bundle-root", str(root))
+        assert payload["_exit"] == 1
+        assert payload["ok"] is False
+        joined = " ".join(payload["problems"])
+        assert "bundle_stray_entry" in joined
+        assert "README.md" in joined and ".DS_Store" in joined
+
+    def test_two_candidates_for_the_same_owner_fail_the_bundle(self, tmp_path):
+        """同一个 owner 两份包：随包携带时以谁为准说不清，按规范化 ID 查重直接拒。"""
+        root = tmp_path / "release"
+        root.mkdir(parents=True)
+        built, zip_path = build(tmp_path / "work")
+        shutil.copytree(built, root / "hello-local")
+        shutil.copy2(zip_path, root / "hello-local.zip")
+        payload = _json_run("--bundle-root", str(root))
+        assert payload["_exit"] == 1
+        assert payload["ok"] is False
+        joined = " ".join(payload["problems"])
+        assert "bundle_duplicate_id" in joined
+        assert OWNER in joined
 
     def test_the_repo_example_packages_pass(self, tmp_path):
         """仓库自己的示例就是作者照着跑的那一份：它打出来的包必须一直过门。"""

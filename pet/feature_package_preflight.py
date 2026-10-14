@@ -143,27 +143,29 @@ def _bounded_text(value) -> str:
     return value if isinstance(value, str) and len(value) <= _MAX_TEXT else ""
 
 
-def parse_verdict(path: Path | str, *, returncode: int) -> ProbeVerdict:
+def parse_verdict(path: Path | str, *, returncode: int, child_pid: int | None = None) -> ProbeVerdict:
     """严格读回子进程写的回执；任何不符形状的输入都折成 ``probe_failed``。
 
     这是**父侧唯一的信任缝**：schema、原因码闭集、元信息形状逐项校验，子进程多写的
     字段一律不看（也不透传）。
+
+    ``child_pid`` 由**父侧**给出（``subprocess`` 的进程对象）：包代码就在子进程里跑，
+    回执里那一栏是它的自述，既可能写错也可能被改写，所以父侧不采信它、也不拿它对质
+    ——"这次预检起了哪个进程"只有起进程的那一方知道。
     """
     try:
         raw = Path(path).read_bytes()
     except OSError:
         # 子进程死在写回执之前（导入期崩、解释器起不来）——超时由 run() 自己判。
-        return ProbeVerdict(False, "probe_failed")
+        return ProbeVerdict(False, "probe_failed", child_pid=child_pid)
     if not raw or len(raw) > _IO_LIMIT:
-        return ProbeVerdict(False, "probe_failed")
+        return ProbeVerdict(False, "probe_failed", child_pid=child_pid)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return ProbeVerdict(False, "probe_failed")
+        return ProbeVerdict(False, "probe_failed", child_pid=child_pid)
     if not isinstance(payload, dict) or payload.get("schema") != PROBE_SCHEMA or type(payload.get("ok")) is not bool:
-        return ProbeVerdict(False, "probe_failed")
-    pid = payload.get("child_pid")
-    child_pid = pid if type(pid) is int and pid > 0 else None
+        return ProbeVerdict(False, "probe_failed", child_pid=child_pid)
     if payload["ok"] is True:
         if returncode != 0:
             # 回执说行、退出码说不行：两边不一致就按不行算，不猜。
@@ -229,20 +231,28 @@ class LocalPackageProbe:
                 environment = isolated_worker_environment(os.environ, core_roots=_core_roots())
                 # 子进程只读包、只在私有临时目录里写回执；不写 __pycache__。
                 environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                # 用 Popen 而不是 run()：回执里那个 pid 是子进程的自述，父侧要报给上游的
+                # 必须是**自己起的那一个**进程号（run() 的 CompletedProcess 不带 pid）。
                 try:
-                    completed = subprocess.run(
+                    child = subprocess.Popen(
                         [program, *arguments, str(job_path)],
                         cwd=cwd,
                         env=environment,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        timeout=self.timeout,
-                        check=False,
                     )
+                except OSError:
+                    return ProbeVerdict(False, "probe_unavailable")
+                child_pid = child.pid
+                try:
+                    child.wait(timeout=self.timeout)
                 except subprocess.TimeoutExpired:
-                    return ProbeVerdict(False, "probe_timeout")
-                return parse_verdict(verdict_path, returncode=completed.returncode)
+                    # 有界等待到点：只杀这一次直接起的那个进程（不冒充分级进程树清理）。
+                    child.kill()
+                    child.wait()
+                    return ProbeVerdict(False, "probe_timeout", child_pid=child_pid)
+                return parse_verdict(verdict_path, returncode=child.returncode, child_pid=child_pid)
         except (OSError, ValueError, subprocess.SubprocessError):
             return ProbeVerdict(False, "probe_unavailable")
 

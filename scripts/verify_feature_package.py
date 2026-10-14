@@ -70,6 +70,12 @@ REASONS = frozenset(
 #: 包根下什么都没找到时的问题码（构建脚本要能一眼看出"根给错了"）。
 BUNDLE_EMPTY = "bundle_empty"
 
+#: 包根里有不是候选包的条目（构建脚本整目录复制 ⇒ 门没验的字节会被一起带进产物）。
+BUNDLE_STRAY_ENTRY = "bundle_stray_entry"
+
+#: 包根里多份包声明同一个 owner（按规范化 ID 查重）。
+BUNDLE_DUPLICATE_ID = "bundle_duplicate_id"
+
 #: 告警（**不影响 ``ok``**）：门要如实说出来的事，但不是拒绝理由。
 SIGNATURE_IGNORED = "signature_ignored"
 
@@ -214,6 +220,13 @@ def _bounded(error: BaseException, limit: int = 200) -> str:
 # --------------------------------------------------------------------------- 包根
 
 
+def _is_candidate(entry: Path) -> bool:
+    """门认的候选：直接子目录，或 ``*.zip``（点开头的条目一律不算）。"""
+    return not entry.name.startswith(".") and (
+        entry.is_dir() or (entry.is_file() and entry.suffix.lower() == ".zip")
+    )
+
+
 def bundle_candidates(root: Path | str) -> list[Path]:
     """包根的候选：每个直接子目录 + 每个 ``*.zip``（点开头的条目除外）。"""
     root = Path(root)
@@ -221,21 +234,57 @@ def bundle_candidates(root: Path | str) -> list[Path]:
         entries = sorted(root.iterdir(), key=lambda item: item.name)
     except OSError:
         return []
-    return [
-        entry
-        for entry in entries
-        if not entry.name.startswith(".") and (entry.is_dir() or (entry.is_file() and entry.suffix.lower() == ".zip"))
-    ]
+    return [entry for entry in entries if _is_candidate(entry)]
+
+
+def _stray_entries(root: Path) -> list[str]:
+    """根下**不是**候选包的条目（点开头的条目、非 ZIP 的文件）。
+
+    为什么要管它们：构建脚本是把包根**整目录**复制进产物的（三端都是 ``cp -R`` /
+    ``Copy-Item -Recurse``），而门只验候选。留在根里的东西照样会被带走——复制范围就
+    大于验证范围了。判据只有一份：这里点名，构建在复制**之前**中止。
+    """
+    try:
+        entries = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return []
+    return [entry.name for entry in entries if not _is_candidate(entry)]
+
+
+def _duplicate_ids(packages: list[dict]) -> list[tuple[str, list[str]]]:
+    """同一个 owner 的候选多于一份：随包携带时"以谁为准"说不清。"""
+    names: dict[str, list[str]] = {}
+    for report in packages:
+        feature_id = report.get("feature_id")
+        if feature_id:
+            names.setdefault(feature_id, []).append(Path(report["source"]).name)
+    return sorted((feature_id, sorted(items)) for feature_id, items in names.items() if len(items) > 1)
 
 
 def inspect_bundle(root: Path | str, *, target_platform: str = sys.platform) -> dict:
-    """验一个包根下的**每一份**候选包，返回 ``{root, ok, packages, problems}``。"""
+    """验一个包根下的**每一份**候选包，返回 ``{root, ok, packages, problems}``。
+
+    除逐份结论之外，包根本身也要过两条：**不许有非候选条目**（复制范围 = 验证范围），
+    而且**同一个 owner 不许有两份**（规范化 ID 查重）。两条都是"构建会照单全收"的那
+    类问题：它们不在任何一份包的结论里，只在根上看得出来。
+    """
     root = Path(root)
     candidates = bundle_candidates(root)
     packages = [inspect(candidate, target_platform=target_platform) for candidate in candidates]
     problems = [
         f"{Path(report['source']).name}: {problem}" for report in packages for problem in report["problems"]
     ]
+    strays = _stray_entries(root)
+    if strays:
+        problems.append(
+            f"{root} 下有不是候选包的条目（{BUNDLE_STRAY_ENTRY}）：{', '.join(strays)}"
+            "——构建脚本整目录复制，这些字节会被一起带进产物而门没验过；移走它们，或打成包"
+        )
+    for feature_id, items in _duplicate_ids(packages):
+        problems.append(
+            f"{feature_id} 在包根里有 {len(items)} 份（{BUNDLE_DUPLICATE_ID}）：{', '.join(items)}"
+            "——同一个 owner 两份包，随包携带时以谁为准说不清"
+        )
     if not candidates:
         problems.append(f"{root} 下没有找到任何候选包（{BUNDLE_EMPTY}）：包根给错了，或包没打出来")
     return {

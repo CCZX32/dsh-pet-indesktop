@@ -62,7 +62,10 @@ def _run_probe(package: Path, *, timeout: float | None = None, verifier=None):
 # ------------------------------------------------------------- 正路径与元信息
 
 def test_the_probe_loads_the_package_in_another_process(tmp_path):
-    """回执里的 pid 必须不是本进程——这是"真起了子进程"的机器证据。"""
+    """回执里的 pid 必须不是本进程——这是"真起了子进程"的机器证据。
+
+    这个 pid 由**父侧**的 ``Popen`` 给出（见 ``parse_verdict``），不是子进程的自述。
+    """
     package, _archive = build(tmp_path / "pkg")
     before = set(sys.modules)
     verdict = _run_probe(package)
@@ -71,6 +74,36 @@ def test_the_probe_loads_the_package_in_another_process(tmp_path):
     # 本进程不留痕迹：包代码的命名空间一个都没进宿主的 sys.modules
     # （装载 + pin 全发生在子进程里，宿主的 host 租约没有被这次预检占住）。
     assert {name for name in set(sys.modules) - before if name.startswith("_pet_official_screen")} == set()
+
+
+def test_the_child_pid_comes_from_the_parent_not_from_the_receipt(tmp_path):
+    """回执里自报的 pid 不算数：真 pid 只有父侧的 ``Popen`` 知道。
+
+    包代码就在子进程里跑，它能改写自己的回执（甚至 ``os.getpid``）。父侧从进程对象
+    拿到的那个 pid 才是"这次预检起了哪个进程"的证据，所以回执里那一栏一律不看——
+    既不采信，也不拿它跟真值对质（自述与真值不一致时没有更好的结论可言）。
+    """
+    path = tmp_path / "verdict.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "ok": True,
+                "child_pid": 4242,
+                "metadata": {
+                    "owner": OWNER,
+                    "mount_contract": "mod/v1",
+                    "contributions": [],
+                    "has_runtime": True,
+                    "has_settings": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    verdict = parse_verdict(path, returncode=0, child_pid=os.getpid())
+    assert verdict.ok is True
+    assert verdict.child_pid == os.getpid(), "回执自报的 pid 被当成真值了"
 
 
 def test_the_probe_reads_back_the_public_metadata(tmp_path):
