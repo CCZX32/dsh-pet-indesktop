@@ -1124,6 +1124,22 @@ _SESSIONS: dict[str, _Session] = {}
 _FAILED_UNTIL: dict[str, float] = {}
 _SESSION_LOCK = threading.RLock()
 
+#: 缓存会话（D3D11 设备 + 输出句柄 ≈ 几十 MB GPU 侧资源）的闲置回收窗口：
+#: 最后一次抓帧后这么久没再用，就整组还回系统（识屏不是高频常驻功能，
+#: 用完一直占着就是白占——实机内存剖析 2026-10-14）。
+_IDLE_RELEASE_S = 30.0
+_idle_timer: threading.Timer | None = None
+
+
+def _arm_idle_release() -> None:
+    """每次抓帧后重新武装闲置回收器（并发安全：持 ``_SESSION_LOCK`` 调用）。"""
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+    _idle_timer = threading.Timer(_IDLE_RELEASE_S, release_cached_sessions)
+    _idle_timer.daemon = True
+    _idle_timer.start()
+
 
 def _drop_session(key: str) -> None:
     session = _SESSIONS.pop(key, None)
@@ -1157,10 +1173,11 @@ def _session_for(screen, paths) -> _Session | None:
 
 
 def release_cached_sessions() -> None:
-    """放掉全部缓存会话与退避表（进程退出或测试用；正常抓帧不需要显式调用）。
+    """放掉全部缓存会话与退避表（闲置回收器/进程退出/测试用）。
 
     会话里握着 D3D11 设备与 DXGI 复制会话：进程退出后由系统回收，所以正常路径
-    不需要调它；但"这片屏不抓了、想把 GPU 资源还回去"的场景需要一个显式出口。
+    不需要调它；闲置回收（``_arm_idle_release``，最后一次抓帧 30s 后）与
+    "这片屏不抓了、想把 GPU 资源还回去"的场景需要一个显式出口。
     """
     with _SESSION_LOCK:
         for key in list(_SESSIONS):
@@ -1258,6 +1275,7 @@ def grab_hdr_sdr(screen_name=None) -> QImage | None:
                 _drop_session(session.key)
                 _FAILED_UNTIL[session.key] = time.monotonic() + backoff
                 return None
+            _arm_idle_release()   # 用上了才武装：闲置 30s 后设备整组还回系统
             return _qimage_rgb888(rgb)
     except Exception as exc:  # noqa: BLE001 - 抓帧这条通道绝不许把异常抛给调用方
         log.warning("HDR 抓帧失败，回退 GDI：%s", exc)

@@ -717,3 +717,26 @@ def test_grab_screen_image_fake_screen_without_geometry_still_works(monkeypatch)
     screen = _fake_screen(grabbed=QPixmap(8, 8))
 
     assert not pixels.grab_screen_image(screen).isNull()
+
+
+def test_cached_sessions_are_released_after_idle(qapp, monkeypatch):
+    """最后一次抓帧 30s 后，缓存的 D3D11 设备/会话整组还回系统（闲置回收器）。"""
+    import time as _time
+    import pet.screen_capture.hdr_capture as hdr
+
+    released = []
+
+    class _FakeSession:
+        def release(self):
+            released.append(True)
+
+    monkeypatch.setattr(hdr, "_IDLE_RELEASE_S", 0.05)   # 测试预算内的短窗
+    hdr._SESSIONS["TEST\DISPLAY"] = _FakeSession()
+    hdr._arm_idle_release()
+
+    deadline = _time.monotonic() + 5.0
+    while not released and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert released, "闲置回收器没有在窗口期放掉缓存会话"
+    assert hdr._SESSIONS == {}
+    hdr._FAILED_UNTIL.clear()
