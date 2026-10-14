@@ -849,6 +849,74 @@ def test_stop_is_idempotent_and_releases_a_stopped_process(tmp_path: Path):
     assert _active_timers(supervisor) == []
 
 
+def test_stop_clears_the_io_poll_timer_when_no_process_is_left(tmp_path: Path):
+    """没有活进程就不该有 I/O 轮询：``stop()`` 的"进程已不在"分支也要停它。
+
+    ``_io_timer`` 的常规关闭点是 ``finished`` 收尾；这一条钉的是**不变式本身**——不论
+    从哪个分支收口，stop() 之后都不许留活动定时器。定时器在这里显式打开：真路径上它是
+    由 ``started`` 开的，而"进程已不在 + 轮询还开着"正是收尾没走到时的现场（对象树被拆、
+    信号被丢），没法在单测里稳定复现，所以直接把那个状态摆出来。
+    """
+    supervisor = WorkerSupervisor(
+        "demo-worker",
+        program=sys.executable,
+        arguments=["-c", "import sys; sys.exit(0)"],
+        max_restarts=0,
+    )
+    assert supervisor.start()
+    assert _wait_until(lambda: supervisor.state == supervisor.FAULT, what="FAULT after clean exit")
+    assert supervisor.process is None
+    supervisor._io_timer.start()
+    assert "_io_timer" in _active_timers(supervisor)
+
+    supervisor.stop()
+    assert supervisor.state == supervisor.STOPPED
+    assert _active_timers(supervisor) == []
+
+
+def test_a_second_stop_does_not_restart_the_shutdown_budget(tmp_path: Path):
+    """STOPPING 期间再 stop 是幂等的空操作：不重发 shutdown，也不重计关闭预算。
+
+    重入会把关闭预算重新计时（子进程因此拖得更久），并再发一帧 shutdown——两层都要钉住，
+    所以子进程把自己的收件箱写盘，父侧读它。
+    """
+    inbox = tmp_path / "worker_inbox.log"
+    supervisor, recorder, _pid_file = _start_supervisor(
+        tmp_path,
+        f"""
+        record_pid()
+        handshake()
+        while True:
+            command = read_command()
+            if command is None:
+                break
+            with open({str(inbox)!r}, "a", encoding="ascii") as stream:
+                stream.write(command["type"] + chr(10))
+            if command["type"] == "shutdown":
+                time.sleep(1.0)
+                break
+        """,
+        shutdown_timeout_ms=5000,
+    )
+    try:
+        assert supervisor.start()
+        _wait_ready(supervisor, recorder)
+        supervisor.stop()
+        # 等关闭预算真的走掉一段（关停阶梯在跑），再重入一次 stop。
+        assert _wait_until(
+            lambda: supervisor._shutdown_timer.remainingTime() <= 5000 - 400,
+            timeout=10.0,
+            what="关闭预算走掉一部分",
+        )
+        remaining = supervisor._shutdown_timer.remainingTime()
+        supervisor.stop()
+        assert supervisor._shutdown_timer.remainingTime() <= remaining, "重入把关闭预算重新计时了"
+        assert _wait_until(lambda: supervisor.state == supervisor.STOPPED, what="STOPPED")
+        assert inbox.read_text(encoding="ascii").split().count("shutdown") == 1, "shutdown 帧被重发了"
+    finally:
+        _stop_supervisor(supervisor)
+
+
 #: 真子进程驱动：不 stop 就销毁 supervisor（应用退出/父对象先死的路径），
 #: 把"子进程有没有被带走"和"stderr 有没有被吞掉的 traceback"一起报回来。
 _DESTROY_DRIVER = '''\

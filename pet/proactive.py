@@ -307,6 +307,9 @@ class ProactiveScreenWatcher:
         else:
             self._generation += 1  # 关闭 = 作废在飞任务
             self._timer.stop()
+            # 关掉就不该再占着一个子进程：worker 活着也只等请求，用户看到的是"关了还占内存"。
+            # 这一次调用对 in_process 模式与"从来没起过"是空操作（幂等）。
+            self._stop_worker_process()
         self.publish_worker_status()
 
     # ------------------------------------------------ 执行位置（worker / 进程内）
@@ -446,7 +449,14 @@ class ProactiveScreenWatcher:
             logging.debug("写入主动识屏 worker 状态失败", exc_info=True)
 
     def pause(self) -> None:
-        """窗口隐藏或活动暂停时停止定时器，并作废在飞/已排队的任务。"""
+        """窗口隐藏或活动暂停时停止定时器与 worker，并作废在飞/已排队的任务。
+
+        **代价如实写在这里**：隐藏时把 worker 子进程停掉（省内存），恢复时
+        ``resume`` → ``apply_config`` 会按最新配置重新拉起它，那是一次真实的重新握手
+        ——空载冷启动到 READY 实测约 135 ms（见 ``workers/supervisor.py`` 的握手预算
+        注释），满载机器上会拉到几百毫秒。这段时间里的 tick 因为 worker 未 ready 而
+        不派发（``capture_foreground`` 返回 None），即"恢复后的头几百毫秒不截图"。
+        """
         self._timer.stop()
         self._current_hwnd = 0
         self._entered_ts = 0.0
@@ -456,9 +466,10 @@ class ProactiveScreenWatcher:
         # 重复发起第二条请求。它的 finally 一定会把标志复位（有超时兜底），
         # 其迟到答复被代次检查丢弃，不会冒泡/计费/写记忆。
         self._worker_busy = False
+        self._stop_worker_process()
 
     def resume(self) -> None:
-        """窗口恢复显示时按最新配置重新评估启停。"""
+        """窗口恢复显示时按最新配置重新评估启停（worker 在这里被重新拉起）。"""
         self.apply_config()
 
     def _on_tick(self) -> None:
@@ -468,7 +479,10 @@ class ProactiveScreenWatcher:
 
         eff = effective_proactive_config(self.cfg.get("proactive_screen", {}))
         if not eff["enabled"] or not eff["whitelist"]:
+            # 配置可能是**别的进程**改的（设置页独立进程）：tick 是这里唯一会发现它的地方。
+            # 停表之外还要停 worker——否则"用户已经关掉了"的现场里留着一个活着的子进程。
             self._timer.stop()
+            self._stop_worker_process()
             return
 
         # G1 桌宠守卫

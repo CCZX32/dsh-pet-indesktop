@@ -92,6 +92,8 @@ class ProactiveScreenWorkerAdapter(QObject):
         self._budget_checker = budget_checker
         self._config: dict[str, Any] = {}
         self._pending: dict[str, _PendingRequest] = {}
+        #: STOPPING 期间来过的 start：进程停定（stopped）时补拉一次，不静默丢弃。
+        self._pending_start = False
         self._deadline_timer = QTimer(self)
         self._deadline_timer.setInterval(500)
         self._deadline_timer.timeout.connect(self._expire_requests)
@@ -132,9 +134,18 @@ class ProactiveScreenWorkerAdapter(QObject):
         if self.mode != "auto":
             return False
         if self.active:
+            self._pending_start = False
             if self.ready:
                 return self.supervisor.configure(self._config)
             return False
+        if self.supervisor.state == WorkerSupervisor.STOPPING:
+            # 还在关闭阶梯里：现在拉起会被 supervisor 明确拒绝（进程还没退）。**不能**
+            # 就这样丢掉——"隐藏→恢复"正好会落在这个窗口里（pause 停 worker、resume
+            # 立刻再拉），丢掉的后果是恢复之后识屏再也不开工，而现场一次报错都没有。
+            # 记成待补拉，等进程真的停定（stopped）再起一次。
+            self._pending_start = True
+            return False
+        self._pending_start = False
         self._pending.clear()
         return self.supervisor.start(self._config)
 
@@ -146,6 +157,8 @@ class ProactiveScreenWorkerAdapter(QObject):
         return self.supervisor.configure(self._config)
 
     def stop(self) -> None:
+        # 显式停优先于待补拉：停就是停（用户关掉主动识屏时不该被一次排队的 start 复活）。
+        self._pending_start = False
         self._fail_pending("worker_stopped")
         self.supervisor.stop()
 
@@ -340,6 +353,12 @@ class ProactiveScreenWorkerAdapter(QObject):
     def _on_state_changed(self, state: str) -> None:
         if state in {"crashed", "fault", "stopping", "stopped"}:
             self._fail_pending("worker_unavailable")
+        if state == WorkerSupervisor.STOPPED and self._pending_start:
+            # 关闭阶梯走完了：把 STOPPING 期间那次 start 补上（见 :meth:`start`）。
+            # 直接调，不再排一次 0ms 定时器——start() 只会换一个 QProcess 并置 STARTING，
+            # 不依赖本栈里那个已释放的旧进程（`_release_process` 在 STOPPED 之前就跑过了）。
+            self._pending_start = False
+            self.start(self._config)
         self.state_changed.emit(state)
 
     def _on_failed(self, reason: str) -> None:

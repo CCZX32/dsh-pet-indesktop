@@ -25,6 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 # QApplication 必须先于任何 QObject/QTimer 存在（见 tests/test_proactive_worker.py 的说明）。
@@ -725,3 +726,174 @@ def test_app_exit_path_drains_workers_after_the_main_loop():
     assert source.index(call) < source.index("overlay_gate.release()", source.index("return app.exec()")), (
         "收口泵必须早于进程门释放（还在收尾时第二实例不得起来）"
     )
+
+
+# ----------------------------------------------- watcher 启停的 worker 生命周期
+
+class _WorkerAdapterStub(QObject):
+    """带**真信号**的最小适配器替身：走生产接线（``_attach_worker_adapter``），不拉真进程。
+
+    既有的 ``_FakeAdapter`` 是直接塞进 ``watcher._worker_adapter`` 的，因此不需要信号；
+    本组换的是**构造期**由 ``_ensure_worker_adapter`` 建的那个适配器，接线照常走生产代码
+    （五条信号都真连），所以替身必须有它们。
+    """
+
+    capture_ready = Signal(object)
+    analysis_ready = Signal(object)
+    request_failed = Signal(str, object)
+    state_changed = Signal(str)
+    failed = Signal(str)
+    diagnostic = Signal(str, object)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(None)
+        self.ready = False
+        self.active = False
+        self.state = "stopped"
+        self.started: list[dict] = []
+        self.configured: list[dict] = []
+        self.stopped = 0
+
+    def start(self, config=None):
+        self.started.append(dict(config or {}))
+        self.active = True
+        self.ready = True
+        self.state = "ready"
+        return True
+
+    def configure(self, config=None):
+        self.configured.append(dict(config or {}))
+        return True
+
+    def stop(self):
+        self.stopped += 1
+        self.active = False
+        self.ready = False
+        self.state = "stopped"
+
+    def status_snapshot(self):
+        return {
+            "mode": "auto",
+            "state": self.state,
+            "generation": 0,
+            "pending": 0,
+            "last_stage": "",
+            "last_detail": {},
+            "hint": "",
+        }
+
+
+def _watcher_with_fake_adapter(tmp_path, monkeypatch, *, platform: str = "win32", **config):
+    """造一个 watcher，并把它的适配器换成替身（本组只验启停决定，不拉真进程）。"""
+    from pet.config import Config
+    from pet.proactive import ProactiveScreenWatcher
+
+    created: list[_WorkerAdapterStub] = []
+
+    def factory(*_args, **_kwargs):
+        adapter = _WorkerAdapterStub()
+        created.append(adapter)
+        return adapter
+
+    monkeypatch.setattr("pet.workers.proactive_screen_adapter.ProactiveScreenWorkerAdapter", factory)
+    monkeypatch.setattr(sys, "platform", platform)
+    cfg = Config(base=tmp_path)
+    values = {"enabled": True, "whitelist": ["code.exe"], "execution": "worker", "pre_cue": True}
+    values.update(config)
+    cfg.set("proactive_screen", values)
+    watcher = ProactiveScreenWatcher(_DummyWindow(), cfg)
+    assert created, "开启态构造时就该建适配器（execution=worker）"
+    return cfg, watcher, created[0]
+
+
+def test_turning_proactive_off_stops_the_worker_process(tmp_path, monkeypatch):
+    """设置里关掉主动识屏：定时器与 worker 子进程一起停。
+
+    只停表会留下一个活着的子进程（它自己不会再有任何请求），而"关掉"对用户的含义
+    就是这个功能不再占内存。
+    """
+    cfg, watcher, adapter = _watcher_with_fake_adapter(tmp_path, monkeypatch)
+    assert adapter.started, "开启态构造时就该把 worker 拉起来"
+    cfg.set("proactive_screen", {"enabled": False, "whitelist": ["code.exe"], "execution": "worker"})
+    watcher.apply_config()
+    assert adapter.stopped == 1
+    assert watcher.is_running() is False
+
+
+def test_clearing_the_whitelist_stops_the_worker_process(tmp_path, monkeypatch):
+    cfg, watcher, adapter = _watcher_with_fake_adapter(tmp_path, monkeypatch)
+    cfg.set("proactive_screen", {"enabled": True, "whitelist": [], "execution": "worker"})
+    watcher.apply_config()
+    assert adapter.stopped == 1
+    assert watcher.is_running() is False
+
+
+def test_a_tick_that_finds_proactive_disabled_stops_the_worker_process(tmp_path, monkeypatch):
+    """配置在**外部**被改（设置页是独立进程写盘）：tick 发现后停表，worker 也要停。"""
+    cfg, watcher, adapter = _watcher_with_fake_adapter(tmp_path, monkeypatch)
+    cfg.set("proactive_screen", {"enabled": False, "whitelist": ["code.exe"], "execution": "worker"})
+    watcher._on_tick()
+    assert adapter.stopped == 1
+    assert watcher.is_running() is False
+
+
+def test_pause_stops_the_worker_and_resume_brings_it_back(tmp_path, monkeypatch):
+    """隐藏时停 worker，恢复时按最新配置重新拉起（代价是重新握手，见 ``pause`` 注释）。"""
+    _cfg, watcher, adapter = _watcher_with_fake_adapter(tmp_path, monkeypatch)
+    watcher.pause()
+    assert adapter.stopped == 1 and adapter.active is False
+    watcher.resume()
+    assert len(adapter.started) == 2, "恢复要重新拉起来，不是只把表打开"
+
+
+# --------------------------------------------- STOPPING 窗口里的 start（真进程）
+
+_FAKE_WORKER_SOURCE = '''\
+import json
+import sys
+import time
+
+CAPABILITIES = ["foreground.read", "screenshot.capture", "vision.request", "logging.write"]
+
+
+def emit(kind, payload=None):
+    frame = {"protocol": "pet-worker/v1", "worker_id": "proactive-screen", "type": kind,
+             "timestamp": "2026-01-01T00:00:00Z", "payload": payload or {}}
+    sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
+    sys.stdout.flush()
+
+
+emit("hello", {"capabilities": CAPABILITIES})
+line = sys.stdin.readline()
+generation = json.loads(line)["payload"]["generation"] if line else 0
+emit("ready", {"generation": generation})
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    if json.loads(line)["type"] == "shutdown":
+        time.sleep(0.5)  # 刻意慢退：让 STOPPING 这个窗口真的存在
+        break
+'''
+
+
+def test_a_start_during_the_shutdown_stair_is_taken_up_when_it_settles(tmp_path):
+    """STOPPING 期间来的 start 不能被静默丢弃（隐藏→恢复卡在关闭阶梯上就永远回不来）。
+
+    ``WorkerSupervisor.start()`` 在 STOPPING 期间明确返回 False；适配器必须把这次请求
+    记成"待补拉"，等进程真的停定后自己再起一次——否则恢复显示之后识屏再也不开工，
+    而现场没有任何一次报错。
+    """
+    script = tmp_path / "slow_worker.py"
+    script.write_text(_FAKE_WORKER_SOURCE, encoding="utf-8")
+    adapter = _adapter(mode="auto", program=sys.executable, arguments=[str(script)])
+    try:
+        assert adapter.start({"max_edge": 640}) is True
+        assert _wait_until(lambda: adapter.ready, timeout=30.0), adapter.state
+        adapter.stop()
+        assert adapter.state == "stopping", "子进程还在退：这正是会丢掉 start 的那个窗口"
+        assert adapter.start({"max_edge": 640}) is False
+        assert _wait_until(lambda: adapter.ready, timeout=30.0), adapter.state
+    finally:
+        adapter.stop()
+        assert _wait_until(lambda: adapter.state == "stopped", timeout=30.0)

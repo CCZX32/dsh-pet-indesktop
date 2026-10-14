@@ -357,12 +357,20 @@ class WorkerSupervisor(QObject):
         return self._send("response", body, request_id=rid)
 
     def stop(self) -> None:
+        # 重入闸：第一次 stop 已经发过 shutdown 帧、关过写通道并起了终止阶梯。再进来只会
+        # 把关闭预算重新计时（进程反而拖得更久）并重复发帧——STOPPING 期间的这个调用是
+        # 幂等的空操作。``_requested_stop`` 在这里必然已经是 True（只有 stop 会置位）。
+        if self._state == self.STOPPING:
+            return
         self._requested_stop = True
         self._cancel_restart_timer()
         self._handshake_timer.stop()
         self._heartbeat_timer.stop()
         process = self._process
         if process is None or process.state() == QProcess.ProcessState.NotRunning:
+            # 没有活进程就不该留着 I/O 轮询：这里此前只停表停心跳，漏了它（进程已经退到
+            # NotRunning、而 finished 那次收尾没走到时，poll 会一直空转）。
+            self._io_timer.stop()
             if process is not None:
                 self._release_process(process)
             self._set_state(self.STOPPED)
