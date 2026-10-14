@@ -306,6 +306,18 @@ def _close_qt_top_level_widgets():
         MovieLibrary._shutdown_live_for_tests()
     except Exception:
         pass
+    # Worker supervisor：QProcess + 六个 QTimer 的属主，本域唯一没进全局收口登记册的
+    # 对象。`ProactiveScreenWatcher(execution="worker")` 在构造期就 apply_config →
+    # 起真 worker 子进程；用例只把它塞给替身适配器、从不 shutdown()，于是
+    # 「handshaking + 活的子进程 + 活动的 _io_timer(50ms)/_handshake_timer」跨用例存活，
+    # 被 GC 时的销毁落在后续用例的事件循环里（QTimer 登记表项悬空 → WM_TIMER 投递给已
+    # 销毁对象 → 原生访问违规）。收口范式与 AgentLinkManager/OverlayShell 同：登记册逐测试
+    # 停表停进程，见 WorkerSupervisor._shutdown_live_for_tests 与 test_workers_lifecycle。
+    try:
+        from pet.workers.supervisor import WorkerSupervisor
+        WorkerSupervisor._shutdown_live_for_tests()
+    except Exception:
+        pass
     # OverlayShell：壳的 tick 驱动器/自言自语计时/监视器/配图加载线程/素材库
     # 全部要逐测试收口——否则它们漂过整个套件活到进程退出，撞上 Qt 对象树
     # 拆除就是原生段错误（macOS CI 3/3 同点复现 + Windows 本地 2/12 退出崩；
