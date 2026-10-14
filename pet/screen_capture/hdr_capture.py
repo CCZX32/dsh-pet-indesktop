@@ -132,10 +132,43 @@ _FORMAT_VERDICT_TTL_S = 900.0
 # --------------------------------------------------------------- Win32 结构体
 # 布局与 .scratch/screen-capture/probe_hdr.py 一致（该探针已在本机跑通），
 # 另外补了复制会话与 D3D11 侧要用的几个。
+#
+# 字段一律用固定宽度类型，不用 wintypes 别名：wintypes.DWORD/LONG 是
+# c_ulong/c_long，在非 Windows 上是 8 字节；c_wchar 在非 Windows 上是 4
+# 字节——结构体尺寸会随宿主平台漂移，ABI 契约测试（tests/
+# test_screen_capture_hdr_capture.py）在非 Windows CI 上就会误报。
+# Win32 ABI 的宽度是死的，跟宿主平台无关。
+
+_DWORD = ctypes.c_uint32
+_LONG = ctypes.c_int32
+#: Win32 WCHAR 固定 2 字节；ctypes.c_wchar 在非 Windows 上是 4 字节。
+_WCHAR = ctypes.c_uint16
+
+
+def _wstr(chars) -> str:
+    """固定宽度 UTF-16 码位数组 → str（到第一个 NUL 为止）。
+
+    结构体里的 WCHAR 字段是 ``_WCHAR`` 数组（ctypes 不会像 c_wchar 那样
+    自动转 str），读出来统一过这里。
+    """
+    buf = bytearray()
+    for unit in chars:
+        if unit == 0:
+            break
+        buf += unit.to_bytes(2, "little")
+    return bytes(buf).decode("utf-16-le", errors="replace")
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", _LONG), ("y", _LONG)]
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", _LONG), ("top", _LONG), ("right", _LONG), ("bottom", _LONG)]
 
 
 class _LUID(ctypes.Structure):
-    _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+    _fields_ = [("LowPart", _DWORD), ("HighPart", _LONG)]
 
 
 class _DEVICE_INFO_HEADER(ctypes.Structure):
@@ -201,7 +234,7 @@ class _MODE_INFO(ctypes.Structure):
 class _SOURCE_DEVICE_NAME(ctypes.Structure):
     _fields_ = [
         ("header", _DEVICE_INFO_HEADER),
-        ("viewGdiDeviceName", ctypes.c_wchar * CCHDEVICENAME),
+        ("viewGdiDeviceName", _WCHAR * CCHDEVICENAME),
     ]
 
 
@@ -213,8 +246,8 @@ class _TARGET_DEVICE_NAME(ctypes.Structure):
         ("edidManufactureId", ctypes.c_uint16),
         ("edidProductCodeId", ctypes.c_uint16),
         ("connectorInstance", ctypes.c_uint32),
-        ("monitorFriendlyDeviceName", ctypes.c_wchar * 64),
-        ("monitorDevicePath", ctypes.c_wchar * 128),
+        ("monitorFriendlyDeviceName", _WCHAR * 64),
+        ("monitorDevicePath", _WCHAR * 128),
     ]
 
 
@@ -235,18 +268,18 @@ class _SDR_WHITE_LEVEL(ctypes.Structure):
 
 class _MONITORINFOEXW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", wintypes.RECT),
-        ("rcWork", wintypes.RECT),
-        ("dwFlags", wintypes.DWORD),
-        ("szDevice", ctypes.c_wchar * CCHDEVICENAME),
+        ("cbSize", _DWORD),
+        ("rcMonitor", _RECT),
+        ("rcWork", _RECT),
+        ("dwFlags", _DWORD),
+        ("szDevice", _WCHAR * CCHDEVICENAME),
     ]
 
 
 class _DXGI_OUTPUT_DESC(ctypes.Structure):
     _fields_ = [
-        ("DeviceName", ctypes.c_wchar * 32),
-        ("DesktopCoordinates", wintypes.RECT),
+        ("DeviceName", _WCHAR * 32),
+        ("DesktopCoordinates", _RECT),
         ("AttachedToDesktop", wintypes.BOOL),
         ("Rotation", ctypes.c_uint32),
         ("Monitor", wintypes.HANDLE),
@@ -255,8 +288,8 @@ class _DXGI_OUTPUT_DESC(ctypes.Structure):
 
 class _DXGI_OUTPUT_DESC1(ctypes.Structure):
     _fields_ = [
-        ("DeviceName", ctypes.c_wchar * 32),
-        ("DesktopCoordinates", wintypes.RECT),
+        ("DeviceName", _WCHAR * 32),
+        ("DesktopCoordinates", _RECT),
         ("AttachedToDesktop", wintypes.BOOL),
         ("Rotation", ctypes.c_uint32),
         ("Monitor", wintypes.HANDLE),
@@ -273,7 +306,7 @@ class _DXGI_OUTPUT_DESC1(ctypes.Structure):
 
 
 class _OUTDUPL_POINTER_POSITION(ctypes.Structure):
-    _fields_ = [("Position", wintypes.POINT), ("Visible", wintypes.BOOL)]
+    _fields_ = [("Position", _POINT), ("Visible", wintypes.BOOL)]
 
 
 class _OUTDUPL_FRAME_INFO(ctypes.Structure):
@@ -502,7 +535,7 @@ def _source_device_name(path) -> str:
     request.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME
     if not _device_info(request, path.sourceInfo.adapterId, path.sourceInfo.id):
         return ""
-    return request.viewGdiDeviceName
+    return _wstr(request.viewGdiDeviceName)
 
 
 def _target_friendly_name(path) -> str:
@@ -511,7 +544,7 @@ def _target_friendly_name(path) -> str:
     request.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME
     if not _device_info(request, path.targetInfo.adapterId, path.targetInfo.id):
         return ""
-    return request.monitorFriendlyDeviceName
+    return _wstr(request.monitorFriendlyDeviceName)
 
 
 def _advanced_color(path) -> _ADVANCED_COLOR_INFO | None:
@@ -540,7 +573,7 @@ def _gdi_name_for_point(x: int, y: int) -> str:
     info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
     if not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
         return ""
-    return info.szDevice
+    return _wstr(info.szDevice)
 
 
 def _gdi_name_for_screen(screen) -> str:
@@ -582,7 +615,7 @@ def _enumerate_monitors() -> list[tuple[str, int, int, int, int]]:
         info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
         if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
             rect = info.rcMonitor
-            found.append((info.szDevice, rect.left, rect.top, rect.right, rect.bottom))
+            found.append((_wstr(info.szDevice), rect.left, rect.top, rect.right, rect.bottom))
         return True
 
     callback = MONITORENUMPROC(_cb)
@@ -1072,7 +1105,7 @@ def _session_from_output(adapter: int, output: int, gdi_name: str) -> _Session |
     desc = _DXGI_OUTPUT_DESC()
     hr = _com_call(output, 7, ctypes.c_long, [ctypes.POINTER(_DXGI_OUTPUT_DESC)],
                    ctypes.byref(desc))                          # IDXGIOutput::GetDesc
-    if not _succeeded(hr) or desc.DeviceName.casefold() != gdi_name.casefold():
+    if not _succeeded(hr) or _wstr(desc.DeviceName).casefold() != gdi_name.casefold():
         return None
     output6 = ctypes.c_void_p()
     if not _succeeded(_com_call(output, 0, ctypes.c_long,

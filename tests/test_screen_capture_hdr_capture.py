@@ -263,6 +263,20 @@ def test_win32_struct_sizes_match_the_sdk_layout():
     assert ctypes.sizeof(hdr_capture._SOURCE_DEVICE_NAME) == 84
 
 
+def test_wstr_decodes_utf16_units_up_to_nul():
+    """WCHAR 字段是固定宽度码位数组（不用 c_wchar，它在非 Windows 是 4 字节），
+    读出统一过 _wstr：ASCII、中文、NUL 截断、全零空串。"""
+    def buf(text, size=8):
+        arr = (hdr_capture._WCHAR * size)(*[ord(c) for c in text])
+        return arr
+
+    assert hdr_capture._wstr(buf("A1")) == "A1"
+    assert hdr_capture._wstr(buf("显示器")) == "显示器"
+    assert hdr_capture._wstr((hdr_capture._WCHAR * 4)()) == ""
+    arr = (hdr_capture._WCHAR * 6)(*[ord(c) for c in "AB"], 0, ord("C"))
+    assert hdr_capture._wstr(arr) == "AB"
+
+
 def test_com_pointer_normalisation_accepts_int_and_c_void_p():
     assert hdr_capture._ptr_value(None) == 0
     assert hdr_capture._ptr_value(0) == 0
