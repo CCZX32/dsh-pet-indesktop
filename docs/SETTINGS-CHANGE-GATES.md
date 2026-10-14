@@ -83,6 +83,19 @@ recovery
 
 ## 变更记录
 
+### 2026-10-14（补登）— 主动识屏执行位置：`proactive_screen.execution`
+
+DLC 线（S3）引入时漏了本条准入记录，合并复审（2026-10-14）发现后补登。
+
+| 项 | 口径 |
+|---|---|
+| setting_id | `proactive_screen.execution`（UI 行 id `proactive_execution`，自动化域「主动识屏 · 开关与节奏」组，`pet/settings_automation_domain.py:42`） |
+| 取值 / 默认 | `worker`（默认）= 截图与视觉请求都在独立子进程；`in_process` = 宿主进程内后台线程旧路径。三处默认值一致：`pet/config.py` `_default_proactive_screen_data()`、`pet/proactive_limiter.py:52`、`pet/settings_default_marks.py:57` |
+| 生效条件 | 只在 `proactive_screen.enabled = true`（默认 false）时有意义；开关本身默认关 |
+| 关键语义 | worker 故障**不会**自动改用 in_process（避免两套行为同时活着），只会停识屏并如实回报状态（`pet/proactive_limiter.py` 注释口径） |
+| 保存时机 / 迁移 | 即改即存；无迁移（新键，旧配置缺省时取默认 `worker`） |
+| 平台 | 全平台；worker 依赖冻结入口的 `--worker` 分流（`packaging/pet_entry*.py`） |
+
 ### 2026-10-12 — 游戏帧率的权限模型改为「一次性加入 `Performance Log Users` 组」（取代下一条）
 
 下一条的「按需 UAC 独立助手」已整体归档（源码、测试、原生工程、随包资源移入
