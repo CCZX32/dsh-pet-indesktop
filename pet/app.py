@@ -580,6 +580,9 @@ class PetInstance:
         win.on_check_update = self._slot_wrap(self.shell.check_update)
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
+        # 截图（快速识屏 P0）：状态与短结果上灵动岛——岛归 AppShell 所有，窗口侧
+        # 没有别的路径，这里显式注入取岛回调（岛会被重建，所以传可调用者而非实例）。
+        win.screen_capture_island = lambda: getattr(self.shell, "island", None)
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
         # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见
         # window_alerts.redirect_hidden_bubble）；岛对话不可用时注入方返回 False。
@@ -4618,6 +4621,12 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_DIR_NAME)
     app.setQuitOnLastWindowClosed(False)
+    # 图片解码上限（像素级别的一处设定）：Qt 默认 256 MB/张（本机 Qt 6.11.2 实测），
+    # 用户给的超大图会**直接读不出来**而不是慢一点——聊天附件预览、设置页头像、
+    # 趣味图片弹窗都吃这条上限。踩点放在这里而不是各调用点：它是静态设置，
+    # 一处设定覆盖全进程（与本文件里其它 Qt 全局设定同一位置纪律）。
+    from .qt_image_limits import apply_image_allocation_limit
+    apply_image_allocation_limit()
 
     # 确定配置根目录
     config_dir = _default_base() / APP_DIR_NAME
