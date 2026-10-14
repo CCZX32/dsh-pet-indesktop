@@ -7,7 +7,7 @@
 | 动作 | 中间那一步 | 隐私口径 |
 |---|---|---|
 | 提取文字 | 本地 OCR | 纯本地，绝不联网、不确认 |
-| 翻译 | OCR（原文）+ 翻译引擎（译文，后续片） | 引擎缺席时如实说明，不留假结果 |
+| 翻译 | OCR（原文）+ 聊天模型文本互译 | 与问答同一条聊天服务；没配就如实说明，不留假结果 |
 | 复制图像 | 系统剪贴板 | 纯本地 |
 | 截图问答 | 打开问答浮窗（图进输入栏） | **发端点在浮窗里**：用户亲手点「发送」才出网 |
 
@@ -51,6 +51,7 @@ from pet.screen_capture.actions import (  # noqa: E402
     ScreenCapturePresenter,
 )
 from pet.screen_capture.result_panel import ScreenResult, ScreenResultPanel  # noqa: E402
+from pet.screen_capture.session import SelectionRect  # noqa: E402
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -64,6 +65,10 @@ def _image() -> QImage:
     return img
 
 
+#: 假闭环默认框到的那块选区（结果面/问答窗要跟到它下方）。
+_SELECTION = SelectionRect(120, 200, 300, 160)
+
+
 # ------------------------------------------------------------------ 假件
 
 
@@ -71,8 +76,9 @@ class _FakeController(QObject):
     """假采集闭环：按脚本把三条出口之一发出来（同步，钉死顺序）。
 
     ``action`` 就是覆盖层动作条上那一下选择（默认等价于按 Enter 的提取文字）；
-    真控制器只放行这一组闭集（见 ``test_screen_capture_controller.py``），这里放开
-    是为了能单独验编排层的分发表。
+    ``selection`` 是框到的那块选区（真控制器给的是 SelectionRect——编排层现在要
+    把它记住，好让结果面/问答窗落在选区下方）。真控制器只放行动作闭集
+    （见 ``test_screen_capture_controller.py``），这里放开是为了能单独验分发表。
     """
 
     captured = Signal(object, object, object)
@@ -80,11 +86,12 @@ class _FakeController(QObject):
     failed = Signal(str)
 
     def __init__(self, *, mode: str = "captured", action: str = ACTION_OCR,
-                 reason: str = "esc") -> None:
+                 reason: str = "esc", selection=None) -> None:
         super().__init__()
         self.mode = mode
         self.action = action
         self.reason = reason
+        self.selection = _SELECTION if selection is None else selection
         self.starts = 0
         self.emit_on_start = True
 
@@ -99,7 +106,7 @@ class _FakeController(QObject):
     def emit(self) -> None:
         image = _image()
         if self.mode == "captured":
-            self.captured.emit(image, object(), self.action)
+            self.captured.emit(image, self.selection, self.action)
         elif self.mode == "cancelled":
             self.cancelled.emit(self.reason)
         else:
@@ -107,23 +114,27 @@ class _FakeController(QObject):
 
 
 class _FakeAskDialog:
-    """问答浮窗替身：记录"被打开过、收到哪张图、带没带上下文"。
+    """问答浮窗替身：记录"被打开过、收到哪张图、上下文与该跟的选区"。
 
     （发送与否不归编排层管——浮窗自己负责，见 ``test_screen_capture_ask_dialog.py``。）
     """
 
     def __init__(self, *, fail: bool = False) -> None:
-        self.calls: list[tuple] = []      # [(图, 上下文文字)]
+        self.calls: list[tuple] = []      # [(图, 上下文文字, below 选区)]
         self.fail = fail
 
-    def start_with_image(self, image, context_text: str = "") -> None:
+    def start_with_image(self, image, context_text: str = "", below=None) -> None:
         if self.fail:
             raise RuntimeError("浮窗炸了")
-        self.calls.append((image, str(context_text)))
+        self.calls.append((image, str(context_text), below))
 
     @property
     def images(self) -> list:
-        return [image for image, _text in self.calls]
+        return [image for image, _text, _below in self.calls]
+
+    @property
+    def belows(self) -> list:
+        return [below for _image, _text, below in self.calls]
 
 
 class _FakeWatcher:
@@ -152,17 +163,35 @@ class _FakeWatcher:
         self.running = self.allowed
 
 
-class _RecordingPresenter:
+class _FakePanel:
+    """结果面板替身：只记"被关过几次"（「继续提问」要先把结果卡收掉）。"""
+
     def __init__(self) -> None:
+        self.closes = 0
+
+    def close_panel(self) -> None:
+        self.closes += 1
+
+
+class _RecordingPresenter:
+    """结果落点替身：状态/结果照收，同时记下每一张结果该落在哪个选区下方。"""
+
+    def __init__(self, *, panel=None) -> None:
         self.statuses: list[str] = []
         self.results: list[ScreenResult] = []
+        self.belows: list = []            # 每次 show 带下来的 below（选区矩形）
+        self._panel = panel
 
     def status(self, text: str) -> None:
         self.statuses.append(str(text))
 
-    def show(self, result: ScreenResult):
+    def show(self, result: ScreenResult, below=None):
         self.results.append(result)
+        self.belows.append(below)
         return None
+
+    def panel(self):
+        return self._panel
 
 
 class _FakeIsland(QWidget):
@@ -250,8 +279,13 @@ def test_ocr_action_reports_an_honest_reason_when_no_engine_is_wired(monkeypatch
 # ------------------------------------------------------------------ 翻译
 
 
-def test_translate_action_keeps_the_source_and_says_the_engine_is_pending(monkeypatch):
-    monkeypatch.setattr(actions_mod, "resolve_translator", lambda: None)
+def test_translate_action_keeps_the_source_and_says_the_service_is_unavailable():
+    """没有配置面就没有翻译器：原文照旧拿得到，状态行如实说"要配 AI 服务"。
+
+    （旧契约里翻译引擎是"后续片"、恒缺席；现在翻译真的接了，缺席的唯一原因是
+    宿主没有配置面——文案随之从"将在后续片接入"改成 ``TRANSLATION_UNAVAILABLE_REASON``。
+    ``resolve_translator`` 已不是这条链路的入口：装配走 ``_build_translator()``。）
+    """
     presenter = _RecordingPresenter()
 
     _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world", translator=None,
@@ -260,8 +294,9 @@ def test_translate_action_keeps_the_source_and_says_the_engine_is_pending(monkey
     result = presenter.results[0]
     assert result.title == "截图翻译"
     assert result.primary == "Hello world"      # 原文照旧拿得到
-    assert result.secondary == ""               # 没有引擎就不摆假译文
-    assert "后续片" in result.status
+    assert result.secondary == ""               # 没有翻译器就不摆假译文
+    assert result.status == actions_mod.TRANSLATION_UNAVAILABLE_REASON
+    assert result.primary_label == ""
 
 
 def test_translate_action_fills_both_bilingual_slots_with_an_engine():
@@ -279,6 +314,63 @@ def test_translate_action_fills_both_bilingual_slots_with_an_engine():
     result = presenter.results[0]
     assert result.primary == "Hello world"
     assert result.secondary == "你好，世界"
+
+
+def test_the_translation_engine_is_the_configured_chat_model(monkeypatch):
+    """翻译真的接通了：装机默认翻译器 = ``translate.translate_text``（纯文本聊天调用）。
+
+    打桩打在**模块函数**上（不是网络）：这里验的是编排层把识别出的原文与宿主配置
+    一起交给它，再把译文填进第二槽——翻译走哪条端点/用什么 Key 是 ``translate.py``
+    自己的事（见 ``test_screen_capture_translate.py``）。
+    """
+    from pet.screen_capture import translate as translate_mod
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(translate_mod, "translate_text",
+                        lambda text, config: seen.append((text, config)) or "Hello world")
+
+    host = _FakeHost()
+    config = {"context_menu_appearance": {"theme": "light"}}
+    host.cfg = config
+    presenter = _RecordingPresenter()
+
+    _start(ACTION_TRANSLATE, host=host, ocr=lambda _img: "你好，世界", presenter=presenter)
+
+    assert seen == [("你好，世界", config)]
+    result = presenter.results[0]
+    assert result.primary == "你好，世界"
+    assert result.secondary == "Hello world"
+    assert "已翻译" in result.status
+
+
+def test_translate_action_does_not_spin_the_engine_on_an_empty_recognition():
+    """没识别到文字就不去翻译：省一次网络往返，状态行如实说明。"""
+    calls: list = []
+    presenter = _RecordingPresenter()
+
+    _start(ACTION_TRANSLATE, ocr=lambda _img: "   ",
+           translator=lambda image, source: calls.append((image, source)) or "不该发生",
+           presenter=presenter)
+
+    assert calls == [], "原文是空的还去调翻译＝白花一次网络往返"
+    result = presenter.results[0]
+    assert result.primary == "" and result.secondary == ""
+    assert result.status == "没有识别到文字，无可翻译"
+    assert result.primary_label == ""
+
+
+def test_translate_action_reports_an_empty_translation_honestly():
+    """翻译器在、但没给出译文：说"没有拿到译文"，原文照旧交给用户（不编译文）。"""
+    presenter = _RecordingPresenter()
+
+    _start(ACTION_TRANSLATE, ocr=lambda _img: "Hello world",
+           translator=lambda _img, _src: "   ", presenter=presenter)
+
+    result = presenter.results[0]
+    assert result.primary == "Hello world"
+    assert result.secondary == ""
+    assert result.status == "没有拿到译文"
+    assert result.primary_label == ""
 
 
 # ------------------------------------------------------------------ 复制图像
@@ -397,14 +489,38 @@ def test_an_unknown_action_still_lands_on_an_explicit_branch():
 
 
 def test_continue_ask_opens_the_dialog_with_the_image_and_the_recognized_text():
-    """结果面板「继续提问…」的落点：同一张图 + 已识别文字一起进浮窗（上下文只进首轮）。"""
+    """结果面板「继续提问…」的落点：图 + 已识别文字 + 选区一起进浮窗（上下文只进首轮）。"""
     image = _image()
     dialog = _FakeAskDialog()
-    action = _make_actions(controller=_FakeController(), ask_dialog=dialog)
+    action = _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", ask_dialog=dialog)
 
     action._continue_ask(image, "识别到的文字")
 
-    assert dialog.calls == [(image, "识别到的文字")]
+    assert dialog.calls == [(image, "识别到的文字", _SELECTION)]
+
+
+def test_continue_ask_closes_the_result_panel_before_opening_the_dialog():
+    """实机反馈：续聊开始后结果卡不该还挂在屏幕上——先收面板、再开浮窗。"""
+    panel = _FakePanel()
+    dialog = _FakeAskDialog()
+    action = _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", ask_dialog=dialog,
+                    presenter=_RecordingPresenter(panel=panel))
+
+    action._continue_ask(_image(), "识别到的文字")
+
+    assert panel.closes == 1
+    assert len(dialog.calls) == 1
+
+
+def test_continue_ask_tolerates_a_host_without_a_panel():
+    """面板还不存在（没上面板过/建不出来）时不许炸：关面板那一步跳过，浮窗照开。"""
+    dialog = _FakeAskDialog()
+    action = _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", ask_dialog=dialog,
+                    presenter=_RecordingPresenter())   # panel() 返回 None
+
+    action._continue_ask(_image(), "识别到的文字")
+
+    assert len(dialog.calls) == 1
 
 
 def test_ocr_result_carries_the_selection_image_for_the_continue_entry():
@@ -419,8 +535,9 @@ def test_ocr_result_carries_the_selection_image_for_the_continue_entry():
 def test_the_continue_button_on_the_real_panel_reaches_the_ask_dialog():
     """端到端（真实面板，offscreen）：结果面板底部「继续提问…」→ 浮窗。
 
-    串起四层：OCR 结果带图 → 真实面板露出入口 → 点它 → 编排层把（图, 文字）
-    交给问答浮窗。这条链路上任何一处断掉，用户看到的是"点了没反应"。
+    串起四层：OCR 结果带图 → 真实面板露出入口 → 点它 → 编排层先收掉结果卡，
+    再把（图, 文字, 选区）交给问答浮窗。这条链路上任何一处断掉，用户看到的
+    都是"点了没反应"或"结果卡与浮窗同时挂着"。
     """
     dialog = _FakeAskDialog()
     action = ScreenCaptureActions(
@@ -435,10 +552,36 @@ def test_the_continue_button_on_the_real_panel_reaches_the_ask_dialog():
     assert panel.continue_button().isVisibleTo(panel) is True, "有图却没有「继续提问」入口"
     panel.continue_button().click()
 
+    assert panel.isVisible() is False, "续聊已经开始，结果卡还挂在屏幕上"
     assert len(dialog.calls) == 1
-    image, context_text = dialog.calls[0]
+    image, context_text, below = dialog.calls[0]
     assert isinstance(image, QImage) and context_text == "识别到的文字"
+    assert below == _SELECTION
     panel.close_panel()
+
+
+# ------------------------------------------------------------ 跟到选区下方（round 2）
+
+
+def test_the_result_panel_follows_the_selection_it_came_from():
+    """定位契约：结果面落在框选的那块**下方**（实机反馈：角落要来回跳视线）。
+
+    传下去的是框到的那块选区矩形（逻辑坐标）——不是覆盖层、不是冻结帧。
+    """
+    presenter = _RecordingPresenter()
+
+    _start(ACTION_OCR, ocr=lambda _img: "识别到的文字", presenter=presenter)
+
+    assert presenter.belows == [_SELECTION]
+
+
+def test_the_ask_dialog_follows_the_selection_it_came_from():
+    """问答浮窗同一条定位口径（用户拖过位置后由浮窗自己沿用用户的位置）。"""
+    dialog = _FakeAskDialog()
+
+    _start(ACTION_ASK, ask_dialog=dialog)
+
+    assert dialog.belows == [_SELECTION]
 
 
 def test_default_ask_dialog_is_built_from_the_host_config():

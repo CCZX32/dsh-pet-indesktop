@@ -240,6 +240,49 @@ def test_panel_flips_above_an_anchor_that_sits_on_the_bottom_edge():
     anchor.deleteLater()
 
 
+def test_the_panel_lands_below_the_selection_it_came_from(qapp):
+    """定位契约（round 2 实机反馈）：给选区就落在选区正下方，不再甩到屏幕角落。
+
+    落点是"这块图的下文"，用户的视线不用在选区和屏幕角落之间来回跳。
+    """
+    from pet.screen_capture.session import SelectionRect
+
+    rect = SelectionRect(200, 200, 300, 100)
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字"), below=rect)
+
+    geo = panel.geometry()
+    assert geo.top() >= rect.y + rect.height, "面板压在选区上了"
+    assert abs(geo.center().x() - (rect.x + rect.width // 2)) <= 2, "没有对齐选区中线"
+    panel.close_panel()
+
+
+def test_the_selection_beats_the_anchor_and_the_screen_corner(qapp):
+    """选区优先级最高：同一次展示既给锚（岛）又给选区时，跟选区。
+
+    （锚/角落是"没有选区上下文"时的退路——两套口径混用会让结果卡在岛边、问答窗
+    在选区边，用户看到的是同一张图的两个落点。）
+    """
+    from pet.screen_capture.session import SelectionRect
+
+    screen = QGuiApplication.primaryScreen()
+    assert screen is not None
+    available = screen.availableGeometry()
+    anchor = QWidget()
+    anchor.setGeometry(available.right() - 40, available.bottom() - 20, 40, 20)
+    rect = SelectionRect(120, 120, 260, 80)
+
+    panel = ScreenResultPanel()
+    panel.show_result(ScreenResult(title="截图提取文字", primary="识别到的文字"),
+                      anchor, below=rect)
+
+    geo = panel.geometry()
+    assert abs(geo.center().x() - (rect.x + rect.width // 2)) <= 2
+    assert geo.top() >= rect.y + rect.height
+    panel.close_panel()
+    anchor.deleteLater()
+
+
 def test_empty_result_renders_without_crashing():
     """空输入（引擎没认到文字 / 引擎缺席）：面板照旧能开，复制如实返回 False。"""
     panel = ScreenResultPanel()
@@ -262,8 +305,8 @@ def test_panel_height_tracks_the_content():
     （无裁切由同一份度量保证，视觉证据是离屏截图 probe_panel_ocr.png：
     四行中文完整可见、没有滚动条。）
 
-    **每条都用一个新面板量**：面板是复用件，而"复用同一件时的定高"是产品缺陷
-    （见文件末尾「已知产品缺陷」），不在这里假装它没问题。
+    **每条都用一个新面板量**：复用同一件面板时的定高有缺陷（第一张是短结果就会
+    锁死，见文件末尾「已知产品缺陷」），不在这里假装它没问题。
     """
     def _height(result: ScreenResult) -> int:
         panel = ScreenResultPanel()
@@ -460,33 +503,44 @@ def test_the_card_is_a_rounded_translucent_corner(qapp):
 
 # ------------------------------------------------------------ 已知产品缺陷（未修）
 #
-# **面板复用时的"内容定高"是坏的**（发现于本片测试适配，按纪律没有动产品代码）。
+# **面板实例的"内容定高"在第一张结果是短结果时会永久冻在 140 px**
+# （round 2 之后复验仍在；按纪律没有动产品代码，只把结论写在这里）。
 #
-# 症状：一个 ``ScreenResultPanel`` 实例只在**第一张**结果上按内容定高；此后每张
-# 结果都停在第一张算出来的尺寸上。头一张是空结果（或一行短结果）时，面板永远
-# 140 px 高——长文与问答答复被压进一条 140 px 的窄带里，只靠滚动条看；头一张是
-# 超长文本时，面板又永远 ~300 px 高，短结果留一大片空白。
+# 症状（2026-10-14 复验，offscreen 实测）：
+#
+#     新面板 → 第一张短结果 → 此后任何内容都停在 140 px（短/长/多行 = 140/140/140）
+#     新面板 → 第一张长结果 → 此后正常跟随内容（长/短/多行 = 299/140/206）
+#
+# 也就是"第一张够高就没事、第一张矮就锁死"——而第一张是短结果恰恰是常见情形
+# （"没有识别到文字"、一行结果），用户于是看到后面的长文本被压进 140 px 窄带、
+# 只能靠滚动条读。
 #
 # 机理（``pet/screen_capture/result_panel.py``）：``show_near`` 用
 # ``_applying_size`` 把"程序化排版"的 ``resize()`` 挡在用户尺寸记忆之外，但面板
 # 在**首次 show() 之前**是未创建状态的顶层窗口，那时 ``resize()`` 的
-# ``QResizeEvent`` 被 Qt 挂起，直到 ``show()``（``show_near`` 早就返回、
+# ``QResizeEvent`` 被 Qt 挂起，直到 ``show()``（``show_near`` 早已返回、
 # ``_applying_size`` 已复位）才投递——于是首张结果的排版尺寸被当成"用户拉的尺寸"
-# 记进 ``_user_size``，此后 ``show_near`` 一律用它覆盖内容定高。
+# 记进 ``_user_size``（实测 ``QSize(300, 140)``），此后 ``show_near`` 的
+# ``max(140, min(_user_size.height, avail))`` 覆盖了内容定高。只有首张算出来的
+# 高度与窗口当时的实际高度相同（都被 140 的地板压住）时才会被记下来，这就是
+# "条件性"的来源。
 #
 # 复现（offscreen，不需要产品改动）::
 #
 #     QT_QPA_PLATFORM=offscreen python -c "
 #     from PySide6.QtWidgets import QApplication
 #     from pet.screen_capture.result_panel import ScreenResult, ScreenResultPanel
-#     app = QApplication([]); p = ScreenResultPanel()
-#     p.show_result(ScreenResult(title='t', primary='答' * 4000)); print(p.height())  # 301
-#     p.show_result(ScreenResult(title='t', primary='短'));        print(p.height())  # 301（应为 ~140）
-#     p.show_result(ScreenResult(title='t', primary='行\n' * 8));  print(p.height())  # 301（应为 ~200）
+#     app = QApplication([])
+#     for first, second in (('短', '答' * 4000), ('答' * 4000, '短')):
+#         p = ScreenResultPanel()
+#         p.show_result(ScreenResult(title='t', primary=first));  print(p.height(), end=' ')
+#         p.show_result(ScreenResult(title='t', primary=second)); print(p.height(), p._user_size)
 #     "
+#     # 短 → 长:  140 140 QSize(300, 140)   ← 冻住（应 140 300）
+#     # 长 → 短:  299 140 None             ← 正常
 #
 # 修法方向（留给出产品改动的人定）：把"用户尺寸"的判定挪到事件之外（例如只在
-# ``QSizeGrip`` 的 ``mouseReleaseEvent`` / 非 ``_applying_size`` 的**显式**入口上记），
-# 或者在同一事件循环轮次里区分"首次 show 的补投递"。修好后本文件末尾那条
-# "新面板量"的注释与 ``test_a_size_the_user_pulled_survives_the_next_result``
-# 的说明可一并收紧。
+# ``QSizeGrip`` 的 ``mouseReleaseEvent`` 或显式入口上记），或者让"首次 show 的
+# 补投递"不参与记忆。修好后 ``test_panel_height_tracks_the_content`` 里
+# "每条都用一个新面板量"的注释与 ``test_a_size_the_user_pulled_survives_the_next_result``
+# 的说明可以一并收紧（那时才谈得上"复用同一件也跟随内容"）。

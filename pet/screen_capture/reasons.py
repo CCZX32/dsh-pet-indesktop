@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """「快速识屏」的不可用说明——两份消费面共用的**单一真相源**。
 
-同一句话有两个出口，措辞必须一致：
+同一句话有多个出口，措辞必须一致：
 
-- **动作条**：``pet/screen_capture/overlay.py`` 把「翻译」按钮置灰时写进 tooltip；
-- **结果浮层**：``pet/screen_capture/actions.py`` 发现引擎缺席时写进状态行。
-
-它们曾经各写一份字面量（内容相同、各管各的）。同一句话两处维护，改一处漏一处就会
-出现"按钮说引擎还没接入、点下去浮层说的是另一句"这种自相矛盾；所以文案搬进本模块。
+- **动作条 / 结果浮层**：引擎缺席或配置缺失时，overlay 与 ``actions.py`` 写出的
+  是同一句——各写一份字面量就会漂成"按钮说一套、点下去说另一套"；文案收进本模块。
 
 本模块**零 import**（不拖 Qt、不拖截图栈）：菜单层在启动期就装载，它可以把这里的
 import 放在模块级而不付实质代价（本机实测：暖缓存下 import 0.6–0.8 ms，首次含字节码
@@ -16,10 +13,10 @@ import 放在模块级而不付实质代价（本机实测：暖缓存下 import
 
 from __future__ import annotations
 
-__all__ = ["OCR_PENDING_REASON", "TRANSLATION_PENDING_REASON"]
+__all__ = ["OCR_PENDING_REASON", "TRANSLATION_UNAVAILABLE_REASON"]
 
 #: 本地 OCR 引擎缺席时那条如实说明（不是"暂时没有数据"，也不摆假结果）。
 OCR_PENDING_REASON = "本地文字识别引擎尚未接入"
 
-#: 翻译引擎缺席时那条如实说明（入口与双语对照位已就位，引擎是后续片）。
-TRANSLATION_PENDING_REASON = "翻译引擎将在后续片接入"
+#: 翻译走用户配置的聊天模型（纯文本调用）：没配置/已关闭时的如实说明。
+TRANSLATION_UNAVAILABLE_REASON = "截图翻译要用你在设置里配置的 AI 服务（未配置或已关闭）"

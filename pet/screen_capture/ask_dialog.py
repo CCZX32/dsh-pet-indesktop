@@ -47,7 +47,6 @@ __all__ = ["ScreenAskDialog"]
 
 _MARGIN = 12          # 缺省落点贴屏幕右下的留白
 _MIN_W, _MIN_H = 320, 360
-_THUMB_MAX_H = 140    # 输入栏上方缩略图的最大高度
 _BUBBLE_RADIUS = 10
 
 
@@ -92,6 +91,7 @@ class ScreenAskDialog(QFrame):
         self._drag_offset: QPoint | None = None
         self._user_pos: QPoint | None = None   # 用户拖过的位置（复用窗体时沿用）
         self._user_size: QSize | None = None
+        self._pending_below = None             # start_with_image 带入的选区矩形
 
         self._style = resolve_style(style, self.palette())
         self._palette = _STYLES[self._style]
@@ -138,19 +138,31 @@ class ScreenAskDialog(QFrame):
         header.addWidget(close_btn)
         layout.addLayout(header)
 
-        # 缩略图卡（输入栏上方——"这张图是接下来提问的上下文"）
-        self._thumb = QLabel(self)
+        # 缩略图 chip（输入栏上方一小条——Kimi Code 输入区附件同款形态；
+        # 大图横幅会把对话区挤没，实机反馈后改成 chip）
+        self._thumb_chip = QFrame(self)
+        self._thumb_chip.setObjectName("screen-ask-chip")
+        chip_row = QHBoxLayout(self._thumb_chip)
+        chip_row.setContentsMargins(6, 4, 8, 4)
+        chip_row.setSpacing(8)
+        self._thumb = QLabel(self._thumb_chip)
         self._thumb.setObjectName("screen-ask-thumb")
+        self._thumb.setFixedSize(40, 40)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb.setFixedHeight(_THUMB_MAX_H)
-        layout.addWidget(self._thumb)
+        chip_row.addWidget(self._thumb)
+        chip_text = QLabel("截图已就位 · 发送时随问题一起给 AI", self._thumb_chip)
+        chip_text.setObjectName("screen-ask-chip-text")
+        chip_row.addWidget(chip_text, 1)
+        layout.addWidget(self._thumb_chip)
 
-        # 消息列表
+        # 消息列表（视口与宿主都不透明：透明窗上"透明滚动区"会透出桌面，
+        # 消息少的时候整片内容像浮在壁纸上——实机反馈的"重叠看不清"就是这条）
         self._scroll = QScrollArea(self)
         self._scroll.setObjectName("screen-ask-scroll")
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._messages_host = QWidget()
+        self._messages_host.setObjectName("screen-ask-messages")
         self._messages = QVBoxLayout(self._messages_host)
         self._messages.setContentsMargins(2, 2, 2, 2)
         self._messages.setSpacing(6)
@@ -185,10 +197,21 @@ class ScreenAskDialog(QFrame):
             QLabel#screen-ask-note, QLabel#screen-ask-status {{
                 color: {colors["hint"]}; font-size: 11px;
             }}
-            QLabel#screen-ask-thumb {{
+            QFrame#screen-ask-chip {{
                 background: {colors["button"]}; border-radius: 8px;
+                border: 1px solid {colors["border"]};
             }}
-            QScrollArea#screen-ask-scroll {{ background: transparent; }}
+            QLabel#screen-ask-thumb {{
+                background: {colors["divider"]}; border-radius: 6px;
+            }}
+            QLabel#screen-ask-chip-text {{
+                color: {colors["hint"]}; font-size: 11px;
+            }}
+            QScrollArea#screen-ask-scroll,
+            QScrollArea#screen-ask-scroll QWidget#qt_scrollarea_viewport,
+            QWidget#screen-ask-messages {{
+                background: {colors["surface"]};
+            }}
             QScrollArea#screen-ask-scroll QScrollBar:vertical {{
                 background: transparent; width: 8px; margin: 2px;
             }}
@@ -224,10 +247,11 @@ class ScreenAskDialog(QFrame):
 
     # ---------------------------------------------------------------- 对外
 
-    def start_with_image(self, image: QImage, context_text: str = "") -> None:
+    def start_with_image(self, image: QImage, context_text: str = "", below=None) -> None:
         """开新会话：换缩略图、清消息、重置会话上下文，然后显示并聚焦输入框。
 
         ``context_text``：随首轮发出的参考资料（现在是结果面板带来的 OCR 文字）。
+        ``below``：采集选区——窗口落在选区正下方（用户拖过位置后沿用用户的位置）。
         """
         if image is None or image.isNull():
             raise ValueError("截图问答收到空图")
@@ -238,9 +262,18 @@ class ScreenAskDialog(QFrame):
             # 通道建不起来（没配置/配置坏了）：如实报错，窗口照样不开。
             log.exception("截图问答：会话通道创建失败")
             raise
+        self._pending_below = below
+        # 窗口已经可见时 show() 不会再触发 showEvent：用户没拖过位置就跟新选区走
+        # （拖过位置的窗口不动——"开着就别乱动"优先于"跟选区"）。
+        if self.isVisible() and self._user_pos is None and below is not None:
+            from .result_panel import position_below_rect
+
+            position_below_rect(self, below)
+            self._pending_below = None
         self._conversation = conversation
-        thumb = QPixmap.fromImage(image).scaledToHeight(
-            _THUMB_MAX_H, Qt.TransformationMode.SmoothTransformation)
+        thumb = QPixmap.fromImage(image).scaled(
+            40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
         self._thumb.setPixmap(thumb)
         self._clear_messages()
         self._set_status("")
@@ -336,6 +369,12 @@ class ScreenAskDialog(QFrame):
             self.resize(self._user_size)
         if self._user_pos is not None:
             self.move(self._user_pos)
+            return
+        below, self._pending_below = self._pending_below, None
+        if below is not None:
+            from .result_panel import position_below_rect
+
+            position_below_rect(self, below)
             return
         screen = self.screen()
         if screen is None:

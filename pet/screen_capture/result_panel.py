@@ -78,6 +78,34 @@ _STYLES = {
 #: ``context_menus/menu_styles/modern.py`` 的 ``theme == "system"`` 同一口径）。
 _DARK_LIGHTNESS = 128
 
+
+def position_below_rect(widget: QWidget, rect, gap: int = _GAP) -> None:
+    """把窗口摆到选区矩形正下方（放不下翻上缘，再不行贴屏幕边）。
+
+    实机反馈（2026-10-14）：结果面板/问答窗落在屏幕角落 = 视线要从选区跳到角落
+    再跳回来；跟在选区旁边才是"这块图的下文"。``rect`` 是逻辑像素下的屏幕坐标
+    （采集选区就是它）。
+    """
+    from PySide6.QtCore import QRect
+
+    if rect is None:
+        return
+    bounds = QRect(int(rect.x), int(rect.y), int(rect.width), int(rect.height))
+    screen = QGuiApplication.screenAt(bounds.center()) or QGuiApplication.primaryScreen()
+    available = screen.availableGeometry() if screen is not None else None
+    if available is None:
+        return
+    width, height = widget.width(), widget.height()
+    x = bounds.center().x() - width // 2
+    y = bounds.bottom() + gap
+    if y + height > available.bottom():
+        y = bounds.top() - height - gap           # 下方放不下 → 翻上缘
+    if y < available.top():
+        y = available.bottom() - height - _MARGIN  # 选区贴顶 → 贴屏幕下边
+    x = max(available.left(), min(x, available.right() - width))
+    y = max(available.top(), min(y, available.bottom() - height))
+    widget.move(x, y)
+
 #: ``style`` 参数里代表"跟着宿主走"的取值（含缺省 ``None``）。
 SYSTEM_STYLE = "system"
 
@@ -109,8 +137,8 @@ class ScreenResult:
     """一次截图动作的结果（展示层的唯一输入模型）。
 
     ``primary`` = 主文本（OCR 文字 / 问答答复 / 翻译原文），``secondary`` =
-    双语对照的第二槽（译文，留给后续片的翻译引擎），``status`` = 一句话口径
-    （"本地识别 · 12 字" / "翻译引擎将在后续片接入"），写在标题右侧。
+    双语对照的第二槽（译文——翻译已接通：聊天模型文本互译），``status`` =
+    一句话口径（"本地识别 · 12 字" / "已翻译 · N 字"），写在标题右侧。
 
     ``image`` = 这次截下的选区图（纯内存，不落盘）：非空时面板底部出现
     「继续提问…」入口——把图（与已识别文字）带进问答浮窗接着聊（豆包式
@@ -369,12 +397,15 @@ class ScreenResultPanel(QFrame):
 
     # ---------------------------------------------------------------- 展示
     def show_result(self, result: ScreenResult, anchor: QWidget | None = None,
-                    on_continue_ask=None) -> None:
+                    on_continue_ask=None, below=None) -> None:
         """换内容 + 定位 + 显示（复用同一件面板，不重复造窗）。
 
         ``on_continue_ask``：签名 ``(image, recognized_text) -> None``——面板底部
         「继续提问…」的回调（由编排层注入，把图带进问答浮窗）。``result.image``
         为空时入口不出现（没有上下文的"继续问"是空转）。
+
+        ``below``：采集选区（SelectionRect 或矩形）——给定时面板落在选区正下方
+        （实机反馈：落在屏幕角落视线要来回跳），缺省维持锚/屏幕边的旧定位。
         """
         self._title.setText(str(result.title))
         self._status.setText(str(result.status))
@@ -400,12 +431,12 @@ class ScreenResultPanel(QFrame):
         self._continue_btn.setVisible(self._on_continue_ask is not None)
         self._continue_image = result.image
 
-        self.show_near(anchor)
+        self.show_near(anchor, below=below)
         self.show()
         self.raise_()
 
-    def show_near(self, anchor: QWidget | None = None) -> None:
-        """贴边定位：优先锚（岛）左边，放不下换右边，再放不下就贴屏幕边。
+    def show_near(self, anchor: QWidget | None = None, below=None) -> None:
+        """贴边定位：有选区矩形优先跟选区；否则优先锚（岛）左边，再贴屏幕边。
 
         用户用 grip 拉过尺寸后（``_user_size`` 非 None）沿用用户的大小——面板是
         复用件，"每张结果都重置回默认大小"会把用户刚调好的布局没收掉。
@@ -426,6 +457,11 @@ class ScreenResultPanel(QFrame):
             if self._user_size is not None:
                 width = max(_MIN_WIDTH, min(self._user_size.width(), available.width()))
                 height = max(140, min(self._user_size.height(), available.height()))
+            # 记录的必须是**实际会交付的尺寸**——最小高度地板会把 resize(300,115)
+            # 钳成 (300,140)，记 115 的话延迟投递的事件就被误当成"用户拉的"
+            # （短结果首发永久锁高度的缺陷就是这么来的）。
+            width = max(self.minimumWidth(), width)
+            height = max(self.minimumHeight(), height)
             self._last_programmatic_size = QSize(width, height)
             self.resize(width, height)
         finally:
@@ -446,7 +482,10 @@ class ScreenResultPanel(QFrame):
             y = available.bottom() - height - _MARGIN
         x = max(available.left(), min(x, available.right() - width))
         y = max(available.top(), min(y, available.bottom() - height))
-        self.move(QPoint(x, y))
+        if below is not None:
+            position_below_rect(self, below)       # 选区优先于角落定位
+        else:
+            self.move(QPoint(x, y))
 
     def _fit_view_height(self, view: QPlainTextEdit, min_h: int, max_h: int,
                          panel_width: int) -> None:

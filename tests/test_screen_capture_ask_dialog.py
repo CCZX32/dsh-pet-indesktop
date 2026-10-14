@@ -31,8 +31,8 @@ from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from pet.chat.models import ProviderConfig  # noqa: E402
-from pet.screen_capture import ask_dialog as ask_mod  # noqa: E402
 from pet.screen_capture.ask_dialog import ScreenAskDialog, _Bubble  # noqa: E402
+from pet.screen_capture.session import SelectionRect  # noqa: E402
 from pet.screen_capture.vision_bridge import VisionConversation  # noqa: E402
 
 #: 等待预算（秒）：后台线程 + CI 慢 runner 给足，靠事件同步醒，不靠 sleep 猜。
@@ -164,8 +164,12 @@ def test_start_with_image_opens_a_session_with_the_thumbnail_and_input_focus(qap
     dialog.start_with_image(image)
 
     assert factory.latest.started == [image], "会话拿到的必须是刚框到的那张图"
-    assert dialog._thumb.pixmap().isNull() is False
-    assert dialog._thumb.pixmap().height() == ask_mod._THUMB_MAX_H
+    # 缩略图是输入栏上方那一小条 chip 里的 40×40 方块（round 2：大图横幅把对话区挤没了）
+    assert dialog._thumb_chip.objectName() == "screen-ask-chip"
+    assert (dialog._thumb.width(), dialog._thumb.height()) == (40, 40)
+    thumb = dialog._thumb.pixmap()
+    assert thumb.isNull() is False
+    assert thumb.width() <= 40 and thumb.height() <= 40, "缩略图溢出了 chip"
     assert dialog.isVisible() is True
     _settle()   # 焦点要事件循环推一把才生效（Qt 的 setFocus 是排队的）
     assert dialog._input.hasFocus() is True, "开窗就聚焦输入框：用户下一秒要打字"
@@ -191,6 +195,68 @@ def test_opening_the_dialog_puts_nothing_on_the_wire(qapp, monkeypatch):
     assert sent == [], "打开浮窗就把图发出去了"
     assert dialog._conversation is not None
     assert dialog._conversation.ready is True
+    dialog.close()
+
+
+def test_the_dialog_lands_below_the_selection(qapp):
+    """定位契约（round 2 实机反馈）：窗口落在框选的那块**下方**，不再甩到屏幕角落。"""
+    dialog = _dialog()
+    rect = SelectionRect(200, 200, 300, 100)
+
+    dialog.start_with_image(_image(), below=rect)
+
+    geo = dialog.geometry()
+    assert geo.top() >= rect.y + rect.height, "窗口压在选区上了"
+    assert abs(geo.center().x() - (rect.x + rect.width // 2)) <= 2, "没有对齐选区中线"
+    dialog.close()
+
+
+def test_the_dialog_follows_a_new_selection_on_the_next_open(qapp):
+    """下一次开窗（上一次已关）跟的是**这次**的选区，不是上一张图的那块。
+
+    选区贴屏幕下缘时窗口按既定规则翻到选区上方（离屏屏高 800，窗口高 360，
+    下缘 600 之后放不下），所以这里按"贴着这块选区"断言，而不是硬要求落在下方。
+    """
+    dialog = _dialog()
+    dialog.start_with_image(_image(), below=SelectionRect(200, 200, 300, 100))
+    dialog.close()
+
+    rect = SelectionRect(100, 500, 200, 100)
+    dialog.start_with_image(_image(), below=rect)
+
+    geo = dialog.geometry()
+    assert abs(geo.center().x() - (rect.x + rect.width // 2)) <= 2, "没有对齐新选区的中线"
+    assert geo.top() >= rect.y + rect.height or geo.bottom() <= rect.y, "没有贴着新选区"
+    dialog.close()
+
+
+def test_a_position_the_user_dragged_wins_over_the_selection(qapp):
+    """用户拖过的位置是他要的：再开一次也不许被"选区下方"抢走。"""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    _settle()
+
+    def _mouse(kind, local, glob, button, buttons):
+        return QMouseEvent(kind, QPointF(*local), QPointF(*glob), button, buttons,
+                           Qt.KeyboardModifier.NoModifier)
+
+    origin = dialog.pos()
+    dialog.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, (10, 8),
+                                  (origin.x() + 10, origin.y() + 8),
+                                  Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton))
+    dialog.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, (10, 8), (210, 108),
+                                Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton))
+    dialog.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, (10, 8), (210, 108),
+                                   Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton))
+    dragged_to = dialog.pos()
+    assert dragged_to != origin
+
+    dialog.start_with_image(_image(), below=SelectionRect(100, 500, 200, 100))
+
+    assert dialog.pos() == dragged_to
     dialog.close()
 
 
@@ -410,17 +476,18 @@ def test_the_reply_and_failure_handlers_map_to_the_ui(qapp):
 def test_an_empty_reply_does_not_render_an_empty_bubble(qapp):
     """模型没说话（空答复）也要有可见的一句，不许塞一个空气泡让界面看起来卡住。
 
-    **只钉真空串**：``_on_reply`` 用的是 ``reply or 兜底``，纯空白（``"   "``）
-    现在兜不住——那是一条已记录的产品缺陷（见本片报告的「问答浮窗」小节），
-    不在这里把它当成期望行为钉下来。
+    真空串与纯空白都算"没说话"（round 1 的实现在纯空白上会落一个看不见的气泡，
+    round 2 已改成先 strip 再兜底——这条现在把两种输入都钉住）。
     """
-    dialog = _dialog()
-    dialog.start_with_image(_image())
+    for blank in ("", "   ", "\n\t"):
+        dialog = _dialog()
+        dialog.start_with_image(_image())
 
-    dialog._on_reply("")
+        dialog._on_reply(blank)
 
-    assert _texts(dialog) and _texts(dialog)[0].strip() != ""
-    dialog.close()
+        texts = _texts(dialog)
+        assert texts and texts[0].strip() != "", f"{blank!r} 落了空气泡"
+        dialog.close()
 
 
 def test_the_network_call_runs_off_the_gui_thread(qapp):

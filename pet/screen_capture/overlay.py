@@ -4,9 +4,10 @@
 视觉契约（"真截屏体验"就靠这几笔）：
 
 - 底图 = 冻结帧（用户看到的是静止画面，不是身后的实时桌面）；
-- 非选区轻压暗 ``DIM_ALPHA``——压暗是为了衬托选区，**不是遮住内容**：
-  用户要先看得清屏幕，才知道该框哪块（2026-10-14 实机反馈：110 在 HDR 屏上
-  被 SDR 提亮补偿抬成一层白雾，字都读不清，调到 80）；
+- **还没框选时不压暗**——用户要看着清晰的屏幕决定框哪（2026-10-14 实机反馈：
+  全局压暗在明亮桌面上是一层雾，PixPin/豆包在框选前都不压暗）；
+- 有选区后：非选区轻压暗 ``DIM_ALPHA`` 衬托选区（压暗是衬托，**不是遮内容**；
+  HDR 屏的 SDR 感知提亮会把重压暗抬成白雾，所以只到 80 为止）；
 - 选区描白色虚线框 + 左上角尺寸标签，松手后下方浮出动作条——
   交互对齐主流截图工具（框完松手 → 选做什么），不再要求"拖完再按 Enter"。
 
@@ -25,9 +26,9 @@
   画出来、动作条直接待命（"盯着同一个小区域反复截"是高频用法）。跨屏不共用
   ——尺寸变了旧坐标就没有意义；取消不算记住，没动过作的东西不该被当成默认值。
 
-动作条的可用性：「翻译」引擎未接入，恒置灰并带原因 tooltip（文案真值在
-``reasons.py``，与结果浮层状态行同一份）。其余动作不在这一层判可用——引擎缺席
-这类事只有真跑才知道，动作的诚实报错由编排层负责（见 ``actions.py``）。
+动作条的可用性：四个动作全部可点（翻译已接入：OCR 原文走用户配置的聊天模型做
+文本互译；没配置聊天服务时由动作结果如实报错）。引擎缺席这类事只有真跑才知道，
+诚实报错由编排层负责（见 ``actions.py`` 与 ``reasons.py`` 的单一真相源）。
 
 本片覆盖层是**独占**的：它铺满整屏并置顶，期间不处理"鼠标穿透到非选区"的
 需求（那是后续片；先保证"框选期间点不到别的"这个可预期的行为）。
@@ -43,7 +44,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QWidget
 
-from .reasons import TRANSLATION_PENDING_REASON
 from .session import SelectionRect, normalize_drag
 
 log = logging.getLogger("dsh-pet-standalone")
@@ -151,10 +151,6 @@ class _ActionBar(QFrame):
                 from ..context_menus.icons import vector_widget_icon
 
                 button.setIcon(vector_widget_icon(button, icon_name, 13))
-            if action_id == ACTION_TRANSLATE:
-                # 引擎是后续片：留位置、置灰、写明原因（与菜单置灰同一口径）。
-                button.setEnabled(False)
-                button.setToolTip(TRANSLATION_PENDING_REASON)
             button.clicked.connect(
                 lambda _checked=False, aid=action_id: self.triggered.emit(aid))
             layout.addWidget(button)
@@ -389,7 +385,8 @@ class SelectionOverlay(QWidget):
 
         selection = self._selection
         if selection is None or selection.is_empty:
-            painter.fillRect(area, QColor(0, 0, 0, DIM_ALPHA))
+            # 无选区 = 不压暗（用户要看着清晰屏幕选区）；只留一条顶部提示。
+            self._paint_hint(painter, area)
             painter.end()
             return
 
@@ -416,6 +413,24 @@ class SelectionOverlay(QWidget):
 
         self._paint_size_label(painter, hole)
         painter.end()
+
+    def _paint_hint(self, painter: QPainter, area: QRect) -> None:
+        """无选区时的顶部居中提示条（拖拽开始即消失——那时 self._selection 已有值）。"""
+        text = "拖拽框选 · Esc 取消"
+        metrics = painter.fontMetrics()
+        pad_x, pad_y = 14, 7
+        chip_w = metrics.horizontalAdvance(text) + 2 * pad_x
+        chip_h = metrics.height() + 2 * pad_y
+        x = area.x() + (area.width() - chip_w) // 2
+        y = area.y() + 64   # 顶中要让开灵动岛胶囊（它也在顶中，高约 44px）
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addRoundedRect(float(x), float(y), float(chip_w), float(chip_h),
+                            _CHIP_RADIUS, _CHIP_RADIUS)
+        painter.fillPath(path, _CHIP_BG)
+        painter.setPen(_CHIP_FG)
+        painter.drawText(QRect(x, y, chip_w, chip_h), Qt.AlignmentFlag.AlignCenter, text)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_size_label(self, painter: QPainter, hole: QRect) -> None:
         """选区左上方的尺寸标签（W × H）；贴顶时收进选区内侧。"""

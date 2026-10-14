@@ -299,28 +299,20 @@ def test_action_bar_offers_every_action_with_the_shared_ids(qapp):
     overlay.close()
 
 
-def test_translate_is_the_only_greyed_button_and_explains_why(qapp):
-    """翻译引擎是后续片：留位置、置灰、写明原因，且点了绝不上报任何动作。"""
-    from pet.screen_capture import overlay as overlay_mod
-    from pet.screen_capture.reasons import TRANSLATION_PENDING_REASON
-
+def test_all_action_buttons_are_enabled_and_report_their_action(qapp):
+    """翻译已接入（文本互译走聊天模型）：动作条不再有置灰按钮，点了就上报动作。"""
     overlay = SelectionOverlay(screen=_FakeScreen(800, 600), memory=SelectionMemory())
     _drag(overlay, (100, 100), (300, 220))
     actions, cancelled = _record(overlay)
 
     bar = overlay.action_bar()
-    translate = bar.findChild(QPushButton, "screen-capture-action-translate")
-    assert translate.isEnabled() is False
-    assert translate.toolTip() == TRANSLATION_PENDING_REASON
-    # 真值只有一份：动作条的 tooltip 与结果浮层的状态行读的是同一个对象
-    # （不是两份同文字面量——那样改一处漏一处）。
-    assert overlay_mod.TRANSLATION_PENDING_REASON is TRANSLATION_PENDING_REASON
+    for name in ("ocr", "translate", "ask", "copy"):
+        button = bar.findChild(QPushButton, f"screen-capture-action-{name}")
+        assert button.isEnabled() is True, f"{name} 不该置灰"
 
-    for name in ("ocr", "ask", "copy"):
-        assert bar.findChild(QPushButton, f"screen-capture-action-{name}").isEnabled() is True
-
-    translate.click()
-    assert actions == [] and cancelled == []
+    bar.findChild(QPushButton, "screen-capture-action-translate").click()
+    assert actions == [(ACTION_TRANSLATE, SelectionRect(100, 100, 200, 120))]
+    assert cancelled == []
     overlay.close()
 
 
@@ -607,13 +599,17 @@ def test_selection_area_stays_bright_while_the_rest_is_dimmed(qapp):
     overlay.close()
 
 
-def test_overlay_without_frozen_frame_still_paints_dim_mask(qapp):
-    """抓帧失败的兜底形态：没有底图也得有可见的压暗遮罩。"""
+def test_overlay_without_frozen_frame_shows_hint_instead_of_dim(qapp):
+    """抓帧失败的兜底形态：没有底图也不压暗（无选区不遮内容），只出提示条。"""
     overlay = SelectionOverlay(screen=_FakeScreen())
 
     canvas = _render(overlay, background=QColor(255, 255, 255))
 
-    assert canvas.pixelColor(10, 10).red() < 200
+    assert canvas.pixelColor(10, 10).red() >= 230, \
+        "无选区不压暗：角落只见窗口默认底色（239 灰），不见压暗遮罩"
+    # 顶部提示条在屏中央（200 宽的假屏：chip 约 x25..175, y64..88，让开灵动岛高度）
+    center = canvas.pixelColor(100, 76)
+    assert center.red() < 120, "无选区时顶部应有提示 chip"
     overlay.close()
 
 

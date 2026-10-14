@@ -5,7 +5,7 @@
 的差别只在中间那一步，前后两端共用同一套收口：
 
     提取文字：capture → 本地 OCR            → 结果浮层（可复制，纯本地）
-    翻译    ：capture → OCR(原文) + 翻译引擎 → 结果浮层（双语对照位；引擎后续片）
+    翻译    ：capture → OCR(原文) + 聊天模型文本互译 → 结果浮层（双语对照位）
     复制图像：capture → 系统剪贴板           → 岛/气泡一句状态（纯本地）
     截图问答：capture → 打开问答浮窗          → 图进输入栏，用户自己打字发问、可多轮
               （不弹系统确认框：发不发送、发什么，都由用户在浮窗里亲手点「发送」
@@ -47,7 +47,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .controller import ScreenCaptureController, _weak_slot
 from .overlay import ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE
-from .reasons import OCR_PENDING_REASON, TRANSLATION_PENDING_REASON
+from .reasons import OCR_PENDING_REASON, TRANSLATION_UNAVAILABLE_REASON
 from .result_panel import SHORT_RESULT_LIMIT, ScreenResult, ScreenResultPanel
 
 # ``_weak_slot``：slice-1 的 Qt 生命周期小工具（信号槽只持弱引用，避免
@@ -63,7 +63,7 @@ __all__ = [
     "ACTION_TRANSLATE",
     "ACTIONS",
     "OCR_PENDING_REASON",
-    "TRANSLATION_PENDING_REASON",
+    "TRANSLATION_UNAVAILABLE_REASON",
     "ScreenCaptureActions",
     "ScreenCapturePresenter",
     "actions_for",
@@ -93,8 +93,9 @@ OCR_ENTRY = "recognize"
 #: 时是零成本 no-op）。每次会话收口都调它——切片 5 起识别跑在独立子进程里，收口处
 #: 这一次调用是**兜底清扫**：把还在跑的识别子进程杀掉，不留孤儿。
 OCR_RELEASE_ENTRY = "release_engine"
-#: 翻译引擎 seam 的契约：``translate_selection(image: QImage, source: str) -> str``。
-#: 本片一律解析为空（入口与双语对照位就位，引擎是后续片）。
+#: 翻译引擎 seam 的契约：``translate_selection(image: QImage, source: str) -> str``
+#: （留给"独立翻译引擎模块"的扩展位；当前产品链路不走它——翻译由
+#: ``_build_translator`` 装配 ``translate.translate_text``，吃宿主配置面）。
 TRANSLATOR_MODULE = "translate"
 TRANSLATOR_ENTRY = "translate_selection"
 
@@ -121,7 +122,12 @@ def resolve_ocr_engine() -> Callable | None:
 
 
 def resolve_translator() -> Callable | None:
-    """翻译引擎（``pet/screen_capture/translate.py::translate_selection``），本片恒 None。"""
+    """旧的翻译引擎 seam（``translate.py::translate_selection``）。
+
+    当前翻译走 ``translate.translate_text``（编排层经 ``_build_translator`` 装配，
+    需要宿主配置面）；这个按名解析的 seam 留给"独立翻译引擎模块"的后续扩展，
+    没有那个入口时恒 None。
+    """
     return _resolve_engine(TRANSLATOR_MODULE, TRANSLATOR_ENTRY)
 
 
@@ -150,7 +156,19 @@ def ocr_engine_available() -> bool:
 
 
 def translation_engine_available() -> bool:
-    return resolve_translator() is not None
+    """翻译链路是否接线（translate 模块在 + 有 translate_text 入口）。
+
+    注意语义：这回答的是"引擎在不在"，不是"用户配没配置 AI 服务"——后者只有
+    真跑才知道（`_build_translator` 需要宿主的配置面），UI 闸门要配配置面判断
+    一起用，别拿这条单独当置灰依据。
+    """
+    try:
+        import importlib
+
+        module = importlib.import_module(f"{__package__}.translate")
+    except Exception:
+        return False
+    return callable(getattr(module, "translate_text", None))
 
 
 # ---------------------------------------------------------------- watcher 隔离
@@ -314,8 +332,11 @@ class ScreenCapturePresenter:
         """过程状态（"正在识别…"）：只借岛的动效/消息槽，不上面板。"""
         self._notify(str(text), "generic")
 
-    def show(self, result: ScreenResult) -> ScreenResultPanel | None:
-        """结果落地：岛永远拿到一句短文案；长结果/双语结果/强制件再开面板。"""
+    def show(self, result: ScreenResult, below=None) -> ScreenResultPanel | None:
+        """结果落地：岛永远拿到一句短文案；长结果/双语结果/强制件再开面板。
+
+        ``below``：采集选区——面板落在选区正下方（实机反馈：角落要来回跳视线）。
+        """
         self._notify(result.summary or result.status, "reply")
         long_text = len(result.primary.strip()) > SHORT_RESULT_LIMIT
         if not (result.force_panel or long_text or result.secondary.strip()):
@@ -323,7 +344,8 @@ class ScreenCapturePresenter:
         panel = self.panel()
         if panel is None:
             return None
-        panel.show_result(result, self.island_widget(), on_continue_ask=self._continue_ask)
+        panel.show_result(result, self.island_widget(),
+                          on_continue_ask=self._continue_ask, below=below)
         return panel
 
     def panel(self) -> ScreenResultPanel | None:
@@ -425,6 +447,7 @@ class ScreenCaptureActions(QObject):
         self._busy = False
         self._pending: tuple[Callable, Callable] | None = None
         self._last_image = None   # 最近一次截下的选区图（「继续提问」的上下文）
+        self._last_selection = None   # 选区位置（结果面/问答窗跟到选区下方）
         self._stage_done.connect(self._on_stage_done)
         # 两处连接的**判据**不同，别混着读（2026-10-13 交叉审查 nit 要的就是这条区分）：
         #
@@ -487,6 +510,7 @@ class ScreenCaptureActions(QObject):
         # 采集期到这一刻结束：窗口已还原、冻结帧已裁出，watcher 可以回岗。
         self._watcher_gate.restore()
         self._last_image = image   # 「继续提问」要把它带进问答浮窗（纯内存）
+        self._last_selection = _selection   # 结果面/问答窗落在选区下方
         if action == ACTION_OCR:
             self._run_ocr(image)
         elif action == ACTION_TRANSLATE:
@@ -558,10 +582,12 @@ class ScreenCaptureActions(QObject):
 
     def _run_translate(self, image) -> None:
         ocr = self._ocr if self._ocr is not None else resolve_ocr_engine()
-        translator = self._translator if self._translator is not None else resolve_translator()
+        translator = self._translator if self._translator is not None else self._build_translator()
 
         def work() -> tuple[str, str]:
             source = str(ocr(image) or "").strip() if ocr is not None else ""
+            if not source:
+                return "", ""   # 没识别到文字就不空转翻译（省一次网络往返）
             translated = (
                 str(translator(image, source) or "").strip() if translator is not None else ""
             )
@@ -579,12 +605,14 @@ class ScreenCaptureActions(QObject):
         source, translated = value if isinstance(value, tuple) else (str(value or ""), "")
         source = str(source or "").strip()
         translated = str(translated or "").strip()
-        if translator and not translated:
+        if not source:
+            status = "没有识别到文字，无可翻译"
+        elif translator and not translated:
             status = "没有拿到译文"
         elif translator:
             status = f"已翻译 · {len(translated)} 字"
         else:
-            status = TRANSLATION_PENDING_REASON
+            status = TRANSLATION_UNAVAILABLE_REASON
         self._emit_result(ScreenResult(
             title=TITLE_TRANSLATE, primary=source, secondary=translated,
             force_panel=True, status=status, primary_label="原文" if translated else "",
@@ -606,7 +634,7 @@ class ScreenCaptureActions(QObject):
             ))
             return
         try:
-            dialog.start_with_image(image)
+            dialog.start_with_image(image, below=self._last_selection)
         except Exception as exc:
             log.exception("快速识屏：问答浮窗打开失败")
             self._emit_result(ScreenResult(
@@ -699,14 +727,17 @@ class ScreenCaptureActions(QObject):
             log.exception("快速识屏：释放本地 OCR 资源失败（不影响本次结果）")
 
     def _emit_result(self, result: ScreenResult) -> None:
-        self._presenter.show(result)
+        self._presenter.show(result, below=self._last_selection)
         self.result_ready.emit(result)
 
     def status(self, text: str) -> None:
         self._presenter.status(text)
 
     def _continue_ask(self, image, recognized_text: str) -> None:
-        """结果面板的「继续提问…」：把这张图（+ 已识别文字）带进问答浮窗。"""
+        """结果面板的「继续提问…」：结果面板关掉，图（+ 已识别文字）带进问答浮窗。"""
+        panel = self._presenter.panel()
+        if panel is not None:
+            panel.close_panel()   # 实机反馈：续聊开始后结果卡不该还挂着
         dialog = self._get_ask_dialog()
         if dialog is None:
             self._emit_result(ScreenResult(
@@ -715,7 +746,8 @@ class ScreenCaptureActions(QObject):
             ))
             return
         try:
-            dialog.start_with_image(image, context_text=recognized_text)
+            dialog.start_with_image(image, context_text=recognized_text,
+                                    below=self._last_selection)
         except Exception as exc:
             log.exception("快速识屏：问答浮窗打开失败")
             self._emit_result(ScreenResult(
@@ -737,6 +769,21 @@ class ScreenCaptureActions(QObject):
             style=_host_theme(host),
             continue_ask=self._continue_ask,
         )
+
+    def _build_translator(self):
+        """文本翻译器：OCR 原文 → 用户配置的聊天模型（纯文本调用，不碰视觉端点）。
+
+        配置面不可用返回 None（结果浮层如实报"需要配置 AI 服务"）。
+        """
+        if self._config is None:
+            return None
+        try:
+            from .translate import translate_text
+        except Exception:
+            log.exception("快速识屏：翻译模块装载失败")
+            return None
+        config = self._config
+        return lambda _image, source: translate_text(source, config)
 
     def _get_ask_dialog(self):
         """问答浮窗（懒造 + 复用）：配置面不可用返回 None（如实上报，不静默）。"""

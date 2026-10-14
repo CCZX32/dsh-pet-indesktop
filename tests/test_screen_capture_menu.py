@@ -183,8 +183,12 @@ def test_the_leaf_does_not_gate_on_the_engines(monkeypatch):
     leaf = _only_leaf(_screen_capture_menu(pet))
 
     assert leaf.isEnabled() is True
+    # 可用态不再挂"为什么用不了"的说明：两条旧的置灰原因都不许出现在这里
+    # （「翻译」现在真的接了；真值在 reasons.py，动作条上才用它）。
+    from pet.screen_capture import reasons as reasons_mod
+
     assert "尚未接入" not in leaf.toolTip()
-    assert "后续片" not in leaf.toolTip()
+    assert reasons_mod.TRANSLATION_UNAVAILABLE_REASON not in leaf.toolTip()
     leaf.trigger()
     assert pet.calls == ["capture"]
 
