@@ -131,7 +131,7 @@ class _ActionBar(QFrame):
     _BUTTONS = (
         (ACTION_OCR, "提取文字", "edit"),
         (ACTION_TRANSLATE, "翻译", ""),
-        (ACTION_ASK, "截图问答", "chat"),
+        (ACTION_ASK, "问问肥鱼", "chat"),
         (ACTION_COPY, "复制图像", "copy"),
         ("cancel", "取消", "exit"),
     )

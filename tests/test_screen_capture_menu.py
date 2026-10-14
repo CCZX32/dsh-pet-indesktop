@@ -102,22 +102,16 @@ class _FakePet:
         return lambda *args, **kwargs: None
 
 
-def _screen_capture_menu(pet=None) -> QMenu:
+def _screen_capture_action(pet=None):
+    """「截图」在菜单上是一个**直接动作**（不套子菜单——只有一个选项没必要，实机反馈）。"""
     menu = QMenu()
     populate_context_menu(menu, pet or _FakePet())
     action = next(
         (item for item in menu.actions() if item.text() == "截图"), None
     )
-    assert action is not None, "截图子菜单没出现在右键菜单上"
-    submenu = action.menu()
-    assert submenu is not None, "截图必须是子菜单（入口挂它下面）"
-    return submenu
-
-
-def _only_leaf(submenu: QMenu):
-    leaves = [action for action in submenu.actions() if not action.isSeparator()]
-    assert len(leaves) == 1, f"截图子菜单应该是单一入口，实际有 {len(leaves)} 条"
-    return leaves[0]
+    assert action is not None, "截图入口没出现在右键菜单上"
+    assert action.menu() is None, "单一选项不该再套一层子菜单"
+    return action
 
 
 def test_registry_registers_the_screen_capture_group():
@@ -163,9 +157,9 @@ def test_saved_user_layout_gets_the_new_entry_merged_in(tmp_path):
 
 def test_the_single_leaf_starts_a_selection_and_routes_to_the_host():
     pet = _FakePet()
-    leaf = _only_leaf(_screen_capture_menu(pet))
+    leaf = _screen_capture_action(pet)
 
-    assert leaf.text() == "框选识屏…"
+    assert leaf.text() == "截图"
     assert leaf.isEnabled() is True
     leaf.trigger()
     assert pet.calls == ["capture"]
@@ -180,7 +174,7 @@ def test_the_leaf_does_not_gate_on_the_engines(monkeypatch):
     monkeypatch.setattr(actions_mod, "ocr_engine_available", lambda: False)
     monkeypatch.setattr(actions_mod, "translation_engine_available", lambda: False)
     pet = _FakePet()
-    leaf = _only_leaf(_screen_capture_menu(pet))
+    leaf = _screen_capture_action(pet)
 
     assert leaf.isEnabled() is True
     # 可用态不再挂"为什么用不了"的说明：两条旧的置灰原因都不许出现在这里
@@ -201,7 +195,7 @@ def test_the_entry_survives_without_a_chat_capability():
     报一句在结果浮层上——见 ``test_screen_capture_actions.py``。）
     """
     pet = _FakePet(chat=False)
-    leaf = _only_leaf(_screen_capture_menu(pet))
+    leaf = _screen_capture_action(pet)
 
     leaf.trigger()
     assert pet.calls == ["capture"]

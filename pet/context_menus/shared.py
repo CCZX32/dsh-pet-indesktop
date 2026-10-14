@@ -920,26 +920,21 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
 SCREEN_CAPTURE_LABEL = "截图"
 
 
-def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True) -> QMenu | None:
-    """「截图」子菜单：单一入口「框选识屏…」。
+def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
+    """「截图」= 单一**直接**菜单项（不进子菜单）：点了就进框选。
 
     交互模型（2026-10-14 实机反馈后重做）：菜单只负责**开始框选**；框完松手，
-    覆盖层动作条给出「提取文字 / 翻译 / 截图问答 / 复制图像 / 取消」由用户当场选
-    ——不再让菜单层预先押注用户想干什么，也就不再需要三条叶子各自的可用性判断
-    （动作条上「翻译」恒置灰带原因，引擎缺席由动作结果如实报错）。
+    覆盖层动作条给出「提取文字 / 翻译 / 截图问答 / 复制图像 / 取消」由用户当场选。
+    原来还套一层只装一个叶子的子菜单——实机反馈：一个选项没必要（平铺直出）。
 
-    整组仍挂在**一个** id（``screen_capture``）上：菜单模板与用户自己编排过的
-    布局里只会出现这一个 id，叶子形态变化不必让老布局迁移。
-
-    截图栈（控制器/覆盖层/编排件）仍只有真触发时才装载——本函数不再 import
-    ``screen_capture.actions``，叶子的可延迟到回调点（``actions_for`` 内部）。
+    截图栈（控制器/覆盖层/编排件）仍只有真触发时才装载——本函数不 import
+    ``screen_capture.actions``，装载点在动作回调里（``actions_for``）。
     """
     callback = getattr(pet, "on_screen_capture", None)
     if not callable(callback):
         return None  # 宿主没接这套面（纯桌宠变体）= 能力不可用，整组不出现
-    submenu = add_submenu(menu, SCREEN_CAPTURE_LABEL, "screen" if icons else None)
-    add_action(submenu, "框选识屏…", None, callback, close_on_trigger=True)
-    return submenu
+    return add_action(menu, SCREEN_CAPTURE_LABEL, "screen" if icons else None,
+                      callback, close_on_trigger=True)
 
 
 def add_balance(menu: QMenu, pet, *, icons: bool = True):
