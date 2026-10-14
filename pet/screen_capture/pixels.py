@@ -23,6 +23,7 @@ import logging
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QColorSpace, QImage, QPixmap
 
+from .hdr_capture import grab_hdr_sdr, hdr_capture_disabled, hdr_state
 from .session import SelectionRect
 
 log = logging.getLogger("dsh-pet-standalone")
@@ -35,13 +36,43 @@ SRGB8_FORMAT = QImage.Format.Format_RGB888
 SRGB_COLOR_SPACE = QColorSpace(QColorSpace.NamedColorSpace.SRgb)
 
 
+def _grab_hdr_screen(screen) -> QImage | None:
+    """HDR 屏优先走 DXGI FP16 通道；不适用或失败一律 ``None``（调用方落回 GDI）。
+
+    三层闸，任何一层不满足都直接回退：
+
+    1. 逃生门环境变量 ``DSH_PET_DISABLE_HDR_CAPTURE``（见 ``hdr_capture``）；
+    2. 这块屏的 HDR 是否开着（DisplayConfig，只读；SDR 屏在这一层就返回，不碰 DXGI）；
+    3. ``grab_hdr_sdr`` 自己那一路的判据（DXGI 输出必须真在 HDR10/PQ、抓到的帧
+       必须是 FP16 scRGB……）。
+
+    这里再包一层 ``except``：``grab_hdr_sdr`` 已经承诺不抛，但抓帧是主路径，
+    "HDR 通道的任何意外都不许影响它"这条要在这里也成立。
+    """
+    if hdr_capture_disabled():
+        return None
+    try:
+        enabled, _white = hdr_state(screen)
+        if not enabled:
+            return None
+        # 传 QScreen 而不是 screen.name()：多屏同型号时名字会撞车，物理位置不会。
+        return grab_hdr_sdr(screen)
+    except Exception as exc:  # noqa: BLE001 - 见 docstring：主路径不受 HDR 通道影响
+        log.warning("HDR 抓帧通道异常，回退 GDI：%s", exc)
+        return None
+
+
 def grab_screen_image(screen) -> QImage:
     """抓一整屏作为冻结帧底图；抓不到返回空图（调用方按失败处理）。
 
-    ``screen.grabWindow(0)`` 是 Qt 的整屏抓取入口（Windows 上走 BitBlt）。
-    HDR 显示器上这条路径的成色待真机探针确认（见 ``.scratch/screen-capture/
-    probe_hdr.py``）；本函数只保证返回值的坐标口径确定。
+    路径选择：**HDR 屏先走 DXGI FP16 通道**（真机 A/B 对照探针见
+    ``.scratch/screen-capture/probe_hdr_capture_ab.py``），拿不到就落回
+    ``screen.grabWindow(0)``（Qt 的整屏抓取入口，Windows 上走 BitBlt）——回退
+    路径的行为一字未改。本函数只保证返回值的坐标口径确定。
     """
+    hdr_image = _grab_hdr_screen(screen)
+    if hdr_image is not None:
+        return hdr_image
     try:
         grabbed = screen.grabWindow(0)
     except (AttributeError, RuntimeError, TypeError) as exc:
