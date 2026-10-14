@@ -46,7 +46,9 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, Signal
 
 from .controller import ScreenCaptureController, _weak_slot
-from .overlay import ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE
+from .overlay import (
+    ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE, SelectionOverlay,
+)
 from .reasons import OCR_PENDING_REASON, TRANSLATION_UNAVAILABLE_REASON
 from .result_panel import SHORT_RESULT_LIMIT, ScreenResult, ScreenResultPanel
 
@@ -433,7 +435,8 @@ class ScreenCaptureActions(QObject):
     result_ready = Signal(object)     # ScreenResult
     failed = Signal(str)              # 采集或引擎失败理由
 
-    _stage_done = Signal(object, object)   # 私有：后台线程 → GUI 线程
+    _stage_done = Signal(int, object, object)   # 私有：后台线程 → GUI（代号, 值, 错误）
+    _retranslate_done = Signal(int, object, object)   # 重翻独立槽（见 _submit 的 channel）
 
     def __init__(self, host=None, *, controller=None, ocr=None, translator=None,
                  ask_dialog=None, presenter=None, watcher=None, release=None,
@@ -450,13 +453,32 @@ class ScreenCaptureActions(QObject):
             functools.partial(_host_watcher, host) if watcher is None else (lambda: watcher)
         )
         self._presenter = presenter if presenter is not None else self._default_presenter()
-        self._controller = controller if controller is not None else ScreenCaptureController(self)
+        if controller is not None:
+            self._controller = controller
+        else:
+            # 能力闸门从这里注入覆盖层：翻译/问答要聊天配置（没配置就置灰写原因，
+            # 别让用户点完才炸——盲审 m10）。OCR/复制是纯本地，永不置灰。
+            chat_ok = self._chat_capable()
+            caps = {"translate": chat_ok, "ask": chat_ok}
+            self._controller = ScreenCaptureController(
+                self,
+                overlay_factory=lambda frame, screen: SelectionOverlay(
+                    frame, screen, capabilities=caps),
+            )
         self._busy = False
-        self._pending: tuple[Callable, Callable] | None = None
+        self._pending: tuple[int, Callable, Callable] | None = None
+        # 后台任务的代号：**回来只认当代**——重翻与新一轮采集共用一条信号通道，
+        # 不带代号的话先回来的旧结果会拿走别人的回调（盲审 M1：译文被当成 OCR
+        # 结果展示、OCR 子进程被误杀、真结果被静默丢）。
+        self._stage_seq = 0
+        # 重翻的独立槽位：与采集链路的 ``_pending`` 互不覆盖（盲审 M1——重翻挤占
+        # 采集槽会把在跑的 OCR 结果静默吞掉并把会话卡死在 busy）。
+        self._pending_retranslate: tuple[int, Callable, Callable] | None = None
         self._last_image = None   # 最近一次截下的选区图（「继续提问」的上下文）
         self._last_selection = None   # 选区位置（结果面/问答窗跟到选区下方）
         self._last_ocr_source = ""    # 最近一次翻译链路的原文（语言行切换直接重翻）
         self._stage_done.connect(self._on_stage_done)
+        self._retranslate_done.connect(self._on_retranslate_done)
         # 两处连接的**判据**不同，别混着读（2026-10-13 交叉审查 nit 要的就是这条区分）：
         #
         # - 上面那条是**自连**（发出者与接收者是同一个对象）：不存在 ``宿主 ↔ 发出者``
@@ -656,7 +678,11 @@ class ScreenCaptureActions(QObject):
         )
 
     def _retranslate(self, target: str) -> None:
-        """语言行切换：用缓存的原文直接重翻（OCR 不重跑），面板原地更新。"""
+        """语言行切换：用缓存的原文直接重翻（OCR 不重跑），面板原地更新。
+
+        注入优先：测试/宿主给了 ``translator`` 替身就走它（``translator(None,
+        source)``——替身不接 target 语义），缺省走 ``translate_text`` 的 target 路。
+        """
         source = self._last_ocr_source
         if not source or self._busy or self._config is None:
             return
@@ -664,18 +690,35 @@ class ScreenCaptureActions(QObject):
             title=TITLE_TRANSLATE, primary=source, primary_label="原文",
             force_panel=True, loading=True, image=self._last_image,
         ))
-        from .translate import translate_text
-
         config = self._config
+        injected = self._translator
+        if injected is not None:
+            work = lambda: injected(None, source)   # noqa: E731 - 闭包取当前值
+        else:
+            from .translate import translate_text
+
+            work = lambda: translate_text(source, config, target=target)  # noqa: E731
         self._submit(
-            lambda: translate_text(source, config, target=target),
-            lambda translated: self._on_translate_done((source, str(translated or "").strip()),
-                                                       translator=True),
-            functools.partial(self._on_stage_error, stage="翻译"),
+            work,
+            lambda translated: self._on_translate_done(
+                (source, str(translated or "").strip()),
+                translator=True, from_retranslate=True),
+            # 重翻失败也别走 _on_stage_error 的 _finish（同上：不占别人的会话）——
+            # 直接在面板上把原文摆回来 + 一句人话
+            lambda message: self._emit_result(ScreenResult(
+                title=TITLE_TRANSLATE, primary=source, primary_label="原文",
+                status=f"翻译失败：{message}", force_panel=True,
+                image=self._last_image, language_selector=True,
+            )),
+            channel="retranslate",
         )
 
-    def _on_translate_done(self, value, *, translator: bool) -> None:
-        self._finish()
+    def _on_translate_done(self, value, *, translator: bool,
+                           from_retranslate: bool = False) -> None:
+        # 重翻不占采集会话：不调 _finish（那会清掉别人正忙着的 busy 位、还会把
+        # 正在跑的 OCR 子进程当"本链路的引擎"杀掉——盲审 M1 的时序二）。
+        if not from_retranslate:
+            self._finish()
         source, translated = value if isinstance(value, tuple) else (str(value or ""), "")
         source = str(source or "").strip()
         translated = str(translated or "").strip()
@@ -723,9 +766,12 @@ class ScreenCaptureActions(QObject):
 
     # ---------------------------------------------------------------- 线程纪律
 
-    def _submit(self, work: Callable, on_ok: Callable, on_err: Callable) -> None:
-        """把可能阻塞的一步放到后台线程，完成后经 ``_stage_done`` 回到 GUI 线程。
+    def _submit(self, work: Callable, on_ok: Callable, on_err: Callable,
+                *, channel: str = "main") -> None:
+        """把可能阻塞的一步放到后台线程，完成后经信号回到 GUI 线程。
 
+        ``channel="retranslate"`` 走重翻的独立槽位（信号 ``_retranslate_done``、
+        槽位 ``_pending_retranslate``）：语言行重翻与采集链路互不占槽。
         ``run_inline`` 是给测试用的直通开关（同步跑、异常同样走到 ``on_err``）：
         编排本身与线程无关，两条路径共用同一组回调。
         """
@@ -738,26 +784,52 @@ class ScreenCaptureActions(QObject):
             else:
                 on_ok(value)
             return
-        self._pending = (on_ok, on_err)
+        self._stage_seq += 1
+        seq = self._stage_seq
+        if channel == "retranslate":
+            self._pending_retranslate = (seq, on_ok, on_err)
+        else:
+            self._pending = (seq, on_ok, on_err)
         threading.Thread(
-            target=self._stage_worker, args=(work,), daemon=True,
+            target=self._stage_worker, args=(seq, work, channel), daemon=True,
             name="pet-screen-capture",
         ).start()
 
-    def _stage_worker(self, work: Callable) -> None:
+    def _stage_worker(self, seq: int, work: Callable, channel: str) -> None:
+        signal = self._retranslate_done if channel == "retranslate" else self._stage_done
         try:
             value = work()
         except Exception as exc:
             log.exception("快速识屏：本步失败")
-            self._stage_done.emit(None, str(exc) or type(exc).__name__)
+            signal.emit(seq, None, str(exc) or type(exc).__name__)
             return
-        self._stage_done.emit(value, None)
+        signal.emit(seq, value, None)
 
-    def _on_stage_done(self, value, error) -> None:
-        pending, self._pending = self._pending, None
+    def _on_stage_done(self, seq, value, error) -> None:
+        pending = self._pending
         if pending is None:
             return
-        on_ok, on_err = pending
+        pending_seq, on_ok, on_err = pending
+        if seq != pending_seq:
+            # 迟到/串台的结果：槽里已经是别人（新一轮采集），丢弃
+            log.debug("快速识屏：丢弃串台的后台结果 (seq=%s 槽位=%s)", seq, pending_seq)
+            return
+        self._pending = None
+        if error is not None:
+            on_err(str(error))
+            return
+        on_ok(value)
+
+    def _on_retranslate_done(self, seq, value, error) -> None:
+        """重翻槽的收口（与 ``_on_stage_done`` 同构，互不占槽）。"""
+        pending = self._pending_retranslate
+        if pending is None:
+            return
+        pending_seq, on_ok, on_err = pending
+        if seq != pending_seq:
+            log.debug("快速识屏：丢弃串台的重翻结果 (seq=%s 槽位=%s)", seq, pending_seq)
+            return
+        self._pending_retranslate = None
         if error is not None:
             on_err(str(error))
             return
@@ -853,6 +925,20 @@ class ScreenCaptureActions(QObject):
             continue_ask=self._continue_ask,
             language_change=self._retranslate,
         )
+
+    def _chat_capable(self) -> bool:
+        """宿主有没有可用的聊天配置（翻译/问答的能力闸门；读配置面，不探网络）。"""
+        config = self._config
+        if config is None:
+            return False
+        try:
+            settings = config.chat_settings()
+            if not getattr(settings, "enabled", True):
+                return False
+            return getattr(settings, "active_config", None) is not None
+        except Exception:
+            log.debug("快速识屏：聊天能力判定失败，按不可用处理", exc_info=True)
+            return False
 
     def _build_translator(self):
         """文本翻译器：OCR 原文 → 用户配置的聊天模型（纯文本调用，不碰视觉端点）。

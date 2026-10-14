@@ -26,9 +26,9 @@
   画出来、动作条直接待命（"盯着同一个小区域反复截"是高频用法）。跨屏不共用
   ——尺寸变了旧坐标就没有意义；取消不算记住，没动过作的东西不该被当成默认值。
 
-动作条的可用性：四个动作全部可点（翻译已接入：OCR 原文走用户配置的聊天模型做
-文本互译；没配置聊天服务时由动作结果如实报错）。引擎缺席这类事只有真跑才知道，
-诚实报错由编排层负责（见 ``actions.py`` 与 ``reasons.py`` 的单一真相源）。
+动作条的可用性：OCR/复制纯本地永远可点；翻译/问答在没有聊天配置的宿主上
+置灰并写明原因（能力闸门由编排层经 ``capabilities`` 注入；引擎缺席这类事
+只有真跑才知道，那时由动作结果如实报错）。
 
 本片覆盖层是**独占**的：它铺满整屏并置顶，期间不处理"鼠标穿透到非选区"的
 需求（那是后续片；先保证"框选期间点不到别的"这个可预期的行为）。
@@ -44,6 +44,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QWidget
 
+from .reasons import ASK_UNAVAILABLE_REASON, TRANSLATION_UNAVAILABLE_REASON
 from .session import SelectionRect, normalize_drag
 
 log = logging.getLogger("dsh-pet-standalone")
@@ -136,10 +137,17 @@ class _ActionBar(QFrame):
         ("cancel", "取消", "exit"),
     )
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget, capabilities: dict | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("screen-capture-action-bar")
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        # 能力闸门（盲审 m10）：没配 AI 服务的宿主上，翻译/问答留位置、置灰、
+        # 写明原因——点了才报错的旧行为是"能点但必炸"，不如不让点。
+        caps = capabilities or {}
+        disabled_reasons = {
+            ACTION_TRANSLATE: TRANSLATION_UNAVAILABLE_REASON,
+            ACTION_ASK: ASK_UNAVAILABLE_REASON,
+        }
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(2)
@@ -151,6 +159,9 @@ class _ActionBar(QFrame):
                 from ..context_menus.icons import vector_widget_icon
 
                 button.setIcon(vector_widget_icon(button, icon_name, 13))
+            if action_id in disabled_reasons and caps.get(action_id) is False:
+                button.setEnabled(False)
+                button.setToolTip(disabled_reasons[action_id])
             button.clicked.connect(
                 lambda _checked=False, aid=action_id: self.triggered.emit(aid))
             layout.addWidget(button)
@@ -186,7 +197,8 @@ class SelectionOverlay(QWidget):
     selection_cancelled = Signal(str)       # 取消理由（"esc" / "toolbar"）
 
     def __init__(self, frame: QImage | None = None, screen=None, parent=None,
-                 *, memory: SelectionMemory | None = None) -> None:
+                 *, memory: SelectionMemory | None = None,
+                 capabilities: dict | None = None) -> None:
         super().__init__(parent)
         self._frame = frame
         self._screen = screen if screen is not None else QGuiApplication.primaryScreen()
@@ -204,7 +216,7 @@ class SelectionOverlay(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setMouseTracking(True)
         self._apply_screen_geometry()
-        self._action_bar = _ActionBar(self)
+        self._action_bar = _ActionBar(self, capabilities)
         self._action_bar.triggered.connect(self._on_action_triggered)
         self._action_bar.hide()
         # 预选上次用过的那块（同尺寸屏幕才会命中，见 SelectionMemory）。刻意放在

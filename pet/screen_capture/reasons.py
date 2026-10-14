@@ -13,10 +13,13 @@ import 放在模块级而不付实质代价（本机实测：暖缓存下 import
 
 from __future__ import annotations
 
-__all__ = ["OCR_PENDING_REASON", "TRANSLATION_UNAVAILABLE_REASON"]
+__all__ = ["ASK_UNAVAILABLE_REASON", "OCR_PENDING_REASON", "TRANSLATION_UNAVAILABLE_REASON"]
 
 #: 本地 OCR 引擎缺席时那条如实说明（不是"暂时没有数据"，也不摆假结果）。
 OCR_PENDING_REASON = "本地文字识别引擎尚未接入"
 
 #: 翻译走用户配置的聊天模型（纯文本调用）：没配置/已关闭时的如实说明。
 TRANSLATION_UNAVAILABLE_REASON = "截图翻译要用你在设置里配置的 AI 服务（未配置或已关闭）"
+
+#: 问答同理（多轮对话浮窗要视觉/聊天通道）。
+ASK_UNAVAILABLE_REASON = "问问肥鱼要你在设置里配置的 AI 服务（未配置或已关闭）"

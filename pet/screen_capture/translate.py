@@ -107,6 +107,8 @@ def translate_text(text: str, config, *, target: str | None = None) -> str:
             except Exception:
                 detail = ""
             raise TranslateError(_safe_detail(detail)) from exc
+        except TimeoutError as exc:  # 超时不重试（短调用，再等一轮没有意义）
+            raise TranslateError("翻译超时：服务没在规定时间回答") from exc
         except (urllib.error.URLError, OSError) as exc:
             last_error = exc
             if attempt == 0:

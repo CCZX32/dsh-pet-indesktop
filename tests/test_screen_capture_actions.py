@@ -1233,3 +1233,84 @@ def test_default_presenter_builds_a_light_panel_for_a_light_host():
     assert isinstance(panel, ScreenResultPanel)
     assert panel.style == "light"
     panel.close_panel()
+
+
+# ------------------------------------------------------------------ 盲审 M1：重翻不占采集会话
+
+
+def _pump_until(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    return predicate()
+
+
+def test_retranslate_is_blocked_during_a_busy_capture():
+    """采集会话在跑时语言行重翻是 no-op：busy 位不动、引擎不还、面板不多卡。"""
+    ocr_gate = threading.Event()
+    released: list[bool] = []
+
+    def slow_ocr(_img):
+        ocr_gate.wait(10)
+        return "识别到的文字"
+
+    presenter = _RecordingPresenter()
+    action = _make_actions(controller=_FakeController(action=ACTION_OCR),
+                           ocr=slow_ocr, presenter=presenter, run_inline=False,
+                           translator=lambda _img, src: "译文",
+                           release=lambda: released.append(True))
+    assert action.run() is True
+    assert action.busy is True
+    action._last_ocr_source = "上一轮原文"
+    before = len(presenter.results)
+
+    action._retranslate("日本語")   # busy 守卫：直接 no-op
+
+    assert action.busy is True
+    assert released == []
+    assert len(presenter.results) == before, "忙时重翻不该往面板上摆任何东西"
+    ocr_gate.set()
+    assert _pump_until(lambda: not action.busy)
+    assert _final(presenter).primary == "识别到的文字"
+
+
+def test_an_inflight_retranslate_survives_a_new_capture_and_neither_loses_its_result():
+    """重翻在跑时用户又发起新采集：两个槽位互不覆盖，两边结果都该落地（M1 时序一）。"""
+    retranslate_gate = threading.Event()
+    ocr_gate = threading.Event()
+    released: list[bool] = []
+
+    def slow_translate(_img, src):
+        retranslate_gate.wait(10)
+        return f"{src}→译文"
+
+    def slow_ocr(_img):
+        ocr_gate.wait(10)
+        return "识别到的文字"
+
+    import types
+
+    # 重翻要有配置面（_config 守卫）；注入的 translator 替身不走真网络
+    host = types.SimpleNamespace(cfg={}, show_bubble=None, proactive_watcher=None)
+    presenter = _RecordingPresenter()
+    action = _make_actions(host=host, controller=_FakeController(action=ACTION_OCR),
+                           ocr=slow_ocr, presenter=presenter, run_inline=False,
+                           translator=slow_translate,
+                           release=lambda: released.append(True))
+    action._last_ocr_source = "原文"
+    action._retranslate("日本語")          # 空闲时发起：占重翻槽
+    assert action._pending_retranslate is not None
+
+    assert action.run() is True            # 新采集：占主槽，互不覆盖
+    assert action.busy is True
+
+    retranslate_gate.set()
+    assert _pump_until(lambda: action._pending_retranslate is None)
+    assert action.busy is True, "重翻收口把采集的 busy 清了"
+    assert released == [], "重翻收口把在跑的 OCR 引擎还了"
+    assert any("译文" in (r.secondary or "") for r in presenter.results), "重翻结果丢了"
+
+    ocr_gate.set()
+    assert _pump_until(lambda: not action.busy)
+    assert _final(presenter).primary == "识别到的文字", "采集结果被重翻吞了"

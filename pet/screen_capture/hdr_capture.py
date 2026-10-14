@@ -544,15 +544,51 @@ def _gdi_name_for_point(x: int, y: int) -> str:
 
 
 def _gdi_name_for_screen(screen) -> str:
-    """QScreen → GDI 设备名：用它**物理像素**中心点问 ``MonitorFromPoint``。
+    """QScreen → GDI 设备名：按**物理矩形**匹配显示器枚举，不靠约定猜坐标。
 
-    多屏同型号时名字会撞车，物理位置不会——所以 QScreen 这条路径优先走位置。
+    盲审 M5：Qt6 在 Windows 混合 DPI 下的 ``QScreen.geometry()`` 换算口径
+    （原点是否也乘 DPR）随版本/平台插件有分歧，单靠"中心点×dpr"会把副屏
+    定位到另一块屏上。这里两条约定各算一个候选物理矩形（A=原点也乘 dpr；
+    B=原点原生、只乘宽高），跟 ``EnumDisplayMonitors`` 拿到的真实显示器矩形
+    （±2px）对得上哪个用哪个；都对不上返回 ""（调用方按失败回退 GDI——
+    抓错屏比抓不到更糟，绝不蒙一个）。
     """
     geometry = screen.geometry()
     dpr = float(screen.devicePixelRatio() or 1.0)
-    center_x = (geometry.x() + geometry.width() / 2.0) * dpr
-    center_y = (geometry.y() + geometry.height() / 2.0) * dpr
-    return _gdi_name_for_point(round(center_x), round(center_y))
+    candidates = [
+        (round(geometry.x() * dpr), round(geometry.y() * dpr),
+         round(geometry.width() * dpr), round(geometry.height() * dpr)),
+        (geometry.x(), geometry.y(),
+         round(geometry.width() * dpr), round(geometry.height() * dpr)),
+    ]
+    for name, left, top, right, bottom in _enumerate_monitors():
+        for cx, cy, cw, ch in candidates:
+            if (abs(left - cx) <= 2 and abs(top - cy) <= 2
+                    and abs(right - (cx + cw)) <= 2 and abs(bottom - (cy + ch)) <= 2):
+                return name
+    return ""
+
+
+def _enumerate_monitors() -> list[tuple[str, int, int, int, int]]:
+    """（设备名, 原生矩形 left/top/right/bottom）列表；失败返回空列表。"""
+    user32 = _libs()["user32"]
+    found: list[tuple[str, int, int, int, int]] = []
+    MONITORENUMPROC = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def _cb(handle, _hdc, rect_ptr, _lparam):
+        info = _MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(_MONITORINFOEXW)
+        if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+            rect = info.rcMonitor
+            found.append((info.szDevice, rect.left, rect.top, rect.right, rect.bottom))
+        return True
+
+    callback = MONITORENUMPROC(_cb)
+    if not user32.EnumDisplayMonitors(None, None, callback, 0):
+        return []
+    return found
 
 
 def _screen_name(screen) -> str:
@@ -754,7 +790,8 @@ class _Session:
         return _succeeded(reason)
 
     def output_meta_ok(self) -> bool:
-        """输出的色彩空间/旋转与建会话时一致（用户中途关了 HDR 就重建）。"""
+        """输出的色彩空间/旋转/尺寸与建会话时一致（用户中途关了 HDR 或改了
+        分辨率就重建——尺寸不符不比对的话会抓到错尺寸的帧，盲审 m8）。"""
         try:
             desc = _DXGI_OUTPUT_DESC1()
             if not _succeeded(_com_call(self.output, 27, ctypes.c_long,
@@ -763,10 +800,14 @@ class _Session:
                 return False
         except Exception:  # noqa: BLE001
             return False
-        return desc.ColorSpace == self.color_space and desc.Rotation == self.rotation
+        coords = desc.DesktopCoordinates
+        width_match = abs((coords.right - coords.left) - self.width) <= 1
+        height_match = abs((coords.bottom - coords.top) - self.height) <= 1
+        return (desc.ColorSpace == self.color_space and desc.Rotation == self.rotation
+                and width_match and height_match)
 
     def is_reusable(self) -> bool:
-        return bool(self.duplication) and self.device_alive() and self.output_meta_ok()
+        return self.device_alive() and self.output_meta_ok()
 
     # ---- 抓帧 ----
 
@@ -821,13 +862,17 @@ class _Session:
             desc = _TEXTURE2D_DESC()
             _com_call(texture, 10, None, [ctypes.POINTER(_TEXTURE2D_DESC)],
                       ctypes.byref(desc))                        # ID3D11Texture2D::GetDesc
-            if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT
-                    or desc.Width != self.width or desc.Height != self.height):
-                # 不是 FP16/尺寸对不上：这张图不能按 scRGB 解释，回退 GDI
+            if desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT:
+                # 协商过还给 BGRA8 = 这个桌面模式给不出 FP16，判定级退避（长）
                 raise _FormatMismatch(
-                    f"帧不是 FP16 或尺寸不符 (format={desc.Format} "
-                    f"{desc.Width}x{desc.Height} negotiated={self.negotiated})",
+                    f"帧不是 FP16 (format={desc.Format} negotiated={self.negotiated})",
                     negotiated=self.negotiated)
+            if desc.Width != self.width or desc.Height != self.height:
+                # 尺寸不符是一过性事件（多半是用户刚改了分辨率），走抖动级退避
+                # （60s）——别跟"给不出 FP16"共用 900s 判定退避（盲审 m8）
+                raise _Unavailable(
+                    f"帧尺寸不符（{desc.Width}x{desc.Height} != "
+                    f"{self.width}x{self.height}，多半是分辨率刚变）")
             staging_desc = _TEXTURE2D_DESC()
             for field, value in (("Width", desc.Width), ("Height", desc.Height),
                                  ("MipLevels", 1), ("ArraySize", 1),
@@ -875,7 +920,8 @@ class _Session:
             return None
         staging, mapped = acquired
         try:
-            view = (ctypes.c_ubyte * (mapped.RowPitch * self.height)).from_address(mapped.pData)
+            view = (ctypes.c_ubyte * (mapped.RowPitch * (self.height - 1)
+                                      + self.width * 8)).from_address(mapped.pData)
             return fp16_scrgb_to_srgb8(view, self.width, self.height,
                                        mapped.RowPitch, sdr_white_scale)
         finally:
@@ -884,27 +930,34 @@ class _Session:
             _release(staging)
 
     def grab_srgb8(self, sdr_white_scale: float) -> np.ndarray | None:
-        """抓一帧并换算成 sRGB 8-bit 数组；拿不到返回 ``None``。"""
-        reused = bool(self.duplication)
-        # 用过的会话只在"桌面正在动、确实排着新帧"时能立刻拿到图，所以先零等待
-        # 试一次；静态桌面上必然超时，此时重开复制会话（重开的第一帧就是当前桌面）。
-        rgb = self._grab_rgb8(0 if reused else FRAME_WAIT_MS,
-                              0 if reused else FRAME_POLL_MS, sdr_white_scale)
-        if rgb is None and reused:
+        """抓一帧并换算成 sRGB 8-bit 数组；拿不到返回 ``None``。
+
+        复制会话**用完即放**（finally 里 release）：DXGI 对每块屏的复制客户端有
+        上限（本机实测文案里的"上限 4"是系统级名额，OBS/远程桌面/录屏软件共用），
+        常驻桌宠不许一直占着（盲审 M3）。缓存里只留设备/上下文/输出——建设备才是
+        贵的那一步；重开复制会话实测只要 ~2.3ms（见 ``_restart_duplication``）。
+        """
+        try:
+            # 静态桌面上"用过的会话"只交付超时（AcquireNextFrame 一直等不到新帧），
+            # 所以每次抓帧都重开复制会话：重开的第一帧就是当前桌面图。
             if not self._restart_duplication():
                 return None
             rgb = self._grab_rgb8(FRAME_WAIT_MS, FRAME_POLL_MS, sdr_white_scale)
-        if rgb is None:
-            return None
-        if not rgb.any():
-            # 全零帧不是桌面内容：本机实测刚开的复制会话会先给一张**未初始化的
-            # 全零 FP16 面**（desc 报 FP16、内容全 0）。再等一帧；还是全零就返回
-            # ``None`` 交给 GDI——真·全黑桌面在 GDI 那边同样全黑，不会因此丢内容。
-            log.info("HDR 抓帧：拿到全零帧（未初始化的 FP16 面），再等一帧")
-            rgb = self._grab_rgb8(FRAME_WAIT_MS, FRAME_POLL_MS, sdr_white_scale)
-            if rgb is None or not rgb.any():
+            if rgb is None:
                 return None
-        return rgb
+            if not rgb.any():
+                # 全零帧不是桌面内容：本机实测刚开的复制会话会先给一张**未初始化的
+                # 全零 FP16 面**（desc 报 FP16、内容全 0）。再等一帧；还是全零就返回
+                # ``None`` 交给 GDI——真·全黑桌面在 GDI 那边同样全黑，不会因此丢内容。
+                log.info("HDR 抓帧：拿到全零帧（未初始化的 FP16 面），再等一帧")
+                rgb = self._grab_rgb8(FRAME_WAIT_MS, FRAME_POLL_MS, sdr_white_scale)
+                if rgb is None or not rgb.any():
+                    return None
+            return rgb
+        finally:
+            if self.duplication:
+                _release(self.duplication)
+                self.duplication = 0
 
 
 def _duplicate_output(device: int, output: int) -> tuple[int, bool]:

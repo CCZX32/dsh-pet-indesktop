@@ -694,3 +694,22 @@ def test_the_border_is_a_bright_dash_over_a_dark_underlay(qapp):
     assert min(edge) <= 100, "描边缺少深色垫底（间隙里露不出来）"
     assert abs(canvas.pixelColor(200, 195).red() - 88) <= 6, "描边外一圈仍是均匀压暗"
     overlay.close()
+
+
+def test_the_action_bar_gates_chat_dependent_actions_by_capability(qapp):
+    """没配 AI 服务的宿主：翻译/问问留位置、置灰、写明原因；本地的提取/复制照常。
+
+    能力由编排层注入（``capabilities``）；缺省/全 True 时全部可点（盲审 m10：
+    能点但必炸的按钮不如不让点）。
+    """
+    overlay = SelectionOverlay(screen=_FakeScreen(800, 600), memory=SelectionMemory(),
+                               capabilities={"translate": False, "ask": False})
+    _drag(overlay, (100, 100), (300, 220))
+    bar = overlay.action_bar()
+    for name in ("translate", "ask"):
+        button = bar.findChild(QPushButton, f"screen-capture-action-{name}")
+        assert button.isEnabled() is False, f"{name} 在无配置宿主上不该能点"
+        assert button.toolTip(), "置灰必须写明原因"
+    for name in ("ocr", "copy"):
+        assert bar.findChild(QPushButton, f"screen-capture-action-{name}").isEnabled() is True
+    overlay.close()

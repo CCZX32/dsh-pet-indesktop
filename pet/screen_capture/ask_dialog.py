@@ -56,6 +56,9 @@ class _Bubble(QLabel):
     def __init__(self, text: str, role: str, colors: dict, parent=None) -> None:
         super().__init__(text, parent)
         self.setObjectName(f"screen-ask-{role}")
+        # 模型输出/OCR 文本里可能带 <b>/<img> 这类 HTML 残片：一律纯文本渲染
+        # （AutoText 会把本地路径图片加载出来——那是隐私面，不是样式面）
+        self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         bg = "#1677e8" if role == "user" else colors["button"]
@@ -76,8 +79,8 @@ class ScreenAskDialog(QFrame):
     ``conversation_factory`` 是测试替身入口（默认 :class:`VisionConversation`）。
     """
 
-    _reply_ready = Signal(str)    # 后台线程 → GUI：答复到了
-    _reply_failed = Signal(str)   # 后台线程 → GUI：失败理由（人话）
+    _reply_ready = Signal(int, str)    # 后台线程 → GUI：（会话代号, 答复）
+    _reply_failed = Signal(int, str)   # 后台线程 → GUI：（会话代号, 失败理由）
 
     def __init__(self, config, parent: QWidget | None = None, *,
                  style: str | None = None, conversation_factory=None) -> None:
@@ -88,6 +91,10 @@ class ScreenAskDialog(QFrame):
         )
         self._conversation = None
         self._sending = False
+        # 会话代号：换图开新会话时 +1。旧会话还在路上的回复凭代号丢弃——否则旧答案
+        # 会落进新会话的消息列表、还会把新会话的发送锁解开（盲审 M2）。
+        self._gen = 0
+        self._context_note = ""   # 首轮随图发出的 OCR 参考文字（chip 文案要带上字数）
         self._drag_offset: QPoint | None = None
         self._user_pos: QPoint | None = None   # 用户拖过的位置（复用窗体时沿用）
         self._user_size: QSize | None = None
@@ -150,9 +157,9 @@ class ScreenAskDialog(QFrame):
         self._thumb.setFixedSize(40, 40)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chip_row.addWidget(self._thumb)
-        chip_text = QLabel("截图已就位 · 发送时随问题一起给 AI", self._thumb_chip)
-        chip_text.setObjectName("screen-ask-chip-text")
-        chip_row.addWidget(chip_text, 1)
+        self._chip_text = QLabel("截图已就位 · 发送时随问题一起给 AI", self._thumb_chip)
+        self._chip_text.setObjectName("screen-ask-chip-text")
+        chip_row.addWidget(self._chip_text, 1)
         layout.addWidget(self._thumb_chip)
 
         # 消息列表（视口与宿主都不透明：透明窗上"透明滚动区"会透出桌面，
@@ -271,10 +278,18 @@ class ScreenAskDialog(QFrame):
             position_below_rect(self, below)
             self._pending_below = None
         self._conversation = conversation
+        self._gen += 1   # 新会话：旧会话在途的回复一律作废（见 _on_reply 的代号核对）
+        self._context_note = str(context_text or "").strip()
         thumb = QPixmap.fromImage(image).scaled(
             40, 40, Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
         self._thumb.setPixmap(thumb)
+        # OCR 参考文字会随首轮一起发出（VisionConversation）：必须在界面上看得见，
+        # 不许"发了什么用户不知道"（盲审 m2）
+        base = "截图已就位 · 发送时随问题一起给 AI"
+        if self._context_note:
+            base += f"（附识别文字 {len(self._context_note)} 字）"
+        self._chip_text.setText(base)
         self._clear_messages()
         self._set_status("")
         self._set_sending(False)
@@ -289,35 +304,41 @@ class ScreenAskDialog(QFrame):
             return False
         text = self._input.text().strip()
         conversation = self._conversation
+        gen = self._gen   # 闭包捕获：回来时对不上代号就说明会话已经换了
         question = text or "看看这块区域里是什么，说清内容，能给出判断或建议时就直接给。"
         self._append_bubble(question, "user")
         self._input.clear()
         self._set_sending(True)
         self._set_status("正在看图…")
         threading.Thread(
-            target=self._ask_worker, args=(conversation, question),
+            target=self._ask_worker, args=(conversation, question, gen),
             daemon=True, name="pet-screen-ask",
         ).start()
         return True
 
     # ---------------------------------------------------------------- 会话收口
 
-    def _ask_worker(self, conversation, question: str) -> None:
+    def _ask_worker(self, conversation, question: str, gen: int) -> None:
         try:
             reply = conversation.ask(question)
         except Exception as exc:
             log.exception("截图问答：发送失败")
-            self._reply_failed.emit(str(exc) or type(exc).__name__)
+            self._reply_failed.emit(gen, str(exc) or type(exc).__name__)
             return
-        self._reply_ready.emit(reply)
+        self._reply_ready.emit(gen, reply)
 
-    def _on_reply(self, reply: str) -> None:
+    def _on_reply(self, gen: int, reply: str) -> None:
+        if gen != self._gen:
+            log.debug("截图问答：丢弃上一会话迟到的回复 (gen=%s 当前=%s)", gen, self._gen)
+            return
         self._set_sending(False)
         self._set_status("")
         text = str(reply or "").strip()
         self._append_bubble(text or "（模型没说话，再试一次？）", "assistant")
 
-    def _on_error(self, reason: str) -> None:
+    def _on_error(self, gen: int, reason: str) -> None:
+        if gen != self._gen:
+            return
         self._set_sending(False)
         self._set_status(f"发送失败：{reason}")
 

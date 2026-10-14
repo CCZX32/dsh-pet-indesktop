@@ -708,6 +708,22 @@ def _discard_clipboard_cache(path) -> None:
         pass  # 删除失败只是临时目录里多躺一天，懒清扫会收
 
 
+def _looks_like_real_text(text: str) -> bool:
+    """剪贴板文本是"真内容"还是截图工具附带的文件名占位。
+
+    占位形态：单行、不超过 260 字符、长得像图片文件名/路径（"xxx.png"、"
+    C:\\tmp\\shot.jpg"）。Office 里复制的文字（多行/自然语言）一律算真内容——
+    那时剪贴板里的位图是 Office 顺手渲染的，不是用户想粘的东西（盲审 M4）。
+    """
+    if not text:
+        return False
+    if "\n" in text or len(text) > 260:
+        return True
+    tail = text.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    stem, dot, ext = tail.rpartition(".")
+    return not (dot and stem and ext.lower() in ("png", "jpg", "jpeg", "webp", "gif", "bmp"))
+
+
 class AttachmentTextEdit(QPlainTextEdit):
     """输入框：文本编辑 + 附件入口。
 
@@ -730,10 +746,15 @@ class AttachmentTextEdit(QPlainTextEdit):
 
     def insertFromMimeData(self, source) -> None:  # noqa: N802 (Qt 命名)
         if source.hasImage():
-            path = _save_clipboard_image(_mime_to_image(source))
-            if path is not None:
-                self.files_dropped.emit([str(path)])
-                return
+            # 有图不一定取图：Office 复制单元格/段落时剪贴板同时带真文本+位图渲染，
+            # 一律取图会把"粘文字"变成"粘截图"（盲审 M4）。只在文本是空或
+            # 文件名占位（截图工具常附带的 "xxx.png" 这类）时才让图赢。
+            text = source.text().strip() if source.hasText() else ""
+            if not _looks_like_real_text(text):
+                path = _save_clipboard_image(_mime_to_image(source))
+                if path is not None:
+                    self.files_dropped.emit([str(path)])
+                    return
         if source.hasUrls():
             paths = [url.toLocalFile() for url in source.urls() if url.isLocalFile()]
             if paths:

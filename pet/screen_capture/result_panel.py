@@ -609,6 +609,12 @@ class ScreenResultPanel(QFrame):
             on_language_change if (result.language_selector and not loading) else None
         )
         self._lang_row.setVisible(self._on_language_change is not None)
+        if result.language_selector:
+            # 新一轮翻译复位到"自动检测"（面板是复用件：上一轮选了日本語，
+            # 这一轮走自动判定却显示日本語 = 控件和内容各说各话）
+            self._lang_combo.blockSignals(True)
+            self._lang_combo.setCurrentIndex(0)
+            self._lang_combo.blockSignals(False)
 
         self.show_near(anchor, below=below)
         self.show()

@@ -462,12 +462,12 @@ def test_the_reply_and_failure_handlers_map_to_the_ui(qapp):
     dialog = _dialog()
     dialog.start_with_image(_image())
 
-    dialog._on_error("网络超时")
+    dialog._on_error(dialog._gen, "网络超时")
     assert dialog._status.text() == "发送失败：网络超时"
     assert dialog._status.isVisible() is True
     assert dialog._sending is False
 
-    dialog._on_reply("回答")
+    dialog._on_reply(dialog._gen, "回答")
     assert dialog._status.isVisible() is False, "答复到了，状态行要让位"
     assert _texts(dialog) == ["回答"]
     dialog.close()
@@ -483,7 +483,7 @@ def test_an_empty_reply_does_not_render_an_empty_bubble(qapp):
         dialog = _dialog()
         dialog.start_with_image(_image())
 
-        dialog._on_reply(blank)
+        dialog._on_reply(dialog._gen, blank)
 
         texts = _texts(dialog)
         assert texts and texts[0].strip() != "", f"{blank!r} 落了空气泡"
@@ -650,3 +650,37 @@ def test_ask_without_start_is_refused(monkeypatch):
     assert conversation.ready is False
     with pytest.raises(RuntimeError):
         conversation.ask("问")
+
+
+# ------------------------------------------------------------------ 盲审 M2：会话代号门
+
+
+def test_a_late_reply_from_a_previous_session_never_lands_in_the_new_one(qapp):
+    """换图开新会话后，旧会话迟到的回复必须丢弃（不落气泡、不解新会话的发送锁）。"""
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    first_gen = dialog._gen
+    dialog._on_reply(first_gen, "当代答复")
+    assert _texts(dialog) == ["当代答复"]
+
+    dialog.start_with_image(_image())   # 新会话：代号 +1，消息清空
+    # 清空气泡走 deleteLater：QEvent.DeferredDelete 不由 processEvents 派发
+    # （本机实测），要用 sendPostedEvents 刷
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert _texts(dialog) == []
+    dialog._on_reply(first_gen, "迟到的旧答复")   # 旧代号 → 丢弃
+    assert _texts(dialog) == [], "旧会话的答复落进了新会话"
+    dialog.close()
+
+
+def test_a_stale_failure_does_not_unlock_the_new_sessions_send(qapp):
+    """旧会话的失败回执不能把新会话正在跑的发送锁解开。"""
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    first_gen = dialog._gen
+    dialog.start_with_image(_image())     # 新会话（代号 +1）
+    dialog._sending = True                # 新会话的发送进行中
+    dialog._on_error(first_gen, "旧会话的网络超时")   # 旧代号 → 不动发送锁
+    assert dialog._sending is True, "旧回执解开了新会话的发送锁"
+    dialog.close()

@@ -49,7 +49,7 @@ log = logging.getLogger("dsh-pet-standalone")
 
 __all__ = ["ScreenCaptureController", "settle_before_grab"]
 
-#: 覆盖层可能上报的动作闭集（翻译的按钮恒置灰不会到，但信号面不信 UI 层的保证）。
+#: 覆盖层可能上报的动作闭集（置灰按钮不会到，但信号面不信 UI 层的保证）。
 _VALID_ACTIONS = frozenset({ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY})
 
 #: hide 与 grab 之间等一帧的上限（ms）。DwmFlush 正常只花一个合成周期（60 Hz ≈ 17 ms），

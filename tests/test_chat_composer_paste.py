@@ -163,3 +163,21 @@ def test_clipboard_cache_file_guard(tmp_path):
 def test_saving_a_null_image_is_a_noop():
     _app()
     assert _save_clipboard_image(QImage()) is None
+
+
+def test_office_style_text_wins_over_the_rendered_image():
+    _app()
+    """Office 复制单元格：剪贴板同时带真文本+位图渲染——文本优先（盲审 M4）。
+
+    截图工具的占位文本（裸文件名）才让图赢（见 test_pasted_image_wins_...）。
+    """
+    edit = AttachmentTextEdit()
+    received = []
+    edit.files_dropped.connect(received.extend)
+    mime = _image_mime(_solid_image())
+    mime.setText("第一季度销售额\n环比 +12%")   # Office 式真内容
+
+    edit.insertFromMimeData(mime)
+
+    assert received == [], "真文本被剪贴板里的位图渲染顶替了"
+    assert "第一季度销售额" in edit.toPlainText()

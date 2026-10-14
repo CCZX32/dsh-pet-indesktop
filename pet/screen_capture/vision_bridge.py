@@ -162,6 +162,14 @@ class VisionConversation:
         else:
             self._history.append({"role": "user", "content": question})
         messages = [{"role": "system", "content": self._system_prompt}, *self._history]
-        reply = str(vision_mod.post_vision_messages(messages, self._provider) or "").strip()
-        self._history.append({"role": "assistant", "content": reply})
+        try:
+            reply = str(vision_mod.post_vision_messages(messages, self._provider) or "").strip()
+        except Exception:
+            # 失败要回滚历史：留着这条 user 消息，下一轮就会出现两条连续 user 消息
+            # （严格的服务端会直接拒绝这种历史形状）
+            self._history.pop()
+            raise
+        # 空回复不进历史（部分接口不接受空 content 的 assistant 消息）
+        if reply:
+            self._history.append({"role": "assistant", "content": reply})
         return reply
