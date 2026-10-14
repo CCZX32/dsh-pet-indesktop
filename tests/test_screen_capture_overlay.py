@@ -600,13 +600,16 @@ def test_selection_area_stays_bright_while_the_rest_is_dimmed(qapp):
 
 
 def test_overlay_without_frozen_frame_shows_hint_instead_of_dim(qapp):
-    """抓帧失败的兜底形态：没有底图也不压暗（无选区不遮内容），只出提示条。"""
-    overlay = SelectionOverlay(screen=_FakeScreen())
+    """无选区时不压暗（无遮罩遮内容），只出提示条。
+
+    带冻结帧断言（不带帧的场景是合成边角：控制器抓不到帧根本不会建覆盖层）；
+    不依赖窗口默认底色——全量套件里跑过主题类用例后调色板会变，底色断言会误伤。
+    """
+    overlay = SelectionOverlay(frame=_frozen_frame(), screen=_FakeScreen())
 
     canvas = _render(overlay, background=QColor(255, 255, 255))
 
-    assert canvas.pixelColor(10, 10).red() >= 230, \
-        "无选区不压暗：角落只见窗口默认底色（239 灰），不见压暗遮罩"
+    assert canvas.pixelColor(10, 10).red() >= 250, "无选区不压暗：角落应是冻结帧原样的白"
     # 顶部提示条在屏中央（200 宽的假屏：chip 约 x25..175, y64..88，让开灵动岛高度）
     center = canvas.pixelColor(100, 76)
     assert center.red() < 120, "无选区时顶部应有提示 chip"
