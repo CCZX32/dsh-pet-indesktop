@@ -147,6 +147,7 @@ class FeatureHost:
             allow_in_process=definition.allow_in_process,
             execution_authorized=lambda: self.enabled(context.owner),
             bind_execution=lambda stop, resume: self.bind_execution(context.owner, stop, resume),
+            events=ScopedEventBus(self._events, context.owner),
         )
 
     def runtime(self, context, *, worker_mode="auto"):

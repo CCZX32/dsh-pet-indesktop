@@ -286,3 +286,46 @@ def test_lifecycle_changes_are_published_on_the_bus():
     host.disable(OWNER)
     assert [(event.payload["owner"], event.payload["state"]) for event in seen] == [(OWNER, "enabled"), (OWNER, "disabled")]
     assert all(event.source == "core.feature_host" for event in seen)
+
+
+# ==================================================================
+# 宿主上下文事件面：bind_context 注入 + v1 门面导出
+# ==================================================================
+
+
+def test_bind_context_injects_an_owner_scoped_event_bus(tmp_path):
+    from pet.config import Config
+    from pet.feature_host_bindings import bind_local_context
+
+    host = FeatureHost()
+    host.provide(_definition(), enabled=False)
+    context = bind_local_context(Config(base=tmp_path), OWNER)
+    assert context.events is None  # 未授权的原生上下文没有事件面
+    bound = host.bind_context(context)
+    assert isinstance(bound.events, ScopedEventBus)
+    bound.events.subscribe("test.event", lambda event: None)
+    assert len(host.events.subscriptions(owner=OWNER)) == 1
+
+
+def test_the_runtime_factory_receives_the_event_bus(tmp_path):
+    from pet.config import Config
+    from pet.feature_host_bindings import bind_local_context
+
+    captured = {}
+
+    def runtime_factory(context, **_kwargs):
+        captured["context"] = context
+        return object()
+
+    host = FeatureHost()
+    host.provide(_definition(runtime_factory=runtime_factory), enabled=True)
+    runtime = host.runtime(bind_local_context(Config(base=tmp_path), OWNER))
+    assert runtime is not None
+    assert isinstance(captured["context"].events, ScopedEventBus)
+
+
+def test_the_v1_facade_exports_the_event_types():
+    from pet.mod_api import v1
+
+    assert v1.CoreEvent is CoreEvent
+    assert v1.ScopedEventBus is ScopedEventBus

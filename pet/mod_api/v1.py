@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from pet.api_ports import ApiRequest, FeatureApiPort
 from pet.feature_ports import FeatureHostContext
 from pet.plugins.contributions import Contribution
+from pet.plugins.events import CoreEvent, ScopedEventBus
 from pet.plugins.feature_host import FeatureDefinition as _Definition
 
 
@@ -39,7 +40,7 @@ class SettingsComponent(Protocol):
     def dispose(self) -> None: ...
 
 
-__all__ = ["WorkerClient", "ApiRequest", "Contribution", "FeatureApiPort", "FeatureDefinition", "FeatureHostContext", "Runtime", "SettingsComponent"]
+__all__ = ["WorkerClient", "ApiRequest", "Contribution", "CoreEvent", "FeatureApiPort", "FeatureDefinition", "FeatureHostContext", "Runtime", "ScopedEventBus", "SettingsComponent"]
 
 
 if TYPE_CHECKING:

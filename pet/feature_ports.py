@@ -8,6 +8,10 @@ Ported from the DLC branch ``pet/feature_ports.py``；本仓库只保留**本地
 （``FeatureUserDataPort``）与官方内置域（screen / ai）绑定不在本仓库的 MOD 路径上，
 随那条线一起做——本地包不拿凭据、不拿 Core 窗口对象、不拿全局配置。
 
+``events`` 是 Phase 2 内核移植新增的事件订阅面：原生上下文恒为 ``None``，由
+:meth:`pet.plugins.feature_host.FeatureHost.bind_context` 在授权后注入绑定本
+owner 的 :class:`pet.plugins.events.ScopedEventBus`。
+
 Not a sandbox: 端口是"能力面"的表达，不是 Python 沙箱；作者代码与桌宠同权限运行
 （见 ``docs/modding/HOST-ONLY.md`` 的信任模型）。给定端口也不授予安装状态账本或
 另一个 owner 的数据。
@@ -79,3 +83,5 @@ class FeatureHostContext:
     bind_execution: Callable[[Callable, Callable], Callable[[], None]] | None = None
     #: 通用 api 端口；本仓库固定为"调用即抛 unsupported_capability"（D2-d 未落地）。
     api: FeatureApiPort | None = None
+    #: owner 作用域的事件订阅门面；未过 bind_context 授权的原生上下文恒为 None。
+    events: Any | None = None
