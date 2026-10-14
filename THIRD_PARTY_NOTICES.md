@@ -304,3 +304,13 @@ headless，本机两个发行名同版本并存、都提供 `cv2` 顶层模块�
 `numpy`/`cv2` **不再**出现在构建脚本的"构建机环境污染"排除清单里，也不再被
 `scripts/slim_bundle.py` 的违禁清单拦——它们现在是产品依赖（排除它们曾让冻结包
 的 OCR 全线不可用，2026-10-13 实测）。
+
+## 8. DeepSeek 鲸鱼标识（识屏加载动画：ds_whale.png）
+
+- **File**：`assets/chat/ds_whale.png`（512×512 透明 PNG，由本项目用 QtSvg 渲染生成）。
+- **Origin / Source**：形状路径取自 simple-icons 仓库的 `icons/deepseek.svg`
+  （https://github.com/simple-icons/simple-icons ，**CC0 1.0**）；颜色为本项目
+  按界面 accent 令牌施加的蓝紫渐变（#3563EA → #6A5CFF）。
+- **License / 权利口径**：simple-icons 的图标路径数据按 CC0 分发；**"DeepSeek"
+  名称与鲸鱼标识的商标权归深度求索（DeepSeek）所有**——本项目是其桌面宠物衍生
+  作品，按品牌本意作指示性使用（不代表官方出品/背书）。

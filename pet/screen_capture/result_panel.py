@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPalette, QPen, QTextOption
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -135,8 +135,9 @@ def resolve_style(style: str | None, palette=None) -> str:
 
 
 class _LoadingFish(QWidget):
-    """加载动画：大肥鱼原地摆尾游 + 嘴边泡泡往上冒（项目吉祥物元素，替代干巴巴的
-    三点跳动——实机反馈"要有点特色"）。
+    """加载动画：DeepSeek 官方鲸鱼轻轻浮动 + 喷泡泡（项目吉祥物；素材
+    ``assets/chat/ds_whale.png`` 随包分发，simple-icons CC0 渲出的渐变蓝 PNG）。
+    素材缺席时回退为三点跳动（绝不让"加载动画"自己成为故障点）。
 
     面板是防抢焦点的复用件，动画用自己的 QTimer：``hideEvent``/非 loading 结果
     都会停掉它，绝不会在面板收起后还占着定时器空转。
@@ -148,9 +149,27 @@ class _LoadingFish(QWidget):
         self.setFixedHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._phase = 0.0
+        self._whale = self._load_whale()
         self._timer = QTimer(self)
         self._timer.setInterval(50)   # 20fps 足够顺滑又省电
         self._timer.timeout.connect(self._tick)
+
+    @staticmethod
+    def _load_whale() -> QPixmap:
+        import sys
+        from pathlib import Path
+
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "assets" / "chat" / "ds_whale.png")
+        candidates.append(Path(__file__).resolve().parents[2] / "assets" / "chat" / "ds_whale.png")
+        for path in candidates:
+            if path.is_file():
+                pixmap = QPixmap(str(path))
+                if not pixmap.isNull():
+                    return pixmap
+        return QPixmap()
 
     def start(self) -> None:
         if not self._timer.isActive():
@@ -172,41 +191,48 @@ class _LoadingFish(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         phase = self._phase
-        cx, cy = self.width() / 2, self.height() / 2 + 8
+        cx, cy = self.width() / 2, self.height() / 2 + 10
 
-        # 泡泡：三个相位错开的小圆，从鱼嘴位置往上升、越来越淡
+        if self._whale.isNull():
+            # 素材缺席的回退：三点跳动（形状简单但绝不能不画）
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#1677e8"))
+            spacing = 22
+            for i in range(3):
+                lift = max(0.0, math.sin((phase * 2.2 - i * 0.9))) * 8
+                painter.drawEllipse(QPointF(cx + (i - 1) * spacing, cy - 6 - lift), 5, 5)
+            painter.end()
+            return
+
+        # 泡泡：从鲸鱼头顶（喷水孔位置）往上升、越来越淡
         for i in range(3):
-            t = (phase * 0.55 + i / 3.0) % 1.0          # 0..1 循环
-            bubble_x = cx + 26 + math.sin(t * math.pi * 2 + i) * 4
-            bubble_y = cy - 6 - t * 34
-            alpha = int(220 * (1.0 - t * 0.75))
-            painter.setPen(QPen(QColor(22, 119, 232, alpha), 1.4))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            r = 2.5 + t * 2.0
+            t = (phase * 0.5 + i / 3.0) % 1.0          # 0..1 循环
+            bubble_x = cx - 6 + math.sin(t * math.pi * 2 + i) * 4
+            bubble_y = cy - 24 - t * 30
+            r = 2.2 + t * 1.8
+            if t < 0.2:
+                # 最新生的泡泡：实心 accent 蓝（空心描边在小尺寸下会全被抗锯齿
+                # 糊掉，实心才有纯 accent 像素——这一点有测试守着）
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#1677e8"))
+            else:
+                alpha = int(220 * (1.0 - t * 0.75))
+                painter.setPen(QPen(QColor(22, 119, 232, alpha), 1.4))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(bubble_x, bubble_y), r, r)
             painter.drawEllipse(QPointF(bubble_x, bubble_y), r, r)
 
-        # 鱼身：椭圆身体 + 摆动的三角尾 + 眼睛，整体随相位轻轻上下浮动
-        bob = math.sin(phase) * 2.2
-        tail_wag = math.sin(phase * 2.0) * 4.0
-        body = QColor("#1677e8")
-        belly = QColor("#7db8f7")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(body)
-        painter.drawEllipse(QPointF(cx, cy + bob), 22.0, 13.0)          # 胖身体
-        painter.setBrush(belly)
-        painter.drawEllipse(QPointF(cx + 2, cy + 5 + bob), 14.0, 7.0)    # 浅肚皮
-        tail = QPainterPath()
-        tail.moveTo(cx - 20, cy + bob)
-        tail.lineTo(cx - 32, cy - 8 + bob + tail_wag)
-        tail.lineTo(cx - 32, cy + 8 + bob + tail_wag)
-        tail.closeSubpath()
-        painter.setBrush(body)
-        painter.drawPath(tail)                                            # 摆尾
-        painter.setBrush(QColor("#ffffff"))
-        painter.drawEllipse(QPointF(cx + 11, cy - 4 + bob), 3.4, 3.4)     # 眼白
-        painter.setBrush(QColor("#1d2129"))
-        painter.drawEllipse(QPointF(cx + 12, cy - 4 + bob), 1.7, 1.7)     # 眼珠
+        # 鲸鱼：随相位轻轻上下浮动 + 极轻微摇摆（像浮在水里）
+        bob = math.sin(phase) * 2.4
+        tilt = math.sin(phase * 0.7) * 0.06
+        size = 44
+        painter.save()
+        painter.translate(cx, cy + bob)
+        painter.rotate(math.degrees(tilt))
+        painter.drawPixmap(-size // 2, -size // 2, size, size, self._whale)
+        painter.restore()
         painter.end()
 
 
