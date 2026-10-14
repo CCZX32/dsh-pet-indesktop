@@ -893,7 +893,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
         "厉害了我的鲸",
         "AI 对话",
         "看看屏幕",
-        "截图",
+        "截图提问",
         "播放动画",
         "切换角色",
         "播放速率",
