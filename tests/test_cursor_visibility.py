@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pet import vision, window
+from pet import desktop_query, vision, window
 from pet.window import PetWindow
 
 
@@ -66,7 +66,8 @@ class _FakeFunction:
     ],
 )
 def test_get_cursor_visibility_maps_flags(monkeypatch, flags, expected):
-    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='win32'))
+    # 平台缝口已随实现迁到 pet.desktop_query（vision 只剩返回形状适配）。
+    monkeypatch.setattr(desktop_query, 'sys', _ns_shim(sys, platform='win32'))
     user32 = FakeUser32(flags=flags)
 
     assert vision.get_cursor_visibility(user32) == expected
@@ -75,12 +76,12 @@ def test_get_cursor_visibility_maps_flags(monkeypatch, flags, expected):
 
 @pytest.mark.parametrize('user32', [FakeUser32(result=0), FakeUser32(error=OSError())])
 def test_get_cursor_visibility_failures_are_unknown(monkeypatch, user32):
-    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='win32'))
+    monkeypatch.setattr(desktop_query, 'sys', _ns_shim(sys, platform='win32'))
     assert vision.get_cursor_visibility(user32) == 'UNKNOWN'
 
 
 def test_get_cursor_visibility_non_windows_does_not_access_user32(monkeypatch):
-    monkeypatch.setattr(vision, 'sys', _ns_shim(sys, platform='linux'))
+    monkeypatch.setattr(desktop_query, 'sys', _ns_shim(sys, platform='linux'))
     assert vision.get_cursor_visibility(SimpleNamespace()) == 'UNKNOWN'
 
 
