@@ -83,14 +83,11 @@ from PySide6.QtGui import QColorSpace, QImage
 log = logging.getLogger("dsh-pet-standalone")
 
 __all__ = ["DISABLE_ENV", "fp16_scrgb_to_srgb8", "grab_hdr_sdr", "hdr_capture_disabled",
-           "hdr_state"]
+           "hdr_state", "release_cached_sessions"]
 
 #: 逃生门：置为 1（或 true/yes/on 之类的真值）时整条 HDR 通道不启用，抓帧直接
 #: 走 GDI。给"新通道在某个驱动/某个显示器上出问题"留一条不改代码就能回退的路。
 DISABLE_ENV = "DSH_PET_DISABLE_HDR_CAPTURE"
-
-#: scRGB 的参考白：1.0 == 80 nits（scRGB 规范定义，参考实现同样取 80）。
-SCRGB_WHITE_NITS = 80.0
 
 # --------------------------------------------------------------- Win32 常量
 
@@ -450,6 +447,20 @@ def _succeeded(value: int) -> bool:
     return _hr(value) < 0x80000000
 
 
+def _dxgi_reason(hr: int) -> str:
+    """DXGI 失败码 → 一句话（只翻真有区分度的两个，其余给码）。
+
+    这两个是真实世界最常见的两种失败，日志里能看出区别很值：
+    "别的应用正占着这一屏"（DXGI 最多四个复制客户端）与"会话失效"
+    （桌面切换/锁屏/权限变化）——两者的处置完全不同。
+    """
+    known = {
+        DXGI_ERROR_ACCESS_LOST: "复制会话失效（桌面切换/锁屏/权限变化）",
+        DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: "已有应用占满这一屏的复制会话（DXGI 上限 4）",
+    }
+    return f"hr={hr:#010x}" + (f"（{known[hr]}）" if hr in known else "")
+
+
 # ------------------------------------------------------- DisplayConfig（只读）
 
 
@@ -795,7 +806,7 @@ class _Session:
                     break
                 _com_call(self.duplication, 14, ctypes.c_long, [])   # ReleaseFrame
             elif _hr(hr) != DXGI_ERROR_WAIT_TIMEOUT:
-                raise _Unavailable(f"AcquireNextFrame hr={_hr(hr):#010x}")
+                raise _Unavailable(f"AcquireNextFrame {_dxgi_reason(_hr(hr))}")
             if timeout_ms <= 0 or time.monotonic() >= deadline:
                 return None
 
@@ -1092,8 +1103,12 @@ def _session_for(screen, paths) -> _Session | None:
     return session
 
 
-def _release_sessions() -> None:
-    """放掉全部缓存会话（进程退出或测试用；正常路径不需要显式调用）。"""
+def release_cached_sessions() -> None:
+    """放掉全部缓存会话与退避表（进程退出或测试用；正常抓帧不需要显式调用）。
+
+    会话里握着 D3D11 设备与 DXGI 复制会话：进程退出后由系统回收，所以正常路径
+    不需要调它；但"这片屏不抓了、想把 GPU 资源还回去"的场景需要一个显式出口。
+    """
     with _SESSION_LOCK:
         for key in list(_SESSIONS):
             _drop_session(key)

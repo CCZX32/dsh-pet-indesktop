@@ -512,6 +512,33 @@ def test_session_cache_is_reused_while_still_valid(monkeypatch):
     assert len(created) == 2
 
 
+def test_release_cached_sessions_returns_the_gpu_resources():
+    """显式放掉缓存会话：会话本身被 release，退避表也清空（"这片屏不抓了"的出口）。"""
+    released = []
+
+    class _Session:
+        key = "\\\\.\\DISPLAY1"
+
+        def release(self):
+            released.append(self.key)
+
+    hdr_capture._SESSIONS["\\\\.\\DISPLAY1"] = _Session()
+    hdr_capture._FAILED_UNTIL["\\\\.\\DISPLAY1"] = 12345.0
+
+    hdr_capture.release_cached_sessions()
+
+    assert released == ["\\\\.\\DISPLAY1"]
+    assert hdr_capture._SESSIONS == {}
+    assert hdr_capture._FAILED_UNTIL == {}
+
+
+def test_dxgi_reason_names_the_two_actionable_failures():
+    """"别的应用占满复制会话"与"会话失效"要能和别的码区分开——处置完全不同。"""
+    assert "占满" in hdr_capture._dxgi_reason(hdr_capture.DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)
+    assert "失效" in hdr_capture._dxgi_reason(hdr_capture.DXGI_ERROR_ACCESS_LOST)
+    assert hdr_capture._dxgi_reason(0x887A0004) == "hr=0x887a0004"
+
+
 def test_grab_hdr_sdr_is_disabled_by_the_escape_hatch(monkeypatch):
     monkeypatch.setenv(DISABLE_ENV, "1")
     monkeypatch.setattr(hdr_capture, "_platform_ok", lambda: True)
