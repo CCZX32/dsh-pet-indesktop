@@ -214,6 +214,19 @@ class TestBundleRoot:
         assert "bundle_duplicate_id" in joined
         assert OWNER in joined
 
+    def test_bundle_root_problems_are_visible_in_text_mode(self, tmp_path):
+        """文本模式（构建脚本/作者人眼看着的那份）也必须打出包根级原因——
+        否则退出码拒得对、用户却找不到一句为什么（2026-10-14 实证过这个哑巴拒）。"""
+        root = tmp_path / "release"
+        root.mkdir(parents=True)
+        built, zip_path = build(tmp_path / "work")
+        shutil.copytree(built, root / "hello-local")
+        shutil.copy2(zip_path, root / "hello-local.zip")
+        result = _run("--bundle-root", str(root))   # 注意：不走 --json
+        assert result.returncode == 1
+        assert "bundle_duplicate_id" in result.stderr
+        assert OWNER in result.stderr
+
     def test_the_repo_example_packages_pass(self, tmp_path):
         """仓库自己的示例就是作者照着跑的那一份：它打出来的包必须一直过门。"""
         _built, zip_path = build(tmp_path / "example")

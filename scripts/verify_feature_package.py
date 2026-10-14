@@ -274,25 +274,30 @@ def inspect_bundle(root: Path | str, *, target_platform: str = sys.platform) -> 
     problems = [
         f"{Path(report['source']).name}: {problem}" for report in packages for problem in report["problems"]
     ]
+    # 包根级问题单独记账：它们不属于任何单份报告，人类可读输出要有地方看到它们
+    # （否则 rc=1 拒得对、用户却看不到一句原因——2026-10-14 写 PR 证据时实证）。
+    bundle_problems: list[str] = []
     strays = _stray_entries(root)
     if strays:
-        problems.append(
+        bundle_problems.append(
             f"{root} 下有不是候选包的条目（{BUNDLE_STRAY_ENTRY}）：{', '.join(strays)}"
             "——构建脚本整目录复制，这些字节会被一起带进产物而门没验过；移走它们，或打成包"
         )
     for feature_id, items in _duplicate_ids(packages):
-        problems.append(
+        bundle_problems.append(
             f"{feature_id} 在包根里有 {len(items)} 份（{BUNDLE_DUPLICATE_ID}）：{', '.join(items)}"
             "——同一个 owner 两份包，随包携带时以谁为准说不清"
         )
     if not candidates:
-        problems.append(f"{root} 下没有找到任何候选包（{BUNDLE_EMPTY}）：包根给错了，或包没打出来")
+        bundle_problems.append(f"{root} 下没有找到任何候选包（{BUNDLE_EMPTY}）：包根给错了，或包没打出来")
+    problems.extend(bundle_problems)
     return {
         "root": str(root),
         "target_platform": target_platform,
         "ok": bool(packages) and not problems,
         "packages": packages,
         "problems": problems,
+        "bundle_problems": bundle_problems,
     }
 
 
@@ -354,10 +359,12 @@ def main(argv: list[str] | None = None) -> int:
 
     packages: list[dict] = []
     problems: list[str] = []
+    bundle_problems: list[str] = []
     if args.bundle_root is not None:
         bundle = inspect_bundle(args.bundle_root, target_platform=args.target_platform)
         packages.extend(bundle["packages"])
         problems.extend(bundle["problems"])
+        bundle_problems.extend(bundle["bundle_problems"])
     for source in args.sources:
         report = inspect(source, target_platform=args.target_platform)
         packages.append(report)
@@ -372,6 +379,9 @@ def main(argv: list[str] | None = None) -> int:
                 print()
             print(format_human(report))
         if not ok:
+            # 包根级问题不属于任何单份报告，不在这里打出来用户就永远看不到原因
+            for problem in bundle_problems:
+                print(f"\n包根问题：{problem}", file=sys.stderr)
             print("\nFAIL: 有包没通过门——构建/发布中止（坏包在界面上多半看不出来，"
                   "装到用户机器上才知道）。逐条见上面的「问题」。", file=sys.stderr)
         else:
