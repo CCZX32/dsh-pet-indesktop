@@ -285,7 +285,7 @@ D4 补的是其中**与本站拓扑对得上**的那一段。范围划分与文�
 | 旁置包根（`PHASE5A` 的 Setup 旁 `packages` 根；卸载/重装边界） | ⚠️ **半做**：构建脚本可**明确要求**随包携带一个包根，落到产物 `<app>/features/`（macOS 在 `.app/Contents/Resources/features/`）并两道门校验；**产品运行期还没有读这个目录的地方**，安装器侧那条链也没做——不带 `-FeaturePackages` 的构建是正常构建 |
 | 本地分发签名与体积门（`PHASE5A` §5 的五产物总签名） | **不做**（正式签名基线与官方产物都不在本仓库） |
 | 4B-5「真实构建端到端」 | ⚠️ 前进一步：作者侧**打包入口 + 发布前自检 + 三端构建门**已落地；**冻结 exe 与 host-worker 的真实构建仍未做** |
-| 作者要「一条命令产出可导入包」（`AUTHORING-HANDBOOK` §4） | ✅ `scripts/build_mod_example.py` 从测试材料级升级为**正式入口**：源码树不合格/`host/` 里有打不进包的文件/输出已存在都在写任何字节之前报错，`--check` 升级为「清单 + 验签 + 装前子进程预检」 |
+| 作者要「一条命令产出可导入包」（`AUTHORING-HANDBOOK` §4） | ✅ `scripts/build_mod_example.py` 从测试材料级升级为**正式入口**：源码树不合格/`host/` 里有打不进包的文件/输出已存在都在写任何字节之前报错，`--check` 升级为「清单完整性 + 摘要校验 + 装前子进程预检」 |
 | 社区作者需要打包自检工具（作者 Phase 6 的「校验工具」） | ✅ `scripts/verify_feature_package.py`：单份/包根/`--json`/`--target-platform`，退出码与原因码是闭集，只读、零 Qt |
 
 **D4 新增/改动的文件**：新增 `scripts/verify_feature_package.py`（发布/构建门）、
@@ -300,6 +300,42 @@ D4 补的是其中**与本站拓扑对得上**的那一段。范围划分与文�
 `<app>/features/` 的那条链、host-worker 的真实冻结构建（`build_mod_echo` /
 `build_feature_probe_native`）、官方包构件脚本（`build_character_mod_example.py`）、
 LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understanding`**（本轮不动）。
+
+---
+
+## 八、盲审修复回写（2026-10-14）
+
+对 `dlc/mod-center-port` 分支 D2–D4 落地面的**一轮独立盲审**提出的问题与处置。每条都
+留了红→绿证据（先写会红的用例，改后转绿）；"缓"的写明缓的理由与归属片。
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| B1 | 冻结入口（`packaging/pet_entry*.py`）不分流 `--worker` / `--feature-package-probe`：冻结包里这两种子进程会 import `pet.app`，把整只桌宠拉起来并撞主进程的单实例门 | ✅ 修：两条分流补在 `import pet.app` 之前，转发给 `pet/__main__.py` 里那一份实现（不抄第二份路由）。守卫 `tests/test_frozen_entry_routing.py`：源码顺序断言 + **真进程**边界探针（入口一旦走进桌面 UI 图就抛），并真跑一次 worker 握手与预检回执 |
+| M1 | `is_valid_feature_id` 允许大写与末尾点、放过设备名：`Official.Screen-Understanding` 绕过官方闭集，`foo`/`Foo`/`foo.` 在 NTFS 上共用同一份 `feature-data/` | ✅ 修：ID 规范形收口为 `[a-z0-9][a-z0-9_.-]*` + 禁末尾 `.`/`-` + 禁设备名首段（`nul`、`con.package`），官方闭集按规范形比较。用例：`tests/test_official_features.py`（14 条变体）、`tests/test_feature_package_import_zip.py`（声明官方 ID 变体的 ZIP 在路由层被拒、不落任何目录）。**无迁移负担**：没有任何 tag 包含本分支（`git tag --contains HEAD` 为空），仓库里也不存在大写 ID 的字面量或落盘写法 |
+| M2 | 升级/回滚/卸载的第二段失败时，第一段交还的宿主绑定没了：菜单与会话消失到重启 | ✅ 修：记 `_released_for_apply`，第二段非 settled 时把**当前落盘**的版本重新装回宿主；用户看到的只是这次操作失败。用例：`tests/test_feature_management.py::test_a_failed_apply_puts_the_old_version_back_in_the_host`（改前 `host.state == "absent"`，改后回 `enabled` 且菜单在） |
+| M3 | 发布门自称"验签"，而 `local_user` 口径下 `manifest.sig` 被静默忽略 | ✅ 修：门 / 三端构建脚本 / 作者侧打包入口 / 作者文档的口径统一为「清单完整性 + 摘要校验 + 装前子进程预检」；报告新增 `trust_status`（`local_user`、未做发布者认证）与 `warnings`，包里带 `manifest.sig` 时给 `signature_ignored` 告警（放行但说出来）。守卫：`tests/test_feature_packaging_wiring.py::TestTheChainDoesNotClaimPublisherAuthentication`（五个文件的文案一起钉）+ 门的三条行为用例 |
+| M4 | 主动识屏 worker 在关闭 / 清空白名单 / tick 发现已关闭 / 窗口隐藏时只停表、不停子进程 | ✅ 修：四处补 `_stop_worker_process()`（幂等）；`pause` 的代价（恢复要重新握手，空载实测约 135 ms、满载数百毫秒，这段时间不截图）写进方法 docstring。用例：`tests/test_proactive_worker_adapter.py` 四条 |
+| m3 | 构建门的复制范围大于验证范围（门只验非点目录与 `*.zip`，脚本整目录复制） | ✅ 修：判据收在**门**里——包根出现非候选条目（`bundle_stray_entry`）或同一 owner 多份包（`bundle_duplicate_id`）就在**复制之前**中止构建（三端脚本只看退出码，不必各自枚举候选，避免第二份候选判据）。`docs/ONEDIR_PACKAGING.md` 同步 |
+| m5 | supervisor `STOPPING` 重入重计关闭预算并重发 shutdown；STOPPING 期间的 `start` 被静默丢弃 | ✅ 修：`stop()` 在 STOPPING 期间是幂等空操作；适配器把 STOPPING 期间的 start 记成待补拉、进程停定后自己再起（"隐藏→恢复"正好落在这个窗口里，此前恢复后识屏再也不开工且无任何报错） |
+| n1 | `stop()` 的"进程已不在"分支不停 `_io_timer` | ✅ 修 + 不变式用例：不论从哪个分支收口，`stop()` 之后不留活动定时器 |
+| n2 | 预检回执的 `child_pid` 采信子进程自述 | ✅ 修：pid 由父侧 `Popen` 给出（runner 由 `subprocess.run` 换成 `Popen` + `wait`，超时仍只杀这一次直接起的进程）；回执里那一栏既不采信也不对质 |
+
+**缓做（本轮不改，登记在此）**：
+
+| 编号 | 问题 | 缓的理由 / 归属 |
+|---|---|---|
+| m1 | 预检回执没有 nonce，理论上可被同名旧文件顶替 | 回执路径在每次新建的私有临时目录里（`tempfile.TemporaryDirectory`），顶替要先拿到那个目录；收益低于改动面（回执 schema 升版）。归属：探针硬化片 |
+| m2 | 预检不可取消（父侧不持有句柄），只能等 `timeout` | 30 s 单次上限已经有界；取消要父侧留句柄 + 事务层接口，与"装前预检要不要并发"一起做。归属：Phase 4B-5 |
+| m4 | 构建机在预检阶段执行包代码（`create_host()`），构建机上没有告警/文档 | 门与产品口径一致地**不声称隔离**（`pet/feature_package_preflight.py` 模块 docstring 已写死"不是沙箱"）；缺的是构建脚本侧一句告警。归属：构建脚本文案批次 |
+
+**本轮顺带发现的既有问题（不在盲审清单里，本轮未修）**：`tests/test_proactive.py` +
+`tests/test_proactive_worker.py` + `tests/test_proactive_worker_adapter.py` **三个文件一起**跑，
+会在 `test_adapter_drives_the_real_worker_over_the_default_command` 处触发 Windows 访问违规
+（进程直接段错误，没有汇总行）。**与本轮改动无关**：把 `pet/` 与 `tests/` 整体退回 `6e2f723`
+后同样 3/3 复现（去掉 `test_proactive.py` 或去掉后两个中的任一个即不崩，2/2 通过）。
+全量套件会经过这段，归属与
+[`docs/QT-LIFECYCLE-FULL-SUITE-STABILIZATION-2026-09.md`](../QT-LIFECYCLE-FULL-SUITE-STABILIZATION-2026-09.md)
+那一族同源（泄漏的 worker supervisor / QProcess 在后续用例的事件循环里被拆除）。
 
 ---
 
