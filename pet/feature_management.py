@@ -153,6 +153,8 @@ class FeatureManagementManager(QObject):
         self._closed = threading.Event()
         self._inflight = 0
         self._auto_apply_requested = False
+        #: 两段式的第一段是否已经把宿主绑定交还（第二段失败时据此装回旧版本）。
+        self._released_for_apply = False
         self.last_operation = None
         self.last_result = self._result("idempotent", reason="not_installed")
         self.verifier = local_package_verifier(owner)
@@ -357,6 +359,9 @@ class FeatureManagementManager(QObject):
                 return
             # 第二段是**同一个**动作的续跑：不另外计数，也不在这里减计数
             # （否则两段之间 busy 会瞬时为假，第二个命令就能挤进来）。
+            # ``_released_for_apply`` 记下"绑定已经交还"：第二段失败时，旧绑定要装回来
+            # （见 ``_sync_host``），否则交还就是净损失。
+            self._released_for_apply = True
             QTimer.singleShot(0, lambda: self._apply_plan(plan))
             return
         self._auto_apply_requested = False
@@ -407,8 +412,17 @@ class FeatureManagementManager(QObject):
         这一步必须发生在 ``result_ready.emit`` 之前。
         """
         if getattr(result, "status", None) not in _SETTLED:
+            if self._released_for_apply:
+                # 两段式的第二段没落定，而第一段已经把宿主绑定交还了（``host.remove``
+                # 之后菜单与设置已经从界面上消失）。此时**当前落盘的**版本仍是原来那一份
+                # ——把它重新装回宿主：用户看到的应当是"这次操作失败"，而不是"失败 +
+                # 菜单不见了，重启才回来"。
+                self._released_for_apply = False
+                self._record_load(self._load_current())
+                return
             self.last_result = result
             return
+        self._released_for_apply = False
         if getattr(result, "status", None) == "awaiting_startup_confirmation":
             operation_id = getattr(result, "operation_id", None)
             if not operation_id:

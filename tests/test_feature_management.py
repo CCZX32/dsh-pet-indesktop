@@ -519,3 +519,46 @@ def test_the_host_draft_gate_survives_an_uninstall_and_reinstall(tmp_path):
         assert runtime.host.enabled(OWNER) is True
     finally:
         runtime.close()
+
+
+def test_a_failed_apply_puts_the_old_version_back_in_the_host(tmp_path):
+    """两段式的第二段失败时，第一段交还的宿主绑定必须装回来。
+
+    卸载 / 更新 / 回滚是"先把宿主绑定交还、再落盘"的两段式：第一段成功而第二段失败
+    （另一个进程在这个窗口里抢到版本租约、预检结论过期、状态读不到等），交还就成了
+    净损失——菜单与设置在界面上消失，直到重启才回来。这里只注入事务层的失败结论
+    （真机上要第二个进程持有租约才会出现那条 ``version_in_use``，见
+    ``tests/test_feature_package_transactions.py``），其余全走生产代码。
+    """
+    runtime = _runtime(tmp_path)
+    try:
+        manager = _install(runtime, tmp_path)
+        manager.submit("enable", True, expected_revision=manager.service.inspect().revision)
+        assert _wait(lambda: not manager.busy and runtime.host.enabled(OWNER))
+        assert runtime.menu_owners() == (OWNER,)
+        before = manager.service.inspect()
+
+        def failing_apply(plan, **kwargs):
+            return manager._result("awaiting_release", reason="version_in_use", plan=plan, blocked_versions=(VERSION,))
+
+        original = manager.service.apply
+        manager.service.apply = failing_apply
+        try:
+            manager.submit("uninstall")
+            assert _wait(lambda: not manager.busy)
+        finally:
+            manager.service.apply = original
+
+        # 用户看到的是失败：版本与安装状态一个都没动
+        assert manager.last_operation.status == "awaiting_release"
+        assert manager.last_operation.reason == "version_in_use"
+        after = manager.service.inspect()
+        assert (after.active, after.revision) == (before.active, before.revision)
+        # 而宿主里那份绑定已经装回来了：菜单与设置还在，状态仍是启用
+        assert runtime.host.state(OWNER) == "enabled"
+        assert runtime.host.enabled(OWNER) is True
+        assert runtime.menu_owners() == (OWNER,)
+        assert runtime.host.menu(OWNER, runtime.scope, "hello") is not None
+        assert manager.last_result.status in ("completed", "idempotent")
+    finally:
+        runtime.close()
