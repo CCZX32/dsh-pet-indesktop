@@ -356,6 +356,9 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 全量套件会经过这段，归属与
 [`docs/QT-LIFECYCLE-FULL-SUITE-STABILIZATION-2026-09.md`](../QT-LIFECYCLE-FULL-SUITE-STABILIZATION-2026-09.md)
 那一族同源（泄漏的 worker supervisor / QProcess 在后续用例的事件循环里被拆除）。
+**复审轮补记（同日）**：这条组合本轮跑了两遍（修 N3 前 / 修 N3 后各一次）都**正常退出**
+（`125 passed + 2 failed`（那 2 条是本轮新用例，未修时红）/ `127 passed`），没有复现那个访问
+违规。登记保留（它是时序相关的），但"本轮全绿"不等于它已消失。
 
 ---
 

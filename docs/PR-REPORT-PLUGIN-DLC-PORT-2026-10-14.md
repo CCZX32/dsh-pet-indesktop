@@ -2,16 +2,17 @@
 
 > **基线**：`7575572`（S4「MOD 中心收官」——前作报告
 > [`PR-REPORT-DLC-MOD-CENTER-2026-10-13.md`](PR-REPORT-DLC-MOD-CENTER-2026-10-13.md) 的收尾提交）
-> **分支**：`dlc/mod-center-port`　**日期**：2026-10-14　**HEAD**：`cf9e2e6`
-> **范围**：15 个提交 / 110 处文件（新增 56 / 修改 54，`+15414 / −844`）
+> **分支**：`dlc/mod-center-port`　**日期**：2026-10-14　**HEAD**：`584ca57`（写完本报告时）
+> **范围**：19 个提交 / 112 处文件（新增 58 / 修改 54，`+16265 / −848`；在 `cf9e2e6` 的
+> 110 处 `+15414 / −844` 之上多了门文案修复 `fac40e3` 与复审修复轮 `584ca57`）
 > **关联**：`.scratch/dlc-fusion/PLAN.md`（移植判定）、`D2-RUNTIME-SPEC.md`（D2 实施 spec）、
 > `D2a-HANDOFF.md` / `D2b-HANDOFF.md` / `D4-HANDOFF.md`（逐片断点）、
-> [`docs/modding/PORT-STATUS.md`](modding/PORT-STATUS.md)（§六/§七/§八 回写）、
+> [`docs/modding/PORT-STATUS.md`](modding/PORT-STATUS.md)（§六/§七/§八/§八之二 回写）、
 > 前作报告（S1–S4 六片汇总，本报告不重复它的内容）
 
-> **范围口径（先读）**：本报告覆盖 `7575572..cf9e2e6` 这 15 个提交（D1 → D4 → 盲审修复 →
-> 崩溃修复 → flake）。分支相对 `main` 的**累计**面更大——`git diff main...HEAD` 是
-> **178 处文件 / 131 新增 47 修改 / `+36064 −987`**，其中 S1–S4 六片已在 2026-10-13 的前作
+> **范围口径（先读）**：本报告覆盖 `7575572..584ca57` 这 19 个提交（D1 → D4 → 盲审修复 →
+> 崩溃修复 → flake → 门文案修复 → 复审修复轮）。分支相对 `main` 的**累计**面更大——
+> `git diff main...HEAD` 是 **178 处文件 / 131 新增 47 修改 / `+36064 −987`**，其中 S1–S4 六片已在 2026-10-13 的前作
 > 报告里逐文件写过，本报告只列累计数字、不重复逐文件说明。
 
 ## 一、核心特性
@@ -53,16 +54,20 @@ S1–S4 已经把 MOD 中心（角色资源）与 workers 子进程底座搬进�
 
 ### 规模
 
-| 面 | 文件数 | 增删（本片 `7575572...HEAD`） |
+| 面 | 文件数 | 增删（本片 `7575572...HEAD`，HEAD=`584ca57`） |
 |---|---|---|
 | `docs/plugin-*/`（D1 同步的 28 篇） | 28 | `+4873 / −737` |
-| 其他文档（`docs/INDEX.md`、`docs/ONEDIR_PACKAGING.md`、`docs/modding/*`） | 13 | `+557 / −51` |
-| `pet/`（实现） | 39 | `+4723 / −44` |
-| `scripts/`（打包入口与门） | 5 | `+682 / −0` |
+| 其他文档（`docs/INDEX.md`、`docs/ONEDIR_PACKAGING.md`、`docs/modding/*`、本报告） | 14 | `+1136 / −53` |
+| `pet/`（实现） | 39 | `+4805 / −46` |
+| `scripts/`（打包入口与门） | 5 | `+692 / −0` |
 | `packaging/`（冻结入口分流） | 2 | `+31 / −0` |
-| `tests/` | 22 | `+4533 / −6` |
+| `tests/` | 23 | `+4713 / −6` |
 | `examples/mods/README.md` | 1 | `+15 / −6` |
-| **合计** | **110**（56 新增 / 54 修改） | **`+15414 / −844`** |
+| **合计** | **112**（58 新增 / 54 修改） | **`+16265 / −848`** |
+
+（上表按 `git diff --numstat 7575572...584ca57` 分面汇总；`cf9e2e6` 时点是 110 处 /
+`+15414 −844`，之后多了门文案修复 `fac40e3` 与复审修复轮 `584ca57` 这两笔。本报告自身
+也在"其他文档"这一行里，所以它越写越长时这行的数字会跟着长——这不是回归。）
 
 **分支相对 `main` 的累计**：178 处文件（131 新增 / 47 修改）、`+36064 / −987`
 （含 S1–S4，见前作报告）。**落地形式**：`git diff main...HEAD --numstat`。
@@ -183,6 +188,20 @@ S1–S4 已经把 MOD 中心（角色资源）与 workers 子进程底座搬进�
 | `tests/conftest.py` | `+12` | 逐测试收口 `WorkerSupervisor`（登记册范式，同 `AgentLinkManager`/`OverlayShell`/`MovieLibrary`）。`ProactiveScreenWatcher(execution="worker")` 构造期就 `apply_config` 起真 worker 子进程；只验路由/编解码的用例随后把它塞给替身适配器、从不 `shutdown()`，于是「handshaking + 活子进程 + 活动的 `_io_timer`(50ms)/`_handshake_timer`」跨用例存活十几例，被 GC 时的销毁落在后续用例的事件循环里 ⇒ Qt Windows 事件分发器的 QTimer 登记表项悬空、WM_TIMER 投递给已销毁对象 ⇒ 原生访问违规（崩点随套件进度漂移） |
 | `tests/test_overlay_app_hosts.py` | `+7 / −2` | `test_show_balance_uses_overlay_host` 的余额气泡断言从"一轮 `processEvents`"改成有界轮询（2 s 宽预算）。全量高负载下 `singleShot` 一轮派不完（61 分钟全量里实测红过一次，隔离与文件内均绿）；按 `PR-MERGE-LESSONS` 的时序测试纪律修 |
 
+### H. 复审修复轮（`584ca57`，9 文件 `+277 / −5`）
+
+对 §F 那批的**复审**又提了三条（N1/N2/N3）与一处 M3 漏改。N1/N2 是**同一处代码**（M2 的
+"装回"）在两段式不同阶段上的两种伤害，N3 是 m5 那条修复的收口缺口（下表的"为什么"里给了
+每条一句话）。
+
+| 编号 | 文件（增删） | 改了什么 / 为什么 |
+|---|---|---|
+| N1 重试阶梯被自己挡死 | `pet/feature_management.py`（与 N2 同文件，合计 `+47 / −1`）、`tests/test_feature_apply_retry_ladder.py` 新增 `+117` | 第二段失败时把那**当前落盘**的版本装回宿主（M2）会重新占上本进程的版本 pin，而控制器的重试阶梯恰好要在**已交还**状态下才走得通——重试被自己挡在 `version_in_use` 上（`feature_package_transactions.py:838-845`），重试到超时也解不开（挡路的不是别的程序，是这只桌宠自己）。改法：`submit("apply")`（只有控制器重试走这条入口）先重新交还再进事务（`_rearm_apply`），并照旧置 `_released_for_apply` 让这一趟再失败时还能装回。装回那一半行为不变 |
+| N2 接受后装回 = 把宿主打成 fault | 同上 | 装回只覆盖"接受前失败"：事务在 `state_pending` 之后失败时落盘的 active 已指向候选版本，装回走 `load_pending` 的启动确认路，而本进程不是启动方（`startup_permit` 以 `not_awaiting_startup` 拒绝）⇒ 变成一次带假理由的 `host.fault("startup_load_failed")`。改法：只在事务**未被接受**时装回（`_transaction_accepted` 读 `store.read()` 的 `pending_transaction`，唯一权威；没干净读出来按"已接受"处理）。用 `store.read()` 而不是 `inspect()`：后者会把"状态没读出来"一并报成 `pending_transaction is None`，方向正好相反 |
+| N3 退出收口补拉待办的 start | `pet/workers/supervisor.py` `+11 / −2`、`pet/workers/proactive_screen_adapter.py` `+11`、`tests/test_proactive_worker_adapter.py` `+37` | "待补拉"只在 `ProactiveScreenAdapter.stop()` 里作废，而退出收口两条路径（`finish_app_shutdown` / `_shutdown_live_for_tests`）直接调 `supervisor.stop()`：进程停定后适配器照常补拉，在整只桌宠正在退出的当口又拉起一个 worker 子进程。改法：作废挂在 supervisor 的通知上（新增 `stop_requested` 信号，在重入闸**之前**广播，重入那次调用同样要作废），退出收口对每个 supervisor 一律调一次 `stop()`（本身幂等） |
+| M3 漏改作者面文案 | `docs/modding/README.md` `+3 / −2`、`tests/test_feature_packaging_wiring.py` `+10` | README 仍写着"清单 + 验签 + 装前子进程预检"与"宿主按完整验签链重新回答"，改成与门一致的口径；守卫扩到这份 README（定向规则：只钉作者面 README，`package_trust` 内部链与 `PORT-STATUS` 里描述那条链自己做什么的"验签/指纹对账"措辞不动） |
+| N4 作者文档一句 | `docs/modding/AUTHORING-HANDBOOK.md` `+4`、`docs/modding/PORT-STATUS.md` `+20` | 补"发布根里每个 owner 只放一种形态"（`build_mod_example.py` 的标准产出是目录 + 同名 ZIP，两份同放会被判 `bundle_duplicate_id` 并在复制之前中止构建，实测 rc=1 且文本模式本轮已能打出原因——`fac40e3`）；PORT-STATUS §八 补"八之二"修复轮回写与 N4/N5/N6 缓做登记 |
+
 ### 未改动（看起来相关但故意没动）
 
 | 文件 | 为什么不动 |
@@ -296,6 +315,21 @@ S1–S4 已经把 MOD 中心（角色资源）与 workers 子进程底座搬进�
   （含只跑桌宠、不用 MOD 中心的用户）零成本。
 - **`tests/conftest.py` 那 12 行**与 `test_overlay_app_hosts.py` 的轮询改动：测试期收口，
   `pet/` 运行期零。
+
+**复审修复轮新增路径的实测**（方法同 §四 开头；脚本 `.scratch/dlc-fusion/probe_perf_round.py`
+与 `probe_read_cost.py`，真事务层 + 真宿主 + 真控制器）：
+
+| 新增路径 | 触发时机（频率） | 实测（样本量） |
+|---|---|---|
+| `_sync_host` → `_transaction_accepted()` | **只在**"第一段已交还 + 第二段非 settled"这条失败路径上；成功路径与稳态一次都不问 | `store.read()` **14.9 ms/次**（300 次平均；含 install-state 读 + state 共享锁）。对照 `service.inspect()` 19.0 ms/次（还多一次 journal 目录枚举，且会把"没读出来"报成 `pending_transaction is None`）。GUI 线程一次调用，无新增线程/网络/新进程 |
+| `submit("apply")` → `_rearm_apply` → `_release_host` | 只在控制器的重试阶梯上（`_retry_apply` 最多 5 次，delay 100/250/500/1000/2000 ms） | 复用既有 `release()`（关 host 绑定 + 放本进程租约），零新增系统调用；端到端实测"第一段失败 → 重试 → 删除完成" **1106 ms**（第一段 399 ms、重试段 707 ms，含 100 ms 起始延迟），删除成功 |
+| `WorkerSupervisor.stop_requested.emit()` | 每次 `stop()`（含 STOPPING 期间的重入）+ 退出收口对每个 supervisor 一次 | **1.81 µs/次**（10000 次平均，1 个订阅者）；无新系统调用。退出收口是进程级一次，且 `finish_app_shutdown` 对已在 STOPPING 的 supervisor 这次调用本身就是幂等早退 |
+| 稳态 | `enable` + `disable` 一次往返（不经过任何失败路径） | 805 / 818 / 924 ms（3 次），与本轮改动前同数量级；本轮新增判据一次都不跑 |
+
+- **内存**：无新增缓存/容器；新增的只有 `pet/feature_management.py` 的一个模块级 `frozenset`
+  与一个 Qt 信号（`stop_requested`，常量级）。
+- **不经过就不付**：`feature_package_transactions.py` 一个字没改；`mod_center_controller.py`
+  没改（重试阶梯原样，只是现在能真正跑通）。
 
 ## 五、实机运行记录
 
@@ -436,7 +470,7 @@ Segmentation fault    pytest exit=139（无汇总行）
 [`PORT-STATUS.md` §八](modding/PORT-STATUS.md) 记录的崩点一致。收口后同一条命令 4/4 全绿。
 崩溃日志留在 `.scratch/pr-report-metrics/_crash_repro.log`；跑完检查无残留 `--worker` 进程（0 个）。
 
-### 5.5 本轮写报告时**新发现**的一个缺陷（未修，登记在 §七）
+### 5.5 写报告时**新发现**的一个缺陷（已修：行为那一半 `fac40e3`、文档那一半 `584ca57`）
 
 门的**人类可读输出**丢掉了包根级原因：`--bundle-root` 的 `bundle_empty` /
 `bundle_stray_entry` / `bundle_duplicate_id` 只在 `--json` 分支出现
@@ -461,7 +495,9 @@ problems= ['demo.hello-local 在包根里有 2 份（bundle_duplicate_id）：he
 即：**退出码是对的（1）、拒绝是对的（m3 的设计如此）、但用户看不到原因**，而 FAIL 那句话还
 明确指着不存在的「问题」行。现有用例只覆盖 `--json`
 （`tests/test_feature_package_gate.py:182/200/214` 都走 `_json_run`），所以全量套件全绿也抓不到。
-本报告只登记，不改代码。
+**已修（`fac40e3`）**：文本模式把包根级原因一并打出（同一目录现在第一行就是"包根问题：
+demo.hello-local 在包根里有 2 份（bundle_duplicate_id）…"，rc 仍为 1），并补了文本模式的
+包根拒绝用例；作者文档那一句见 §7.1。
 
 ### 5.6 未验项（如实登记，不含"应该没问题"）
 
@@ -474,6 +510,25 @@ problems= ['demo.hello-local 在包根里有 2 份（bundle_duplicate_id）：he
 | **人工点按**（真机点"停用/删除/回滚"的三键询问、真机隐藏→恢复、设置页「扩展管理」逐步点按） | 本轮全程 offscreen；草稿门与三键询问由 monkeypatch 驱动，真机交互未点过 |
 | **全量套件复跑** | 61 分钟 × 单机（§六 记录的是分支交卷口径），本轮改动只新增一份文档 |
 | **m1 / m2 / m4** | 缓做项，见 §七 |
+
+### 5.7 复审修复轮（`584ca57`）：每条的红 → 绿
+
+注入方式与 §5.3 同：把该修复那一笔的对应文件**反向应用**
+（`git stash push -- <path>`），跑守卫，再 `git stash pop` 还原；还原后 `git status` 只剩
+本轮该有的改动。
+
+| 修复 | 注入 | 注入后（红，原始断言） | 还原后（绿） |
+|---|---|---|---|
+| N1 重试阶梯 | `git stash push -- pet/feature_management.py` | `test_feature_apply_retry_ladder.py` **1 failed / 1 passed**：`assert '1.0.0' is None`（`Inspection(status='disabled', revision=6, active='1.0.0', pending_transaction='tx-5122…')`——第一段失败后重试自己把事务接受又卡在 `version_in_use`，删除永远做不完） | 该文件 `2 passed in 5.57s` |
+| N2 接受后装回 | 同上（同一文件） | 同文件**另一条**：`AssertionError: OperationResult(status='recovery_required', …, reason='startup_load_failed')` / `assert 'recovery_required' == 'awaiting_release'`（宿主被装回打成 fault） | 同上 |
+| N3 退出收口 | `git stash push -- pet/workers/supervisor.py pet/workers/proactive_screen_adapter.py` | `test_proactive_worker_adapter.py -k exit_drain` **2 failed**（两条参数各自失败，原始断言 `assert 'ready' == 'stopped'`——收口之后真的又拉起了一个 worker 并完成握手） | `2 passed in 2.82s` |
+| M3 补漏 | `git stash push -- docs/modding/README.md` | `test_feature_packaging_wiring.py -k never_says_the_chain_verifies` **1 failed**（README 里"验签"仍在） | 整文件 `35 passed in 3.93s` |
+
+**真链路证据（不是 mock）**：`test_feature_apply_retry_ladder.py` 走的是
+`scripts.build_mod_example` 真构建的示例包 + `DialogModHost`/`LocalFeatureRuntime` 真宿主 +
+`ModCenterController` 真队列 + `FeaturePackageTransactionService` 真事务层（既有那两条用例
+把 `service.apply` 换掉，测不到这两条）。N3 那条起的是真 Python 子进程（慢退 worker 脚本）
+跑真关闭阶梯。
 
 ## 六、测试与验证
 
@@ -488,7 +543,13 @@ problems= ['demo.hello-local 在包根里有 2 份（bundle_duplicate_id）：he
 | 崩溃归因（反向验证） | 撤掉 conftest 收口后跑同一组 | `exit=139`、原生访问违规、崩点第 99 例、无汇总行 |
 | 端到端（实机，非 CI） | §5.1 的 `_d3_e2e.py`；§5.2 的打包入口 + `--check` + 门 | `== OK ==`；门正路径 rc=0、三条负路径 rc=1/1/2 |
 | 架构红线 | `tests/test_architecture.py`（本片给零 Qt 名单 +25 行登记） | `15 passed in 3.62s` |
-| 全量 | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | **`7739 passed / 18 skipped`（分支交卷口径）**。口径说明：本分支自己的全量记录（D2 片 1 那次是 `7522 passed, 18 skipped`，59 分 08 秒，日志 `.scratch/dlc-fusion/_d2a_fullsuite.log`）加上 D3/D4 与修复批新增的用例数；**本轮写报告时未复跑**（61 分钟 × 单机，且本轮改动只新增一份文档）。其中 61 分钟那一次在 `tests/test_overlay_app_hosts.py::test_show_balance_uses_overlay_host` 红过一回，已按轮询宽预算修（`cf9e2e6`），隔离/文件内跑均绿 |
+| 复审修复轮：静态检查 | `python -m ruff check pet tests scripts packaging` | `All checks passed!` |
+| 复审修复轮：新增守卫 | `pytest -q tests/test_feature_apply_retry_ladder.py` | `2 passed in 5.57s` |
+| 复审修复轮：`feature_*` 族（12 文件） | `pytest -q tests/test_feature_{apply_retry_ladder,management,package_transactions,package_startup,packaging_wiring,package_gate,package_import_zip,install_state,state_io,version_lease,gating,package_preflight}.py` | `357 passed, 1 skipped in 195.58s`（1 skipped 是本机无 LPAC 沙箱那条既有 fail-closed 守卫） |
+| 复审修复轮：`mod_center_*` + `workers_*` 族（9 文件） | `pytest -q tests/test_mod_center_{contracts,controller,end_to_end,routing,ui}.py tests/test_workers_{entry,lifecycle,protocol,source}.py` | `158 passed, 1 skipped in 47.60s` |
+| 复审修复轮：proactive 族 | `pytest -q tests/test_proactive_worker_adapter.py` / `pytest -q tests/test_proactive.py tests/test_proactive_worker.py tests/test_proactive_worker_adapter.py` / `pytest -q tests/test_proactive_memory_concurrency.py tests/test_overlay_chat_proactive.py` | `37 passed in 13.82s` / `127 passed in 28.58s` / `51 passed in 11.63s` |
+| 复审修复轮：断言有效性（注入） | 见 §5.7（4 组注入，分别 1F/1F/2F/1F） | 每组注入都精确命中对应守卫 |
+| 全量 | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | **`7739 passed / 18 skipped`（分支交卷口径，未变）**。口径说明：本分支自己的全量记录（D2 片 1 那次是 `7522 passed, 18 skipped`，59 分 08 秒，日志 `.scratch/dlc-fusion/_d2a_fullsuite.log`）加上 D3/D4 与两个修复批新增的用例数；**复审修复轮未复跑全量**（61 分钟 × 单机，本轮按"相关族全绿"口径收口：上面三行共 596 passed / 2 skipped）。其中 61 分钟那一次在 `tests/test_overlay_app_hosts.py::test_show_balance_uses_overlay_host` 红过一回，已按轮询宽预算修（`cf9e2e6`），隔离/文件内跑均绿 |
 
 **跨平台**：本片无新增平台分支；`platform=sys.platform` 沿既有验签策略，`--target-platform`
 把产物平台显式传给门（三端脚本各自传自己的）。新代码零 Qt 名单已登记（`feature_policy.py`
@@ -500,11 +561,22 @@ problems= ['demo.hello-local 在包根里有 2 份（bundle_duplicate_id）：he
 
 `scripts/verify_feature_package.py` 的文本输出丢失包根级原因（`bundle_empty` /
 `bundle_stray_entry` / `bundle_duplicate_id`），FAIL 提示指向不存在的「问题」行；退出码正确。
+**已修（`fac40e3`）**：文本模式把包根级原因一并打出，并补了文本模式的包根拒绝用例。
 顺带的事实：`build_mod_example.py` 的默认产出（同名目录 + ZIP 在同一输出目录）直接当包根喂给
 门会触发 `bundle_duplicate_id`（这是 m3 的设计意图），但作者文档没写"包根每个 owner 只放一份"。
-**修法建议（未实施）**：文本分支把包根级 `problems` 一并打印（或让 `format_human` 收一个
-bundle 段），并给作者文档补一句；用例补一条**文本模式**的包根拒绝（现有三条都走 `--json`，
-所以全绿套件抓不到）。
+**文档这一半已补（`584ca57`）**：`docs/modding/AUTHORING-HANDBOOK.md` 加"发布根里每个 owner
+只放一种形态"，写明门在复制之前就中止构建。实测（本机）：
+
+```
+$ python -X utf8 scripts/build_mod_example.py examples/mods/hello-local .scratch/probe-bundle/release/hello-local
+created: …\release\hello-local
+ZIP: …\release\hello-local.zip          # 打包入口的标准产出就是两份
+
+$ python -X utf8 scripts/verify_feature_package.py --bundle-root .scratch/probe-bundle/release ; echo rc=$?
+包根问题：demo.hello-local 在包根里有 2 份（bundle_duplicate_id）：hello-local, hello-local.zip
+          ——同一个 owner 两份包，随包携带时以谁为准说不清
+FAIL: 有包没通过门——构建/发布中止…                  rc=1
+```
 
 ### 7.2 PORT-STATUS §八 的缓做项（本轮不改，登记在此）
 
@@ -513,6 +585,11 @@ bundle 段），并给作者文档补一句；用例补一条**文本模式**的
 | m1 | 预检回执没有 nonce，理论上可被同名旧文件顶替 | 回执路径在每次新建的私有临时目录里（`tempfile.TemporaryDirectory`），顶替要先拿到那个目录；收益低于改动面（回执 schema 升版）。归属：探针硬化片 |
 | m2 | 预检不可取消（父侧不持有句柄），只能等 `timeout` | 30 s 单次上限已经有界；取消要父侧留句柄 + 事务层接口，与"装前预检要不要并发"一起做。归属：Phase 4B-5 |
 | m4 | 构建机在预检阶段执行包代码（`create_host()`），构建机上没有告警/文档 | 门与产品口径一致地**不声称隔离**（`pet/feature_package_preflight.py` 模块 docstring 已写死"不是沙箱"）；缺的是构建脚本侧一句告警。归属：构建脚本文案批次 |
+| N4 的行为那一半 | 同名目录 + ZIP 同放一个发布根被判 `bundle_duplicate_id` | 判据本身是对的（m3 的设计意图），所以行为不改；作者文档一句已补（§7.1）。回归面：构建机若把打包产物的两份都拷进发布根，会看到 rc=1 与包根原因（`fac40e3` 起文本模式可见） |
+| N5 | 补拉会让 `state_changed` 乱序（迟到事件夹在 `stopping → stopped → starting → ready` 之间） | 订阅者读的是快照（`status_snapshot()` / `state`），乱序不影响它们；要修得给补拉一条"代次"语义（迟到的旧代次事件直接丢），属状态机精修。归属：proactive worker 状态机片 |
+| N6 | B1 的守卫在**源码解释器**下跑入口，覆盖不到 windowed 冻结包的 stdio | 需要一份真冻结产物（`build_onedir` 的 windowed exe）才能测，本机没有随包分发的探针 bundle。归属：Phase 4B-5 冻结构建片（与 host-worker 真实冻结构建同批），已同时登记在 PORT-STATUS §八之二 |
+
+完整的编号对应与红→绿证据见 `docs/modding/PORT-STATUS.md` §八（首轮）与 §八之二（复审轮）。
 
 ### 7.3 未做的片与边界
 
