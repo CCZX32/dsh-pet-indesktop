@@ -134,13 +134,15 @@ _FORMAT_VERDICT_TTL_S = 900.0
 # 另外补了复制会话与 D3D11 侧要用的几个。
 #
 # 字段一律用固定宽度类型，不用 wintypes 别名：wintypes.DWORD/LONG 是
-# c_ulong/c_long，在非 Windows 上是 8 字节；c_wchar 在非 Windows 上是 4
-# 字节——结构体尺寸会随宿主平台漂移，ABI 契约测试（tests/
-# test_screen_capture_hdr_capture.py）在非 Windows CI 上就会误报。
-# Win32 ABI 的宽度是死的，跟宿主平台无关。
+# c_ulong/c_long，在非 Windows 上是 8 字节；wintypes.BOOL 在 Linux 上是 8
+# 字节（CI 实测）；c_wchar 在非 Windows 上是 4 字节——结构体尺寸会随宿主
+# 平台漂移，ABI 契约测试（tests/test_screen_capture_hdr_capture.py）在非
+# Windows CI 上就会误报。Win32 ABI 的宽度是死的，跟宿主平台无关。
 
 _DWORD = ctypes.c_uint32
 _LONG = ctypes.c_int32
+#: Win32 BOOL 固定 4 字节（wintypes.BOOL 在 Linux 上是 8）。
+_BOOL = ctypes.c_int32
 #: Win32 WCHAR 固定 2 字节；ctypes.c_wchar 在非 Windows 上是 4 字节。
 _WCHAR = ctypes.c_uint16
 
@@ -203,7 +205,7 @@ class _PATH_TARGET_INFO(ctypes.Structure):
         ("scaling", ctypes.c_uint32),
         ("refreshRate", _RATIONAL),
         ("scanLineOrdering", ctypes.c_uint32),
-        ("targetAvailable", wintypes.BOOL),
+        ("targetAvailable", _BOOL),
         ("statusFlags", ctypes.c_uint32),
     ]
 
@@ -280,7 +282,7 @@ class _DXGI_OUTPUT_DESC(ctypes.Structure):
     _fields_ = [
         ("DeviceName", _WCHAR * 32),
         ("DesktopCoordinates", _RECT),
-        ("AttachedToDesktop", wintypes.BOOL),
+        ("AttachedToDesktop", _BOOL),
         ("Rotation", ctypes.c_uint32),
         ("Monitor", wintypes.HANDLE),
     ]
@@ -290,7 +292,7 @@ class _DXGI_OUTPUT_DESC1(ctypes.Structure):
     _fields_ = [
         ("DeviceName", _WCHAR * 32),
         ("DesktopCoordinates", _RECT),
-        ("AttachedToDesktop", wintypes.BOOL),
+        ("AttachedToDesktop", _BOOL),
         ("Rotation", ctypes.c_uint32),
         ("Monitor", wintypes.HANDLE),
         ("BitsPerColor", ctypes.c_uint32),
@@ -306,7 +308,7 @@ class _DXGI_OUTPUT_DESC1(ctypes.Structure):
 
 
 class _OUTDUPL_POINTER_POSITION(ctypes.Structure):
-    _fields_ = [("Position", _POINT), ("Visible", wintypes.BOOL)]
+    _fields_ = [("Position", _POINT), ("Visible", _BOOL)]
 
 
 class _OUTDUPL_FRAME_INFO(ctypes.Structure):
@@ -319,8 +321,8 @@ class _OUTDUPL_FRAME_INFO(ctypes.Structure):
         ("LastPresentTime", ctypes.c_int64),
         ("LastMouseUpdateTime", ctypes.c_int64),
         ("AccumulatedFrames", ctypes.c_uint32),
-        ("RectsCoalesced", wintypes.BOOL),
-        ("ProtectedContentMaskedOut", wintypes.BOOL),
+        ("RectsCoalesced", _BOOL),
+        ("ProtectedContentMaskedOut", _BOOL),
         ("PointerPosition", _OUTDUPL_POINTER_POSITION),
         ("TotalMetadataBufferSize", ctypes.c_uint32),
         ("PointerShapeBufferSize", ctypes.c_uint32),
