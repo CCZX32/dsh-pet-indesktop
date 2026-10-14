@@ -15,9 +15,19 @@ from types import MappingProxyType
 SCREEN_FEATURE_ID = "official.screen-understanding"
 AI_FEATURE_ID = "official.ai-chat"
 
-_FEATURE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+#: ID 的**规范形**。这个串会变成 ``feature-data/<id>/`` 与 ``plugins/<id>/`` 下的目录名，
+#: 所以"另一个拼法"必须被判成非法，而不是当成另一个 owner：
+#:
+#: * 只允许小写——NTFS 不区分大小写，``Official.Screen-Understanding`` 与
+#:   ``official.screen-understanding`` 是**同一个目录**，放进来就能绕过官方闭集；
+#: * 禁末尾 ``.`` / ``-``——Win32 折叠目录名的末尾点，``foo.`` 与 ``foo`` 同目录；
+#: * 禁空段（``..``）与设备名首段（``nul`` / ``con.package`` 指向设备，不是目录）。
+_FEATURE_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
 _FACTORY_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}(?:/[A-Za-z0-9_.-]{1,128})?\Z")
 _EXECUTION_KINDS = frozenset({"host-only", "host-worker"})
+#: Windows 设备名（与 ``plugins/package_trust._DEVICE`` / ``mod_management._DEVICE_ID``
+#: 同一份判据）：按首个 ``.`` 之前的段比，因为 ``nul.txt`` 同样是设备。
+_DEVICE_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])\Z", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -45,7 +55,17 @@ OfficialFeature = FeatureRegistration
 
 
 def is_valid_feature_id(feature_id: object) -> bool:
-    return isinstance(feature_id, str) and bool(_FEATURE_ID.fullmatch(feature_id)) and ".." not in feature_id
+    """ID 是否处于**规范形**（唯一一处判据，见 :data:`_FEATURE_ID`）。
+
+    收口的理由：这个串同时是目录名（``feature-data/<id>/``、``plugins/<id>/``）与官方
+    闭集的查表键。NTFS 不分大小写、Win32 折叠末尾点，所以"看着像另一个 ID"的拼法在
+    文件系统上落进同一个目录——一处放松就等于让两个 owner 共用一份数据目录。
+    """
+    if not isinstance(feature_id, str) or not _FEATURE_ID.fullmatch(feature_id):
+        return False
+    if ".." in feature_id or feature_id.endswith((".", "-")):
+        return False
+    return not _DEVICE_NAME.fullmatch(feature_id.split(".", 1)[0])
 
 
 def is_valid_factory_id(factory: object) -> bool:
@@ -68,7 +88,10 @@ OFFICIAL_FEATURES = MappingProxyType(
 
 
 def official_feature(feature_id: str) -> FeatureRegistration:
-    if not isinstance(feature_id, str) or feature_id not in OFFICIAL_FEATURES:
+    # 闭集按**规范形**比较：非规范形（大小写 / 末尾点 / 设备名）先被 ID 校验拒掉，
+    # 再查表——否则 `Official.Screen-Understanding` 在 NTFS 上会与官方
+    # `official.screen-understanding` 落进同一个数据目录，闭集就白设了。
+    if not is_valid_feature_id(feature_id) or feature_id not in OFFICIAL_FEATURES:
         raise ValueError("unsupported official feature")
     return OFFICIAL_FEATURES[feature_id]
 

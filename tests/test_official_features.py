@@ -49,10 +49,32 @@ def test_an_unknown_or_malformed_owner_is_refused():
         ("x" * 129, False),
         (None, False),
         (7, False),
+        # 规范形收紧（ID 会变成 feature-data/<id>/ 与 plugins/<id>/ 的**目录名**）：
+        # NTFS 不区分大小写、Win32 折叠末尾点/空格，所以"同目录的另一种拼法"不许当
+        # 另一个 ID 用——它会绕过官方闭集，或让两个 owner 共用一份数据目录。
+        ("Official.Screen-Understanding", False),
+        ("official.Screen-understanding", False),
+        ("official.screen-understanding.", False),
+        ("official.screen-understanding-", False),
+        # Windows 设备名：feature-data\nul 指向 NUL 设备，不是目录。
+        ("nul", False),
+        ("con.package", False),
+        ("COM1.tool", False),
+        ("lpt9", False),
     ],
 )
 def test_feature_id_validation(value, expected):
     assert of.is_valid_feature_id(value) is expected
+
+
+def test_a_case_or_trailing_dot_variant_cannot_shadow_the_official_registry():
+    """官方闭集按**规范形**比较：变体先被 ID 校验拒掉，轮不到"查表查不到就放行"。"""
+    for variant in ("Official.Screen-Understanding", "official.screen-understanding.", "OFFICIAL.AI-CHAT"):
+        assert of.is_valid_feature_id(variant) is False
+        with pytest.raises(ValueError, match="unsupported official feature"):
+            of.official_feature(variant)
+        with pytest.raises(ValueError, match="invalid feature"):
+            of.FeatureRegistration(variant, "a/v1", "host-only", frozenset())
 
 
 @pytest.mark.parametrize(

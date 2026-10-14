@@ -11,8 +11,9 @@
   打包脚本、构建门共用一份）；上游那份取自 ``pet.feature_build_policy``（本仓库没有
   那个模块）。曾在这里抄过一份字面量，``tests/test_feature_packaging_wiring.py``
   的"不许有第二份定义"守卫现在钉住这件事；
-* **``--check`` 是发布前的真自检**：清单 + 验签 + **装前子进程预检**，判据与构建脚本
-  用的那道门是同一个（``scripts/verify_feature_package.py``）——自检不该是另一套结论；
+* **``--check`` 是发布前的真自检**：清单完整性 + 摘要校验 + **装前子进程预检**，判据与
+  构建脚本用的那道门是同一个（``scripts/verify_feature_package.py``）——自检不该是另一套
+  结论。本地包按显式用户信任校验，那道门**不做发布者认证**；
 * **打包期不静默**：源码树不合格、``host/`` 里有打不进包的文件、输出已存在，都在写任何
   字节之前报一句作者能照做的错（不给 traceback），而不是产出一个"看着装上了、缺东西"的包。
 
@@ -96,7 +97,7 @@ def _check_host_tree(source: Path) -> None:
 def build_example(source: Path, output: Path, *, worker_bundle: Path | None = None, worker_name: str = 'mod-echo.exe') -> Path:
     """把作者源码树打成包（目录 + 同名 ZIP），返回那个目录。
 
-    写完立刻在**进程内**过一遍路由与验签（快、零子进程）；更完整的自检（含子进程预检）
+    写完立刻在**进程内**过一遍路由与完整校验（快、零子进程）；更完整的自检（含子进程预检）
     在 :func:`main` 的 ``--check`` 与 ``scripts/verify_feature_package.py`` 那一道门里。
     """
     source, output = Path(source).resolve(strict=True), Path(output).absolute()
@@ -142,7 +143,7 @@ def build_example(source: Path, output: Path, *, worker_bundle: Path | None = No
 
 
 def check(package):
-    """进程内自检：路由 + 完整验签（不起子进程，也不执行包代码）。"""
+    """进程内自检：路由 + 完整校验（不起子进程，也不执行包代码）。"""
     from pet.local_package_intents import route_local_package
 
     package = Path(package).expanduser().absolute()
@@ -166,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('output', type=Path, nargs='?')
     parser.add_argument('--worker-bundle', type=Path, help="host-worker 包要随包携带的冻结 worker 目录")
     parser.add_argument('--worker-name', default='mod-echo.exe')
-    parser.add_argument('--check', action='store_true', help="只自检：清单 + 验签 + 装前子进程预检")
+    parser.add_argument('--check', action='store_true', help="只自检：清单完整性 + 摘要校验 + 装前子进程预检")
     args = parser.parse_args(argv)
     if args.check:
         from scripts.verify_feature_package import format_human

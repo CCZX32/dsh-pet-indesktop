@@ -145,10 +145,12 @@ python -X utf8 scripts/verify_feature_package.py --bundle-root .scratch/my-mods/
 ```
 
 打包产出**目录 + 同名 ZIP**两份，装配链把它们当同一份东西（ZIP 会按同一套边界解包再验）。
-`--check` 与 `verify_feature_package.py` 是同一套判据，做三件事：**清单**（有界路由）、
-**验签**（结构 / Core·API·平台兼容 / 路径边界 / 逐文件摘要与指纹）、**装前子进程预检**
+`--check` 与 `verify_feature_package.py` 是同一套判据，做三件事：**清单完整性**（有界路由）、
+**摘要校验**（结构 / Core·API·平台兼容 / 路径边界 / 逐文件摘要与指纹）、**装前子进程预检**
 （另起一个进程把包装一次，读回 `create_host()` 的说法）。它只在"拒绝"方向有权威：说不行的
-就是不行，说行的那一半仍由宿主按完整验签链重新回答。
+就是不行，说行的那一半仍由宿主按同一套完整校验链重新回答。本地用户自选包按**显式用户
+信任**校验，这道门不做发布者认证：`manifest.sig` 存在也只被忽略（`signature_ignored` 告警，
+`trust_status` 是 `local_user`）。
 
 > 门的退出码就是它的结论：0 = 过，1 = 拒（原因码在 stdout/stderr 与 `--json` 里）。
 > `--target-platform` 是**目标平台**（默认本机）：构建脚本按产物平台传，为别的平台声明的包

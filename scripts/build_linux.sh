@@ -73,8 +73,9 @@ fi
 # **随包携带**的包根（作者用 scripts/build_mod_example.py 打出来的成品包：目录或 ZIP）。
 # 源目录先验一遍——坏包不该等 PyInstaller 跑完（甚至装到用户机器上）才说话；产物里那
 # 一份在下面的变体循环里再验一次（拷贝截断/漏件运行期看不出来）。判据只有一份，在
-# scripts/verify_feature_package.py（清单 + 验签 + 装前子进程预检）；--target-platform
-# 传**产物平台**，所以为别的平台声明的包在这里就会被点名拒绝。
+# scripts/verify_feature_package.py（清单完整性 + 摘要校验 + 装前子进程预检；本地包按
+# 显式用户信任校验，**不做发布者认证**——manifest.sig 被忽略时给 signature_ignored）；
+# --target-platform 传**产物平台**，所以为别的平台声明的包在这里就会被点名拒绝。
 if [[ -n "$FEATURE_PACKAGES" ]]; then
     if ! "$PYTHON_BIN" scripts/verify_feature_package.py --bundle-root "$FEATURE_PACKAGES" --target-platform linux; then
         echo "[features] 功能包没过门（原因见上面的 stderr），拒绝出包" >&2

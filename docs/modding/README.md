@@ -126,8 +126,10 @@ python scripts/build_mod_example.py <输出目录> --check                     #
 python scripts/verify_feature_package.py <包目录或 ZIP>                    # 同一道门，可批量/可 --json
 ```
 
-`--check` 与 `verify_feature_package.py` 是**同一套判据**：清单（有界路由）+ 验签
-（结构 / 兼容性 / 路径边界 / 逐文件摘要）+ **装前子进程预检**。`echo-worker` 那条
+`--check` 与 `verify_feature_package.py` 是**同一套判据**：清单完整性（有界路由）+ 摘要校验
+（结构 / 兼容性 / 路径边界 / 逐文件摘要）+ **装前子进程预检**。本地包走"显式用户信任"口径，
+这道门**不做发布者认证**——`manifest.sig` 存在也只被忽略（报告里给 `signature_ignored`
+告警，`trust_status` 如实写 `local_user`）。`echo-worker` 那条
 host-worker 路径需要冻结的 worker 可执行（`--worker-bundle`），本机不可验证。
 
 上表只覆盖 MOD 这一面。**要把作者的全部 phase（1 / 2 / 3A / 3B / 3C / 4A / 4B / 5A / 5B /

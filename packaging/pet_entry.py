@@ -33,6 +33,24 @@ if "--uninstall-cleanup" in sys.argv:
 
     sys.exit(uninstall_cleanup_main())
 
+if "--worker" in sys.argv:
+    # 子进程分流：冻结态 supervisor 用 `sys.executable --worker <id>` 起 worker
+    #（pet/workers/supervisor.py::_resolve_command），而冻结包里 PyInstaller 执行的是
+    # **本文件**——pet/__main__.py 那条分流根本不会跑。漏掉这一步的后果不是"少个功能"：
+    # 子进程会拉起整只桌宠（窗口/托盘/素材库/ffmpeg）并撞上主进程的单实例门，而 worker
+    # 存在的唯一理由就是不背桌面 UI 依赖。实现只有一份，转发给 pet/__main__.py。
+    from pet.__main__ import _run_worker, _worker_id
+
+    sys.exit(_run_worker(_worker_id(sys.argv)))
+
+if "--feature-package-probe" in sys.argv:
+    # 同一条纪律：装前预检子进程（pet/feature_package_preflight.probe_command 冻结态
+    # 正是 `<exe> --feature-package-probe <job.json>`）只读一个包、写一份回执，
+    # 结构上不该碰 QApplication。
+    from pet.__main__ import _run_feature_probe
+
+    sys.exit(_run_feature_probe())
+
 if "--settings" in sys.argv:
     # exe 自启动参数分流：设置页独立进程必须在 import pet.app 之前分流，否则子进程
     # 会把整个桌宠（素材库/ffmpeg/托盘/灵动岛）再拉一份，独立进程省内存的前提就没了。

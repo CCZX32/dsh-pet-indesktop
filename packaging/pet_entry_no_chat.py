@@ -13,6 +13,19 @@ if "--uninstall-cleanup" in sys.argv:
 
     sys.exit(uninstall_cleanup_main())
 
+if "--worker" in sys.argv:
+    # 同 pet_entry.py：worker / 预检子进程必须在 import pet.app 之前分流——冻结包里
+    # PyInstaller 执行的是本文件，pet/__main__.py 那条分流不会跑。
+    from pet.__main__ import _run_worker, _worker_id
+
+    sys.exit(_run_worker(_worker_id(sys.argv)))
+
+if "--feature-package-probe" in sys.argv:
+    # 同 pet_entry.py：装前预检子进程只读一个包、写一份回执，不建 QApplication。
+    from pet.__main__ import _run_feature_probe
+
+    sys.exit(_run_feature_probe())
+
 if "--settings" in sys.argv:
     # 同 pet_entry.py：--settings 必须在 import pet.app 之前分流到独立设置进程。
     # no-chat 变体里 pet.chat 被 excludes 剔除，_run_settings 会经 find_spec 探测

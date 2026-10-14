@@ -255,3 +255,39 @@ class TestDocsTellTheTruth:
     def test_implementation_plan_points_at_the_builder(self):
         text = HANDOFF_PLAN.read_text(encoding="utf-8")
         assert "scripts/build_mod_example.py` 都已存在" in text
+
+
+class TestTheChainDoesNotClaimPublisherAuthentication:
+    """本地包是**显式用户信任**（Phase 5A）：分发链的文字不许说自己在"验签"。
+
+    这条链（门 + 三端构建脚本 + 作者侧打包入口）对一份本地包做的是清单完整性、摘要校验
+    与装前预检；``manifest.sig`` 在本口径下被忽略。写成"验签"会让作者读成发布者已认证。
+    """
+
+    #: 门自己的那句话（构建脚本与作者入口都照抄它）。
+    CLAIM = "清单完整性 + 摘要校验 + 装前子进程预检"
+
+    def _chain(self) -> dict[str, Path]:
+        return {
+            "gate": GATE,
+            "builder": BUILDER,
+            "windows": WINDOWS_BUILD,
+            **{name: path for name, (path, _platform) in SHELL_BUILDS.items()},
+        }
+
+    def test_every_link_states_what_the_gate_really_does(self):
+        for name, path in self._chain().items():
+            # 强调标记（``**``）不算文案的一部分——判据是那句话本身在不在。
+            text = path.read_text(encoding="utf-8").replace("**", "")
+            assert self.CLAIM in text, name
+            assert "验签" not in text, f"{name} 仍在声称验签（本地口径不做发布者认证）"
+
+    def test_the_gate_reports_the_trust_path_and_the_ignored_signature(self):
+        text = GATE.read_text(encoding="utf-8")
+        assert "SIGNATURE_IGNORED" in text
+        assert "未做发布者认证" in text
+
+    def test_the_author_facing_docs_say_the_same(self):
+        for path in (MODDING_README, ROOT / "docs" / "modding" / "AUTHORING-HANDBOOK.md"):
+            text = path.read_text(encoding="utf-8")
+            assert "不做发布者认证" in text, path.name

@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
-"""功能扩展包的门：清单 + 验签 + 装前子进程预检（作者自检 / 构建 / 发布共用）。
+"""功能扩展包的门：清单完整性 + 摘要校验 + 装前子进程预检（作者自检 / 构建 / 发布共用）。
 
 **为什么需要这道门**：一份功能包坏掉的方式，产品在运行期大多**看不见**——少一个文件、
 摘要对不上、``create_host()`` 说的 owner 与清单不符，用户在 MOD 中心拿到的是"装不上"，
 而作者在打包机上什么都看不到。所以门做三件事，一件都不省：
 
-1. **清单**（有界路由）：读得出 id / version / platforms / execution_kind；
-2. **验签**（完整验签链）：结构、Core/API/平台兼容、路径边界、逐文件摘要与指纹、
-   祖先快照——目录与 ZIP 在这里归一成同一份已解包目录（``feature_package_files.stage``）；
+1. **清单完整性**（有界路由）：读得出 id / version / platforms / execution_kind；
+2. **摘要校验**（完整校验链）：结构、Core/API/平台兼容、路径边界、逐文件摘要与指纹、
+   祖先快照——目录与 ZIP 在这里归一成同一份已解包目录（``feature_package_files.stage``）。
+   这条链**不做发布者认证**：本地用户自选包走 Phase 5A 的"显式用户信任"口径，
+   ``manifest.sig`` 即使存在也只被**忽略**（报告里给 ``signature_ignored`` 告警，
+   不拒），``trust_status`` 如实写 ``local_user``；
 3. **装前子进程预检**（``pet.feature_package_preflight``）：在**另一个进程**里把包按
    同一份字节导入一次，读回 ``create_host()`` 说了什么。
 
 **边界（与产品口径一致，别读成沙箱）**：门的"通过"**不授权任何执行**，它只在"拒绝"
-方向有权威——说不行的就是不行，说行的那一半仍由宿主按完整验签链自己重新回答。子进程
-预检不声称任何隔离（同用户、同权限、同文件系统；超时只杀掉这一次直接起的进程）。
+方向有权威——说不行的就是不行，说行的那一半仍由宿主按同一套完整校验链自己重新回答
+（同样是显式用户信任，不是发布者认证）。子进程预检不声称任何隔离（同用户、同权限、
+同文件系统；超时只杀掉这一次直接起的进程）。
 
 **约束**：只读输入（一个字节都不写；ZIP 只在私有临时目录里解包），只 import 零 Qt 的
 产品模块（``pet/feature_policy`` / ``pet/local_package_intents`` /
@@ -59,12 +63,15 @@ REASONS = frozenset(
         "route_rejected",       # 有界清单读不出来（缺 manifest.json / 形状不合路由契约）
         "official_reserved",    # 官方保留 owner：本地包占不了这个名字
         "platform_mismatch",    # 清单声明的 platforms 不含目标平台
-        "verification_failed",  # 验签链拒：结构 / 兼容性 / 路径边界 / 摘要 / 指纹
+        "verification_failed",  # 校验链拒：结构 / 兼容性 / 路径边界 / 摘要 / 指纹
     }
 )
 
 #: 包根下什么都没找到时的问题码（构建脚本要能一眼看出"根给错了"）。
 BUNDLE_EMPTY = "bundle_empty"
+
+#: 告警（**不影响 ``ok``**）：门要如实说出来的事，但不是拒绝理由。
+SIGNATURE_IGNORED = "signature_ignored"
 
 
 # --------------------------------------------------------------------------- 单份包
@@ -72,6 +79,10 @@ BUNDLE_EMPTY = "bundle_empty"
 
 def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
     """验一份包（目录或 ZIP），返回体检报告 dict——**不抛异常**，结论都在返回值里。
+
+    报告的 ``trust_status`` 是**信任口径**（本地包恒为 ``local_user``：显式用户信任，
+    未做发布者认证），``warnings`` 是不构成拒绝的如实告知（见
+    :data:`SIGNATURE_IGNORED`）。
 
     预检那一环固定是生产那一份（``LocalPackageProbe``，30s 单次上限）：门与安装链要
     给出同一个结论，中间不该有第三份实现。
@@ -88,14 +99,16 @@ def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
         "execution_kind": None,
         "manifest_digest": None,
         "platforms": [],
+        "trust_status": None,
         "probe": None,
         "problems": [],
+        "warnings": [],
     }
     if not source.is_dir() and not source.is_file():
         report["reason"] = "source_missing"
         report["problems"].append("包不存在：既不是目录也不是 ZIP")
         return report
-    # 验签链要求**绝对路径**（relative root 会被它按"路径穿越"拒掉），而构建脚本与
+    # 校验链要求**绝对路径**（relative root 会被它按"路径穿越"拒掉），而构建脚本与
     # 作者文档里给的都是相对路径；在这里归一，报告里也统一写绝对路径。
     try:
         source = source.resolve(strict=True)
@@ -133,14 +146,21 @@ def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
     verifier = local_package_verifier(route.feature_id, platform=target_platform)
     try:
         # 解包目录要活到探针跑完（探针按 descriptor.root 重新验一遍）——所以整段
-        # "验签 + 预检"都在这个上下文里，ZIP 的临时解包目录不能被提前回收。
+        # "完整校验 + 预检"都在这个上下文里，ZIP 的临时解包目录不能被提前回收。
         with _staged_root(source) as root:
             try:
                 descriptor = verifier.verify(root)
             except (PackageVerificationError, OSError, ValueError) as error:
                 report["reason"] = "verification_failed"
-                report["problems"].append(f"验签链拒：{_bounded(error)}")
+                report["problems"].append(f"校验链拒：{_bounded(error)}")
                 return report
+            report["trust_status"] = descriptor.trust_status
+            if descriptor.signature is not None:
+                # 本地用户信任口径不做发布者认证：包里的 manifest.sig 被**忽略**（放行）。
+                # 静默忽略会让作者读成"我的签名生效了"，所以在这里如实说出来，但不拒。
+                report["warnings"].append(
+                    f"{SIGNATURE_IGNORED}: 包里有 manifest.sig，但本地用户信任口径不做发布者认证（签名被忽略）"
+                )
             try:
                 verdict = LocalPackageProbe().run(descriptor, verifier)
             except (OSError, RuntimeError, ValueError):  # 探针实现本身出错，不是包的结论
@@ -238,6 +258,9 @@ def format_human(report: dict) -> str:
             f" 声明平台 {','.join(sorted(report['platforms']))}"
         )
         lines.append(f"  清单摘要：sha256:{report['manifest_digest']}")
+    if report["trust_status"]:
+        # 口径要写在报告里：本地包是"用户明确信任"，门**没有**认证发布者。
+        lines.append(f"  信任口径：{report['trust_status']}（未做发布者认证）")
     probe = report["probe"]
     if probe is not None:
         if probe["ok"] and probe["metadata"] is not None:
@@ -249,6 +272,8 @@ def format_human(report: dict) -> str:
         else:
             lines.append(f"  装前预检：拒（{probe['reason'] or 'probe_failed'}）")
     lines.append(f"  结论：{'通过' if report['ok'] else '拒（' + str(report['reason']) + '）'}")
+    for warning in report["warnings"]:
+        lines.append(f"  告警：{warning}")
     for problem in report["problems"]:
         lines.append(f"  问题：{problem}")
     return "\n".join(lines)
@@ -261,8 +286,9 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(encoding="utf-8", errors="replace")
 
     parser = argparse.ArgumentParser(
-        description="校验功能扩展包（清单 + 验签 + 装前子进程预检）——作者自检与构建门共用",
-        epilog=f"原因码闭集：{', '.join(sorted(REASONS))}，加上探针的 probe_*",
+        description="校验功能扩展包（清单完整性 + 摘要校验 + 装前子进程预检）——作者自检与构建门共用",
+        epilog=f"原因码闭集：{', '.join(sorted(REASONS))}，加上探针的 probe_*；"
+               f"本地包按显式用户信任校验（不做发布者认证），签名被忽略时给 {SIGNATURE_IGNORED} 告警",
     )
     parser.add_argument("sources", nargs="*", type=Path, help="包目录或 ZIP（可多份）")
     parser.add_argument("--bundle-root", type=Path, default=None, help="包根：根下每一份候选包都验一遍")
@@ -300,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             print("\nFAIL: 有包没通过门——构建/发布中止（坏包在界面上多半看不出来，"
                   "装到用户机器上才知道）。逐条见上面的「问题」。", file=sys.stderr)
         else:
-            print(f"\nOK: {len(packages)} 份包全部通过（清单 + 验签 + 装前子进程预检）")
+            print(f"\nOK: {len(packages)} 份包全部通过（清单完整性 + 摘要校验 + 装前子进程预检）")
     return 0 if ok else 1
 
 

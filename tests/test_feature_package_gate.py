@@ -107,6 +107,33 @@ class TestAcceptance:
         assert result.returncode == 0
         assert OWNER in result.stdout
 
+    def test_the_report_says_which_trust_path_was_used(self, package):
+        """本地包走的是**显式用户信任**（Phase 5A）：门要说得出自己没做发布者认证。"""
+        built, _zip = package
+        report = _only(_json_run(str(built)))
+        assert report["trust_status"] == "local_user"
+        assert report["warnings"] == []
+
+    def test_an_ignored_signature_is_reported_not_swallowed(self, package):
+        """包里带了 ``manifest.sig`` 时不许静默忽略：本地口径照样放行，但要说出来。"""
+        built, _zip = package
+        (built / "manifest.sig").write_bytes(b"\x00" * 64)
+        report = _only(_json_run(str(built)))
+        assert report["ok"] is True
+        assert any("signature_ignored" in warning for warning in report["warnings"])
+        human = _run(str(built))
+        assert human.returncode == 0
+        assert "signature_ignored" in human.stdout
+
+    def test_the_human_report_does_not_claim_a_signature_check(self, package):
+        """门做的是清单完整性 / 摘要校验 / 预检——"验签"会让作者读成发布者已认证。"""
+        built, _zip = package
+        result = _run(str(built))
+        assert result.returncode == 0
+        assert "local_user" in result.stdout
+        assert "清单完整性 + 摘要校验 + 装前子进程预检" in result.stdout
+        assert "验签" not in result.stdout
+
     def test_relative_source_path_is_accepted(self, tmp_path):
         """作者文档与构建脚本给的都是**相对路径**（``.scratch/…``）；验签链要求绝对路径，
         门必须自己归一——否则门在真实用法下对每一份包都报"路径穿越"。"""

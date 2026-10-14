@@ -123,7 +123,9 @@ if ($nodeExe) {
 # scripts\build_mod_example.py 打出来的成品包：目录或 ZIP）。源目录先验一遍——坏包
 # 不该等 PyInstaller 跑完（甚至装到用户机器上）才说话；产物里那一份在下面再验一次
 # （拷贝截断/漏件同样致命：运行期看不出来，用户只会得到"装不上"）。
-# 判据只有一份，在 scripts\verify_feature_package.py（清单 + 验签 + 装前子进程预检）。
+# 判据只有一份，在 scripts\verify_feature_package.py（清单完整性 + 摘要校验 + 装前子进程预检）。
+# 本地用户自选包按**显式用户信任**校验——那道门不做发布者认证（manifest.sig 被忽略时给
+# signature_ignored 告警，trust_status 如实写 local_user）。
 # 不给这个开关就一个包都不带——产品侧读 <app>\features\ 的那条链（Setup 选装 / 便携）
 # 不在本轮范围，别把没带包的构建读成"功能扩展不可用"。
 if ($FeaturePackages) {

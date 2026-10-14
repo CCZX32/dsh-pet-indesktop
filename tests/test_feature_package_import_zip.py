@@ -26,6 +26,8 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QWidget
@@ -322,6 +324,53 @@ def test_a_zip_claiming_an_official_owner_is_refused(tmp_path):
         data_root = _data_root(tmp_path)
         assert not (data_root / "feature-data" / OFFICIAL_OWNER).exists()
         assert not (data_root / "plugins" / OFFICIAL_OWNER).exists()
+    finally:
+        center.close()
+
+
+def test_a_case_variant_of_an_official_owner_is_refused_at_the_route_layer(tmp_path):
+    """官方 ID 的**大小写/末尾点变体**不是"另一个 owner"：在 NTFS 上它们是同一个目录。
+
+    ``Official.Screen-Understanding`` 靠"查表查不到 + 旧校验只认 ASCII"就能当第三方
+    DLC 装进去，落点却是官方那份 ``feature-data/official.screen-understanding/``——
+    一个自选包因此拿到官方功能的用户数据根。判据在 ID 校验那一处（``is_valid_feature_id``
+    的规范形），路由层原样复用，所以这里断言的是**装不进去**，不是某句文案。
+    """
+    center = _center(tmp_path)
+    try:
+        variant = "Official.Screen-Understanding"
+        archive = _handmade_zip(
+            tmp_path,
+            "variant.zip",
+            {
+                "manifest.json": json.dumps(
+                    {
+                        "format_version": 2,
+                        "execution_kind": "host-only",
+                        "key_id": "local-user",
+                        "id": variant,
+                        "factory": "impostor/v1",
+                        "version": "1.0.0",
+                        "api_version": "1",
+                        "core_requires": ">=1.0.0,<6.0.0",
+                        "platforms": [sys.platform],
+                        "capabilities": ["menu.contribute"],
+                        "worker": None,
+                        "files": {"host/factory.py": {"sha256": "0" * 64, "size": 22}},
+                    }
+                ),
+                "host/factory.py": "def create_host():\n    return None\n",
+            },
+        )
+        with pytest.raises(PackageVerificationError):
+            route_local_package(archive)
+        assert center.runtime.route(archive) is None
+        assert center.runtime.extensions() == {}
+        assert center.controller.import_source(archive) is False
+        assert center.outcome.success is False
+        data_root = _data_root(tmp_path)
+        assert not (data_root / "feature-data" / variant).exists()
+        assert not (data_root / "plugins" / variant).exists()
     finally:
         center.close()
 
