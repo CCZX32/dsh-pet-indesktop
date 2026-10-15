@@ -7,7 +7,7 @@
 > 契约文本，只做两件事：改掉指向 DLC 分支才有的文件链接、按本仓库的落地现状写明
 > 「哪些已经能跑、哪些还没接」。**本仓库当前两条腿都在**：「角色资源」（一直可用）与
 > 「第三方本地功能扩展」（D2/D3 起可构建、导入、启停、卸载、重装；官方包 `official.*`
-> 安装链与 host-worker 真实冻结构建仍未落地）——请先读
+> 走 Core 自有链：识屏包 host-worker、聊天包 host-only，**与内置域并存**）——请先读
 > 下面的[「移植基线与现状」](#移植基线与现状2026-10-13)，再读各篇教程。
 >
 > ZIP 导入缺陷的处置口径见同一节（[§四](#四zip-导入探针缺陷2026-10-10--2026-10-13-收口口径)），
@@ -25,9 +25,9 @@
 
 > **角色资源包**：ZIP 与目录两条路都可用（`pet/mod_management.py::_materialize`）。
 > **功能扩展包（第三方本地包）**：ZIP 与目录都装得上（D2/D3）——显式用户信任 +
-> 装前子进程预检，导入后在「扩展管理」里启停；**官方包（`official.*`）**的安装链未落地，
-> 本地包声明官方 ID 会被点名拒绝（`pet/mod_center_controller.py::unsupported_package_message`），
-> 不是静默失败。
+> 装前子进程预检，导入后在「扩展管理」里启停；**官方包（`official.*`）**走 Core
+> 自有链（`attach_official`，不占本地导入路由），本地包声明官方 ID 会被点名拒绝
+> （`pet/mod_center_controller.py::unsupported_package_message`），不是静默失败。
 
 ## 二、我想做 MOD（作者）
 
@@ -92,7 +92,7 @@ MOD 中心**分片移植**，落地面如下——判定依据是分支上的六
 | 作者侧打包入口 + 发布前自检 | ✅ 已落地（D4）：构建入口产目录 + ZIP，自检走"清单完整性 + 摘要校验 + 装前子进程预检" | `scripts/build_mod_example.py`、`scripts/verify_feature_package.py` |
 | 随包携带功能包的构建门（三端两道门 + `<app>/features/`） | ✅ 接线已落地（D4）；**产品运行期还没有读那个目录的地方**（Setup 选装 / 便携未做） | `scripts/build_{onedir.ps1,linux.sh,macos.sh}`、`docs/ONEDIR_PACKAGING.md` |
 | 功能扩展宿主运行时（`pet.mod_api.v1` / `pet/feature_management.py` / `pet/local_package_intents.py`） | ✅ 已落地并已接入 MOD 中心（D2/D3） | `pet/feature_management.py`、`pet/mod_runtime.py`、`pet/mod_menu.py`、`pet/settings_mod_panel.py`、`pet/plugins/{feature_host,feature_packages,package_binding}.py` |
-| 官方功能包（`official.ai-chat` / `official.screen-understanding`）的安装链 | ❌ 未落地（官方 ID 在本地导入处按保留 ID 拒绝） | `pet/official_features.py`、`pet/mod_center_controller.py` |
+| 官方功能包（`official.screen-understanding` / `official.ai-chat`）的安装链 | ✅ **已落地**（Core 自有链 `attach_official` + `official_package_verifier`；识屏包 `bd3d10d` 前后，聊天包 DLC 第四片）：两个包都走真打包 → 清单完整性 + 摘要校验 + 装前子进程预检 → 真事务 → 真宿主 → 真菜单；官方 ID 在**本地**导入处仍按保留 ID 拒绝 | `pet/feature_management.py::attach_official`、`pet/official_features.py`、`scripts/build_{screen,ai_chat}_package.py` |
 | workers 子进程基础设施 | ✅ 已落地 | `pet/workers/`（protocol / supervisor / launch / proactive-screen worker） |
 | 跨进程角色控制通道（`pet/mod_resource_ipc.py`） | ❌ 放弃 | 属 4.4b 淘汰语义；等价物是设置页所属桌宠窗口上的 `on_switch_character` |
 
@@ -115,7 +115,9 @@ tarball + MSVC + 官方 libsodium + AppContainer canary，本仓库没有也不�
 **因此**：本目录里凡描述「功能扩展」的教程（`API-V1.md` / `HOST-ONLY.md` /
 `HOST-WORKER.md` / `AUTHORING-HANDBOOK.md` 的功能扩展部分 / `COMPATIBILITY.md`）
 在**第三方本地包（未知 owner、host-only）**这一面上现在可以照着跑一遍（导入 → 启停 →
-卸载 → 重装），官方包与 host-worker 仍是**待落地目标**；凡描述「角色素材包」的
+卸载 → 重装），官方包现在也走通了 Core 自有链（识屏 host-worker / 聊天 host-only，
+装机入口是 `attach_official` 而不是本地导入路由），host-worker 的**真实冻结构建**
+仍是待落地目标；凡描述「角色素材包」的
 （`CHARACTER-PACKS.md` / `PERSONA-TEMPLATES.md` / `USER-GUIDE.md`
 的导入与管理部分）**一直可用**。
 
@@ -150,4 +152,4 @@ host-worker 路径需要冻结的 worker 可执行（`--worker-bundle`），本�
 
 ## 实际效果与限制
 
-这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前两条腿都在**：角色资源包（一直可用）与第三方本地功能扩展包（D2/D3：导入 → 启停 → 卸载 → 重装），打包与发布前的自检在 D4 补齐（`scripts/build_mod_example.py` + `scripts/verify_feature_package.py`）。**仍未落地的是官方功能包（`official.*`）的安装链、host-worker 的真实冻结构建与 LPAC 探针沙箱**——这三条见 [移植状态对照](PORT-STATUS.md)。
+这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前三条腿都在**：角色资源包（一直可用）、第三方本地功能扩展包（D2/D3：导入 → 启停 → 卸载 → 重装，打包与发布前自检在 D4 补齐），以及**官方功能包**（`official.screen-understanding` / `official.ai-chat`，Core 自有链 `attach_official`，DLC 第三/第四片）。**仍未落地的是 host-worker 的真实冻结构建与 LPAC 探针沙箱**——这两条见 [移植状态对照](PORT-STATUS.md)。

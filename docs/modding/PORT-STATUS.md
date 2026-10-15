@@ -159,9 +159,9 @@
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`README.md`](../plugin-phase-05-distribution/README.md) §2 + [`PLUGIN-FEATURE-DELIVERY-MATRIX.md`](../plugin-roadmap/PLUGIN-FEATURE-DELIVERY-MATRIX.md)：屏幕理解样板稳定后，**AI 对话与文件理解是下一项主要拆包目标**，随后 Agent 及其余领域；11 个逻辑领域不等于 11 个 ZIP。 |
-| 本仓库状态 | ❌ **未做**。AI 对话在本仓库是**核心域**（`pet/chat/`：providers / session store / widgets / markdown_view / web_search / prompt …），未做端口化，也没有专属包边界。 |
-| 证据落点 | 反向证据（按 HEAD `7575572`）：`pet/mod_api/`、`pet/feature_management.py`、`pet/local_package_intents.py`、`pet/feature_ports.py` 均不存在；`pet/chat/` 无包声明。**注**：工作树里那片并发落地的未提交改动已经新建了 `pet/mod_api/`（`v1.py` / `worker_v1.py`）与 `pet/feature_ports.py`，但它尚未接到 `pet/chat/` 上，`pet/chat/` 仍无包声明。 |
-| 没做的原因 / 后续归属 | 依赖 Phase 4A/4B 的宿主与信任链闭环（同一根因链）。PLAN.md 也记了「`features/ai_chat` 整包**放弃**——主线 AI 已是核心域；只借用端口化手法」。后续片：**AI 端口化片**（未排期）。 |
+| 本仓库状态 | ⚠️ **包线已落地（DLC 第四片），但落地形态与作者文档不同**。作者要的是"AI 与文件理解端口化后拆包，11 个逻辑领域不等于 11 个 ZIP"；本仓库落的是**共存**形态：`features/ai-chat/` 是官方 `host-only` 包（上游 `features/ai_chat` 整包移植，自带 provider / 会话 / 窗口 / 文件解读），与**未动过**的内置域 `pet/chat/` 并存，两套各持一本配置与会话账。逐项见 §九。 |
+| 证据落点 | `features/ai-chat/`（30 文件）、`pet/feature_host_bindings.py::bind_ai_context`、`pet/ai_bindings.py`、`scripts/build_ai_chat_package.py`；用例 `tests/test_ai_package_e2e.py`（装卸链）、`tests/test_ai_package_host.py`（包侧核）、`tests/test_ai_host_binding.py`、`tests/test_ai_bindings.py`。反向证据：`pet/chat/` 无包声明（内置聊天仍是核心域），包目录里不出现 `from pet.chat` 的引用。 |
+| 没做的原因 / 后续归属 | 上游把 AI **整包化**（Core 里不再有内置聊天），本仓库选择**并存**——内置聊天是现行权威且带着后续产品修复，整包化会把那些修复又一次分叉。代价写进 §九的"未做"表：包的 UI 落后于内置 UI（后续片）。 |
 
 ### Phase 6：第三方 SDK 与社区生态（作者标注"条件阶段"）
 
@@ -363,6 +363,52 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 **复审轮补记（同日）**：这条组合本轮跑了两遍（修 N3 前 / 修 N3 后各一次）都**正常退出**
 （`125 passed + 2 failed`（那 2 条是本轮新用例，未修时红）/ `127 passed`），没有复现那个访问
 违规。登记保留（它是时序相关的），但"本轮全绿"不等于它已消失。
+
+---
+
+## 九、DLC 第四片回写：AI 对话官方包（`official.ai-chat`）
+
+上面 §二 Phase 5B 那格写的是「AI 对话整包未做，PLAN.md 记了『放弃』」。本片把
+**包**这一半落了地，但**没有**改内置聊天——两条腿并存，这也是本片与前几片最大的口径
+差别：内置 AI 对话（`pet/chat/` + `pet/app.py` 的 `open_chat*`）**一个字节没动**，
+包是它的可插拔形态，开自己的窗口、用自己那本配置与自己的会话目录。
+
+| 项 | 新事实 | 证据落点 |
+|---|---|---|
+| 包本体 | ✅ `features/ai-chat/`（`mod.json` + `host/` 30 个文件，上游 `features/ai_chat` 整包移植） | `git ls-tree -r --name-only HEAD \| grep '^features/ai-chat/'` |
+| 宿主绑定 | ✅ `bind_ai_context`：配置命名空间 / 偏好面 / 凭据库 / `FeatureUserDataPort`；**不给**桌面查询、窗口操作面与 Core API 端口 | `pet/feature_host_bindings.py`、`tests/test_ai_host_binding.py` |
+| 呈现面 | ✅ `pet/ai_bindings.py`（`AiPetView` / `AiFileView` + 进程级提供方），AppShell 注册主实例的聊天宿主 | `pet/app.py::_build_feature_runtime`/`_ai_pet_view`、`tests/test_ai_bindings.py` |
+| 装卸链 | ✅ 与识屏包同一条 Core 自有链：真打包 → 清单完整性 + 摘要校验 + 装前子进程预检 → 真事务 → 真宿主 → 真菜单 | `scripts/build_ai_chat_package.py`、`tests/test_ai_package_e2e.py` |
+| 识屏↔聊天联动 | ✅ 包侧接收端（`ExternalTurnReceiver` + `pet.plugins.services` 服务路由）：识屏包投结构化结果 → 写进**包自己的**会话存储 | `features/ai-chat/host/chat/external_turns.py`、`tests/test_ai_package_host.py`、`tests/test_plugins_services.py` |
+| Core 缺口补齐 | ✅ `pet/async_exit.py`（owner 退出闸门）、`pet/plugins/services.py`（owner 服务路由）、`FeatureUserDataPort` | 各自同名用例文件 |
+
+**四处有意的分歧（都是本仓库拓扑决定的，不是没做）**：
+
+1. **命令归包**：上游的 `chat`/`quick_chat` 菜单命令由 Core 的 `pet/ai_bindings.py`
+   经 `host.attach` 挂 Core 回调（`instance.open_chat`）——那条路的前提是上游 Core 里
+   已经没有内置聊天。本仓库内置聊天不动，包开自己的窗口，命令跟着包 Runtime 走
+   （`AiPackageRuntime.commands`），菜单文案带「（包）」后缀与内置项区分。
+2. **包不进配置树**：上游把包的偏好绑在 app 配置树的 `chat` 节点上（包与内置共用一份
+   provider 配置）。本仓库把包的配置与偏好收在 `feature-data/official.ai-chat/` 下，
+   两套聊天各持一本账（机器判据：`test_the_package_never_touches_the_builtin_chat_configuration`）。
+3. **不引第二份摘要**：上游 `host/config.py` 从 `pet.feature_config.namespace_revision`
+   现算命名空间摘要；本仓库直接用配置端口自己的 `revision()`（同一算法），
+   于是 `pet/feature_config.py` 这个模块**不需要移植**。
+4. **退出闸门显式退订**（这是修上游的一处缺陷）：上游 `AiRuntime.close()` 不把
+   参与者从 Core 退出闸门里摘出来，只靠闸门轮询 `drain_status` 回收——于是
+   "停用/卸载后到下一次退出事件之间"闸门里登记的是一份已死的参与者，每装一次包多
+   一份。用例族跑出 14 份残留（`tests/test_async_exit.py::test_a_quit_passes_through_when_nothing_is_registered`
+   被挤红），已改为 `close()` 里显式 `unregister`。
+
+**未做（本片边界）**：
+
+| 未做项 | 归属 | 说明 |
+|---|---|---|
+| 包内 UI 与内置聊天的功能对齐 | 后续片（**未排期**） | 上游包是内置聊天某个较早时间点的**分叉**：缺 markdown 渲染、思考链展示、`#191` 的布局修复、联网检索等后续产品修复（`host/chat/widgets.py` 上游 2219 行 vs 内置 2532 行）。本片按"整包移植上游形态"落地，**没有**把两套实现合并（本片口径明确禁止），因此包的聊天窗在功能上落后于内置聊天窗。要对齐就得把内置那份 UI 再分叉进包（或反过来让包复用内置实现），两者都是新决策。 |
+| 包的 `notifier` / `auth_callback` 接线 | 同上 | `AiRuntime.create_window` 的这两个参数本片传 `None`（上游由 `bind_ai_window` 从 Core 取）。缺失的效果是"未配 Key 时不能一键跳到 API 设置页"，包自己的设置面板不受影响。 |
+| 文件解读的触发接线（拖文件 → 包的解读器） | 同上 | 包侧 `FileInterpretController` 与 `create_file_interpreter` 都在，Core 侧的投喂接线（上游 `bind_ai_window` 的 `file_factory` + `install_file_interpreter`）本片未落。 |
+| MOD 中心 UI 的「装官方包」按钮 | 后续片 | 与识屏包同一状态：当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮未做。 |
+| 冻结包投递（随发行版携带预构建包） | 打包/构建片 | 与识屏包同：只有源码态打包入口。 |
 
 ---
 
