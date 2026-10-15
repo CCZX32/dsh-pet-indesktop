@@ -335,7 +335,7 @@ def _name_matches(candidate: str, wanted: str) -> bool:
     raw_b = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(wanted or "").lower())]
     raw_a = [p for p in raw_a if p]
     raw_b = [p for p in raw_b if p]
-    # 只在两侧都是多歌手形态时才逐段比：单侧无分隔符保持原语义（防单名误命中）
+    # 仅两侧均呈多歌手形态时增加逐段匹配
     if len(raw_a) < 2 or len(raw_b) < 2:
         return False
     # 逐段**相等**比对（去空白后）：子串比对会让 2-3 字符碎片几乎什么都命中
