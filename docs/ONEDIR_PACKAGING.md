@@ -11,6 +11,9 @@ AIGC:
 
 # onedir 打包流水线（绿色版 zip + Inno Setup 安装包）
 
+Android 原生测试包使用独立 Gradle 工程，共用角色素材；其工具链、资源导出和
+验收见 [Android 悬浮桌宠](ANDROID.md)，不使用下述 PyInstaller 流程。
+
 目标：**运行期零解压**——不再产生 `C:\...\Temp\_MEIxxxxxx` 缓存。
 
 - onefile：每次启动把全部素材解压到系统临时目录；崩溃/强杀/断电残留；启动慢（GIF 版 800MB 每次全解压）

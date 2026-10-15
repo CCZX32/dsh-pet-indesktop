@@ -2,6 +2,9 @@
 
 This project includes third-party software and assets subject to their respective licenses.
 
+The Android client carries the character attribution below and Android-specific
+notices in `android/NOTICE.txt`; its build includes these notices in the APK.
+
 ---
 
 ## 1. DeepSeek Balance Whale Widget Sound Assets
@@ -314,3 +317,15 @@ headless，本机两个发行名同版本并存、都提供 `cv2` 顶层模块�
 - **License / 权利口径**：simple-icons 的图标路径数据按 CC0 分发；**"DeepSeek"
   名称与鲸鱼标识的商标权归深度求索（DeepSeek）所有**——本项目是其桌面宠物衍生
   作品，按品牌本意作指示性使用（不代表官方出品/背书）。
+
+## 9. Android 客户端与构建工具
+
+- Kotlin 及 kotlinx.coroutines：JetBrains 与贡献者，Apache-2.0。
+  https://github.com/JetBrains/kotlin ，https://github.com/Kotlin/kotlinx.coroutines 。
+- AndroidX / Jetpack Compose / Material Components：Android Open Source Project
+  与贡献者，Apache-2.0，https://android.googlesource.com/platform/frameworks/support/ 。
+- Gradle Wrapper：Gradle Inc. 与贡献者，Apache-2.0，仅作为构建工具。
+  https://github.com/gradle/gradle 。Wrapper JAR 与分发 ZIP 按官方摘要校验。
+- Apache-2.0 全文：`android/LICENSE-APACHE-2.0.txt`，随 APK 分发。
+- 手机使用的 WebP 动画与图标由第 2 节角色素材派生，继续保留其署名和
+  个人非商业使用限制。工具与验收说明见 [Android 文档](docs/ANDROID.md)。
