@@ -2772,3 +2772,22 @@ def test_system_font_stack_matches_platform():
     )
     assert "," not in custom, f"自选字体被拼成多族: {custom}"
     assert "Consolas" in custom
+
+
+def test_screen_capture_menu_entry_uses_jingwa_icon():
+    """「截图提问」菜单项：鲸蛙是品牌图标对里菜单的固定岗位（素材缺席回退矢量图标）。"""
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    QApplication.instance() or QApplication([])
+
+    from pet.context_menus.shared import add_screen_capture_menu
+
+    class _Pet:
+        def on_screen_capture(self):
+            pass
+
+    menu = QMenu()
+    action = add_screen_capture_menu(menu, _Pet())
+    assert action is not None
+    assert not action.icon().isNull(), "鲸蛙素材随包在场，图标必须非空"
+    menu.deleteLater()

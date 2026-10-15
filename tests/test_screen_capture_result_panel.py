@@ -669,3 +669,35 @@ def test_the_card_is_a_rounded_translucent_corner(qapp):
     assert canvas.pixelColor(0, 0).getRgb() == (255, 0, 255, 255), "角上被涂实了，圆角没成形"
     assert canvas.pixelColor(panel.width() // 2, panel.height() // 2).getRgb() != (255, 0, 255, 255)
     panel.close_panel()
+
+
+def test_loading_animation_alternates_between_brand_icons(qapp):
+    """品牌图标对（DS 鲸鱼 ↔ 鲸蛙）：两只素材都在时主角随相位轮换。"""
+    from pet.screen_capture import result_panel as rp
+
+    fish = rp._LoadingFish()
+    assert len(fish._icons) == 2, "两只品牌素材都应随包在场"
+    fish._phase = 0.0
+    assert fish._current_icon() is fish._icons[0]
+    fish._phase = 3.2   # 过第一个换场点（3.1 ≈ 1.2s）
+    assert fish._current_icon() is fish._icons[1]
+    fish._phase = 6.3
+    assert fish._current_icon() is fish._icons[0]
+
+
+def test_loading_animation_single_brand_icon_never_alternates(qapp, monkeypatch):
+    """只剩一只素材：它单独浮动（不轮换、不出空帧）；全缺席回退三点跳动。"""
+    from pet.screen_capture import brand_icons, result_panel as rp
+    from PySide6.QtGui import QPixmap
+
+    monkeypatch.setattr(rp, "load_jingwa", lambda: QPixmap())
+    fish = rp._LoadingFish()
+    assert len(fish._icons) == 1
+    fish._phase = 0.0
+    solo = fish._current_icon()
+    fish._phase = 6.3
+    assert fish._current_icon() is solo
+
+    monkeypatch.setattr(rp, "load_ds_whale", lambda: QPixmap())
+    fish2 = rp._LoadingFish()
+    assert fish2._icons == []

@@ -21,10 +21,7 @@
 from __future__ import annotations
 
 import logging
-import random
-import sys
 import threading
-from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
@@ -41,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .brand_icons import pick_brand_icon
 from .result_panel import _STYLES, resolve_style
 from .vision_bridge import VisionConversation
 
@@ -52,24 +50,8 @@ _MARGIN = 12          # 缺省落点贴屏幕右下的留白
 _MIN_W, _MIN_H = 320, 360
 _BUBBLE_RADIUS = 10
 
-# 鲸蛙彩蛋：每次开新会话（start_with_image）掷一次，10% 概率标题变「鲸蛙问答」
-# 并在标题前摆鲸蛙图标；未命中一切照旧（零加载、零布局变化）。
-_EGG_CHANCE = 0.10
-_EGG_TITLE = "鲸蛙问答"
-_DEFAULT_TITLE = "截图问答"
-
-
-def _jingwa_pixmap() -> QPixmap:
-    """鲸蛙彩蛋图标（``assets/chat/jingwa.png``，随包分发；加载失败给空图）。"""
-    candidates = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass) / "assets" / "chat" / "jingwa.png")
-    candidates.append(Path(__file__).resolve().parents[2] / "assets" / "chat" / "jingwa.png")
-    for path in candidates:
-        if path.is_file():
-            return QPixmap(str(path))
-    return QPixmap()
+# 标题栏图标：品牌图标对（DS 鲸鱼 / 鲸蛙）每次开新会话抽一个，见
+# ``brand_icons``；素材缺席时不显示图标。
 
 
 class _Bubble(QLabel):
@@ -155,13 +137,13 @@ class ScreenAskDialog(QFrame):
         self._egg_icon.setObjectName("screen-ask-egg")
         self._egg_icon.setFixedSize(24, 24)
         self._egg_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._egg_icon.setVisible(False)  # 鲸蛙彩蛋：命中才出场（_roll_easter_egg）
+        self._egg_icon.setVisible(False)  # 品牌图标：抽中素材才出场（_pick_title_icon）
         self._egg_active = False          # 本窗本次会话是否命中（素材缺失 = False）
         self._egg_src = QPixmap()         # 命中时的原图（DPR 变化时按它重出）
         self._egg_scaled = None           # 最近一次出图（测试可核对 DPR/物理尺寸）
         self._egg_screen_wired = False    # screenChanged 一次性接线标记
         header.addWidget(self._egg_icon)
-        title = QLabel(_DEFAULT_TITLE, self)
+        title = QLabel("截图问答", self)
         title.setObjectName("screen-ask-title")
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._title = title
@@ -326,7 +308,7 @@ class ScreenAskDialog(QFrame):
         self._clear_messages()
         self._set_status("")
         self._set_sending(False)
-        self._roll_easter_egg()
+        self._pick_title_icon()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -337,23 +319,24 @@ class ScreenAskDialog(QFrame):
         if self._egg_active:
             self._refresh_egg_icon()
 
-    def _roll_easter_egg(self) -> None:
-        """鲸蛙彩蛋：每次开新会话掷一次（10%）。窗口本体复用，每开必重置。"""
-        hit = random.random() < _EGG_CHANCE
-        src = _jingwa_pixmap() if hit else QPixmap()
-        # 素材缺失（裁剪包/坏包）时静默回退默认形态
-        self._egg_active = hit and not src.isNull()
+    def _pick_title_icon(self) -> None:
+        """标题栏图标：每次开新会话从品牌图标对（DS 鲸鱼/鲸蛙）里抽一个。
+
+        窗口本体复用，每开必重抽；素材缺席时不显示图标（绝不让图标自己
+        成为故障点）。只抽一次——换屏重出图不换图标（见 _refresh_egg_icon）。
+        """
+        src = pick_brand_icon()
+        self._egg_active = not src.isNull()
         self._egg_src = src
         self._refresh_egg_icon()
 
     def _refresh_egg_icon(self, dpr: float | None = None) -> None:
-        """按当前屏 DPR 出图。掷骰在 show 之前，选区定位可能把它落到另一块
-        缩放比的屏上；拖到不同缩放屏时经 screenChanged 重出——两处都不重新
-        掷骰，只重出图。``dpr`` 是测试注入缝（offscreen 恒 1.0），生产缺省
-        读窗口真实 DPR。"""
+        """按当前屏 DPR 出图。抽图标在 show 之前，选区定位可能把它落到另一块
+        缩放比的屏上；拖到不同缩放屏时经 screenChanged 重出——只重出图，
+        不重新抽。``dpr`` 是测试注入缝（offscreen 恒 1.0），生产缺省读窗口
+        真实 DPR。"""
         if not self._egg_active:
             self._egg_icon.setVisible(False)
-            self._title.setText(_DEFAULT_TITLE)
             return
         dpr = self.devicePixelRatioF() if dpr is None else float(dpr)
         scaled = self._egg_src.scaled(
@@ -365,7 +348,6 @@ class ScreenAskDialog(QFrame):
         self._egg_scaled = scaled  # 出图留档：测试可直接核对 DPR/物理尺寸
         #（QLabel.pixmap() 在 offscreen 下会归一化 DPR，读它验不了 HiDPI）
         self._egg_icon.setVisible(True)
-        self._title.setText(_EGG_TITLE)
 
     def send_current(self) -> bool:
         """发送当前输入（空输入走默认问法）。发送中/无会话时拒收，返回是否受理。"""

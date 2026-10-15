@@ -686,27 +686,34 @@ def test_a_stale_failure_does_not_unlock_the_new_sessions_send(qapp):
     dialog.close()
 
 
-# ------------------------------------------------------------------ 鲸蛙彩蛋
-def test_jingwa_easter_egg_shows_when_the_roll_hits(qapp, monkeypatch):
-    """10% 命中：标题变「鲸蛙问答」+ 鲸蛙图标出现在标题前。"""
+# ------------------------------------------------------- 品牌图标（DS 鲸鱼/鲸蛙）
+def _force_brand(monkeypatch, which: str):
+    """把品牌图标抽取钉成指定的一只（jingwa / whale / null=素材缺席）。"""
     import pet.screen_capture.ask_dialog as ask_mod
+    from pet.screen_capture import brand_icons
 
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
+    src = {"jingwa": brand_icons.load_jingwa, "whale": brand_icons.load_ds_whale,
+           "null": lambda: brand_icons.QPixmap()}[which]
+    monkeypatch.setattr(ask_mod, "pick_brand_icon", lambda: src())
+    return src
+
+
+def test_brand_icon_appears_without_changing_the_title(qapp, monkeypatch):
+    """每次开新会话都抽一只品牌图标摆标题前；标题文字永远是「截图问答」。"""
+    src = _force_brand(monkeypatch, "jingwa")
     dialog = _dialog()
     dialog.start_with_image(_image())
 
-    assert dialog._title.text() == "鲸蛙问答"
+    assert dialog._title.text() == "截图问答"
     assert dialog._egg_icon.isVisible() is True
-    pix = dialog._egg_icon.pixmap()
-    assert pix is not None and not pix.isNull(), "彩蛋图标必须真的加载到素材"
+    assert dialog._egg_src is src(), "标题图标就是抽中的那只"
+    assert dialog._egg_scaled is not None
     dialog.close()
 
 
-def test_jingwa_easter_egg_stays_hidden_when_the_roll_misses(qapp, monkeypatch):
-    """90% 未命中：标题与图标与今天逐位一致（零打扰）。"""
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
+def test_brand_icon_hidden_when_assets_missing(qapp, monkeypatch):
+    """素材缺席：图标隐藏、窗口照常，绝不让图标成为故障点。"""
+    _force_brand(monkeypatch, "null")
     dialog = _dialog()
     dialog.start_with_image(_image())
 
@@ -715,119 +722,59 @@ def test_jingwa_easter_egg_stays_hidden_when_the_roll_misses(qapp, monkeypatch):
     dialog.close()
 
 
-def test_jingwa_easter_egg_resets_on_the_next_open(qapp, monkeypatch):
-    """命中后下一次未命中要复位（窗口本体复用，状态不能跨年）。"""
+def test_brand_icon_repicked_each_open_and_rescaled_on_screen_change(qapp, monkeypatch):
+    """每次开新会话重新抽；换屏只按新 DPR 重出图、不重抽。"""
     import pet.screen_capture.ask_dialog as ask_mod
+    from pet.screen_capture import brand_icons
 
-    dialog = _dialog()
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
-    dialog.start_with_image(_image())
-    assert dialog._title.text() == "鲸蛙问答"
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.99)
-    dialog.start_with_image(_image())
-    assert dialog._title.text() == "截图问答"
-    assert dialog._egg_icon.isVisible() is False
-    dialog.close()
-
-
-def test_jingwa_easter_egg_falls_back_when_the_asset_is_missing(qapp, monkeypatch):
-    """素材缺失（坏包/裁剪包）：命中也静默回退默认形态，不炸窗。"""
-    from PySide6.QtGui import QPixmap
-
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
-    monkeypatch.setattr(ask_mod, "_jingwa_pixmap", lambda: QPixmap())  # 空图 = 加载失败
+    picks = []
+    whale = brand_icons.load_ds_whale()
+    jingwa = brand_icons.load_jingwa()
+    monkeypatch.setattr(ask_mod, "pick_brand_icon",
+                        lambda: picks.append(1) or (whale if len(picks) % 2 else jingwa))
     dialog = _dialog()
     dialog.start_with_image(_image())
+    first_pick, first_scaled = dialog._egg_src, dialog._egg_scaled
 
-    assert dialog._title.text() == "截图问答"
-    assert dialog._egg_icon.isVisible() is False
-    dialog.close()
-
-
-def test_jingwa_easter_egg_loads_nothing_when_the_roll_misses(qapp, monkeypatch):
-    """未命中的 90%：零 IO——素材加载器一次都不许被调用。"""
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    calls = []
-
-    def _probe():
-        calls.append(1)
-        from PySide6.QtGui import QPixmap
-        return QPixmap()
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
-    monkeypatch.setattr(ask_mod, "_jingwa_pixmap", _probe)
-    dialog = _dialog()
-    dialog.start_with_image(_image())
-
-    assert calls == []
-    dialog.close()
-
-
-def test_jingwa_egg_icon_follows_device_pixel_ratio(qapp, monkeypatch):
-    """彩蛋图标按当前 DPR 出图：换屏/首落点变化后重出，物理像素跟着变。"""
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
-    dialog = _dialog()
-    dialog.start_with_image(_image())
-    assert dialog._egg_active is True
-
-    # offscreen 的 DPR 恒 1.0 且 PySide6 的方法遮蔽不可靠：走测试注入缝
-    dialog._refresh_egg_icon(dpr=2.0)
-    pix = dialog._egg_scaled
-    assert pix.devicePixelRatio() == 2.0
-    assert pix.width() == 48, "物理尺寸 48 = 24 × dpr 2（QLabel 读回会归一化，不可验）"
-    dialog.close()
-
-
-def test_jingwa_egg_refresh_retriggers_on_reshow_and_screen_change(qapp, monkeypatch):
-    """事件接线回归：命中后重开/换屏会重出图（新对象），且换屏不重新掷骰。"""
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    rolls = []
-    def _roll():
-        rolls.append(1)
-        return 0.05
-    monkeypatch.setattr(ask_mod.random, "random", _roll)
-
-    dialog = _dialog()
-    dialog.start_with_image(_image())
-    assert dialog._egg_active is True
-    first = dialog._egg_scaled
-    assert first is not None
-    assert dialog._egg_screen_wired is True, "showEvent 必须接上换屏信号"
-
-    # 换屏信号 → 重出图（新对象），不重新掷骰
-    rolls.clear()
     handle = dialog.windowHandle()
     assert handle is not None
     handle.screenChanged.emit(dialog.screen())
-    assert dialog._egg_scaled is not first, "换屏后图标必须重出（DPR 可能变了）"
-    assert rolls == [], "换屏只重出图，不重新掷骰"
-    second = dialog._egg_scaled
+    assert len(picks) == 1, "换屏只重出图不重抽"
+    assert dialog._egg_scaled is not first_scaled, "换屏要按新 DPR 重出"
 
-    # 关闭再开（窗口复用，再次命中）→ showEvent 重出
     dialog.close()
     dialog.start_with_image(_image())
-    assert dialog._egg_scaled is not second
+    assert len(picks) == 2, "再开一次要重新抽"
+    assert dialog._egg_src is not first_pick, "第二次抽另一只（两只都在场时）"
     dialog.close()
 
 
-def test_jingwa_egg_no_refresh_when_roll_missed(qapp, monkeypatch):
-    """未命中：show/换屏都不出图（_egg_scaled 保持 None）。"""
-    import pet.screen_capture.ask_dialog as ask_mod
-
-    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
+def test_brand_icon_follows_device_pixel_ratio(qapp, monkeypatch):
+    """图标按 DPR 出物理像素（offscreen 恒 1.0，走注入缝验证）。"""
+    _force_brand(monkeypatch, "whale")
     dialog = _dialog()
     dialog.start_with_image(_image())
-    assert dialog._egg_active is False
-    assert dialog._egg_scaled is None
-    handle = dialog.windowHandle()
-    if handle is not None:
-        handle.screenChanged.emit(dialog.screen())
-    assert dialog._egg_scaled is None
+    dialog._refresh_egg_icon(dpr=2.0)
+    pix = dialog._egg_scaled
+    assert pix.devicePixelRatio() == 2.0
+    assert pix.width() == 48
     dialog.close()
+
+
+def test_brand_icons_pick_prefers_the_present_one(qapp, monkeypatch):
+    """brand_icons 自身：只有一个素材在场时它就是答案；都缺席给空图。"""
+    from pet.screen_capture import brand_icons
+    from PySide6.QtGui import QPixmap
+
+    whale, jingwa = brand_icons.load_ds_whale(), brand_icons.load_jingwa()
+    monkeypatch.setattr(brand_icons, "load_ds_whale", lambda: QPixmap())
+    monkeypatch.setattr(brand_icons, "load_jingwa", lambda: jingwa)
+    assert brand_icons.pick_brand_icon() is jingwa
+
+    monkeypatch.setattr(brand_icons, "load_ds_whale", lambda: whale)
+    monkeypatch.setattr(brand_icons, "load_jingwa", lambda: QPixmap())
+    assert brand_icons.pick_brand_icon() is whale
+
+    monkeypatch.setattr(brand_icons, "load_ds_whale", lambda: QPixmap())
+    monkeypatch.setattr(brand_icons, "load_jingwa", lambda: QPixmap())
+    assert brand_icons.pick_brand_icon().isNull()

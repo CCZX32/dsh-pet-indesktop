@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .brand_icons import load_ds_whale, load_jingwa
+
 __all__ = ["SHORT_RESULT_LIMIT", "SYSTEM_STYLE", "ScreenResult", "ScreenResultPanel",
            "resolve_style"]
 
@@ -135,9 +137,10 @@ def resolve_style(style: str | None, palette=None) -> str:
 
 
 class _LoadingFish(QWidget):
-    """加载动画：DeepSeek 官方鲸鱼轻轻浮动 + 喷泡泡（项目吉祥物；素材
-    ``assets/chat/ds_whale.png`` 随包分发，simple-icons CC0 渲出的渐变蓝 PNG）。
-    素材缺席时回退为三点跳动（绝不让"加载动画"自己成为故障点）。
+    """加载动画：品牌图标对（DeepSeek 鲸鱼 ↔ 鲸蛙）轮流轻轻浮动 + 喷泡泡
+    （素材 ``assets/chat/`` 随包分发）。两只素材都在时约每 1.2s 换一只（互换
+    瞬间有一个轻微缩放脉冲）；只剩一只就它单独浮动；素材全缺席时回退为
+    三点跳动（绝不让"加载动画"自己成为故障点）。
 
     面板是防抢焦点的复用件，动画用自己的 QTimer：``hideEvent``/非 loading 结果
     都会停掉它，绝不会在面板收起后还占着定时器空转。
@@ -149,27 +152,17 @@ class _LoadingFish(QWidget):
         self.setFixedHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._phase = 0.0
-        self._whale = self._load_whale()
+        # 品牌图标对（DS 鲸鱼 ↔ 鲸蛙），加载链见 brand_icons；空图被过滤
+        self._icons = [p for p in (load_ds_whale(), load_jingwa()) if not p.isNull()]
         self._timer = QTimer(self)
         self._timer.setInterval(50)   # 20fps 足够顺滑又省电
         self._timer.timeout.connect(self._tick)
 
-    @staticmethod
-    def _load_whale() -> QPixmap:
-        import sys
-        from pathlib import Path
-
-        candidates = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            candidates.append(Path(meipass) / "assets" / "chat" / "ds_whale.png")
-        candidates.append(Path(__file__).resolve().parents[2] / "assets" / "chat" / "ds_whale.png")
-        for path in candidates:
-            if path.is_file():
-                pixmap = QPixmap(str(path))
-                if not pixmap.isNull():
-                    return pixmap
-        return QPixmap()
+    def _current_icon(self) -> QPixmap:
+        """当前浮动的主角：两只素材都在时约每 1.2s 换一只（相位 3.1 ≈ 1.2s）。"""
+        if len(self._icons) < 2:
+            return self._icons[0]
+        return self._icons[int(self._phase / 3.1) % 2]
 
     def start(self) -> None:
         if not self._timer.isActive():
@@ -195,7 +188,7 @@ class _LoadingFish(QWidget):
         phase = self._phase
         cx, cy = self.width() / 2, self.height() / 2 + 10
 
-        if self._whale.isNull():
+        if not self._icons:
             # 素材缺席的回退：三点跳动（形状简单但绝不能不画）
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#1677e8"))
@@ -224,14 +217,20 @@ class _LoadingFish(QWidget):
             painter.drawEllipse(QPointF(bubble_x, bubble_y), r, r)
             painter.drawEllipse(QPointF(bubble_x, bubble_y), r, r)
 
-        # 鲸鱼：随相位轻轻上下浮动 + 极轻微摇摆（像浮在水里）
+        # 品牌图标对的主角：随相位轻轻上下浮动 + 极轻微摇摆（像浮在水里）；
+        # 两只素材都在时轮流出场（_current_icon），互换瞬间加一个轻微缩放脉冲
         bob = math.sin(phase) * 2.4
         tilt = math.sin(phase * 0.7) * 0.06
+        swap_pulse = 1.0
+        if len(self._icons) >= 2:
+            t_swap = (phase % 3.1) / 3.1   # 距上次互换的占比 0..1
+            swap_pulse = 1.0 + 0.10 * max(0.0, 1.0 - t_swap * 8)  # 换场后 1/8 周期内回弹
         size = 44
         painter.save()
         painter.translate(cx, cy + bob)
         painter.rotate(math.degrees(tilt))
-        painter.drawPixmap(-size // 2, -size // 2, size, size, self._whale)
+        painter.scale(swap_pulse, swap_pulse)
+        painter.drawPixmap(-size // 2, -size // 2, size, size, self._current_icon())
         painter.restore()
         painter.end()
 
