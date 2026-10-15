@@ -57,7 +57,7 @@ def bound(built, tmp_path, monkeypatch):
     writers(handle).reset_writers_for_tests()
     vault = CredentialVaultPort(OWNER, "test-instance", backend=MemoryVault())
     host = FeatureHost()
-    raw = bind_ai_context(Config(base=tmp_path), vault=vault, authorized=lambda: host.enabled(OWNER), host=host)
+    raw = bind_ai_context(Config(base=tmp_path), vault=vault, host=host)
     try:
         host.provide(handle.factory(), enabled=True)
         yield host, host.bind_context(raw), vault, handle

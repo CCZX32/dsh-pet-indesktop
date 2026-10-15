@@ -402,6 +402,10 @@ def test_a_broken_host_never_stops_the_pet_from_starting(tmp_path, monkeypatch):
 
     class _Shell:
         config = Config(base=tmp_path)
+        # 壳替身要给装配路径读到的每一处：_build_feature_runtime 除 config
+        # 之外还会注册两个进程级呈现提供方（识屏 proxy / 聊天包桌宠面），所以接
+        # 真方法而不是各写一份假值——真方法对没有 instance 本就是安全降级。
+        _ai_pet_view = AppShell._ai_pet_view
 
     assert AppShell._build_feature_runtime(_Shell()) is not None
 

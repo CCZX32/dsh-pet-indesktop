@@ -44,10 +44,22 @@ def test_official_verifier_refuses_a_non_official_id():
         official_package_verifier("demo.impostor")
 
 
-def test_official_verifier_supports_only_wired_owners():
-    # AI 包的宿主绑定属聊天包线；本片只接识屏。
-    with pytest.raises(ValueError):
-        official_package_verifier(AI_FEATURE_ID)
+def test_official_verifier_supports_every_wired_owner():
+    """官方闭集里的每个 owner 都有验签策略，且各按自己的登记取能力上限。
+
+    这条判据随"第二片官方包"一起改过口径：闭集里有两个包（识屏 ``host-worker``、
+    聊天 ``host-only``）时，验签器**不能**只认识其中一个——否则第二个包装不进事务层，
+    而且报出来的是一句与原因无关的 "unsupported official feature"。
+    """
+    from pet.official_features import official_feature
+
+    for owner in (SCREEN_FEATURE_ID, AI_FEATURE_ID):
+        verifier = official_package_verifier(owner)
+        assert verifier.feature_id == owner
+        assert verifier.allowed_capabilities == official_feature(owner).capabilities
+    # 官方登记里的能力确实超出 v1 本地包上限（这条链存在的意义），本地上限没被撑大
+    assert "screen.capture" in official_package_verifier(SCREEN_FEATURE_ID).allowed_capabilities
+    assert "screen.capture" not in FEATURE_CAPABILITIES
 
 
 # --------------------------------------------------------------- 管理器参数化

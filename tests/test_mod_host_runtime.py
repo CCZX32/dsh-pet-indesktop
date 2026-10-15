@@ -76,10 +76,9 @@ def test_the_context_grants_no_desktop_credentials_or_shared_configuration(tmp_p
     assert context.desktop is None and context.worker_launch_factory is None
     assert context.allow_in_process is True
     assert _valid_execution_ports(context, "host-only") is True
-    # 识屏包线起这四个字段在 ABI 上存在，但本地 MOD 路径一律不注入（恒 None）。
-    for attribute in ("credentials", "legacy_secret_reader", "preferences", "window"):
+    # 识屏包线 / 聊天包线起这五个字段在 ABI 上存在，但本地 MOD 路径一律不注入（恒 None）。
+    for attribute in ("credentials", "legacy_secret_reader", "preferences", "window", "user_data"):
         assert getattr(context, attribute) is None
-    assert not hasattr(context, "user_data")
 
 
 def test_author_configuration_lives_under_its_own_owner_directory(tmp_path):
