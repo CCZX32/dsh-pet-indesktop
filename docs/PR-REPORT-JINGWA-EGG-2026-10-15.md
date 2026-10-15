@@ -2,20 +2,21 @@
 
 > **基线**：`d6bd3f3`（main，含 #272）
 > **分支**：`feat/jingwa-easter-egg`　**日期**：2026-10-15
-> **范围**：4 个文件（实现 1、测试 1、素材 1、文档 1）
+> **范围**：5 个文件（实现 1、测试 1、素材 1、文档 2）
 > **关联**：用户点单的彩蛋需求
 
 ## 一、核心特性
 
 截图问答浮窗（识屏 →「问问肥鱼」）每次开新会话时掷 10%：命中则标题变
-「鲸蛙问答」、标题前出现鲸蛙图标；未命中零加载、零布局变化（标题与图标可见性
-逐项断言锁住）。
+「鲸蛙问答」、标题前出现鲸蛙图标；未命中零加载、零布局变化（测试逐项断言：
+标题文字不变、图标不可见、素材加载器零调用；**不做**与 main 的像素/几何级对照——
+布局不变由"未命中分支一行布局代码都没动"的 diff 保证，如实说明）。
 素材缺失（裁剪包/坏包）时静默回退默认形态。
 
 | # | 能力 | 说明 |
 |---|---|---|
 | 1 | 鲸蛙彩蛋 | 10% 概率出现在截图问答标题栏 |
-| 2 | 零打扰 | 未命中分支不加载素材、不改布局；窗口复用场景每开必重置 |
+| 2 | 零打扰 | 未命中分支不加载素材、不改布局；窗口复用场景每开必重置；命中后换屏按新 DPR 重出图（不重掷骰） |
 
 **红线 / 不变量**：未命中路径与改动前逐位一致；彩蛋不影响会话/发送/隐私链路
 （纯标题栏表现层）；素材加载失败不炸窗（静默回退）。
@@ -38,7 +39,7 @@
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_screen_capture_ask_dialog.py` | +98 / −0 | 六条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）、素材缺失静默回退、未命中零 IO（加载器不被调用）、DPR 跟随（注入缝出图 48px@dpr2）。monkeypatch `random.random` 定序，无赌概率 |
+| `tests/test_screen_capture_ask_dialog.py` | +135 / −0 | 八条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）、素材缺失静默回退、未命中零 IO（加载器不被调用）、DPR 跟随（注入缝出图 48px@dpr2）、事件接线（重开/换屏重出图、换屏不重掷骰）、未命中零出图。monkeypatch `random.random` 定序，无赌概率 |
 
 ## 三、实现要点
 
@@ -56,8 +57,12 @@ SmoothTransformation，留以后更大尺寸复用的余地。
 | 掷骰 `random.random()` | 0.092 µs/次（n=10000） | 每次开新会话一次 |
 | 彩蛋图标加载 `_jingwa_pixmap()` | 0.65 ms/次（n=100） | 仅命中时、每次会话最多一次 |
 
-未命中路径零 IO；命中路径 0.65ms 一次性。内存：命中时一张 24×24 缩放图，
-随对话框复用不累积。
+未命中路径零 IO；命中路径 0.65ms 一次性。内存：命中时持有原图（_egg_src，
+847×682 RGBA ≈ 2.3MB）+ 一张按 DPR 缩放的出图，随对话框复用不累积、未命中不持有。
+
+性能数字复现（本机 Windows 11 / Python 3.13 / offscreen QApplication）：
+`python -c "import time;from PySide6.QtWidgets import QApplication;app=QApplication();from pet.screen_capture.ask_dialog import _jingwa_pixmap;t0=time.perf_counter();[(_jingwa_pixmap()) for _ in range(100)];print((time.perf_counter()-t0)/100*1000)"`（ms/次）
+`python -c "import time,random;t0=time.perf_counter();[random.random() for _ in range(10000)];print((time.perf_counter()-t0)/10000*1e6)"`（µs/次）
 
 ## 五、实机运行记录
 
@@ -68,7 +73,7 @@ SmoothTransformation，留以后更大尺寸复用的余地。
 
 ## 六、验证
 
-- `tests/test_screen_capture_ask_dialog.py`：**36 passed**（30 既有 + 6 新增）。
+- `tests/test_screen_capture_ask_dialog.py`：**38 passed**（30 既有 + 8 新增）。
   复现命令：`QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:randomly tests/test_screen_capture_ask_dialog.py`
   （红→绿取证：彩蛋三条在实现前全红——`_egg_icon`/`_title` 属性不存在，`AttributeError`）。
 - `ruff check` 改动文件干净。

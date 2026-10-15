@@ -158,6 +158,7 @@ class ScreenAskDialog(QFrame):
         self._egg_icon.setVisible(False)  # 鲸蛙彩蛋：命中才出场（_roll_easter_egg）
         self._egg_active = False          # 本窗本次会话是否命中（素材缺失 = False）
         self._egg_src = QPixmap()         # 命中时的原图（DPR 变化时按它重出）
+        self._egg_scaled = None           # 最近一次出图（测试可核对 DPR/物理尺寸）
         self._egg_screen_wired = False    # screenChanged 一次性接线标记
         header.addWidget(self._egg_icon)
         title = QLabel(_DEFAULT_TITLE, self)

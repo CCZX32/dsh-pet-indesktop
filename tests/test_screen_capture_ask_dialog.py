@@ -782,3 +782,52 @@ def test_jingwa_egg_icon_follows_device_pixel_ratio(qapp, monkeypatch):
     assert pix.devicePixelRatio() == 2.0
     assert pix.width() == 48, "物理尺寸 48 = 24 × dpr 2（QLabel 读回会归一化，不可验）"
     dialog.close()
+
+
+def test_jingwa_egg_refresh_retriggers_on_reshow_and_screen_change(qapp, monkeypatch):
+    """事件接线回归：命中后重开/换屏会重出图（新对象），且换屏不重新掷骰。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    rolls = []
+    def _roll():
+        rolls.append(1)
+        return 0.05
+    monkeypatch.setattr(ask_mod.random, "random", _roll)
+
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    assert dialog._egg_active is True
+    first = dialog._egg_scaled
+    assert first is not None
+    assert dialog._egg_screen_wired is True, "showEvent 必须接上换屏信号"
+
+    # 换屏信号 → 重出图（新对象），不重新掷骰
+    rolls.clear()
+    handle = dialog.windowHandle()
+    assert handle is not None
+    handle.screenChanged.emit(dialog.screen())
+    assert dialog._egg_scaled is not first, "换屏后图标必须重出（DPR 可能变了）"
+    assert rolls == [], "换屏只重出图，不重新掷骰"
+    second = dialog._egg_scaled
+
+    # 关闭再开（窗口复用，再次命中）→ showEvent 重出
+    dialog.close()
+    dialog.start_with_image(_image())
+    assert dialog._egg_scaled is not second
+    dialog.close()
+
+
+def test_jingwa_egg_no_refresh_when_roll_missed(qapp, monkeypatch):
+    """未命中：show/换屏都不出图（_egg_scaled 保持 None）。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    assert dialog._egg_active is False
+    assert dialog._egg_scaled is None
+    handle = dialog.windowHandle()
+    if handle is not None:
+        handle.screenChanged.emit(dialog.screen())
+    assert dialog._egg_scaled is None
+    dialog.close()
