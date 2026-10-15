@@ -31,14 +31,14 @@
 
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
-| `pet/music_lyric.py` | +18 / −1 | `_name_matches`：整串子串命中后，新增「两侧都含分隔符 → 归一逐段子串比对」分支；`_ARTIST_SEP_RE` 模块级编译一次 |
+| `pet/music_lyric.py` | +25 / −1 | `_name_matches`：整串子串命中后，新增「两侧都含分隔符 → 归一逐段**相等**比对」分支；`_ARTIST_SEP_RE` 模块级编译一次，feat/ft 带词边界且在去空白前切分（盲审 P1/P2 返修） |
 | `pet/modern_settings_dialog.py` | +1 / −1 | 「显示歌词」行 hint：补酷狗开关的具体位置（设置 → 常规设置 → 播放 → 支持系统播放控件）+「酷狗/汽水无需填路径」（防止再有人往音乐关联槽里填 exe） |
 
 ### 测试
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_music_lyric.py` | +20 / −0 | 两条：分隔符变体互认（含实机样本 `FLOW/GRANRODEO` × `FLOW、GRANRODEO`、中文、feat.、英文逗号）；防误伤（单侧无分隔符/多歌手互不相干/单字符段） |
+| `tests/test_music_lyric.py` | +39 / −0 | 三条：分隔符变体互认（含实机样本 `FLOW/GRANRODEO` × `FLOW、GRANRODEO`、中文、feat.、英文逗号）；防误伤（单侧无分隔符/多歌手互不相干）；词边界反例（盲审 P1：swift/craft/daft punk 不被拆碎、碎片不假命中） |
 
 红→绿：改前 `test_name_matches_multi_artist_separator_variants` 红在
 `assert _name_matches("FLOW/GRANRODEO", "FLOW、GRANRODEO")`（False）；
@@ -59,7 +59,10 @@
 对照 Lyricify 官方支持表（酷狗"无时间轴信息"、汽水"完美"）。
 
 分隔符集合的取法：CJK 顿号（酷狗实测）、ASCII/全角斜杠（网易云/QQ 歌词源）、
-`&`/`×`/逗号/分号（常见曲库）、`feat.`/`ft.`（英文曲库）。逐段比对要求
+`&`/`×`/逗号/分号（常见曲库）、`feat.`/`ft.`（英文曲库，带词边界——否则 swift/
+craft/daft punk 会被拆碎，盲审 P1）。逐段比对是**去空白后相等**（不用子串——
+2-3 字符碎片几乎什么都命中，盲审 P2）。`&`/`/` 会拆开 Simon & Garfunkel / AC/DC
+这类组合名，由「两侧都是多歌手形态」闸门限幅（盲审 P3，已知取舍）。逐段比对要求
 **两侧**都是多歌手形态（`len(raw) >= 2`），单侧无分隔符直接退回原语义——
 防止 "A" 误中 "Aimer、B" 这类单名误命中；1 字符段（罕见单字母歌手）不参与
 逐段比对。

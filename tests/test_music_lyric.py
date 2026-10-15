@@ -2163,3 +2163,20 @@ def test_name_matches_multi_artist_does_not_overreach():
     assert not music_lyric._name_matches("周杰伦", "林俊杰、蔡依林")
     assert not music_lyric._name_matches("A", "B、C")
     assert not music_lyric._name_matches("FLOW/GRANRODEO", "MUSE、Aimer")
+
+
+def test_name_matches_feat_split_never_shreds_single_names():
+    """feat/ft 必须带词边界（盲审 P1）：swift/craft/daft punk 这类含 ft/feat
+    字母序列的单名不得被拆碎成"多歌手形态"，碎片子串不得乱命中。"""
+    for single in ("Taylor Swift", "Craft", "Daft Punk", "Soft Cell", "Leftfield",
+                   "Featherstone"):
+        # 单名 vs 多歌手：单侧无分隔符，不许借碎片命中
+        assert not music_lyric._name_matches(single, "林俊杰、蔡依林"), single
+    # 碎片假阳性实案（ops5.5 审查实测）：'cra' 不得借 'raf' 碎片命中
+    assert not music_lyric._name_matches("Craft/Lift", "Soft、Raft")
+    # 逐段相等：BTS 命中 BTS、Halsey 里的一段；但 BTS、Coldplay 里没有 BTS…等下，有
+    assert music_lyric._name_matches("BTS/Halsey", "BTS、Coldplay")   # 任一段相等即中（与原"任一命中"语义一致）
+    assert not music_lyric._name_matches("BTS/Halsey", "BT、Coldplay")  # 'bt' 不是 'bts'
+    # feat 的正常形态仍认（词边界 + 可选句点）
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")

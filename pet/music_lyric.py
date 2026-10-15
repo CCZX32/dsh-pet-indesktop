@@ -315,7 +315,9 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
 
 # 多歌手分隔符（酷狗报「、」、歌词源多写「/」，feat./ft. 见英文曲库）：
 # 两侧都是多歌手形态时归一逐段比对，否则整串子串必然丢词。
-_ARTIST_SEP_RE = re.compile(r"[、/／&×,，;；]|feat\.?|ft\.?", re.IGNORECASE)
+# feat/ft 必须带单词边界（\b），且切分发生在**去空白之前**——否则 swift/craft/
+# daft punk 这类含 ft/feat 字母序列的单名会被拆碎（盲审 P1）。
+_ARTIST_SEP_RE = re.compile(r"\s*(?:[、/／&×,，;；]|\bfeat\.?|\bft\.?)\s*", re.IGNORECASE)
 
 
 def _name_matches(candidate: str, wanted: str) -> bool:
@@ -328,14 +330,17 @@ def _name_matches(candidate: str, wanted: str) -> bool:
         return False
     if a in b or b in a:
         return True
-    raw_a = [p for p in _ARTIST_SEP_RE.split(a) if p]
-    raw_b = [p for p in _ARTIST_SEP_RE.split(b) if p]
+    # 在保留空白的小写串上切分（feat/ft 的词边界要靠空白/标点判定），切完去空白
+    raw_a = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(candidate or "").lower())]
+    raw_b = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(wanted or "").lower())]
+    raw_a = [p for p in raw_a if p]
+    raw_b = [p for p in raw_b if p]
     # 只在两侧都是多歌手形态时才逐段比：单侧无分隔符保持原语义（防单名误命中）
     if len(raw_a) < 2 or len(raw_b) < 2:
         return False
-    parts_a = [p for p in raw_a if len(p) >= 2]
-    parts_b = [p for p in raw_b if len(p) >= 2]
-    return any(pa in pb or pb in pa for pa in parts_a for pb in parts_b)
+    # 逐段**相等**比对（去空白后）：子串比对会让 2-3 字符碎片几乎什么都命中
+    # （盲审 P2："Craft/Lift" 的 "cra" 会被 "Soft、Raft" 的 "raf" 碎片带上）。
+    return any(pa == pb for pa in raw_a for pb in raw_b)
 
 
 def _as_lyrics(lines: list[LyricLine]) -> Lyrics | None:
