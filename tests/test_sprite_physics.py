@@ -111,6 +111,7 @@ def _drag_steps(sprite: PetSprite, clock: FakeClock, start: tuple[float, float],
     """press 后按 (dx, dy, dt) 序列拖动，返回松手位置（不 release）。
 
     真拖拽序列 = on_press（点击候选）→ begin_drag（过阈值升级）→ on_move…
+    每步拖动后推一帧（真实拖拽中移动事件与帧交错；弹簧档靠 advance 追踪光标）。
     """
     sprite.on_press(QPointF(*start))
     sprite.begin_drag()
@@ -119,6 +120,7 @@ def _drag_steps(sprite: PetSprite, clock: FakeClock, start: tuple[float, float],
         clock.advance(dt)
         x, y = x + dx, y + dy
         sprite.on_move(QPointF(x, y))
+        sprite.advance(dt)
     return QPointF(x, y)
 
 
@@ -321,8 +323,8 @@ def test_high_speed_release_enters_thrown():
     assert sprite.interaction_state == INTERACTION_THROWN
     assert sprite.velocity.x() > physics_mod.DEAD_ZONE_SPEED
     assert sprite.velocity.y() == 0.0                      # 纯水平甩动
-    # 松手后停在最后一次拖动位置（grab 偏移 (10,10)）
-    assert sprite.pos == release - QPointF(10.0, 10.0)
+    # 弹簧档松手不 snap：宠从滞后位置起抛（legacy 手感），不是瞬移到光标
+    assert 100.0 < sprite.pos.x() < release.x() - 20.0
 
 
 def test_slow_release_returns_normal():
@@ -336,7 +338,9 @@ def test_slow_release_returns_normal():
 
     assert sprite.interaction_state == INTERACTION_NORMAL
     assert sprite.velocity == QPointF(0, 0)                # 停住，不恢复拖拽前速度
-    assert sprite.pos == release - QPointF(10.0, 10.0)
+    # 慢拖弹簧贴得很紧：落在拖拽位置附近（不 snap，允许弹簧残差；
+    # 本例拖拽全程仅 6px，跟不上的残差 ~5.7px 是弹簧还没走完的物理事实）
+    assert abs(sprite.pos.x() - (release.x() - 10.0)) < 8.0
 
 
 def test_stale_release_returns_normal():

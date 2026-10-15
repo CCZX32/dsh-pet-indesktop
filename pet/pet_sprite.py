@@ -1136,9 +1136,11 @@ class PetSprite(QObject):
         """
         if not self._dragging:
             return
-        if self._drag_offset is not None:
+        # 弹簧档松手**不 snap 到光标**：弹簧跟随的滞后位置就是起抛/落地点
+        #（legacy window.py 同语义——瞬移过去再飞出去是 v4.3.0-hotfix 第一版
+        # 的错，实机反馈瞬移突兀）。直跟档下宠本来就在光标处，snap 是 no-op。
+        if self._drag_offset is not None and not self.drag_physics:
             self.set_pos(QPointF(pos) - self._drag_offset)
-        # 弹簧档松手：先把滞后位置结算到目标点再估初速（否则松手瞬间位置跳变），
         # 初速口径不变（轨迹采样的是光标位置）；弹簧状态随拖拽结束复位。
         self._drag_spring_target = None
         self._drag_spring_vel = QPointF(0.0, 0.0)
