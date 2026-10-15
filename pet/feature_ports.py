@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from .api_ports import FeatureApiPort
@@ -37,6 +38,7 @@ __all__ = [
     "FeatureHostContext",
     "FeaturePreferencesPort",
     "FeatureStateDocumentPort",
+    "FeatureUserDataPort",
     "FeatureWindowPorts",
     "FeatureWindowState",
 ]
@@ -80,6 +82,21 @@ class FeatureStateDocumentPort(FeatureDocumentPort, Protocol):
     """一份可跨实例互斥的状态文档（锁策略由宿主决定）。"""
 
     def locked(self) -> AbstractContextManager[None]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureUserDataPort:
+    """一个 owner 自己的数据根 + 只读的展示快照（与上游 DLC 同形）。
+
+    给的是**一个目录**（会话/迁移侧车都落在它下面）与两样 Core 产出的展示值：
+    当前角色与角色显示名别名。它不授予安装账本、别的 owner 的数据，也不授予
+    全局 :class:`pet.config.Config`——密钥另有凭据库端口，不从这里走。
+    """
+
+    root: Path
+    instance_id: str
+    read_display: Callable[[], Mapping]
+    alias_for: Callable[[str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,3 +160,5 @@ class FeatureHostContext:
     preferences: FeaturePreferencesPort | None = None
     #: 窗口操作面（快照/气泡/聊天联动/生命周期）；仅官方识屏绑定注入。
     window: FeatureWindowPorts | None = None
+    #: owner 自己的数据根 + 只读展示快照；仅官方聊天绑定注入，本地 MOD 恒 None。
+    user_data: FeatureUserDataPort | None = None

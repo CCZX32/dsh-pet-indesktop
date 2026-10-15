@@ -36,7 +36,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable
+from typing import Callable, Mapping
 
 from .api_ports import unsupported_api_port
 from .feature_ports import (
@@ -44,11 +44,12 @@ from .feature_ports import (
     FeatureDocumentPort,
     FeatureHostContext,
     FeatureStateDocumentPort,
+    FeatureUserDataPort,
     FeatureWindowPorts,
     FeatureWindowState,
 )
 from .feature_state_io import StateError, atomic_write, open_kernel_lock, read_bytes, safe_path
-from .official_features import SCREEN_FEATURE_ID, is_valid_feature_id
+from .official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
 
 #: 一份作者文档 / 配置的有界读取上限（与验签清单同一量级的保守值）。
 _DOCUMENT_LIMIT = 1 << 20
@@ -419,4 +420,85 @@ def bind_screen_context(
         desktop=get_desktop_query(),
         window=_bind_screen_window(cfg, owner, authorized=authorized, host=host),
         api=None,
+    )
+
+
+# ---------------------------------------------------------------- 官方聊天包
+
+#: 聊天包偏好的授权字段集（上游 ``bind_ai_context`` 逐字）：包只能 stage 这些键。
+#:
+#: 与上游的一处**有意分歧**：上游把这份字段集绑在 app 配置树的 ``chat`` 节点上
+#: （包与内置聊天共用一份 provider 配置）。本仓库不让包进配置树——包的那份
+#: preferences 落在 ``feature-data/<owner>/preferences.json``（见下文），于是
+#: 内置聊天与包各持一本自己的账，谁都不动谁（本片的口径：两套聊天实现并存，
+#: 不合并）。
+_AI_PREFERENCE_FIELDS = frozenset(
+    {
+        "enabled",
+        "active_provider",
+        "default_system_prompt",
+        "history_message_limit",
+        "history_char_limit",
+        "providers",
+    }
+)
+
+
+def bind_ai_context(
+    cfg,
+    *,
+    owner: str = AI_FEATURE_ID,
+    vault=None,
+    authorized: Callable[[], bool] | None = None,
+    host=None,
+) -> FeatureHostContext:
+    """官方聊天包的宿主绑定：自己的数据根 + 自己那本配置 + 凭据库。
+
+    与识屏绑定（:func:`bind_screen_context`）的差异就是"不给什么"：**不给**桌面
+    查询端口、**不给**窗口操作面、**不给** Core 的 API 端口（``api=None``）——
+    换句话说，包要联网只能走它自己命名空间里的 provider 配置 + 凭据库里的 key，
+    读不到 Core 内置聊天的那一份。``legacy_secret_reader`` 是"调用即拒绝"的显式
+    口子（包会主动调它，见 ``host/config.py``），而不是识屏那边的 ``None``。
+    """
+    if owner != AI_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+    from .credentials import CredentialError, CredentialVaultPort
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    if vault is None:
+        scope = str(Path(cfg.path).resolve()) if hasattr(cfg, "path") else str(root.resolve())
+        vault = CredentialVaultPort(owner, scope)
+
+    def deny_legacy(ref: str) -> str:
+        raise CredentialError("legacy_import_authorization_required")
+
+    def read_display() -> Mapping:
+        return MappingProxyType(
+            {
+                "character": cfg.get("character"),
+                "self_talk_bubble_style": cfg.get("self_talk_bubble_style", "classic_top"),
+            }
+        )
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        credentials=vault,
+        legacy_secret_reader=deny_legacy,
+        preferences=_BoundPreferences(root / "preferences.json", _AI_PREFERENCE_FIELDS),
+        documents=MappingProxyType({}),
+        state_documents=MappingProxyType({}),
+        desktop=None,
+        window=None,
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
     )
