@@ -2,7 +2,7 @@
 
 > **基线**：`99bdc7f`（main，含 #277）
 > **分支**：`feat/music-multi-artist`　**日期**：2026-10-15
-> **范围**：4 个文件（实现 2、测试 1、文档 1）
+> **范围**：5 个文件（实现 2、测试 1、文档 2）
 > **关联**：用户需求「酷狗音乐/汽水音乐看不到歌词」；调研记录见本报告 §三
 
 ## 一、核心特性
@@ -23,7 +23,8 @@
 | 2 | 设置页指引 | 「显示歌词」行写明酷狗的开关位置；酷狗/汽水无需填路径 |
 
 **红线 / 不变量**：单侧无分隔符保持原语义（防单名误命中）；整串子串命中
-优先于逐段比对（既有行为逐位保留）；1 字符段不参与逐段比对。
+优先于逐段比对（既有行为逐位保留）；逐段比对是去空白后**相等**（不用子串，
+防碎片假命中）。
 
 ## 二、修改文件说明
 
@@ -31,14 +32,14 @@
 
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
-| `pet/music_lyric.py` | +25 / −1 | `_name_matches`：整串子串命中后，新增「两侧都含分隔符 → 归一逐段**相等**比对」分支；`_ARTIST_SEP_RE` 模块级编译一次，feat/ft 带词边界且在去空白前切分（盲审 P1/P2 返修） |
+| `pet/music_lyric.py` | +23 / −2 | `_name_matches`：整串子串命中后，新增「两侧都含分隔符 → 归一逐段**相等**比对」分支；`_ARTIST_SEP_RE` 模块级编译一次，feat/ft 带**双侧**词边界且在去空白前切分（两轮盲审返修：左侧无边界会拆碎 swift/craft，右侧无边界会拆碎 Featherstone/FTIsland）；逐段比对为去空白后相等 |
 | `pet/modern_settings_dialog.py` | +1 / −1 | 「显示歌词」行 hint：补酷狗开关的具体位置（设置 → 常规设置 → 播放 → 支持系统播放控件）+「酷狗/汽水无需填路径」（防止再有人往音乐关联槽里填 exe） |
 
 ### 测试
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_music_lyric.py` | +39 / −0 | 三条：分隔符变体互认（含实机样本 `FLOW/GRANRODEO` × `FLOW、GRANRODEO`、中文、feat.、英文逗号）；防误伤（单侧无分隔符/多歌手互不相干）；词边界反例（盲审 P1：swift/craft/daft punk 不被拆碎、碎片不假命中） |
+| `tests/test_music_lyric.py` | +46 / −0 | 四条：分隔符变体互认（含实机样本 `FLOW/GRANRODEO` × `FLOW、GRANRODEO`、中文、feat.、英文逗号）；防误伤（单侧无分隔符/多歌手互不相干）；词边界反例（盲审两轮：swift/craft/daft punk 不被拆碎、碎片不假命中、Featherstone/FTIsland 词首不误拆） |
 
 红→绿：改前 `test_name_matches_multi_artist_separator_variants` 红在
 `assert _name_matches("FLOW/GRANRODEO", "FLOW、GRANRODEO")`（False）；
@@ -69,7 +70,9 @@ craft/daft punk 会被拆碎，盲审 P1）。逐段比对是**去空白后相�
 
 ## 四、性能分析
 
-实测（本机 Windows 11，Python 3.13，n=30000 混合样本取均值）：
+实测（本机 Windows 11，Python 3.13，混合样本（含多歌手命中/单名子串/无关拒绝），
+n=30000 取均值；复现命令：
+`python -c "import time;from pet.music_lyric import _name_matches;pairs=[('FLOW/GRANRODEO','FLOW、GRANRODEO'),('周杰伦','周杰伦/Jay Chou'),('其他歌手','周杰伦')];t0=time.perf_counter();[[_name_matches(c,w) for c,w in pairs] for _ in range(10000)];print((time.perf_counter()-t0)/30000*1e6)"`）：
 
 | 路径 | 实测 | 触发频率 |
 |---|---|---|
