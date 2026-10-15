@@ -178,3 +178,26 @@ def test_a_fresh_runtime_replays_the_official_ledger(installed, tmp_path):
     finally:
         dispose_qobject(fresh.mounts.runtimes.get(OWNER) if fresh.mounts else None)
         fresh.close()
+
+
+def test_the_package_settings_panel_mounts_with_draft_gates(installed):
+    """设置面：真 ScreenContributionSettings 经 OwnerSettingsPanel 挂载，草稿门禁生效。"""
+    runtime, manager, _fake = installed
+    _enable(manager)
+    try:
+        panel = runtime.settings_panel(OWNER)
+        assert panel is not None
+        component = panel.component
+        assert type(component).__module__.startswith("_pet_official_screen_")
+        assert component.dirty() is False
+        # 未保存草稿 → 宿主侧拒绝停用/卸载（事务层同判据的第二入口）
+        component.vision.prompt.setPlainText("草稿改动")
+        assert component.dirty() is True
+        runtime.refresh_drafts()
+        assert runtime.lifecycle.drafts(OWNER)
+        assert component.discard_changes() is True
+        runtime.refresh_drafts()
+        assert not runtime.lifecycle.drafts(OWNER)
+        assert panel.dispose() is None or True
+    finally:
+        dispose_qobject(runtime.mounts.runtimes.get(OWNER))

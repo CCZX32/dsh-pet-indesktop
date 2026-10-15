@@ -1408,10 +1408,17 @@ class AppShell:
         try:
             from .feature_management import LocalFeatureRuntime
 
-            return LocalFeatureRuntime(self.config, role='core')
+            runtime = LocalFeatureRuntime(self.config, role='core')
         except Exception:
             logging.exception('功能扩展宿主装配失败；桌宠照常启动，MOD 中心显示宿主不可用')
             return None
+        # 官方识屏包的呈现提供方（DLC 识屏包线）：注册的是惰性工厂，``_shared``
+        # 的构建晚于本方法，运行时每次调用时才读当前 proxy；bubble/聊天同步经它
+        # 扇出到首个可见窗（与共享 proactive 同一张呈现面）。
+        from .feature_host_bindings import register_screen_presentation
+
+        register_screen_presentation(lambda: self._shared.proxy if getattr(self, "_shared", None) is not None else None)
+        return runtime
 
     def _mark_slot0_profile_unusable(self, migration) -> None:
         """slot0 档案不可用（单槽损坏）：**降级该槽**，不拖死整个应用（ops D2）。
@@ -2838,6 +2845,13 @@ class AppShell:
                 runtime.close()
             except Exception:
                 logging.exception("退出时关闭功能扩展宿主失败")
+        # 识屏包的呈现提供方随宿主一起摘（进程退出后迟到回调不投递）。
+        try:
+            from .feature_host_bindings import register_screen_presentation
+
+            register_screen_presentation(None)
+        except Exception:
+            logging.exception("退出时摘除识屏呈现提供方失败")
         # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win

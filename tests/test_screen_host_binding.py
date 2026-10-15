@@ -189,3 +189,39 @@ def test_window_enabled_requires_the_host_authority(tmp_path, presentation):
     assert context.window.enabled() is False  # 未过 bind_context 授权
     context2 = bind_screen_context(Config(base=tmp_path), authorized=lambda: True)
     assert context2.window.enabled() is True
+
+
+# --------------------------------------------------------------- 识屏→聊天联动（app 面）
+
+
+def test_sync_text_reaches_the_builtin_chat_session_store(tmp_path, presentation):
+    """包 → 内置聊天面的真实落点：sync_text → on_look_synced → SessionStore 落盘。
+
+    窗口侧那一小段是 ``PetInstance.sync_look_to_chat`` 的同语义替身（它的既有覆盖在
+    ``test_overlay_chat_proactive.py``）；这里验的是**包的端口面**接到内置聊天存储后
+    真的写出一条「用户问 + 宠物答」。
+    """
+    from pet.chat.models import ChatMessage
+    from pet.chat.session_store import SessionStore
+
+    config = Config(base=tmp_path)
+    store = SessionStore(config.dir, "")
+    session = store.create("shenshen", "test-provider", "你是桌宠")
+    assert store.save(session)
+    assert store.flush()
+
+    class _Windowish:
+        def on_look_synced(self, user_text, reply):
+            store.append_messages(session, [ChatMessage("user", str(user_text)), ChatMessage("assistant", str(reply))])
+
+    provider = _FakePresentation()
+    windowish = _Windowish()
+    provider.on_look_synced = windowish.on_look_synced
+    register_screen_presentation(lambda: provider)
+    window = bind_screen_context(config, authorized=lambda: True).window
+    window.sync_text("[主动识屏] 前台进程：code.exe（写代码）", "你在写代码呀")
+    loaded = store.load(session.session_id, "shenshen")
+    assert loaded is not None
+    roles = [(m.role, str(m.content)) for m in loaded.messages]
+    assert ("user", "[主动识屏] 前台进程：code.exe（写代码）") in roles
+    assert ("assistant", "你在写代码呀") in roles
