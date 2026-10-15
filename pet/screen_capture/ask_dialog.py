@@ -156,6 +156,9 @@ class ScreenAskDialog(QFrame):
         self._egg_icon.setFixedSize(24, 24)
         self._egg_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._egg_icon.setVisible(False)  # 鲸蛙彩蛋：命中才出场（_roll_easter_egg）
+        self._egg_active = False          # 本窗本次会话是否命中（素材缺失 = False）
+        self._egg_src = QPixmap()         # 命中时的原图（DPR 变化时按它重出）
+        self._egg_screen_wired = False    # screenChanged 一次性接线标记
         header.addWidget(self._egg_icon)
         title = QLabel(_DEFAULT_TITLE, self)
         title.setObjectName("screen-ask-title")
@@ -328,23 +331,40 @@ class ScreenAskDialog(QFrame):
         self.activateWindow()
         self._input.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
+    def _on_egg_screen_changed(self, _screen) -> None:
+        """拖到不同缩放比的屏：彩蛋命中时按新屏 DPR 重出图标。"""
+        if self._egg_active:
+            self._refresh_egg_icon()
+
     def _roll_easter_egg(self) -> None:
         """鲸蛙彩蛋：每次开新会话掷一次（10%）。窗口本体复用，每开必重置。"""
         hit = random.random() < _EGG_CHANCE
-        if hit:
-            pix = _jingwa_pixmap()
-            hit = not pix.isNull()  # 素材缺失（裁剪包/坏包）时静默回退默认形态
-        if hit:
-            # HiDPI：按设备像素比出图，150%/200% 屏上不发糊
-            dpr = self.devicePixelRatioF()
-            scaled = pix.scaled(
-                int(24 * dpr), int(24 * dpr),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation)
-            scaled.setDevicePixelRatio(dpr)
-            self._egg_icon.setPixmap(scaled)
-        self._egg_icon.setVisible(hit)
-        self._title.setText(_EGG_TITLE if hit else _DEFAULT_TITLE)
+        src = _jingwa_pixmap() if hit else QPixmap()
+        # 素材缺失（裁剪包/坏包）时静默回退默认形态
+        self._egg_active = hit and not src.isNull()
+        self._egg_src = src
+        self._refresh_egg_icon()
+
+    def _refresh_egg_icon(self, dpr: float | None = None) -> None:
+        """按当前屏 DPR 出图。掷骰在 show 之前，选区定位可能把它落到另一块
+        缩放比的屏上；拖到不同缩放屏时经 screenChanged 重出——两处都不重新
+        掷骰，只重出图。``dpr`` 是测试注入缝（offscreen 恒 1.0），生产缺省
+        读窗口真实 DPR。"""
+        if not self._egg_active:
+            self._egg_icon.setVisible(False)
+            self._title.setText(_DEFAULT_TITLE)
+            return
+        dpr = self.devicePixelRatioF() if dpr is None else float(dpr)
+        scaled = self._egg_src.scaled(
+            int(24 * dpr), int(24 * dpr),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        self._egg_icon.setPixmap(scaled)
+        self._egg_scaled = scaled  # 出图留档：测试可直接核对 DPR/物理尺寸
+        #（QLabel.pixmap() 在 offscreen 下会归一化 DPR，读它验不了 HiDPI）
+        self._egg_icon.setVisible(True)
+        self._title.setText(_EGG_TITLE)
 
     def send_current(self) -> bool:
         """发送当前输入（空输入走默认问法）。发送中/无会话时拒收，返回是否受理。"""
@@ -434,6 +454,15 @@ class ScreenAskDialog(QFrame):
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         super().showEvent(event)
+        # 彩蛋图标按最终落点的屏 DPR 重出（掷骰在 show 前）；并一次性接上
+        # 换屏信号——拖到不同缩放比的屏只重出图，不重新掷骰。
+        if self._egg_active:
+            self._refresh_egg_icon()
+        if not self._egg_screen_wired:
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.screenChanged.connect(self._on_egg_screen_changed)
+                self._egg_screen_wired = True
         if self._user_size is not None:
             self.resize(self._user_size)
         if self._user_pos is not None:

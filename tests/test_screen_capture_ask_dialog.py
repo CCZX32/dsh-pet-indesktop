@@ -765,3 +765,20 @@ def test_jingwa_easter_egg_loads_nothing_when_the_roll_misses(qapp, monkeypatch)
 
     assert calls == []
     dialog.close()
+
+
+def test_jingwa_egg_icon_follows_device_pixel_ratio(qapp, monkeypatch):
+    """彩蛋图标按当前 DPR 出图：换屏/首落点变化后重出，物理像素跟着变。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+    assert dialog._egg_active is True
+
+    # offscreen 的 DPR 恒 1.0 且 PySide6 的方法遮蔽不可靠：走测试注入缝
+    dialog._refresh_egg_icon(dpr=2.0)
+    pix = dialog._egg_scaled
+    assert pix.devicePixelRatio() == 2.0
+    assert pix.width() == 48, "物理尺寸 48 = 24 × dpr 2（QLabel 读回会归一化，不可验）"
+    dialog.close()
