@@ -21,7 +21,10 @@
 from __future__ import annotations
 
 import logging
+import random
+import sys
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
@@ -48,6 +51,25 @@ __all__ = ["ScreenAskDialog"]
 _MARGIN = 12          # 缺省落点贴屏幕右下的留白
 _MIN_W, _MIN_H = 320, 360
 _BUBBLE_RADIUS = 10
+
+# 鲸蛙彩蛋：每次开新会话（start_with_image）掷一次，10% 概率标题变「鲸蛙问答」
+# 并在标题前摆鲸蛙图标；未命中一切照旧（零加载、零布局变化）。
+_EGG_CHANCE = 0.10
+_EGG_TITLE = "鲸蛙问答"
+_DEFAULT_TITLE = "截图问答"
+
+
+def _jingwa_pixmap() -> QPixmap:
+    """鲸蛙彩蛋图标（``assets/chat/jingwa.png``，随包分发；加载失败给空图）。"""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / "chat" / "jingwa.png")
+    candidates.append(Path(__file__).resolve().parents[2] / "assets" / "chat" / "jingwa.png")
+    for path in candidates:
+        if path.is_file():
+            return QPixmap(str(path))
+    return QPixmap()
 
 
 class _Bubble(QLabel):
@@ -129,9 +151,16 @@ class ScreenAskDialog(QFrame):
         # 标题栏（拖拽把手：标签对鼠标透明，按下落在面板上）
         header = QHBoxLayout()
         header.setSpacing(8)
-        title = QLabel("截图问答", self)
+        self._egg_icon = QLabel(self)
+        self._egg_icon.setObjectName("screen-ask-egg")
+        self._egg_icon.setFixedSize(24, 24)
+        self._egg_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._egg_icon.setVisible(False)  # 鲸蛙彩蛋：命中才出场（_roll_easter_egg）
+        header.addWidget(self._egg_icon)
+        title = QLabel(_DEFAULT_TITLE, self)
         title.setObjectName("screen-ask-title")
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._title = title
         header.addWidget(title)
         note = QLabel("点「发送」才会把图发给你配置的 AI 服务", self)
         note.setObjectName("screen-ask-note")
@@ -293,10 +322,24 @@ class ScreenAskDialog(QFrame):
         self._clear_messages()
         self._set_status("")
         self._set_sending(False)
+        self._roll_easter_egg()
         self.show()
         self.raise_()
         self.activateWindow()
         self._input.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def _roll_easter_egg(self) -> None:
+        """鲸蛙彩蛋：每次开新会话掷一次（10%）。窗口本体复用，每开必重置。"""
+        hit = random.random() < _EGG_CHANCE
+        if hit:
+            pix = _jingwa_pixmap()
+            hit = not pix.isNull()  # 素材缺失（裁剪包/坏包）时静默回退默认形态
+        if hit:
+            self._egg_icon.setPixmap(pix.scaled(
+                24, 24, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        self._egg_icon.setVisible(hit)
+        self._title.setText(_EGG_TITLE if hit else _DEFAULT_TITLE)
 
     def send_current(self) -> bool:
         """发送当前输入（空输入走默认问法）。发送中/无会话时拒收，返回是否受理。"""

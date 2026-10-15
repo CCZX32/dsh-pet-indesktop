@@ -684,3 +684,48 @@ def test_a_stale_failure_does_not_unlock_the_new_sessions_send(qapp):
     dialog._on_error(first_gen, "旧会话的网络超时")   # 旧代号 → 不动发送锁
     assert dialog._sending is True, "旧回执解开了新会话的发送锁"
     dialog.close()
+
+
+# ------------------------------------------------------------------ 鲸蛙彩蛋
+def test_jingwa_easter_egg_shows_when_the_roll_hits(qapp, monkeypatch):
+    """10% 命中：标题变「鲸蛙问答」+ 鲸蛙图标出现在标题前。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+
+    assert dialog._title.text() == "鲸蛙问答"
+    assert dialog._egg_icon.isVisible() is True
+    pix = dialog._egg_icon.pixmap()
+    assert pix is not None and not pix.isNull(), "彩蛋图标必须真的加载到素材"
+    dialog.close()
+
+
+def test_jingwa_easter_egg_stays_hidden_when_the_roll_misses(qapp, monkeypatch):
+    """90% 未命中：标题与图标与今天逐位一致（零打扰）。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+
+    assert dialog._title.text() == "截图问答"
+    assert dialog._egg_icon.isVisible() is False
+    dialog.close()
+
+
+def test_jingwa_easter_egg_resets_on_the_next_open(qapp, monkeypatch):
+    """命中后下一次未命中要复位（窗口本体复用，状态不能跨年）。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    dialog = _dialog()
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
+    dialog.start_with_image(_image())
+    assert dialog._title.text() == "鲸蛙问答"
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.99)
+    dialog.start_with_image(_image())
+    assert dialog._title.text() == "截图问答"
+    assert dialog._egg_icon.isVisible() is False
+    dialog.close()
