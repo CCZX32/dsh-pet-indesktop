@@ -1418,7 +1418,22 @@ class AppShell:
         from .feature_host_bindings import register_screen_presentation
 
         register_screen_presentation(lambda: self._shared.proxy if getattr(self, "_shared", None) is not None else None)
+        # 官方聊天包的桌宠形呈现面（DLC 聊天包线）：同样是惰性工厂——包**每次开窗**
+        # 才解析一次，拿到的是本实例的聊天宿主（legacy = PetWindow 本体；overlay =
+        # sprite 壳的 pet 形 ``_OverlayChatHost``，与内置聊天窗用的是同一个宿主），
+        # 没有实例时返回 None，包按"不跟随桌宠"的安全默认开窗。
+        from .ai_bindings import register_ai_pet_view
+
+        register_ai_pet_view(self._ai_pet_view)
         return runtime
+
+    def _ai_pet_view(self):
+        """聊天包的桌宠呈现面：主实例的聊天宿主（拿不到就是 None，不伪造几何）。"""
+        instance = getattr(self, "instance", None)
+        if instance is None:
+            return None
+        host = getattr(instance, "_chat_host", None)
+        return host() if callable(host) else getattr(instance, "win", None)
 
     def _mark_slot0_profile_unusable(self, migration) -> None:
         """slot0 档案不可用（单槽损坏）：**降级该槽**，不拖死整个应用（ops D2）。
@@ -2852,6 +2867,13 @@ class AppShell:
             register_screen_presentation(None)
         except Exception:
             logging.exception("退出时摘除识屏呈现提供方失败")
+        # 聊天包的桌宠呈现面同理：宿主一关，包不该再拿到这只桌宠的几何。
+        try:
+            from .ai_bindings import register_ai_pet_view
+
+            register_ai_pet_view(None)
+        except Exception:
+            logging.exception("退出时摘除聊天包呈现面失败")
         # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win
