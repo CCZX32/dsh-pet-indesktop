@@ -439,7 +439,9 @@ def test_harness_controls_are_editable_on_the_child_page(tmp_path, app):
             assert row is not None
             hint = row.hint_label.text()
             assert "仅主桌宠" not in hint
-            assert "影响所有桌宠" in hint
+            # 作用域是行内独立标注（说明末尾不再带它），原文逐字保留。
+            assert "影响所有桌宠" in row.scope_note.text()
+            assert row.scope_note.isHidden() is False
 
         dialog.harness_autostart_check.setChecked(True)
         dialog.harness_launch_target_select.setCurrentData("service")

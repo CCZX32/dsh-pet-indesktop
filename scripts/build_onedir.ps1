@@ -326,6 +326,11 @@ if (-not $SkipBuild) {
         "VARIANT = '$Variant'`n",
         [System.Text.UTF8Encoding]::new($false)
     )
+    # 运行期图标（窗口/标题栏）也要进包：上面的 --icon 只把图标写进 exe 的**文件图标**
+    # 资源，窗口图标由 pet/application_icon.py 从 <_MEIPASS>\assets\icon.ico 读。
+    # 漏掉这一行不会有任何报错（只有源文件不存在时 PyInstaller 才会挡下），因此由
+    # tests/test_application_icon.py 的打包契约测试守着。见 docs\ONEDIR_PACKAGING.md
+    # 「运行期应用图标」。
     python -m PyInstaller --noconfirm --clean --onedir --windowed --noupx `
         --name $name `
         --distpath dist-onedir `
@@ -346,6 +351,7 @@ if (-not $SkipBuild) {
         @chatData `
         --add-data "assets\sounds;assets\sounds" `
         --add-data "assets\chat;assets\chat" `
+        --add-data "assets\icon.ico;assets" `
         --add-data "integrations;integrations" `
         --add-data "resources\presentmon;resources\presentmon" `
         @rapidocrData `

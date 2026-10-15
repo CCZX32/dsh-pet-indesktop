@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QPointF, QRect, Qt
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QWidget
 
 from pet import config as config_mod
 from pet import overlay_settings_command as cmd_mod
@@ -528,13 +528,65 @@ def test_reset_button_is_reachable_and_unclipped_at_minimum_window_size(qapp, tm
 
         button = dialog.reset_defaults_btn
         assert button.isVisible(), "侧栏底部的重置入口必须在最小尺寸下可达"
-        assert button.text() == settings_reset_defaults.RESET_BUTTON_TEXT
+        assert button.text() == settings_reset_defaults.RESET_SLOT_BUTTON_TEXT
         assert button.width() >= button.sizeHint().width(), "按钮被压到文案裁切"
         assert button.toolTip(), "破坏性操作必须有不裁切的说明（tooltip）"
         assert button.focusPolicy() != Qt.FocusPolicy.NoFocus, "键盘（Tab）必须够得着"
     finally:
         dialog.hide()
         dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_reset_buttons_name_their_scope_on_a_slot_page(qapp, tmp_path: Path):
+    """侧栏有两个重置动作时，**作用域写在按钮标签上**（不许靠 tooltip 告诉用户谁管哪面）。
+
+    #271 起主宠页也是 slot0 页，两个动作是常态：一个只重置这只桌宠的档案，另一个重置
+    所有桌宠共用的全局设置。旧文案（「恢复默认设置…」/「恢复全局默认…」）里主按钮不带
+    作用域，用户要么点开确认框、要么读 tooltip 才知道自己刚才点的是哪一个——破坏性操作
+    不该让人猜。
+    """
+    slot_dialog = ModernSettingsDialog(
+        Config(base=tmp_path / "appdata", instance_id="slot-1"), include_ai=False)
+    try:
+        own = slot_dialog.reset_defaults_btn
+        glob = slot_dialog.reset_global_defaults_btn
+        assert own.text() == settings_reset_defaults.RESET_SLOT_BUTTON_TEXT == "重置本宠设置…"
+        assert glob.text() == settings_reset_defaults.RESET_GLOBAL_BUTTON_TEXT == "重置全局设置…"
+        assert "本宠" in own.text() and "全局" in glob.text()
+        assert own.text() != glob.text(), "两个动作的标签必须能区分"
+        # 作用域标注不改变动作本身：回调、确认框与保留项一个字都没动（逐条见本文件其余用例）。
+        assert "这只桌宠" in own.toolTip()
+        assert "所有桌宠" in glob.toolTip()
+    finally:
+        slot_dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_global_only_page_does_not_call_itself_this_pet(qapp, tmp_path: Path):
+    """没有每宠划分的那一面（全局页）不自称"本宠"：单动作按钮沿用原文案。
+
+    那一面没有"每宠档案 / 全局"的区分，按钮写成"本宠"会指向一个不存在的划分——用户会
+    以为"本宠之外的设置没被重置"。产品入口（``--instance slot-N`` 与空身份会话）都按
+    slot0 分流、给的是两个带作用域的按钮；这一支是 legacy 整表身份/诊断身份才会走到的
+    路径，判据仍是 ``reset_scope_is_slot``（配置面，不是实例名）。
+    """
+
+    class _Host(QWidget):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    host = _Host(Config(base=tmp_path / "appdata"))
+    settings_reset_defaults.create_reset_button(host, QVBoxLayout(host))
+    try:
+        assert settings_reset_defaults.reset_scope_is_slot(host) is False
+        assert host.reset_defaults_btn.text() == settings_reset_defaults.RESET_BUTTON_TEXT
+        assert "本宠" not in host.reset_defaults_btn.text()
+        assert getattr(host, "reset_global_defaults_btn", None) is None, (
+            "全局页只有一个作用域，不该多出一个全局按钮")
+    finally:
+        host.deleteLater()
         qapp.processEvents()
 
 
