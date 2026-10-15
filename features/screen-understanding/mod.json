@@ -1,0 +1,8 @@
+{
+  "id": "official.screen-understanding",
+  "name": "识屏",
+  "description": "手动看看屏幕与按白名单自动识屏；独立 Worker 子进程处理截图和视觉请求。与内置识屏并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "screen-understanding/v1",
+  "execution_kind": "host-worker"
+}

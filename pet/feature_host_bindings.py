@@ -97,10 +97,12 @@ class _BoundConfiguration:
 def _bind_configuration(path: Path) -> FeatureConfigurationPort:
     # 视觉凭据事务的写前日志侧车（上游 journal_path 的等价物）：识屏包的
     # VisionConfigService.apply/recover 靠它做"已落 keyring 但未提交"的回收。
+    # 两把锁与上游同口径：commit 用 ``.write.lock``，operation()（recover/apply
+    # 外层事务）用 journal 的锁——同一把会非重入自锁（apply 里先 operation 再 commit）。
     journal_path = path.with_suffix(".journal.json")
 
     def commit(value: dict, *, expected_revision: str, source_guard: Callable[[dict], None] | None = None) -> None:
-        with open_kernel_lock(path.with_suffix(path.suffix + ".lock")):
+        with open_kernel_lock(path.with_suffix(path.suffix + ".write.lock")):
             latest = _read_document(path)
             if namespace_revision(latest) != expected_revision:
                 raise StateError("configuration_changed")
@@ -124,7 +126,7 @@ def _bind_configuration(path: Path) -> FeatureConfigurationPort:
         lambda: _read_document(path),
         lambda: namespace_revision(_read_document(path)),
         commit,
-        lambda: open_kernel_lock(path.with_suffix(path.suffix + ".lock")),
+        lambda: open_kernel_lock(journal_path.with_suffix(journal_path.suffix + ".lock")),
         read_journal,
         write_journal,
     )
