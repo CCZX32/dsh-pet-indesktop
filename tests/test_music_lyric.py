@@ -2146,3 +2146,20 @@ def test_cooldown_pause_is_still_deducted_without_reported_progress(monkeypatch)
 
     # 441 - 100 - 30 = 311（冷却期的 300s 算作播放——无进度源只能这么估，本修复没改）
     assert ctrl._tracker.position(441.0) == pytest.approx(311.0)
+
+
+def test_name_matches_multi_artist_separator_variants():
+    """多歌手分隔符归一：酷狗报「、」歌词源写「/」，两侧都是多歌手时逐段比对。"""
+    # 实机样本（酷狗 20.1 SMTC → 网易云歌词源）
+    assert music_lyric._name_matches("FLOW/GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW、GRANRODEO", "FLOW/GRANRODEO")
+    assert music_lyric._name_matches("周杰伦/蔡依林", "周杰伦、蔡依林")
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW, GRANRODEO", "FLOW、GRANRODEO")
+
+
+def test_name_matches_multi_artist_does_not_overreach():
+    """单侧无分隔符保持原语义；两侧多歌手但谁都不沾边不误判。"""
+    assert not music_lyric._name_matches("周杰伦", "林俊杰、蔡依林")
+    assert not music_lyric._name_matches("A", "B、C")
+    assert not music_lyric._name_matches("FLOW/GRANRODEO", "MUSE、Aimer")

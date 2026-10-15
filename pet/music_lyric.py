@@ -313,13 +313,29 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
         return None
 
 
+# 多歌手分隔符（酷狗报「、」、歌词源多写「/」，feat./ft. 见英文曲库）：
+# 两侧都是多歌手形态时归一逐段比对，否则整串子串必然丢词。
+_ARTIST_SEP_RE = re.compile(r"[、/／&×,，;；]|feat\.?|ft\.?", re.IGNORECASE)
+
+
 def _name_matches(candidate: str, wanted: str) -> bool:
-    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）。"""
+    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）；
+    多歌手分隔符（、/／&×,; feat./ft.）在**两侧都出现**时归一逐段比对——
+    实机样本：酷狗 SMTC 报「FLOW、GRANRODEO」而网易云歌词源写「FLOW/GRANRODEO」。"""
     a = re.sub(r"\s+", "", str(candidate or "").lower())
     b = re.sub(r"\s+", "", str(wanted or "").lower())
     if not a or not b:
         return False
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    raw_a = [p for p in _ARTIST_SEP_RE.split(a) if p]
+    raw_b = [p for p in _ARTIST_SEP_RE.split(b) if p]
+    # 只在两侧都是多歌手形态时才逐段比：单侧无分隔符保持原语义（防单名误命中）
+    if len(raw_a) < 2 or len(raw_b) < 2:
+        return False
+    parts_a = [p for p in raw_a if len(p) >= 2]
+    parts_b = [p for p in raw_b if len(p) >= 2]
+    return any(pa in pb or pb in pa for pa in parts_a for pb in parts_b)
 
 
 def _as_lyrics(lines: list[LyricLine]) -> Lyrics | None:
