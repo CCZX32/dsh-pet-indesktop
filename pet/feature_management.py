@@ -843,13 +843,17 @@ def _official_binder(owner: str):
     两个官方包要的**不是同一套端口**：识屏包拿凭据/偏好/窗口/桌面四端口；聊天包
     拿数据根/偏好/凭据/用户数据面，**不给**桌面与窗口。把路由收在一处，新增官方包
     时改的是这张表，不是 ``attach_official`` 里的分支。
+
+    表里的每一项都收同一个调用面 ``(cfg, *, authorized, host)``，各自只取自己要的
+    那几样——这样"包需要什么"和"宿主给什么"的对照只有一处，也不会把没人用的实参
+    留在绑定函数的签名里。
     """
     from .official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID
 
     if owner == SCREEN_FEATURE_ID:
-        return bind_screen_context
+        return lambda cfg, *, authorized, host: bind_screen_context(cfg, authorized=authorized, host=host)
     if owner == AI_FEATURE_ID:
-        return bind_ai_context
+        return lambda cfg, *, authorized, host: bind_ai_context(cfg, host=host)
     raise ValueError("unsupported official feature")
 
 

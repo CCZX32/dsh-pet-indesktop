@@ -243,6 +243,81 @@ def test_the_runtime_refuses_windows_before_execution_is_authorized(bound):
         dispose_qobject(runtime)
 
 
+def test_every_window_kind_the_package_offers_can_actually_open(bound):
+    """四种窗口各自构造一遍：包内 UI 是移植过来的，不能只验"import 得过"。
+
+    上游 ``create_window`` 支持 modern / classic / quick / island 四种；本仓库的
+    拓扑适配（配置适配器、主题取美术的路径、pet 形呈现面）任何一处接错，
+    都只会在这里露出来——菜单只走 modern 那一条。
+    """
+    from pet.ai_bindings import register_ai_pet_view
+
+    _host, context, _vault, handle = bound
+    register_ai_pet_view(lambda: FakePetView())
+    mount_module = import_pkg(handle, "host.runtime_mount")
+    runtime = mount_module.AiPackageRuntime(context)
+    try:
+        for kind in ("modern", "classic", "quick", "island"):
+            window = runtime.runtime.create_window(kind, view=mount_module._pet_view())
+            assert window is not None, kind
+            assert type(window).__module__.startswith("_pet_official_ai_chat_"), kind
+            window.close()
+    finally:
+        register_ai_pet_view(None)
+        dispose_qobject(runtime)
+
+
+def test_the_package_builds_its_file_interpret_controller(bound):
+    """拖文件解读控制器：包侧能建起来，且消费的是 Core 的 ``AiFileView``。"""
+    from pet.ai_bindings import AiFileView, register_ai_pet_view
+
+    _host, context, _vault, handle = bound
+    fake = FakePetView()
+    register_ai_pet_view(lambda: fake)
+    mount_module = import_pkg(handle, "host.runtime_mount")
+    runtime = mount_module.AiPackageRuntime(context)
+    try:
+        controller = runtime.runtime.create_file_interpreter(mount_module._pet_view())
+        assert controller is not None
+        assert isinstance(controller._win, AiFileView)
+        assert controller._win.cfg is runtime.runtime.config
+        controller.suspend_execution()
+    finally:
+        register_ai_pet_view(None)
+        dispose_qobject(runtime)
+
+
+def test_the_package_settings_dialog_opens_against_its_own_config(bound):
+    """设置对话框（经典那套）也能在包的配置适配器上开起来。"""
+    _host, context, _vault, handle = bound
+    config = import_pkg(handle, "host.config").AiConfiguration(context)
+    dialog_module = import_pkg(handle, "host.chat.settings_dialog")
+    name = next(name for name in dir(dialog_module) if name.endswith("Dialog") and not name.startswith("_"))
+    dialog = getattr(dialog_module, name)(config)
+    try:
+        assert getattr(dialog, "config", config) is config
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_the_package_island_chat_speaks_the_island_bubble_contract(bound):
+    """岛对话气泡：包侧那一半要能与 Core 的岛段同形（文本 + 样式）。
+
+    本片只验包内这一半（Core 侧的岛段接线不在片内）；这里钉的是"它读的配置键
+    与样式预设仍然存在"，避免适配时把 `self_talk_bubble_style` 这类键读废。
+    """
+    _host, context, _vault, handle = bound
+    config = import_pkg(handle, "host.config").AiConfiguration(context)
+    island = import_pkg(handle, "host.island_chat")
+    bubble = island.IslandChatBubble(config)
+    try:
+        assert bubble.isVisible() is False  # 未 show 前创建成功即通过
+    finally:
+        bubble.close()
+        bubble.deleteLater()
+
+
 def test_closing_the_runtime_leaves_the_core_exit_gate_clean(bound):
     """关掉的包不许继续占着 Core 的退出闸门（停用/卸载后立刻不再挡退出）。
 

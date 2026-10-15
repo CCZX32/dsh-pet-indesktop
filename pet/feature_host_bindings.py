@@ -449,7 +449,6 @@ def bind_ai_context(
     *,
     owner: str = AI_FEATURE_ID,
     vault=None,
-    authorized: Callable[[], bool] | None = None,
     host=None,
 ) -> FeatureHostContext:
     """官方聊天包的宿主绑定：自己的数据根 + 自己那本配置 + 凭据库。
@@ -459,6 +458,11 @@ def bind_ai_context(
     换句话说，包要联网只能走它自己命名空间里的 provider 配置 + 凭据库里的 key，
     读不到 Core 内置聊天的那一份。``legacy_secret_reader`` 是"调用即拒绝"的显式
     口子（包会主动调它，见 ``host/config.py``），而不是识屏那边的 ``None``。
+
+    也正因为没有窗口端口，这里**没有** ``bind_screen_context`` 那个 ``authorized``
+    实参：那一个是给"包自己直接调的窗口方法"做启用态判据的，识屏包有、聊天包没有；
+    权限注入统一走 :meth:`pet.plugins.feature_host.FeatureHost.bind_context`
+    （``execution_authorized`` / ``bind_execution``）。
     """
     if owner != AI_FEATURE_ID or not is_valid_feature_id(owner):
         raise ValueError("invalid_feature_owner")
