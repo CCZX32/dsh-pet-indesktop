@@ -129,6 +129,9 @@ class PetSprite(QObject):
         # 关 = 1:1 直写（overlay 初版行为）。
         self._drag_spring_target: QPointF | None = None
         self._drag_spring_vel = QPointF(0.0, 0.0)
+        # 弹簧活跃期（拖拽中未收敛）：set_pos 的整数矩形跳报（F-PERF P1）
+        # 让位——绘制落点是 float pos，亚像素步进也要上屏，否则拖拽掉帧
+        self._spring_active = False
         # 时间源：默认 time.monotonic；测试替换为假钟即可确定性构造轨迹，
         # 不用固定 sleep 赌时序
         self._clock = time.monotonic
@@ -474,7 +477,7 @@ class PetSprite(QObject):
         # 待上屏帧（_frame_dirty）照旧上报：帧到达路径的报脏语义不变，新帧
         # 有机会上屏。帧到达/换帧另有 _on_frame_changed 直驱通道，不依赖这里。
         new_rect = self.paint_bounds()
-        if new_rect == old_rect and not self._frame_dirty:
+        if new_rect == old_rect and not self._frame_dirty and not self._spring_active:
             return
         self._notify_dirty(old_rect, new_rect)
 
@@ -894,7 +897,15 @@ class PetSprite(QObject):
             vy = physics_mod.spring_velocity(
                 self._drag_spring_vel.y(), self.pos.y(), self._drag_spring_target.y(), dt)
             self._drag_spring_vel = QPointF(vx, vy)
+            self._spring_active = True  # 活跃期亚像素步进也要报脏上屏
             self.set_pos(self.pos + self._drag_spring_vel * dt)
+            # 收敛即钉死：渐近尾迹不许永远触发重绘
+            if (abs(self._drag_spring_target.x() - self.pos.x()) < 0.5
+                    and abs(self._drag_spring_target.y() - self.pos.y()) < 0.5
+                    and abs(vx) < 5.0 and abs(vy) < 5.0):
+                self._drag_spring_vel = QPointF(0.0, 0.0)
+                self._spring_active = False
+                self.set_pos(self._drag_spring_target)
         if self.interaction_state == INTERACTION_NORMAL and not self.velocity.isNull():
             self.set_pos(self.pos + self.velocity * dt)  # 积分也过 body_box 钳制
         squashing = False
@@ -1105,6 +1116,7 @@ class PetSprite(QObject):
         self._dragging = True
         self._drag_spring_target = None
         self._drag_spring_vel = QPointF(0.0, 0.0)
+        self._spring_active = False
         self.interaction_state = INTERACTION_DRAG
 
     def on_move(self, pos: QPointF) -> None:
@@ -1144,6 +1156,7 @@ class PetSprite(QObject):
         # 初速口径不变（轨迹采样的是光标位置）；弹簧状态随拖拽结束复位。
         self._drag_spring_target = None
         self._drag_spring_vel = QPointF(0.0, 0.0)
+        self._spring_active = False
         self._dragging = False
         self._drag_offset = None
         rvx, rvy = physics_mod.estimate_release_velocity(
