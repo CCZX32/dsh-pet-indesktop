@@ -18,9 +18,10 @@
    依赖 `pet.chat.service`（Qt）；
 3. 失败提示不再调 DLC 的 ``vision_failure_hint``：本仓库的 ``VisionError``
    自己带 ``code`` / ``retryable``，消息文本就是给人看的那句话；
-4. ``hello.payload.lease_claimed`` 认 ``DSH_PET_WORKER_HANDOFF_TOKEN``
-   （S2 定下的通用交接契约；DLC 用的是功能包版本租约的
-   ``DSH_PET_FEATURE_LEASE_CLAIMED``，那套子系统本拓扑未移植）；
+4. ``hello.payload.lease_claimed`` 认两条交接口径：``DSH_PET_WORKER_HANDOFF_TOKEN``
+   在场（S2 通用契约，screen_entry 只读不 pop）或
+   ``DSH_PET_FEATURE_LEASE_CLAIMED=1``（``lease_bootstrap`` 的正式认领——它会
+   **pop** 掉一次性 token，官方识屏包的 worker 入口走这条）；
 5. ``provider_key_missing`` 判的是**这次请求真正会用的那把钥匙**
    （同聊天模型用 ``api_key``，独立视觉端点用 ``vision_api_key``）；宿主负责在
    下发前把钥匙串里的钥匙解析好，子进程不做凭据解析。
@@ -696,7 +697,8 @@ class ProactiveScreenWorker:
             {
                 "pid": os.getpid(),
                 "capabilities": list(_CAPABILITIES),
-                "lease_claimed": bool(os.environ.get("DSH_PET_WORKER_HANDOFF_TOKEN")),
+                "lease_claimed": bool(os.environ.get("DSH_PET_WORKER_HANDOFF_TOKEN"))
+                or os.environ.get("DSH_PET_FEATURE_LEASE_CLAIMED") == "1",
             },
         )
         self._reader = threading.Thread(target=self._read_commands, name="proactive-screen-stdin", daemon=True)
