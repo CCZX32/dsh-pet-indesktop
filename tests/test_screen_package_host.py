@@ -218,3 +218,20 @@ def test_a_stale_generation_reply_never_reaches_the_chat_surface(loaded, bound):
     finally:
         runtime.close()
         dispose_qobject(runtime)
+
+
+def test_settings_command_publishes_an_owner_scoped_event(loaded, bound):
+    """「打开设置…」不碰 UI：经 owner 作用域事件总线发布，Core 侧订阅者决定开哪里。"""
+    host, raw, _fake, _vault = bound
+    definition = _provide(host, loaded)
+    context = host.bind_context(raw)
+    seen = []
+    host.events.subscribe("feature.settings.open-requested", seen.append, owner="test.observer")
+    runtime = definition.runtime_factory(context, worker_mode="in_process")
+    try:
+        runtime.commands["automatic"]("settings", None)
+        assert [event.payload["owner"] for event in seen] == [OWNER]
+        # 停用后宿主清掉 owner 的订阅面；事件回调异常口径由 test_plugin_events 族钉住
+    finally:
+        runtime.close()
+        dispose_qobject(runtime)
