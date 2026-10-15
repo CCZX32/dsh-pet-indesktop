@@ -2774,12 +2774,13 @@ def test_system_font_stack_matches_platform():
     assert "Consolas" in custom
 
 
-def test_screen_capture_menu_entry_uses_jingwa_icon():
-    """「截图提问」菜单项：鲸蛙是品牌图标对里菜单的固定岗位（素材缺席回退矢量图标）。"""
+def test_screen_capture_menu_entry_keeps_shared_vector_icon():
+    """「截图提问」菜单项继续用 shared 矢量图标，不挂任何位图品牌素材。"""
     from PySide6.QtWidgets import QApplication, QMenu
 
     QApplication.instance() or QApplication([])
 
+    from pet.context_menus.icons import vector_menu_icon
     from pet.context_menus.shared import add_screen_capture_menu
 
     class _Pet:
@@ -2789,5 +2790,9 @@ def test_screen_capture_menu_entry_uses_jingwa_icon():
     menu = QMenu()
     action = add_screen_capture_menu(menu, _Pet())
     assert action is not None
-    assert not action.icon().isNull(), "鲸蛙素材随包在场，图标必须非空"
+    assert action.icon().pixmap(16, 16).toImage() == vector_menu_icon(menu, "size").pixmap(16, 16).toImage()
     menu.deleteLater()
+
+    bare = QMenu()
+    assert add_screen_capture_menu(bare, _Pet(), icons=False).icon().isNull()
+    bare.deleteLater()

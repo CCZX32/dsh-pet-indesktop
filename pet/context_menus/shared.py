@@ -392,11 +392,8 @@ def connect_action(action, callback) -> None:
 def add_action(
     menu: QMenu, text: str, icon_name: str | None, callback=None, *,
     close_on_trigger: bool = False,
-    icon: QIcon | None = None,
 ):
-    if icon is None:
-        icon = vector_menu_icon(menu, icon_name) if icon_name else QIcon()
-    action = menu.addAction(icon, text)
+    action = menu.addAction(vector_menu_icon(menu, icon_name) if icon_name else QIcon(), text)
     action.setProperty("closeOnTrigger", bool(close_on_trigger))
     if callback is not None:
         connect_action(action, callback)
@@ -923,20 +920,6 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
 SCREEN_CAPTURE_LABEL = "截图提问"
 
 
-def _jingwa_menu_icon(menu, icons: bool) -> QIcon:
-    """「截图」菜单项用鲸蛙图标（品牌图标对里鲸蛙的固定岗位：鲸蛙为菜单）。
-
-    素材缺席时回退矢量 'size'（品牌图标绝不让菜单项裸奔）。真用到才装载
-    （``brand_icons`` 加载有进程内缓存，菜单重复打开零 IO）。
-    """
-    if not icons:
-        return QIcon()
-    from ..screen_capture.brand_icons import load_jingwa
-
-    pix = load_jingwa()
-    return QIcon(pix) if not pix.isNull() else vector_menu_icon(menu, "size")
-
-
 def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
     """「截图」= 单一**直接**菜单项（不进子菜单）：点了就进框选。
 
@@ -950,9 +933,8 @@ def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
     callback = getattr(pet, "on_screen_capture", None)
     if not callable(callback):
         return None  # 宿主没接这套面（纯桌宠变体）= 能力不可用，整组不出现
-    return add_action(menu, SCREEN_CAPTURE_LABEL, None,
-                      callback, close_on_trigger=True,
-                      icon=_jingwa_menu_icon(menu, icons))
+    return add_action(menu, SCREEN_CAPTURE_LABEL, "size" if icons else None,
+                      callback, close_on_trigger=True)
 
 
 def add_balance(menu: QMenu, pet, *, icons: bool = True):
