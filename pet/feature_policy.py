@@ -31,7 +31,7 @@ FEATURE_CAPABILITIES = frozenset({"menu.contribute", "settings.contribute"})
 #: 免得"装的时候一套上限、验的时候另一套"）。
 DEFAULT_LIMITS = VerificationLimits()
 
-__all__ = ["API_VERSION", "DEFAULT_LIMITS", "FEATURE_CAPABILITIES", "local_package_verifier"]
+__all__ = ["API_VERSION", "DEFAULT_LIMITS", "FEATURE_CAPABILITIES", "local_package_verifier", "official_package_verifier"]
 
 
 def local_package_verifier(feature_id: str, *, platform: str = sys.platform, limits: VerificationLimits = DEFAULT_LIMITS) -> FeaturePackageVerifier:
@@ -47,6 +47,33 @@ def local_package_verifier(feature_id: str, *, platform: str = sys.platform, lim
         api_version=API_VERSION,
         platform=platform,
         allowed_capabilities=FEATURE_CAPABILITIES,
+        allow_local_packages=True,
+        feature_id=feature_id,
+        limits=limits,
+    )
+
+
+def official_package_verifier(feature_id: str, *, platform: str = sys.platform, limits: VerificationLimits = DEFAULT_LIMITS) -> FeaturePackageVerifier:
+    """官方闭集功能包的验签策略（DLC 识屏包线）：能力上限 = 官方登记，不是本地包上限。
+
+    与 :func:`local_package_verifier` 的差异只在 ``allowed_capabilities``——官方登记
+    （``OFFICIAL_FEATURES``）里的 ``screen.capture`` / ``network.http`` 不属于 v1 本地包
+    公开面，官方包经这条 Core 自有链声明它们。``allow_local_packages=True`` 是 Phase5A
+    的显式用户信任口径（本地激活，不是发布者认证）；官方 id 的 factory/执行形态/能力
+    闭集核对在 ``package_trust`` 内部照旧生效。
+
+    当前只接识屏包：AI 包的宿主绑定属聊天包线，这里明确拒绝。
+    """
+    from .official_features import SCREEN_FEATURE_ID, official_feature
+
+    if feature_id != SCREEN_FEATURE_ID:
+        raise ValueError("unsupported official feature")
+    registration = official_feature(feature_id)
+    return FeaturePackageVerifier(
+        core_version=__version__,
+        api_version=API_VERSION,
+        platform=platform,
+        allowed_capabilities=registration.capabilities,
         allow_local_packages=True,
         feature_id=feature_id,
         limits=limits,

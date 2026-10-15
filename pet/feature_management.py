@@ -51,7 +51,7 @@ from pathlib import Path
 import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from .feature_host_bindings import bind_local_context
+from .feature_host_bindings import bind_local_context, bind_screen_context
 from .feature_package_preflight import LocalPackageProbe
 from .feature_package_startup import ProductionFeatureStartup
 from .feature_package_transactions import LOCK_BUSY_REASONS, FeaturePackageTransactionService
@@ -145,7 +145,8 @@ class FeatureManagementManager(QObject):
     busy_changed = Signal(bool)
     _finished = Signal(object)
 
-    def __init__(self, config, host: FeatureHost, owner: str, *, role: str = "core", lifecycle=None, parent=None) -> None:
+    def __init__(self, config, host: FeatureHost, owner: str, *, role: str = "core", lifecycle=None, parent=None,
+                 verifier: FeaturePackageVerifier | None = None, context_factory=None) -> None:
         super().__init__(parent)
         if not is_valid_feature_id(owner):
             raise ValueError("invalid feature owner")
@@ -162,7 +163,9 @@ class FeatureManagementManager(QObject):
         self._released_for_apply = False
         self.last_operation = None
         self.last_result = self._result("idempotent", reason="not_installed")
-        self.verifier = local_package_verifier(owner)
+        # 官方闭集包（识屏）由 attach_official 注入官方验签策略与 bind_screen_context；
+        # 缺省保持本地 MOD 路径（local_package_verifier + bind_local_context）不变。
+        self.verifier = verifier if verifier is not None else local_package_verifier(owner)
         self.service = FeaturePackageTransactionService(
             config.dir,
             self.verifier,
@@ -173,7 +176,7 @@ class FeatureManagementManager(QObject):
             self.service,
             host,
             runtime_directory=Path(config.dir) / "feature-runtime" / owner,
-            context_factory=lambda: bind_local_context(config, owner),
+            context_factory=context_factory if context_factory is not None else (lambda: bind_local_context(config, owner)),
             binder=self._binder,
             role=role,
         )
@@ -567,6 +570,9 @@ class LocalFeatureRuntime:
         self._unsubscribe = self.host.subscribe(self._on_state)
         for owner in discover_local_feature_ids(config):
             self.attach(owner)
+        # 官方闭集（识屏包）：Core 自有链，不走本地导入路由，但账本发现同口径。
+        for owner in discover_official_feature_ids(config):
+            self.attach_official(owner)
 
     @property
     def scope(self) -> str:
@@ -599,6 +605,42 @@ class LocalFeatureRuntime:
         manager.before_dispatch = self.refresh_drafts
         # 宿主侧的第二道草稿闸门：卸载/换版本要走 host.remove(owner)，有草稿就拒绝
         # （与事务层的 draft_blocked 是同一条判据的两个入口，读同一份快照）。
+        self.host.before_remove(owner, lambda owner=owner: not self.lifecycle.drafts(owner))
+        manager.bootstrap()
+        return manager
+
+    def attach_official(self, owner: str) -> FeatureManagementManager | None:
+        """**Core 自有**的官方包入口：官方验签策略 + 官方宿主绑定（DLC 识屏包线）。
+
+        与 :meth:`attach` 的差异：验签走 :func:`official_package_verifier`（能力上限 =
+        官方登记闭集），上下文走 ``bind_screen_context``（凭据/偏好/窗口/桌面四端口）。
+        本地导入路由（``route``）依旧拒收官方 id——冒名 guard 不变；这里只接受 Core
+        自己点名的 owner。当前只接识屏包（其余官方 id 的宿主绑定属聊天包线）。
+        """
+        from .feature_policy import official_package_verifier
+
+        if owner not in OFFICIAL_FEATURES:
+            raise ValueError("invalid feature owner")
+        existing = self.managers.get(owner)
+        if existing is not None:
+            return existing
+        try:
+            manager = FeatureManagementManager(
+                self.config,
+                self.host,
+                owner,
+                role=self.role,
+                lifecycle=self.lifecycle,
+                verifier=official_package_verifier(owner),
+                context_factory=lambda: bind_screen_context(
+                    self.config, authorized=lambda: self.host.enabled(owner), host=self.host
+                ),
+            )
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("official feature manager could not be created: %s", owner)
+            return None
+        self.managers[owner] = manager
+        manager.before_dispatch = self.refresh_drafts
         self.host.before_remove(owner, lambda owner=owner: not self.lifecycle.drafts(owner))
         manager.bootstrap()
         return manager
@@ -833,6 +875,26 @@ def discover_local_feature_ids(config) -> tuple[str, ...]:
     return tuple(sorted(discovered))
 
 
+def discover_official_feature_ids(config) -> tuple[str, ...]:
+    """官方闭集里**已有安装账本**的 owner（与本地发现同口径，方向相反）。
+
+    官方包不进本地发现（防冒名路由不变）；它们的启动回放走 :meth:`attach_official`。
+    """
+    from .feature_install_state import FeatureInstallStateStore
+
+    discovered: list[str] = []
+    for owner in OFFICIAL_FEATURES:
+        try:
+            state = FeatureInstallStateStore(config.dir, feature_id=owner).read()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if state.state is not None and (state.state.versions or state.state.pending_transaction):
+            discovered.append(owner)
+        elif state.status == "lock_busy":
+            discovered.append(owner)
+    return tuple(discovered)
+
+
 __all__ = [
     "API_VERSION",
     "FEATURE_CAPABILITIES",
@@ -840,4 +902,5 @@ __all__ = [
     "LocalFeatureRuntime",
     "LocalUserTrustSelfChecker",
     "discover_local_feature_ids",
+    "discover_official_feature_ids",
 ]
