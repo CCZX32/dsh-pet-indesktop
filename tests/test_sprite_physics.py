@@ -314,6 +314,7 @@ def test_flight_anim_speed_untouched_for_non_thrown():
 def test_high_speed_release_enters_thrown():
     clock = FakeClock()
     sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 400px / 0.1s ≈ 4000px/s，远超 DEAD_ZONE_SPEED
     release = _drag_steps(sprite, clock, (110.0, 110.0),
                           [(40.0, 0.0, 0.01)] * 10)
@@ -519,6 +520,7 @@ def test_grounded_drop_skips_thrown_capture_and_landing_warm(monkeypatch):
 def test_release_velocity_direction_matches_drag():
     clock = FakeClock()
     sprite = _make_sprite((300.0, 300.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 向右上甩：dx:dy = 3:-2
     release = _drag_steps(sprite, clock, (310.0, 310.0),
                           [(30.0, -20.0, 0.01)] * 8)
@@ -533,6 +535,7 @@ def test_release_velocity_direction_matches_drag():
 def test_release_speed_soft_clamped_below_cap():
     clock = FakeClock()
     sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 3000px / 0.05s ≈ 60000px/s：十倍于 cap 的暴力甩
     release = _drag_steps(sprite, clock, (110.0, 110.0),
                           [(300.0, 0.0, 0.005)] * 10)
