@@ -122,6 +122,39 @@ def _drag_steps(sprite: PetSprite, clock: FakeClock, start: tuple[float, float],
     return QPointF(x, y)
 
 
+# ---------------------------------------------------------------- 拖拽跟随弹簧
+def test_drag_follow_springs_when_drag_physics_on():
+    """拖拽弹簧（对齐 legacy window.py _tick_drag_physics 的 K=200/C=30 手感）：
+    drag_physics 开时 on_move 只写目标点不直写位置，advance 用 spring_velocity
+    阻尼收敛。v4.3.0 回归：overlay 拓扑从未实现这段，拖拽变 1:1 硬跟手。"""
+    clock = FakeClock()
+    sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True
+    sprite.on_press(QPointF(110.0, 110.0))
+    sprite.begin_drag()
+    sprite.on_move(QPointF(410.0, 110.0))     # 拖拽目标 x=400（grab 偏移 10）
+
+    assert sprite.pos.x() == 100.0            # 不直写
+    for _ in range(12):                        # 0.1s：在半路（滞后），且没到
+        clock.advance(1 / 120)
+        sprite.advance(1 / 120)
+    assert 100.0 < sprite.pos.x() < 390.0
+    for _ in range(120):                       # 再 1s：收敛到目标
+        clock.advance(1 / 120)
+        sprite.advance(1 / 120)
+    assert abs(sprite.pos.x() - 400.0) < 2.0
+
+
+def test_drag_follow_stays_direct_when_drag_physics_off():
+    """drag_physics 关 = 今天的 1:1 直跟，逐字不变。"""
+    sprite = _make_sprite((100.0, 100.0))
+    sprite.drag_physics = False
+    sprite.on_press(QPointF(110.0, 110.0))
+    sprite.begin_drag()
+    sprite.on_move(QPointF(410.0, 110.0))
+    assert sprite.pos.x() == 400.0
+
+
 # ---------------------------------------------------------------- 飞行段（controller）
 def test_thrown_falls_under_gravity():
     controller = ThrowPhysicsController(BOUNDS)

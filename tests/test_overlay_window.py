@@ -422,6 +422,9 @@ def test_pet_sprite_drag_protocol():
     clip = FakeClip()
     sprite = PetSprite(FakeLibrary(clip), pos=QPointF(50, 50), scale=0.5)
     sprite.bind_clip("fake")
+    # 本条验拖拽协议（点击候选/升级/松手放下），跟手方式不归它管：
+    # drag_physics 关 = 1:1 直跟（弹簧跟随有 test_sprite_physics.py 专测）
+    sprite.drag_physics = False
     sprite.set_velocity(QPointF(120, 0))
     # 固定假钟：轨迹样本时间戳相同 → 初速不可估算 → 静止放下，
     # 不依赖真实时间流逝（时序测试纪律）

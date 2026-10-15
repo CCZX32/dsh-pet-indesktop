@@ -123,6 +123,12 @@ class PetSprite(QObject):
         # 拖拽轨迹（(monotonic_ts, x, y) 光标样本）：松手初速估算的输入，
         # 格式对齐 physics.estimate_release_velocity；松手后清空
         self._drag_trail: list[tuple[float, float, float]] = []
+        # 拖拽弹簧状态（drag_physics 开时生效）：on_move 只写目标点，
+        # advance 用 physics.spring_velocity 阻尼跟随——legacy
+        # window.py _tick_drag_physics 的手感（K=200/C=30，滞后约 4 帧）。
+        # 关 = 1:1 直写（overlay 初版行为）。
+        self._drag_spring_target: QPointF | None = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
         # 时间源：默认 time.monotonic；测试替换为假钟即可确定性构造轨迹，
         # 不用固定 sleep 赌时序
         self._clock = time.monotonic
@@ -879,6 +885,16 @@ class PetSprite(QObject):
         """
         old = (self._last_reported_rect
                if self._last_reported_rect is not None else self.paint_bounds())
+        if (self._dragging and self.drag_physics
+                and self._drag_spring_target is not None):
+            # 拖拽弹簧档：过阻尼跟随目标点（physics.spring_velocity，
+            # 与 legacy window.py 同一 K/C 常数 = 同一手感）
+            vx = physics_mod.spring_velocity(
+                self._drag_spring_vel.x(), self.pos.x(), self._drag_spring_target.x(), dt)
+            vy = physics_mod.spring_velocity(
+                self._drag_spring_vel.y(), self.pos.y(), self._drag_spring_target.y(), dt)
+            self._drag_spring_vel = QPointF(vx, vy)
+            self.set_pos(self.pos + self._drag_spring_vel * dt)
         if self.interaction_state == INTERACTION_NORMAL and not self.velocity.isNull():
             self.set_pos(self.pos + self.velocity * dt)  # 积分也过 body_box 钳制
         squashing = False
@@ -1087,12 +1103,18 @@ class PetSprite(QObject):
         if self._dragging:
             return
         self._dragging = True
+        self._drag_spring_target = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
         self.interaction_state = INTERACTION_DRAG
 
     def on_move(self, pos: QPointF) -> None:
         if not self._dragging or self._drag_offset is None:
             return
-        self.set_pos(QPointF(pos) - self._drag_offset)
+        if self.drag_physics:
+            # 弹簧档：只写目标点，位置由 advance 的阻尼积分追过去（不直写）
+            self._drag_spring_target = QPointF(pos) - self._drag_offset
+        else:
+            self.set_pos(QPointF(pos) - self._drag_offset)
         now = self._clock()
         self._drag_trail.append((now, pos.x(), pos.y()))
         cutoff = now - physics_mod.TRAIL_KEEP_SEC
@@ -1116,6 +1138,10 @@ class PetSprite(QObject):
             return
         if self._drag_offset is not None:
             self.set_pos(QPointF(pos) - self._drag_offset)
+        # 弹簧档松手：先把滞后位置结算到目标点再估初速（否则松手瞬间位置跳变），
+        # 初速口径不变（轨迹采样的是光标位置）；弹簧状态随拖拽结束复位。
+        self._drag_spring_target = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
         self._dragging = False
         self._drag_offset = None
         rvx, rvy = physics_mod.estimate_release_velocity(
