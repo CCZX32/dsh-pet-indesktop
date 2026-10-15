@@ -129,6 +129,9 @@ class PetSprite(QObject):
         # 关 = 1:1 直写（overlay 初版行为）。
         self._drag_spring_target: QPointF | None = None
         self._drag_spring_vel = QPointF(0.0, 0.0)
+        # 拖拽弹簧系数（比 legacy 的 200/30 活：滞后约减半、微过冲）
+        self.drag_spring_k = 300.0
+        self.drag_spring_c = 24.0
         # 弹簧活跃期（拖拽中未收敛）：set_pos 的整数矩形跳报（F-PERF P1）
         # 让位——绘制落点是 float pos，亚像素步进也要上屏，否则拖拽掉帧
         self._spring_active = False
@@ -890,12 +893,15 @@ class PetSprite(QObject):
                if self._last_reported_rect is not None else self.paint_bounds())
         if (self._dragging and self.drag_physics
                 and self._drag_spring_target is not None):
-            # 拖拽弹簧档：过阻尼跟随目标点（physics.spring_velocity，
-            # 与 legacy window.py 同一 K/C 常数 = 同一手感）
+            # 拖拽弹簧档：阻尼跟随目标点（physics.spring_velocity）。
+            # K/C 比 legacy（200/30）活一点（实机反馈 200/30 阻尼感偏强）：
+            # 300/24 滞后量约减半、略带过冲弹性；逐 sprite 可调。
             vx = physics_mod.spring_velocity(
-                self._drag_spring_vel.x(), self.pos.x(), self._drag_spring_target.x(), dt)
+                self._drag_spring_vel.x(), self.pos.x(), self._drag_spring_target.x(), dt,
+                k=self.drag_spring_k, c=self.drag_spring_c)
             vy = physics_mod.spring_velocity(
-                self._drag_spring_vel.y(), self.pos.y(), self._drag_spring_target.y(), dt)
+                self._drag_spring_vel.y(), self.pos.y(), self._drag_spring_target.y(), dt,
+                k=self.drag_spring_k, c=self.drag_spring_c)
             self._drag_spring_vel = QPointF(vx, vy)
             self._spring_active = True  # 活跃期亚像素步进也要报脏上屏
             self.set_pos(self.pos + self._drag_spring_vel * dt)
