@@ -8,7 +8,8 @@
 ## 一、核心特性
 
 截图问答浮窗（识屏 →「问问肥鱼」）每次开新会话时掷 10%：命中则标题变
-「鲸蛙问答」、标题前出现鲸蛙图标；未命中与现状逐位一致（零加载、零布局变化）。
+「鲸蛙问答」、标题前出现鲸蛙图标；未命中零加载、零布局变化（标题与图标可见性
+逐项断言锁住）。
 素材缺失（裁剪包/坏包）时静默回退默认形态。
 
 | # | 能力 | 说明 |
@@ -25,7 +26,7 @@
 
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
-| `pet/screen_capture/ask_dialog.py` | +45 / −1 | ① 模块级 `_EGG_CHANCE/_EGG_TITLE/_DEFAULT_TITLE` + `_jingwa_pixmap()`（`_MEIPASS`/源码树双候选；解码失败静默回退）；② 标题栏加 `_egg_icon`（24×24、鼠标透明、默认隐藏），title 存为 `self._title`；③ `start_with_image` 每次开新会话调 `_roll_easter_egg()`（命中才加载素材，缺失静默回退；图标按 devicePixelRatioF 出图，HiDPI 不发糊） |
+| `pet/screen_capture/ask_dialog.py` | +78 / −1 | ① 模块级 `_EGG_CHANCE/_EGG_TITLE/_DEFAULT_TITLE` + `_jingwa_pixmap()`（`_MEIPASS`/源码树双候选；解码失败静默回退）；② 标题栏加 `_egg_icon`（24×24、鼠标透明、默认隐藏），title 存为 `self._title`；③ `start_with_image` 每次开新会话调 `_roll_easter_egg()`（命中才加载素材，缺失静默回退）；④ HiDPI：按 DPR 出图，`showEvent`（掷骰在 show 前，落点可能在另一块屏）与 `screenChanged`（拖到别的缩放屏）都重出图标，不重掷骰；`_egg_scaled` 留档供测试核对（QLabel.pixmap() 在 offscreen 会归一化 DPR，读它验不了） |
 
 ### 素材
 
@@ -37,7 +38,7 @@
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_screen_capture_ask_dialog.py` | +85 / −0 | 五条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）、素材缺失静默回退、未命中零 IO（加载器不被调用）。monkeypatch `random.random` 定序，无赌概率 |
+| `tests/test_screen_capture_ask_dialog.py` | +98 / −0 | 六条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）、素材缺失静默回退、未命中零 IO（加载器不被调用）、DPR 跟随（注入缝出图 48px@dpr2）。monkeypatch `random.random` 定序，无赌概率 |
 
 ## 三、实现要点
 
@@ -67,6 +68,8 @@ SmoothTransformation，留以后更大尺寸复用的余地。
 
 ## 六、验证
 
-- `tests/test_screen_capture_ask_dialog.py`：**33 passed**（30 既有 + 3 新增，红→绿取证齐）。
+- `tests/test_screen_capture_ask_dialog.py`：**36 passed**（30 既有 + 6 新增）。
+  复现命令：`QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:randomly tests/test_screen_capture_ask_dialog.py`
+  （红→绿取证：彩蛋三条在实现前全红——`_egg_icon`/`_title` 属性不存在，`AttributeError`）。
 - `ruff check` 改动文件干净。
 - 打包零改动（`assets/chat` 已在 add-data 清单）。
