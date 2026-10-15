@@ -214,6 +214,24 @@ def test_a_fresh_runtime_replays_the_official_ledger(installed, tmp_path):
         fresh.close()
 
 
+def test_disable_stops_the_package_runtime_and_enable_resumes_it(installed):
+    """启用态就是包的执行转换（``bind_execution``）：停用真的把包停住，不只是撤菜单。"""
+    runtime, manager, _fake = installed
+    _enable(manager)
+    mount = runtime.mounts.runtimes[OWNER]
+    try:
+        assert mount.runtime.accepting is True
+        assert manager.submit("enable", False, expected_revision=manager.service.inspect().revision) is True
+        _settle(manager)
+        assert mount.runtime.accepting is False
+        # 停用期间命令是空转的（不开窗、不抛）
+        assert mount.chat() is None
+        _enable(manager)
+        assert mount.runtime.accepting is True
+    finally:
+        dispose_qobject(mount)
+
+
 def test_the_package_settings_panel_mounts_with_draft_gates(installed):
     """设置面：真 AiContributionSettings 经 OwnerSettingsPanel 挂载，草稿门禁生效。"""
     runtime, manager, _fake = installed

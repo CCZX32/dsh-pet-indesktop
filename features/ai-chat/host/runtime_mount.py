@@ -43,11 +43,11 @@ class AiPackageRuntime:
         self._closed = False
 
     # --------------------------------------------------------------- 命令面
-    def chat(self) -> None:
-        self._show("modern")
+    def chat(self):
+        return self._show("modern")
 
-    def quick_chat(self) -> None:
-        self._show("quick")
+    def quick_chat(self):
+        return self._show("quick")
 
     def _show(self, kind: str):
         if self._closed or not self.runtime.accepting:

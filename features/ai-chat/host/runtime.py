@@ -258,4 +258,12 @@ class AiRuntime(QObject):
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
+        # 本仓库补的一处收口（上游同文件没有这一步）：关掉的 Runtime 必须从
+        # Core 的退出闸门里**退订**。上游只靠闸门自己轮询 ``drain_status`` 回收，
+        # 于是"停用/卸载后到下一次退出事件之间"那个窗口里，闸门登记的是一份
+        # 已经死掉的参与者——每装一次包就多一份，全部要等一次真 Quit 才被清掉。
+        # 显式退订之后，"关过的包不再挡退出"是立刻成立的。
+        if self._exit_token is not None:
+            self._gate.unregister(self._exit_token)
+            self._exit_token = None
         return self.drain_status == "completed"
