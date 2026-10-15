@@ -7,6 +7,9 @@ Ported from the DLC branch ``pet/feature_ports.py``；本仓库只保留**本地
 （``preferences``）、窗口（``FeatureWindowPorts``）、用户数据
 （``FeatureUserDataPort``）与官方内置域（screen / ai）绑定不在本仓库的 MOD 路径上，
 随那条线一起做——本地包不拿凭据、不拿 Core 窗口对象、不拿全局配置。
+注：DLC 4A 的两个 host 侧端口本体已移植（``pet/desktop_query.py`` /
+``pet/credentials.py``，含契约测试），但本上下文**不注入**它们——``desktop``
+恒为 ``None``、``credentials`` 字段不落地；宿主注入随识屏/聊天包线一起做。
 
 ``events`` 是 Phase 2 内核移植新增的事件订阅面：原生上下文恒为 ``None``，由
 :meth:`pet.plugins.feature_host.FeatureHost.bind_context` 在授权后注入绑定本

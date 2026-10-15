@@ -132,7 +132,7 @@
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`PHASE4A-SCREEN-DELIVERY-AUDIT.md`](../plugin-phase-04-updates/PHASE4A-SCREEN-DELIVERY-AUDIT.md) + [`PHASE4A-SCREEN-PACKAGE-DESIGN.md`](../plugin-phase-04-updates/PHASE4A-SCREEN-PACKAGE-DESIGN.md)：五组接口（`DesktopQueryPort`、独立视觉配置 + `CredentialVaultPort`、菜单/设置/搜索/快捷键贡献、可选识屏—聊天联动、自包含 Worker + 独立构建 + 可信加载）。 |
-| 本仓库状态 | ⚠️ **半做——只落了"信任与契约"半，宿主侧接口半未落（以 HEAD `7575572` 判定）**。<br>✅ 已落：包验签与路径边界（`pet/plugins/package_trust.py`）、有界 `stage()` 与目录↔ZIP 归一（`pet/feature_package_files.py`）、探针契约（`pet/feature_package_probe.py`）、官方功能 id 与白名单（`pet/official_features.py:55 OFFICIAL_FEATURES`，含 `official.screen-understanding` / `official.ai-chat`）。<br>❌ 未落（HEAD）：`pet/desktop_query.py`、独立视觉配置与凭据端口、`pet/plugins/runtime.py`、`pet/plugins/services.py`、`pet/screen_understanding/` 整个包、owner 绑定的菜单/设置贡献注册面。<br>🔄 **正在落地（工作树未提交，非本文改动）**：`pet/api_ports.py`、`pet/feature_ports.py`、`pet/plugins/{ports,capabilities,contributions,feature_host,feature_packages,package_binding,worker_launch}.py` —— 这半**已不再是"没人做"**，但尚未提交、本文不据此改判；等它落盘后本格要回写。 |
+| 本仓库状态 | ⚠️ **半做——信任与契约半 + 两个 host 侧端口本体已落，宿主注入与识屏包未落（以 `e3295fa` + `6586cf0` 判定）**。<br>✅ 已落：包验签与路径边界（`pet/plugins/package_trust.py`）、有界 `stage()` 与目录↔ZIP 归一（`pet/feature_package_files.py`）、探针契约（`pet/feature_package_probe.py`）、官方功能 id 与白名单（`pet/official_features.py:55 OFFICIAL_FEATURES`，含 `official.screen-understanding` / `official.ai-chat`）；`pet/api_ports.py`、`pet/feature_ports.py`、`pet/plugins/{ports,capabilities,contributions,feature_host,feature_packages,package_binding,worker_launch}.py` 宿主骨架；**`pet/desktop_query.py`（`DesktopQueryPort`，vision 旧入口已改委托）与 `pet/credentials.py`（`CredentialVaultPort` / `CoreBalanceVault`，keyring 同一 OS 存储上的作用域门面）**。<br>❌ 未落（HEAD）：独立视觉配置、`pet/plugins/runtime.py`、`pet/plugins/services.py`、`pet/screen_understanding/` 整个包、owner 绑定的菜单/设置贡献注册面、两端口的**宿主注入**（`FeatureHostContext` 的 MOD 路径按设计不拿凭据/桌面查询，注入随识屏/聊天包线）。 |
 | 证据落点 | 正向：上面四个模块 + `tests/test_plugins_package_trust.py`（含 `VerificationLimits` / `FileStamp` 指纹 / 祖先快照）。反向（拒绝路径）：`pet/feature_package_transactions.py:772`、`pet/mod_center_controller.py:198/214`、`pet/settings_mod_domain.py:147`（`extensions()` 当前仍 `return {}`）、`pet/mod_center_controller.py:366`（拒绝语装配点）。判定主机侧"在不在"用 `git ls-tree -r --name-only HEAD`。 |
 | 没做的原因 / 后续归属 | 两条独立的阻塞：(a) 设计里的 host 侧接口是按上游的 `feature_host` + 跨进程 IPC 拓扑写的，本仓库的宿主面只有「设置页所属桌宠窗口」（`DialogModHost`），要按新拓扑重写；(b) **LPAC 原生探针沙箱未移植**——没有它，功能包连自检都过不去，接了宿主也是 fail-closed。后续片：**MSVC 构建片**（钉版 PyInstaller tarball + MSVC + libsodium + AppContainer canary）→ 然后才是宿主接入片。两片**均未排期**；触发条件是"要做功能扩展包的真安装"。 |
 
@@ -217,7 +217,7 @@
 |---|---|---|---|
 | LPAC 原生探针沙箱 + 密封 probe bundle | MSVC 构建片 | 钉版 PyInstaller tarball + MSVC + libsodium + AppContainer canary | 未排期 |
 | 功能扩展宿主运行时（`pet.mod_api.v1` 等）与宿主接入 | 宿主接入片 | 上一行 | **部分在飞**：同一工作树里已有一片未提交的宿主侧骨架（`pet/mod_api/`、`pet/feature_ports.py`、`pet/plugins/{ports,...}.py`，见上文「快照口径」）；剩下的接入与提交仍未排期 |
-| 4A 的 host 侧五组接口（`DesktopQueryPort` / `CredentialVaultPort` / 贡献注册 / 识屏—聊天联动 / 自包含 Worker） | 宿主接入片 | 同上 | 同上（贡献注册与端口骨架在飞，`DesktopQueryPort` / 凭据端口 / `pet/screen_understanding/` 仍缺） |
+| 4A 的 host 侧五组接口（`DesktopQueryPort` / `CredentialVaultPort` / 贡献注册 / 识屏—聊天联动 / 自包含 Worker） | 宿主接入片 | 同上 | 同上（贡献注册与端口骨架在飞；`DesktopQueryPort` / 凭据端口本体已落（`e3295fa` + `6586cf0`），宿主注入与 `pet/screen_understanding/` 仍缺） |
 | 4B-5 真实构建端到端 | 打包 / 构建片 | 宿主接入 + MSVC | 未排期 |
 | 5A Setup 选装、旁置包、显式便携、ZIP 官方包 | 打包 / 构建片 | 同上 | 未排期 |
 | 5B AI 对话与文件理解端口化 | AI 端口化片 | 宿主接入片 | 未排期 |
