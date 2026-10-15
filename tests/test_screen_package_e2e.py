@@ -201,3 +201,22 @@ def test_the_package_settings_panel_mounts_with_draft_gates(installed):
         assert panel.dispose() is None or True
     finally:
         dispose_qobject(runtime.mounts.runtimes.get(OWNER))
+
+
+def test_a_settings_role_host_shares_the_official_ledger_without_mounting(installed, tmp_path):
+    """独立设置进程（role=settings）：同一账本、同一启用态，但永不挂菜单/不起 Runtime。"""
+    runtime, manager, _fake = installed
+    _enable(manager)
+    settings = LocalFeatureRuntime(Config(base=tmp_path), role="settings")
+    try:
+        assert OWNER in settings.managers
+        assert settings.mounts is None and settings.menu_owners() == ()
+        assert settings.host.enabled(OWNER) is True
+        panel = settings.settings_panel(OWNER)
+        assert panel is not None
+        assert type(panel.component).__module__.startswith("_pet_official_screen_")
+        # 核心侧不受影响
+        assert runtime.host.enabled(OWNER) is True and runtime.menu_owners() == (OWNER,)
+    finally:
+        settings.close()
+        dispose_qobject(runtime.mounts.runtimes.get(OWNER))
