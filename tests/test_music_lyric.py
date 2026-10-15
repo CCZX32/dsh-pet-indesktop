@@ -2180,3 +2180,15 @@ def test_name_matches_feat_split_never_shreds_single_names():
     # feat 的正常形态仍认（词边界 + 可选句点）
     assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
     assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")
+
+
+def test_name_matches_feat_split_has_both_word_boundaries():
+    """feat/ft 双侧词边界（astra 盲审）：Featherstone→herstone、FTIsland→island
+    这类词首拆碎不得发生，拆出的碎片不得参与命中。"""
+    assert not music_lyric._name_matches("Featherstone/Alpha", "Herstone、Beta")
+    assert not music_lyric._name_matches("FTIsland/Alpha", "Island、Beta")
+    # 正例仍认：独立 feat 标记（含无空格/带句点形态）
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW feat.GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft. GRANRODEO", "FLOW/GRANRODEO")

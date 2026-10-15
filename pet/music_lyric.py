@@ -317,7 +317,7 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
 # 两侧都是多歌手形态时归一逐段比对，否则整串子串必然丢词。
 # feat/ft 必须带单词边界（\b），且切分发生在**去空白之前**——否则 swift/craft/
 # daft punk 这类含 ft/feat 字母序列的单名会被拆碎（盲审 P1）。
-_ARTIST_SEP_RE = re.compile(r"\s*(?:[、/／&×,，;；]|\bfeat\.?|\bft\.?)\s*", re.IGNORECASE)
+_ARTIST_SEP_RE = re.compile(r"\s*(?:[、/／&×,，;；]|\bfeat\b\.?|\bft\b\.?)\s*", re.IGNORECASE)
 
 
 def _name_matches(candidate: str, wanted: str) -> bool:
