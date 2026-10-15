@@ -150,8 +150,11 @@ class PetSprite(QObject):
         # Q 弹挤压（点击/碰撞反馈，window.py _squash_geometry 语义）：
         # None = 未激活；否则 0..1 进度，advance 按 220ms 推进
         self._squash_progress: float | None = None
-        # 拖动物理开关（菜单「拖动物理」）：False 时松手原地放下（不抛掷）
-        self.drag_physics = True
+        # 拖动物理开关（菜单「拖动物理」）：False 时松手原地放下（不抛掷）、
+        # 拖拽 1:1 直跟。缺省 False 对齐 config 默认值与集成层同步口径
+        #（overlay_shell._sync_sprite_settings 按设置显式写入）；弹簧跟随
+        #（on_move 不直写、advance 阻尼积分）只在 True 时生效。
+        self.drag_physics = False
         # 静止放手下落（config drop_gravity，#219）：True 时低速松手不再原地
         # 停在半空，而是零初速进抛掷物理（重力落地）。默认关 = 旧行为；
         # 集成层 `_sync_sprite_settings` 按设置写入。
