@@ -335,9 +335,14 @@ class ScreenAskDialog(QFrame):
             pix = _jingwa_pixmap()
             hit = not pix.isNull()  # 素材缺失（裁剪包/坏包）时静默回退默认形态
         if hit:
-            self._egg_icon.setPixmap(pix.scaled(
-                24, 24, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            # HiDPI：按设备像素比出图，150%/200% 屏上不发糊
+            dpr = self.devicePixelRatioF()
+            scaled = pix.scaled(
+                int(24 * dpr), int(24 * dpr),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            self._egg_icon.setPixmap(scaled)
         self._egg_icon.setVisible(hit)
         self._title.setText(_EGG_TITLE if hit else _DEFAULT_TITLE)
 

@@ -25,7 +25,7 @@
 
 | 文件 | 增删 | 改动意图 |
 |---|---|---|
-| `pet/screen_capture/ask_dialog.py` | +40 / −1 | ① 模块级 `_EGG_CHANCE/_EGG_TITLE/_DEFAULT_TITLE` + `_jingwa_pixmap()`（`_MEIPASS`/源码树双候选，与 `result_panel.py` 的 ds_whale 同口径）；② 标题栏加 `_egg_icon`（24×24、鼠标透明、默认隐藏），title 存为 `self._title`；③ `start_with_image` 每次开新会话调 `_roll_easter_egg()`（命中才加载素材，缺失静默回退） |
+| `pet/screen_capture/ask_dialog.py` | +45 / −1 | ① 模块级 `_EGG_CHANCE/_EGG_TITLE/_DEFAULT_TITLE` + `_jingwa_pixmap()`（`_MEIPASS`/源码树双候选；解码失败静默回退）；② 标题栏加 `_egg_icon`（24×24、鼠标透明、默认隐藏），title 存为 `self._title`；③ `start_with_image` 每次开新会话调 `_roll_easter_egg()`（命中才加载素材，缺失静默回退；图标按 devicePixelRatioF 出图，HiDPI 不发糊） |
 
 ### 素材
 
@@ -37,7 +37,7 @@
 
 | 文件 | 增删 | 覆盖 |
 |---|---|---|
-| `tests/test_screen_capture_ask_dialog.py` | +45 / −0 | 三条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）。monkeypatch `random.random` 定序，无赌概率 |
+| `tests/test_screen_capture_ask_dialog.py` | +85 / −0 | 五条：命中（标题+图标+素材真的加载到）、未命中（逐位照旧）、命中后下次未命中复位（窗口复用不跨年）、素材缺失静默回退、未命中零 IO（加载器不被调用）。monkeypatch `random.random` 定序，无赌概率 |
 
 ## 三、实现要点
 

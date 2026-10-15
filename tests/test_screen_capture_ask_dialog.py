@@ -729,3 +729,39 @@ def test_jingwa_easter_egg_resets_on_the_next_open(qapp, monkeypatch):
     assert dialog._title.text() == "截图问答"
     assert dialog._egg_icon.isVisible() is False
     dialog.close()
+
+
+def test_jingwa_easter_egg_falls_back_when_the_asset_is_missing(qapp, monkeypatch):
+    """素材缺失（坏包/裁剪包）：命中也静默回退默认形态，不炸窗。"""
+    from PySide6.QtGui import QPixmap
+
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.05)
+    monkeypatch.setattr(ask_mod, "_jingwa_pixmap", lambda: QPixmap())  # 空图 = 加载失败
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+
+    assert dialog._title.text() == "截图问答"
+    assert dialog._egg_icon.isVisible() is False
+    dialog.close()
+
+
+def test_jingwa_easter_egg_loads_nothing_when_the_roll_misses(qapp, monkeypatch):
+    """未命中的 90%：零 IO——素材加载器一次都不许被调用。"""
+    import pet.screen_capture.ask_dialog as ask_mod
+
+    calls = []
+
+    def _probe():
+        calls.append(1)
+        from PySide6.QtGui import QPixmap
+        return QPixmap()
+
+    monkeypatch.setattr(ask_mod.random, "random", lambda: 0.5)
+    monkeypatch.setattr(ask_mod, "_jingwa_pixmap", _probe)
+    dialog = _dialog()
+    dialog.start_with_image(_image())
+
+    assert calls == []
+    dialog.close()
