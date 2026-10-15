@@ -45,7 +45,11 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from . import catalog
 from . import overlay_peripherals
-from .platform_mac import _mac_no_window_shadow_flag
+from .platform_mac import (
+    _keep_macos_tool_window_visible,
+    _mac_no_window_shadow_flag,
+    _mac_set_hides_on_deactivate,
+)
 from .platform_passthrough import QtPerPixelInputController
 from .sprite_menu import build_sprite_menu
 from .sprite_slingshot import SlingshotController
@@ -72,6 +76,13 @@ class OverlayWindow(QWidget):
                             | _mac_no_window_shadow_flag())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        # macOS：本窗带 Qt.Tool，Cocoa 在应用失活时会自动把它 order out。真机表现是
+        # 「切到别的应用后整只桌宠从桌面消失，点 Dock 图标把应用激活回来才重现」——
+        # 窗口只是被移出屏幕，进程并没有退出，所以 Dock 图标还在（真机实测：切到
+        # Finder 时本进程在屏窗口 2→0，切回 →1）。
+        # legacy ``PetWindow`` 一直带着这条修复（pet/window.py，同一 helper），overlay
+        # 单合成窗新架构落成时漏了它。只设 native 属性、不动 flags，不会重建原生窗口。
+        _keep_macos_tool_window_visible(self)
         # Phase 1a 暂不做多屏：默认主屏，调用方可注入别的 QScreen。
         self._screen = screen or QApplication.primaryScreen()
         self.setGeometry(self._screen.geometry())
@@ -184,6 +195,12 @@ class OverlayWindow(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # macOS：原生关掉 hidesOnDeactivate（issue #262 / #273）。Cocoa 失活时
+        # order out 窗口的**真正判据**就是这个原生属性；Qt 属性
+        # （__init__ 里已下发的 WA_MacAlwaysShowToolWindow）在部分系统版本上被
+        # 反馈为不再生效，故两条路并存。必须在这里调用：showEvent 时 winId()
+        # 才指向就绪的 NSView，构造期拿不到。非 cocoa 平台本函数是安全 no-op。
+        _mac_set_hides_on_deactivate(int(self.winId()))
         self._refresh_tick_interval()  # V-6：显示时重读刷新率（电池 DRR）
         self._feed_dpr()               # V-11：DPR 由 overlay 统一喂
         self._arm_dpr_change_watch()   # D2/P1：屏 DPR 变化 → 重喂 + 重建
