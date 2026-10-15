@@ -51,7 +51,7 @@ from pathlib import Path
 import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from .feature_host_bindings import bind_local_context, bind_screen_context
+from .feature_host_bindings import bind_ai_context, bind_local_context, bind_screen_context
 from .feature_package_preflight import LocalPackageProbe
 from .feature_package_startup import ProductionFeatureStartup
 from .feature_package_transactions import LOCK_BUSY_REASONS, FeaturePackageTransactionService
@@ -613,9 +613,10 @@ class LocalFeatureRuntime:
         """**Core 自有**的官方包入口：官方验签策略 + 官方宿主绑定（DLC 识屏包线）。
 
         与 :meth:`attach` 的差异：验签走 :func:`official_package_verifier`（能力上限 =
-        官方登记闭集），上下文走 ``bind_screen_context``（凭据/偏好/窗口/桌面四端口）。
+        官方登记闭集），上下文按 owner 走各自的官方绑定（识屏包：凭据/偏好/窗口/桌面
+        四端口；聊天包：数据根/偏好/凭据/用户数据面，**不给**桌面与窗口）。
         本地导入路由（``route``）依旧拒收官方 id——冒名 guard 不变；这里只接受 Core
-        自己点名的 owner。当前只接识屏包（其余官方 id 的宿主绑定属聊天包线）。
+        自己点名的 owner。
         """
         from .feature_policy import official_package_verifier
 
@@ -624,6 +625,7 @@ class LocalFeatureRuntime:
         existing = self.managers.get(owner)
         if existing is not None:
             return existing
+        binder = _official_binder(owner)
         try:
             manager = FeatureManagementManager(
                 self.config,
@@ -632,9 +634,7 @@ class LocalFeatureRuntime:
                 role=self.role,
                 lifecycle=self.lifecycle,
                 verifier=official_package_verifier(owner),
-                context_factory=lambda: bind_screen_context(
-                    self.config, authorized=lambda: self.host.enabled(owner), host=self.host
-                ),
+                context_factory=lambda: binder(self.config, authorized=lambda: self.host.enabled(owner), host=self.host),
             )
         except (OSError, ValueError, RuntimeError):
             _LOG.exception("official feature manager could not be created: %s", owner)
@@ -835,6 +835,22 @@ def _dispose_component(component) -> None:
                 delete()
     except Exception:
         _LOG.debug("feature settings component could not be disposed", exc_info=True)
+
+
+def _official_binder(owner: str):
+    """官方闭集 owner → 它的宿主绑定（唯一一处路由表）。
+
+    两个官方包要的**不是同一套端口**：识屏包拿凭据/偏好/窗口/桌面四端口；聊天包
+    拿数据根/偏好/凭据/用户数据面，**不给**桌面与窗口。把路由收在一处，新增官方包
+    时改的是这张表，不是 ``attach_official`` 里的分支。
+    """
+    from .official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID
+
+    if owner == SCREEN_FEATURE_ID:
+        return bind_screen_context
+    if owner == AI_FEATURE_ID:
+        return bind_ai_context
+    raise ValueError("unsupported official feature")
 
 
 def discover_local_feature_ids(config) -> tuple[str, ...]:

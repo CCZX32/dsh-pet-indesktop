@@ -39,6 +39,7 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import os
+import re
 import sys
 import threading
 import uuid
@@ -86,10 +87,22 @@ class LeaseCounts:
         return not (self.host or self.settings or self.worker or self.imported)
 
 
+def _namespace_for(descriptor: VerifiedFeatureDescriptor) -> str:
+    """装载命名空间按 owner 取名（诊断用；日志/回溯里一眼看出是哪个包）。
+
+    上游把前缀写死成 ``_pet_official_screen_``——只有一个官方包时无所谓，现在
+    闭集里有两个（识屏 + 聊天），写死会让聊天包的模块在回溯里叫"screen"。取 owner
+    的末段做 slug（``official.screen-understanding`` → ``screen_understanding``），
+    既有的"前缀 ``_pet_official_screen_``"断言继续成立。
+    """
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(descriptor.id).rsplit(".", 1)[-1]).strip("_").lower()
+    return f"_pet_official_{slug}_" + uuid.uuid4().hex
+
+
 @dataclass
 class _Generation:
     descriptor: VerifiedFeatureDescriptor
-    namespace: str = field(default_factory=lambda: "_pet_official_screen_" + uuid.uuid4().hex)
+    namespace: str = ""
     leases: dict[str, set[object]] = field(default_factory=lambda: {"host": set(), "settings": set(), "worker": set()})
     imported: bool = False
     failed: bool = False
@@ -123,7 +136,7 @@ def _generation(descriptor: VerifiedFeatureDescriptor) -> _Generation:
     key = _key(descriptor)
     with _LOCK:
         if key not in _GENERATIONS:
-            _GENERATIONS[key] = _Generation(descriptor)
+            _GENERATIONS[key] = _Generation(descriptor, namespace=_namespace_for(descriptor))
         return _GENERATIONS[key]
 
 

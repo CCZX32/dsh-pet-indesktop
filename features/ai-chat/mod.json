@@ -1,0 +1,8 @@
+{
+  "id": "official.ai-chat",
+  "name": "AI 对话",
+  "description": "独立形态的 AI 对话：现代窗与经典窗、快捷气泡、拖文件解读与会话历史，自带 provider 配置与凭据库引用。与内置 AI 对话并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "ai-chat/v1",
+  "execution_kind": "host-only"
+}

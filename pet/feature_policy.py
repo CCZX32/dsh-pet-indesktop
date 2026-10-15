@@ -62,12 +62,11 @@ def official_package_verifier(feature_id: str, *, platform: str = sys.platform, 
     的显式用户信任口径（本地激活，不是发布者认证）；官方 id 的 factory/执行形态/能力
     闭集核对在 ``package_trust`` 内部照旧生效。
 
-    当前只接识屏包：AI 包的宿主绑定属聊天包线，这里明确拒绝。
+    接受**闭集里的每一个** owner（识屏包 + 聊天包）：``OFFICIAL_FEATURES`` 就是闭集
+    本身，能力上限按各包自己的登记取；闭集外的 owner 由 ``official_feature`` 自己拒。
     """
-    from .official_features import SCREEN_FEATURE_ID, official_feature
+    from .official_features import official_feature
 
-    if feature_id != SCREEN_FEATURE_ID:
-        raise ValueError("unsupported official feature")
     registration = official_feature(feature_id)
     return FeaturePackageVerifier(
         core_version=__version__,
