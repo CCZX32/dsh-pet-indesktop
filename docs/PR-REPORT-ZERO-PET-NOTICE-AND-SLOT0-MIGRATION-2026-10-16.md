@@ -504,7 +504,7 @@ PET_SRC=<tree> python .scratch/probe_perf_migration.py
 | `git diff --check` | 干净 |
 | 聚焦 + 受影响族（上一节 7 个文件 + `test_overlay_shell.py` + `test_overlay_window_capabilities.py`） | **303 passed** |
 | 文档纪律 + 架构红线（`test_pr_report_discipline.py` + `test_architecture.py`） | **186 passed** |
-| 全量四分片 | **1 failed / 7877 passed / 27 skipped**（`EXIT=1`，脚本判"分片失败：[3]"）；分片明细 1764+2082+1982+2049 passed、11+4+9+3 skipped。日志：`.scratch/full-suite-289-merged.log` |
+| 全量四分片 | **1 failed / 7877 passed / 27 skipped**（`EXIT=1`，脚本判"分片失败：[3]"）；分片明细 1764+2082+1982+2049 passed、11+4+9+3 skipped。日志：`.scratch/full-suite-289-merged.log`。**那条红的归因已更正并重跑（2026-10-17）→ §九之八** |
 | 隔离复现复跑（多屏模型下）：`issue286/repro_e_position_corner.py` | 三行结果与合并前**逐字相同**（A 落原位 535.2/396.8、B/C 落右下角 1775.0/959.0，迁移都没动目标）——`#288` 之后这条结论不变 |
 
 **那 1 条全量红的归因（与上一节那 5 条既有红不是同一批）**：
@@ -518,19 +518,94 @@ PET_SRC=<tree> python .scratch/probe_perf_migration.py
 1. 失败点是 `tests/test_screen_capture_ocr.py:909` 的 `from omegaconf import OmegaConf`
    —— **裸 import，没有守卫**；同一文件里相邻两条同类用例（`:823` / `:930`）都写了
    `pytest.importorskip("rapidocr", reason="未安装本地 OCR 依赖（rapidocr）"）`，这条漏了。
-2. `omegaconf>=2.3` **确实写在 `requirements.txt:85`**，但本机解释器里
-   `import omegaconf` 直接 `ModuleNotFoundError` —— 是这台机器的环境缺包，不是代码回归。
+2. `omegaconf>=2.3` **确实写在 `requirements.txt:85`**，但这**次全量跑的那个解释器里没有**
+   —— 见 §九之八的指认（跑全量的是 `D:/dsh-pet-src/.venv`，`include-system-site-packages=false`，
+   系统解释器里其实装着）。是环境缺包，不是代码回归。
 3. 该测试文件与本刀**无关**：`git diff 056dc2a HEAD -- tests/test_screen_capture_ocr.py`
    **为空**（与 `origin/main` 逐字节相同，来自更早的 `03768bc`）。加上第 2 条，同一断言
-   在 `origin/main` 上**必然同样失败**——这一条是**演绎**（文件相同 + 解释器缺模块），
-   不是另跑基线测出来的，如实标注。
+   在 `origin/main` 上**必然同样失败**——当初只写了演绎；**§九之八补上了同解释器上的真红复现**
+   （装包前 `1 failed`、装包后 `1 passed`）。
 
-**本刀没有修它**：它在 screen-capture/OCR 那条线上，不在本片（slot0 迁移/设置语义）的
-范围内，改它会把一个不相干的文件拖进本片 diff。**建议的后续**（留给维护者/那条线的作者）：
-把 `:909` 那行改成 `OmegaConf = pytest.importorskip("omegaconf")`（与相邻两条同规），
-或在本地环境补装 `omegaconf`。本片新增/改写的用例（`tests/test_pet_profiles.py` 4 例）
+**本刀没有改那个测试文件**：它在 screen-capture/OCR 那条线上，不在本片（slot0 迁移/设置语义）的
+范围内，改它会把一个不相干的文件拖进本片 diff；缺的那味药在环境侧（§九之八补装声明过的依赖，
+**没有**给用例加 skip、没有放宽任何断言）。`:909` 那行本身缺守卫的观察仍然成立，是否收归
+screen-capture 线的作者自便。本片新增/改写的用例（`tests/test_pet_profiles.py` 4 例）
 在分片里**全绿**。
 
 **合并后专门复核过的一件事**：`#288` 把 sprite 分散到每屏宿主，但 `_build_slot_sprite`
 仍维护 `self.sprite` / `self._spawned`，所以零宠物判据 `_all_sprites()` 不会因为
 "宠在别的屏"而误报（否则会在有宠的机器上打出假的零宠物 WARN）。
+
+### 九之八、分片 3 那条红的归因更正 + 分片重跑（2026-10-17）
+
+§九之七 那句「本机解释器里 `import omegaconf` 直接 ModuleNotFoundError」**指错了对象**：
+缺包的确实是环境，但是**跑那次全量的那个隔离环境**，不是系统解释器。按**同一个环境**重跑
+分片 3 之后，那条红已消失（分片里的红换成了另一条环境依赖用例，见下）。本节只记这件事。
+
+**1. 指认跑全量的解释器（证据在盘上）**
+
+| 事实 | 命令 | 输出 |
+|---|---|---|
+| 全量分片用的 pytest 是 9.1.1 | `ls tests/__pycache__/ \| grep -oE "pytest-[0-9.]+" \| sort -u` | `9.1.0`（系统解释器，04:28 那次）与 `9.1.1`（**03:30–03:40 那次全量**）两套 pyc 并存 |
+| 项目隔离环境就是 9.1.1 | `D:/dsh-pet-src/.venv/Scripts/python.exe -m pytest --version` | `pytest 9.1.1`（Python 3.13.7） |
+| 系统解释器是 9.1.0、且**装着** omegaconf | `python -m pytest --version` / `python -c "import omegaconf,omegaconf;print(omegaconf.__file__)"` | `pytest 9.1.0` / `...Python313\Lib\site-packages\omegaconf\__init__.py`（2.4.0） |
+| 隔离环境**看不到**系统 site-packages | `cat D:/dsh-pet-src/.venv/pyvenv.cfg` | `include-system-site-packages = false` |
+
+**2. 同一个解释器上的真红复现（装包前）**
+
+```
+$ QT_QPA_PLATFORM=offscreen D:/dsh-pet-src/.venv/Scripts/python.exe -m pytest -q \
+    tests/test_screen_capture_ocr.py::test_self_built_sessions_are_injected_into_the_engine_cfg
+E       ModuleNotFoundError: No module named 'omegaconf'
+tests\test_screen_capture_ocr.py:909: ModuleNotFoundError
+1 failed in 2.29s
+```
+
+对照（系统解释器，同一用例、同一棵树）：`1 passed in 2.98s` ——
+所以这条红**只由解释器决定**，与代码分支无关。这就是 §九之七 第 3 条当初只敢写"演绎"的那一步，
+现在补成了实测。
+
+**3. 补装（不改测试、不加 skip）**
+
+```
+$ D:/dsh-pet-src/.venv/Scripts/python.exe -m pip install "omegaconf>=2.3"
+Successfully installed PyYAML-6.0.3 omegaconf-2.4.0
+```
+
+`omegaconf>=2.3` 本来就写在 `requirements.txt:85`，所以**仓库里一行都不用改**：缺的是
+环境里那一份（同一环境的 `rapidocr` 也缺，但它的每处用例都写了 `importorskip`，所以只有
+`:909` 这条裸 import 会红——27 个 skip 里就有它们）。装完同一条用例：**1 passed**。
+没有给任何用例加守卫、没有放宽断言、没有 `-k` 掉任何东西。
+
+**4. 分片 3 重跑（只有这一个分片，其余三片沿用 04:01 那次同解释器的绿结果）**
+
+- 文件清单按 `scripts/ci_shards.py` 的同一条切法重算（93 个文件：`tests/test_now_playing_session_probe.py … tests/test_settings_default_marks.py`，**与 04:01 日志里分片 3 的表头逐字相同**）；
+- 运行器 `.scratch/rerun_shard3.py`，日志 `.scratch/shard3-after-omegaconf.log`；
+- 结果：`1 failed, 1982 passed, 9 skipped`——**条数不变，红的那条换了人**：
+
+| | 分片 3 之前（04:01） | 分片 3 之后（补装依赖后） |
+|---|---|---|
+| `test_screen_capture_ocr.py::test_self_built_sessions_are_injected_into_the_engine_cfg` | **FAILED**（ModuleNotFoundError） | **passed** |
+| `test_proactive.py::TestVisionAndWatcherPhase2::test_foreground_window_info_real_call_no_shadow_bug` | passed | **FAILED** |
+
+**可加总的真实结果**：三片未重跑的绿结果（1764+2082+2049 passed、11+4+3 skipped、0 failed）
+＋ 分片 3（1982 passed、9 skipped、1 failed）＝ **7877 passed / 27 skipped / 1 failed**。
+
+**剩下这 1 条红的性质（不是本刀、也不是本片环境缺包）**：桌面当前的前台窗口是不可见的
+`WeChatAppEx.exe`（class `Chrome_WidgetWin_0`）宿主窗，而 `pet/vision.py::foreground_window_info`
+按自身契约对不可见窗口返回 None——用例断言的是"桌面上存在可见前台窗口"这件**外部事实**。
+不是本刀引入：`git diff 056dc2a HEAD -- tests/test_proactive.py pet/vision.py` **为空**；
+平行输入链路片（`D:/dsh-pet-wt-input-final`，直接基于 `origin/main` `056dc2a`）上同一条用例
+同样红，那一片正用「真实可见性前置条件 + 不放松断言」收它（只改该测试，不动产品）。**合并顺序
+建议**：那一片先合，本片的分片跑就无红（本片不重复改那个文件，避免同一个 hunk 落两处）。
+
+**5. 同一棵树上其余门禁（同一个 venv 解释器）**
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 静态检查 | `ruff check pet/ tests/` | **All checks passed!** |
+| 聚焦 + 受影响族（11 个文件：`test_pet_profiles` / `test_slot0_lifecycle` / `test_no_pet_startup_notice` / `test_slot0_ownership` / `test_slot_and_memory` / `test_config_schema` / `test_overlay_shell` / `test_overlay_window_capabilities` / `test_overlay_peripherals` / `test_overlay_tray_icon` / `test_overlay_tray_routing`） | 见左 | **329 passed**（含 §九之七 那批 303 例的超集） |
+| 文档纪律 + 架构红线 | `pytest -q tests/test_pr_report_discipline.py tests/test_architecture.py` | **186 passed** |
+
+全量**没有**整跑（本轮只重跑红片）：这是任务边界（避免重复 25 分钟），三片绿结果与分片 3
+同属 04:01 那一次、同一棵树（本刀此后只动过本报告这一份文档）。
