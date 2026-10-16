@@ -3,10 +3,11 @@
 > **基线**：`6a68570`（`origin/main`，含 #285 播放器）
 > **分支**：`feat/per-pet-multiscreen`（worktree `D:/dsh-pet-wt-multiscreen`）
 > **日期**：2026-10-16
-> **范围**：累计 **33 个已跟踪文件 `+2931/−459`**（本分支相对 `origin/main`，含先前一片宿主化改造）
-> + **3 个新增文件**（`tests/test_overlay_cross_screen_switch.py` 327 行、
-> `tests/test_settings_cross_screen.py` 128 行、本报告）；
-> 其中**本刀（开关 + 位置归属语义 + 夹具泄漏 + 文档）**= 15 个既有文件 `+198/−18` + 上述 3 个新增文件
+> **范围**：累计 **36 个文件 `+3656/−459`**（本分支相对 `origin/main`，含先前一片宿主化改造，
+> `git diff --numstat origin/main`）；
+> 其中**本刀（开关 + 位置归属语义 + 夹具泄漏 + 文档）**= `bcac67c..518480d` 的 18 个文件 `+923/−18`
+> **本刀提交**：`518480d`（实现与测试；**本地，未 push**，随后一个仅改文档的提交补齐证据与索引）
+> **运行期状态**：实现、测试、门、证据与未验边界均已冻结并跑过全量；无已知未修的失败
 > **关联**：[`AGENTS.md`](../AGENTS.md)（多屏段落 = 现行口径）、[`SETTINGS-CHANGE-GATES.md`](SETTINGS-CHANGE-GATES.md)（本刀新增设置的准入/准出记录）、[`INDEX.md`](INDEX.md)（本报告已登记）、
 > `.scratch/per-pet-multiscreen/HANDOFF.md`（断点与未验清单）、多屏条目的 BACKLOG（`D:/dsh-pet-src/.scratch/BACKLOG.md`）；
 > #284（整群搬屏）**不采用**、不混 DLC
@@ -14,6 +15,8 @@
 ## 〇、状态与边界（先读这一段）
 
 - **本地提交，未 push、未开 PR**：留主代理按 ops5.5 + astra 一次盲审后处置。
+- **本地三道门全过**：`ruff check pet/ tests/` 通过；全量 `pytest -q` **7835 passed /
+  15 skipped / 0 failed**（23:17）；受影响时序族 **3 连跑各 193 passed**。
 - **真双屏未验**：本机 Qt 口径只有 **1 块活动屏**（§四之一），跨缝手感 / 异 DPI /
   负坐标拼接只有假屏逻辑证据（假屏不是 `QScreen`，见 §四）。
 - **显存未测**：只给理论缓冲估算（§三之三），明确不是实测。
@@ -236,6 +239,16 @@ FAILURES: 0
 3. 关闭态下 `handle_screen_removed` 走到 `_migrate_to_screen` 时，主宿主换屏是否会
    误写任何屏归属（本刀口径：不写）；
 4. 设置页把开关放在「窗口与系统」而非新分组，披露层级 = primary 是否可接受。
+
+### 4.5 其他自检（换目录 / 脏值 / 多次输入）
+
+- **换目录跑**：`cd /d && python D:/dsh-pet-wt-multiscreen/.scratch/per-pet-multiscreen/probe_cross_screen.py switch`
+  → 三次 STEP 全部 `ok`、`FAILURES: 0`（与在仓库根跑逐行同形：`absent→False`、
+  `true→True`、`false→False`，都在 `hosts=1 / overlays=1 / visible=[True]`）。
+- **脏值不崩**：把 `allow_cross_screen` 手工写成 `"false"` / `"yes"` / `1` / `0` /
+  `null` / `[]` / `{}`，`Config.get` 全部返回 **`bool`**（`"false"` → `False`，
+  不是被当真的非空字符串；`null`/`[]`/`{}` → `False`），无异常。
+- **多次输入**：开关探针本身就是三次不同输入（键缺失 / true / false）+ 三个独立进程。
 
 ## 五、已知限制、后续与回滚
 
