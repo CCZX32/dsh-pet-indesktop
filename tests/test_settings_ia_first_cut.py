@@ -343,8 +343,10 @@ def test_v2_general_domain_keeps_only_autostart_on_the_first_screen(tmp_path, mo
         window_group = sections[1]
         window_rows = [row.objectName() for row in window_group.rows]
         assert "settingRow_on_top" in window_rows, "置顶仍在主组"
+        assert window_rows[-1] == "settingRow_cross_screen", (
+            "「允许桌宠跨屏」是全局窗口偏好、三端都有行，排在窗口旗标类之后")
         if any(row == "settingRow_cursor_hidden_passthrough" for row in window_rows):
-            assert window_rows[-1] == "settingRow_cursor_hidden_passthrough", (
+            assert window_rows[-2] == "settingRow_cursor_hidden_passthrough", (
                 "光标穿透要在「窗口与系统」里（Windows 专属行，非 Windows 无此行）")
 
         capture = next((s for s in sections if _section_title(s) == "直播捕获（高级）"), None)

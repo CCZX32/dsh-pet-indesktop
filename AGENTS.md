@@ -50,9 +50,29 @@ classDiagram
 
 **Two render topologies, one process.** `PET_RENDER_TOPOLOGY=overlay` (dev env
 flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as a
-`PetSprite` inside a single `OverlayWindow`; multi-pet is in-process
+`PetSprite` inside an `OverlayWindow`; multi-pet is in-process
 (`AppShell.spawn_in_process_window` / `OverlayShell.spawn_pet`, slot identity via
-`pet/overlay_spawn_state.py`). The topology verdict also reads the persistent
+`pet/overlay_spawn_state.py`). Each **occupied display** has its own
+`OverlayWindow`, owned by a `pet/screen_host.ScreenHost` that also owns that
+screen's behaviour/collision/physics worlds (screen-local coordinates: equal local
+coordinates on two displays are not the same point), while the shell, the
+`TickDriver` timer and every shared service stay single. `OverlayShell.overlay`
+and the three controllers are the *home* host's views; anything that means
+"every pet/window" enumerates `shell.hosts()`. `host_for_sprite(sprite)` and
+`move_sprite_to_screen(sprite, screen, global_pos=None)` are the per-pet screen
+seams (normal drag crosses screens with them; `ScreenHost` bounds come from the
+profile's `screen_name`/`rx`/`ry`). The whole cross-display capability is gated by
+the global `allow_cross_screen` key (default off, snapshotted once per process like
+`stream_capture_mode`): off = every pet stays on the screen the shell started on,
+one window, drags cannot cross, no second host is created. `screen_name` is the
+pet's *screen assignment*: it is stamped at first placement (every pet, so a child
+never silently follows the main pet to another display) and rewritten only by a
+deliberate cross-screen move (`_remember_sprite_screen`). `_save_child_geometry`
+writes the assignment together with ratios/facing/scale **only while the pet is on
+its assigned screen**; a temporary host (switch off, or the assigned screen
+unplugged) writes no geometry key at all, so neither the assignment nor the ratios
+it recorded on its own screen are eaten — turning the switch back on and restarting
+returns each pet to its own screen at its own position. The topology verdict also reads the persistent
 `stream_capture_mode` key (main `config.json`, snapshotted once per process by
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real
