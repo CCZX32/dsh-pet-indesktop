@@ -295,9 +295,14 @@ def test_drag_across_screens_transfers_only_the_dragged_pet(tmp_path, monkeypatc
         main = shell.sprite
         _hittable(child)
         child.set_pos(QPointF(200, 700))
-        # 子宠先放到 B：这样 A 只剩主宠，一次跨屏拖拽正好把 A 拖空
+        # 子宠先放到 B：这样 A 只剩主宠，一次跨屏拖拽正好把 A 拖空。
+        # 落点选在 B 的**右侧远处**（局部 (1480, 200)），刻意避开主宠被拖进来时
+        # 走的那条通道（缝附近、局部 y≈859）：拖鱼撞鱼**本来就会把旁边的宠撞开**
+        # （见 tests/test_drag_collision_velocity.py），那是另一条独立且正确的行为，
+        # 不是"被移交带动"。实测（60 次 × 16 拍）：坐在通道上会被撞开 14–90px，
+        # 坐在远处则一步不动（0.00px）；本用例要判的是后者。
         assert shell.move_sprite_to_screen(
-            child, b, global_pos=QPointF(2200, 700)) is True
+            child, b, global_pos=QPointF(3400, 200)) is True
         host_child = shell.host_for_sprite(child)
         child_global = _global_of(host_child, child)
         overlay_a = shell.overlay
