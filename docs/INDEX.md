@@ -26,10 +26,10 @@
 |---|---|---|
 | [`PRODUCT-STATUS-2026-10-09.md`](PRODUCT-STATUS-2026-10-09.md) | 2026-10-11 当前状态快照：分开源码、候选包、实机证据与待验证项，包含 issues/PR 适用性分类。 | 恢复工作或引用最新进度前必读；先核对证据的源码范围和包摘要，不能把旧全量或局部测试当作当前三端通过。 |
 | [`PRODUCT-NEXT-STEPS-SPEC-2026-10-09.md`](PRODUCT-NEXT-STEPS-SPEC-2026-10-09.md) | 本版目标契约：固定身份、设置作用域、提醒、扩展与三端交付门；后续 DLC 与本版分开。 | 修改上述行为或准备提交前必读；按文首最新授权，本版收口及全产品确认后可自主提交 PR，未放行提前发布、合并或跳过验收。 |
-| [`../README.md`](../README.md) | 面向用户与贡献者的主说明：功能、安装、构建、更新日志与踩坑。 | 第一次接触项目；查用户可见行为、发布形态、上游同步状态。 |
+| [`../README.md`](../README.md) | 主说明，**用户优先**：下载/安装/使用/功能/隐私/已知限制/求助在前，开发者入口与约束在后（详细开发约束以 `AGENTS.md` 与 `docs/` 为准；逐条变更史已下沉到 [`CHANGELOG-ARCHIVE-2026-10.md`](CHANGELOG-ARCHIVE-2026-10.md)，素材制作链下沉到 [`ASSET-PIPELINE.md`](ASSET-PIPELINE.md)，模块一览/Harness 机制/性能内存口径下沉到 [`DEV-HANDOVER.md`](DEV-HANDOVER.md) §10）。 | 第一次接触项目；查用户可见行为、发布形态、上游同步状态、当前版本是否已发布。**工程细节（模块职责、端口/反查口径、内存调节键、包体与内存实测）不要在 README 里找**——按上句的下沉去向查。 |
 | [`../AGENTS.md`](../AGENTS.md) | 工程指南：项目结构、变更纪律、CI 成本纪律、"Context pointers" 触发表、agent skills 入口。 | 提交任何代码之前；尤其改动碰撞选举、ffmpeg 派生、打包、菜单、设置、PR 合并前，先查 "Context pointers"。 |
 | [`../CONTEXT.md`](../CONTEXT.md) | 领域术语表（Shared UX Contract / Settings System / Menu Action Model / Report Gate / Session-End Spawn Freeze 等）与禁用说法。 | 命名新概念、写设计文档、或需要确认"这个词在本项目里到底指什么"时；提案与既有术语冲突时必须先读。 |
-| [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) | 第三方素材、组件**与随包分发的第三方二进制**（如 `resources/presentmon/` 的帧率采集后端及其 MIT 原文）的授权声明。 | 新增/替换动画素材、图标、字体、第三方库，或**把任何第三方二进制随包分发**时（后者另有构建期的 sha256/架构门，见 [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md)）。 |
+| [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) | 第三方素材、组件**与随包分发的第三方二进制**（如 `resources/presentmon/` 的帧率采集后端及其 MIT 原文）的授权声明。 | 新增/替换动画素材、图标、字体、第三方库，或**把任何第三方二进制随包分发**时（后者另有构建期的 sha256/架构门，见 [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md)）；素材制作与入库流程见 [`ASSET-PIPELINE.md`](ASSET-PIPELINE.md)，新素材的来源署名必须同步回本文。 |
 
 ---
 
@@ -38,12 +38,13 @@
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md) | onedir 打包流水线：绿色版 zip + Inno Setup 安装包，目标是运行期零解压、不产生 `_MEI` 缓存；含随包资产三块（`resources/presentmon/` 第三方后端、帧序列素材）各自的构建门与诚实边界，以及帧率采集权限为何不随包任何提权组件。 | **改 PyInstaller spec、打包资源、或平台构建脚本（`scripts/build_onedir.ps1` / `build_macos.sh` / `build_linux.sh`）时必读**（AGENTS.md 口径）。 |
+| [`ASSET-PIPELINE.md`](ASSET-PIPELINE.md) | 动画素材流水线：素材在仓库里的位置与几何/清单约定（`body_box`、脚底 `y=330`）、参考项目「三件套」生成链（提示词绿幕规范 → 抠像/归一化 → 640×360 透明 WebM）、GIF 变体重生成、新角色入库流程与素材授权同步要求。 | **做/替换动画素材、跑 `scripts/convert_to_gif.py`、或新增角色入库时必读**；用户侧「换角色/热加载」在 [`../README.md`](../README.md)「动画素材与自定义角色」。 |
 | [`STABLE_BUILDS.md`](STABLE_BUILDS.md) | 稳定版构建冻结记录：受保护文件名、构建隔离规则、防止误覆盖稳定版产物。 | **改发布/构建工作流时必读**（AGENTS.md 口径）。注意其冻结对象是 onefile 时代的 `dist/*.exe`，现行发布形态已是 onedir（见文末过时清单）。 |
 | [`BUILD-CI-FAILURE-NOTES-2026-08.md`](BUILD-CI-FAILURE-NOTES-2026-08.md) | 三平台打包/CI 反复踩坑与最终解法汇总（持续更新）：脚本统一入口、资源漏收集、依赖只在叶子模块导入导致整族用例红等。 | CI 连续两轮红、或遇到"本机红 CI 绿"的依赖类假红时；动手重试之前先查这里是否已有同类记录。 |
 | [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) | 验收测试文件清单：设置窗口、DSH Bridge、Qt 生命周期/全量三条验收路径的精确命令与当前实测基线。 | 提 PR 前跑验收、或需要确认"这个改动该跑哪几个测试文件"时；改动测试边界后必须同步更新本文基线数字。 |
 | [`RELEASE-v4.2.0.md`](RELEASE-v4.2.0.md) | v4.1.0 → v4.2.0 的完整功能与修复汇总（含全部合入 PR 与各平台产物清单）。 | 写发布说明、回答"这个功能从哪个版本开始有"、或判断某行为是哪个 PR 引入时；**v4.2.1 之后的变更改看 [`RELEASE-v4.3.0.md`](RELEASE-v4.3.0.md)**。 |
 | [`RELEASE-v4.3.0.md`](RELEASE-v4.3.0.md) | **v4.2.1 → v4.3.0 的发布稿（已发布）**：398 提交 / 623 文件的完整汇总（截图提问 #268、AI 对话五连 #247–#251、灵动岛段化、单进程主架构等）。两段式同 v4.2.1：正文到 `## 🙏 致谢` 为止，维护者清单在 `RELEASE-BODY-END` 之后。 | 准备发布时必读；改版本号、打 tag、换 Release 正文（用文件头那行命令生成 body.md）时。 |
-| [`RELEASE-v4.3.1.md`](RELEASE-v4.3.1.md) | **v4.3.0 → v4.3.1 的修复稿**：拖拽弹簧手感批（恢复阻尼跟随/松手不瞬移/亚像素上屏/调参）、Markdown 渲染补齐（快捷气泡+经典聊天窗）、#271 主宠设置保存生效。两段式同上。 | 准备 v4.3.1 发布时必读；#271 的技术细节见 [`PR-REPORT-SLOT0-SETTINGS-271-2026-10-15.md`](PR-REPORT-SLOT0-SETTINGS-271-2026-10-15.md)。 |
+| [`RELEASE-v4.3.1.md`](RELEASE-v4.3.1.md) | **v4.3.0 → v4.3.1 的修复稿（未发布）**：拖拽弹簧手感批（恢复阻尼跟随/松手不瞬移/亚像素上屏/调参）、Markdown 渲染补齐（快捷气泡+经典聊天窗）、#271 主宠设置保存生效、#272 macOS 失活时合成窗保持可见、#277 穿透卡死（看得见点不到）修复。两段式同上；文件头不写提交数（随合入变化，以 `git log v4.3.0..v4.3.1` 为准）。 | 准备 v4.3.1 发布时必读；#271 / #272 / #277 的技术细节分别见 [`PR-REPORT-SLOT0-SETTINGS-271-2026-10-15.md`](PR-REPORT-SLOT0-SETTINGS-271-2026-10-15.md)、[`PR-REPORT-OVERLAY-MACOS-DEACTIVATE-2026-10-15.md`](PR-REPORT-OVERLAY-MACOS-DEACTIVATE-2026-10-15.md)、[`PR-REPORT-CURSOR-PASSTHROUGH-2026-10-15.md`](PR-REPORT-CURSOR-PASSTHROUGH-2026-10-15.md)。 |
 | [`RELEASE-v4.2.1.md`](RELEASE-v4.2.1.md) | **v4.2.0 → v4.2.1 的发布稿（2026-09-23 已发布）**：57 个已合并 PR / 192 个提交的完整汇总（含 #181 歌词代理修复、#182 流畅度与岛墙批次）。文件分两段：`## 📦 下载` 至 `## 🙏 致谢` 是**发布正文**，`RELEASE-BODY-END` 注释之后的**发布前测试清单**（勾选式）、**视频预演脚本**（逐段分镜）与维护者清单**只在仓库内使用、不随 Release 发布**。 | **准备发布、跑人工验收、或录制演示视频时必读**；改版本号、打 tag、换 Release 正文（用文件头那行命令生成 body.md，别整份贴）、或需要"这一版到底该验哪些行为"的清单时。 |
 | [`BUILD_ARTIFACTS-2026-08-22.md`](BUILD_ARTIFACTS-2026-08-22.md) | 单次构建产物记录：EXE 路径、大小、SHA-256 与启动验证结果。 | 需要核对历史 onefile 产物哈希时（README 仍引用此路径）；日常构建流程看 `ONEDIR_PACKAGING.md`。 |
 
@@ -228,7 +229,8 @@
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
-| [`DEV-HANDOVER.md`](DEV-HANDOVER.md) | 开发交接文档：本地运行、改配置、加功能、跑测试、重新打包的全流程，面向接手「语音报时」定制分支的开发者。 | 新人上手或需要一份"从零到跑起来"的完整流程时；它是三份交接文档中基线最新的一份（2026-09-16）。 |
+| [`DEV-HANDOVER.md`](DEV-HANDOVER.md) | 开发交接文档：本地运行、改配置、加功能、跑测试、重新打包的全流程，面向接手「语音报时」定制分支的开发者；**§10（2026-10-15 补录）是从 `README.md` 下沉的工程细节**——`pet/` 模块一览、Harness 启动器机制、性能与内存治理口径与键位、真实窗口人工验证清单，含 §7 打包流程与冒烟要求、§8 PR 流程与三份交付证据判定标准。 | 新人上手或需要一份"从零到跑起来"的完整流程时；查 README 不再保留的工程细节（模块职责、Harness 端口/反查口径、内存调节键）时也读它。正文一至九章的基线是 2026-09-16（行数/用例数按当时实测算），§10 基线为 2026-10-15。 |
+| [`CHANGELOG-ARCHIVE-2026-10.md`](CHANGELOG-ARCHIVE-2026-10.md) | **变更记录存档（历史快照，已停止更新）**：从 `README.md` 下沉的 2026-08 起逐条变更记录（发布后补丁、#182 及更早的逐 PR 条目、v4.0.x 与 v3.1.1 的功能与踩坑）与 v4.0.0 历史亮点，正文逐字保留。 | 追溯「某个行为或修复是哪一批做的、当时怎么定位的」时；**引用某版本的正式说明时不要用它**——以 [`RELEASE-v4.3.1.md`](RELEASE-v4.3.1.md) / [`RELEASE-v4.3.0.md`](RELEASE-v4.3.0.md) / [`RELEASE-v4.2.1.md`](RELEASE-v4.2.1.md) / [`RELEASE-v4.2.0.md`](RELEASE-v4.2.0.md) 与 GitHub Releases 为准；新变更写进 `PR-REPORT-*.md` 与发布稿，不往存档里追加。 |
 | [`HANDOVER_2026-09.md`](HANDOVER_2026-09.md) | perf/stage-1 性能+结构线的交付手册（自带历史快照警示，含后续批次更正）。 | 追溯 perf/stage-1 那条线做了什么时；**正文数值已被后续批次更新**，实际以代码与 `_plan/current/` 档案为准。 |
 | [`PROJECT_HANDOFF.md`](PROJECT_HANDOFF.md) | 项目交接文档：主动识屏 + 多 Agent 联动时期的完整工作区状态、设计决策、遗留 TODO。 | 追溯识屏/联动落地时期的状态快照时；基线为 v3.1.1 / 194 passed，与现状差距较大。 |
 | [`CHANGELOG-DEV-SINCE-v4.1.0-2026-09-09.md`](CHANGELOG-DEV-SINCE-v4.1.0-2026-09-09.md) | 自 v4.1.0 以来开发版变更汇总：按合入顺序的主线演进表、性能线/结构线细节，含"实现后被回滚/取代"的口径说明。 | 需要逐 PR 粒度的开发期变更脉络、或核对"某功能是否真的上线"（第六节列了被取代项）时。 |
