@@ -256,6 +256,8 @@ def test_v2_new_advanced_groups_are_advanced_and_collapsed(tmp_path, monkeypatch
             "harness_launch_target": "启动项（高级）",
             "music_player_netease": music_title,
             "music_player_qqmusic": music_title,
+            "music_player_kugou": music_title,
+            "music_player_soda": music_title,
             "music_player_detect": music_title,
             "network_probe_interval": "网络延迟检测（高级）",
         }
