@@ -87,6 +87,13 @@ A stable sidebar destination organized by user intent. Every persistent setting
 has one owning domain; platform support changes availability, not ownership.
 _Avoid_: Module page, Windows settings page
 
+**About Page**:
+The About page follows Updates in the sidebar and is available for every pet
+identity and both chat-capable and pet-only builds. It shows the application
+version and the author's public accounts; copying a handle or opening the GitHub
+profile does not write preferences. Account display and clipboard text share one
+static source in `pet/settings_about.py`.
+
 **Settings Reset**:
 The whole-settings recovery command in the Settings System sidebar. It restores
 every persistent preference to its factory default in one atomic write and keeps

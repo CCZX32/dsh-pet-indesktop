@@ -575,6 +575,24 @@ def test_standalone_preview_uses_local_channel(tmp_path, monkeypatch):
         inproc.deleteLater()
 
 
+def test_frozen_standalone_missing_tts_points_to_app_update(tmp_path, monkeypatch):
+    import pet.settings_standalone as standalone_mod
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    _qapp()
+    dialog = ModernSettingsDialog(Config(base=tmp_path), include_ai=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(standalone_mod, "_edge_tts_available", lambda: False)
+    try:
+        standalone_mod.install_standalone_hooks(dialog)
+        button = dialog.voice_chime_page.preview_btn
+        assert not button.isEnabled()
+        assert "更新" in button.toolTip()
+        assert "pip install" not in button.toolTip()
+    finally:
+        dialog.deleteLater()
+
+
 def test_standalone_festival_preview_shows_notice_without_speech(tmp_path, monkeypatch):
     """节日试听本地演示：文案经宿主 system_notify 可见；语音默认关不触发合成。"""
     import pet.settings_standalone as standalone_mod

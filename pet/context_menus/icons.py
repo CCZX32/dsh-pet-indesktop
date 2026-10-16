@@ -311,6 +311,16 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         ])
         painter.drawPolygon(pencil)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+    elif name == "info":
+        painter.drawEllipse(QRectF(1.5, 1.5, 13.0, 13.0))
+        painter.drawPoint(QPointF(8.0, 5.0))
+        painter.drawLine(QPointF(8.0, 7.5), QPointF(8.0, 11.0))
+    elif name == "external_link":
+        painter.drawLine(QPointF(8.0, 2.0), QPointF(14.0, 2.0))
+        painter.drawLine(QPointF(14.0, 2.0), QPointF(14.0, 8.0))
+        painter.drawLine(QPointF(14.0, 2.0), QPointF(7.0, 9.0))
+        path.moveTo(5.0, 3.0); path.lineTo(2.0, 3.0); path.lineTo(2.0, 14.0)
+        path.lineTo(13.0, 14.0); path.lineTo(13.0, 11.0); painter.drawPath(path)
     elif name == "copy":
         painter.drawRoundedRect(QRectF(5.0, 3.0, 8.0, 9.0), 1.3, 1.3)
         painter.drawRoundedRect(QRectF(2.5, 5.5, 8.0, 8.0), 1.3, 1.3)

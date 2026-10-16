@@ -159,6 +159,7 @@ from .settings_widgets import (
     _system_dark,
 )
 from .settings_theme_qss import _settings_stylesheet
+from .settings_about import AboutPage
 from .settings_menu_layout_editor import MenuLayoutEditor
 from .persona_template import (
     CONDITIONAL_PARAMETERS,
@@ -2052,6 +2053,7 @@ class ModernSettingsDialog(QDialog):
             "语音": voice,
             "文件识别": file_interpret,
             "更新": self.update_page,
+            "关于": AboutPage(self),
         }
         for label, icon in SETTINGS_DOMAIN_NAV:
             content = domain_content.get(label)

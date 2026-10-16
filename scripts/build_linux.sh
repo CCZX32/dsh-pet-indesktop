@@ -27,6 +27,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
+"$PYTHON_BIN" scripts/verify_bundle_tts.py --environment
 
 # 仅当要构建 gif 变体时才生成 GIF 素材（convert_to_gif 默认幂等：只转换
 # 缺失/过期的，CI 只构建 webm 变体时不会触发；与 build_macos.sh 一致）。
@@ -161,6 +162,7 @@ for variant in "${variant_list[@]}"; do
     # （pet.screen_capture.ocr，动态 seam 的目标，只有 --hidden-import 能把它拉进包）
     # 与 rapidocr 的两份配置数据。三者缺一「截图提取文字」都不可用，所以一并判。
     "$PYTHON_BIN" scripts/verify_rapidocr_models.py --app-dir "$DIST_DIR/$name"
+    "$PYTHON_BIN" scripts/verify_bundle_tts.py --app-dir "$DIST_DIR/$name"
     # 中文编码自检（issue #26）：字节码/资源/文件名被编码污染即中止。
     "$PYTHON_BIN" scripts/check_bundle_encoding.py --dir "$DIST_DIR/$name"
     # Bridge 零依赖防线（2026-09 事故：缺 @deepseek-ai/dsh-llm 导致用户整个

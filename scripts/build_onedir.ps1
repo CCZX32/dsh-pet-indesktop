@@ -75,6 +75,9 @@ Write-Host "[build] pet-runtime-2026-09-01.1 build_started=$buildStamp source=$r
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 
+python scripts\verify_bundle_tts.py --environment
+if ($LASTEXITCODE -ne 0) { throw '[tts] upgrade build dependencies with pip install -r requirements.txt' }
+
 $variants = @{
     'webm-chat' = @{ Name = 'dsh-pet-standalone-webm-chat'; Entry = 'packaging\pet_entry.py' }
     'webm'      = @{ Name = 'dsh-pet-standalone-webm';      Entry = 'packaging\pet_entry_no_chat.py'; NoChat = $true }
@@ -596,6 +599,8 @@ if ($LASTEXITCODE -ne 0) { throw "[rapidocr] bundle cannot run local OCR (module
 Write-Host "[rapidocr] bundle carries the engine module + models + rapidocr config" -ForegroundColor Green
 
 # ---------- exe smoke test（启动成功才继续打包） ----------
+python scripts\verify_bundle_tts.py --app-dir $appDir
+if ($LASTEXITCODE -ne 0) { throw '[tts] bundled dependency version or modules are invalid' }
 # 注意：PyInstaller --windowed 在 import 失败时会弹错误对话框且进程存活，
 # 只看"进程 8 秒没退出"是假阳性。这里先做确定性加载链验证（从 bundle 布局
 # 真实加载 Shiboken/QtCore/QtGui/QtWidgets），再启动 exe 检查主窗口出现。
