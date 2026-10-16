@@ -1410,11 +1410,19 @@ def test_advanced_setting_groups_use_single_collapsed_disclosure_layer(tmp_path,
 
 
 def test_ai_settings_content_expands_to_the_shared_page_width(tmp_path, monkeypatch):
+    """AI 域的内容跟页头共用同一个宽度契约，不是自己缩成一条窄列。
+
+    契约 = ``min(CONTENT_READING_MAX_WIDTH, 滚动视口宽)``：宽窗下内容被阅读宽度封顶
+    （见 ``settings_widgets.CONTENT_READING_MAX_WIDTH``），窄窗下就是视口宽。"共用"
+    在这里的判据是**与页头逐像素同宽**——页头与内容是同一条宽度契约的两个呈现面
+    （``_SettingsPageShell``）。
+    """
     from PySide6.QtWidgets import QApplication
 
     from pet import modern_settings_dialog as settings_mod
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
+    from pet.settings_widgets import CONTENT_READING_MAX_WIDTH
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
@@ -1422,11 +1430,17 @@ def test_ai_settings_content_expands_to_the_shared_page_width(tmp_path, monkeypa
     dialog.resize(1100, 760)
     dialog.sidebar.setCurrentRow(5)
     dialog.show()
-    app.processEvents()
+    for _turn in range(3):  # 页头宽度跟着视口走，布局要多落一拍（见 _SettingsPageShell）
+        app.processEvents()
 
     ai_domain = dialog.findChild(settings_mod.QWidget, "settingsDomain_ai")
     assert ai_domain is not None
-    assert ai_domain.width() >= ai_domain.parentWidget().width() - 2
+    page = dialog.pages.currentWidget()
+    header = page.findChild(settings_mod.QWidget, "pageHeader")
+    expected = min(CONTENT_READING_MAX_WIDTH, ai_domain.parentWidget().width())
+    assert ai_domain.width() == expected, (
+        f"AI 域内容宽 {ai_domain.width()}px ≠ 共用契约 {expected}px")
+    assert header.width() == expected, "页头与内容必须同宽（一个契约两处呈现）"
     assert not dialog.ai_page.isVisible()
     dialog.reject()
     app.processEvents()
@@ -1464,6 +1478,12 @@ def test_settings_visual_hierarchy_uses_shared_product_tokens(tmp_path, monkeypa
 
 
 def test_wide_settings_title_tracks_the_centered_page_content(tmp_path, monkeypatch):
+    """页头标题跟着内容走：宽窗留白两侧对称，标题不漂到自己的位置上。
+
+    判据是**同宽**（页头与内容取同一个宽度契约，见 ``_SettingsPageShell``）；左边缘
+    允许"半个滚动条"的差——页头由页布局居中、内容由滚动视口居中，两条链天生差
+    ``滚动条宽 / 2``（有滚动条的页上 4px，无滚动条的页上逐像素相等）。
+    """
     from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QApplication, QScrollArea
 
@@ -1478,15 +1498,21 @@ def test_wide_settings_title_tracks_the_centered_page_content(tmp_path, monkeypa
     dialog.show()
     app.processEvents()
 
-    page = dialog.pages.currentWidget()
-    title = page.findChild(settings_mod.QLabel, "pageTitle")
-    scroll = page.findChild(QScrollArea, "settingsScroll")
-    content = scroll.widget()
-    assert title.mapTo(page, QPoint(0, 0)).x() == content.mapTo(page, QPoint(0, 0)).x()
-
-    dialog.resize(720, 700)
-    app.processEvents()
-    assert title.mapTo(page, QPoint(0, 0)).x() == content.mapTo(page, QPoint(0, 0)).x()
+    for width, height in ((1600, 900), (720, 700)):
+        dialog.resize(width, height)
+        for _turn in range(3):  # 页头宽度跟着视口走，布局要多落一拍
+            app.processEvents()
+        page = dialog.pages.currentWidget()
+        title = page.findChild(settings_mod.QLabel, "pageTitle")
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        content = scroll.widget()
+        title_x = title.mapTo(page, QPoint(0, 0)).x()
+        content_x = content.mapTo(page, QPoint(0, 0)).x()
+        extent = max(0, scroll.width() - scroll.viewport().width())
+        assert abs(title_x - content_x) <= extent, (
+            f"{width}×{height}：标题 {title_x} 与内容 {content_x} 错开超过滚动条宽 {extent}")
+        assert title.width() == content.width(), (
+            f"{width}×{height}：标题 {title.width()}px / 内容 {content.width()}px 不同宽")
     dialog.reject()
     app.processEvents()
 
@@ -1506,7 +1532,11 @@ def test_setting_rows_name_and_describe_their_controls_for_accessibility(tmp_pat
     assert row.label.buddy() is row.control
     assert row.label.wordWrap()
     assert row.control.accessibleName() == row.label.text()
-    assert row.control.accessibleDescription() == row.hint_label.text()
+    # 可访问说明 = 行内**全部**可读文案：说明 + 作用域标注（标注只是从说明末尾换到独立
+    # 一行呈现，读屏听到的内容不许因此变少，见 SettingRow.set_scope_note）。
+    assert row.control.accessibleDescription() == (
+        row.hint_label.text() + row.scope_note.text())
+    assert "影响所有桌宠" in row.control.accessibleDescription()
     assert "QPushButton:focus" in dialog.styleSheet()
 
     dialog.reject()

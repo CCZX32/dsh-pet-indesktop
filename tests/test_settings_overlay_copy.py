@@ -47,7 +47,7 @@ WINDOW_SCOPE_IDS = (
     "auto_hide_fullscreen",
 )
 
-SCOPE_NOTE = "对所有桌宠生效"
+SCOPE_NOTE = "（对所有桌宠生效）"
 LEGACY_STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
 
 
@@ -80,6 +80,20 @@ def _hint(dialog, setting_id: str) -> str:
     row = dialog.findChild(settings_mod.SettingRow, f"settingRow_{setting_id}")
     assert row is not None, f"设置页必须有 {setting_id} 行"
     return row.hint_label.text()
+
+
+def _row(dialog, setting_id: str):
+    import pet.modern_settings_dialog as settings_mod
+
+    row = dialog.findChild(settings_mod.SettingRow, f"settingRow_{setting_id}")
+    assert row is not None, f"设置页必须有 {setting_id} 行"
+    return row
+
+
+def _scope_note(dialog, setting_id: str) -> str:
+    """行内**独立标注**里的那句话（作用域声明不再粘在灰说明末尾）。"""
+    row = _row(dialog, setting_id)
+    return row.scope_note.text() if not row.scope_note.isHidden() else ""
 
 
 # --------------------------------------------------------------------------
@@ -119,8 +133,10 @@ def test_stream_capture_enabled_with_restart_level_copy_under_overlay(overlay_di
     hint = _hint(overlay_dialog, "stream_capture")
     assert overlay_dialog.stream_capture_check.isEnabled() is True
     assert hint == (LEGACY_STREAM_CAPTURE_HINT
-                    + "重启后生效；重启时多只桌宠会先收拢为主宠物。（影响所有桌宠）")
+                    + "重启后生效；重启时多只桌宠会先收拢为主宠物。")
     assert "暂不支持" not in hint
+    # 作用域声明仍在行内，只是从说明末尾挪成独立标注（见 SettingRow.set_scope_note）。
+    assert _scope_note(overlay_dialog, "stream_capture") == "（影响所有桌宠）"
 
 
 def test_stream_capture_toggle_clickable_in_both_topologies(tmp_path, monkeypatch):
@@ -161,19 +177,19 @@ def test_stream_capture_unchanged_under_legacy(tmp_path, monkeypatch):
 @pytest.mark.parametrize("setting_id", WINDOW_SCOPE_IDS)
 def test_child_page_marks_window_scope_keys_as_global(tmp_path, monkeypatch, setting_id):
     """overlay + 子宠页：窗口级键补「对所有桌宠生效」，可访问说明同步。"""
-    import pet.modern_settings_dialog as settings_mod
-
+    row = None
     dialog = _dialog(tmp_path, monkeypatch, instance_id="slot-1")
     try:
         hint = _hint(dialog, setting_id)
-        row = dialog.findChild(settings_mod.SettingRow, f"settingRow_{setting_id}")
+        row = _row(dialog, setting_id)
+        note = _scope_note(dialog, setting_id)
         description = row.control.accessibleDescription()
     finally:
         _close(dialog)
-    assert SCOPE_NOTE in hint
-    # SettingRow 在构造期把 hint 写进 accessibleDescription；改文案后必须同步，
-    # 否则读屏仍播旧说明（test_menu_layout 的可访问性契约）。
-    assert description == hint
+    assert note == SCOPE_NOTE, "标注里要有这一句（挂在标签那一行，不粘在说明末尾）"
+    assert SCOPE_NOTE not in hint, "灰说明末尾不该还带着它"
+    # 可访问说明是"说明 + 标注"全文：读屏仍播得到作用域（构造期 hint 已含它时不能丢）。
+    assert description == hint + SCOPE_NOTE
 
 
 @pytest.mark.parametrize("setting_id", WINDOW_SCOPE_IDS)
@@ -190,10 +206,10 @@ def test_main_page_shows_scope_note(tmp_path, monkeypatch, setting_id):
 
     dialog = _dialog(tmp_path, monkeypatch)
     try:
-        hint = _hint(dialog, setting_id)
+        note = _scope_note(dialog, setting_id)
     finally:
         _close(dialog)
-    assert ALL_PETS_SCOPE_NOTE in hint
+    assert note == ALL_PETS_SCOPE_NOTE
 
 
 @pytest.mark.parametrize("setting_id", WINDOW_SCOPE_IDS)
@@ -202,8 +218,10 @@ def test_legacy_child_page_has_no_scope_note(tmp_path, monkeypatch, setting_id):
     dialog = _dialog(tmp_path, monkeypatch, topology="legacy", instance_id="slot-1")
     try:
         hint = _hint(dialog, setting_id)
+        note = _scope_note(dialog, setting_id)
     finally:
         _close(dialog)
+    assert note == ""
     assert SCOPE_NOTE not in hint
 
 
@@ -211,8 +229,31 @@ def test_standalone_settings_process_marks_scope_note(tmp_path, monkeypatch):
     """真实交付路径：独立设置进程（--settings --instance slot-1）同样带说明。"""
     dialog = _dialog(tmp_path, monkeypatch, instance_id="slot-1", standalone=True)
     try:
-        hints = {key: _hint(dialog, key) for key in WINDOW_SCOPE_IDS}
+        notes = {key: _scope_note(dialog, key) for key in WINDOW_SCOPE_IDS}
     finally:
         _close(dialog)
-    for key, hint in hints.items():
-        assert SCOPE_NOTE in hint, key
+    for key, note in notes.items():
+        assert note == SCOPE_NOTE, key
+
+
+@pytest.mark.parametrize("setting_id", WINDOW_SCOPE_IDS)
+def test_window_scope_note_survives_readers(tmp_path, monkeypatch, setting_id):
+    """窗口级注入不许漏：七行都在、都可见、搜索也还找得回这一行。
+
+    这条盯的是"拆成独立标注"最容易踩的坑——原注入（``_apply_window_scope_rows``）
+    是运行期按 objectName 补的，改成标注之后就多了一个"标注没挂上"的失败面。
+    """
+    row = None
+    dialog = _dialog(tmp_path, monkeypatch, instance_id="slot-1")
+    try:
+        row = _row(dialog, setting_id)
+        assert row.scope_note.isHidden() is False, f"{setting_id} 的标注没有呈现"
+        dialog.search_edit.setText("")
+        app.processEvents()
+        dialog.search_edit.setText(SCOPE_NOTE)
+        app.processEvents()
+        hits = [item.objectName() for item in dialog._search_matches]
+    finally:
+        _close(dialog)
+    assert f"settingRow_{setting_id}" in hits, (
+        f"搜「{SCOPE_NOTE}」应当仍能命中 {setting_id}（实得 {hits}）")
