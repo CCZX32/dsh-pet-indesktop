@@ -65,6 +65,10 @@
 
 ## 安装、升级与卸载
 
+Android 原生悬浮桌宠已提供本地测试版构建入口，支持 Android 8.0 及以上。
+安装、功能边界和构建步骤见 [Android 说明](docs/ANDROID.md)，实际验证范围见
+[Android 交付报告](docs/PR-REPORT-ANDROID-PET-2026-10-15.md)。测试 APK 不作为正式发布附件。
+
 ### Windows：安装包（setup.exe）
 
 1. **下载**：选择 `dsh-pet-standalone-webm-chat-setup.exe`（或无 Chat 版）放到任意位置。

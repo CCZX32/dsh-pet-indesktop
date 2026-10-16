@@ -1354,7 +1354,7 @@ class OverlayShell(QObject):
         """主气泡的 hidden 信号/可点态接线（构造后与"提升者跟随器接管"共用）。"""
         bubble = self._speech_bubble
         if bubble is not None:
-            self._apply_bubble_text_scale(bubble)
+            self._apply_bubble_text_scale(bubble, self._sprite_config(self.alert_target_sprite()))
             self._connect_alert_hidden(bubble)
         if self._quick_chat_resolved:
             # 快速对话可用性已解析过（不重付 import 成本）：新气泡直接对齐
@@ -3854,19 +3854,10 @@ class OverlayShell(QObject):
         # 先停表再按 enabled 早退，开/关/改间隔都收敛到这一条路径）。
         self._load_self_talk_settings()
         self._schedule_self_talk()
-        # 气泡风格/字号热改（M10，legacy window.py:3879-3895 在
-        # refresh_pet_settings 里热生效，不走重建）：直接对活气泡下手。
-        bubble = self._speech_bubble
-        if bubble is not None:
-            set_style = getattr(bubble, "set_style", None)
-            if callable(set_style):
-                set_style(str(self._config.get(
-                    "self_talk_bubble_style", DEFAULT_SELF_TALK_BUBBLE_STYLE)
-                    or DEFAULT_SELF_TALK_BUBBLE_STYLE))
-            self._apply_bubble_text_scale(bubble)
-        # 子宠的气泡族不跟主配置走（它们各读自己的 slot 文件，热改由 slot 目录
-        # 事件那条窄路径负责，见 _refresh_slot_settings_if_changed）——这里一个键
-        # 都不碰，避免"改主宠设置把子宠也刷了"。
+        # The visible presenter may be any slot; style and text size belong to
+        # each pet, never to the process-wide configuration.
+        for sprite in self._all_sprites():
+            self._refresh_sprite_bubble_style(sprite)
         self.sync_music_lyric()
         # M5f：音乐自动唱歌开关热改（开→启轮询，关→停表并退出唱歌态）
         self.sync_music_sing()

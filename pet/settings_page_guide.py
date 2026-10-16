@@ -173,6 +173,7 @@ def current_page_height(scroll: QScrollArea, tabs: SettingsTabContainer | None =
 #: ``tests/test_settings_copy_lint.py``）。新增组必须在这里补一行，
 #: ``tests/test_settings_page_guide.py`` 的覆盖率守卫会盯住。
 SECTION_GUIDE: dict[str, str] = {
+    "作者账号": "BiliBili、抖音与 GitHub。",
     # 常规
     "应用启动": "开机后要不要自动把桌宠叫起来。",
     "窗口与系统": "它压在别的窗口上面还是能被盖住，全屏玩游戏时让不让位，光标被系统藏起来时要不要自动穿透点击。",

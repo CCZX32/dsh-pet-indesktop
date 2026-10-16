@@ -95,6 +95,8 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .tts_diagnostics import describe_failure, missing_dependency_hint
+
 from .voice_chime import (
     DEFAULT_VOICE,
     VOICE_OPTIONS,
@@ -242,13 +244,15 @@ def refresh_voice_list(*, force: bool = False, timeout: float = 10.0) -> frozens
     with _voice_lock:
         if not force and _live_voices and now - _live_voices_at < VOICE_LIST_TTL_S:
             return _live_voices
+    proxy = _resolve_edge_tts_proxy()
     try:
         import edge_tts
 
-        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=_resolve_edge_tts_proxy()), timeout=timeout))
+        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=proxy), timeout=timeout))
         voices = frozenset(str(item.get("ShortName") or "") for item in raw if item)
     except Exception as exc:  # noqa: BLE001 —— 拉不到不是错误，用旧的就够
-        logger.debug("拉取在线音色表失败（沿用内置/旧表）：%s", exc)
+        logger.debug("拉取在线音色表失败（沿用内置/旧表）：%s",
+                     describe_failure(exc, proxy_used=bool(proxy))[1])
         return None
     voices = frozenset(name for name in voices if name)
     if not voices:
@@ -375,6 +379,7 @@ class _TTSWorker(threading.Thread):
         self._out_path = out_path
         self._temp_path = _temp_cache_path(out_path)
         self._on_done = on_done
+        self._proxy_used: bool | None = None
 
     def run(self) -> None:  # noqa: D102
         # 临时文件台账：登记在册的路径不受启动清扫影响（见 _sweep_orphan_temp_files）。
@@ -407,8 +412,9 @@ class _TTSWorker(threading.Thread):
                     self._on_done(str(self._out_path), self._text, EDGE_TTS_MISSING)
                     return
                 except Exception as exc:  # noqa: BLE001
-                    errors.append(f"{candidate} 第{attempt}次: {type(exc).__name__}: {exc}")
-                    logger.warning("edge-tts 合成失败（%s 第%d次）：%s", candidate, attempt, exc)
+                    message, diagnostic = describe_failure(exc, proxy_used=self._proxy_used)
+                    errors.append(message)
+                    logger.warning("edge-tts 合成失败（%s 第%d次）：%s", candidate, attempt, diagnostic)
                     self._discard_partial()
                     if attempt < EDGE_RETRY_TIMES and candidate != candidates[-1]:
                         time.sleep(EDGE_RETRY_DELAY_S)
@@ -430,7 +436,7 @@ class _TTSWorker(threading.Thread):
                 errors.append(f"{candidate} 第{attempt}次: 服务端未返回音频（空文件）")
                 self._discard_partial()
         self._on_done(
-            str(self._out_path), self._text, "edge-tts 合成失败 → " + "；".join(errors[-4:])
+            str(self._out_path), self._text, "edge-tts 合成失败：" + (errors[-1] if errors else "未生成音频")
         )
 
     def _publish(self) -> bool:
@@ -475,12 +481,14 @@ class _TTSWorker(threading.Thread):
         # 惰性导入：只在真的要合成的后台线程里付这笔 import 成本。
         import edge_tts
 
+        proxy = _resolve_edge_tts_proxy()
+        self._proxy_used = bool(proxy)
         communicate = edge_tts.Communicate(
             self._text,
             voice,
             rate=self._rate,
             pitch=self._pitch,
-            proxy=_resolve_edge_tts_proxy(),
+            proxy=proxy,
         )
         await communicate.save(str(self._temp_path))
 
@@ -1614,7 +1622,7 @@ class VoiceChimeService:
                 logger.exception("桌面通知失败")
 
     def _notify_missing_tts(self) -> None:
-        msg = "语音报时需要 edge-tts 库：请运行 pip install edge-tts 后重试"
+        msg = missing_dependency_hint()
         logger.warning(msg)
         self._bubble(msg)
 
