@@ -18,4 +18,11 @@ https://android.googlesource.com/platform/frameworks/support/
 Gradle Wrapper (build tooling only): Gradle Inc. and contributors,
 Apache License 2.0. https://github.com/gradle/gradle
 
+Click sound pair bundled in this APK as res/raw/click_press.mp3 and
+res/raw/click_release.mp3 (source assets/sounds/duck/Ya1.mp3 and Ya2.mp3):
+MIT License, Copyright (c) 2025 MeteorNOX.
+Origin: https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget
+The MIT License text is reproduced as section 1 of THIRD_PARTY_NOTICES.md in
+the source repository.
+
 The complete Apache License 2.0 text is included as LICENSE-APACHE-2.0.txt.

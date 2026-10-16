@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.dshpet.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
@@ -20,7 +20,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/petAssets"))
     sourceSets["main"].res.srcDir(layout.buildDirectory.dir("generated/petRes"))
     testOptions { unitTests.isReturnDefaultValues = true }
@@ -31,6 +31,7 @@ val exportPetAssets by tasks.registering(Exec::class) {
     val repository = rootProject.projectDir.parentFile
     val python = providers.gradleProperty("petPython").orElse("python")
     inputs.dir(repository.resolve("assets/characters/shenshen/videos"))
+    inputs.dir(repository.resolve("assets/sounds/duck"))
     inputs.file(repository.resolve("scripts/export_android_assets.py"))
     inputs.file(repository.resolve("pet/frameseq_provision.py"))
     inputs.file(repository.resolve("pet/config.py"))

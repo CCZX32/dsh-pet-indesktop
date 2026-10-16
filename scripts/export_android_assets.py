@@ -18,6 +18,21 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_GROUPS = frozenset(("idle", "move", "turn", "click", "drag"))
+CLICK_SOUND_SOURCES = {"click_press.mp3": "Ya1.mp3", "click_release.mp3": "Ya2.mp3"}
+
+
+def copy_click_sounds(sounds_root: Path, res_output: Path) -> list[Path]:
+    target = res_output / "raw"
+    target.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, origin in sorted(CLICK_SOUND_SOURCES.items()):
+        source = sounds_root / origin
+        if not source.is_file():
+            raise FileNotFoundError(f"missing click sound: {source}")
+        destination = target / name
+        shutil.copyfile(source, destination)
+        written.append(destination)
+    return written
 
 
 def export_prepared(videos: Path, prepared: dict[Path, Path], output: Path,
@@ -126,6 +141,7 @@ def main() -> int:
         resource = args.res_output / "drawable-nodpi"
         resource.mkdir(parents=True, exist_ok=True)
         icon.save(resource / "pet_icon.png")
+        copy_click_sounds(ROOT / "assets" / "sounds" / "duck", args.res_output)
     byte_count = sum(p.stat().st_size for p in args.output.rglob("*") if p.is_file())
     print(json.dumps({"clips": len(manifest["clips"]),
                       "frames": sum(c["frames"] for c in manifest["clips"]),

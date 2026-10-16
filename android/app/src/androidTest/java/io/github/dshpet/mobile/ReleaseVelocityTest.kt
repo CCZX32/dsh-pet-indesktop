@@ -16,7 +16,7 @@ class ReleaseVelocityTest {
                 val engine = PetEngine(AssetCatalog.load(activity.assets).clips).apply {
                     resize(800.0, 1600.0); restorePosition(.5, .5)
                 }
-                val view = PetView(activity, engine, {}, {}, {}, {})
+                val view = PetView(activity, 0, engine, RecordingListener())
                 activity.setContentView(view)
                 fun gesture(releaseDelay: Long) {
                     val start = SystemClock.uptimeMillis()

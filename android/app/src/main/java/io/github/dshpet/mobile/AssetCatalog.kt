@@ -20,15 +20,21 @@ data class ClipSpec(
     val crop: SourceBox = SourceBox(0.0, 0.0, 640.0, 360.0),
 ) {
     val duration get() = frames / fps
+
+    fun framePath(index: Int): String =
+        "pet/$path/f_${(index.coerceIn(0, frames - 1) + 1).toString().padStart(4, '0')}.webp"
 }
 
 data class AssetCatalog(
     val canvasWidth: Int,
     val canvasHeight: Int,
     val body: SourceBox,
+    val unionCrop: SourceBox,
     val clips: List<ClipSpec>,
     val phrases: List<String>,
 ) {
+    fun clipsIn(group: String): List<ClipSpec> = clips.filter { it.group == group }
+
     companion object {
         private fun JSONArray.box() = SourceBox(getDouble(0), getDouble(1), getDouble(2), getDouble(3))
         fun load(assets: AssetManager): AssetCatalog {
@@ -55,7 +61,8 @@ data class AssetCatalog(
             require(clips.map { it.id }.distinct().size == clips.size)
             require(clips.map { it.group }.containsAll(listOf("idle", "turn", "move", "click", "drag")))
             val phrases = root.getJSONArray("phrases")
-            return AssetCatalog(canvas.getInt(0), canvas.getInt(1), body, clips,
+            return AssetCatalog(canvas.getInt(0), canvas.getInt(1), body,
+                WindowGeometry.union(clips), clips,
                 (0 until phrases.length()).map { phrases.getString(it) })
         }
     }

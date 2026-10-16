@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from scripts.export_android_assets import export_prepared
+from scripts.export_android_assets import copy_click_sounds, export_prepared
 
 
 def prepared(tmp_path):
@@ -66,3 +66,25 @@ def test_export_cannot_write_inside_source_package(tmp_path):
     video, clips = prepared(tmp_path)
     with pytest.raises(ValueError, match="source"):
         export_prepared(video, clips, video / "mobile", ["Hello"])
+
+
+def test_click_sounds_land_as_raw_resources(tmp_path):
+    sounds = tmp_path / "duck"
+    sounds.mkdir()
+    (sounds / "Ya1.mp3").write_bytes(b"press bytes")
+    (sounds / "Ya2.mp3").write_bytes(b"release bytes")
+    res = tmp_path / "res"
+    written = copy_click_sounds(sounds, res)
+    assert [p.name for p in written] == ["click_press.mp3", "click_release.mp3"]
+    assert [p.relative_to(res).as_posix() for p in written] == [
+        "raw/click_press.mp3", "raw/click_release.mp3"]
+    assert (res / "raw/click_press.mp3").read_bytes() == b"press bytes"
+    assert (res / "raw/click_release.mp3").read_bytes() == b"release bytes"
+
+
+def test_missing_click_sound_fails_build(tmp_path):
+    sounds = tmp_path / "duck"
+    sounds.mkdir()
+    (sounds / "Ya1.mp3").write_bytes(b"press bytes")
+    with pytest.raises(FileNotFoundError, match="Ya2.mp3"):
+        copy_click_sounds(sounds, tmp_path / "res")

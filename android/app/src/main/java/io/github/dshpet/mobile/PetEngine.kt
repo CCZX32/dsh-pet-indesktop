@@ -62,6 +62,36 @@ class PetEngine(clips: List<ClipSpec>, private val random: Random = Random.Defau
     val normalizedY get() = if (bottom > 0) (y / bottom).coerceIn(0.0, 1.0) else 0.0
     val frameIndex get() = (elapsed * clip.fps).toInt().coerceIn(0, clip.frames - 1)
 
+    /** Parks the pet: used when the wander module is switched off mid-stride. */
+    fun stopWandering() {
+        wander = false
+        if (mode == PetMode.MOVE || mode == PetMode.TURN) idle()
+    }
+
+    /** Source-pixel placement, for a freshly spawned companion. */
+    fun placeAt(bodyX: Double, bodyY: Double) {
+        if (bodyX.isFinite()) x = bodyX.coerceIn(0.0, right)
+        if (bodyY.isFinite()) y = bodyY.coerceIn(0.0, bottom)
+    }
+
+    /** Position-only separation from a collision that carried no usable impulse. */
+    fun shift(dx: Double, dy: Double) {
+        if (paused) return
+        if (dx.isFinite()) x = (x + dx).coerceIn(0.0, right)
+        if (dy.isFinite()) y = (y + dy).coerceIn(0.0, bottom)
+    }
+
+    /** A real collision hit: move, take the impulse, and let gravity take over. */
+    fun nudge(dx: Double, dy: Double, dvx: Double, dvy: Double) {
+        if (paused || mode == PetMode.DRAG) return
+        shift(dx, dy)
+        if (!vx.isFinite() || !vy.isFinite() || !dvx.isFinite() || !dvy.isFinite()) return
+        vx += dvx
+        vy += dvy
+        facingRight = vx > 0
+        if (mode != PetMode.THROWN) enter(PetMode.THROWN, pick("drag"))
+    }
+
     fun resize(width: Double, height: Double) {
         val rx = normalizedX; val ry = normalizedY
         right = width.takeIf { it.isFinite() }?.coerceAtLeast(0.0) ?: 0.0

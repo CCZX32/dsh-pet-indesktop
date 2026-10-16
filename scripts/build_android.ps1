@@ -26,8 +26,10 @@ try {
     if ($Tasks -contains 'assembleDebug') {
         $destination = Join-Path $repository 'dist-android'
         New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        $apk = Join-Path $destination 'dsh-pet-android-0.1.0-debug.apk'
-        Copy-Item -LiteralPath 'app/build/outputs/apk/debug/app-debug.apk' -Destination $apk -Force
+        $metadata = Get-Content -LiteralPath 'app/build/outputs/apk/debug/output-metadata.json' -Raw | ConvertFrom-Json
+        $output = $metadata.elements[0]
+        $apk = Join-Path $destination "dsh-pet-android-$($output.versionName)-debug.apk"
+        Copy-Item -LiteralPath (Join-Path 'app/build/outputs/apk/debug' $output.outputFile) -Destination $apk -Force
         $digest = Get-FileHash -LiteralPath $apk -Algorithm SHA256
         "$($digest.Hash.ToLowerInvariant())  $(Split-Path $apk -Leaf)" |
             Set-Content -LiteralPath (Join-Path $destination 'SHA256SUMS.txt') -Encoding ascii
