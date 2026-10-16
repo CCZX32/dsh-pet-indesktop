@@ -16,14 +16,15 @@ issue #286 的现场是「**进程在、托盘在、桌面上什么都没有**�
 日志停在 `进入事件循环`、CPU 累计 **0.72 s 且 5 s 不增长**、无线程活动、无子进程、无 TCP
 连接——观感等同于「启动失败或被安全软件拦了」。根因不是某个异常被静默吞掉（报告者这一点
 的推断不成立，见 §三），而是**「一只宠物都没有」这个合法状态本身不报错、不打日志、不给任何
-提示**。本片把它变成可观测的，并顺手修掉同一族数据卫生问题：slot0 迁移在目标档案已存在时
-**不写目标却照样清源**。
+提示**。本片把它变成可观测的，并顺手处理同一族数据卫生问题：slot0 迁移在目标档案已存在时
+**不写目标却照样清源**——该数据卫生口径在 §九 被大幅更正（"清源"保留、"不留可恢复副本"
+才是真缺陷）。
 
 | # | 能力 | 说明 |
 |---|---|---|
 | 1 | overlay 零宠物不再静默 | 启动收口处若一只 sprite 都没有：WARN（含活跃集合与配置目录）+ 托盘 tooltip 说实话 + 恢复窗开着且空白时补一句说明 |
 | 2 | legacy 零宠物不再静默 | `_build_empty_pet_tray`（只剩托盘、没有捕获窗那条路）补同样的 WARN + 托盘 tooltip |
-| 3 | slot0 迁移不再丢数据 | `already-exists` 支不再清源；未迁走的每宠键如实登记在 `retained_keys`，`copied_keys` 只记真写进档案的 |
+| 3 | slot0 迁移不再"既没迁走又删掉且无处可读" | `already-exists` 支**不覆盖目标**、**清源每宠键**（与 `Config.save()` 的全局清理同一条规则），清源前先保证恢复路径真的留住了那批值（规范备份装的就是它们就直接用，该路径被另一份快照占用则不覆盖它、另存时间戳恢复副本）；未采用的键名登记在 `retained_keys`，`copied_keys` 只记真写进档案的。**§九 更正**：本片首版写的是"该支不清源"，实测在盘上不成立（见 §九） |
 
 **红线 / 不变量**：
 
@@ -46,14 +47,14 @@ issue #286 的现场是「**进程在、托盘在、桌面上什么都没有**�
 |---|---:|---|
 | `pet/overlay_shell.py` | +54 / −0 | ① `_build` 尾段（`_slot_signature_cache` 之后）新增一行调用 `self._announce_no_pets_if_empty()`——放在 `_build_tray()` **之后**，因为托盘是零宠物态下唯一的可见入口，提示要能改到它；② 新增 `_announce_no_pets_if_empty`（`_all_sprites()` 非空即返回；否则 WARN + 托盘 tooltip + 恢复窗**空白时**补文案）与 `_no_pets_reason`（按三条已知入口如实陈述原因，**不猜**：优先用 slot0 降级诊断，其次"活跃清单为空"，最后"清单里的宠物都没能建起来"）。整段是**一个 hunk**，不含任何多屏几何改动。 |
 | `pet/app.py` | +14 / −0 | `_build_empty_pet_tray` 补 docstring 说明"这里必须留一条 WARN"、补 WARN（含活跃集合与配置目录）与托盘 tooltip 实话化；菜单与恢复窗的既有可见入口一字未动。 |
-| `pet/pet_profiles.py` | +24 / −9 | `migrate_slot0_profile`：`already-exists` 支**不再清源**（旧口径"不写目标却照样清源"= 把源每宠值直接删掉且无处可读）；`retained_keys` 登记未迁走的那批键、`copied_keys` 只记真写进档案的；模块头与函数 docstring 同步改口径。`retained` 显式初始化（首版漏了，`created` 支会 `UnboundLocalError`，见 §五）。 |
+| `pet/pet_profiles.py` | 首版 +24 / −9；**§九 更正后 +90 / −20** | `migrate_slot0_profile`：首版把 `already-exists` 支改成**不再清源**——§九 实测该口径在盘上不成立（`Config.save()` 会把它抹掉，`retained_keys` 成了骗人的字段）且把双真值写成了"修复"。更正后：两条支**都清源**（与 `Config.save()` 同一条规则），清源前用新增的 `_backup_holds_values` 验"备份真的装着即将被清掉的那批值"，验不过就在**不覆盖**规范备份的前提下另存时间戳恢复副本（新字段 `recovery_path`），取不到副本就**不清源**并返回 `backup-failed`；`retained_keys` 语义改为"未采用的源每宠键（值在备份里）"；模块头与函数 docstring 同步。`retained` 显式初始化（首版漏了，`created` 支会 `UnboundLocalError`，见 §五）。 |
 
 ### 测试
 
 | 文件 | 增删 | 覆盖 |
 |---|---:|---|
 | `tests/test_no_pet_startup_notice.py`（新增） | +201 / −0 | 7 项：overlay 零宠物 WARN + 点名配置目录、恢复窗说明与托盘 tooltip、有宠物时不打该 WARN（对照）、**空合成窗处处穿透**守卫、**零宠物不得占用 slot0 诊断源**（含下游契约：生成失败仍须带该槽档案路径）、legacy 零宠物 WARN + 点名配置目录、legacy 恢复入口不许被日志改动挤掉。 |
-| `tests/test_pet_profiles.py` | +24 / −0 | `already-exists` 时目标字节不变 **且** 源每宠键原样保留、`retained_keys` 如实登记、`copied_keys` 为空。 |
+| `tests/test_pet_profiles.py` | 首版 +24 / −0；**§九 更正后 +96 / −9** | 首版那一条（源每宠键原样保留）在 §九 被**改写**为新契约：目标字节不变、源每宠键清干净、被清掉的值可从备份取回、`retained_keys` 如实登记、`copied_keys` 为空、且**不把源几何补进档案**。新增 3 例：与真 `Config.save()` 的一致性（迁移清源 == 保存清源，两条路不许有分歧）、规范备份被旧快照占用时另存恢复副本且**旧备份逐字节不动**、取不到恢复副本就**不清源**且目标不动。 |
 
 ### 未改动（明确不做）
 
@@ -81,11 +82,15 @@ grep 的拓扑行是 `pet/app.py` 的 `渲染拓扑: overlay(单合成窗)`）�
 全历史从未存在过 `layered` 这个取值；他把 `layered` 当逃生门用属误解，本片不改这个判定
 （改它等于改 env 契约），只把事实写清。
 
-**为什么迁移选择「不清源」而不是「把源值合并进目标」。** 目标档案在 `already-exists` 支上
+**为什么迁移没有选择「把源值合并进目标」。** 目标档案在 `already-exists` 支上
 **不许被写**（既有用例逐字节钉死），所以"补目标缺的键"这条路会破掉一条已发布的契约。
-不清源是纯减法（只是不再删东西），零写入风险；而"源全局键暂留"本就是既有设计承认的过渡
-状态——见 `test_migrated_profile_is_the_truth_not_the_retained_global_keys` 的 docstring：
-"读侧真值只有档案"。
+这一半仍然成立。
+
+**首版给出的另一半理由（"不清源是纯减法、零写入风险"）是错的，§九 已更正。** 实测：
+`Config.save()` 对全局身份**无条件** `pop(PER_PET_KEYS | SLOT_LOCAL_KEYS)`，所以
+"不清源"在盘上根本留不住东西——下一次保存就把源里那批键抹掉，`retained_keys` 描述的
+"保留"不成立；而且全局配置与槽档案同时装每宠值正是规范禁止的双真值。正确口径是
+**清源 + 由备份承担"不丢数据"**：见 §九。
 
 ### 自查到的一处自伤（保留对照）
 
@@ -152,9 +157,10 @@ legacy 侧的 WARN 是一条 `logging.warning`（`_build_empty_pet_tray` 本来�
 
   | 产品改动 | 撤掉后 | 断言 |
   |---|---|---|
-  | `pet/pet_profiles.py` | 1 failed | `assert remaining[key] == source[key]`（源每宠键被删掉） |
+  | `pet/pet_profiles.py`（**§九 更正后的版本**） | 4 failed | 清源未发生 / 与 `Config.save()` 的分歧 / 旧备份被当成恢复路径 / 取不到副本仍清源 |
   | `pet/overlay_shell.py` + `pet/app.py` | 3 failed / 3 passed | WARN 与诊断缺失；3 个守卫（有宠物不报警、空窗穿透、legacy 恢复入口）前后皆绿 |
   | 零宠物提示首版（越权写 `_slot0_profile_diagnosis`） | 3 failed | 含 `tests/test_slot0_lifecycle.py` 那条既有用例，见 §三「自伤」 |
+  | 首版"不清源"口径（**§九 判定为错**） | 1 failed | `assert remaining[key] == source[key]`——首版把这条**保留**当成了正确契约 |
 
 - **实现过程中自己踩到并修掉的两个真实缺陷**（都留在报告里不删）：
   1. `retained` 未在 `created` 支初始化 → `UnboundLocalError`，被
@@ -208,11 +214,16 @@ legacy 侧的 WARN 是一条 `logging.warning`（`_build_empty_pet_tray` 本来�
 "目标档案已存在"时的源清理行为。**不影响任何正常路径**（有宠物时的稳态开销 0.233 µs，
 迁移在 `created` 支逐位不变）。
 
-**配置迁移**：**没有新增或修改任何配置键**，`docs/SETTINGS-CHANGE-GATES.md` 的门不触发。
+**配置迁移**：**没有新增或修改任何配置键**。但本片**改变了迁移的源清理语义**
+（`already-exists` 支），按 [`SETTINGS-CHANGE-GATES.md`](SETTINGS-CHANGE-GATES.md) 的
+适用范围（"修改保存语义"），该门**触发**并已登记 2026-10-17 一条变更记录。§八 首版写的
+"门不触发"是判断错误，特此更正。
 
-**回滚**：`git revert` 本片即可，无残留状态。唯一需要留意的是**迁移侧**：回滚后
-`already-exists` 又会清源，但因为本片不写源，回滚不会让已经保留下来的源键丢失
-（旧行为只删不加，回滚等于恢复"会删"的旧语义，不影响已落盘数据）。
+**回滚**：`git revert` 本片即可，无残留状态。**迁移侧注意**：本片更正后
+`already-exists` 会清源（与首版相反），回滚会把这条口径再翻回去——两版都是"删源"派
+（旧版删、首版不删但被 `Config.save()` 补删），所以回滚不会让已经清掉的值回来；
+真正兜底的是备份与恢复副本（`config.json.pre-slot0-migration*.bak`），它们**只增不改**，
+回滚不动它们。
 
 **分支与合并**：本片开工基线是 `0b7152d`，收口前已合入 `6a68570`（#285 播放器路径）。
 合并冲突只有 `docs/INDEX.md` 一处（两方都在"PR 报告存档"表头下新增行），解法是**两行都留**：
@@ -246,3 +257,174 @@ upstream 的 `PR-REPORT-MUSIC-PLAYER-PATHS-2026-10-16.md` 行 + 本报告行。�
 "0ms 探针 + 前序用例事件循环污染"，并给了"基线只加 30ms sleep 也复现同一条红"的对照）。
 **本片不修这一族**；按 AGENTS.md 的 CI 纪律，该由维护者决定是隔离出主套件还是单独办。
 基线全量日志：`.scratch/full-suite-baseline.log`；本片全量日志：`.scratch/full-suite-286-merged.log`。
+
+## 九、收口更正：`already-exists` 的"不清源"是**假保证**；#286 三条具体症状逐条复核
+
+> 本节由收口复核补入（2026-10-17）。§一/§二/§三/§五/§八 里"该支不清源"的表述以本节为准。
+
+### 九之一、被更正的口径，以及它为什么错
+
+首版口径：`already-exists` 支**不清源**，源每宠键原样保留，未采用的键登记在 `retained_keys`。
+
+**实测反驳（两层，都可复跑）：**
+
+1. **源键在盘上留不住。** `Config.save()` 对全局身份**无条件**执行
+   `for key in pet_profiles.PER_PET_KEYS | pet_profiles.SLOT_LOCAL_KEYS: payload.pop(key, None)`
+   （`pet/config.py:2314-2329`），而它只在 `not target.exists()` 时才调用迁移——**目标已存在
+   时迁移根本不会被 save 调到**，源里那批键就只等下一次保存被抹掉。复现脚本
+   `.scratch/repro_286_retention_defeated.py`：target 已存在 + 源有每宠键 → 迁移
+   `already-exists`（源键仍在）→ 紧接着一次普通 `Config.save()` → 源每宠键 `{}`。
+   即"保留"最长只活到用户下一次改设置。
+2. **`retained_keys` 全仓零读者**：`grep -rn retained_keys pet/` 只有赋值与 docstring，
+   没有任何消费方（本片没为它接线）。
+3. **它还把双真值写成了"修复"**：全局 `config.json` 与槽档案同时装着每宠值，正是规范
+   禁止的"同一份数据两个活真值"。
+
+**定性：这不是修复，是一条假保证**——文件里留不住的东西被描述成"保留"，
+用户按报告复测会看到配置已空。所以它不该留在这一片里。
+
+### 九之二、更正后的最小一致方案（不新增持久键、不引入迁移框架）
+
+| 项 | 改正后的口径 |
+|---|---|
+| 规则 | `created` 与 `already-exists` **都清源每宠键**——全局 `config.json` 不留每宠键，全仓只有这一条规则，与 `Config.save()` 的 `pop` 同源 |
+| 目标档案 | `already-exists` 照旧**绝不写目标**（锁内复查；`test_slot0_migration_never_overwrites_existing_profile` 逐字节钉死） |
+| "不丢数据"由谁承担 | **备份**。`_backup_file` 在这条支路之前跑（`config.json.pre-slot0-migration.bak`，已存在则保留第一份、**不覆盖**）。清源前再用 `_backup_holds_values` 验一次"这份备份**装的就是即将被清掉的那批值**"（值逐条相等——比 `_is_global_config_snapshot` 的"键在不在"强） |
+| 恢复副本 | 规范备份路径已被**另一份快照**占用时（旧快照也能过键存在性校验），**不覆盖它**，另存 `config.json.pre-slot0-migration-recovery-<毫秒>-<pid>.bak`（时间戳 + pid ⇒ 结构上不可能覆盖任何既有文件），走新增字段 `recovery_path` |
+| 拒绝不可恢复的删除 | 恢复副本写不出 → **不清源**、不写目标、返回 `backup-failed`（宁可留下双份，也不做不可恢复的删除） |
+| 可诊断 | `retained_keys` = 未采用的源每宠键；`reason` 点名备份/副本**文件名**；另有一条 WARNING 写明路径与键名 |
+| **明确不做** | 不新增任何持久键；不引入 retain/迁移框架；不改 `Config.save()` 的 `pop`（那是单真值的落地处）；**不把源几何补进既有档案**（"不覆盖目标"是已发布契约） |
+
+### 九之三、隔离复现：三种现场（`.scratch/repro_286_backup_route.py`）
+
+三种现场都是**合法配置**（target 已存在、源里有 v4.2.1 形态的每宠键），跑完迁移**再**跑一次
+真 `Config.save()`：
+
+| 现场 | 迁移结果 | 规范备份被覆盖? | 恢复副本 | save 后源每宠键 | **不可恢复的键** |
+|---|---|---|---|---|---|
+| A 无备份 | `already-exists` | （本次新建） | 无（规范备份就是这批值） | `{}` | **无** |
+| B 备份是**另一份**快照 | `already-exists` | **否** | 有 | `{}` | **无**（值在副本里） |
+| C 备份=当前源 | `already-exists` | 否 | 无 | `{}` | **无** |
+
+**首版在 B 上会丢数据**：`_is_global_config_snapshot` 只查键存在性，旧快照因此被当成
+有效的恢复路径被保护下来，而当前源值无处可查——现在由恢复副本补上。
+
+### 九之四、#286 三条具体症状的复核（用隔离合法配置，不碰真实 APPDATA/CU）
+
+| 症状 | 隔离复现 | 现在的结论 |
+|---|---|---|
+| **不可见**（进程在、托盘在、桌面上什么都没有） | `issue286/repro_a_no_pet.py`（5 个状态：正常升级 / 二次启动 / 空活跃清单 / 活跃清单损坏 / slot0 档案损坏） | 本片**已变成可观测**：空活跃清单与损坏两族都打出 `overlay: 启动后没有任何宠物（活跃集合=[…]，配置目录=…）`，`_build_empty_pet_tray` 走"只有托盘、无窗"。仍是**合法状态**，不造宠物 |
+| **迁移**（升级/降级往返） | `repro_a` 的 `normal-upgrade`→`created`、`second-boot`→`already-exists`；`repro_286_backup_route.py` 的 A/B/C | 迁移本身幂等、可重跑；清源与 `Config.save()` 一致；被清的值可从备份/恢复副本取回。**"迁移把位置/设置弄丢"这条现在可以排除**：源键从来不进读端（见下一行），丢位置只可能是**档案自己没有几何** |
+| **拖回右下角** | `issue286/repro_e_position_corner.py`（真 `OverlayShell` + 仓内替身，1920×1080 可用区 1920×1040，用户原位置 rx=0.31 ry=0.42） | **本片修不了，首版也修不了**（下表实证）。覆盖层主宠落点取自**槽档案**：`_build_slot_sprite` → `overlay_spawn_state._clean_geometry(profile.data)` → `_spawn_sprite_pos`，`rx/ry` 为 `None` 就 `_default_corner_pos`（右下角）。全局 `config.json` 的 `rx/ry` 在覆盖层里**没有读者**，而"绝不写目标"是已发布契约 ⇒ 迁移**无法**把源几何补进档案 |
+
+`repro_e` 实测（三行都是合法配置，迁移在每行都跑过）：
+
+| 场景 | migrate | 档案 rx/ry | sprite 落点 | 落默认右下角? | 迁移动过目标? |
+|---|---|---|---|---|---|
+| A 档案有位置 | `already-exists` | `0.31 / 0.42` | **(535.2, 396.8)** | 否 | 否 |
+| B **只有全局**有位置 | `already-exists` | `None / None` | **(1775.0, 959.0)** | **是** | 否 |
+| C 两边都没有（基线） | `already-exists` | `None / None` | (1775.0, 959.0) | 是 | 否 |
+
+**所以：本片不声称 #286 已根治。** 已确定的部分是"零宠物不再静默" +
+"迁移的源清理口径一致且可恢复"；**未确定**的是报告者那句"整屏鼠标失效 /
+`WS_EX_TRANSPARENT` 常驻"——那两句互相冲突（前者是穿透态=桌面正常，后者是
+`_press_global` 卡死造成的全屏吞点击），一个 `GetWindowLongW` 读数就能分辨，
+必须有报告者那台机器的证据。
+
+**给报告人的最小所需证据（一次就够）：**
+
+1. 失效**当下**取一次窗口扩展样式读数（普通权限即可，**不需要管理员**）。先拿窗口句柄：
+
+   ```powershell
+   Get-Process dsh-pet-standalone* | Select-Object Id, MainWindowHandle
+   ```
+
+   再读 `GWL_EXSTYLE`（`-20`），看 `0x20`（`WS_EX_TRANSPARENT`）那一位：
+
+   ```powershell
+   python -c "import ctypes; u=ctypes.windll.user32; print(hex(u.GetWindowLongW(<上面那个 MainWindowHandle>, -20)))"
+   ```
+
+   **`0x20` 置位 = 穿透态**（宠物点不到、桌面正常）；**未置位 = 吞点击态**
+   （整个桌面点不动）。这一位就是两条互相冲突的描述的分界线。
+2. 同一时刻的日志尾部（含启动那几行）。最省事的路子是托盘右键「打开配置目录」，
+   日志与配置都在 `%APPDATA%\dsh-pet-standalone-webm-chat\`。
+3. 配置目录里 `overlay-active-pets.json`、`config.json`、`config-slot-0.json` **三个文件的内容**
+   （每宠键与活跃集合是判断"零宠物 / 档案降级"的关键）。
+4. 出问题的版本号与升级来源版本（例：从 v4.2.1 覆盖升级到 v4.3.x）。
+
+**可直接回复报告人的文本（拟稿，未发送——外发动作需用户批准）：**
+
+> 谢谢反馈，也谢谢那份日志和读数，它们把问题缩小到了两个**互斥**的状态。
+>
+> 我们先说能确定的部分：v4.3 的单合成窗拓扑下，「一只宠物都没有」是一个**合法但完全静默**
+> 的状态（用户点过托盘「退出这只」、`overlay-active-pets.json` 损坏或版本不认识、slot0 档案
+> 降级被剥出活跃集，三种都会走到）。旧版在这种状态下照常显示一个全屏空窗（或只剩托盘图标），
+> **不报错、不打日志**——你看到的「进程在、托盘在、桌面上什么都没有」正是它。我们已修成
+> 可观测：启动时留一条 WARN（含活跃集合与配置目录）、托盘 tooltip 如实说明、恢复窗空白时补一句
+> 解释。请注意它**不会**自动替你造一只宠物（那会改你的意图），但托盘和恢复窗里都有显式的生成入口。
+>
+> 还需要你帮一件事来定最后那个根因：你说「exstyle 含 `WS_EX_TRANSPARENT` 常驻」和「整屏
+> 鼠标失效」——这两句描述的是**两个不同**的状态，一个是"桌面正常、只是宠物点不到"，
+> 另一个是"整个桌面都点不动"。分辨它们只需要在失效**当下**取一次读数（普通权限即可）：
+>
+> ```powershell
+> Get-Process dsh-pet* | Select-Object Id, MainWindowHandle
+> python -c "import ctypes; u=ctypes.windll.user32; h=<上面取到的 MainWindowHandle>; print(hex(u.GetWindowLongW(h, -20)))"
+> ```
+>
+> 最后那个十六进制数里，**`0x20` 这一位**在不在，就决定了是哪一种：
+> 在 = 穿透态（宠物点不到、桌面正常）；不在 = 吞点击态（桌面也点不动）。
+> 顺手把同时刻的日志尾部与配置目录里 `overlay-active-pets.json` / `config.json` /
+> `config-slot-0.json` 三份内容贴一下，我们就能给出确定的结论，而不用再猜。
+
+（外发需用户批准；本节只备稿。）
+
+### 九之五、性能分析（本次更正带来的增量）
+
+**方法（可复现）**：
+
+```bash
+PET_SRC=<tree> python .scratch/probe_perf_migration.py
+```
+
+环境：Windows 11，Python 3.13.7（仓库 `.venv`），n=400 × 3 轮取中位；每轮**重写源**
+`config.json`（迁移会把源每宠键清掉，不重写第二轮就走不到这条支路），只计
+`migrate_slot0_profile` 自身。基线 = 把 `pet/pet_profiles.py` stash 掉后跑同一脚本。
+
+| 分支（每进程启动一次，`already-exists`） | 修前 | 修后 | 增量 |
+|---|---:|---:|---:|
+| 规范备份本来就是这批值（读 + 比值，不复制） | 2262.9 µs | 4298.5 µs | **+2035.6 µs** |
+| 规范备份是另一份快照（比值不中 → 另存恢复副本） | 2325.2 µs | 6659.3 µs | +4334.1 µs |
+| 纯新增逻辑 `_backup_holds_values`（单测口径，n=20000 × 5） | — | **193.4 µs/次** | — |
+
+**怎么读这张表**：上两行是**整条支路**的耗时，不是纯新增逻辑。修后这条支路多了两件事：
+①`_backup_holds_values`（读一次规范备份 JSON + 逐键比值）= **193 µs**，这是真正新增的
+工作；②**清理源**那一次 `atomic_write_json(src, …)` —— 它是 `Config.save()` 的下一次保存
+本来就要做的写入（`pop` 之后整表落盘），本刀只是把它移到迁移这一步来做，所以是
+"同一份工作提前做"，不是净新增。第三行那个 193 µs 才是可归给本刀的净开销。
+
+逐条回答模板三问：
+
+1. **稳态开销 / 触发频率**：这段逻辑每次**进程启动**跑一次（`app.py` / `overlay_shell._build` /
+   空身份设置会话各一处），**不是每帧、不是每次保存**。净新增 ≈ **0.19 ms / 次进程启动**；
+   在启动总耗时（建行为/碰撞/物理/探头/托盘/素材，百毫秒级）里是噪声。
+2. **新系统调用/网络/磁盘/线程**：**没有**新线程、没有网络。磁盘上多**一次读**（读规范备份）；
+   只有在"规范备份装着**别的**快照"这一稀有支路上才多**一次写**（恢复副本，字节数 =
+   `config.json` 磁盘大小，上表 +2.4 ms 就是它）。`created` 支与既有失败路径逐位不变。
+3. **内存**：无新增容器与缓存，只在栈上多一个"键→值"小字典（`copied` 键数级，
+   实测 8 键）；`recovery_path` 是结果对象上的一个 `Path | None` 字段。
+
+### 九之六、门禁（本次更正）
+
+见 §六 的同一批命令在更正后的树上重跑结果，本节只记**新增**的门：
+
+- 静态检查：`python -m ruff check pet/ tests/` → **All checks passed!**
+- 聚焦：`pytest -q tests/test_pet_profiles.py` → **98 passed**
+- 消融（撤掉 `pet/pet_profiles.py` 的产品改动）：
+  `pytest -q tests/test_pet_profiles.py -k existing_profile` → **4 failed / 1 passed**
+- 受影响族（profiles + slot0_lifecycle + no_pet_startup_notice + slot0_ownership +
+  slot_and_memory + config_schema）→ **227 passed**
+- 文档纪律：`pytest -q tests/test_pr_report_discipline.py tests/test_architecture.py`
+- 隔离复现（不碰真实 APPDATA）：`issue286/repro_a_no_pet.py`、`repro_e_position_corner.py`、
+  `.scratch/repro_286_retention_defeated.py`、`.scratch/repro_286_backup_route.py`
