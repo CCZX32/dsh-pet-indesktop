@@ -891,7 +891,8 @@ def test_golden_spin_skips_while_throw_egg_active(tmp_path):
         active = True
 
     try:
-        shell._throw_egg = _BusyEgg()
+        # 探头/彩蛋逐屏一份：本用例只有一块屏，替身挂到那块屏的宿主上
+        shell._main_host.throw_egg = _BusyEgg()
         shell.trigger_golden_spin()
         assert shell._golden_spin_timer is None or not shell._golden_spin_timer.isActive()
     finally:

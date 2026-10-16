@@ -1136,6 +1136,10 @@ class Config:
             "anim_menu_stay_open": False,
             "quick_launch_apps": [dict(item) for item in DEFAULT_QUICK_LAUNCH_APPS],
             "auto_hide_fullscreen": True,  # 全屏应用自动隐藏（Windows）
+            # 允许桌宠跨屏（全局键、重启级）：开启后每块有桌宠的屏各一张合成窗，
+            # 拖动可以跨显示器；关闭时全部桌宠只留在启动时那块屏。默认关 =
+            # 单显示器用户与旧行为逐位相同（见 overlay_shell._cross_screen_allowed）。
+            "allow_cross_screen": False,
             # 免打扰（issue #208）：右键菜单四档时长的默认档 + 全屏应用时自动等效
             # 免打扰。二者只描述**偏好**，当前是否在免打扰是运行态、不落盘。
             "quiet_minutes_default": DEFAULT_QUIET_MINUTES,
@@ -1475,6 +1479,7 @@ class Config:
             "harness_autostart",
             "harness_launch_target",
             "stream_capture_mode",
+            "allow_cross_screen",
             "pnpm_bin",
             "music_sing_enabled",
             "music_sing_grace_seconds",
@@ -1863,6 +1868,7 @@ class Config:
         self.data["animation_gap_seconds"] = _float_or_default(self.data.get("animation_gap_seconds"), DEFAULT_ANIMATION_GAP_SECONDS, 0.0, 3600.0)
         self.data["self_talk_voice_precache_enabled"] = _bool_or_default(self.data.get("self_talk_voice_precache_enabled"), False)
         self.data["cursor_hidden_passthrough"] = _bool_or_default(self.data.get("cursor_hidden_passthrough"), True)
+        self.data["allow_cross_screen"] = _bool_or_default(self.data.get("allow_cross_screen"), False)
         self.data["spawn_inherit_size"] = _bool_or_default(self.data.get("spawn_inherit_size"), True)
         self.data["spawn_scale"] = _float_or_default(self.data.get("spawn_scale"), catalog.DEFAULT_SCALE, 0.1, 4.0)
         self.data["spawn_inherit_dynamic_island"] = _bool_or_default(self.data.get("spawn_inherit_dynamic_island"), False)

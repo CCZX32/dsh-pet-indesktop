@@ -269,15 +269,18 @@ def test_worker_exception_after_partial_write_cleans_temp(monkeypatch, tmp_path)
     """
     _install_fake_edge_tts(monkeypatch, live_voices=[DEFAULT_VOICE])
 
+    class NoAudioReceived(RuntimeError):
+        pass
+
     async def save_half_then_raise(self, path):
         Path(path).write_bytes(b"\x00half")
-        raise RuntimeError("NoAudioReceived")
+        raise NoAudioReceived("No audio received")
 
     monkeypatch.setattr(_FakeCommunicate, "save", save_half_then_raise)
 
     results = _run_worker(monkeypatch, tmp_path, DEFAULT_VOICE, ["ok"])
 
-    assert "NoAudioReceived" in results[0][2]
+    assert "未返回音频" in results[0][2]
     assert svc_mod._cache_hit(tmp_path / "chime.mp3") is False
     assert list(tmp_path.glob(f"*{svc_mod.TEMP_SUFFIX}")) == [], "半截临时文件必须清掉"
 

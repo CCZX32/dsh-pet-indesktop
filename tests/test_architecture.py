@@ -260,7 +260,12 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 阅读宽度换成 CONTENT_READING_MAX_WIDTH（import +1）、开机自启的范围声明改由
 # settings_pet_controls 的作用域 pass 拆成行内标注（-2），其余靠收掉几处重复注释对齐。
 # 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2515
+# 2026-10-16 上调到 2526（允许桌宠跨屏开关，本文件净 +11）：常规域「窗口与系统」
+# 多一行（行装配 8 行 + claim 表加一个 id + 保存回写 2 行）。控件本体与两条说明
+# 文案落在 settings_pet_controls（`CROSS_SCREEN_HINT` 与作用域登记），本文件只留
+# 装配与接线；行内文案表仍是唯一来源。按文件约定预算只随实测校准，不为达标压缩
+# 行宽/合并语句；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2526
 
 
 def _read(name: str) -> str:

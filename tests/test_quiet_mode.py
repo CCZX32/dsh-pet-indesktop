@@ -865,6 +865,10 @@ def test_overlay_fullscreen_exit_settles_after_overlay_is_shown(qapp):
     shell = type("Shell", (), {
         "_auto_hidden": False,
         "overlay": overlay,
+        # 整组显隐走宿主循环（多屏）：本桩只有这一张窗，三个入口都落到它上面
+        "_any_host_visible": lambda self: overlay.isVisible(),
+        "_show_all_hosts": lambda self: overlay.show(),
+        "_hide_all_hosts": lambda self: overlay.hide(),
         "_hide_bubble_for_visibility": lambda self: None,
         "_set_all_clips_paused": lambda self, on: None,
         "_pause_shared_subsystems": lambda self: None,

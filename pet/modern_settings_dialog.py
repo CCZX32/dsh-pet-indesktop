@@ -547,6 +547,16 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check),
                 ]
             )
+        # 「允许桌宠跨屏」不分平台（三端都有多显示器），排在窗口旗标类之后：前面几条
+        # 讲"窗口怎么摆"，它讲"桌宠能不能到别的显示器去"（行序见常规域装配的 claim 表）。
+        window_rows.append(
+            SettingRow(
+                "cross_screen",
+                "允许桌宠跨屏",
+                settings_pet_controls.CROSS_SCREEN_HINT,
+                self.cross_screen_check,
+            )
+        )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
         # 拓扑收口：「单进程多开」实验开关已从设置页移除，4.4b 起配置键
         # `experimental_single_process_spawn` 本身也随多进程多宠退役层删除
@@ -1781,7 +1791,7 @@ class ModernSettingsDialog(QDialog):
                 ("应用启动", claim("autostart")),
                 # 「光标隐藏时自动穿透」回主组：它也是窗口旗标类偏好（与置顶/全屏隐藏同族），
                 # 用户找它会先看这一组；原先跟「直播捕获」一起塞进"Windows 兼容"是埋掉了它。
-                ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough")),
+                ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "cross_screen")),
                 # 「直播捕获兼容」单独进一层折叠：行说明有四段（重启级切换、OBS 捕获方式、
                 # 平台限制、作用域），平铺在首屏就是逼用户读完。组描述只写一句"这一项做什么"，
                 # 重启/平台限制/作用域全部留在行内（展开即见全文），搜索照旧可达。
@@ -2311,6 +2321,8 @@ class ModernSettingsDialog(QDialog):
             self.config.set("balance_tier_color_enabled", self.balance_tier_color_check.isChecked())
         if self.auto_hide_fullscreen_check is not None:
             self.config.set("auto_hide_fullscreen", self.auto_hide_fullscreen_check.isChecked())
+        if getattr(self, "cross_screen_check", None) is not None:
+            self.config.set("allow_cross_screen", self.cross_screen_check.isChecked())
         # 「单进程多开」键不落盘控件值：开关已隐藏（拓扑收口 Phase A），
         # 配置字典里加载的原值随 config.save() 原样回写（兼容保留）。
         if self.cursor_hidden_passthrough_check is not None:
