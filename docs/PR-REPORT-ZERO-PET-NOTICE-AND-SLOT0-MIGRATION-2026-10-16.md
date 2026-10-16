@@ -495,8 +495,32 @@ PET_SRC=<tree> python .scratch/probe_perf_migration.py
 | `git diff --check` | 干净 |
 | 聚焦 + 受影响族（上一节 7 个文件 + `test_overlay_shell.py` + `test_overlay_window_capabilities.py`） | **303 passed** |
 | 文档纪律 + 架构红线（`test_pr_report_discipline.py` + `test_architecture.py`） | **186 passed** |
-| 全量 | 见 `.scratch/full-suite-289-merged.log`（四分片） |
+| 全量四分片 | **1 failed / 7877 passed / 27 skipped**（`EXIT=1`，脚本判"分片失败：[3]"）；分片明细 1764+2082+1982+2049 passed、11+4+9+3 skipped。日志：`.scratch/full-suite-289-merged.log` |
 | 隔离复现复跑（多屏模型下）：`issue286/repro_e_position_corner.py` | 三行结果与合并前**逐字相同**（A 落原位 535.2/396.8、B/C 落右下角 1775.0/959.0，迁移都没动目标）——`#288` 之后这条结论不变 |
+
+**那 1 条全量红的归因（与上一节那 5 条既有红不是同一批）**：
+
+| 失败用例 | 落点 | 归因 |
+|---|---|---|
+| `tests/test_screen_capture_ocr.py::test_self_built_sessions_are_injected_into_the_engine_cfg` | 分片 3 | **环境缺可选依赖 + 该用例少一道守卫**，与本刀无关 |
+
+三条依据：
+
+1. 失败点是 `tests/test_screen_capture_ocr.py:909` 的 `from omegaconf import OmegaConf`
+   —— **裸 import，没有守卫**；同一文件里相邻两条同类用例（`:823` / `:930`）都写了
+   `pytest.importorskip("rapidocr", reason="未安装本地 OCR 依赖（rapidocr）"）`，这条漏了。
+2. `omegaconf>=2.3` **确实写在 `requirements.txt:85`**，但本机解释器里
+   `import omegaconf` 直接 `ModuleNotFoundError` —— 是这台机器的环境缺包，不是代码回归。
+3. 该测试文件与本刀**无关**：`git diff 056dc2a HEAD -- tests/test_screen_capture_ocr.py`
+   **为空**（与 `origin/main` 逐字节相同，来自更早的 `03768bc`）。加上第 2 条，同一断言
+   在 `origin/main` 上**必然同样失败**——这一条是**演绎**（文件相同 + 解释器缺模块），
+   不是另跑基线测出来的，如实标注。
+
+**本刀没有修它**：它在 screen-capture/OCR 那条线上，不在本片（slot0 迁移/设置语义）的
+范围内，改它会把一个不相干的文件拖进本片 diff。**建议的后续**（留给维护者/那条线的作者）：
+把 `:909` 那行改成 `OmegaConf = pytest.importorskip("omegaconf")`（与相邻两条同规），
+或在本地环境补装 `omegaconf`。本片新增/改写的用例（`tests/test_pet_profiles.py` 4 例）
+在分片里**全绿**。
 
 **合并后专门复核过的一件事**：`#288` 把 sprite 分散到每屏宿主，但 `_build_slot_sprite`
 仍维护 `self.sprite` / `self._spawned`，所以零宠物判据 `_all_sprites()` 不会因为
