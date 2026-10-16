@@ -475,6 +475,30 @@ def test_slot0_migration_never_overwrites_existing_profile(tmp_path):
     assert (tmp_path / "config.json.pre-slot0-migration.bak").exists()
 
 
+def test_slot0_migration_existing_profile_keeps_source_keys(tmp_path):
+    """目标已存在时不得"既没迁走又被删掉"：源每宠键原样保留、不清源。
+
+    旧口径在这一支**不写目标却照样清源**：源里的角色/缩放/几何被整批删除，而槽
+    档案又是唯一可读处，于是宠物静默回落工厂默认、位置落回右下角，全程无日志无提示
+    （issue #286「设置与位置莫名丢失」的候选成因）。契约：不覆盖目标 + 不清源。
+    """
+    source = _global_with_per_pet(tmp_path)
+    target = pp.slot_profile_path(tmp_path, 0)
+    _dump(target, {"version": 4, "character": "dog", "sentinel": 7})
+    before_target = target.read_bytes()
+
+    result = pp.migrate_slot0_profile(tmp_path)
+
+    assert result.status == "already-exists"
+    assert target.read_bytes() == before_target, "目标档案一个字节都不许动"
+    remaining = json.loads(pp.global_config_path(tmp_path).read_text(encoding="utf8"))
+    for key in ("rx", "ry", "screen_name", "facing", "scale", "character"):
+        assert remaining[key] == source[key], key
+    # 没迁走的那批键如实登记在 retained_keys 上（copied_keys 只记真的写进档案的）
+    assert set(result.retained_keys) >= {"rx", "ry", "character"}
+    assert result.copied_keys == ()
+
+
 def test_slot0_migration_is_idempotent_and_retryable(tmp_path, monkeypatch):
     _global_with_per_pet(tmp_path)
     target = pp.slot_profile_path(tmp_path, 0)

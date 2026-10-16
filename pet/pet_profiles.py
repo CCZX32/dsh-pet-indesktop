@@ -39,9 +39,10 @@ overlay、legacy与设置路由共同使用本模块的固定身份档案、活�
 ``migrate_slot0_profile``：从**全局** ``config.json`` 抽取每宠键（含几何）写进
 ``config-slot-0.json``。铁律：
 
-- 目标已存在 → ``already-exists``，**绝不覆盖**（锁内复查，避免两个进程同时创建）；
+- 目标已存在 → ``already-exists``，**绝不覆盖**（锁内复查，避免两个进程同时创建），
+  **也不清源**——不覆盖又清源等于把源里的每宠值直接删掉且无处可读；
 - **先备份再写**（``config.json.pre-slot0-migration.bak``，已存在则保留第一份）；
-- 档案写入或既有目标验证成功后清除源每宠键；legacy由同一档案派生读取。
+- 只有**新建档案**（``created``）这一支清除源每宠键；legacy由同一档案派生读取。
 - **不是事务**：备份 + 写目标 + 将来删源是多个文件的多个步骤，中途中断只会留下
   "备份在、目标未写"或"目标已写、源未清"这类可重跑状态，本模块**不声称原子**——
   重跑一遍即可收敛（幂等）。
@@ -983,7 +984,9 @@ def migrate_slot0_profile(config_dir: Path | str, *, source: Path | str | None =
     ``status`` 取值与含义：
 
     - ``created``：先备份、清洗抽档案、再清源每宠键；
-    - ``already-exists``：已有档案不覆盖，仍验证备份并清源；
+    - ``already-exists``：已有档案不覆盖、**也不清源**（源每宠键原样保留，见
+      ``retained_keys``）——旧口径"不写目标却照样清源"会把源里的每宠值直接删掉
+      且无处可读；
     - ``no-source``：源文件不存在，或源里没有任何每宠键（无事可做，不造空档案）；
     - ``source-corrupt`` / ``source-unreadable``：源读不出可信对象 → 不写目标；
     - ``target-corrupt``：目标（``config-slot-0.json``）不可信 → **一个字节都不写、
@@ -1044,22 +1047,34 @@ def migrate_slot0_profile(config_dir: Path | str, *, source: Path | str | None =
                            else "备份全局配置失败：中止迁移，不写档案")
             from .config import normalize_pet_profile_snapshot
 
-            if not existed:
+            retained: tuple[str, ...] = ()
+            if existed:
+                # 目标已存在：**既不覆盖目标，也不清源**。旧口径在这条支路上"不写
+                # 目标却照样清源"，源里的每宠值（角色/缩放/几何…）被整批删掉且无处
+                # 可读——宠物静默回落工厂默认、位置落回右下角，全程没有日志也没有提示
+                # （issue #286「设置与位置莫名丢失」的候选成因之一）。留着这些键是安全的：
+                # 4.3 运行时只从槽档案读每宠键（读端不回退全局值，槽档案才是唯一真值），
+                # 而用户退回旧版本时正好还能读到它们。
+                retained = tuple(copied)
+            else:
                 cleaned = normalize_pet_profile_snapshot(data)
                 profile = {key: cleaned[key] for key in PER_PET_KEYS if key in cleaned}
                 profile.update(version=PROFILE_FILE_VERSION, user_customized=True)
                 cwl.atomic_write_json(target, profile)
-            remaining = {key: value for key, value in data.items()
-                         if key not in PER_PET_KEYS and key not in SLOT_LOCAL_KEYS
-                         and key != "click_sound_path"}
-            cwl.atomic_write_json(src, remaining)
+                remaining = {key: value for key, value in data.items()
+                             if key not in PER_PET_KEYS and key not in SLOT_LOCAL_KEYS
+                             and key != "click_sound_path"}
+                cwl.atomic_write_json(src, remaining)
     except cwl.ConfigWriteError as exc:
         return Slot0Migration(status=_failure_status(exc), profile_path=target,
                               source_path=src, reason=str(exc))
     return Slot0Migration(
         status="already-exists" if existed else "created",
         profile_path=target, source_path=src, backup_path=backup,
-        copied_keys=copied, reason="备份已验证、档案保留、源每宠键已清理")
+        copied_keys=() if existed else copied,
+        retained_keys=retained,
+        reason=("备份已验证；目标档案已存在：不覆盖目标，源每宠键原样保留（不清源）"
+                if existed else "备份已验证、档案已建、源每宠键已清理"))
 
 
 # ------------------------------------------------------------------ 数据代次
