@@ -2802,3 +2802,27 @@ def test_system_font_stack_matches_platform():
     )
     assert "," not in custom, f"自选字体被拼成多族: {custom}"
     assert "Consolas" in custom
+
+
+def test_screen_capture_menu_entry_keeps_shared_vector_icon():
+    """「截图提问」菜单项继续用 shared 矢量图标，不挂任何位图品牌素材。"""
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    QApplication.instance() or QApplication([])
+
+    from pet.context_menus.icons import vector_menu_icon
+    from pet.context_menus.shared import add_screen_capture_menu
+
+    class _Pet:
+        def on_screen_capture(self):
+            pass
+
+    menu = QMenu()
+    action = add_screen_capture_menu(menu, _Pet())
+    assert action is not None
+    assert action.icon().pixmap(16, 16).toImage() == vector_menu_icon(menu, "size").pixmap(16, 16).toImage()
+    menu.deleteLater()
+
+    bare = QMenu()
+    assert add_screen_capture_menu(bare, _Pet(), icons=False).icon().isNull()
+    bare.deleteLater()
