@@ -11,6 +11,9 @@ AIGC:
 
 # onedir 打包流水线（绿色版 zip + Inno Setup 安装包）
 
+Android 原生测试包使用独立 Gradle 工程，共用角色素材；其工具链、资源导出和
+验收见 [Android 悬浮桌宠](ANDROID.md)，不使用下述 PyInstaller 流程。
+
 目标：**运行期零解压**——不再产生 `C:\...\Temp\_MEIxxxxxx` 缓存。
 
 - onefile：每次启动把全部素材解压到系统临时目录；崩溃/强杀/断电残留；启动慢（GIF 版 800MB 每次全解压）
@@ -36,6 +39,17 @@ dist-onedir\dsh-pet-standalone-webm-chat-portable.zip
 ```
 
 绿色版用法：解压 zip 到任意盘（E:\、D:\、U 盘均可），双击 exe 即用；无安装、无缓存。
+
+### 语音依赖门禁（4.3.1）
+
+4.3.1 的语音依赖门禁在三端构建中均强制执行：构建前运行
+`python scripts/verify_bundle_tts.py --environment`，要求已安装的 edge-tts 满足
+`requirements.txt` 的 `>=7.3.1,<8`；冻结后运行同脚本的 `--app-dir` 检查，
+同时核对模块闭包、包内发行元数据和构建环境版本。旧版本、缺元数据或版本不一致
+均中止打包。环境依赖可用 `python -m pip install -r requirements.txt` 更新。
+不能只在系统 Python 升级：必须用实际运行 PyInstaller 的解释器安装和检查。
+协议变更的旧版 403 对照及真实试听证据见
+[4.3.1 交付报告](PR-REPORT-DESKTOP-431-2026-10-16.md)。
 
 ### 包体瘦身（默认开启，`-SkipSlim` 可关闭）
 

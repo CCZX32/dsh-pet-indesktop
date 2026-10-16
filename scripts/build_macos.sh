@@ -31,6 +31,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
+"$PYTHON_BIN" scripts/verify_bundle_tts.py --environment
 if [[ -d "$BUILD_DEPS/PyInstaller" ]]; then
     export PYTHONPATH="$BUILD_DEPS${PYTHONPATH:+:$PYTHONPATH}"
     export PYINSTALLER_CONFIG_DIR="$ROOT/build/.pyinstaller/config"
@@ -171,6 +172,7 @@ for variant in "${variant_list[@]}"; do
     # （pet.screen_capture.ocr，动态 seam 的目标，只有 --hidden-import 能把它拉进包）
     # 与 rapidocr 的两份配置数据。三者缺一「截图提取文字」都不可用，所以一并判。
     "$PYTHON_BIN" scripts/verify_rapidocr_models.py --app-dir "$DIST_DIR/$name.app"
+    "$PYTHON_BIN" scripts/verify_bundle_tts.py --app-dir "$DIST_DIR/$name.app"
     # 中文编码自检（issue #26）：字节码/资源/文件名被编码污染即中止。
     "$PYTHON_BIN" scripts/check_bundle_encoding.py --dir "$DIST_DIR/$name.app"
     # Bridge 零依赖防线（2026-09 事故：缺 @deepseek-ai/dsh-llm 导致用户整个

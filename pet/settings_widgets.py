@@ -1256,7 +1256,7 @@ class ResponsiveToggleActionRow(QWidget):
         self.updateGeometry()
 
 class SettingsCard(QFrame):
-    def __init__(self, rows: list[SettingRow], parent=None):
+    def __init__(self, rows: list[QWidget], parent=None):
         super().__init__(parent)
         self.setObjectName("settingsCard")
         self.rows = list(rows)
@@ -1320,7 +1320,7 @@ def _section_description_label(text: str, parent: QWidget) -> QLabel:
 
 
 class SettingsSection(QWidget):
-    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False,
+    def __init__(self, title: str, rows: list[QWidget], parent=None, *, advanced: bool = False,
                  description: str = ""):
         super().__init__(parent)
         self.advanced = advanced
