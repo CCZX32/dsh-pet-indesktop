@@ -6240,6 +6240,8 @@ class OverlayShell(QObject):
 
         只处理"开了跨屏域"的 sprite（跨屏拖拽中/过渡中的那些）：没开域的都是常规
         单屏宠物，这一步与它们无关。单屏或关闭跨屏时连遍历都不做。
+
+        收尾同步跨屏**只读投影**：身体跨出自己那块屏的那一部分由邻窗画出来。
         """
         if not self._cross_screen_allowed:
             return
@@ -6248,6 +6250,53 @@ class OverlayShell(QObject):
                 if getattr(sprite, "_clamp_rects", None) is None:
                     continue
                 self._route_one_seam(sprite)
+        self._sync_seam_projections()
+
+    def _sync_seam_projections(self) -> None:
+        """跨缝这只的身体越过自己那块屏的那部分 → 邻窗的**只读投影**。
+
+        投影只在"身体确实越过本屏几何边界、且与邻屏几何相交"时存在（相接与否由
+        真实几何判，不穿过屏间空洞）；越界结束、域被收窄、或这只退场即摘掉——
+        邻居窗口随之可以回收（投影期间不许回收：见 ``_reap_empty_hosts``）。
+
+        邻窗按映射偏移重画同一只 sprite 的当前帧（脏区按映射后的矩形局部 update），
+        所以缝两侧的像素拼起来就是"这只宠"本来的样子。
+        """
+        wanted: dict = {}
+        for host in list(self._hosts):
+            for sprite in list(host.overlay.sprites):
+                if getattr(sprite, "_clamp_rects", None) is None:
+                    continue
+                body = self._global_body_rect(sprite)
+                if body is None:
+                    continue
+                owner_geo = QRectF(host.screen.geometry())
+                if self._rect_covers(owner_geo, body):
+                    continue  # 整块还在自己屏里：不需要投影
+                for screen in QGuiApplication.screens():
+                    try:
+                        geo = QRectF(screen.geometry())
+                    except RuntimeError:
+                        continue
+                    if screen is host.screen or not geo.intersects(body):
+                        continue
+                    target = self.host_for_screen(screen) or self._create_host(screen)
+                    offset = (QPointF(host.overlay.geometry().topLeft())
+                              - QPointF(target.overlay.geometry().topLeft()))
+                    wanted.setdefault(target, {})[sprite] = offset
+
+        for host in list(self._hosts):
+            overlay = host.overlay
+            keep = wanted.get(host, {})   # wanted 以**宿主**为键（不是 overlay）
+            for sprite in list(overlay._projections):  # noqa: SLF001 - 同模块协作面
+                if sprite not in keep:
+                    overlay.clear_projection(sprite)
+                    overlay.update(overlay.projection_rect(sprite))
+            for sprite, offset in keep.items():
+                overlay.set_projection(sprite, offset)
+                # 投影每 tick 都要跟着这只的动画/位移重画（它是别人的帧，本窗的
+                # sprite 脏通道覆盖不到它）；区域就是它在本窗里的外接矩形。
+                overlay.update(overlay.projection_rect(sprite))
 
     def _route_one_seam(self, sprite) -> bool:
         """单只一次的跨屏判定，判据全部取自**这一拍的实际身体位置**：
@@ -6491,6 +6540,8 @@ class OverlayShell(QObject):
                 break
             if host.overlay.sprites:
                 continue
+            if host.overlay._projections:  # noqa: SLF001 - 同模块协作面
+                continue  # 正在给缝那边画投影：过渡没完，窗不能拆
             if getattr(host.overlay, "_mouse_grab", None) is not None:
                 continue
             self._release_host(host)

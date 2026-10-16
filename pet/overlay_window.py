@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QCursor, QPainter, QRegion, QScreen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -109,6 +109,11 @@ class OverlayWindow(QWidget):
         # 变化的 sprite 触发其 listeners（cb(sprite)）；外围小窗（气泡等）的
         # 跟随源——sprite 不是窗口，没有 moveEvent 可挂。
         self._position_listeners: dict = {}
+        # 跨屏过渡的**只读投影**：sprite -> 偏移（归属窗原点 − 本窗原点）。
+        # 身体跨在缝上时，缝两侧各画自己那一半：归属窗画本体，邻窗按这条映射把
+        # 同一只 sprite 平移后重画一次（本窗裁剪天然只留落在自己屏里的部分）。
+        # 只读协议：不复制 sprite/媒体、不进 tick 与 collision、不换 DPR、不抢 grab。
+        self._projections: dict = {}
         # 逐像素穿透协议字段（platform_win 的 Windows 控制器与
         # platform_passthrough 的 Qt 控制器共用同一套判定，见 showEvent 平台分派）：
         # mouse_through = 用户手动"鼠标穿透"开关（恒穿透）；_press_global 非 None
@@ -550,6 +555,32 @@ class OverlayWindow(QWidget):
         if cb not in self._sprite_removed_listeners:
             self._sprite_removed_listeners.append(cb)
 
+    # ---------------------------------------------------------------- 跨屏只读投影
+    def set_projection(self, sprite, offset) -> None:
+        """登记/更新一只**属于别的窗**的 sprite 在本窗的只读投影。
+
+        ``offset`` = 归属窗原点 − 本窗原点（把这只的局部坐标搬进本窗坐标系的平移
+        量）。只读：本窗只借 painter 平移重画它的当前帧，不持有它的驱动权。
+        """
+        self._projections[sprite] = QPointF(offset)
+
+    def clear_projection(self, sprite) -> bool:
+        """摘掉一只投影（返回是否原本有）。"""
+        return self._projections.pop(sprite, None) is not None
+
+    def projection_offset(self, sprite):
+        """该投影的映射偏移（没投影返回 None）。"""
+        return self._projections.get(sprite)
+
+    def projection_rect(self, sprite) -> QRect:
+        """该投影在本窗坐标系里的绘制外接矩形（脏区映射用它）。"""
+        offset = self._projections.get(sprite)
+        if offset is None:
+            return QRect()
+        rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
+                else sprite.rect())
+        return rect.translated(int(offset.x()), int(offset.y()))
+
     # ---------------------------------------------------------------- 位置监听（Phase 3b）
     def add_position_listener(self, sprite, cb) -> None:
         """注册 sprite 位置监听：tick 推进后 rect 变化时回调 cb(sprite)。
@@ -672,6 +703,22 @@ class OverlayWindow(QWidget):
                 continue  # M14：隐藏 sprite 跳过绘制（脏区域照旧被覆盖擦除）
             if region.intersects(sprite.rect()):
                 sprite.paint(painter)
+        # 跨屏投影：不属于本窗、但身体有一部分落在本屏的那只，按映射平移重画。
+        # 画在本窗自己的 sprite 之上（正在被拖的那只是活动对象，压在别人上面）。
+        # 本窗裁剪天然只留落在自己屏里的那一部分——这就是"两边各画一半"的拼接。
+        for sprite, offset in list(self._projections.items()):
+            if not getattr(sprite, "visible", True):
+                continue
+            rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
+                    else sprite.rect()).translated(int(offset.x()), int(offset.y()))
+            if not region.intersects(rect):
+                continue
+            painter.save()
+            try:
+                painter.translate(offset)
+                sprite.paint(painter)
+            finally:
+                painter.restore()
         self._paint_slingshot(painter)  # 瞄准 UI 层（橡皮带 + 轨迹预览，最上）
         painter.end()
 

@@ -532,3 +532,128 @@ def test_straddling_pet_is_not_hauled_back_by_the_host_controllers(tmp_path, mon
             body.width()), "这只仍应停在缝附近（被拽回本屏就是硬钳）"
     finally:
         hosts_mod._cleanup(shell)
+
+
+# ---------------------------------------------------------------- 6. 跨缝只读投影
+def _composite(shell, screens):
+    """把各窗的内容拼成一张"全局桌面"图（每窗按自己原点贴到对应位置）。
+
+    投影正确时，拼出来的图应当与"同一块大屏、同一位置"的参考图**逐像素一致**
+    （同 DPR、同素材、同位置；差异只可能来自拼接本身）。
+    """
+    from PySide6.QtGui import QImage, QPainter
+
+    left = min(s.geometry().x() for s in screens)
+    top = min(s.geometry().y() for s in screens)
+    right = max(s.geometry().x() + s.geometry().width() for s in screens)
+    bottom = max(s.geometry().y() + s.geometry().height() for s in screens)
+    canvas = QImage(right - left, bottom - top, QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(0)
+    painter = QPainter(canvas)
+    try:
+        for host in shell.hosts():
+            geo = host.overlay.geometry()
+            pix = host.overlay.grab()
+            painter.drawImage(geo.x() - left, geo.y() - top, pix.toImage())
+    finally:
+        painter.end()
+    return canvas
+
+
+def _body_pixels(canvas, body_global, alpha_min=128):
+    """全局身体框内 alpha≥阈值 的像素占比（判断"这只在图上画出来了多少"）。"""
+    hits = 0
+    total = 0
+    for x in range(int(body_global.left()), int(body_global.left() + body_global.width()), 4):
+        for y in range(int(body_global.top()), int(body_global.top() + body_global.height()), 4):
+            total += 1
+            if canvas.pixelColor(x, y).alpha() >= alpha_min:
+                hits += 1
+    return hits / max(1, total)
+
+
+def test_projection_makes_the_straddling_pet_fully_visible(tmp_path, monkeypatch):
+    """身体跨缝时：两个窗拼起来这只**完整可见**（不是被缝裁掉一半）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 400.0))
+        overlay, origin, cursor = _drag_to_straddle(shell, main)
+        host = shell.host_for_sprite(main)
+        body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+        assert body.left() < 1920.0 < body.left() + body.width(), "前提：身体跨在缝上"
+
+        for host_ in shell.hosts():
+            host_.overlay.grab()  # 先把两个窗都画过一遍（offscreen 下 grab 触发 paintEvent）
+        canvas = _composite(shell, [a, b])
+        covered = _body_pixels(canvas, body)
+        assert covered > 0.6, (
+            f"跨缝的身体在拼接图上只画出了 {covered:.0%}——投影没接上（缝那边是空的）")
+        # 反例锚点：投影确实落在邻窗里（不是只靠本窗画出来的那一半）
+        neighbour = shell.host_for_screen(b)
+        assert neighbour is not None, "跨缝期间邻窗必须存在（投影画在那儿）"
+        assert neighbour.overlay.projection_offset(main) is not None, "邻窗应当登记了这只的投影"
+        assert neighbour.overlay.sprites == [], "邻窗只是画投影，不持有这只 sprite"
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_projection_host_is_kept_until_the_transition_ends(tmp_path, monkeypatch):
+    """投影期间邻窗不许被回收；过渡结束（域收窄、投影摘掉）后恢复可回收。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 400.0))
+        overlay, origin, cursor = _drag_to_straddle(shell, main)
+        host = shell.host_for_sprite(main)
+        body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+        assert body.left() < 1920.0 < body.left() + body.width(), "前提：身体跨在缝上"
+        neighbour = shell.host_for_screen(b)
+        assert neighbour is not None and neighbour.overlay.projection_offset(main) is not None, (
+            "前提：邻窗正在画这只的投影")
+        assert host.screen is a
+
+        shell._reap_empty_hosts()
+        assert shell.host_for_screen(b) is not None, "有投影的窗不许被回收"
+        assert shell.host_for_screen(b).overlay.sprites == [], "它只是画投影，不持有 sprite"
+
+        # 继续拖到 B 深处 → 身体整块进 B → 收窄域并摘掉投影
+        cursor = QPointF(origin.x() + 2400.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        assert shell.host_for_sprite(main).screen is b, "身体整块进 B"
+        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        _tick(shell)
+        assert getattr(main, "_clamp_rects", None) is None, "身体整块在 B → 收窄域"
+        assert shell.host_for_screen(a) is None or not shell.host_for_screen(a).overlay._projections, (
+            "过渡结束：投影必须摘掉")
+        shell._reap_empty_hosts()
+        assert shell.host_for_screen(a) is None, "过渡结束后空窗照旧回收"
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_switch_off_never_projects_and_never_creates_a_window(tmp_path, monkeypatch):
+    """关闭跨屏：拖拽全程不投影、不建第二张窗（默认态与旧行为逐位相同）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a, switch=False)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 400.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        cursor = QPointF(origin.x() + 2600.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        assert len(shell.hosts()) == 1, "关闭态不许建窗"
+        assert not shell.overlay._projections, "关闭态不投影"
+        _tick(shell)
+        assert not shell.overlay._projections
+    finally:
+        hosts_mod._cleanup(shell)
