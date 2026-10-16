@@ -17,8 +17,10 @@
 ``pet/voice_chime_tts_panel.py``——它在「语音」域把行搬进平卡之后仍然成立（详见该模块文档）。
 
 密码类字段（``kind="secret"``）单独进「要你自己去拿的凭据」组：值只写系统钥匙串
-（``pet/tts_secrets``），**不落 config.json**；行提示只说「已保存 / 还没设置」与
-「仅本次运行」，存放位置由组标题那句统一交代。
+（``pet/tts_secrets``），**不落 config.json**；行提示只说「已保存 / 还没设置 /
+没能保存上」与「只在本进程内存」，存放位置由组标题那句统一交代。钥匙串写失败时
+除了行状态还要弹一次提示：设置页默认跑在独立进程里，进程内存兜底对主程序（真正
+合成的那个进程）等于没存，不许说成「已保存」或「本次运行有效」。
 
 自含 QWidget 页，
 提供 apply_to_config，
@@ -32,6 +34,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -427,7 +430,11 @@ class VoiceChimeSettingsPage(QWidget):
     def _secret_state(spec: tts.TtsField) -> str:
         if not tts_secrets.get(spec.secret_ref):
             return "还没设置"
-        return "已保存" if tts_secrets.available() else "已保存（仅本次运行）"
+        if tts_secrets.persisted(spec.secret_ref):
+            return "已保存"
+        # 写失败时值只在**写它的那个进程**的内存里：设置页默认是独立进程，主程序
+        # 读不到，所以既不能说「已保存」也不能说「本次运行有效」。
+        return "没能保存上（只在本进程内存，重启就没了）"
 
     # ------------------------------------------------------------ 配置读写
     def apply_to_config(self) -> None:
@@ -458,13 +465,23 @@ class VoiceChimeSettingsPage(QWidget):
         """凭据写入口：非空即保存（钥匙串优先），输入框随即清空。
 
         空输入且没按过「清除」= 不改动已保存的凭据（避免每次保存设置都把凭据抹掉）。
+
+        写失败（``set()`` 返回 False）必须看得见：值只落在当前进程内存里，而设置页
+        默认跑在独立进程（``settings_process_isolation``），主程序根本读不到——不提示
+        就是让用户以为填好了，收费后端却一直自报「没配 Key」。
         """
         edit = self._secret_edits.get(spec.key)
         if edit is None:
             return
         text = edit.text().strip()
         if text:
-            tts_secrets.set(spec.secret_ref, text)
+            if not tts_secrets.set(spec.secret_ref, text):
+                QMessageBox.warning(
+                    self,
+                    "凭据没能保存上",
+                    "系统钥匙串不可用：这个 Key 没能保存上，只留在本进程的内存里——"
+                    "重启就没了，其他进程读不到它。",
+                )
             edit.clear()
             self._secret_cleared.discard(spec.key)
         self._refresh_secret_hints()

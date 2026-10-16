@@ -216,22 +216,69 @@ def test_credential_group_is_hidden_when_the_backend_needs_no_key(tmp_path):
 
 
 def test_secret_row_hint_tells_where_it_is_saved(tmp_path, monkeypatch):
-    """凭据行只说状态（已保存 / 还没设置），存放位置交给组标题那一句。"""
+    """凭据行只说状态（已保存 / 还没设置 / 没保存上），存放位置交给组标题那一句。"""
     from pet import tts_secrets
 
     monkeypatch.setattr(tts_secrets, "get", lambda ref: "")
-    monkeypatch.setattr(tts_secrets, "available", lambda: True)
+    monkeypatch.setattr(tts_secrets, "persisted", lambda ref: False)
     page = _page(tmp_path, backend="mimo")
     key_row = page._field_rows[("mimo", "api_key")]
     assert key_row.hint_label.text().endswith("还没设置")
 
     monkeypatch.setattr(tts_secrets, "get", lambda ref: "already-saved")
+    monkeypatch.setattr(tts_secrets, "persisted", lambda ref: True)
     page._refresh_secret_hints()
     assert key_row.hint_label.text().endswith("已保存")
 
-    monkeypatch.setattr(tts_secrets, "available", lambda: False)
+    # 值只在当前进程内存里（钥匙串没写成）≠「已保存」：行里必须直说本进程临时。
+    monkeypatch.setattr(tts_secrets, "persisted", lambda ref: False)
     page._refresh_secret_hints()
-    assert "仅本次运行" in key_row.hint_label.text()
+    hint = key_row.hint_label.text()
+    assert "已保存" not in hint, f"没写进钥匙串就不能说「已保存」：{hint}"
+    assert "仅本次运行" not in hint, f"独立设置进程退出后这次运行也就结束了：{hint}"
+    assert "本进程" in hint and "重启" in hint
+
+
+def test_secret_write_failure_is_reported_and_never_claims_saved(tmp_path, monkeypatch):
+    """系统钥匙串写失败（模块在、系统拒绝写）：必须报失败，不得说「已保存」。
+
+    修前的两种假话都出在这里：``_apply_secret`` 丢掉 ``set()`` 的返回值，行状态由
+    「keyring 模块在不在」推导——模块在就报「已保存」（明明没保存进钥匙串），模块不在
+    就报「已保存（仅本次运行）」（而设置页默认跑在独立进程里，主程序根本读不到）。
+    """
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from pet import tts_secrets
+
+    app = QApplication.instance() or QApplication([])
+    warnings: list = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a))
+
+    class _BrokenKeyring:
+        def get_password(self, service, ref):
+            return None
+
+        def set_password(self, service, ref, value):
+            raise RuntimeError("system refused")
+
+        def delete_password(self, service, ref):
+            pass
+
+    monkeypatch.setattr(tts_secrets, "_keyring_module", lambda: _BrokenKeyring())
+    tts_secrets.reset_memory()
+
+    page = _page(tmp_path, backend="mimo")
+    page.mimo_key_edit.setText("sk-new")
+    page.apply_to_config()
+    app.processEvents()
+
+    assert warnings, "凭据没能保存上时必须有一条看得见的提示"
+    assert "没能保存上" in str(warnings[0][2])
+    assert "本进程" in str(warnings[0][2])
+    assert page.mimo_key_edit.text() == "", "值已收进内存，输入框照旧清空（不把明文留在控件里）"
+    hint = page._field_rows[("mimo", "api_key")].hint_label.text()
+    assert "已保存" not in hint, f"没写进钥匙串就不能说「已保存」：{hint}"
+    assert "没能保存上" in hint
 
 
 # ============================================================ 文案
