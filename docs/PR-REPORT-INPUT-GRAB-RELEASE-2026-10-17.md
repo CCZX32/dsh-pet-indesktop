@@ -1,11 +1,13 @@
 # PR 报告：输入链路两处残留收口（屏事件 grab 收尾走协议 + 右键进弹弓的判据收紧）
 
-> **基线**：`056dc2a`（fix(music): 歌词请求改为直连首选 + 有界单次回退 #291，`origin/main`）
-> **分支**：`fix/input-grab-release`（worktree `D:/dsh-pet-wt-input-final`）　**日期**：`2026-10-17`
-> **范围**：10 个文件（实现 3：`+49 / −13`；测试 4：`+314 / −19`；文档 3：本报告 523 行新增
-> + `INDEX.md` `+2 / −1` + 穿透修复报告追加 `+16`）——合计 `+904 / −33`，**本地提交（3 个提交）、未 push**
+> **基线**：`53d0587`（fix(frameseq): 清理 alpha=1 背景残留并更新素材世代 #292，`origin/main`；
+> 本片开工时是 `056dc2a`，冻结内容期间 main 前进了一次，按口径只合 main、只有 `INDEX.md` 一处并集冲突）
+> **分支**：`fix/input-grab-release`（worktree `D:/dsh-pet-wt-input-final`，**已 push**）　**日期**：`2026-10-17`
+> **范围**：11 个文件（实现 3：`+49 / −13`；测试 5：`+369 / −21`；文档 3：本报告 605 行新增
+> + `INDEX.md` `+2 / −1` + 穿透修复报告追加 `+21`）——合计 `+1046 / −35`
 > **关联**：本报告收的是 [`PR-REPORT-CURSOR-PASSTHROUGH-2026-10-15.md`](PR-REPORT-CURSOR-PASSTHROUGH-2026-10-15.md)
-> §三 列出的两条同族残留（该报告 §七 已回填交叉引用）。
+> §三 列出的两条同族残留（该报告 §七 已回填交叉引用）。另有**一处与本片两条产品改动无关的
+> 测试侧收口**（`tests/test_proactive.py` 的前台窗口用例，见 §六之二／§七 第 5、6 条）。
 
 ## 一、核心特性
 
@@ -54,6 +56,7 @@
 | `tests/test_overlay_hosts_multiscreen.py` | +102 / −0 | 新增 `_three_screens()` 与两条：① **没有兜底屏可迁**（`_fallback_screen` → None）的拔屏：会话仍走完协议、穿透待办被冲刷（这条路径没有随后的 `show()` 收敛）；② 跨屏拖拽进行中拔掉**输入会话所在**那块屏：会话只松一次手、空宿主只回收一次（少幂等闸即 `ValueError`）、C 窗上另一只在途 grab 全程不被打断。 |
 | `tests/test_overlay_screen_migration.py` | +27 / −0 | `_migrate_to_screen` 换窗前收尾在途 grab 的回归（旗标与穿透档位一起复位）——直接钉 `_end_drag` 的第二个调用点。 |
 | `tests/test_sprite_slingshot.py` | +107 / −19 | `_mouse` 助手补 `modifiers` 形参（SHIFT 用例需要）；老的 `test_stale_press_watchdog_clears_click_only_grab_and_cancels_aim` 钉的是旧契约（click-only 也能进瞄准），按新契约重写为五条：锁定位不进、SHIFT 未按不进、SHIFT 按住进、**没过阈值**的合法按下照旧进、已瞄准时判据不合格也仍能退出。 |
+| `tests/test_proactive.py` | +55 / −2 | **本片独立补的一处测试侧收口**（与本片两条产品改动无关，另起一节讲）：`test_foreground_window_info_real_call_no_shadow_bug` 原先无条件断言"真调用必须返回 dict"，而它其实依赖「桌面上存在可见前台窗口」这件外部事实；改为先独立读一遍真实可见性前置条件，成立才断言。**断言一个字未放宽**，判别力有红/绿双向取证（§六之二）。 |
 
 ### 文档
 
@@ -68,7 +71,9 @@
   legacy 的 `_enter_slingshot` 前置判据本来就要求"正在拖拽"（`_dragging`），无此缺口。
 - `_finish_grab` 本体、`_reap_empty_hosts` 判据、看门狗两支的结构：本刀只换调用方，
   不改协议内部（看门狗那支新出现的不可达分支口径见 §七）。
-- `hideEvent`/`closeEvent` 不结束在途 grab（既有行为，已登记 BACKLOG）。
+- `hideEvent`/`closeEvent` 不结束在途 grab（既有行为，已登记 BACKLOG）：本片**探针查过**
+  它会不会留下用户能感觉到的输入状态，结论是"不能确认"，故不改成产品分支——取证与结论
+  见 §七 第 2 条与 §六之二。
 
 ## 三、实现要点
 
@@ -460,14 +465,24 @@ probe done
 | 架构红线 | `tests/test_architecture.py`（在全量内，本刀未新增/恢复任何被退役模块） | 随全量绿 |
 | 交付证据纪律 | `pytest -q tests/test_pr_report_discipline.py` | **171 passed**（本报告已登记入 INDEX，四节标题齐备） |
 | 换目录复跑 | `cd /tmp && pytest -q <绝对路径的 3 个聚焦文件>` | **58 passed**（无路径硬编码依赖） |
+| 静态检查（合 `origin/main` `53d0587` **后**复跑，含本片新增的测试改动） | `python -m ruff check pet tests scripts` | **All checks passed** |
+| 本片聚焦（合 main 后复跑） | `pytest -q tests/test_sprite_slingshot.py tests/test_overlay_window_capabilities.py tests/test_overlay_hosts_multiscreen.py tests/test_overlay_screen_migration.py` | **80 passed**（5.56s） |
+| 相关族（合 main 后复跑，12 个文件＝上表那条同一份命令） | 见上 | **209 passed**（11.97s） |
+| 前台窗口用例 + 文档纪律（合 main 后） | `pytest -q tests/test_proactive.py tests/test_pr_report_discipline.py -rs` | **241 passed / 1 skipped**（跳过的那条＝§六之二 的前置条件闸；本报告改过，纪律门必须重跑） |
+| 全量四分片（合 main 后，`53d0587`→合并后树） | `python scripts/ci_shards.py` | **7898 passed / 16 skipped / 0 failed**，`EXIT=0`（分片明细 1769+2084+1991+2054 passed、6+4+4+2 skipped；`ci_shards.py` 按 CI 口径忽略 4 个 webm 生命周期文件，CI 里另跑——所以这个数比早期整跑全量的 7954/7955 少那几十条）。日志：`.scratch/full-suite-shards-merged.log` |
 
-**本轮观察到的一条与本刀无关的红（如实登记，不计入本刀失败）**：复跑时
+**合 main 的事**：`origin/main` 在本片冻结内容期间前进了一次（`056dc2a` → `53d0587`，后者是
+#292 frameseq 档位），按任务口径只合 main：`git merge origin/main` 只有 `docs/INDEX.md`
+一处冲突（两行索引争同一插入点），按仓库惯例取**并集**（两行都留），其余文件自动合入。
+上表的聚焦/相关族/纪律门都是**合并后**在合并后的树上复跑的。
+
+**那条与本刀无关的红已经收了（测试侧，本片一并带上）**：复跑时
 `tests/test_proactive.py::TestVisionAndWatcherPhase2::test_foreground_window_info_real_call_no_shadow_bug`
 失败（`vision.foreground_window_info()` 返回 None）。判定为**环境依赖的既有用例**，
-证据三条：
+证据三条（上一版文字在提交 `4b91eb6` 里可查，结论不变）：
 
-1. **未改动的基线同样红**：在 `origin/main`（`056dc2a`）的干净检出上单独跑同一条用例，
-   此刻同样 `1 failed in 2.96s`（只为取证临时建了一个 detached worktree，取证后已删除）；
+1. **未改动的基线同样红**：在 `origin/main` 的干净检出上单独跑同一条用例，同样
+   `1 failed`（当时建了临时 detached worktree 取证，取完删除）；
 2. **现场根因可指名**：探针显示 `GetForegroundWindow()` 返回 `WeChatAppEx.exe`
    （微信小程序宿主，class `Chrome_WidgetWin_0`）的一个**不可见**窗口
    （`IsWindowVisible=False`、无标题、未 cloaked、rect 930,376–1630,1016），而
@@ -475,7 +490,31 @@ probe done
    "当前桌面存在一个可见的前台窗口"；
 3. **同一份代码此前是绿的**：首次全量（03:35）该用例通过，说明它是随桌面状态翻转的
    真调用用例，不是本刀引入（本刀未触碰 `pet/vision.py` / `pet/proactive*`）。
-   要它转绿只需把任意可见窗口切到前台再跑。
+
+本片把它改成**按真实可见性前置条件断言**（`tests/test_proactive.py` `+55 / −2`，
+详见 §六之二），此后本机跑它是 `1 skipped` 而不是红。
+
+#### §六之二、前台窗口用例的前置条件闸（本片测试侧收口，与本片两条产品改动无关）
+
+改法（一句话）：**先独立读一遍 Win32 判据**（`GetForegroundWindow()` 非零 /
+`IsWindowVisible` / 非 `IsIconic` / 未被 `DwmGetWindowAttribute(…,14,…)` cloak /
+`GetWindowRect` 尺寸为正），**不经过产品函数**；成立才执行原来的两条断言，不成立则
+`pytest.skip` 并写明原因。产品契约一个字没动，断言一个字没放宽，也没有 `-k` 掉它。
+
+**判别力取证（红/绿双向，脚本 `.scratch/verify_precondition_gate.py`，未入库）**：本机桌面
+此刻恰好**没有**可见前台窗口（判据 `False`），所以取证把"可见"这一条用桩置真，让前置条件
+成立，然后在同一前置条件下跑两条：
+
+| 被试 | 结果 | 说明 |
+|---|---|---|
+| 真产品（`pet/vision.py` 原样） | **用例通过** | 置桩后产品返回 `{'hwnd': 27987436, 'pid': 11008, 'process': 'WeChatAppEx.exe', 'title': '', 'rect': (937, 376, 686, 633)}`——证明闸不是"恒跳过"，断言在成立时确实被执行 |
+| 把历史 shadow bug **原样放回**的变体（函数体内 `import ctypes.wintypes` 造成局部名 → `UnboundLocalError` 被吞 → 恒返回 None） | **用例红**（`AssertionError`） | 证明同一前置条件下 bug 仍然被抓住——这正是"不放松产品契约"的可执行证据 |
+
+**为什么不去"造"一个可见前台窗口当锚点**：实测过（同脚本更早一版）：自建 `QWidget`
+`show()+activateWindow()+raise_()` 在 `windows` 插件下确实是真可见 HWND
+（`IsWindowVisible=True`），但**抢不到前台**（有界等待 5 s，`GetForegroundWindow()`
+始终不是它，Windows 的前台锁规则），在 `offscreen` 插件下 `winId()` 干脆是 `1`。
+故"确定性前置条件"在本机不可得，只有"按真实状态判定 + 不成立则跳过"这一条路。
 
 **断言有效性**：两条缺陷都做了"产品改动前必须红"的取证（见上表逐条数字），且每一条
 新用例都能指出它钉的是哪一行产品代码；`_release_host` 幂等闸用"撤掉即抛"直接证明
@@ -496,17 +535,56 @@ probe done
 2. **看门狗 click-only 分支里"先收瞄准会话"那一句已不可达**：新判据下
    click-only 的按下再也起不了瞄准会话，故"`_press_global` 为空 + 持有 grab + 正在
    瞄准"这一形态不再出现（该分支保留为会话侧兜底，删除属另一刀的范围，口径已写进
-   `_check_stale_press` docstring 与穿透修复报告 §七）。同族仍开放的一项：
-   `hideEvent`/`closeEvent` 不结束在途 grab（既有行为，已登记 BACKLOG）。
+   `_check_stale_press` docstring 与穿透修复报告 §七）。同族仍开放的一项见第 6 条。
 3. **拔屏时若正开在瞄准会话上**：会话不被 `_end_drag` 取消（与改动前一致），但它在
    新的承载窗上仍有退出路径（松左键 → `_fire_slingshot` / Esc / 看门狗），不会卡死；
    未做端到端实机复现（需要物理拔屏）。
 4. **真双屏 / 异 DPI 未验**（本机只有一块活动屏）：多屏链路的验证止于真壳 + 假屏
    信号，与 `PR-REPORT-PER-PET-MULTISCREEN-2026-10-16.md` 登记的同一局限。
-5. **本机有一条与本刀无关的环境依赖用例会间歇红**：`test_proactive.py` 的
-   `test_foreground_window_info_real_call_no_shadow_bug` 断言"当前存在可见前台窗口"，
-   当前台窗口恰好是隐形窗口（实测是一次微信小程序宿主窗口）时必红；取证与基线对照
-   见 §六。改判据（有可见前台窗口才断言、否则跳过）不在本刀范围。
+5. **本机那条环境依赖用例已收（测试侧，见 §六之二）**：`test_proactive.py` 的
+   `test_foreground_window_info_real_call_no_shadow_bug` 原先无条件断言"当前存在可见前台
+   窗口"，隐形宿主窗当前台时必红；现在按真实可见性前置条件断言，本机跑成 `1 skipped`，
+   断言未放宽（红/绿双向取证在 §六之二）。
+6. **`hideEvent`/`closeEvent` 不结束在途 grab：探针查过，不确认"会留用户能感觉到的输入
+   状态"，故不改产品代码**（既有行为，仍留在 BACKLOG）。取证用隔离的真实 Qt 探针
+   （`.scratch/probe_hide_close_grab.py`：真 `OverlayWindow` + 真 `PetSprite`，不 sleep
+   赌时序），事件注入走 **`QWindow` 重载**的 `QTest`——widget 重载是**直接投递给指定
+   widget**、不模拟真实路由（对照取证 `.scratch/probe_qtest_routing.py`：把 release 发给
+   B 的 widget，B 收到了；改发给 B 的 `windowHandle()`，按隐式 grab 路由落到了按下窗 A）。
+   逐条实测（`场景 → 观测`）：
+
+   | 场景 | 实测 | 读法 |
+   |---|---|---|
+   | A 拖拽中 `hide()` | hide 本身**不动**任何 grab 字段：`grab=True`/`_press_global` 在/`committed=True`/轮询停表（`timer_active=False`） | hide 不是收尾口（代码层也没有任何 hide 分支碰 grab） |
+   | E hide 之后**窗口系统仍送来 release** | 按钮态归零（`qt_buttons=0`）但隐藏窗**收不到**这次 release（grab 仍在、sprite 仍 `drag`）——Qt 的派发在隐藏控件上到此为止 | "事件到了本进程却到不了窗口"是真实可能的一支 |
+   | E 续：`show()` 后**下一拍 tick 看门狗** | `grab=None`、`_press_global=None`、旗标清零、sprite 回 `normal`、轮询档位回 10ms——**当场收干净** | 这一支没有残留：应用一旦知道按钮已抬起，既有看门狗就收掉它 |
+   | B hide 后**release 根本没到本进程** | `show()` 回来状态**依然陈旧**：`grab=True`、sprite 停在 `drag` 姿态、轮询停在 100ms 降频档；按钮态一直报按下，**轮询与 tick 两条看门狗都不动它** | 唯一会"看见残留"的一支（但本机造不出它，见下） |
+   | C 锁定位 click-only 按住中 hide | 同 B（`click_only=True`、`grab=True` 一路留着） | 同上 |
+   | F 陈旧态下用户再点一下宠 | 真 press + 真 release 后**全部收干净**（`grab=None`、sprite 回 `normal`）；重按那一下会把 `_drag_committed` 复位 | 恢复路径＝用户下一次点击 |
+   | D 拖拽中 `close()` | close 本身也不清（`controller=None`、`grab=True`、sprite 仍 `drag`）；release 到了也到不了已关闭的窗 | 关窗这条路代码层另有闸，见下 |
+
+   **顺带查实的两条代码层事实**（不是推测，`grep` 可复核）：
+   - 拖拽期的看门狗**只能靠 tick 路径**：两个控制器都在 `_press_global` 非空时短路、
+     不做命中判定（`pet/platform_win.py:156`；非 Windows 的 `pet/platform_passthrough.py:134`
+     同口径），于是走不到 `_is_transparent_at` → `_check_stale_press`；真正每拍兜底的是
+     `pet/tick_driver.py:592` 那一句（`_check_stale_press` 的 docstring 写的是"穿透轮询与
+     tick 路径兜底"，对 click-only 分支成立、对拖拽分支只有后一半）；
+   - "关窗时还握着 grab"不可达：`_reap_empty_hosts` 明确跳过持有 grab 的空宿主（注释写着
+     "按着不放的宿主不拆"），屏事件的两条关窗路径（`handle_screen_removed` /
+     `_migrate_to_screen`）都在前面走 `_end_drag`。
+
+   **不能确认的那一半（为什么不臆造产品分支）**：真机 Windows 在窗口隐藏时会释放 capture，
+   松手事件**落进别的进程**这一支，在离屏隔离测试里**造不出来**（探针只能"注入"，注入即
+   假设事件到达）；平台插件是否在下一次真实移动里把按键态校正为 0，属 `QWindowsMouseHandler`
+   对 `WM_MOUSEMOVE` 的 `wParam` 处理，同样不在本机可测范围。也就是说：B/C 那一支会不会在
+   真机上出现、以及若出现是否在用户下一次点击前就被抹平，只有**实机**（真鼠标 + 真 hide
+   触发路径，例如「按住宠时全屏避让触发」）才能定。**照任务口径：不确认就不加产品分支。**
+
+   **下一轮若要收（先实机确认再动）**：最省的形状是在 `hideEvent`/`closeEvent` 里按既有
+   `_finish_grab` 协议收尾（`if self._mouse_grab is not None` 一句，位置取按当前光标松手），
+   不新增防御框架；要留意重入——`_finish_grab` → `_notify_grab_finished` → 壳层收敛/空宿主
+   回收会再触发一次可见性动作，落在 hide/close 回调里就是重入，`closeEvent` 里还得排在
+   `_input_controller = None` 之前（协议里有 `set_drag_active(False)`）。
 
 ## 八、风险与回滚
 
@@ -515,6 +593,10 @@ probe done
   拖拽、点击、发射、看门狗、穿透收敛的既有路径逐字未动。
 - **开关 / 配置迁移**：无新增设置键、无新增环境变量、无落盘格式变化（不需要迁移；
   回滚后也没有残留状态——本刀不写任何持久化字段）。
+- **测试侧改动（`tests/test_proactive.py`，与本片两条产品改动无关）**：只加了一次
+  Win32 前置条件读取与一条跳过分支，不进入任何产品路径，也不改变被断言契约；回滚
+  ＝revert 该提交，行为回到"桌面前台是隐形窗时红"。它带来的唯一新成本是测试进程里一次
+  同步 Win32 读取（首次调用即测，量级 µs～ms 级，且只在 Windows 上跑）。
 - **回滚步骤**：`git revert` 本提交即可。回滚后旧行为（`_end_drag` 半清、
   click-only 可进弹弓）恢复，不产生残留数据；唯一需要留意的是"回滚后
   `handle_screen_removed` 不再可能二次回收宿主"，幂等闸留着也无害（它只在

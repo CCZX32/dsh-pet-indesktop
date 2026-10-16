@@ -145,6 +145,11 @@ grab 在途时收敛不立即动手（记待办，grab 收尾后补做）；
 - click-only 按下不再能进弹弓瞄准（进入判据收紧为"确有拖拽资格或已瞄准"），
   看门狗那支会话收尾保留为会话侧兜底。
 
-仍开放：`hideEvent`/`closeEvent` 不结束在途 grab（既有行为，click-only 侧已由
-看门狗覆盖）；看门狗 click-only 分支里"先收瞄准会话"这一句在新进入判据下已
-不可达（会话不可能在 click-only 按下上建立），处置口径见新报告 §七。
+仍开放：`hideEvent`/`closeEvent` 不结束在途 grab（既有行为）。2026-10-17 用隔离真实 Qt
+探针查过一遍：**拖拽**在途时穿透轮询到不了看门狗（两个控制器同口径——`platform_win.py:156`
+与 `platform_passthrough.py:134` 都在 `_press_global` 非空时短路，命中判定连同
+`_is_transparent_at` 一起不做），每拍兜底的是 tick 路径（`pet/tick_driver.py:592`），
+click-only 侧才走轮询那条；残留只在"松手事件根本没进本进程"那一支出现，而那一支离屏造不出来，
+故未改产品代码。逐条实测见新报告 §七 第 6 条。
+另：看门狗 click-only 分支里"先收瞄准会话"这一句在新进入判据下已不可达
+（会话不可能在 click-only 按下上建立），处置口径见新报告 §七。
