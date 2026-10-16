@@ -11,6 +11,9 @@
 > 的「后继变更（2026-10-16）」（常规域两处归属调整）、
 > [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md) 的「运行期应用图标」
 > **状态**：**未 commit / 未 push / 未构建 / 未部署**（按用户口径留给最终整合方）
+> **2026-10-16 状态更新（后续追加；不改上面的历史状态）**：本分支已**并入 `main`**——PR
+> [#280](https://github.com/MerZlin/dsh-pet-indesktop/pull/280)，提交 `3f71fd7`。**未构建、未部署**
+> 这一半仍然成立；打包版设置窗图标与 GUI 观感待用户在真实产物上验收，macOS / Linux 真机未跑。
 
 ## 一、核心特性
 

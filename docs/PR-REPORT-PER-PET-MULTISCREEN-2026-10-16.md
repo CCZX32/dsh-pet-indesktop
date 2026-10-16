@@ -1,5 +1,12 @@
 # PR 报告：每屏一窗的独立多屏 + 「允许桌宠跨屏」开关（`docs/PR-REPORT-PER-PET-MULTISCREEN-2026-10-16.md`）
 
+> **2026-10-16 状态更新（后续追加；不改本报告中的历史记录）**：本分支已**并入 `main`**——PR
+> [#288](https://github.com/MerZlin/dsh-pet-indesktop/pull/288)，提交 `b7a697f`（标题即
+> 「feat(multiscreen): 每屏合成窗与逐宠跨屏（待真双屏验收）」）。下面状态段里的
+> 「DRAFT PR（不可合并）/ 不 merge / 未 push」是**当时的记录**。**技术面的未决项没有随合并消失**：
+> 真双屏与混合 DPI 未验（本机只有一块活动屏）、显存未测、打包产物未验；跨屏那一帧的钳制跳位
+> 仍是未解决项（测试只证明「弹簧滞后保留」，**不证明「位置连续」**）。**DLC 未混入**。
+
 > **基线**：`6a68570`（`origin/main`，含 #285 播放器）
 > **分支**：`feat/per-pet-multiscreen`（worktree `D:/dsh-pet-wt-multiscreen`）
 > **日期**：2026-10-16
