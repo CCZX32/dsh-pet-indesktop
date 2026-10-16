@@ -477,3 +477,19 @@ $ python .scratch/soda-lyrics-route/probe_route_loopback.py
 - 分支 `fix/soda-lyrics-route`，本轮最终 HEAD 见文末「附录：HEAD 记录」。
 - 三处改动**只跑了 focused + 相关族 + ruff**；首轮的全量数字不与之混算。
 - 仍未做：merge / 部署 / tag / release；真实端点复测（QQ 端点限流窗口）。
+
+---
+
+## 附录：HEAD 记录
+
+| 提交 | SHA | 内容 | 验证口径 |
+|---|---|---|---|
+| 第一轮（2026-10-16） | `488a43f` | 直连首选 + 有界单次回退（实现、测试、AGENTS/网络文档、本报告首轮章节） | 聚焦 127 + 相关族 394 + ruff + **全量 7924 passed / 15 skipped / 0 failed** |
+| 第二轮（2026-10-17） | `4746a34` | 三处修正（真代理路判据 / `Retry-After` 闸 / 日志只记类型与状态）+ 本报告 §十 | focused 148 + 相关族 415 + ruff（**未重跑全量**，交 CI；首轮全量数字不与本轮混算） |
+
+- 分支：`fix/soda-lyrics-route`，基线 `b7a697f`（= `origin/main` #288）；本附录所在提交只追加本节，无实现改动，分支 HEAD 见 `git log -1`。
+- 全量原始日志（本机，`.scratch/` 被 gitignore）：
+  - 权威口径（系统 Python 441 包）：`.scratch/soda-lyrics-route/full-suite-syspython.log` →
+    `7924 passed, 15 skipped, 3121 warnings in 1367.63s`（见 §6.1）。
+  - 仓库 `.venv`（38 包，缺 `omegaconf`）：`.scratch/soda-lyrics-route/full-suite.log` →
+    `1 failed, 7909 passed, 27 skipped`，唯一红是环境缺依赖（见 §6.2）。
