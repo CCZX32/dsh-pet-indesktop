@@ -596,8 +596,15 @@ class BehaviorController:
         飞行中被移除（托盘退出/换角色）还要补一次"落地"边沿：消费方（壳的
         飞行集合）靠边沿维护簿记，漏掉这一次就会永久留着这只已注销的 sprite
         （强引用 + 它的气泡门禁状态永远是"在飞"）。
+
+        圈末回调的挂接权一并交还：``_ensure_hooks`` 以 owner 判"是否已挂"，把
+        这只 sprite 交给**另一个**世界（跨屏移交宿主）时若仍记着本控制器，
+        新世界永不接管圈末续播（多圈移动/长拖拽在圈末冻结）。
         """
         st = self._states.pop(sprite, None)
+        if getattr(sprite, "_clip_finished_owner", None) is self:
+            sprite._clip_finished_cb = None
+            sprite._clip_finished_owner = None
         if st is None:
             return
         self._unpin_landing_idles(st)

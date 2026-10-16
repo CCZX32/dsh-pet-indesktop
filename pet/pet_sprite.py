@@ -1113,6 +1113,29 @@ class PetSprite(QObject):
         self.velocity = QPointF(0, 0)
         self._drag_trail = [(self._clock(), pos.x(), pos.y())]
 
+    def translate_frame(self, delta: QPointF) -> None:
+        """拖拽中换局部坐标系（跨屏移交宿主）：把**绝对坐标类**样本整体平移。
+
+        ``delta`` = 新原点 - 旧原点（全局像素）。换屏后 sprite 的局部落点由调用方
+        按 ``pos - delta`` 写入；本方法只管拖拽会话里那些"位置量"：
+
+        - ``_drag_spring_target``（弹簧档的目标点，绝对坐标）；
+        - ``_drag_trail``（松手初速的输入，绝对坐标采样）。
+
+        ``_drag_offset`` 刻意**不平移**：它是"光标 - 落点"的**差值**，同一个物理
+        手势在两个坐标系里逐位相同（平移了反而把宠从光标下错开）。轨迹同理——
+        整体平移后相邻样本的差值不变，``estimate_release_velocity`` 读到的仍是
+        真实手势速度，不会把跨屏这一跳当成甩动。
+        """
+        delta = QPointF(delta)
+        if delta.isNull():
+            return
+        if self._drag_spring_target is not None:
+            self._drag_spring_target = self._drag_spring_target - delta
+        if self._drag_trail:
+            dx, dy = delta.x(), delta.y()
+            self._drag_trail = [(t, x - dx, y - dy) for (t, x, y) in self._drag_trail]
+
     def begin_drag(self) -> None:
         """过 ``DRAG_THRESHOLD`` 升级为真拖拽（幂等）。
 

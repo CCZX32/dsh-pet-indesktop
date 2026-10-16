@@ -50,9 +50,18 @@ classDiagram
 
 **Two render topologies, one process.** `PET_RENDER_TOPOLOGY=overlay` (dev env
 flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as a
-`PetSprite` inside a single `OverlayWindow`; multi-pet is in-process
+`PetSprite` inside an `OverlayWindow`; multi-pet is in-process
 (`AppShell.spawn_in_process_window` / `OverlayShell.spawn_pet`, slot identity via
-`pet/overlay_spawn_state.py`). The topology verdict also reads the persistent
+`pet/overlay_spawn_state.py`). Each **occupied display** has its own
+`OverlayWindow`, owned by a `pet/screen_host.ScreenHost` that also owns that
+screen's behaviour/collision/physics worlds (screen-local coordinates: equal local
+coordinates on two displays are not the same point), while the shell, the
+`TickDriver` timer and every shared service stay single. `OverlayShell.overlay`
+and the three controllers are the *home* host's views; anything that means
+"every pet/window" enumerates `shell.hosts()`. `host_for_sprite(sprite)` and
+`move_sprite_to_screen(sprite, screen, global_pos=None)` are the per-pet screen
+seams (normal drag crosses screens with them; `ScreenHost` bounds come from the
+profile's `screen_name`/`rx`/`ry`). The topology verdict also reads the persistent
 `stream_capture_mode` key (main `config.json`, snapshotted once per process by
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real

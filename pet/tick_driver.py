@@ -11,10 +11,17 @@
 本模块把一次 tick 拆成两段（分工边界即 M-2 的拆法）：
 
 1. **仿真段** ``tick_sim(dt)``：行为 → 碰撞 → 抛掷物理（tick 顺序协议不变），
-   sprites 聚合自**全部**已挂载 overlay（T2 的成员快照完整性）；
+   sprites 聚合自**全部**已挂载 overlay（T2 的成员快照完整性）；带宿主
+   （``overlay.host``，多屏装配）时按宿主分组跑各自那份控制器——见下；
 2. **推进+重绘段** ``advance_overlays(dt)``：逐个 overlay 调
    ``overlay.tick_advance(dt)``（advance → 脏矩形 → 位置监听 fanout → update，
    V-3/V-4 帧直驱脏矩形语义不变）。
+
+**按宿主仿真（多屏）**：每块被占用的显示器一个 ``screen_host.ScreenHost``
+（overlay + 屏局部可用区 + 该屏自己的行为/碰撞/物理控制器）。仿真段因此按宿主
+分组：**同一 tick、同一 QTimer**，但每屏只跑自己的世界——两块屏上局部坐标相同的
+两只宠在桌面几何上相距上千像素，混进同一个世界会被判成接触，钳制域也会互相污染。
+没有宿主的 overlay（裸 ``OverlayWindow`` / demo 装配）逐位沿用单世界语义。
 
 驱动器独立持有三控制器、QTimer/QElapsedTimer、dt 钳制与 M-1 TickGovernor
 （四档降档/同步升档语义原样随迁，见 tick_governor.py）；overlay 退化为
@@ -24,8 +31,8 @@ tick 刷新率取全部成员所在屏里最高者（单 overlay 等价于原
 
 兼容期（deprecation）：未挂任何控制器的驱动器（裸 ``OverlayWindow`` / demo
 装配）仍在仿真段调用 ``overlay.before_sprites_advance(dt)`` 钩子，旧装配不迁移
-也能跑；产品壳（overlay_shell）改挂 ``set_controllers`` 后该钩子不再被调用，
-避免"驱动器 + 钩子"双份仿真。该兼容分支随 4.4 退役刀删除。
+也能跑；产品壳（overlay_shell）改按宿主分组后该钩子不再被调用，避免
+"驱动器 + 钩子"双份仿真。该兼容分支随 4.4 退役刀删除。
 
 零 Qt 时钟可注入：offscreen 测试同步直调 ``on_tick(dt=...)``，不启动真实
 QTimer、不 sleep 赌时序（AGENTS.md 时序测试纪律）。
@@ -151,7 +158,9 @@ class TickDriver(QObject):
                  clock=time.monotonic) -> None:
         super().__init__(parent)
         self._overlays: list = []
-        # 进程级一组控制器（T1/T2）：None = 未挂（兼容分支走 overlay 钩子）
+        # 单世界装配（T1/T2：裸 overlay / demo）的一组控制器；None = 未挂
+        #（兼容分支走 overlay 钩子）。多屏产品装配不挂这里——每块屏的控制器
+        # 归它的宿主（``hosts`` / ``ScreenHost``），见 ``tick_sim``。
         self.behavior = None
         self.collision = None
         self.physics = None
@@ -182,7 +191,7 @@ class TickDriver(QObject):
     # ---------------------------------------------------------------- 装配
     def set_controllers(self, behavior=None, collision=None,
                         physics=None) -> None:
-        """挂上仿真段三控制器（进程级一组，T1）；顺序语义由 ``tick_sim`` 固化。
+        """挂上**单世界**装配的三控制器（T1；多屏产品装配用宿主，见 ``tick_sim``）。
 
         只覆盖显式传入的项（``None`` = 保持原值），便于测试只替换其中几个。
         """
@@ -208,6 +217,20 @@ class TickDriver(QObject):
     def sprites(self) -> list:
         """全部已挂载 overlay 的 sprites 聚合快照（仿真段输入，T2）。"""
         return self._all_sprites()
+
+    @property
+    def hosts(self) -> list:
+        """带宿主的成员 overlay 的宿主列表（多屏装配；``tick_sim`` 按它分组）。
+
+        没有宿主的 overlay（裸 ``OverlayWindow`` / demo）不在其中，此时仿真段
+        走单世界语义（驱动器自持的三控制器）。
+        """
+        hosts = []
+        for overlay in self._overlays:
+            host = getattr(overlay, "host", None)
+            if host is not None:
+                hosts.append(host)
+        return hosts
 
     @property
     def timer(self) -> QTimer:
@@ -579,13 +602,25 @@ class TickDriver(QObject):
     def tick_sim(self, dt: float) -> None:
         """仿真段：行为 → 碰撞 → 抛掷物理（tick 顺序协议固定，T2）。
 
-        成员 = 全部已挂载 overlay 的 sprites 聚合；三控制器由驱动器持有，
-        不再经主 overlay 的 ``before_sprites_advance`` 钩子。
+        带宿主（多屏装配）时**按宿主分组**：同一 tick 内每块屏只跑自己那份
+        控制器与自己的成员，不同屏的局部坐标绝不进同一个世界。宿主之外的
+        附加控制器（``_extras``，如唱歌续播链/联动链）是壳级、与几何无关的，
+        仍拿全部 sprite 跑一次。
 
-        兼容期（deprecation）：三控制器都没挂时（裸 overlay / demo 装配），
-        仿真段退回 ``overlay.before_sprites_advance(dt)`` 钩子，保证旧装配可用；
-        产品壳已改挂 ``set_controllers``，不会走这条分支。
+        没有宿主时成员 = 全部已挂载 overlay 的 sprites 聚合；三控制器由驱动器
+        持有，不再经主 overlay 的 ``before_sprites_advance`` 钩子。
+
+        兼容期（deprecation）：三控制器都没挂且没有带宿主的成员时（裸 overlay /
+        demo 装配），仿真段退回 ``overlay.before_sprites_advance(dt)`` 钩子，保证
+        旧装配可用；产品壳走宿主分组，不会走这条分支。
         """
+        hosts = self.hosts
+        if hosts:
+            for host in hosts:
+                host.tick(dt)
+            for ctrl in self._extras:
+                ctrl.tick(self._all_sprites(), dt)
+            return
         if self.behavior is None and self.collision is None and self.physics is None:
             for overlay in list(self._overlays):
                 overlay.before_sprites_advance(dt)
