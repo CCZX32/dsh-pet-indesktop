@@ -313,13 +313,34 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
         return None
 
 
+# 多歌手分隔符（酷狗报「、」、歌词源多写「/」，feat./ft. 见英文曲库）：
+# 两侧都是多歌手形态时归一逐段比对，否则整串子串必然丢词。
+# feat/ft 必须带单词边界（\b），且切分发生在**去空白之前**——否则 swift/craft/
+# daft punk 这类含 ft/feat 字母序列的单名会被拆碎（盲审 P1）。
+_ARTIST_SEP_RE = re.compile(r"\s*(?:[、/／&×,，;；]|\bfeat\b\.?|\bft\b\.?)\s*", re.IGNORECASE)
+
+
 def _name_matches(candidate: str, wanted: str) -> bool:
-    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）。"""
+    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）；
+    多歌手分隔符（、/／&×,; feat./ft.）在**两侧都出现**时归一逐段比对——
+    实机样本：酷狗 SMTC 报「FLOW、GRANRODEO」而网易云歌词源写「FLOW/GRANRODEO」。"""
     a = re.sub(r"\s+", "", str(candidate or "").lower())
     b = re.sub(r"\s+", "", str(wanted or "").lower())
     if not a or not b:
         return False
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    # 在保留空白的小写串上切分（feat/ft 的词边界要靠空白/标点判定），切完去空白
+    raw_a = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(candidate or "").lower())]
+    raw_b = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(wanted or "").lower())]
+    raw_a = [p for p in raw_a if p]
+    raw_b = [p for p in raw_b if p]
+    # 仅两侧均呈多歌手形态时增加逐段匹配
+    if len(raw_a) < 2 or len(raw_b) < 2:
+        return False
+    # 逐段**相等**比对（去空白后）：子串比对会让 2-3 字符碎片几乎什么都命中
+    # （盲审 P2："Craft/Lift" 的 "cra" 会被 "Soft、Raft" 的 "raf" 碎片带上）。
+    return any(pa == pb for pa in raw_a for pb in raw_b)
 
 
 def _as_lyrics(lines: list[LyricLine]) -> Lyrics | None:
