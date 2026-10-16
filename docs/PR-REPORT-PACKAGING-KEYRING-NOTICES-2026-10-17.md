@@ -203,9 +203,17 @@ probe-keyring-off      frozen_modules=  121  按新清单缺=[..., 'keyring', 't
 | 交付纪律与登记 | `pytest -q tests/test_pr_report_discipline.py tests/test_packaging_keyring_notices.py` | **193 passed**（报告三节 + INDEX 登记由机器校验） |
 | 真实冻结探针（非产品包） | 三组 `python -m PyInstaller …` + 运行产物 + 用门的代码读三份模块清单 | 见 §五第 3 条（修复参数可用 / 旧参数 `ModuleNotFoundError`；旧参数按新清单判缺 `keyring`，两次构建均 exit 0） |
 | 三端脚本语法/编码 | `bash -n …` ×2 + PowerShell `Parser::ParseFile` | 见 §五第 4 条 |
-| 全量 | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | 见下方「全量状态」（本机顺序跑，日志 `.scratch/packaging-final-20261017/full_pytest.log`） |
+| 全量（本机顺序跑） | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | **8065 passed / 16 skipped / 0 failed**（0:23:46；日志 `.scratch/packaging-final-20261017/full_pytest.log`） |
+| 三平台 CI（PR [#294](https://github.com/MerZlin/dsh-pet-indesktop/pull/294)） | `gh pr checks 294` | 首轮：macOS **pass**（20m13s）、Ubuntu **pass**（18m52s）、Windows **fail**——失败是 `tests/test_music_lyric.py::test_lyric_request_bypasses_system_proxy` 的浮点相等断言（`7.999999999999886 == 8.0`，`tests/test_music_lyric.py:1485`），与本轮改动无关、本机全量为绿；见下方「CI 状态」 |
 
-**全量状态**：见 §六之补（写完本节后由本轮实测填数）。
+**全量状态**：本机顺序全量 **8065 passed / 16 skipped / 0 failed**（23:46；`.scratch/packaging-final-20261017/full_pytest.log`）。首次尝试被会话侧的后台任务时限截断在 49%（日志 `full_pytest_first_try.log` 保留），随后以无时限方式重跑得到上面的结果。
+
+**CI 状态**：PR #294 首轮三平台 —— macOS / Ubuntu 绿，Windows 红在
+`tests/test_music_lyric.py::test_lyric_request_bypasses_system_proxy`：
+`assert opener.calls[0][1] == music_lyric.HTTP_TIMEOUT` 实测左边是
+`7.999999999999886`（超时预算由 `deadline - monotonic()` 相减得来），是本轮**未触碰**的
+歌词链路里的浮点相等断言（本机同一条用例全量绿）。判定为既有的时序/浮点假红，不在本 PR
+修（改它属于另一条线的行为变更）；修报告时同步补齐 CI 结果。
 
 **断言有效性（红 → 绿）**：19 例在产品代码改动前全部红（`persisted` 不存在、构建脚本仍排除 keyring、`copy_notices` 不存在、`android/NOTICE.txt` 仍指向源码仓库、Gradle 无该输入、写失败无弹窗），改后全绿——不是"一直绿"的装饰断言。
 
