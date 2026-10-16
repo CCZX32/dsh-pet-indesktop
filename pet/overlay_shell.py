@@ -1207,12 +1207,19 @@ class OverlayShell(QObject):
         self._user_mouse_through = bool(self._config.get("mouse_through", False))
         self._auto_cursor_hidden = False
         self._cursor_restore_pending = False
+        # 收敛请求的待办：被 grab 闸挡住的收敛不许丢弃，由 grab 收尾补做
+        # （见 _converge_auto_cursor_hidden / _on_grab_finished）。
+        self._converge_pending = False
         self._watcher = FullscreenCursorWatcher(self)
         self._watcher.fullscreen_changed.connect(self._on_fullscreen_changed)
         self._watcher.cursor_visibility_changed.connect(
             self._on_cursor_visibility_changed)
         self.overlay._through_changed = self._on_user_through_changed
         self.overlay._grab_finished_cb = self._on_grab_finished
+        # 穿透态收敛的两个时机（见 _converge_auto_cursor_hidden）：显示/恢复
+        # 与真到达窗口的鼠标输入，同一入口、同一语义
+        self.overlay._shown_cb = self._converge_auto_cursor_hidden
+        self.overlay._user_input_cb = self._converge_auto_cursor_hidden
         if self.sprite is not None:
             self.overlay.add_position_listener(self.sprite, self._on_main_sprite_moved)
         self._last_marker_write = 0.0
@@ -4147,11 +4154,66 @@ class OverlayShell(QObject):
         quiet_mode.note_fullscreen(False)
 
     def _cursor_transition_blocked(self) -> bool:
-        """拖拽进行中（window._cursor_transition_blocked 等价）。"""
+        """有 grab 在途（含 click-only：锁定位 / 未按 SHIFT 的按住也持有
+        ``_mouse_grab``）——此刻不许改穿透态（window._cursor_transition_blocked
+        只看拖拽态，本壳的判据是任意 grab）。"""
         return self.overlay._mouse_grab is not None
 
+    def _converge_auto_cursor_hidden(self) -> None:
+        """自动穿透态收敛（幂等）：无 grab 在途即解除光标隐藏态。
+
+        触发面（壳层在 ``OverlayShell.__init__`` 挂到 overlay 上，两处都直接
+        挂本函数）：``_shown_cb``（每次 overlay 显示/恢复）与
+        ``_user_input_cb``（``OverlayWindow._note_user_input``：真到达窗口的
+        鼠标输入）。
+
+        语义 = 「无 grab 阻挡即清，真实 HIDDEN 由 watcher 下一拍重建」。收敛
+        时机本身就是证据，不查"最后一次探测说了什么"（曾有过一道 HIDDEN 闸，
+        2026-10-15 撤销——见下）。
+
+        为什么不能只靠 SHOWING：解除这件事原本挂在"收到 SHOWING 且无 grab"
+        上，而滞留状态只有 ``_on_grab_finished`` 会冲刷——grab 一旦卡死
+        （丢 release）就再没有收尾事件，窗口会永久停在"看得见点不到"。
+
+        两道闸（按序）：
+
+        1. ``_auto_cursor_hidden`` 为假 = 没有待解除的自动穿透（幂等）；
+        2. grab 在途（``_cursor_transition_blocked()``）= 此刻不许动穿透态，
+           但**不能丢弃这次收敛请求**：记 ``_converge_pending``，由
+           ``_on_grab_finished`` 在 grab 收尾后补做。丢掉它就会出现"隐藏后
+           重新显示、探针报 UNKNOWN 不产生回调"这条链上的永久卡死（show 的
+           收敛被 grab 挡掉、看门狗随后清掉 grab，而 grab 收尾只处理
+           ``_cursor_restore_pending``，再没人认这笔账）。
+
+        为什么撤掉 HIDDEN 闸（它曾用来挡屏迁移后 ≤50ms 的误拦截）：屏迁移先
+        显示新 overlay 再关旧的，可见性计数 1→2→1 不翻转 → 闸门不补探测，
+        没有闸就会在这一刻清掉真实穿透、下一拍 50ms 轮询前错误拦截点击。但
+        那道闸制造的新风险是永久卡死——生产上 ``_auto_cursor_hidden`` 必由
+        HIDDEN 回调置位（最后见过的必是 HIDDEN），探针转 UNKNOWN 后再无回调、
+        待办补做被闸门永远拦住，窗口永久"看得见点不到"。两害相权：误拦截是
+        ≤1 拍的自愈窗口（探针恢复报 HIDDEN 即重建穿透），卡死不会自愈。故
+        去掉闸门，把这一拍的误拦截当成**刻意接受的代价**。
+
+        定位：显示/恢复与输入两道**都不是通用自愈**。正常穿透开着时点击到不了
+        窗口，输入这条只在窗口重建 / 屏迁移把原生样式与标记弄脱同步时接得上；
+        真正解开"grab 卡死"的是看门狗（``OverlayWindow._check_stale_press``）。
+        """
+        if not self._auto_cursor_hidden:
+            return
+        if self._cursor_transition_blocked():
+            self._converge_pending = True
+            return
+        self._cursor_restore_pending = False
+        self._converge_pending = False
+        self._auto_cursor_hidden = False
+        self._apply_effective_mouse_through()
+
     def _on_cursor_visibility_changed(self, visibility: str) -> None:
-        """光标隐藏（watcher 已做 0.2s 去抖）→ 自动穿透；恢复 → 解除。"""
+        """光标隐藏（watcher 已做 0.2s 去抖）→ 自动穿透；恢复 → 解除。
+
+        watcher 每拍（20Hz）都会重报当前状态，故这里也是"真实 HIDDEN 重建
+        穿透"的来源（收敛清掉后 ≤1 拍内被置回）。
+        """
         if visibility == "HIDDEN":
             if not self._cursor_transition_blocked():
                 self._auto_cursor_hidden = True
@@ -4165,11 +4227,18 @@ class OverlayShell(QObject):
                 self._apply_effective_mouse_through()
 
     def _on_grab_finished(self) -> None:
-        """拖拽收尾（overlay._finish_grab 钩子）：冲刷光标恢复滞留。"""
+        """拖拽收尾（overlay._finish_grab 钩子）：冲刷光标恢复滞留。
+
+        尾段补做被 grab 闸住的收敛请求（``_converge_pending``）：此刻 grab 已
+        清，补做直接生效（收敛函数只看这两道闸）。
+        """
         if self._cursor_restore_pending:
             self._cursor_restore_pending = False
             self._auto_cursor_hidden = False
             self._apply_effective_mouse_through()
+        if self._converge_pending:
+            self._converge_pending = False
+            self._converge_auto_cursor_hidden()
 
     # ---------------------------------------------------------------- 4.2a 位置持久化
     def _pos_from_ratios(self, rx: float, ry: float, sprite=None) -> QPointF:
@@ -5607,6 +5676,9 @@ class OverlayShell(QObject):
             lambda target: build_sprite_full_menu(self, target))
         self.overlay._through_changed = self._on_user_through_changed
         self.overlay._grab_finished_cb = self._on_grab_finished
+        # 迁移重建的新 overlay 同样要挂收敛钩子（与 __init__ 同口径、同一入口）
+        self.overlay._shown_cb = self._converge_auto_cursor_hidden
+        self.overlay._user_input_cb = self._converge_auto_cursor_hidden
         if self.sprite is not None:
             self.overlay.add_position_listener(self.sprite, self._on_main_sprite_moved)
         # 4.2b：子肥鱼随主 sprite 一起迁到新 overlay（否则拔屏/主屏切换后

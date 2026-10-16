@@ -60,8 +60,7 @@ from .settings_widgets import (
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
 
-#: 全局键的作用域声明（措辞与「开机自启」行同源，见 ``modern_settings_dialog``
-#: 的 ``autostart_desc`` 与设置门禁 2026-10-10 条目；规范 §五的原文也是「影响所有桌宠」）。
+#: 全局键的作用域声明（措辞与设置门禁 2026-10-10 条目同源，规范 §五的原文也是「影响所有桌宠」）。
 #:
 #: 与 ``ALL_PETS_SCOPE_NOTE`` 分开：那条是**窗口级键**在子宠页的补充说明
 #: （"这一行在一窗多宠里作用于整窗"），这条是**全局键**的作用域声明
@@ -89,6 +88,25 @@ STREAM_CAPTURE_RESTART_HINT = (
 
 #: 子宠设置页对这些键的补充说明（窗口级键：一窗多宠里作用于整窗）。
 ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
+
+#: 全局键行里逐字写着的那句范围声明（原本拼在说明末尾）。拆成独立标注时**逐字保留**：
+#: 措辞与规范 §五同源，改字就是改语义。
+ALL_PETS_SCOPE_SENTENCE = "此设置影响所有桌宠。"
+
+#: 作用域标注的接线表：``(行键, 说明末尾那句原文)``——同一句既是"从说明里削掉什么"，
+#: 也是"标注显示什么"。行本身照着这张表补标注（见 ``_apply_window_scope_rows``），
+#: 因此文案仍然只有说明表一份来源，这里一个字的文案都不新写。
+#:
+#: - ``stream_capture`` 只 Windows 有行（非 Windows 找不到就跳过）；
+#: - harness 两行在任何身份下都影响全局（dsh 服务与登录项都只有一份）；
+#: - 全部行的说明末尾都逐字带着这句原文（``STREAM_CAPTURE_RESTART_HINT`` /
+#:   ``HARNESS_TARGET_HINT_*`` / 主文件里「开机自启」那一行），所以削得掉、不用另抄。
+GLOBAL_SCOPE_ROWS: tuple[tuple[str, str], ...] = (
+    ("autostart", GLOBAL_SCOPE_NOTE),
+    ("stream_capture", GLOBAL_SCOPE_NOTE),
+    ("harness_autostart", ALL_PETS_SCOPE_SENTENCE),
+    ("harness_launch_target", ALL_PETS_SCOPE_SENTENCE),
+)
 
 #: 「省电模式」（idle_low_fps_enabled）文案，按拓扑分流：
 #: overlay 下该键唯一作用是关掉后台动画预热（``app.py`` 建库与
@@ -187,30 +205,36 @@ def harness_target_hint(desktop_available: bool) -> str:
 
 
 def _apply_window_scope_rows(host) -> None:
-    """overlay 一窗多宠：子宠设置页给窗口级键补「对所有桌宠生效」。
+    """overlay 一窗多宠：slot 页给窗口级键补「对所有桌宠生效」。
 
-    子宠页写的是自己的 ``config-slot-N.json``，但这些键在单合成窗里作用于整窗
-    ——不提示的话用户会以为改的只是那一只。主宠页不加（它本来就是全局视角），
-    legacy 不加（每宠独立窗口，键确实只作用于自己）。
+    slot 页写的是自己的 ``config-slot-N.json``，但这些键在单合成窗里作用于整窗
+    ——不提示的话用户会以为改的只是那一只。每个 slot 页都加（#271 起主宠页也是
+    slot0 页，同口径标注），legacy 不加（每宠独立窗口，键确实只作用于自己）。
 
     行分散在多个模块构建（互动域的「鼠标穿透」在 ``settings_interaction``），
     故在所有行就位后按 objectName 统一补，与 ``_apply_dialogue_scope_rows`` 同
-    一形态；行尚未构建时静默跳过。
+    一形态；行尚未构建时静默跳过。标注走 ``SettingRow.set_scope_note``：挂在标签那一行的
+    右边（不再粘在灰说明末尾，也不独占一行），``accessibleDescription`` 仍是"说明 + 标注"全文。
+
+    同时把**全局键**（``GLOBAL_SCOPE_ROWS``）的同类声明一并拆出来——两者都是
+    "改了谁受影响"，同一处置、同一处调用，故合成一个 pass（主文件的行数预算不
+    允许再接线一次）。
     """
+    for setting_id, note in GLOBAL_SCOPE_ROWS:
+        row = host.findChild(SettingRow, f"settingRow_{setting_id}")
+        if row is None:
+            continue
+        if row.scope_note.text() != note:
+            row.set_scope_note(note)
     if not getattr(getattr(host, "config", None), "instance_id", None):
         return
     if not _is_overlay_topology():
         return
     for setting_id in OVERLAY_WINDOW_SCOPE_IDS:
         row = host.findChild(SettingRow, f"settingRow_{setting_id}")
-        if row is None or ALL_PETS_SCOPE_NOTE in row.hint_label.text():
+        if row is None or row.scope_note.text() == ALL_PETS_SCOPE_NOTE:
             continue
-        row.hint_label.setText(row.hint_label.text() + ALL_PETS_SCOPE_NOTE)
-        control = getattr(row, "control", None)
-        if control is not None:
-            # SettingRow 构造期把 hint 写进 accessibleDescription；改文案后同步，
-            # 否则读屏仍播旧说明。
-            control.setAccessibleDescription(row.hint_label.text())
+        row.set_scope_note(ALL_PETS_SCOPE_NOTE)
 
 
 def build_pet_controls(host) -> None:
@@ -355,7 +379,7 @@ def build_pet_controls(host) -> None:
     host.click_sound_volume_spin.setValue(int(round(click_vol * 100)))
 
     host.click_sound_preview_btn = QPushButton("试听", host)
-    host.click_sound_preview_btn.setIcon(vector_widget_icon(host, "sound", 14))
+    host.click_sound_preview_btn.setIcon(vector_widget_icon(host.click_sound_preview_btn, "sound", 14))
     host.click_sound_preview_btn.setFixedWidth(72)
     host.click_sound_preview_btn.clicked.connect(host._preview_click_sound)
 
@@ -638,7 +662,7 @@ def build_pet_controls(host) -> None:
         path_val = str(agent_link_cfg.get(f"sound_{evt_key}_path") or default_builtin)
         picker = ResourcePathPicker(path_val, name_filter=AUDIO_NAME_FILTER, parent=host)
         preview_btn = QPushButton("试听", host)
-        preview_btn.setIcon(vector_widget_icon(host, "sound", 14))
+        preview_btn.setIcon(vector_widget_icon(preview_btn, "sound", 14))
         preview_btn.setFixedWidth(72)
         preview_btn.clicked.connect(lambda _, k=evt_key: host._preview_agent_sound(k))
         container = ResponsiveToggleActionRow(toggle, picker, preview_btn, host)

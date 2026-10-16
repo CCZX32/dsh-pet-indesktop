@@ -123,6 +123,18 @@ class PetSprite(QObject):
         # 拖拽轨迹（(monotonic_ts, x, y) 光标样本）：松手初速估算的输入，
         # 格式对齐 physics.estimate_release_velocity；松手后清空
         self._drag_trail: list[tuple[float, float, float]] = []
+        # 拖拽弹簧状态（drag_physics 开时生效）：on_move 只写目标点，
+        # advance 用 physics.spring_velocity 阻尼跟随——legacy
+        # window.py _tick_drag_physics 的手感（K=200/C=30，滞后约 4 帧）。
+        # 关 = 1:1 直写（overlay 初版行为）。
+        self._drag_spring_target: QPointF | None = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
+        # 拖拽弹簧系数（比 legacy 的 200/30 活：滞后约减半、微过冲）
+        self.drag_spring_k = 300.0
+        self.drag_spring_c = 24.0
+        # 弹簧活跃期（拖拽中未收敛）：set_pos 的整数矩形跳报（F-PERF P1）
+        # 让位——绘制落点是 float pos，亚像素步进也要上屏，否则拖拽掉帧
+        self._spring_active = False
         # 时间源：默认 time.monotonic；测试替换为假钟即可确定性构造轨迹，
         # 不用固定 sleep 赌时序
         self._clock = time.monotonic
@@ -138,8 +150,11 @@ class PetSprite(QObject):
         # Q 弹挤压（点击/碰撞反馈，window.py _squash_geometry 语义）：
         # None = 未激活；否则 0..1 进度，advance 按 220ms 推进
         self._squash_progress: float | None = None
-        # 拖动物理开关（菜单「拖动物理」）：False 时松手原地放下（不抛掷）
-        self.drag_physics = True
+        # 拖动物理开关（菜单「拖动物理」）：False 时松手原地放下（不抛掷）、
+        # 拖拽 1:1 直跟。缺省 False 对齐 config 默认值与集成层同步口径
+        #（overlay_shell._sync_sprite_settings 按设置显式写入）；弹簧跟随
+        #（on_move 不直写、advance 阻尼积分）只在 True 时生效。
+        self.drag_physics = False
         # 静止放手下落（config drop_gravity，#219）：True 时低速松手不再原地
         # 停在半空，而是零初速进抛掷物理（重力落地）。默认关 = 旧行为；
         # 集成层 `_sync_sprite_settings` 按设置写入。
@@ -468,7 +483,7 @@ class PetSprite(QObject):
         # 待上屏帧（_frame_dirty）照旧上报：帧到达路径的报脏语义不变，新帧
         # 有机会上屏。帧到达/换帧另有 _on_frame_changed 直驱通道，不依赖这里。
         new_rect = self.paint_bounds()
-        if new_rect == old_rect and not self._frame_dirty:
+        if new_rect == old_rect and not self._frame_dirty and not self._spring_active:
             return
         self._notify_dirty(old_rect, new_rect)
 
@@ -879,6 +894,27 @@ class PetSprite(QObject):
         """
         old = (self._last_reported_rect
                if self._last_reported_rect is not None else self.paint_bounds())
+        if (self._dragging and self.drag_physics
+                and self._drag_spring_target is not None):
+            # 拖拽弹簧档：阻尼跟随目标点（physics.spring_velocity）。
+            # K/C 比 legacy（200/30）活一点（实机反馈 200/30 阻尼感偏强）：
+            # 300/24 滞后量约减半、略带过冲弹性；逐 sprite 可调。
+            vx = physics_mod.spring_velocity(
+                self._drag_spring_vel.x(), self.pos.x(), self._drag_spring_target.x(), dt,
+                k=self.drag_spring_k, c=self.drag_spring_c)
+            vy = physics_mod.spring_velocity(
+                self._drag_spring_vel.y(), self.pos.y(), self._drag_spring_target.y(), dt,
+                k=self.drag_spring_k, c=self.drag_spring_c)
+            self._drag_spring_vel = QPointF(vx, vy)
+            self._spring_active = True  # 活跃期亚像素步进也要报脏上屏
+            self.set_pos(self.pos + self._drag_spring_vel * dt)
+            # 收敛即钉死：渐近尾迹不许永远触发重绘
+            if (abs(self._drag_spring_target.x() - self.pos.x()) < 0.5
+                    and abs(self._drag_spring_target.y() - self.pos.y()) < 0.5
+                    and abs(vx) < 5.0 and abs(vy) < 5.0):
+                self._drag_spring_vel = QPointF(0.0, 0.0)
+                self._spring_active = False
+                self.set_pos(self._drag_spring_target)
         if self.interaction_state == INTERACTION_NORMAL and not self.velocity.isNull():
             self.set_pos(self.pos + self.velocity * dt)  # 积分也过 body_box 钳制
         squashing = False
@@ -1087,12 +1123,19 @@ class PetSprite(QObject):
         if self._dragging:
             return
         self._dragging = True
+        self._drag_spring_target = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
+        self._spring_active = False
         self.interaction_state = INTERACTION_DRAG
 
     def on_move(self, pos: QPointF) -> None:
         if not self._dragging or self._drag_offset is None:
             return
-        self.set_pos(QPointF(pos) - self._drag_offset)
+        if self.drag_physics:
+            # 弹簧档：只写目标点，位置由 advance 的阻尼积分追过去（不直写）
+            self._drag_spring_target = QPointF(pos) - self._drag_offset
+        else:
+            self.set_pos(QPointF(pos) - self._drag_offset)
         now = self._clock()
         self._drag_trail.append((now, pos.x(), pos.y()))
         cutoff = now - physics_mod.TRAIL_KEEP_SEC
@@ -1114,8 +1157,15 @@ class PetSprite(QObject):
         """
         if not self._dragging:
             return
-        if self._drag_offset is not None:
+        # 弹簧档松手**不 snap 到光标**：弹簧跟随的滞后位置就是起抛/落地点
+        #（legacy window.py 同语义——瞬移过去再飞出去是 v4.3.0-hotfix 第一版
+        # 的错，实机反馈瞬移突兀）。直跟档下宠本来就在光标处，snap 是 no-op。
+        if self._drag_offset is not None and not self.drag_physics:
             self.set_pos(QPointF(pos) - self._drag_offset)
+        # 初速口径不变（轨迹采样的是光标位置）；弹簧状态随拖拽结束复位。
+        self._drag_spring_target = None
+        self._drag_spring_vel = QPointF(0.0, 0.0)
+        self._spring_active = False
         self._dragging = False
         self._drag_offset = None
         rvx, rvy = physics_mod.estimate_release_velocity(
