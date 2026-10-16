@@ -23,7 +23,7 @@ def test_settings_has_version_footer_and_update_page(tmp_path, monkeypatch):
     dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=False)
     try:
         labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
-        assert labels[-2:] == ["更新", "关于"]
+        assert labels[-1] == "更新"
         assert dialog.version_footer.objectName() == "settingsVersion"
         assert dialog.version_footer.text().startswith("版本 v")
         assert dialog.update_page.findChild(settings_mod.QPushButton, "checkUpdateButton") is not None

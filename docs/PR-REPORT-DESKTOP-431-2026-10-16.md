@@ -15,26 +15,29 @@
   上游 [7.3.0](https://github.com/rany2/edge-tts/releases/tag/7.3.0) 增加 Sec-MS-GEC v2，
   [7.3.1](https://github.com/rany2/edge-tts/releases/tag/7.3.1) 修正日期解析。
   这是本机已证实的协议兼容原因；不将任意 403 都归因于代理或旧版本。
-- 设置侧栏最后增加只读“关于”；显示应用版本、作者和四个账号，复制保留 `@` 与大小写。
+- 作者账号并进「更新」页底部，**不新增侧栏能力域**：四个账号的复制保留 `@` 与大小写，
   GitHub 主页固定为 `https://github.com/MerZlin`，没有为另三个账号猜测主页链接。
+  分区只读、不写入 Config、不参与重置，图标按设置窗自己的主题重画。
 
 ## 二、修改文件说明
 
-已跟踪文件的增删来自 `git diff --numstat`，新增文件按 `git diff --no-index --numstat NUL <file>`
-计数。Android 和原有 `.venv/` 不属于本轮代码变更；`docs/INDEX.md` 原有 Android 登记保留。
+本表以 **`origin/main` 为基线**（合并 main 后用 `git diff --numstat origin/main` 重算），只列本 PR
+在 main 之上的**桌面侧**净增删。Android 侧文件（`android/**`、`docs/ANDROID.md`、两份 Android
+报告、`scripts/android_*`、`tests/test_android_*`、README 的 Android 说明、`THIRD_PARTY_NOTICES.md`
+的点击音效许可、`.gitignore` 的 Android 构建忽略）由 Android 报告逐文件说明，不在此重复；
+原有 `.venv/` 不属于任何一轮代码变更。
 
 | 文件 | 增删 | 改了什么、为什么 |
 |---|---:|---|
-| `pet/__init__.py` | +1/-1 | 桌面版本 4.3.1，关于页/原版本页同源。 |
-| `requirements.txt` | +1/-1 | edge-tts 下限 7.3.1、上限 8，旧环境不再满足依赖。 |
+| `requirements.txt` | +1/-1 | edge-tts 下限 7.3.1、上限 8（main 仍是 `>=6.1.10`），旧环境不再满足依赖。 |
 | `pet/overlay_shell.py` | +5/-14 | 绑定及全局刷新按气泡所属宠物档案应用风格/字号，消除全局值覆盖。 |
 | `pet/speech_bubble.py` | +63/-28 | 提取已有文字/图片布局用于实时重排，失效几何缓存，保留按钮、分页状态和消失计时。 |
 | `pet/tts_diagnostics.py`（新增） | +43/-0 | 分类语音错误、惰性读取版本；错误消息不回显 URL/令牌/代理凭据；统一缺组件提示。 |
 | `pet/voice_chime_service.py` | +15/-7 | 合成/音色列表使用脱敏诊断，记录实际出口类型，打包缺组件指向更新应用。 |
 | `pet/settings_standalone.py` | +3/-1 | 独立设置窗口禁用试听时使用同一缺组件提示。 |
-| `pet/settings_about.py`（新增） | +85/-0 | 只读账号页，复制/主页按钮、可访问名称、明暗图标与原版本源。 |
-| `pet/modern_settings_dialog.py` | +2/-0 | 关于页 import 与域映射；主体保持独立组件。 |
-| `pet/settings_widgets.py` | +3/-2 | 侧栏增加关于；已有区/卡片允许放只读 QWidget 行。 |
+| `pet/settings_about.py`（新增） | +72/-0 | 账号表与复制/主页按钮的静态源；渲染请求记在按钮上，由设置窗按自己的主题重画。 |
+| `pet/update_settings.py` | +2/-0 | 「更新」页底部挂上作者账号分区（import + 一行 `addWidget`）。 |
+| `pet/settings_widgets.py` | +2/-2 | 已有区/卡片允许放只读 QWidget 行（返回类型仍是 `SettingRow` 的调用点不变）。 |
 | `pet/settings_page_guide.py` | +1/-0 | 作者账号组的描述，遵循统一描述表。 |
 | `pet/context_menus/icons.py` | +10/-0 | 共享矢量提供方增加 info/external_link。 |
 | `scripts/verify_bundle_tts.py` | +63/-4 | 环境约束、包内版本/元数据一致性与原导入闭包检查；新增独立环境检查入口。 |
@@ -43,23 +46,24 @@
 | `scripts/build_macos.sh` | +2/-0 | 签名前执行产物门禁，环境门禁在构建前。 |
 | `scripts/capture_settings_pages.py` | +19/-1 | 显式 `--light`，避免深色 Windows 下把默认截图误称浅色。 |
 | `tests/test_bubble_style_refresh.py`（新增） | +110/-0 | 五种风格、字号、多次刷新、slot0 缺席、几何/计时/按钮/隐藏状态回归。 |
-| `tests/test_settings_about.py`（新增） | +70/-0 | 两种构建的真实设置页、复制内容、主页目标、配置不变及深色图标。 |
+| `tests/test_settings_about.py`（新增） | +81/-0 | 两种构建下账号分区都在「更新」页、复制内容、主页目标、配置不变，以及主题重画路径。 |
 | `tests/test_tts_diagnostics.py`（新增） | +40/-0 | 403/超时/代理/空音频分类，敏感串不进入错误与日志，失败清理临时文件。 |
 | `tests/test_verify_bundle_tts.py` | +25/-0 | 旧库、包内旧库、缺元数据、版本不匹配及不支持的大版本均失败。 |
 | `tests/test_voice_chime_service.py` | +9/-2 | 源码与冻结场景的不同缺依赖提示。 |
 | `tests/test_voice_chime_edge_voice.py` | +5/-2 | 网络替身使用真实异常类型语义；原临时文件清理断言保留。 |
 | `tests/test_settings_process_isolation.py` | +18/-0 | 独立设置进程的缺库按钮状态及冻结提示。 |
-| `tests/test_architecture.py` | +2/-1 | 对话框预算 +2，记录 About import/映射两行理由。 |
-| `tests/test_desktop_pet_features.py` | +1/-1 | 新侧栏完整顺序。 |
-| `tests/test_menu_layout.py` | +3/-2 | 侧栏顺序与语义图标注册表。 |
-| `tests/test_settings_interaction_tabs.py` | +1/-1 | 页内标签契约使用新的完整侧栏列表。 |
-| `tests/test_settings_pet_tabs.py` | +1/-1 | 同上，仍断言桌宠页内任务标签。 |
-| `tests/test_settings_page_guide.py` | +1/-1 | 关于不足四组，不显示页内跳转条。 |
-| `tests/test_update_feature.py` | +1/-1 | 更新页仍可直达，侧栏尾部为更新、关于。 |
-| `CONTEXT.md` | +7/-0 | 关于页的只读职责、版本及账号单源。 |
-| `docs/ONEDIR_PACKAGING.md` | +11/-0 | 说明版本门禁和实际打包解释器要求，链接本报告。 |
-| `docs/INDEX.md` | 本轮 +2/-1 | 登记本报告与 TTS 门禁必读时机，保留历史登记。 |
+| `CONTEXT.md` | +10/-0 | 作者账号的只读职责、版本及账号单源（术语由 About Page 改名为 Author Accounts）。 |
+| `docs/ONEDIR_PACKAGING.md` | +14/-0 | 说明版本门禁和实际打包解释器要求，链接本报告。 |
+| `docs/INDEX.md` | +5/-1 | 登记本报告与 TTS 门禁必读时机、`ANDROID.md` 行与 `ONEDIR_PACKAGING.md` 行的门禁触发词。 |
 | 本报告（新增） | 见最终 numstat | 原因、逐文件说明、实测与边界。 |
+
+**净变更为零的文件**（合并 main 后与 `origin/main` 逐字节相同，故不列表）：`pet/__init__.py`
+（main 的 `dab867f` 已是 4.3.1）、`pet/modern_settings_dialog.py`，以及
+`tests/test_architecture.py`、`test_desktop_pet_features.py`、`test_menu_layout.py`、
+`test_settings_interaction_tabs.py`、`test_settings_pet_tabs.py`、`test_settings_page_guide.py`、
+`test_update_feature.py`、`test_settings_sidebar_and_chrome.py`——后八个原先是「关于」独立成域
+带来的侧栏顺序/行数预算/跳转条断言改动，作者账号并进「更新」页后全部退回 main 的样子
+（第九节记了这次设计变更的来龙去脉）。
 
 ## 三、实现要点
 
@@ -169,33 +173,45 @@ ZIP 的 **26675** 个条目完成 CRC 校验，压缩包内元数据亦确认 ed
 四处冲突的解法见合并提交 `091ed63`：README 取 main 的新安装章节结构（去掉 details 包裹、
 改名「安装、升级与卸载」）并重新放回那三行 Android 说明；`docs/INDEX.md` 以 main 为准
 （保住 #280 的 `ASSET-PIPELINE.md` 登记与六条报告）再重新加上本分支三处登记；
-`tests/test_architecture.py` 的行数预算按合并后**实测 2516**；`tests/test_settings_page_guide.py`
+`tests/test_architecture.py` 的行数预算按合并后实测校准；`tests/test_settings_page_guide.py`
 整份取 main——main 已把「四个区以上才显示跳转条」那条**硬编码域集合**的用例改成按落定几何
 测量，本分支当初只是往那个集合里补「关于」，该断言已不存在，属被上游取代而非被删。
 
-**唯一由合并暴露的产品问题**：main 的
-`tests/test_settings_sidebar_and_chrome.py::test_default_window_shows_every_domain_without_scrolling`
-要求默认 800×560 下每个能力域都落在侧栏视口里。加上「关于」后共 **11** 个域，实测**视口
-378px、内容 394px，溢出 16px**（10 个域时余量 19px）。
+### 9.1 设计变更：「关于」独立成域 → 作者账号并进「更新」页
 
-第一版修法（缩行高 34 → 32）**被全量套件判红**：`tests/test_desktop_pet_features.py`
-断言每个导航行的 `sizeHint` **不低于 34px**（可访问性下限），缩行不是选项。于是按该用例
-注释指定的另一半办法收预算——只收间距与侧栏内边距，行高锁死不动：
+原设计把关于页做成侧栏第 11 个能力域。合并 main 后它撞上两件事：
 
-| 项 | 修改前 | 修改后 |
-|---|---:|---:|
-| `SIDEBAR_ROW_HEIGHT`（`pet/settings_widgets.py`） | 34 | **34（锁死，另有 ≥34px 断言）** |
-| 侧栏布局间距（`sidebar_layout.setSpacing`） | 3 | 1 |
-| 导航行距（`sidebar.setSpacing`） | 1 | 0 |
-| 侧栏内边距（`setContentsMargins`） | (12,16,12,12) | (12,12,12,10) |
-| 11 域内容高 / 视口 | 394 / 378（溢出 16） | **374 / 394（余量 20）** |
+1. main 的
+   `tests/test_settings_sidebar_and_chrome.py::test_default_window_shows_every_domain_without_scrolling`
+   要求默认 800×560 下每个能力域都落在侧栏视口里，11 个域实测**视口 378px / 内容 394px，
+   溢出 16px**（10 个域时余量 19px）。
+2. 想靠缩行高把预算收回来，**被全量套件判红**：`tests/test_desktop_pet_features.py` 断言每个
+   导航行的 `sizeHint` **不低于 34px**（可访问性下限），缩行不是选项。
 
-实测命令：`.venv/Scripts/python.exe .scratch/pr-submission/measure_sidebar.py`（构造真实
-`ModernSettingsDialog`，offscreen 平台，默认 800×560）；候选组合的对照表由
-`.scratch/pr-submission/measure_sidebar_variants.py` 一次跑出（行高锁 34 时的七个组合，
-余量从 −16 到 20px）。余量 **20px 与加「关于」前的 19px 持平**，是为 CI 上 Ubuntu runner
-的字体差异留的空间——该用例注释记录过 6px 间距那一轮留 4px 正是被 Ubuntu 字体吃掉的。
-改后 `modern_settings_dialog.py` 仍是 **2516** 行，未动用行数预算。
+中途试过只收间距与内边距（布局间距 3→1、导航行距 1→0、内边距 (12,16,12,12)→(12,12,12,10)，
+余量回到 20px，候选组合对照见 `.scratch/pr-submission/measure_sidebar_variants.py`）。它能过门，
+但**评审后改为把作者账号并进「更新」页**：侧栏回到 10 个域，于是侧栏预算改动与随之而来的
+顺序断言、行数预算、跳转条口径**全部不需要**，这一版整段退回 main 的样子（见第二节的
+「净变更为零」清单）。
 
-本报告的提交编号：桌面修复 `37a6b99`、Android `b1e80b0`、合并 `091ed63`、集成收口见紧随的
-侧栏提交。
+最终形态：作者账号是「更新」页底部的一个只读分区——静态账号表在 `pet/settings_about.py`，
+`pet/update_settings.py` 把分区挂上页尾。它不注册成偏好、不参与重置；每行有复制按钮，
+GitHub 行另有主页按钮（固定 `https://github.com/MerZlin`，不为另三个平台猜链接）。
+
+分区**不在自己身上钉深浅**：`vector_widget_icon` 会把渲染请求记在按钮上，设置窗开窗与切主题时
+用**它自己的**主题（`settingsDark`）重画（`refresh_settings_icons`）。若在分区上钉
+`modernDark`，跟随系统主题就会盖掉设置窗自己选的那一档——这是本轮踩到的坑，测试改按
+「登记请求 + 按宿主主题重画」这条真实路径验证，不再依赖深色调色板这种巧合。
+
+### 9.2 验证状态（如实登记）
+
+- 合并冲突四处全部解决；`origin/main` 侧的能力域顺序、页面引导几何、行数预算断言都保持原样。
+- 受影响聚焦族（关于/更新/侧栏/页内引导/桌面特性/菜单布局/架构预算/设置进程隔离/文案 lint）
+  本机 **285 passed**，`ruff check .` 通过。
+- **本机全量三轮都没跑完整**：第一轮暴露上面那条侧栏预算（已随设计变更消解）；第二轮我在它
+  跑动中改了常量，结果新旧混合、**作废**；第三轮 shard 1 撞上 Windows 已知的
+  `access violation`（`scripts/ci_shards.py` 就是为躲它而存在；那段时间本机还有别的项目的
+  CPU 密集进程在跑）。跑完的分片里没有与本次改动相关的红。**最终全量以 CI 三端为准。**
+
+本报告的提交编号：桌面修复 `37a6b99`、Android `b1e80b0`、合并 `091ed63`、作者账号并进更新页见
+紧随的那个提交。

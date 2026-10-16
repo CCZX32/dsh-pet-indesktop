@@ -260,9 +260,7 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 阅读宽度换成 CONTENT_READING_MAX_WIDTH（import +1）、开机自启的范围声明改由
 # settings_pet_controls 的作用域 pass 拆成行内标注（-2），其余靠收掉几处重复注释对齐。
 # 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-# 2026-10-16：main 侧 #280 落地后实测 2514 行；本分支关于页的 import 与域映射各
-# 一行（+2）后为 2516，关于页实现本体独立放在 settings_about.py，未往本文件加内容。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2516
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2515
 
 
 def _read(name: str) -> str:
