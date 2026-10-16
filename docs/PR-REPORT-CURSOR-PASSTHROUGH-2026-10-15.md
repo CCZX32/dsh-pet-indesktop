@@ -132,3 +132,19 @@ grab 在途时收敛不立即动手（记待办，grab 收尾后补做）；
   nit×2 已处理）；第二轮 astra 复核再提两条（HIDDEN 闸制造新永久卡死、
   待办丢请求语义）→ 终审撤闸简化（无 grab 即清 + watcher 一拍重建），
   终版复核结论见 PR 描述。
+
+## 七、后续（2026-10-17）：§三 两处同族残留已收
+
+本报告 §三 列的残留里，前两项已由输入链路片收口，细节与证据见
+[`PR-REPORT-INPUT-GRAB-RELEASE-2026-10-17.md`](PR-REPORT-INPUT-GRAB-RELEASE-2026-10-17.md)：
+
+- `OverlayShell._end_drag` 改为统一走窗口既有的 `_finish_grab` 协议
+  （`_press_click_only`/`_drag_committed` 旗标、`set_drag_active(False)`、
+  壳层收尾通知一次到位），于是"迁移因 `new_screen is None` 提前返回时没有
+  show() 收敛"这个前提不再构成风险；
+- click-only 按下不再能进弹弓瞄准（进入判据收紧为"确有拖拽资格或已瞄准"），
+  看门狗那支会话收尾保留为会话侧兜底。
+
+仍开放：`hideEvent`/`closeEvent` 不结束在途 grab（既有行为，click-only 侧已由
+看门狗覆盖）；看门狗 click-only 分支里"先收瞄准会话"这一句在新进入判据下已
+不可达（会话不可能在 click-only 按下上建立），处置口径见新报告 §七。
