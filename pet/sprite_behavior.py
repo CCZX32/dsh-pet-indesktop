@@ -679,7 +679,11 @@ class BehaviorController:
             # 进场时若恰在移动态（速度刚好低于静止阈值）：先收尾回待机，否则
             # 到点 snap 会把探头姿态一脚踹回走路目标点
             self._enter_idle(sprite, st, self._categories(sprite.library))
-        if not probing:
+        if not probing and getattr(sprite, "_clamp_rects", None) is None:
+            # 跨屏过渡（这只的合法域是多块屏的并集）期间不按本屏 bounds 硬钳：
+            # 身体还在缝上时钳一次就是第二次 snap，而它此刻的合法位置由 sprite
+            # 自己的域说了算（角点/空洞仍不可达）。收窄域的时机由壳按"身体已完整
+            # 落在某块屏内"决定，不由这里抢先。
             self._clamp_into_bounds(sprite)
         st.elapsed += dt
         if st.gap_remaining > 0.0:

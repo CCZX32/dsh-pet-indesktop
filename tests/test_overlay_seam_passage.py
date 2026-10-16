@@ -382,3 +382,153 @@ def test_domain_narrows_once_the_body_is_fully_inside_one_screen(tmp_path, monke
         assert host.bounds == shell._local_bounds(b), "收窄后用该屏可用区当钳制域"
     finally:
         hosts_mod._cleanup(shell)
+
+
+# ---------------------------------------------------------------- 5. 松手 / 弹弓跨缝
+def _drag_to_straddle(shell, sprite, *, extra=0.0):
+    """拖到"身体正跨在缝上"的位置（左缘在 A、右缘在 B），返回 (overlay, origin, cursor)。
+
+    ``extra`` = 在跨缝位置基础上再往右多拖的像素（0 = 正好卡在缝上）。
+    """
+    overlay, origin, cursor = _grab(shell, sprite)
+    overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+    _tick(shell)
+    body = sprite.body_rect()
+    # 目标：身体左缘刚好落在缝左边半个身体宽的位置（身体横跨 1920）
+    want_body_left = 1920.0 - body.width() / 2.0 + extra
+    want_pos_x = want_body_left - (body.x() - sprite.rect().x())
+    want_cursor_x = want_pos_x + sprite._drag_offset.x()
+    cursor = QPointF(origin.x() + want_cursor_x, cursor.y())
+    overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+    _tick(shell)
+    return overlay, origin, cursor
+
+
+def test_release_straddling_the_seam_neither_snaps_nor_closes_the_domain(
+        tmp_path, monkeypatch):
+    """松手时身体正跨在缝上：位置不许跳，域也不许当场收回（否则就是第二次 snap）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 500.0))
+        overlay, origin, cursor = _drag_to_straddle(shell, main, extra=-20.0)
+        host = shell.host_for_sprite(main)
+        body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+        assert body.left() < 1920.0 < body.left() + body.width(), (
+            "前提：身体正跨在缝上（两边各有一部分）")
+        assert getattr(main, "_clamp_rects", None) is not None, "拖拽中域是开的"
+
+        before = _global(shell, main)
+        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        assert _global(shell, main) == before, "松手本身不许移动这只"
+        assert getattr(main, "_clamp_rects", None) is not None, (
+            "身体还在缝上 → 域必须留着（当场收回就是把跨缝的身体钳进一块屏 = 第二次 snap）")
+
+        # 松手后跑几拍：这只仍完整可见/合法（不落在屏间空洞里），位置连续
+        prev = _global(shell, main)
+        for _ in range(10):
+            _tick(shell)
+            host = shell.host_for_sprite(main)
+            body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+            covered = any(
+                QRectF(s.availableGeometry()).intersects(body)
+                for s in (a, b))
+            assert covered, "身体必须仍落在有显示器的地方"
+            step = abs(_global(shell, main).x() - prev.x())
+            assert step <= 40.0, f"松手后每拍位移 {step} 过大（有人把它钳回去了）"
+            prev = _global(shell, main)
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_release_inside_one_screen_closes_the_domain_without_moving(tmp_path, monkeypatch):
+    """身体整块落在某块屏内时松手：域当场收窄，且一个像素都不移动。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 500.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        cursor = QPointF(origin.x() + 1000.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        before = _global(shell, main)
+        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        _tick(shell)
+        assert _global(shell, main) == before, "收窄域不许带来任何位移"
+        assert getattr(main, "_clamp_rects", None) is None, "身体已合法 → 收窄"
+        assert shell.host_for_sprite(main).screen is a
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_slingshot_over_the_seam_keeps_the_open_domain(tmp_path, monkeypatch):
+    """跨缝时进瞄准 / 发射 / 取消：域保持开着，位移只来自弹弓自己的物理。"""
+    from tests.test_overlay_hosts_multiscreen import _right_press
+
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a, {"drag_physics": True})
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 500.0))
+        assert shell.move_sprite_to_screen(main, b, global_pos=QPointF(2000.0, 500.0)) is True
+        overlay_b = shell.host_for_sprite(main).overlay
+        origin_b = QPointF(overlay_b.geometry().topLeft())
+        _hittable(main)
+        hit = QPointF(main.rect().center())
+        overlay_b.mousePressEvent(_press(hit, origin_b + hit))
+        _tick(shell)
+        cursor = origin_b + hit + QPointF(30.0, 0.0)
+        overlay_b.mouseMoveEvent(_move(cursor - origin_b, cursor))
+        _tick(shell)
+        assert getattr(main, "_clamp_rects", None) is not None, "拖拽中域是开的"
+
+        # 进瞄准：位置定锚不动、域保持开着
+        anchor = _global(shell, main)
+        overlay_b.mousePressEvent(_right_press(cursor - origin_b, cursor))
+        assert shell._slingshot.aiming is True
+        assert _global(shell, main) == anchor, "进瞄准不许移动这只"
+        assert getattr(main, "_clamp_rects", None) is not None, "瞄准期间域不许被收"
+
+        # 再点右键取消（就地恢复拖拽）：位置不跳，域仍开着
+        overlay_b.mousePressEvent(_right_press(cursor - origin_b, cursor))
+        assert shell._slingshot.aiming is False
+        assert _global(shell, main) == anchor, "取消瞄准不许移动这只"
+        assert getattr(main, "_clamp_rects", None) is not None
+
+        # 松手：位置不跳，域按"身体是否已合法"决定去留
+        before = _global(shell, main)
+        overlay_b.mouseReleaseEvent(_release(cursor - origin_b, cursor))
+        assert _global(shell, main) == before, "松手不许移动这只"
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_straddling_pet_is_not_hauled_back_by_the_host_controllers(tmp_path, monkeypatch):
+    """跨缝松手后，本屏的行为/物理控制器不许把它硬拽回本屏（第二次 snap 的另一半）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 500.0))
+        overlay, origin, cursor = _drag_to_straddle(shell, main, extra=-20.0)
+        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        host = shell.host_for_sprite(main)
+        body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+        assert body.left() < 1920.0, "前提：身体仍有一半在原屏"
+        # 行为控制器（每 tick 都对正常态 sprite 调 _clamp_into_bounds）不许在这里钳
+        for _ in range(20):
+            _tick(shell)
+        host = shell.host_for_sprite(main)
+        body = QRectF(main.body_rect()).translated(host.overlay.geometry().topLeft())
+        assert min(abs(body.left() - 1920.0), abs(body.left() + body.width() - 1920.0)) < (
+            body.width()), "这只仍应停在缝附近（被拽回本屏就是硬钳）"
+    finally:
+        hosts_mod._cleanup(shell)
