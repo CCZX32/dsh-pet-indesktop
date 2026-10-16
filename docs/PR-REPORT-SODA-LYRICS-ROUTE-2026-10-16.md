@@ -487,7 +487,8 @@ $ python .scratch/soda-lyrics-route/probe_route_loopback.py
 | 第一轮（2026-10-16） | `488a43f` | 直连首选 + 有界单次回退（实现、测试、AGENTS/网络文档、本报告首轮章节） | 聚焦 127 + 相关族 394 + ruff + **全量 7924 passed / 15 skipped / 0 failed** |
 | 第二轮（2026-10-17） | `4746a34` | 三处修正（真代理路判据 / `Retry-After` 闸 / 日志只记类型与状态）+ 本报告 §十 | focused 148 + 相关族 415 + ruff（**未重跑全量**，交 CI；首轮全量数字不与本轮混算） |
 
-- 分支：`fix/soda-lyrics-route`，基线 `b7a697f`（= `origin/main` #288）；本附录所在提交只追加本节，无实现改动，分支 HEAD 见 `git log -1`。
+- 分支：`fix/soda-lyrics-route`（`origin/MerZlin/dsh-pet-indesktop`），基线 `b7a697f`（= `origin/main` #288）；主线 PR：[#291](https://github.com/MerZlin/dsh-pet-indesktop/pull/291)，全量交该 PR 的 CI 跑。
+- 本节所在提交只追加记录，无实现改动；分支最终 HEAD 见 `git log -1`（本轮实现提交为 `4746a34`）。
 - 全量原始日志（本机，`.scratch/` 被 gitignore）：
   - 权威口径（系统 Python 441 包）：`.scratch/soda-lyrics-route/full-suite-syspython.log` →
     `7924 passed, 15 skipped, 3121 warnings in 1367.63s`（见 §6.1）。
