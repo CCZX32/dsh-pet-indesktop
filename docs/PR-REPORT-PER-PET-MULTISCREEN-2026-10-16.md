@@ -461,3 +461,75 @@ FAILURES: 0
   仍只有假屏 + 真鼠标事件 + 离屏拼接像素证据；投影的**每 tick 区域 update** 在真机上的
   合成代价未测（区域 = 跨缝那只在本窗的外接矩形，过渡期才有）。
 - 本轮**未 push**（避免反复触发 CI）；PR 仍是 Draft，正文需要随本轮结果更新。
+
+## 第四轮 —— CI 稳定化 + 合并 287（2026-10-16 夜）
+
+> 基线：`1d10049`（三片之后仅一笔文档同步）+ 门禁结果 run `38913906551`。
+> **口径**：本轮的 macOS 那条是**测试断言过严的稳定化**，不是"产品故障修好了"；
+> 产品的 20ms 采样一行未动。Ubuntu 那条（原生崩溃）**未修、根因未定**，本轮只再观察一次。
+
+### 1）macOS 判红 = 断言过严（已修，产品零改动）
+
+- 现象：run `38913906551` 的 `test (macos-latest)` 唯一红为
+  `tests/test_now_playing_session_probe.py::test_os_request_happens_on_probe_thread_not_the_caller`，
+  断言 `records == ["smtc-session-probe"]` 实际拿到**两条记录，且两条都来自探针线程**。
+- 为什么是测试过严：等待窗口的判据是"第一条记录出现"（`_wait_until(lambda: records)`），
+  而产品采样间隔 `SESSION_PROBE_TTL_SECONDS = 20 ms`。本机实测（
+  `.scratch/per-pet-multiscreen/probe_sampling_cadence.log`，脚本 `probe_sampling_cadence.py`）：
+  首条记录 `+34.6 ms`、第二条 `+65.0 ms`，线程集合 `{'smtc-session-probe'}`——首条记录出现后
+  主线程只要被调度器压住 ~30 ms（CI 慢 runner 的常态），断言时刻看到两条就是**合法采样节奏**，
+  不是"调用线程也查了 SMTC"。**产品采样节奏/线程归属不在本轮修改范围。**
+- 改动（唯一一处，1 行断言）：`tests/test_now_playing_session_probe.py`
+  `assert records == ["smtc-session-probe"]` → `assert set(records) == {"smtc-session-probe"}`
+  （= 非空 且 每次采样都来自探针线程），并加注释说明为何不钉次数。
+- 判别力（两条消融，均在本机实测打红；插件留在 `.scratch/per-pet-multiscreen/`，不进提交）：
+  - `ablation_sync_probe_caller.py`（把 `_ensure_session_probe` 换成"调用线程当场同步采一次"）→
+    `AssertionError: 调用线程自己查了 SMTC：['MainThread']`（第 174 行，红）；
+  - `ablation_wrong_thread_probe.py`（采样挪到另一个非探针线程）→
+    `assert {'wrong-thread-probe'} == {'smtc-session-probe'}`（第 179 行，红）。
+- 复跑（**先做修复后做其余工作**，logs 同目录）：探针文件 **20 连跑、0 失败**
+  （同时压 12 个 CPU 忙循环，`probe-fix-stress.log`）；相关族 8 个文件 **104 passed**
+  （`now_playing`×3 / `music_detect` / `music_sing_grace` / `music_sing_timer` /
+  `music_player_detect_refresh` / `overlay_music_sing`）；`ruff check pet/ tests/` 通过。
+
+### 2）Linux 判红 = `test_memory_trim` 原生崩溃（未修，仅再观察一次）
+
+- run `38913906551` 的 `test (ubuntu-latest)` 退出码 **139（SIGSEGV, core dumped）**，
+  崩溃时当前线程停在 `tests/test_memory_trim.py:966`
+  `test_unsupported_platform_click_reports_instead_of_crashing`；pytest 进程被信号杀死，
+  该分片最后只剩 `............................................................`（无 summary）。
+- `main` 上有**逐字历史**（同一用例、同一行、同一 pytest 命令、同一 exit 139），
+  但**根因未定**——本轮不宣称它与本分支无关，也不把它记成"已修/已排除"。
+- 处置按约定：**不扩大 Linux 分片、不改 workflow、不隔离该测试**；只在本次提交触发的新 CI 里
+  再观察一次。若再次原生崩溃，下一步取原生证据（`faulthandler`/core + gdb 回溯）。
+
+### 3）合并 287
+
+- 事实核对：`gh pr view 287` → `state = MERGED`（`2026-10-16T14:44:39Z`），
+  `origin/main` = `9fb6c1a`（"feat(desktop+android): 4.3.1 气泡档案/edge-tts 门禁/作者账号 + Android 0.2.x 悬浮桌宠"）。
+- 操作：`git merge origin/main`（**普通 merge**，未 rebase / reset / force）→ **无冲突**，
+  合并提交 `7244a83`。双方条目都在：行数预算仍按实测校准且原因注释保留
+  （`WINDOW_PY_LINE_BUDGET = 4671`、`MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET`，
+  `tests/test_architecture.py` 182 passed 含两条预算用例）；`docs/INDEX.md` 我方报告（第 143 行）
+  与 287 的桌面/Android 三份报告（151–153 行）并存。
+
+### 4）门（第四轮）
+
+- `ruff check pet/ tests/`：**All checks passed**（`ruff-r4.log`）。
+- **合并后累计全量**（本机，合并提交 `7244a83`）：
+  `QT_QPA_PLATFORM=offscreen python -m pytest -q` → **7903 passed / 14 skipped / 0 failed**（23:53，`EXIT=0`，
+  `.scratch/per-pet-multiscreen/full-suite-merge-r4.log`）。相对 r3 的 7854/15 是 287 带入的新测试
+  （净增 49 通过、1 条跳过项随平台条件变化），**无失败**。
+- 双方都动过的交互面（`pet/` 重叠 13 个文件：`config.py`、`modern_settings_dialog.py`、
+  `overlay_shell.py`、`overlay_window.py`、`pet_sprite.py`、`screen_host.py`、
+  `settings_default_marks.py`、`settings_page_guide.py`、`settings_pet_controls.py`、
+  `sprite_behavior.py`、`sprite_physics.py`、`sprite_sound.py`、`tick_driver.py`）另跑了一条
+  设置/精灵/驱动器子集：**276 passed**（2:08）。
+- bridge 零依赖门（CI 同口径）：`node --test` 8 个契约文件 **44 passed / 0 fail** +
+  `verify_import.mjs` OK。
+- PR 状态：仍 **Draft**，不合并、不 tag、不 release；普通 push 一次触发三端 CI。
+
+### 仍未验（第四轮不改变）
+
+- **真双屏未验**（本机 Qt 只枚举到 1 块活动屏）：跨缝手感、混合 DPI、错位拼接仍只有逻辑证据。
+- Ubuntu 原生崩溃若在新 CI 复现，属**未解决**项（见上文 2）；本轮不作"已稳定"结论。
