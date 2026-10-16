@@ -440,9 +440,16 @@ _MUSIC_PLAYER_WARM_DELAY_MS = 2500
 def _warm_music_player_paths() -> None:
     """后台线程暖音乐播放器路径缓存（幂等，可重复调用）。
 
-    右键菜单「打开网易云/QQ音乐并播放」的 builder 在 GUI 线程只读缓存（冷缓存
+    右键菜单「打开某播放器给主人放歌」的 builder 在 GUI 线程只读缓存（冷缓存
     时乐观启用）：真正的目录浅扫在这里的 daemon 线程里做，否则冷缓存下首次开
     菜单要在 MainThread 上扫 6s+。
+
+    **启动只预热下面这两键**（``netease`` / ``qqmusic``）：注册表后补的酷狗、
+    汽水不在启动预热点里，它们的缓存由首次构建音乐子菜单时的幂等预热（或设置页
+    「自动检测」）补齐——菜单条目不因此置灰（冷缓存一样乐观启用），只是那一次
+    扫描发生在打开菜单之后。四条串行浅扫在本机要二十多秒，压在启动路径上会拖慢
+    首屏。这条口径由 ``tests/test_music_player_cache.py`` 的
+    ``test_ui_ready_prewarm_schedules_music_player_cache_warm`` 钉住。
     """
     from . import music_players
 
