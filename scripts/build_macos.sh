@@ -119,6 +119,10 @@ for variant in "${variant_list[@]}"; do
     name="dsh-pet-standalone-$variant"
     printf "VARIANT = '%s'\n" "$variant" > packaging/build_variant.py
 
+    # 运行期图标（窗口/标题栏）也要进包：上面的 --icon 只把图标写进 .app 的**文件
+    # 图标**资源，窗口图标由 pet/application_icon.py 从 <_MEIPASS>/assets/icon.ico 读。
+    # 漏掉这一行不会有任何报错（只有源文件不存在时 PyInstaller 才会挡下），因此由
+    # tests/test_application_icon.py 的打包契约测试守着。
     args=(
         --noconfirm
         --clean
@@ -137,6 +141,7 @@ for variant in "${variant_list[@]}"; do
         --add-data "$assets:$assets"
         --add-data "assets/big_blue_fat_fish:assets/big_blue_fat_fish"
         --add-data "assets/chat:assets/chat"
+        --add-data "assets/icon.ico:assets"
         --add-data "assets/sounds:assets/sounds"
         --add-data "pet/menu_templates:pet/menu_templates"
         --add-data "pet/persona_presets:pet/persona_presets"

@@ -251,8 +251,16 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 布局、SECTION_GUIDE 描述表）全在 pet/settings_page_guide.py，本文件只做接线。
 # 2026-10-09 上调到 2501（bug 狩猎修复批，两批叠加）：即时音效开关的 reload 防陈旧
 # 快照守卫（+7，B04）+ 子宠页读写路由的配置入口一行与 harness 置灰摘除（+3，F2）。
+# 2026-10-16 上调到 2515（设置页外观打磨分批，本文件净 +14）：窗口图标两处接线（import
+# +1、setWindowIcon 与注释 +3）、侧栏容器换成按字体算宽的 SettingsSidebarPane（-1，主体
+# 在 pet/settings_widgets.py）与两处行距下调（配对注释 +5）、常规域的高级组装配（+1 与其
+# 分层口径注释 +5）。控件本体、宽度计算与组描述分别落在 settings_widgets /
+# settings_page_guide，本文件只留装配与接线。**同批第二轮把预算内余量用掉、回到 2515**：
+# 「光标隐藏时自动穿透」从高级组移回「窗口与系统」、高级组只剩「直播捕获兼容」、默认最大
+# 阅读宽度换成 CONTENT_READING_MAX_WIDTH（import +1）、开机自启的范围声明改由
+# settings_pet_controls 的作用域 pass 拆成行内标注（-2），其余靠收掉几处重复注释对齐。
 # 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2501
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2515
 
 
 def _read(name: str) -> str:

@@ -343,7 +343,10 @@ def test_harness_target_row_hint_is_the_helper_output(tmp_path, monkeypatch, des
         row = dialog.findChild(settings_mod.SettingRow, "settingRow_harness_launch_target")
         assert row is not None, "自启目标行必须在"
         rendered = row.hint_label.text().split("默认：", 1)[0].rstrip("\n")
-        assert rendered == harness_target_hint(desktop_available)
+        # 作用域那句已从说明末尾拆成行内独立标注（见 SettingRow.set_scope_note）；
+        # 两者拼起来仍必须逐字等于 helper 的输出——文案来源没有第二份。
+        assert rendered + row.scope_note.text() == harness_target_hint(desktop_available)
+        assert row.scope_note.text() == "此设置影响所有桌宠。"
     finally:
         dialog.close()
         app.processEvents()
