@@ -5,9 +5,9 @@
 > **范围**：9 个文件（实现 1、构建门 1、测试 3 + 新增 1、文档/登记 2 + 新增报告 1）。
 > 实现 + 测试 + 登记的合计 = **+465 / −69**（不含本报告自身——它的行数随修订变化，
 > 自指没法对账）；逐文件增删见 §二，精确值以 `git show --numstat` 为准：
-> **本地已提交，未 push、未开 PR、未构建、未部署**（等待父代理核验）
-> **本报告的提交 SHA**：本报告与实现、测试在**同一个本地提交**里（不自指 SHA——写进去
-> 会被任何一次 amend 作废）；取自 `git log -1 --format=%H`，交接消息里也给了同一个值。
+> **本地已提交，未构建、未部署、未 tag/release**；分支与 PR 状态以 PR 页为准（不写进本报告）
+> **本报告的提交 SHA**：本报告在实现/测试提交之后的独立文档提交里（不自指 SHA——写进去
+> 会被任何一次 amend/变基作废）；取自 `git log --oneline`。
 > **关联**：[`PR-REPORT-FRAMESEQ-V3-PIPELINE-2026-09-29.md`](PR-REPORT-FRAMESEQ-V3-PIPELINE-2026-09-29.md)（被本报告取代档位口径）
 
 ## 一、核心特性
@@ -193,7 +193,8 @@ Pillow 12.2 / imageio-ffmpeg 7.1；样本 = 源 webm（idle 待机呼吸休闲�
 | 聚焦（新） | `pytest -q tests/test_frameseq_alpha_floor.py` | 7 passed |
 | 相关族（帧序列全家） | `pytest -q tests/test_frameseq_{provision,bundle_gate,clip,unblend,unblend_v3,unblend_v4,alpha_floor}.py tests/test_convert_frameseq.py` | **261 passed / 1 skipped**，skip = `test_frameseq_bundle_gate.py::TestPrepareRealMaterial`「本机素材树不完整（干净检出的 CI 必然如此）」——本 worktree 没有 frameseq 派生物（不入库），且主工作树的 v3 素材**按新档判正是"陈旧"**，这条跳过是改档的预期结果 |
 | 线程族高负载复跑（3 遍） | `pytest -q tests/test_frameseq_provision.py` ×3 | **110 passed** ×3（14.80s / 16.04s / 14.49s，负载下不抖；本改动不碰线程/时序，复跑是保险） |
-| 全量 | `python -m pytest -q`（本机，**本刀自身树上跑一次**：`origin/main` `b7a697f` + 本刀提交，**不是与其它在飞分支组合后的树**；日志 `.scratch/frameseq-alpha-floor/full-suite.log`） | **7911 passed / 15 skipped / 0 failed**（`1388.81s` = 0:23:08，`EXIT=0`；无 FAILED/ERROR 行）。本刀新增的 9 条用例（底板 7 + 库级改档 1 + 构建门 1）已含在内。**组合口径未跑**：本轮另有一条歌词分支（#291）在飞，两者领域无产品重叠（见 §二「未改动」与 AGENTS/INDEX 差异）；若最终合入前需要"两分支合并后的树"口径，应重跑全量（交 CI 亦可） |
+| 全量 | `python -m pytest -q`（本机，**本刀自身树上跑一次**：`origin/main` `b7a697f` + 本刀提交，**不是与其它分支组合后的树**；日志 `.scratch/frameseq-alpha-floor/full-suite.log`） | **7911 passed / 15 skipped / 0 failed**（`1388.81s` = 0:23:08，`EXIT=0`；无 FAILED/ERROR 行）。本刀新增的 9 条用例（底板 7 + 库级改档 1 + 构建门 1）已含在内。**组合口径另算**：交付前本分支已合入 `origin/main`（含歌词 #291），合并后全树相对 `origin/main` 只多本报告的 9 个文件（其余逐字节相同），故组合树的全量**交 PR #292 的 CI 三端跑**，本机不重复跑；合并后的相关族另在本机复跑（见下行） |
+| 合并后相关族复跑（本机） | `pytest -q tests/test_frameseq_{provision,bundle_gate,clip,unblend,unblend_v3,unblend_v4,alpha_floor}.py tests/test_convert_frameseq.py` 与 `tests/test_music_lyric.py tests/test_pr_report_discipline.py`；`ruff check pet tests scripts tools` | 合入 `origin/main`（`056dc2a`，含 #291）后：帧序列族 **261 passed / 1 skipped**（与合并前逐条相同）、歌词族 + 报告纪律 **319 passed**、ruff 全绿 |
 | 断言有效性 | ① 撤掉实现（`floor_faint_alpha` 不存在）② 把它替换为直通（`unblend_v3` 链尾不再清理） | ① **7 failed**（AttributeError ×3 + 梯度/管线 4 条）；② **4 failed / 3 passed**（`a==1` 得 187602 而非 0、角落与管线对账同时红）——断言确实能区分新旧实现 |
 
 ## 七、实机运行记录
