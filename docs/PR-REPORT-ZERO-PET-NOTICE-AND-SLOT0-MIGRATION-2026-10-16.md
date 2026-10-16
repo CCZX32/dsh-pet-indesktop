@@ -331,6 +331,15 @@ main 上 `created` 与 `already-exists` **一直**都清源。所以下面的"�
 **旧**快照也能通过校验、并被"保留第一份"规则保护下来；此时若照旧清源，源里**当前**的每宠值
 就再无着落（旧版本退回过、又升级回来时真实可达）。
 
+**为什么没去"把那个校验改严"（值也要相等）——那会把数据卫生问题升级成启动失败。**
+`_is_global_config_snapshot` 是 `_backup_file` 的**入场判据**：判不过就返回
+`BACKUP_INVALID` → 迁移返回 `backup-invalid`，而 `backup-invalid` **不是**
+`SLOT0_DEGRADED_STATUSES` 里的状态 ⇒ `app.py` / `overlay_shell._build` 会
+`raise RuntimeError`（**整个应用起不来**）。为了"备份证据更严"让用户开不了机，
+是把范围判错了（ops D2 的教训：一份坏档案只该降级那一个槽）。所以改法是把严格性
+放进**局部**判据 `_backup_holds_values`：它答否时既不中止、也不丢数据，只是**另存一份
+恢复副本**再清源。用户拿到的是"应用照常起 + 值可从副本取回"。
+
 **基线对照（实测，不是推断）**：把同一份现场跑在收口合并进来的 `origin/main`
 （`056dc2a`，其 `pet/pet_profiles.py` 与合并基 `6a68570` **逐字节相同**——main 上根本没有
 PR 里那条"不清源"）上：
