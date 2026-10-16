@@ -161,4 +161,41 @@ ZIP 的 **26675** 个条目完成 CRC 校验，压缩包内元数据亦确认 ed
 ./scripts/build_onedir.ps1 -Variant webm-chat
 ```
 
-截图、临时用户目录、工具环境、打包产物均留在忽略目录；未提交、推送或发布。
+截图、临时用户目录、工具环境、打包产物均留在忽略目录。
+
+## 九、合并 origin/main 后的集成收口（2026-10-16）
+
+提交前分支原先落后 `origin/main` 15 个提交，把 `origin/main`（`0b7152d`）合入后才推 PR。
+四处冲突的解法见合并提交 `091ed63`：README 取 main 的新安装章节结构（去掉 details 包裹、
+改名「安装、升级与卸载」）并重新放回那三行 Android 说明；`docs/INDEX.md` 以 main 为准
+（保住 #280 的 `ASSET-PIPELINE.md` 登记与六条报告）再重新加上本分支三处登记；
+`tests/test_architecture.py` 的行数预算按合并后**实测 2516**；`tests/test_settings_page_guide.py`
+整份取 main——main 已把「四个区以上才显示跳转条」那条**硬编码域集合**的用例改成按落定几何
+测量，本分支当初只是往那个集合里补「关于」，该断言已不存在，属被上游取代而非被删。
+
+**唯一由合并暴露的产品问题**：main 的
+`tests/test_settings_sidebar_and_chrome.py::test_default_window_shows_every_domain_without_scrolling`
+要求默认 800×560 下每个能力域都落在侧栏视口里。加上「关于」后共 **11** 个域，实测**视口
+378px、内容 394px，溢出 16px**（10 个域时余量 19px）。
+
+第一版修法（缩行高 34 → 32）**被全量套件判红**：`tests/test_desktop_pet_features.py`
+断言每个导航行的 `sizeHint` **不低于 34px**（可访问性下限），缩行不是选项。于是按该用例
+注释指定的另一半办法收预算——只收间距与侧栏内边距，行高锁死不动：
+
+| 项 | 修改前 | 修改后 |
+|---|---:|---:|
+| `SIDEBAR_ROW_HEIGHT`（`pet/settings_widgets.py`） | 34 | **34（锁死，另有 ≥34px 断言）** |
+| 侧栏布局间距（`sidebar_layout.setSpacing`） | 3 | 1 |
+| 导航行距（`sidebar.setSpacing`） | 1 | 0 |
+| 侧栏内边距（`setContentsMargins`） | (12,16,12,12) | (12,12,12,10) |
+| 11 域内容高 / 视口 | 394 / 378（溢出 16） | **374 / 394（余量 20）** |
+
+实测命令：`.venv/Scripts/python.exe .scratch/pr-submission/measure_sidebar.py`（构造真实
+`ModernSettingsDialog`，offscreen 平台，默认 800×560）；候选组合的对照表由
+`.scratch/pr-submission/measure_sidebar_variants.py` 一次跑出（行高锁 34 时的七个组合，
+余量从 −16 到 20px）。余量 **20px 与加「关于」前的 19px 持平**，是为 CI 上 Ubuntu runner
+的字体差异留的空间——该用例注释记录过 6px 间距那一轮留 4px 正是被 Ubuntu 字体吃掉的。
+改后 `modern_settings_dialog.py` 仍是 **2516** 行，未动用行数预算。
+
+本报告的提交编号：桌面修复 `37a6b99`、Android `b1e80b0`、合并 `091ed63`、集成收口见紧随的
+侧栏提交。

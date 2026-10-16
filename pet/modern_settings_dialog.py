@@ -311,10 +311,10 @@ class ModernSettingsDialog(QDialog):
 
         sidebar_pane = SettingsSidebarPane(self)
         sidebar_layout = QVBoxLayout(sidebar_pane)
-        sidebar_layout.setContentsMargins(12, 16, 12, 12)
-        # 间距 3px + 导航行距 1px：slot 页有两个重置按钮时，默认窗口 800×560 下 10 个
-        # 能力域要全落在视口里；3px 把本机余量 4 → 19px（CI 280：Ubuntu 上 6px 不够）。
-        sidebar_layout.setSpacing(3)
+        sidebar_layout.setContentsMargins(12, 12, 12, 10)
+        # 间距 1px + 导航行距 0：默认窗口 800×560 下 11 个能力域都要落在视口里（行高锁
+        # 34px；slot 页两个重置按钮时最挤）；实测余量 20px，与加「关于」前的 19px 持平。
+        sidebar_layout.setSpacing(1)
         # 「保存并退出」的图标 / 保存时机 tooltip / 焦点旗标都在控件库里（本文件有行数预算）。
         self.save_exit_button = settings_save_exit_button(sidebar_pane, self._save)
         sidebar_layout.addWidget(self.save_exit_button)
@@ -336,8 +336,8 @@ class ModernSettingsDialog(QDialog):
         self.sidebar = QListWidget(sidebar_pane)
         self.sidebar.setObjectName("settingsSidebar")
         self.sidebar.setIconSize(QSize(18, 18))
-        # 导航行距 1px：与上面的侧栏间距一起把 10 个能力域收进默认窗口高度。
-        self.sidebar.setSpacing(1)
+        # 导航行距 0：与行高 34、上面的侧栏间距一起把 11 个能力域收进默认窗口高度。
+        self.sidebar.setSpacing(0)
         sidebar_layout.addWidget(self.sidebar, 1)
         # 全局兜底入口（命令而非偏好项，故放侧栏底部；实现在 settings_reset_defaults.py）。
         settings_reset_defaults.create_reset_button(self, sidebar_layout)

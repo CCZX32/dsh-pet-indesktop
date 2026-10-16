@@ -1579,6 +1579,8 @@ CONTENT_READING_MAX_WIDTH = 800
 SIDEBAR_MIN_WIDTH = 200
 
 #: 侧栏导航图标与行高：图标按当前主题渲染一次、切主题时重画（见 :func:`refresh_settings_icons`）。
+#: 行高 34 是**下限**：``tests/test_desktop_pet_features.py`` 断言每个导航行的 ``sizeHint``
+#: 不低于 34px；所以加入「关于」后的第 11 个能力域靠收间距收预算，不靠缩行（2026-10-16）。
 SIDEBAR_ICON_SIZE = 16
 SIDEBAR_ROW_HEIGHT = 34
 
