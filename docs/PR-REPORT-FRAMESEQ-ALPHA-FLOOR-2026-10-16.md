@@ -165,7 +165,7 @@ Pillow 12.2 / imageio-ffmpeg 7.1；样本 = 源 webm（idle 待机呼吸休闲�
 | 绿（实现后） | 同上 | **7 passed** |
 | 既有族回归修正 | `python -m pytest -q tests/test_frameseq_unblend_v4.py` | 先 **1 failed**（挂起语义的参考链未含新步骤，正是"改档必须显式跟"的证据）→ 改参考链后 passed |
 
-新增 `tests/test_frameseq_alpha_floor.py`（231 行）覆盖：
+新增 `tests/test_frameseq_alpha_floor.py`（240 行）覆盖：
 
 1. **梯度 0/1/2/3/255 + 全 256 档**：掩膜只命中 1；产物 alpha `[0,0,2,3,255]`；
    归零像素 RGB = `(0,0,0)`（**不是 255**）；其余像素逐位不动；入参不被修改；
@@ -193,7 +193,7 @@ Pillow 12.2 / imageio-ffmpeg 7.1；样本 = 源 webm（idle 待机呼吸休闲�
 | 聚焦（新） | `pytest -q tests/test_frameseq_alpha_floor.py` | 7 passed |
 | 相关族（帧序列全家） | `pytest -q tests/test_frameseq_{provision,bundle_gate,clip,unblend,unblend_v3,unblend_v4,alpha_floor}.py tests/test_convert_frameseq.py` | **261 passed / 1 skipped**，skip = `test_frameseq_bundle_gate.py::TestPrepareRealMaterial`「本机素材树不完整（干净检出的 CI 必然如此）」——本 worktree 没有 frameseq 派生物（不入库），且主工作树的 v3 素材**按新档判正是"陈旧"**，这条跳过是改档的预期结果 |
 | 线程族高负载复跑（3 遍） | `pytest -q tests/test_frameseq_provision.py` ×3 | **110 passed** ×3（14.80s / 16.04s / 14.49s，负载下不抖；本改动不碰线程/时序，复跑是保险） |
-| 全量 | `python -m pytest -q`（本机，本刀基线树上跑一次；日志 `.scratch/frameseq-alpha-floor/full-suite.log`） | **7911 passed / 15 skipped / 0 failed**（`1388.81s` = 0:23:08，`EXIT=0`；无 FAILED/ERROR 行）。本刀新增的 9 条用例（底板 7 + 库级改档 1 + 构建门 1）已含在内 |
+| 全量 | `python -m pytest -q`（本机，**本刀自身树上跑一次**：`origin/main` `b7a697f` + 本刀提交，**不是与其它在飞分支组合后的树**；日志 `.scratch/frameseq-alpha-floor/full-suite.log`） | **7911 passed / 15 skipped / 0 failed**（`1388.81s` = 0:23:08，`EXIT=0`；无 FAILED/ERROR 行）。本刀新增的 9 条用例（底板 7 + 库级改档 1 + 构建门 1）已含在内。**组合口径未跑**：本轮另有一条歌词分支（#291）在飞，两者领域无产品重叠（见 §二「未改动」与 AGENTS/INDEX 差异）；若最终合入前需要"两分支合并后的树"口径，应重跑全量（交 CI 亦可） |
 | 断言有效性 | ① 撤掉实现（`floor_faint_alpha` 不存在）② 把它替换为直通（`unblend_v3` 链尾不再清理） | ① **7 failed**（AttributeError ×3 + 梯度/管线 4 条）；② **4 failed / 3 passed**（`a==1` 得 187602 而非 0、角落与管线对账同时红）——断言确实能区分新旧实现 |
 
 ## 七、实机运行记录
@@ -248,7 +248,8 @@ key 旧: frameseq-win32-amd64-0eefdac0328ab771da8db392719aeaf3
 - **没有全量重转 25,500 帧**：本刀只做"实现 + 隔离 3 帧真素材验证"。磁盘上现存的 v3 世代
   仍未被替换（运行时会按启动预算逐 clip 重出，构建期由 CI 缓存 key 变化触发全量重出）。
   ⇒ **未验**：全量重出后的实际体积/包体大小、三端 CI 的 41 分钟级重转、真实部署包效果。
-- **没有部署、没有构建、没有 push、没有开 PR**：按用户口径等父代理核验。
+- **没有部署、没有构建**：本刀止于"本地提交 + 隔离 3 帧真素材验证"。分支**未部署、未构建、
+  未 tag/release**；push 与开 PR 是本分支的交付步骤（PR 状态以 PR 页为准，不写进本报告）。
 - **没有在真实桌面上看桌宠**：本机无 CU、按指令不动真实 APPDATA；用户可见行为的证据止于
   "合成到纯白底 254 → 255 + ×64 对照图"，**真机观感由用户验收**。
 - `tools/convert_frameseq.py` 模块文档里的历史档位描述（`ENCODER_DESC_LOSSY`）是**既有
@@ -286,5 +287,5 @@ key 旧: frameseq-win32-amd64-0eefdac0328ab771da8db392719aeaf3
 
 - 分支基线 `b7a697f`（`origin/main`）；工作树 `D:/dsh-pet-wt-alpha-floor`（独占）
 - 本报告描述的是**本地提交**，其 HEAD 与 `git diff --numstat` 见提交记录 / 本报告 §二
-- 未部署、未 push；全量测试日志：`.scratch/frameseq-alpha-floor/full-suite.log`（本地、
+- 未部署、未构建；全量测试日志：`.scratch/frameseq-alpha-floor/full-suite.log`（本地、
   未入库）
