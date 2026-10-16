@@ -167,6 +167,8 @@ class TickDriver(QObject):
         # 附加仿真控制器（如边缘探头）：tick_sim 尾段、三主控制器之后运行
         # ——姿态类控制器是最终写入口，不能被后续控制器覆盖
         self._extras: list = []
+        # 全部 overlay advance 之后的一次性钩子（跨屏路由；见 advance_overlays）
+        self._post_advance = None
         # M-1 闲置降档：governor 决策 + 最近帧到达时间（"动画在播"判定）
         self._governor = TickGovernor(clock)
         self._applied_tier = TIER_ACTIVE
@@ -635,7 +637,23 @@ class TickDriver(QObject):
         for ctrl in self._extras:
             ctrl.tick(sprites, dt)
 
+    def set_post_advance(self, cb) -> None:
+        """挂上"全部 overlay advance 之后"的一次性钩子（跨屏路由用；None 摘除）。
+
+        跨屏路由必须放在这里：拖动物理（弹簧档）的**实际位移发生在 sprite.advance**
+        里，事件时刻读到的位置还没动——按事件时刻路由会在身体真正过缝之前提前移交
+        （旧实现的大跳来源）。放在 advance 之后，每 tick 读到的就是这一拍各 sprite
+        的最终位置，且**每 tick 每 sprite 只判一次**。
+        """
+        self._post_advance = cb
+
     def advance_overlays(self, dt: float) -> None:
-        """推进+重绘段：逐 overlay 走 advance/脏矩形/位置 fanout/update。"""
+        """推进+重绘段：逐 overlay 走 advance/脏矩形/位置 fanout/update。
+
+        收尾调用 ``_post_advance``（若挂了）：此刻全部 overlay 的 advance 都已跑完，
+        sprite 位置是本 tick 的最终值。
+        """
         for overlay in list(self._overlays):
             overlay.tick_advance(dt)
+        if self._post_advance is not None:
+            self._post_advance(dt)

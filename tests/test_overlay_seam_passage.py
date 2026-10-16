@@ -1,0 +1,384 @@
+# -*- coding: utf-8 -*-
+"""跨屏拖拽的缝上通道：临时合法域 + advance 后按实际位置移交 + 原子换帧。
+
+旧实现的三处几何缺陷（用户/主代理定位，本文件逐条钉住）：
+
+1. **按光标落点提前移交**：路由在事件时刻用"光标 − 抓取偏移"的目标落点判身体中心，
+   而弹簧档（``drag_physics``）的实际位移发生在 ``sprite.advance`` 里——身体还没过缝
+   就被换到另一块屏，随后被那块屏的可用区钳住（实测跨屏那一帧跳 +1169 px）。
+2. **单矩形钳制域**：跨屏时这只正跨在两块屏的缝上，任何单矩形域都会在缝上把它钳住。
+3. **移交顺序**：``set_bounds(新矩形)`` 会先用**旧局部坐标**补一次钳制，再 ``set_pos``
+   减 delta 又被钳一次——两次钳制叠起来就是那一跳。
+
+本文件的判据（三条都只看**全局坐标**，不掺局部坐标）：
+
+- 无 tick 时光标大跳不得提前移交，弹簧档的实际位置也不得因它移动；
+- 逐 tick 的全局轨迹必须与"同一块大屏上没有内缝"的参考轨迹一致（缝对轨迹不可见）；
+- 移交那一拍是**原子全局恒等换帧**（``old_origin + pos == new_origin + pos``），
+  弹簧目标 / 轨迹样本 / 速度一律不变；
+- 合法域只按**真实相接**的屏展开：错位拼接的空洞不是合法位置，斜对角的屏不算相接；
+- 开关关着时不得因为拖拽而多建窗。
+"""
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtCore import QPointF, QRect, QRectF
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QApplication
+
+import tests.test_overlay_window_capabilities as cap
+import tests.test_sprite_menu_facade as fac
+import tests.test_overlay_hosts_multiscreen as hosts_mod
+from pet.overlay_shell import OverlayShell
+from pet.pet_sprite import PetSprite
+from tests.test_overlay_hosts_multiscreen import (
+    FakeScreen, _hittable, _move, _press, _release)
+
+app = QApplication.instance() or QApplication([])
+
+TICK_S = 1 / 60.0
+
+
+def _shell(tmp_path, screen, values=None, *, switch=True):
+    # hosts 的 _make_shell 会把 allow_cross_screen 默认成 True（那个文件整体测"允许
+    # 跨屏"），这里要能显式关掉，故先放进 values 再传。
+    values = {"allow_cross_screen": switch, **dict(values or {})}
+    return hosts_mod._make_shell(tmp_path, screen, values)
+
+
+def _install(monkeypatch, screens):
+    """屏枚举喂假屏（只补**类级** Qt API，不碰实例属性——实例 patch 会泄漏）。"""
+    monkeypatch.setattr(QGuiApplication, "screens", staticmethod(lambda: list(screens)))
+    monkeypatch.setattr(QGuiApplication, "primaryScreen",
+                        staticmethod(lambda: screens[0]))
+
+
+def _tick(shell, dt=TICK_S):
+    """一个真 tick 的两段：仿真段 + 推进段（推进段收尾才跑跨屏路由）。"""
+    shell.driver.tick_sim(dt)
+    shell.driver.advance_overlays(dt)
+
+
+def _global(shell, sprite):
+    host = shell.host_for_sprite(sprite)
+    return QPointF(host.overlay.geometry().topLeft()) + QPointF(sprite.pos)
+
+
+def _global_target(shell, sprite):
+    """弹簧目标的**全局等价位置**（换帧后局部值必须变，全局值必须不变）。"""
+    target = getattr(sprite, "_drag_spring_target", None)
+    if target is None:
+        return None
+    host = shell.host_for_sprite(sprite)
+    return QPointF(host.overlay.geometry().topLeft()) + QPointF(target)
+
+
+def _global_trail(shell, sprite):
+    """拖拽轨迹样本的**全局等价** (x, y) 列表（换帧后全局值必须不变）。"""
+    host = shell.host_for_sprite(sprite)
+    origin = QPointF(host.overlay.geometry().topLeft())
+    return [(origin.x() + row[1], origin.y() + row[2]) for row in sprite.drag_trail]
+
+
+def _two_screens(height=1080, avail_height=1040):
+    a = FakeScreen((0, 0, 1920, height), (0, 0, 1920, avail_height), name="DISPLAY1")
+    b = FakeScreen((1920, 0, 1920, height), (1920, 0, 1920, avail_height), name="DISPLAY2")
+    return a, b
+
+
+def _grab(shell, sprite, at=None):
+    """在 sprite 当前宿主窗里按下（返回 (overlay, origin, cursor)）。"""
+    overlay = shell.host_for_sprite(sprite).overlay
+    origin = QPointF(overlay.geometry().topLeft())
+    _hittable(sprite)
+    hit = QPointF(sprite.rect().center()) if at is None else QPointF(at)
+    overlay.mousePressEvent(_press(hit, origin + hit))
+    return overlay, origin, origin + hit
+
+
+# ---------------------------------------------------------------- 1. 无 tick 不提前移交
+def test_cursor_jump_without_tick_neither_transfers_nor_moves_a_spring_pet(
+        tmp_path, monkeypatch):
+    """光标一步跨到另一块屏、但**一个 tick 都没跑**：不换宿主，弹簧档位置不动。
+
+    弹簧档的实际位移只在 advance 里发生——没有 tick 就没有位移，路由当然也不该
+    发生（旧实现正是在这一帧按光标落点提前换了宿主）。
+    """
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a, {"drag_physics": True})
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(300.0, 600.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))   # 过阈值：真拖拽
+        _tick(shell)                                             # 弹簧开始跟
+        before_global = _global(shell, main)
+
+        cursor = QPointF(origin.x() + 2600.0, cursor.y())        # 一步跨到副屏深处
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+
+        assert shell.host_for_sprite(main).screen is a, (
+            "没有 tick 就不许移交：弹簧档的实际位移还没发生")
+        assert _global(shell, main) == before_global, (
+            "弹簧档的实际位置只在 advance 里变；事件本身不得移动它")
+        assert main._drag_spring_target is not None, "前提：弹簧目标已更新（这才是事件的作用）"
+
+        # 弹簧要好几拍才把身体推进邻屏：每一拍的位移都不许超过"到目标的剩余距离"
+        # （超过就是一次瞬移），换宿主那一拍同样是原子的
+        spring_before = _global_target(shell, main)
+        velocity_before = QPointF(main.velocity)
+        moved_tick = None
+        for tick in range(1, 120):
+            prev_global = _global(shell, main)
+            lag = abs(QPointF(main._drag_spring_target).x() - main.pos.x())
+            _tick(shell)
+            step = abs(_global(shell, main).x() - prev_global.x())
+            assert step <= lag + 4.0, (
+                f"第 {tick} 拍位移 {step} 明显超过剩余滞后 {lag}（瞬移，不是弹簧）")
+            if shell.host_for_sprite(main).screen is b:
+                moved_tick = tick
+                break
+        assert moved_tick is not None and moved_tick > 1, (
+            "弹簧档必须等身体真的进了邻屏才移交（不是光标一过缝就换）")
+        assert _global_target(shell, main) == spring_before, (
+            "弹簧目标的**全局**位置不许被改写（换帧只换局部表示）")
+        assert QPointF(main.velocity) == velocity_before, "速度不许被改写"
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_seam_trajectory_matches_a_seamless_screen(tmp_path, monkeypatch):
+    """逐 tick 全局轨迹 == 同一块大屏（没有内缝）上的参考轨迹。
+
+    缝对轨迹必须是**不可见**的：同样的光标路径、同样的 tick 节奏，跨两块屏的宠与
+    在一块 3840 宽屏上的宠每一拍都应落在同一个全局位置（1:1 档两块的可用区并集与
+    那块大屏逐位相同，弹簧档的目标点也相同）。
+    """
+    samples_seam = []
+    samples_ref = []
+
+    def run(screens, out, tmp, physics):
+        _install(monkeypatch, screens)
+        shell = _shell(tmp, screens[0], {"drag_physics": physics})
+        try:
+            main = shell.sprite
+            main.set_pos(QPointF(300.0, 600.0))
+            overlay, origin, cursor = _grab(shell, main)
+            overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+            _tick(shell)
+            for step in range(90):
+                cursor = QPointF(cursor.x() + 32.0, cursor.y())
+                overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+                _tick(shell)
+                out.append(round(_global(shell, main).x(), 3))
+            overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+            return shell
+        finally:
+            pass
+
+    a, b = _two_screens()
+    big = FakeScreen((0, 0, 3840, 1080), (0, 0, 3840, 1040), name="BIG")
+    seam_shell = run([a, b], samples_seam, tmp_path / "seam", physics=False)
+    ref_shell = run([big], samples_ref, tmp_path / "ref", physics=False)
+    try:
+        assert len(samples_seam) == len(samples_ref) == 90
+        assert samples_seam == pytest.approx(samples_ref, abs=0.001), (
+            "跨缝轨迹必须与无内缝参考逐拍一致（差一点点就是钳制/提前移交留下的位移）")
+    finally:
+        hosts_mod._cleanup(seam_shell)
+        hosts_mod._cleanup(ref_shell)
+
+
+def test_transfer_frame_is_a_global_identity_reframe(tmp_path, monkeypatch):
+    """移交那一拍是原子换帧：全局位置、弹簧目标、轨迹样本逐位不变。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a, {"drag_physics": True})
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(300.0, 600.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+
+        cursor = QPointF(origin.x() + 2400.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+
+        # 先把"路由"从 tick 里摘出来：advance 只走弹簧（不判移交），量到的位移
+        # 就是弹簧那一拍的正常量；再单独调一次路由，量移交本身带来的位移。
+        shell.driver.set_post_advance(None)
+        try:
+            for _ in range(200):
+                shell.driver.advance_overlays(TICK_S)
+                host = shell.host_for_sprite(main)
+                body = QRectF(main.body_rect()).translated(
+                    host.overlay.geometry().topLeft())
+                if shell._screen_fully_containing(body) is b:
+                    break
+            else:
+                pytest.fail("弹簧跑满 200 拍身体仍未整块进入副屏")
+
+            before_global = _global(shell, main)
+            spring_before = _global_target(shell, main)
+            velocity_before = QPointF(main.velocity)
+            trail_before = _global_trail(shell, main)
+
+            assert shell.route_seam_after_advance() is None  # 顶层入口不返回值
+            host = shell.host_for_sprite(main)
+            assert host.screen is b, "身体整块进邻屏 → 移交"
+            assert _global(shell, main) == before_global, (
+                "原子换帧：移交本身一个像素都不许移动这只（全局位置逐位不变）")
+            assert _global_target(shell, main) == spring_before, (
+                "弹簧目标的全局位置不许被改写")
+            assert QPointF(main.velocity) == velocity_before, "速度不许被改写"
+            assert _global_trail(shell, main) == pytest.approx(trail_before, abs=1e-6), (
+                "轨迹样本的全局位置不许被改写")
+        finally:
+            shell.driver.set_post_advance(
+                lambda _dt: shell.route_seam_after_advance())
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+# ---------------------------------------------------------------- 4. 只有真相接的屏相连
+def _drag_to(shell, sprite, target_global):
+    overlay, origin, cursor = _grab(shell, sprite)
+    overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+    _tick(shell)
+    overlay.mouseMoveEvent(_move(target_global - origin, target_global))
+    _tick(shell)
+    return overlay, origin
+
+
+def test_touching_group_requires_a_shared_edge(tmp_path, monkeypatch):
+    """斜对角、只差一个像素都不算相接：那只宠不许被送到隔着空洞的屏上。"""
+    a = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="A")
+    # 右下方错位一块屏：与 A 既不共享竖边也不共享横边（只有角点相接）
+    diagonal = FakeScreen((1930, 1000, 1920, 1080), (1930, 1000, 1920, 1040), name="D")
+    _install(monkeypatch, [a, diagonal])
+    shell = _shell(tmp_path, a)
+    try:
+        assert [s.name() for s in shell._screen_touch_group(a)] == ["A"], (
+            "角点相接不是相接（否则外接矩形里的空洞会变成通道）")
+
+        main = shell.sprite
+        main.set_pos(QPointF(300.0, 600.0))
+        overlay, origin = _drag_to(shell, main, QPointF(2200.0, 600.0))
+        assert shell.host_for_sprite(main).screen is a, "隔空洞的屏不算通道"
+        assert len(shell.hosts()) == 1, "隔着空洞不许建窗"
+        body = QRectF(main.body_rect()).translated(
+            shell.host_for_sprite(main).overlay.geometry().topLeft())
+        assert QRect(0, 0, 1920, 1040).contains(
+            QRect(int(body.x()), int(body.y()),
+                  main.body_rect().width(), main.body_rect().height())), (
+            "没能过去的那只必须仍完整落在自己的可用区里")
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_touching_group_follows_real_edges_on_all_four_sides(tmp_path, monkeypatch):
+    """左右上下（含负坐标）的真相接都算通道：身体整块过去就换宿主。"""
+    cases = [
+        ("right", FakeScreen((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), name="R")),
+        ("left", FakeScreen((-1920, 0, 1920, 1080), (-1920, 0, 1920, 1040), name="L")),
+        ("below", FakeScreen((0, 1080, 1920, 1080), (0, 1080, 1920, 1040), name="B")),
+        ("above", FakeScreen((0, -1080, 1920, 1080), (0, -1080, 1920, 1040), name="T")),
+    ]
+    for name, neighbour in cases:
+        a = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="A")
+        _install(monkeypatch, [a, neighbour])
+        shell = _shell(tmp_path / name, a)
+        try:
+            group = shell._screen_touch_group(a)
+            assert len(group) == 2, f"{name}: 真相接应当成组"
+            main = shell.sprite
+            main.set_pos(QPointF(600.0, 500.0))
+            body = main.body_rect()
+            target = {
+                "right": QPointF(2600.0, 500.0),
+                "left": QPointF(-1300.0, 500.0),
+                "below": QPointF(600.0, 1600.0),
+                "above": QPointF(600.0, -600.0),
+            }[name]
+            # 拖进邻屏深处（身体整块过去）：逐拍朝目标推进
+            overlay, origin, cursor = _grab(shell, main)
+            overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+            _tick(shell)
+            start = QPointF(cursor)
+            for step in range(1, 61):
+                cursor = start + (target - start) * (step / 60.0)
+                overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+                _tick(shell)
+            host = shell.host_for_sprite(main)
+            assert host.screen is neighbour, f"{name}: 身体整块进入邻屏后应当换宿主"
+            body_global = QRectF(main.body_rect()).translated(
+                shell.host_for_sprite(main).overlay.geometry().topLeft())
+            assert QRect(neighbour.availableGeometry()).contains(
+                QRect(int(body_global.x()), int(body_global.y()),
+                      main.body_rect().width(), main.body_rect().height())), (
+                f"{name}: 换了宿主后身体在邻屏可用区内")
+            overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        finally:
+            hosts_mod._cleanup(shell)
+
+
+def test_switch_off_drag_opens_no_domain_and_no_window(tmp_path, monkeypatch):
+    """开关关着：拖拽不开跨屏域、不建第二张窗（默认态与旧行为逐位相同）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a, switch=False)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(300.0, 600.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        cursor = QPointF(origin.x() + 2600.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+
+        assert getattr(main, "_clamp_rects", None) is None, "关着时不开跨屏域"
+        assert len(shell.hosts()) == 1, "关着时不许因为拖拽多建窗"
+        assert shell.host_for_sprite(main).screen is a
+    finally:
+        hosts_mod._cleanup(shell)
+
+
+def test_domain_narrows_once_the_body_is_fully_inside_one_screen(tmp_path, monkeypatch):
+    """身体整块落在某块屏可用区内 → 收窄回常规单屏钳制（过渡结束）。"""
+    a, b = _two_screens()
+    _install(monkeypatch, [a, b])
+    shell = _shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(600.0, 500.0))
+        overlay, origin, cursor = _grab(shell, main)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        cursor = QPointF(origin.x() + 1000.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        assert getattr(main, "_clamp_rects", None) is not None, "拖拽中域是开的"
+        _tick(shell)
+        assert getattr(main, "_clamp_rects", None) is not None, (
+            "拖拽没收尾 → 域一直开着（通道要开满整场拖拽）")
+        cursor = QPointF(origin.x() + 2200.0, cursor.y())
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        _tick(shell)
+        host = shell.host_for_sprite(main)
+        assert host.screen is b, "身体整块进副屏 → 移交"
+        assert getattr(main, "_clamp_rects", None) is not None, (
+            "还在拖拽 → 域保持开着（收域只在松手后、且身体已合法时）")
+        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        _tick(shell)
+        assert getattr(main, "_clamp_rects", None) is None, (
+            "松手后身体已整块在副屏内 → 域收窄（回到常规单屏钳制）")
+        host = shell.host_for_sprite(main)
+        assert host.screen is b
+        assert host.bounds == shell._local_bounds(b), "收窄后用该屏可用区当钳制域"
+    finally:
+        hosts_mod._cleanup(shell)

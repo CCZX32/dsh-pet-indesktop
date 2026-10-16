@@ -84,7 +84,8 @@ from collections import deque
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QTimer, Qt, Signal)
 from PySide6.QtGui import QBitmap, QGuiApplication, QIcon, QImage, QPixmap, QRegion
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
@@ -840,19 +841,19 @@ class ShellOverlayWindow(OverlayWindow):
         probe = self._probe_of(sprite)
         if probe is not None:
             probe.on_sprite_drag_started(sprite)
+        cb = getattr(self, "_drag_opened_cb", None)
+        if callable(cb):
+            cb(sprite)  # 壳层：拖拽开始即开跨屏临时合法域（跨屏拖拽的唯一入口）
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         self._press_pos = event.position()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        # 跨屏拖拽：先让壳层判定/执行宿主移交（把这一跳的全局光标位置喂进去），
-        # 再交给基类按 sprite 当前宿主换算坐标。瞄准中 sprite 定锚不动，不换屏。
-        grab = self._mouse_grab
-        route = getattr(self, "_drag_route_cb", None)
-        if (grab is not None and self._drag_committed
-                and not self.slingshot.aiming and callable(route)):
-            route(grab, event.globalPosition().toPoint())
+        # 跨屏移交**不在这里**判：拖动物理（弹簧档）的实际位移发生在 sprite.advance
+        # 里，事件时刻读到的是上一拍的位置——按它判会在身体真正过缝之前提前换宿主
+        # （宠被换到一块身体还没进入的屏上，随后被钳住 = 跨屏大跳）。移交统一由
+        # 驱动器"全部 overlay advance 之后"的钩子按实际身体位置判（每 tick 每只一次）。
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
@@ -864,11 +865,6 @@ class ShellOverlayWindow(OverlayWindow):
         grab = self._mouse_grab
         committed = self._drag_committed  # super() 的 _finish_grab 会清旗标，先快照
         click_only = self._press_click_only  # 锁定位/SHIFT 门（同样先快照）
-        route = getattr(self, "_drag_route_cb", None)
-        if grab is not None and committed and not click_only and callable(route):
-            # 松手落点也过一次移交判定：快速拖动可能只有 release 落在另一块屏上
-            # （没有中间 move），漏这一步宠会钉在旧屏边缘而不是跟着光标落下
-            route(grab, event.globalPosition().toPoint())
         press, self._press_pos = self._press_pos, None
         super().mouseReleaseEvent(event)
         behavior = self._behavior_of(grab)
@@ -1295,6 +1291,9 @@ class OverlayShell(QObject):
         # M-2 统一 tick 驱动器（T2）：进程级**一个**时钟驱动全部屏宿主；仿真段
         # 按宿主分组（见 tick_driver.tick_sim），overlay 只做 advance+paint。
         self.driver = TickDriver(self)
+        # 跨屏路由：全部 overlay advance 之后跑一次（每 tick 每只一次）——弹簧档的
+        # 实际位移发生在 advance 里，事件时刻判会提前移交（跨屏大跳的来源）。
+        self.driver.set_post_advance(lambda _dt: self.route_seam_after_advance())
         # 主宿主（主屏）。slot0 的窗口语义挂在它上面：self.overlay / _bounds /
         # 三控制器 / 探头 / 彩蛋都是它的面。
         host = self._create_host(self._initial_screen)
@@ -1469,8 +1468,10 @@ class OverlayShell(QObject):
         # 跨屏拖拽：输入会话留在按下窗，坐标按 sprite 当前宿主换算；跟随方
         # 也按 sprite 归属窗取（见 OverlayWindow._sprite_event_pos / _follow_overlay）
         overlay._host_for_sprite = self.host_for_sprite
-        # 拖拽路由（每次 move/release 判一次是否该移交宿主）
-        overlay._drag_route_cb = self.route_drag_to_screen
+        # 跨屏移交：**不在事件时刻判**（见 ShellOverlayWindow.mouseMoveEvent），
+        # 由驱动器"全部 overlay advance 之后"的钩子按这一拍的实际身体位置判
+        # （每 tick 每只一次）；拖拽开始即开跨屏临时合法域。
+        overlay._drag_opened_cb = self._open_seam_domain
         # sprite-removed 三条注销监听（迁移/换屏重建 overlay 必须重挂，否则
         # 退出任意一只宠都不再注销行为/探头/彩蛋状态）
         self._wire_sprite_removed_hooks(overlay, host)
@@ -6119,6 +6120,196 @@ class OverlayShell(QObject):
         return None
 
     @staticmethod
+    def _screens_touch(a, b) -> bool:
+        """两块屏是否**真实相接**（共享一段正长度的边）。
+
+        只用几何矩形判：共享边必须有正长度（错开的角落不算相接），故外接矩形里的
+        屏间空洞不会被算成可通行。
+        """
+        ga, gb = a.geometry(), b.geometry()
+        vertical = (ga.x() + ga.width() == gb.x() or gb.x() + gb.width() == ga.x())
+        horizontal = (ga.y() + ga.height() == gb.y() or gb.y() + gb.height() == ga.y())
+        overlap_y = min(ga.y() + ga.height(), gb.y() + gb.height()) - max(ga.y(), gb.y())
+        overlap_x = min(ga.x() + ga.width(), gb.x() + gb.width()) - max(ga.x(), gb.x())
+        return (vertical and overlap_y > 0) or (horizontal and overlap_x > 0)
+
+    def _screen_touch_group(self, screen) -> list:
+        """与 ``screen`` 连通的相接屏组（含它自己；按相接关系传递闭包）。"""
+        screens = []
+        for candidate in QGuiApplication.screens():
+            try:
+                if candidate is not None:
+                    screens.append(candidate)
+            except RuntimeError:
+                continue
+        group = [screen]
+        frontier = [screen]
+        while frontier:
+            current = frontier.pop()
+            for candidate in screens:
+                if candidate in group or not self._screens_touch(current, candidate):
+                    continue
+                group.append(candidate)
+                frontier.append(candidate)
+        return group
+
+    def _seam_domain_rects(self, host) -> tuple:
+        """该宿主所在屏的跨屏合法域（overlay 局部坐标）：相接屏组的可用区。
+
+        **全局可用区减去本宿主窗的原点**：``_local_bounds`` 是"屏可用区减去**该屏自己**
+        的原点"（屏局部坐标），拿它再减宿主原点等于把原点减了两次——邻屏矩形会塌到
+        本屏位置上，域就形同虚设。
+
+        单屏（组里只有它自己）返回空元组 = 不需要开域。
+        """
+        group = self._screen_touch_group(host.screen)
+        if len(group) <= 1:
+            return ()
+        origin = host.overlay.geometry().topLeft()
+        rects = []
+        for screen in group:
+            rects.append(QRectF(screen.availableGeometry()).translated(
+                -origin.x(), -origin.y()))
+        return tuple(rects)
+
+    def _open_seam_domain(self, sprite) -> bool:
+        """拖拽跨屏：给这只**开放跨屏临时合法域**（相接屏组的可用区并集）。
+
+        开域只放宽、不移动：新域是旧域（本屏可用区）的超集，当前身体位置必然仍合法，
+        所以不需要补钳制。单屏（没有相接的屏）或关闭跨屏时不动作。
+        """
+        if sprite is None or not self._cross_screen_allowed:
+            return False
+        host = self._host_of(sprite)
+        if host is None:
+            return False
+        rects = self._seam_domain_rects(host)
+        if not rects:
+            return False
+        sprite.set_clamp_rects(rects)
+        return True
+
+    def _close_seam_domain(self, sprite) -> bool:
+        """收窄跨屏域：**只在身体已完整落在本屏可用区内**时收（否则就是一次钳制位移）。
+
+        返回是否真的收了域。
+        """
+        if sprite is None or getattr(sprite, "_clamp_rects", None) is None:
+            return False
+        host = self._host_of(sprite)
+        if host is None:
+            return False
+        if not self._body_inside(sprite, QRectF(host.bounds)):
+            return False
+        sprite.set_clamp_rects(None)
+        sprite.set_bounds(QRect(host.bounds))
+        return True
+
+    @staticmethod
+    def _rect_covers(outer: QRectF, inner: QRectF) -> bool:
+        """``inner`` 是否完整落在 ``outer`` 内（**含边界**）。
+
+        必须含边界：``set_pos`` 的钳制把贴边的身体正好压在可用区边上（body 底 ==
+        可用区底），用右侧/下侧开区间的判定会把"已经整块进来"判成否——跨屏移交与
+        收域都永远不成立。QRectF.contains(QRectF) 在浮点矩形上的边界语义不保证，
+        这里用显式比较。
+        """
+        return (outer.left() <= inner.left() and outer.top() <= inner.top()
+                and inner.left() + inner.width() <= outer.left() + outer.width()
+                and inner.top() + inner.height() <= outer.top() + outer.height())
+
+    @staticmethod
+    def _body_inside(sprite, rect: QRectF) -> bool:
+        """这只的身体框是否**完整**落在该矩形内（收域判据；两者同一坐标系）。
+
+        ``sprite.body_rect()`` **已经含 pos**（= rect 原点 + body_box），它就在当前
+        宿主的局部坐标里——再叠一次 ``pos`` 就是双重平移（把身体框算到屏外去）。
+        """
+        return OverlayShell._rect_covers(QRectF(rect), QRectF(sprite.body_rect()))
+
+    def _global_body_rect(self, sprite) -> QRectF | None:
+        """这只身体框的全局矩形（跨屏判据统一用它；body_rect 含 pos，只加窗口原点）。"""
+        host = self._host_of(sprite)
+        if host is None:
+            return None
+        return QRectF(sprite.body_rect()).translated(
+            host.overlay.geometry().topLeft())
+
+    def route_seam_after_advance(self) -> None:
+        """每 tick（全部 overlay advance 之后）的一次跨屏判定：**每 tick 每 sprite 一次**。
+
+        只处理"开了跨屏域"的 sprite（跨屏拖拽中/过渡中的那些）：没开域的都是常规
+        单屏宠物，这一步与它们无关。单屏或关闭跨屏时连遍历都不做。
+        """
+        if not self._cross_screen_allowed:
+            return
+        for host in list(self._hosts):
+            for sprite in list(host.overlay.sprites):
+                if getattr(sprite, "_clamp_rects", None) is None:
+                    continue
+                self._route_one_seam(sprite)
+
+    def _route_one_seam(self, sprite) -> bool:
+        """单只一次的跨屏判定，判据全部取自**这一拍的实际身体位置**：
+
+        - 身体完整落在**另一块屏**的可用区内 → 移交宿主（原子换帧：位置/目标/样本
+          一律不变，中间不经任何单矩形钳制）；
+        - 身体完整落在**本屏**可用区内 → 收窄域（回到常规单屏钳制）；
+        - 身体跨在缝上 → 保持开域：**不动它**（视觉由相邻窗的投影负责）。
+
+        返回是否发生了移交。
+        """
+        if sprite is None or not self._cross_screen_allowed:
+            return False
+        host = self._host_of(sprite)
+        if host is None:
+            return False
+        body = self._global_body_rect(sprite)
+        if body is None:
+            return False
+        screen = self._screen_fully_containing(body)
+        if screen is None:
+            return False  # 跨缝：保持开域
+        if screen is host.screen:
+            # 还在拖拽中就不收域：通道要开满整场拖拽（拖到一半就收，等于跨不过去）。
+            # 松手之后（dragging 清零）身体若已完整落在本屏内才算过渡结束。
+            if not getattr(sprite, "dragging", False):
+                self._close_seam_domain(sprite)
+            return False
+        target = self.host_for_screen(screen) or self._create_host(screen)
+        self._transfer_sprite(sprite, host, target)
+        self._keep_seam_domain(sprite)
+        self._reap_empty_hosts()
+        return True
+
+    def _screen_fully_containing(self, body_global: QRectF):
+        """身体框**完整**落在哪块屏的可用区里（跨屏移交的唯一判据；含边界）。
+
+        判据用可用区（而不是屏几何）：换宿主之后这只就被那块屏的可用区钳着——
+        只有"已经整块落在那个域里"才能保证换帧不需要任何钳制。
+        """
+        for screen in QGuiApplication.screens():
+            try:
+                avail = QRectF(screen.availableGeometry())
+            except RuntimeError:
+                continue
+            if self._rect_covers(avail, body_global):
+                return screen
+        return None
+
+    def _keep_seam_domain(self, sprite) -> None:
+        """移交后按新的宿主重算开域矩形（局部坐标随宿主变，必须重算）。
+
+        重算等价于"只换坐标系"：新矩形集合在新局部坐标里同样包含身体位置，
+        故不需要任何钳制。
+        """
+        host = self._host_of(sprite)
+        if host is None:
+            return
+        rects = self._seam_domain_rects(host)
+        sprite.set_clamp_rects(rects or None)
+
+    @staticmethod
     def _sprite_body_center_global(sprite, top_left_global) -> QPointF:
         """sprite 身体框中心的全局坐标（``top_left_global`` = 它的全局左上角）。"""
         rect = sprite.rect()
@@ -6138,39 +6329,17 @@ class OverlayShell(QObject):
             return None
         return QPointF(cursor_global) - QPointF(offset)
 
-    def route_drag_to_screen(self, sprite, cursor_global) -> bool:
-        """跨屏拖拽路由：该 sprite 的身体中心落在别的屏上就移交宿主。
+    def route_drag_to_screen(self, sprite, cursor_global=None) -> bool:
+        """跨屏路由（单只一次；公开接缝，逐 tick 由 :meth:`route_seam_after_advance` 调）。
 
-        - 判据取**光标锚定的落点**（``_drag_offset`` = 光标 − 落点，换屏前后逐位
-          相同）算出的身体中心：它才是"用户把这只拽到哪儿了"。刻意**不**用身体
-          当前位置——身体被钳在本屏可用区里（弹簧档下更落后于目标几十像素），
-          它永远到不了缝上，"按实际位置换屏"等于这只宠根本拖不过去；
-        - 移交**保留实际全局位置与拖拽会话**：只换坐标系（``global_pos=None``），
-          位置、弹簧目标、轨迹一起换帧。若在这里按光标落点 ``set_pos``，拖动物理
-          开着时会把这只从当前位置瞬移到光标处（抹掉弹簧滞后）——跨屏那一帧的
-          位移会随滞后量一起变大；
-        - 目标屏还没有宿主就现建一个（第一次被占用即建窗口）；
-        - 身体中心不在任何屏上（错位拼接的空洞、拖出桌面）时保持当前宿主不变，
-          宠不会被甩到自己不在的那块屏上。
+        判据取**这一拍的实际身体位置**（见 :meth:`_route_one_seam`）：弹簧档的实际
+        位移发生在 ``sprite.advance`` 里，按事件时刻的光标落点判会在身体真正过缝
+        之前提前换宿主——宠被换到一块身体还没进入的屏上、随后被那块屏的钳制拉过去，
+        这正是跨屏大跳的来源。
 
-        返回是否发生了移交。
+        ``cursor_global`` 只为兼容既有调用点保留（本判据不再使用光标）。
         """
-        if sprite is None or not self._cross_screen_allowed:
-            return False
-        source = self._host_of(sprite)
-        if source is None:
-            return False
-        desired = self._desired_global_pos(sprite, cursor_global)
-        if desired is None:
-            return False
-        center = self._sprite_body_center_global(sprite, desired)
-        screen = self._screen_at_global(center)
-        if screen is None or screen is source.screen:
-            return False
-        # 只换坐标系（不给 global_pos）：位置与拖拽会话（弹簧目标/轨迹）整体换帧，
-        # 跨屏那一帧不产生"跳到光标处"的位移（拖动物理开着时那一步就是滞后量）
-        self.move_sprite_to_screen(sprite, screen)
-        return True
+        return self._route_one_seam(sprite)
 
     def move_sprite_to_screen(self, sprite, screen, global_pos=None) -> bool:
         """把**这一只**宠放到指定屏（跨屏拖拽与显式调用共用；返回是否真的换了宿主）。
@@ -6244,10 +6413,19 @@ class OverlayShell(QObject):
             sprite.translate_frame(delta)
         source.overlay.detach_sprite_for_transfer(sprite)
         source.behavior.forget(sprite)  # 状态表过继：目标宿主下一 tick 重建
-        sprite.set_bounds(QRect(target.bounds))
+        # 原子换帧：位置与域必须**同时**按同一个 delta 换算，中间不许出现任何单矩形
+        # 钳制（旧顺序 set_bounds(新矩形) → 用旧局部坐标补钳 → 再 set_pos 减 delta，
+        # 会在缝上连钳两次，这就是跨屏大跳的来源）。
+        seam = getattr(sprite, "_clamp_rects", None)
+        if seam:
+            sprite.set_clamp_rects(
+                tuple(rect.translated(-delta.x(), -delta.y()) for rect in seam))
+        else:
+            sprite.set_bounds(QRect(target.bounds))
         sprite.home_screen = target.screen
         target.overlay.add_sprite(sprite)  # 重挂脏/活力回调，按新屏 DPR 重建帧
         if global_pos is None:
+            # 只换坐标系：old_origin + pos == new_origin + (pos - delta) 逐位成立
             sprite.set_pos(sprite.pos - delta)
         else:
             sprite.set_pos(QPointF(global_pos - new_origin))
@@ -6389,6 +6567,12 @@ class OverlayShell(QObject):
         """
         logging.info("overlay: screen removed (%s)", _screen_name(screen))
         host = self.host_for_screen(screen)
+        # 跨屏临时合法域里可能含这块已拔掉的屏：先全部收回（域是"当时那些相接屏"的
+        # 快照，屏没了还留着它就等于把宠放进一块不存在的屏）。下一次拖拽会重开。
+        for other in list(self._hosts):
+            for sprite in list(other.overlay.sprites):
+                if getattr(sprite, "_clamp_rects", None) is not None:
+                    sprite.set_clamp_rects(None)
         if host is None:
             return
         self._end_drag(host)  # 拖拽中拔屏处置（v1.1 §10）

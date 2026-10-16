@@ -83,6 +83,12 @@ class PetSprite(QObject):
         self._dpr = 1.0
         # D3：钳制域（overlay 局部逻辑坐标的工作区，None = 不钳制）。
         self._bounds: QRectF | None = None
+        # 跨屏过渡的**多矩形合法域**（sprite 局部？否——overlay 局部逻辑坐标，
+        # 与 ``_bounds`` 同系）：拖拽跨屏时这只正跨在两块屏的缝上，任何**单矩形**
+        # 域都会把它在缝上钳住（这正是跨屏跳位的几何来源）。登记的是"真实相接的
+        # 那几块屏的可用区"，故外接矩形里的屏间空洞**不在**域内（宠不会被送进
+        # 没有显示器的地方）。None = 走常规 ``_bounds`` 单矩形语义。
+        self._clamp_rects: tuple[QRectF, ...] | None = None
         # T2 多屏占位：sprite 的归属屏（多屏钳制用，本刀只留字段）。
         self.home_screen = None
         # pos 为 overlay 局部逻辑坐标（Phase 1a 单屏：overlay 铺满主屏，
@@ -421,11 +427,93 @@ class PetSprite(QObject):
 
         放宽域由本 sprite 的 bounds + 身体框就地算出、只作用于自己（不写共享
         状态），因此不影响其它 sprite 的钳制。
+
+        多矩形跨屏域（``_clamp_rects``）**不**经由本方法返回：那是"多个合法矩形"
+        而不是一个矩形，``_at_ground``/``set_pos`` 各取所需（前者要离当前身体最近的
+        那一块，后者逐块钳取位移最小的解）。
         """
         relaxed = self.probe_clamp_bounds()
         if relaxed is not None:
             return relaxed
+        if self._clamp_rects is not None:
+            return self._settling_rect()
         return self._bounds
+
+    def _settling_rect(self) -> QRectF | None:
+        """多矩形域里离这只最近的那一块（``_at_ground`` 这类单矩形口径的取法）。
+
+        贴地/落地判据只对"这只此刻所在的那块屏"有意义：取包含身体中心的那块，
+        都不包含时取中心距离最近的那块（错位拼接的缝上就是这种情形）。
+        """
+        rects = self._clamp_rects
+        if not rects:
+            return None
+        body = self._body_local_rect()
+        cx = self.pos.x() + body.x() + body.width() / 2.0
+        cy = self.pos.y() + body.y() + body.height() / 2.0
+        best = None
+        for rect in rects:
+            if rect.contains(cx, cy):
+                return rect
+            dx = max(rect.left() - cx, 0.0, cx - (rect.left() + rect.width()))
+            dy = max(rect.top() - cy, 0.0, cy - (rect.top() + rect.height()))
+            d = dx * dx + dy * dy
+            if best is None or d < best[0]:
+                best = (d, rect)
+        return best[1] if best is not None else None
+
+    def set_clamp_rects(self, rects) -> None:
+        """登记/清除**多矩形合法域**（跨屏拖拽过渡期用；``None`` 恢复 ``_bounds``）。
+
+        与 :meth:`set_bounds` 的分工：后者是常规单矩形工作区，并在设置时补一次
+        钳制（不变量立刻成立）；本方法**不**补钳制——调用方只在"这只的当前位置
+        已经落在新域内"时开域（域总是旧域的**超集**：相邻屏的可用区并集），补
+        一次钳制反而是多余的位移风险。收窄（清除）由调用方在"身体已完整落在某块
+        屏的可用区内"之后做，那时单矩形域同样不含任何钳制。
+        """
+        if rects is None:
+            self._clamp_rects = None
+            return
+        self._clamp_rects = tuple(QRectF(rect) for rect in rects)
+
+    def _clamp_targets(self) -> tuple[QRectF, ...]:
+        """``set_pos`` 可用的钳制矩形集合（多矩形域优先，否则单域一块）。"""
+        rects = self._clamp_rects
+        if rects:
+            return rects
+        domain = self._clamp_domain()
+        return () if domain is None else (domain,)
+
+    @staticmethod
+    def _rect_covered(body: QRectF, rects) -> bool:
+        """``body`` 是否**逐点**落在 rects 的并集里（轴对齐网格切分，精确）。
+
+        跨屏缝上这只的身体本来就横跨两块屏——"整块落在**某一块**矩形里"会把它钉在
+        缝的一侧（这正是跨屏过不去/被钳回来的来源）。合法条件必须是**身体 ⊆ 并集**：
+        缝上（身体横跨两块相连屏）合法，错位拼接的屏间空洞不合法。
+        用 rects 的边把身体切成网格逐格判中心点，轴对齐下与"逐点"等价且只花几十次
+        比较（域最多几块屏，且只有开域期走这条路）。
+        """
+        xs = {body.left(), body.left() + body.width()}
+        ys = {body.top(), body.top() + body.height()}
+        for rect in rects:
+            for value in (rect.left(), rect.left() + rect.width()):
+                if body.left() < value < body.left() + body.width():
+                    xs.add(value)
+            for value in (rect.top(), rect.top() + rect.height()):
+                if body.top() < value < body.top() + body.height():
+                    ys.add(value)
+        xs = sorted(xs)
+        ys = sorted(ys)
+        for left, right in zip(xs, xs[1:]):
+            for top, bottom in zip(ys, ys[1:]):
+                cx = (left + right) / 2.0
+                cy = (top + bottom) / 2.0
+                if not any(rect.left() <= cx <= rect.left() + rect.width()
+                           and rect.top() <= cy <= rect.top() + rect.height()
+                           for rect in rects):
+                    return False
+        return True
 
     def _at_ground(self) -> bool:
         """是否已贴住活动区地面（松手语义用，容差同 ``physics.is_at_rest``）。
@@ -457,15 +545,31 @@ class PetSprite(QObject):
 
         探头姿态（probe_exposure<1）改用放宽域（probe_body_bounds 语义），
         身体可整体藏出左右缘；取消探头即恢复常规钳制。
+
+        多矩形域（跨屏过渡，``_clamp_rects``）：身体**逐点落在并集内**就一步不动
+        （跨在缝上是合法的：缝两边都有显示器）；只有落进屏间空洞时才把它推到最近的
+        那一块屏——域内永远没有"没有显示器"的合法位置。
         """
         x, y = float(pos.x()), float(pos.y())
-        b = self._clamp_domain()
-        if b is not None:
+        targets = self._clamp_targets()
+        if targets:
             body = self._body_local_rect()
-            x = self._clamp_axis(x, b.left(), b.left() + b.width(),
-                                 body.x(), body.width())
-            y = self._clamp_axis(y, b.top(), b.top() + b.height(),
-                                 body.y(), body.height())
+            if len(targets) > 1 and self._rect_covered(
+                    QRectF(x + body.x(), y + body.y(), body.width(), body.height()),
+                    targets):
+                pass  # 缝上/屏内：合法，不动
+            else:
+                best = None
+                for b in targets:
+                    cx = self._clamp_axis(x, b.left(), b.left() + b.width(),
+                                          body.x(), body.width())
+                    cy = self._clamp_axis(y, b.top(), b.top() + b.height(),
+                                          body.y(), body.height())
+                    d = (cx - x) * (cx - x) + (cy - y) * (cy - y)
+                    if best is None or d < best[0]:
+                        best = (d, cx, cy)
+                if best is not None:
+                    x, y = best[1], best[2]
         new_pos = QPointF(x, y)
         if new_pos == self.pos:
             return

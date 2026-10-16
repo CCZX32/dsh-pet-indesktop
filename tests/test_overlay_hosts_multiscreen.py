@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import json
 
 import pytest
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -159,6 +159,12 @@ def _painted(overlay, canvas) -> bool:
         painter.end()
 
 
+def _tick(shell, dt=1 / 60.0):
+    """一个真 tick 的两段（推进段收尾才跑跨屏路由）。"""
+    shell.driver.tick_sim(dt)
+    shell.driver.advance_overlays(dt)
+
+
 def _right_press(local, global_pos):
     return QMouseEvent(
         QEvent.Type.MouseButtonPress, QPointF(local), QPointF(global_pos),
@@ -167,7 +173,11 @@ def _right_press(local, global_pos):
 
 
 def _drag_across(shell, sprite, *, steps=16, step_px=40):
-    """把 sprite 从 A 拖到 B（真鼠标事件序列，会话留在 A 的窗口）。
+    """把 sprite 从 A 拖到 B（真鼠标事件序列 + 每步一个 tick）。
+
+    跨屏移交由"全部 overlay advance 之后"的钩子按**这一拍的实际身体位置**判，
+    所以每一步都要走一个真 tick（仿真段 + 推进段）——这正是窗口在拖拽期间一直在
+    跑的那个时钟。
 
     返回 (落点全局坐标, A 窗局部坐标)；光标从按下点起每步向右 ``step_px``，默认
     共 640px——落点深入 B，抓取偏移不会被左缘钳制掩盖。
@@ -181,6 +191,8 @@ def _drag_across(shell, sprite, *, steps=16, step_px=40):
     for _ in range(steps):
         cursor = QPointF(cursor.x() + step_px, cursor.y())
         overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
+        shell.driver.tick_sim(1 / 60.0)
+        shell.driver.advance_overlays(1 / 60.0)
     return cursor, cursor - origin_a
 
 
@@ -302,8 +314,18 @@ def test_drag_across_screens_transfers_only_the_dragged_pet(tmp_path, monkeypatc
         # 拖拽期间源窗不拆：这次输入会话还握在它手里（拆了会话就再也收不了尾）
         assert overlay_a in shell.driver.overlays
         assert overlay_a._mouse_grab is main
-        # 只迁这一只：子宠全局位置与归属一分不变
-        assert _global_of(host_child, child) == child_global
+        # 只迁这一只：子宠的屏归属与成员表一分不变；位置只允许它自己的正常走动
+        # （逐拍 tick 里行为链的位移，约 1px/拍），不得被这次移交带动，也不得被
+        # 带到别的屏的域里去
+        child_moved = _global_of(host_child, child) - child_global
+        assert (child_moved.x(), child_moved.y()) == pytest.approx((0.0, 0.0), abs=24.0), (
+            f"子宠被这次移交带动了 {child_moved}")
+        body_child = QRectF(child.body_rect()).translated(
+            host_child.overlay.geometry().topLeft())
+        assert QRect(1920, 0, 1920, 1040).contains(
+            QRect(int(body_child.x()), int(body_child.y()),
+                  child.body_rect().width(), child.body_rect().height())), (
+            "子宠必须仍完整落在它自己那块屏的可用区里")
         # 挂接点没变：两张窗口各自钉在自己那块屏上（拖拽移动的是绘制，不是窗口）
         assert overlay_a.geometry() == geometry_a
         assert host_b.overlay.geometry() == b.geometry()
@@ -334,19 +356,21 @@ def test_cross_screen_drag_keeps_release_velocity_sane(tmp_path, monkeypatch):
         hit = QPointF(main.rect().center())
         overlay_a.mousePressEvent(_press(hit, origin_a + hit))
         trail_samples = []
-        for step in range(1, 8):
+        for step in range(1, 26):
             cursor = QPointF(1700 + 40 * step, 400)
             overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
+            shell.driver.tick_sim(1 / 60.0)
+            shell.driver.advance_overlays(1 / 60.0)
             trail_samples.append(step)
         host_b = shell.host_for_sprite(main)
-        assert host_b.screen is b
+        assert host_b.screen is b, "身体整块进入邻屏后应当移交"
         # 轨迹样本整体换帧：相邻样本差仍是每步 40px（没有被拼成跨屏的一跳）
         trail = main.drag_trail
         assert len(trail) >= 2
         deltas = [abs(trail[i + 1][1] - trail[i][1]) for i in range(len(trail) - 1)]
         # 首个差值含"按下点 → 第一帧光标"的固有位移，只看其后：每步都是 40px
         assert deltas[1:] == pytest.approx([40.0] * (len(deltas) - 1)),             f"轨迹样本帧内一致，实测 {deltas}"
-        cursor = QPointF(1700 + 40 * 7, 400)
+        cursor = QPointF(1700 + 40 * 25, 400)
         overlay_a.mouseReleaseEvent(_release(cursor - origin_a, cursor))
         # 反例锚点：换帧不得把轨迹拼成一跳（否则 estimate_release_velocity 会
         # 把这一跳当成甩动；trail 已在断言段逐差核对）
@@ -731,53 +755,55 @@ def test_slingshot_gesture_after_crossing_uses_one_coordinate_system(
 
 # ---------------------------------------------------------------- 跨屏与弹簧拖拽
 def test_crossing_with_drag_physics_keeps_the_spring_lag(tmp_path, monkeypatch):
-    """拖动物理开着时跨屏：**不**把这只从当前位置瞬移到光标处（弹簧滞后保留）。
+    """拖动物理开着时跨屏：逐拍连续、滞后保留，**不**瞬移到光标处。
 
-    弹簧档的位置由阻尼积分追目标点，跨屏那一帧若按光标落点 ``set_pos``，滞后会被
-    一次抹掉（位移随滞后量一起变大，手感上就是"过缝被吸过去"）。移交只换坐标系：
-    位置与目标点、轨迹整体换帧。
+    移交发生在"全部 overlay advance 之后"（弹簧的实际位移也在 advance 里），所以这
+    里每一拍都走一个真 tick：跨屏那一拍只允许出现弹簧自己的位移（**不超过到目标的
+    剩余滞后**），换宿主后滞后仍然存在（不是被抹平后从光标处重新开始）。
+    跨屏域/原子换帧/轨迹一致这些更细的判据在 ``tests/test_overlay_seam_passage.py``。
     """
     a, b = _two_screens()
     _install_screens(monkeypatch, a, b)
     shell = _make_shell(tmp_path, a, {"drag_physics": True})
     try:
         main = shell.sprite
-        # 从 A 的中段出发（不是贴边）：跨屏一帧的位移必须仍是一步之内的量
         main.set_pos(QPointF(600.0, 600.0))
         overlay_a = shell.overlay
         origin_a = QPointF(overlay_a.geometry().topLeft())
         _hittable(main)
         hit = QPointF(main.rect().center())
         overlay_a.mousePressEvent(_press(hit, origin_a + hit))
-        # 先走几步攒出滞后（弹簧还没积分，实际位置基本不动）
         cursor = origin_a + hit
         for _ in range(5):
             cursor = QPointF(cursor.x() + 40.0, cursor.y())
             overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
         assert shell.host_for_sprite(main).screen is a
-        lag_before = QPointF(main._drag_spring_target) - QPointF(main.pos)
-        assert lag_before.x() > 100.0, "前提：弹簧滞后已经攒出来（拖动确实落后于目标）"
+        assert (QPointF(main._drag_spring_target) - QPointF(main.pos)).x() > 100.0, (
+            "前提：弹簧滞后已经攒出来（拖动确实落后于目标）")
 
-        # 一大步直接跨过缝：目标点落到 B 深处
+        # 一大步跨过缝，然后逐拍推进：每一拍的位移都不许超过当时的剩余滞后
         cursor = QPointF(cursor.x() + 1400.0, cursor.y())
         overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
-        host_b = shell.host_for_sprite(main)
-        assert host_b.screen is b, "前提：这一步确实跨屏了"
-        assert main.pos.x() < host_b.overlay.width(), (
-            "跨屏不是瞬移到光标处：这只仍在它自己坐标系的前段（滞后保留）")
-        lag_after = QPointF(main._drag_spring_target) - QPointF(main.pos)
-        assert lag_after.x() > 0.0, "弹簧目标仍在前面（滞后没被抹平）"
-        # 目标点整体换帧：全局等价位置就是"光标 - 抓取偏移"（同一手势同一落点）
-        target_global = QPointF(host_b.overlay.geometry().topLeft()) + lag_after + QPointF(main.pos)
-        assert target_global.x() == pytest.approx(cursor.x() - main._drag_offset.x(),
-                                                  abs=2.0)
+        lag_at_cross = None
+        for tick in range(1, 120):
+            prev = _global_of(shell.host_for_sprite(main), main)
+            lag = abs(QPointF(main._drag_spring_target).x() - main.pos.x())
+            _tick(shell)
+            step = abs(_global_of(shell.host_for_sprite(main), main).x() - prev.x())
+            assert step <= lag + 4.0, (
+                f"第 {tick} 拍位移 {step} 明显超过剩余滞后 {lag}（那是瞬移不是弹簧）")
+            if shell.host_for_sprite(main).screen is b:
+                lag_at_cross = lag
+                break
+        assert shell.host_for_sprite(main).screen is b, "身体整块进副屏后应当移交"
+        assert lag_at_cross is not None and lag_at_cross > 0.0, (
+            "过缝那一刻滞后仍在（没有被抹平）")
 
-        # 松手也成立：release 会再过一次路由，但位置不得跳（弹簧档不 snap 到光标）
         before_release = _global_of(shell.host_for_sprite(main), main)
         overlay_a.mouseReleaseEvent(_release(cursor - origin_a, cursor))
         after_release = _global_of(shell.host_for_sprite(main), main)
         assert (after_release - before_release).manhattanLength() < 2.0, (
-            "松手不得把这只从我位置挪到光标处")
+            "松手不得把这只从当前位置挪到光标处")
         assert main.interaction_state in ("normal", "thrown")
     finally:
         _cleanup(shell)
