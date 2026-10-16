@@ -91,8 +91,9 @@ recovery
 | 项 | 本刀口径 |
 |---|---|
 | 被修的口径 | 2026-10-16 的 #289 把 `already-exists` 支改成"**不清源**"（源每宠键原样保留、登记在 `retained_keys`）。实测该口径**在盘上不成立**：`Config.save()` 对全局身份**无条件** `pop(PER_PET_KEYS \| SLOT_LOCAL_KEYS)`（`pet/config.py:2328`），下一次保存就把源里那批键抹掉——`retained_keys` 描述的是"保留"，用户拿到的是空配置（已用真 `Config.save()` 跑通复现）。而全局配置 + 槽档案同时装每宠值 = 规范禁止的**双真值** |
-| 回正为 | `created` 与 `already-exists` **都清源每宠键**（全局 `config.json` 不留每宠键，只有一条规则）；`already-exists` 照旧**绝不写目标**（锁内复查 + `test_slot0_migration_never_overwrites_existing_profile` 逐字节钉死）。与 2026-10-10 那条"验证既有目标后清源"一致 |
+| 回正为 | `created` 与 `already-exists` **都清源每宠键**（全局 `config.json` 不留每宠键，只有一条规则）；`already-exists` 照旧**绝不写目标**（锁内复查 + `test_slot0_migration_never_overwrites_existing_profile` 逐字节钉死）。与 2026-10-10 那条"验证既有目标后清源"一致，也就是**回到 main 的既有口径**——`origin/main`（`056dc2a`）的 `pet/pet_profiles.py` 与合并基 `6a68570` 逐字节相同，"不清源"只是这个 PR 自己的改动 |
 | 不丢数据由谁承担 | **备份**。`_backup_file` 在这条支路之前跑（`config.json.pre-slot0-migration.bak`，已存在则保留第一份、不覆盖）。清理前再验一次"这份备份**装的就是即将被清掉的那批值**"（`_backup_holds_values`，值逐条相等——比"键在不在"强）；若规范备份路径已被**另一份快照**占用（旧快照也能过键存在性校验），**不覆盖它**，另存时间戳恢复副本 `config.json.pre-slot0-migration-recovery-<毫秒>-<pid>.bak`，结果走新增字段 `recovery_path`。取不到恢复副本就**不清源**并返回 `backup-failed`——宁可不做，也不做不可恢复的删除 |
+| 相对 main 的净增量 | **只有上面"恢复保证"那半边**（清源口径与 main 一致）。实测对照：同一现场跑在 `origin/main` 上，`already-exists` 同样清源、同样不覆盖旧备份，但**没有恢复副本**（连 `recovery_path` 字段都不存在）⇒ 规范备份被旧快照占用时当前每宠键**真丢 6 个**；本刀把这条路堵上 |
 | 可诊断 | `already-exists` 结果：`retained_keys` = 未采用的源每宠键、`reason` 点名备份/副本文件名、另有一条 WARNING 写明路径与键名 |
 | **明确不做** | 不引入任何新的持久键、不引入 `retain`/迁移框架；不改 `Config.save()` 的 `pop`（那是单真值的落地处）；**不**把源几何"补进"既有档案——「不覆盖目标」是已发布契约，所以本刀**修不了**"位置落回右下角"（覆盖层落点取自档案，全局 rx/ry 无读者，见下） |
 

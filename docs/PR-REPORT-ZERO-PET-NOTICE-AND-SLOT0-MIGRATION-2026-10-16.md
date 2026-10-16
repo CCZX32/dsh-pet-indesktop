@@ -299,6 +299,11 @@ legacy 侧的 WARN 是一条 `logging.warning`（`_build_empty_pet_tray` 本来�
 **定性：这不是修复，是一条假保证**——文件里留不住的东西被描述成"保留"，
 用户按报告复测会看到配置已空。所以它不该留在这一片里。
 
+**还有一层容易漏掉的事实**：这条"不清源"是**本 PR 自己的改动**，不是 main 的现状。
+`origin/main`（`056dc2a`）的 `pet/pet_profiles.py` 与合并基 `6a68570` **逐字节相同**——
+main 上 `created` 与 `already-exists` **一直**都清源。所以下面的"回正"就是回到 main 的
+既有口径；本刀相对 main 的净增量是**恢复保证**那半边（见 §九之三 的基线实测）。
+
 ### 九之二、更正后的最小一致方案（不新增持久键、不引入迁移框架）
 
 | 项 | 改正后的口径 |
@@ -322,8 +327,28 @@ legacy 侧的 WARN 是一条 `logging.warning`（`_build_empty_pet_tray` 本来�
 | B 备份是**另一份**快照 | `already-exists` | **否** | 有 | `{}` | **无**（值在副本里） |
 | C 备份=当前源 | `already-exists` | 否 | 无 | `{}` | **无** |
 
-**首版在 B 上会丢数据**：`_is_global_config_snapshot` 只查键存在性，旧快照因此被当成
-有效的恢复路径被保护下来，而当前源值无处可查——现在由恢复副本补上。
+**B 这一行是真正需要修的场面**：`_is_global_config_snapshot` 只查键**存在性**，所以一份
+**旧**快照也能通过校验、并被"保留第一份"规则保护下来；此时若照旧清源，源里**当前**的每宠值
+就再无着落（旧版本退回过、又升级回来时真实可达）。
+
+**基线对照（实测，不是推断）**：把同一份现场跑在收口合并进来的 `origin/main`
+（`056dc2a`，其 `pet/pet_profiles.py` 与合并基 `6a68570` **逐字节相同**——main 上根本没有
+PR 里那条"不清源"）上：
+
+```
+migrate status      : already-exists
+有 recovery_path 吗 : 字段不存在
+规范备份未被覆盖    : True
+save 后源每宠键     : {}
+备份里可取的每宠键  : {'rx': 1.0, 'ry': 2.0, 'screen_name': 'D1', ...}   ← 旧快照
+不可恢复的键        : ['rx','ry','screen_name','facing','scale','character']
+```
+
+⇒ **main 的版本同样清源、同样不覆盖旧备份，但没有任何恢复副本，B 现场在 main 上就是
+真丢 6 个键**。所以本刀相对 main 的净增量不是"改清源口径"（那一半与 main 一致），
+而是**把"清源前先保证恢复路径真的留住了这批值"做成机制**：验值（`_backup_holds_values`）、
+占位就不覆盖旧备份而另存恢复副本（`recovery_path`）、拿不到副本就宁可不清源
+（`backup-failed`），外加 `retained_keys`/`reason`/WARN 的可诊断信息。
 
 ### 九之四、#286 三条具体症状的复核（用隔离合法配置，不碰真实 APPDATA/CU）
 
