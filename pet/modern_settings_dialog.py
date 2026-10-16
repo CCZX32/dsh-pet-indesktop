@@ -311,9 +311,9 @@ class ModernSettingsDialog(QDialog):
         sidebar_pane = SettingsSidebarPane(self)
         sidebar_layout = QVBoxLayout(sidebar_pane)
         sidebar_layout.setContentsMargins(12, 16, 12, 12)
-        # 间距 6px + 导航行距 1px：slot 页有两个重置按钮时，默认窗口 800×560 下 10 个
-        # 能力域原本差十几像素装不下（「更新」被截在视口外，用户不知道还有这一页）。
-        sidebar_layout.setSpacing(6)
+        # 间距 3px + 导航行距 1px：slot 页有两个重置按钮时，默认窗口 800×560 下 10 个
+        # 能力域要全落在视口里；3px 把本机余量 4 → 19px（CI 280：Ubuntu 上 6px 不够）。
+        sidebar_layout.setSpacing(3)
         # 「保存并退出」的图标 / 保存时机 tooltip / 焦点旗标都在控件库里（本文件有行数预算）。
         self.save_exit_button = settings_save_exit_button(sidebar_pane, self._save)
         sidebar_layout.addWidget(self.save_exit_button)

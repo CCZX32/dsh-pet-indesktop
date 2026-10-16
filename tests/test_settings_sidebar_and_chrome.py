@@ -179,9 +179,13 @@ def test_sidebar_width_tracks_a_font_change_after_construction(tmp_path, monkeyp
 def test_default_window_shows_every_domain_without_scrolling(tmp_path, monkeypatch):
     """默认窗口 800×560：10 个能力域全部落在侧栏视口里（不必滚动才发现「更新」）。
 
-    余量只有个位数像素：导航行高是显式 ``setSizeHint(34)``（与字体无关），其余子控件的
-    高度由 13px 字号决定。别的平台若把按钮画得更高，这条会红——那是"默认尺寸装不下"的
-    真实信号（修法是继续收间距），不是随机抖动。
+    判据是 ``scrollBar.maximum() == 0``：内容只要比视口高 1px，Qt 就把它抬到 1（实测
+    556 → 555 的分界），没有"差一点也算过"的余地。余量只来自侧栏纵向间距——导航行高是
+    显式 ``setSizeHint(34)``（与字体无关），其余子控件的高度由 13px 字号与 QSS
+    ``min-height`` 决定。CI 280 上 6px 间距留的 4px 余量被 Ubuntu runner 的字体/风格吃光，
+    第 10 行落到视口外（ubuntu-latest 红、windows/macOS 绿）；间距因此收到 3px，
+    本机余量 4 → 19px。别的平台再把这份余量吃掉，说明"默认尺寸真的装不下"，
+    修法是继续收间距或按字体度量重算预算，不是放宽这条断言。
     """
     dialog = _dialog(tmp_path, monkeypatch)
     try:

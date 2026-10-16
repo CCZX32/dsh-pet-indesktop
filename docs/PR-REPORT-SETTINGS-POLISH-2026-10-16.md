@@ -3,8 +3,9 @@
 > **基线**：`99bdc7f`（fix(overlay): 穿透卡死——click-only grab 看门狗收尾 #277，本分支的起点）
 > **分支**：`feat/settings-polish`　**日期**：2026-10-16
 > **范围**：34 个文件（实现 10、测试 16、文档 5、构建脚本 3），其中 **7 个新增文件**
-> （5 个测试 + `pet/application_icon.py` + 本报告）；净 `+4043 / −141`
-> （`git diff --numstat HEAD` + 未跟踪新文件逐行计数，与 `git status --short` 逐条对得上，见 §二）
+> （5 个测试 + `pet/application_icon.py` + 本报告）；净 `+4165 / −142`
+> （`git diff --numstat 99bdc7f` + 新增文件的 `wc -l`，与 `git status --short` 逐条对得上，见 §二；
+> 已计入 §九 的 CI 返修增量与本报告自身的增长）
 > **关联**：[`SETTINGS-CHANGE-GATES.md`](SETTINGS-CHANGE-GATES.md) 2026-10-16 条目（本轮门禁登记）、
 > [`SETTINGS-INFORMATION-ARCHITECTURE-2026-08-27.md`](SETTINGS-INFORMATION-ARCHITECTURE-2026-08-27.md)
 > 的「后继变更（2026-10-16）」（常规域两处归属调整）、
@@ -30,7 +31,7 @@
 | 5 | 选中态对比度达标 | 选中 ink 与侧栏 3px 左条共用 `settings_selection_accent(dark)` 一个真值，浅 `#0a7ae8` / 深 `#0a84ff`，两档对选中底 **3.35:1 / 3.07:1**（WCAG 1.4.11 非文本对比线 3:1） |
 | 6 | `save` 不再和 `back` 共用一个字形 | `pet/context_menus/icons.py` 里 `elif name in {"back", "save"}` 拆成 `name == "save"` 的独立字形 |
 | 7 | 作用域声明不再占一整行 | 「影响所有桌宠」这类声明从灰说明末尾拆成标签行右侧的独立标注；800 宽常规域页高从 606px 回到 **538px**（= 拆分前口径），跳转条消失的最小窗高 700 → **640** |
-| 8 | 侧栏密度与宽度 | slot 页有两个重置按钮时 10 个能力域在默认 800×560 下装不下（「更新」被截在视口外）；侧栏宽度改为按字体度量取最小值，1.5 倍字体下按钮文案不再被省略 |
+| 8 | 侧栏密度与宽度 | slot 页有两个重置按钮时 10 个能力域在默认 800×560 下装不下（「更新」被截在视口外）；侧栏宽度改为按字体度量取最小值，1.5 倍字体下按钮文案不再被省略。**CI 280 上 Ubuntu 仍差 1px（本机余量只有 4px），纵向间距再收到 3px、余量抬到 15–19px，见 §九** |
 | 9 | 重置按钮自带作用域 | slot 页的两个破坏性动作改为「重置本宠设置…」/「重置全局设置…」，不必点开确认框或读 tooltip 才知道点的是哪一个 |
 | 10 | 打包版窗口/标题栏图标 | 三端构建脚本各补一行 `--add-data` 把 `assets/icon.ico` 送进包，设置窗 `setWindowIcon(load_application_icon())` |
 
@@ -69,13 +70,13 @@
 | `docs/SETTINGS-CHANGE-GATES.md` | 57 | 0 | 文档（2026-10-16 门禁登记） |
 | `docs/SETTINGS-INFORMATION-ARCHITECTURE-2026-08-27.md` | 17 | 0 | 文档（后继变更） |
 | `docs/INDEX.md` | 3 | 2 | 文档（本报告登记 + 两行「何时必读」同步） |
-| `docs/PR-REPORT-SETTINGS-POLISH-2026-10-16.md` | 394 | 0 | 文档（**新增文件·本报告**；行数为交回时的 `wc -l`） |
-| `scripts/build_onedir.ps1` | 6 | 0 | 构建 |
+| `docs/PR-REPORT-SETTINGS-POLISH-2026-10-16.md` | 511 | 0 | 文档（**新增文件·本报告**；行数为交回时的 `wc -l`，含 §九） |
+| `scripts/build_onedir.ps1` | 7 | 1 | 构建（含 §九 的 UTF-8 BOM） |
 | `scripts/build_macos.sh` | 5 | 0 | 构建 |
 | `scripts/build_linux.sh` | 5 | 0 | 构建 |
 | `tests/test_settings_page_guide.py` | 502 | 13 | 测试 |
 | `tests/test_settings_theme_polish.py` | 539 | 0 | 测试（**新增文件**） |
-| `tests/test_settings_sidebar_and_chrome.py` | 430 | 0 | 测试（**新增文件**） |
+| `tests/test_settings_sidebar_and_chrome.py` | 434 | 0 | 测试（**新增文件**；含 §九 的余量口径登记） |
 | `tests/test_settings_scope_notes.py` | 337 | 0 | 测试（**新增文件**） |
 | `tests/test_application_icon.py` | 322 | 0 | 测试（**新增文件**） |
 | `tests/test_settings_compat_layering.py` | 267 | 0 | 测试（**新增文件**） |
@@ -89,7 +90,7 @@
 | `tests/test_requested_regressions.py` | 4 | 1 | 测试 |
 | `tests/test_settings_slot_config_route.py` | 3 | 1 | 测试 |
 | `tests/test_settings_subslot_autostart.py` | 3 | 2 | 测试 |
-| | **4043** | **141** | 34 个文件 |
+| | **4165** | **142** | 34 个文件 |
 
 ### 实现
 
@@ -101,7 +102,7 @@
 | `pet/settings_page_guide.py` | +181 / −12 | ① `_apply_visibility` 改**有界两拍**：算 → 变了就施加 → `_settle_geometry()` 同步推平 → 复核（同步，不排队、不用定时器、不放大窗口）；② 新增 `_tab_chrome` / `tab_chrome_height` / `current_page_height`，`_content_overflows` 与 `_PastEndPadding._height_for` 改量**整块滚动内容**（页高 + 标签那一层），容器由调用者传入以免非标签域热路径新增子树查找 |
 | `pet/settings_theme_qss.py` | +57 / −4 | 新增 `SETTINGS_SELECTION_ACCENT` / `settings_selection_accent(dark)` 与 QSS 占位记号 `@selection-accent@`：选中左条与图标 ink 共用**同一个真值**，不可能各写一个色号 |
 | `pet/settings_pet_controls.py` | +36 / −12 | 新增 `ALL_PETS_SCOPE_SENTENCE` / `GLOBAL_SCOPE_ROWS` 接线表；`_apply_window_scope_rows` 改为走 `set_scope_note`，并把全局键的同类声明合成同一个 pass（主文件有行数预算，不允许再接线一次）；两个「试听」按钮的图标宿主从 `host` 改成按钮自己 |
-| `pet/modern_settings_dialog.py` | +35 / −22（**净 −1 行**，2515 → 2514） | `setWindowIcon(load_application_icon())`；侧栏改 `SettingsSidebarPane` + 间距 9→6 / 行距 2→1；`_add_page` 改用 `settings_sidebar_item`；保存钮改用工厂；搜索框图标宿主改成它自己；`_apply_selected_theme` 末尾加一行 `refresh_settings_icons`；常规域装配表拆出「直播捕获（高级）」；`_page_shell` 默认宽度改取 `CONTENT_READING_MAX_WIDTH`；`QListWidgetItem` 导入随之删除。**行数预算未上调**（`tests/test_architecture.py` 仍 2515） |
+| `pet/modern_settings_dialog.py` | +35 / −22（**净 −1 行**，2515 → 2514） | `setWindowIcon(load_application_icon())`；侧栏改 `SettingsSidebarPane` + 间距 9→6 / 行距 2→1（§九 因 Ubuntu 再收到 **3**）；`_add_page` 改用 `settings_sidebar_item`；保存钮改用工厂；搜索框图标宿主改成它自己；`_apply_selected_theme` 末尾加一行 `refresh_settings_icons`；常规域装配表拆出「直播捕获（高级）」；`_page_shell` 默认宽度改取 `CONTENT_READING_MAX_WIDTH`；`QListWidgetItem` 导入随之删除。**行数预算未上调也不吃满**（`tests/test_architecture.py` 仍 2515，文件 2514） |
 | `pet/settings_reset_defaults.py` | +19 / −6 | 新增 `RESET_SLOT_BUTTON_TEXT`（「重置本宠设置…」）与改措辞的 `RESET_GLOBAL_BUTTON_TEXT`（「重置全局设置…」）：slot 页两个破坏性动作各自把作用域写在标签上；全局页沿用原文案，不自称"本宠" |
 | `pet/settings_search.py` | +9 / −2 | `_row_text` 把 `scope_note` 也算进索引：那句声明原本拼在 hint 末尾、因此本来就在索引里，拆成独立标注只是换了呈现位置，不该从搜索里掉出去 |
 | `pet/settings_menu_layout_editor.py` | +5 / −5 | 5 个编辑器按钮的图标宿主从"编辑器面板"改成**按钮自己**（记录挂在消费者上，重画才写得回去）；像素逐字节一致 |
@@ -316,6 +317,11 @@
   `--add-data` 那三行只有**最小 onedir 探针包**的实测（PyInstaller 6.22.2：产物
   `_internal/assets/icon.ico` 419 110 字节、冻结进程里 `is_file()` 为真）与契约测试，
   **不等于**本分支的完整包已经跑过。
+- **Ubuntu 的那 1px 没有在本机复现**（§九）：这是一台 Windows 主机，WSL 里的容器运行时
+  拉不到镜像（registry-1.docker.io 直连超时），所以拿不到 Ubuntu runner 的实测
+  chrome 高度，只能从 CI 的 `scrollBar.maximum() == 1` **反推** chrome ≥ 144。本机可构造的
+  最松字体组合（DejaVu Sans + CJK 兜底）停在 chrome = 143、余量 0 —— 正好是边界，再 +1px
+  才复现同款判据。返修给的是 15–19px 余量，等于已观测差距（≥1px）的 15 倍以上。
 - DLC / 日用进程与配置未触碰（用户明确划界）。
 
 ## 六、测试与验证
@@ -327,6 +333,13 @@
 | 非 Windows 腿（模拟） | 同上 + `-p nonwin_plugin` | **31 passed / 9 skipped**（改前同一命令 4 failed / 26 passed / 8 skipped） | `nonwin_after.log` / `tests_red_nonwin.log` |
 | **全量** | `QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:randomly` | **7642 passed, 14 skipped, 3119 warnings in 1239.03s (0:20:39)**；`grep -c FAILED` = **0** | `.scratch/settings-reviewfix/full_suite_final.log` |
 | ruff | `python -m ruff check pet/ tests/` | `All checks passed!` | `.scratch/settings-navfix/ruff.log` |
+| CI 返修·焦点两条（语法门 + 侧栏） | `QT_QPA_PLATFORM=offscreen python -m pytest tests/test_application_icon.py tests/test_settings_sidebar_and_chrome.py -q` | **39 passed**（16.15s） | `.scratch/ci280-probe/focused_final.log` |
+| CI 返修·读了 `build_onedir.ps1` 的族（8 文件 + `test_desktop_pet_features`） | `python -m pytest tests/test_bundle_slim.py … tests/test_desktop_pet_features.py -q` | **404 passed**（26.39s） | `.scratch/ci280-probe/ps1_family.log` |
+| CI 返修·设置/壳层批次 | `python -m pytest tests/ -k "settings or chrome or menu_layout or architecture or modern_settings or desktop_pet_features or requested_regressions" -q` | **1007 passed / 1 skipped**（383.22s） | `.scratch/ci280-probe/focused_settings_batch.log` |
+| CI 返修·脚本编码门（模拟 CI windows runner ACP=1252） | `python .scratch/ci280-probe/ps1_encoding.py` | 加 BOM **前 rc=1**（报错与 CI 日志逐字一致）→ **后 rc=0** | `.scratch/ci280-probe/ps1_encoding_before.txt` / `ps1_encoding_after.txt` |
+| CI 返修·侧栏字体度量矩阵与合成 +1px 对照 | `.scratch/ci280-probe/font_matrix.py 6|3` / `cjk_fallback_scan.py` / `ubuntu_plus1px.py` | 余量 **0–4px → 15–19px**；chrome 144 时修复前 `max=1`、修复后 0 | `.scratch/ci280-probe/sidebar_metrics.txt` |
+| ruff（返修后） | `python -m ruff check pet/ tests/` | `All checks passed!` | 见 §九 |
+| **全量（返修后）** | `QT_QPA_PLATFORM=offscreen python -m pytest -q` | **7644 passed, 14 skipped, 3120 warnings in 1205.34s (0:20:05)**；`grep -c FAILED` = **0**；收集 **7658**（`--collect-only`：返修前的同一棵树也是 7658，返修不改用例集） | `.scratch/ci280-probe/full_after.log` |
 | 空白 / 冲突标记 | `git diff --check` | 空（0 字节） | `.scratch/settings-navfix/diffcheck.log` |
 | 换个目录跑（自检） | `cd C:/Users/me/Desktop && python -m pytest D:/…/tests/test_settings_page_guide.py D:/…/tests/test_settings_compat_layering.py -c D:/…/pytest.ini --rootdir=D:/… -q` | **40 passed** | — |
 | 架构红线 | `python -m pytest tests/test_architecture.py -q` | **15 passed**（`modern_settings_dialog.py` 行数预算新基线 2514 ≤ 2515） | 见相关测试族 |
@@ -392,3 +405,107 @@
 - **可再恢复的既有决定**：「光标隐藏时自动穿透」与「直播捕获兼容」的**行键、文案与平台
   闸门**都没有变，只是分组归属变了；若要把归属改回去，是纯装配表改动（`modern_settings_dialog.py`
   常规域的 `page_content` 列表），不涉及数据。
+
+## 九、CI 返修（run 280：Windows 语法门 + Ubuntu 侧栏）
+
+首轮三端（run 280 = `38820508434`：**ubuntu-latest 红** + **windows-latest 红** +
+macos-latest 绿）暴露两条"本机绿、CI 红"的缺陷。两条都不能靠放宽门禁解决：一条是门禁
+抓到了**真缺陷**，另一条是余量薄到 1px 就翻脸。返修共 3 个文件、**+11 / −7 行**（对 HEAD）：
+
+| 文件 | + | − | 改动 |
+|---|---:|---:|---|
+| `scripts/build_onedir.ps1` | 1 | 1 | 第 1 行加 UTF-8 BOM（3 字节） |
+| `pet/modern_settings_dialog.py` | 3 | 3 | 侧栏纵向间距 `6 → 3`（注释同步） |
+| `tests/test_settings_sidebar_and_chrome.py` | 7 | 3 | 默认尺寸用例的 docstring 登记返修事实与余量口径（**断言一条没改**） |
+
+**运行时开销**：零。BOM 只在 PowerShell 解析脚本时读一次（构建期，且 `shell: pwsh` 的
+workflow 不受影响）；间距是构造期的一个整数。不新增系统调用/线程/网络/磁盘，不新增内存。
+
+### 9.1 Windows：构建脚本在非 UTF-8 系统代码页下语法错误（**真缺陷**）
+
+**症状**：`tests/test_application_icon.py::test_windows_build_script_stays_syntactically_valid`
+在 `windows-latest` 红（`tests\test_application_icon.py:271: AssertionError`），PowerShell
+解析器报 `Unexpected token 'ç¨‹åº'...` 与 `Missing closing '}' in statement block or type
+definition.`，退出码 1；同一条测试在本机绿。
+
+**根因**：Windows PowerShell 5.1 读**无 BOM** 文件用的是 `Encoding.Default`（= 系统 ACP）。
+CI 的 runner ACP 不是 UTF-8（日志没直接记 ACP，由乱码形态 + 逐字复现反推为 **1252**）：
+脚本里 10 638 字节的 UTF-8 中文注释被按 cp1252 解码，
+解析器把乱码字节当成了引号/花括号 → 整份脚本**不可解析**。（本机 ACP = 65001，所以本机
+这道门是**空门**。）
+
+**为什么不能改成"显式 UTF-8 读文本再 ParseInput"**：仓库里**唯一**的 `.ps1` 就是它；
+`docs/ONEDIR_PACKAGING.md` 写给用户的手工构建命令正是
+`powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1`（= 5.1）；脚本自己
+也已经踩过同一条坑并写明（读 `package.json` 必须 `[System.IO.File]::ReadAllText(..., UTF8)`，
+否则「PowerShell 5.1 按系统 ANSI 代码页读 → 中文 description 变成非法 JSON」）。也就是说，
+在 ACP≠UTF-8 的 Windows 上按文档构建会当场失败——门禁抓到的是**真缺陷**；把读取方式换成
+显式 UTF-8 的 `ParseInput` 等于在门禁里把这条信号摘掉（它在本机复现不了）。
+
+**修法**：给脚本加 UTF-8 BOM。带 BOM 的文件 PowerShell 一律按 UTF-8 读，与 ACP 无关，
+脚本的**可解析性**因此在任何代码页下都成立；执行语义零变化（BOM 不影响 PS 7 / `pwsh`）。
+
+**复现与验证**：`.scratch/ci280-probe/ps1_encoding.py` 把 PowerShell 的读取规则原样搬过来
+（有 BOM → UTF-8；无 BOM → 指定 ACP），再交给**产品路径同一个** `Parser::ParseInput`，
+所以被模拟的只有"解码选择"这一步：
+
+| 场景 | 加 BOM 前 | 加 BOM 后 |
+|---|---|---|
+| `Parser::ParseFile`（本机 ACP=65001） | rc=0 | rc=0 |
+| 模拟 ACP=1252（CI windows runner） | **rc=1**：`Unexpected token 'ç¨‹åº'. Build with a PATH " + … Missing closing '}' in statement block or type definition.`（与 CI 日志逐字一致） | rc=0（`via=BOM->UTF8`） |
+| 模拟 ACP=936（GBK） | rc=0（乱码恰好仍是合法语法 → 只有部分代码页会红） | rc=0（`via=BOM->UTF8`） |
+
+`tests/test_application_icon.py` 21 passed（含这条语法门）。
+
+### 9.2 Ubuntu：默认 800×560 下侧栏第 10 个能力域差 1px 装不下（**余量薄**）
+
+**症状**：`tests/test_settings_sidebar_and_chrome.py::test_default_window_shows_every_domain_without_scrolling`
+在 `ubuntu-latest` 红（`:190`）：`assert 1 == 0`，`1 = QListWidget(settingsSidebar).verticalScrollBar().maximum()`。
+
+**判据的粒度**：`scrollBar.maximum()` 是**按行**量（`singleStep=1`、`pageStep=11`），
+内容只要比视口高 1px 就跳到 1（本机实测：视口 359 → 0，358 → 1）。所以这条红说明
+**内容比视口高了至少 1px**，不是差一整行。
+
+**本机实测的预算**（`.scratch/ci280-probe/sidebar_slack.py` / `sidebar_budget.py`，800×560）：
+
+| 项 | 间距 6px（修复前） | 间距 3px（修复后） |
+|---|---:|---:|
+| 侧栏列表视口 | 363 | 378 |
+| 10 行导航需要（显式 `setSizeHint(34)` + 行距） | 359 | 359 |
+| **余量** | **4px** | **19px** |
+| `scrollBar.maximum()` | 0 | 0 |
+
+余量只来自侧栏纵向间距：导航行高是显式 token（与字体无关），另外 5 个子控件（保存并退出
+32 / 搜索框 32 / 两个重置 30 / 版本号 15–19）高度由字号与 QSS `min-height` 决定。
+换句话说，**任何平台的字体度量差异都直接从这个余量里扣**。
+
+**字体度量敏感性**（`.scratch/ci280-probe/font_matrix.py` + `cjk_fallback_scan.py`：把设置窗
+基础字体换成真实字体文件，逐个量 chrome 高度）：
+
+| 设置窗基础字体 | 5 个子控件高度和 | 余量 @6px | 余量 @3px |
+|---|---:|---:|---:|
+| 本机 offscreen 默认（字体库为空） | 139 | 4 | 19 |
+| SimSun | 140 | 3 | 18 |
+| DejaVu Sans（Debian/Ubuntu 解析出的 "Sans Serif"） | 141 | 2 | 17 |
+| Segoe UI / Arial / Noto Sans / Microsoft YaHei | 143 | **0** | 15 |
+| DejaVu Sans + CJK 兜底（雅黑，模拟 `fonts-noto-cjk` 兜底那条路） | 143 | **0** | 15 |
+| 上面任一 + 合成 1px（= CI 的 Ubuntu 情形：chrome 144） | 144 | **−1 → `max=1`＝CI 同款判据** | 14 → 0 |
+
+结论：修复前本机余量只有 **0–4px**，任何平台多画 1px 就翻红——CI 上的 Ubuntu 正是这样
+（`.scratch/ci280-probe/ubuntu_plus1px.py` 把 chrome 补到 144，`max` 就从 0 变 1）。
+间距收到 3px 后新增 **15px** 布局预算；字体矩阵余量为 **15–19px**，合成 +1px 对照的余量为 **14px**，该对照通过。真实 Ubuntu 结果仍以返修后的 CI 为准。
+
+**为什么只动间距**：`references/visual-system.md` 的 Layout 表把「侧栏外边距 12,16,12,12」与
+「侧栏宽度 200」列为**设计令牌**（不动），导航行高 34 是显式 token（规范还要求"行高从
+sizeHint 往上给、不为塞文案缩行"，不缩）；可动的只有间距——它是这里唯一的余量来源，
+本轮把它从 9→6 再收到 3（5 处 × 3px = 15px）。
+
+**没有改断言**：`scrollBar.maximum() == 0` 与逐项 `visualItemRect().bottom() <= viewport`
+两条判据逐字保留；用例 docstring 只是把"余量只剩个位数像素"更新成实测的 0–4px、3px 后的
+15–19px，并写明"再被吃掉就是默认尺寸真装不下，修法是继续收间距或按字体度量重算预算"。
+
+**边界（如实登记）**：Ubuntu 的实测 chrome 高度拿不到——本机是 Windows，WSL 里的容器运行时
+拉不到镜像（registry-1.docker.io 直连 `i/o timeout`），所以 Ubuntu 侧只能**反推**
+（`max=1` ⇒ chrome ≥ 144）＋本机字体矩阵＋合成 +1px 的对照，不能声称"本机复现了 Ubuntu"。
+若下一轮 Ubuntu 仍红，说明 15px 也不够，届时的修法是**按字体度量重算预算**（把 chrome 高度
+算进来再定间距），不是继续手调像素，也不是放宽断言。
