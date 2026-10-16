@@ -257,9 +257,14 @@ exact breakpoint there; see `docs/agents/handoff.md`.
   work *through* the proxy. Lyric requests try direct first and fall back to the
   system proxy exactly once — only on a transport failure or HTTP 500/502/504,
   sharing `fetch_lyrics`' single deadline budget (`pet/music_lyric.py`:
-  `_build_opener` / `_may_switch_to_proxy` / `_attempt_timeout`; 404/429/503 and
-  other definitive answers never switch routes). Never log proxy addresses or
-  credentials — route names only. Other features keep following the proxy.
+  `_build_opener` / `_may_switch_to_proxy` / `_fallback_proxy` /
+  `_attempt_timeout`; 404/429/503 and other definitive answers never switch
+  routes, and neither does any response carrying `Retry-After`). The fallback
+  only counts when the URL's own scheme (http/https) has a proxy that the system
+  `proxy_bypass` list does not exempt — a `NO_PROXY`-only or other-scheme config
+  is not a second route. Never log proxy addresses, credentials, or raw
+  exception/URL text: route names, exception type, HTTP status and `Retry-After`
+  only. Other features keep following the proxy.
 - Treat `assets/characters/<id>/videos/` plus its manifest as one character
   package; preserve relative paths and case because packaged platforms differ.
   The manifest may declare `body_box` (`[x1, y1, x2, y2]` in source pixels,

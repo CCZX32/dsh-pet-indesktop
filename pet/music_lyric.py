@@ -243,8 +243,9 @@ def _prune_cache(limit: int = CACHE_LIMIT) -> None:
 # 「当前进程歌词请求走哪条路」每个进程只记一行（见 _note_route_once）。
 _route_logged = False
 
-# 直连失败时**允许**换到系统代理的 HTTP 状态：网关类故障（服务端或中间设备
-# 自己坏了），换个出口可能就通了。
+# 直连失败时**允许**换到系统代理的 HTTP 状态：500 / 502 / 504。这三个是"这条
+# 路本身出问题"的典型状态（服务端内部错误 / 上游网关错误 / 网关超时），换个出口
+# 可能就通了。
 # 其余状态一律不换路：401/403 是权限与风控、404 是不存在、429/503 是限流，
 # 换条路重打只是把同一个答复再触发一次（也违背服务端 Retry-After 的请求）。
 _FALLBACK_STATUSES = frozenset({500, 502, 504})
@@ -280,10 +281,13 @@ def _build_opener():
 
 
 def _system_proxies() -> dict:
-    """本机的系统代理配置；``{}`` 表示没配（也就没有可回退的第二条路）。
+    """本机的系统代理配置；``{}`` 表示没读到任何配置。
 
     只读注册表 / 环境变量，不发请求。返回值**可能带凭据**（``user:pass@host``），
     因此一律不进日志——日志里只写"直连 / 系统代理"这种路线名（见 :func:`_note_route_once`）。
+
+    注意返回值里有**不是代理**的键（``no`` 是绕过名单），所以判断"有没有第二条路"
+    要用 :func:`_fallback_proxy`，不要直接看这个字典非空。
     """
     try:
         proxies = urllib.request.getproxies()
@@ -294,18 +298,67 @@ def _system_proxies() -> dict:
     return {str(key): str(value) for key, value in proxies.items() if value}
 
 
+_PROXY_SCHEMES = ("http", "https")
+
+
+def _configured_proxies(proxies: dict | None = None) -> dict:
+    """系统配置里**能当代理用**的条目：``http`` / ``https``。
+
+    ``getproxies()`` 还可能出现 ``no``（绕过名单，见 ``NO_PROXY``）与 ``all``/``ftp``
+    这类条目，它们对本模块的 https 目标都不是代理——``ProxyHandler`` 按 URL 的 scheme
+    装 ``*_open`` 处理器，没装到的协议就等于直连。
+
+    ``proxies`` 可传入已读到的配置，避免失败路径上重复读注册表。
+    """
+    source = _system_proxies() if proxies is None else proxies
+    return {
+        str(key).lower(): str(value)
+        for key, value in source.items()
+        if str(key).lower() in _PROXY_SCHEMES and value
+    }
+
+
+def _fallback_proxy(url: str, proxies: dict | None = None) -> str | None:
+    """这个 URL 走系统代理时**真正会用到的**代理；没有就返回 ``None``。
+
+    判据全部沿用标准库语义（``ProxyHandler`` 怎么分派、``urllib.request.proxy_bypass``
+    怎么判），不自建规则：
+
+    1. 只有本 URL 实际协议（http/https）**有代理**才算有第二条路——``no`` 是绕过名单、
+       ``ftp``/``all`` 对本 URL 无效（见 :func:`_configured_proxies`）。
+    2. 主机命中 ``urllib.request.proxy_bypass`` 时，``ProxyHandler.proxy_open`` 会
+       直接放行成直连——那不是"回退系统代理"，再打一次只是重复直连，不能算、也不能
+       在日志里谎称成代理。
+    """
+    parts = urllib.parse.urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in _PROXY_SCHEMES:
+        return None
+    proxy = _configured_proxies(proxies).get(scheme)
+    if not proxy:
+        return None
+    host = parts.hostname
+    if host:
+        try:
+            if urllib.request.proxy_bypass(host):
+                return None
+        except Exception:
+            return None
+    return str(proxy)
+
+
 def _note_route_once() -> None:
-    """本机配了系统代理时，每个进程记一行 INFO 说明路线策略。
+    """本机配了 http/https 代理时，每个进程记一行 INFO 说明路线策略。
 
     排查这类"听起来像功能坏了"的问题，第一眼就该看出网络走了哪条路：
-    没这行 = 本机没配系统代理，歌词请求只有直连一条路。
+    没这行 = 本机没有可用的系统代理配置，歌词请求只有直连一条路。
     **不回显代理地址/凭据**：日志常被整段贴进 issue 与报告，那是用户环境信息。
     """
     global _route_logged
     if _route_logged:
         return
     _route_logged = True
-    if _system_proxies():
+    if _configured_proxies():
         log.info(
             "歌词请求：检测到系统代理，首选直连；仅在直连传输失败或 HTTP 500/502/504 时回退系统代理一次"
         )
@@ -328,24 +381,37 @@ def _may_switch_to_proxy(exc: BaseException) -> bool:
     """直连这次的失败，是否**值得**换到系统代理再试一次。
 
     只认两类：① **传输失败**（连不上、读超时、连接被重置、协议层坏掉——根本没
-    拿到可用响应）；② HTTP **500/502/504**（网关类故障）。其它 HTTP 状态是对方的
-    明确答复：权限、不存在、限流，换条路重打只是再挨一次，还会违背 Retry-After。
+    拿到可用响应）；② HTTP **500 / 502 / 504**。其它 HTTP 状态是对方的明确答复
+    （401/403 权限、404 不存在、429/503 限流），换条路重打只是再挨一次。
+
+    另外：**只要响应带了 ``Retry-After`` 就不换路**——服务端明确要求"等一会儿再
+    打"，立刻从另一条路再打同样违背该请求（三种取值形态都算：整数秒、HTTP 日期、
+    连内容都解析不了的）。历史上这里只看状态码，日志却写着"不换路、不重试"，
+    等于把 500/502/504 + Retry-After 的响应也换路重打了一遍。
 
     2026-10-16 实机事实正是①的极端形态：同一个 URL、同一分钟，直连恒 500 而代理
     200（`.scratch/soda-lyrics/REPORT.md` §4），单一固定路线让这类曲目 100% 0 行。
     """
     if isinstance(exc, urllib.error.HTTPError):
-        return exc.code in _FALLBACK_STATUSES
+        if exc.code not in _FALLBACK_STATUSES:
+            return False
+        return _retry_after(exc) is None
     # URLError / TimeoutError / 连接重置都是 OSError 的子类；BadStatusLine 这类
     # 协议层异常走 HTTPException（不是 OSError），同属"没拿到可用响应"。
     return isinstance(exc, (OSError, http.client.HTTPException))
 
 
-def _retry_after_seconds(exc: BaseException) -> int | None:
-    """限流响应里的 ``Retry-After``（整数秒）；没有/解析不了就是 ``None``。
+# ``Retry-After`` 头存在但值为空时，日志里用这个占位（"存在"就要阻止换路）。
+_RETRY_AFTER_BLANK = "(空值)"
 
-    只用于诊断：本模块对该类响应**既不换路也不重试**（见 :func:`_may_switch_to_proxy`），
-    把服务端给的等待时间写进日志，下次排查能对上时间窗。
+
+def _retry_after(exc: BaseException) -> str | None:
+    """响应头里的 ``Retry-After``，规范化成可安全写日志的短串；没有就是 ``None``。
+
+    三种形态都算**存在**（整数秒、HTTP 日期、以及解析不了的内容）——只要服务端给了
+    这个头就是在要求等待，本模块据此**不换路、也不重试**（见
+    :func:`_may_switch_to_proxy`）。值只留可打印字符并截断，避免把响应头里的
+    任意内容原样写进日志。
     """
     headers = getattr(exc, "headers", None)
     if headers is None:
@@ -356,10 +422,25 @@ def _retry_after_seconds(exc: BaseException) -> int | None:
         return None
     if raw is None:
         return None
-    try:
-        return max(0, int(str(raw).strip()))
-    except (TypeError, ValueError):
-        return None
+    cleaned = "".join(ch for ch in str(raw).strip() if ch.isprintable())[:40]
+    return cleaned or _RETRY_AFTER_BLANK
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """失败原因的可安全落盘形态：异常类型 + HTTP 状态 + Retry-After。
+
+    **不写异常文本**（``str(exc)``）：``URLError``/``InvalidURL`` 的消息里可能带
+    内部代理地址甚至凭据（``<urlopen error ... proxy.internal:8080>``），而日志经常
+    被整段外贴；异常类型 + 状态码已经够定位，需要细节时再看探针。
+    """
+    detail = type(exc).__name__
+    status = getattr(exc, "code", None)
+    if isinstance(status, int):
+        detail += f" HTTP {status}"
+    retry_after = _retry_after(exc)
+    if retry_after is not None:
+        detail += f"（服务端 Retry-After: {retry_after}，按该响应不换路、不重试）"
+    return detail
 
 
 def _attempt_timeout(deadline: float, *, now: float | None = None) -> float | None:
@@ -403,12 +484,15 @@ def _http_get_json(
     **路线**：首选直连（:func:`_build_opener`，2026-09-22 实测代理会把三源拖到
     20~41 秒）。直连失败且**同时**满足下列三条时，**回退一次**系统代理：
 
-    1. 本机确实配了系统代理（没配就没有第二条路）；
-    2. 失败属于传输失败或 HTTP 500/502/504（见 :func:`_may_switch_to_proxy`）；
+    1. 这个 URL 真的有一条代理路可走（:func:`_fallback_proxy`：本 URL 协议配了代理、
+       且没命中系统代理绕过表——否则"回退"只是把同一条直连路再打一遍）；
+    2. 失败属于传输失败或 HTTP 500/502/504，且响应没带 ``Retry-After``
+       （见 :func:`_may_switch_to_proxy`）；
     3. 还剩够用的预算（见 :func:`_attempt_timeout`）。
 
     只回退一次、不做周期重试，也不在这里改任何全局 HTTP 行为——其它功能照旧
-    各自跟随或绕开系统代理。
+    各自跟随或绕开系统代理。日志只记异常类型 / HTTP 状态 / ``Retry-After``，
+    不写异常文本（可能夹带内部代理地址或凭据）。
 
     ``deadline`` 是本次取词的**绝对**截止时刻（``time.monotonic()`` 口径），由
     :func:`fetch_lyrics` 算好后逐层透传：直连与回退**共享同一份预算**，各自只拿到
@@ -438,13 +522,12 @@ def _http_get_json(
         direct_error = exc
 
     if direct_error is not None:
-        note = ""
-        retry_after = _retry_after_seconds(direct_error)
-        if retry_after is not None:
-            note = f"（服务端 Retry-After: {retry_after}s，按该响应不换路、不重试）"
-        detail = f"直连 {type(direct_error).__name__}: {direct_error}{note}"
+        detail = f"直连 {_failure_detail(direct_error)}"
         proxies = _system_proxies()
-        if not proxies or not _may_switch_to_proxy(direct_error):
+        if (
+            not _fallback_proxy(url, proxies)
+            or not _may_switch_to_proxy(direct_error)
+        ):
             _warn_request_failed(url, started, detail)
             return None
         remaining = deadline - time.monotonic()
@@ -462,8 +545,7 @@ def _http_get_json(
         except Exception as proxy_error:
             _warn_request_failed(
                 url, started,
-                f"直连 {type(direct_error).__name__}: {direct_error}；"
-                f"系统代理 {type(proxy_error).__name__}: {proxy_error}",
+                f"{detail}；系统代理 {_failure_detail(proxy_error)}",
             )
             return None
         log.info("歌词请求回退系统代理成功 %s（%.2fs）",
@@ -472,7 +554,7 @@ def _http_get_json(
     try:
         return _decode_json_body(raw)
     except Exception as exc:
-        _warn_request_failed(url, started, f"响应解析失败 {type(exc).__name__}: {exc}")
+        _warn_request_failed(url, started, f"响应解析失败 {type(exc).__name__}")
         return None
 
 

@@ -83,7 +83,7 @@ lrclib 里都没有，**只有 QQ 音乐有**，而本机 QQ 源**直连恒 HTTP
 | `test_direct_success_is_one_attempt_and_never_touches_proxy` | 直连成功 = 1 次尝试、代理 0 次 |
 | `test_no_system_proxy_means_no_fallback` | 没配代理 → 失败就是失败，不凭空造第二次请求 |
 | `test_transport_failure_falls_back_to_system_proxy_once` | 传输失败 → 恰好 2 次尝试，且第二次真的走代理 opener |
-| `test_gateway_statuses_fall_back_to_system_proxy[500/502/504]` | 网关类故障允许换路（参数化 3 例） |
+| `test_gateway_statuses_fall_back_to_system_proxy[500/502/504]` | 500/502/504 且无 `Retry-After` 时允许换路（参数化 3 例） |
 | `test_rejection_and_throttle_statuses_do_not_switch_route[401/403/404/429/503]` | 拒绝/不存在/限流不换路（参数化 5 例） |
 | `test_throttle_retry_after_is_surfaced_in_log` | 429 的 `Retry-After: 30` 进日志、且仍不换路 |
 | `test_both_routes_failing_are_both_reported` | 两路都失败：`None` + 日志里两条异常类型都可辨 |
@@ -383,3 +383,97 @@ $ python -m ruff check pet tests scripts                    → All checks passe
 | `.scratch/soda-lyrics-route/probe_route_loopback.py` / `probe-loopback.log` / `probe-loopback-baseline.log` | 本机回环实测（真实 HTTP 服务器 + 真实 socket），本 PR 8 场景全绿 / 基线红 5 |
 | `.scratch/soda-lyrics-route/bench_route_success.py` / `bench-new.log` / `bench-baseline.log` | 热路径与失败路径 A/B、判据单价（§四 的数字来源） |
 | `.scratch/soda-lyrics-route/full-suite-syspython.log` / `full-suite.log` | 两个解释器的全量原始日志 |
+
+---
+
+## 十、第二轮：提交前核查的三处修正（2026-10-17）
+
+> 本节是**追加**，不改上面首轮的结论与数字（首轮的全量基线 `7924 passed / 15 skipped / 0 failed`
+> 仍以上文 §6.1 为准，原始日志在 `.scratch/soda-lyrics-route/full-suite-syspython.log`）。
+> 本节的三处改动的验证口径只有 **focused + 相关族 + ruff**（见 §十.4），全量由 CI 跑。
+
+### 十.1 改了什么（三处）
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 1 | 「有系统代理」被当成"有第二条路"，但 `getproxies()` 里的 `no` 是**绕过名单**、`ftp`/`all` 对本 URL 无效；命中系统代理绕过表时 `ProxyHandler` 本来就会放行成直连——这两种情况下"回退"实际是**同一条直连路再打一次**，日志还会谎称走了代理 | 新增 `_configured_proxies()`（只认 `http`/`https` 条目）与 `_fallback_proxy(url)`（只认 URL **实际协议**有代理，且 `urllib.request.proxy_bypass(host)` 为假）；不满足就不回退，成功日志只在**真走了代理**时才出现 |
+| 2 | 5xx 也会带 `Retry-After`（整数秒 / HTTP 日期 / 无效值），而 `_may_switch_to_proxy` 只看状态码 → 日志写着"不换路、不重试"，实际却换路重打了一遍 | `_may_switch_to_proxy` 在 500/502/504 上先看 `_retry_after(exc)`：**只要该头存在（三种形态都算）就不换路**；`_retry_after` 改为返回规范化短串（整数/日期/无效值/空值都保留可读形态），只用于日志 |
+| 3 | 失败日志直接写 `str(exc)`：`URLError`/`http.client.InvalidURL` 的文本可能夹带**内部代理地址甚至凭据**（`<urlopen error ... http://user:pass@proxy.internal:8080>`） | 新增 `_failure_detail(exc)`：只输出**异常类型 + HTTP 状态 + Retry-After**；两条路仍分别可辨（`直连 URLError；系统代理 InvalidURL`）。不做 redaction 表、不动其它日志字段 |
+
+判据仍然"最小状态、不新增框架"：全部沿用标准库语义（`ProxyHandler` 按 URL scheme 装
+`*_open`、`proxy_bypass` 的绕过判定），没有自建规则、没有新增线程/配置/状态。
+
+### 十.2 修改文件说明（第二轮）
+
+| 文件 | 增删 | 说明 |
+|---|---|---|
+| `pet/music_lyric.py` | 见 PR 的 `git diff --numstat` | `_configured_proxies` / `_fallback_proxy` / `_retry_after`（取代 `_retry_after_seconds`）/ `_failure_detail` 新增；`_may_switch_to_proxy` 加 `Retry-After` 闸；`_http_get_json` 改用新判据与新日志；注释里"网关类故障"改为**具体状态码**（500 / 502 / 504） |
+| `tests/test_music_lyric.py` | 同上 | 新增 21 例（参数化后）：`no` 单独存在、协议不匹配 4 种、绕过表命中、成功日志不谎称代理、5xx × 4 种 `Retry-After` 形态 × 3 个状态码、无 `Retry-After` 的对照、异常文本不落日志；`_RouteStub` 增加 `proxies` / `bypass` 两个替身旋钮（真实现会读用户注册表，测试不该依赖） |
+| `docs/NETWORK-PROXY-AND-VPN-2026-09-22.md` | 同上 | §二 日志行格式、§六 的口径补上"只有真代理路才算 / Retry-After 阻止换路" |
+
+### 十.3 实机运行记录（第二轮，本机真跑）
+
+**红→绿（消融对照）**：把产品文件临时回退到首轮提交 `488a43f`（`git stash`）后，同一批用例
+
+```
+$ QT_QPA_PLATFORM=offscreen python -m pytest tests/test_music_lyric.py -q -p no:randomly
+20 failed, 128 passed in 3.54s
+```
+
+20 条红覆盖三处改动各自的判据（协议/绕过/`no` 各自的红、5xx+`Retry-After` 12 条红、
+两条日志相关红）；恢复后同一命令 **148 passed**。
+
+**本机回环探针（真实 HTTP 服务器 + 真实 socket，不联网）**：
+
+```
+$ python .scratch/soda-lyrics-route/probe_route_loopback.py
+[PASS] 直连成功只走一次 :: 51ms direct=1 proxy=0
+[PASS] 直连 500 回退代理成事 :: 92ms direct=1 proxy=['http://127.0.0.1:5864/search']
+[PASS] 404 不换路 :: direct=1 proxy=0
+[PASS] 429 不换路且读出 Retry-After :: ... : 直连 HTTPError HTTP 429（服务端 Retry-After: 30，按该响应不换路、不重试）
+[PASS] 无系统代理不回退 :: direct=1 proxy=0
+[PASS] 预算耗尽不回退 :: 353ms direct=1 proxy=0 got=None
+[PASS] 两路失败两条原因都在日志 :: 直连 HTTPError HTTP 500；系统代理 HTTPError HTTP 500（无异常文本）
+[PASS] 现场形态（直连 5.3s 失败 + 代理 1.5s）在 9s 预算内成事 :: 6.90s / 预算 9.00s
+结论：全部通过
+```
+
+注意第 4/7 条的日志形态已是第二轮格式：**没有异常文本**，只有类型 + 状态 + `Retry-After`。
+
+### 十.4 性能分析（第二轮，实测）
+
+方法：`python .scratch/soda-lyrics-route/bench_route_success.py`（本机回环，n=200 000 / n=200 ×3 轮）。
+
+| 指标 | 实测 | 归属 |
+|---|---|---|
+| `_may_switch_to_proxy(500)`（无 `Retry-After`） | 0.418 µs/次 | 失败路径，每条失败请求一次 |
+| `_may_switch_to_proxy(500 + Retry-After: HTTP 日期)` | 2.963 µs/次（多出的是头读取 + 规范化） | 同上 |
+| `_retry_after(429)` / `_failure_detail(502)` | 0.895 / 0.599 µs/次 | 同上 |
+| `_fallback_proxy(url)` | 2.212 µs/次（`proxy_bypass` 用替身时） | 失败路径一次 |
+| `urllib.request.proxy_bypass(host)` 真实调用 | **147.8 µs/次**（n=200，读 HKCU 注册表） | OS 边界 |
+| `urllib.request.getproxies()` 真实调用 | 102.7 µs/次（n=200） | OS 边界 |
+| 直连成功端到端中位（回环，n=30 ×3） | 48.43 / 47.57 / 50.46 ms | 热路径（与首轮/基线同量级） |
+| 直连 500 路径端到端中位（回环，n=30 ×3） | 102.10 / 102.93 / 102.34 ms | 失败路径 = 多一次真实往返 |
+
+逐条：② 新增路径绝对成本 = 判据约 **3 µs**（计算）+ 失败路径上**一次注册表读取**
+（`proxy_bypass` 147.8 µs，只在直连已经失败之后发生，相对那次 ≥0.4s 的失败可忽略）；
+③ **无新增线程/定时器/磁盘写入**；网络只在真回退时 +1 个请求；④ 无新增缓存，只多两个
+模块级常量与一个辅助函数；① 成功路径的判据一条都不走（除每进程一次的路线日志），
+端到端与首轮同量级。
+
+### 十.5 测试与验证（第二轮）
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 静态 | `python -m ruff check pet tests scripts` | `All checks passed!` |
+| 聚焦 | `pytest -q tests/test_music_lyric.py` | **148 passed**（首轮 127 → +21）；默认随机序 3 遍各 148 passed |
+| 相关族 + 文档纪律 | 6 个文件 | **415 passed** |
+| 消融 | 产品文件回退到 `488a43f` | **20 failed / 128 passed** → 恢复后 148 passed |
+| 全量 | 本轮**未跑**（首轮已有 `7924 passed / 15 skipped / 0 failed` 作底；三处改动只动判据与日志字段，回归面由聚焦族覆盖）→ 由 CI 跑全量 | CI |
+| 本轮未做 | 真实端点请求、真机点播、读用户 APPDATA | 按任务边界，未做 |
+
+### 十.6 状态（第二轮结束时）
+
+- 分支 `fix/soda-lyrics-route`，本轮最终 HEAD 见文末「附录：HEAD 记录」。
+- 三处改动**只跑了 focused + 相关族 + ruff**；首轮的全量数字不与之混算。
+- 仍未做：merge / 部署 / tag / release；真实端点复测（QQ 端点限流窗口）。

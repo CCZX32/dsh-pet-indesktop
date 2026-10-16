@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -1441,10 +1442,15 @@ class _RecordingOpener:
 
 
 def _stub_urllib(monkeypatch, opener):
-    """把 urllib 的 opener 构造换成记录桩，并假装系统里配着代理。"""
+    """把 urllib 的 opener 构造换成记录桩，并假装系统里配着代理。
+
+    ``proxy_bypass`` 一并钉成 False：真实现会去读用户注册表，测试不该依赖它
+    （命中绕过名单时"代理路"实际是直连，见 ``_fallback_proxy``）。
+    """
     monkeypatch.setattr(
         urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:12450"}
     )
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
     built: list[tuple] = []
 
     def build(*handlers):
@@ -1553,20 +1559,25 @@ class _RouteStub:
     ``build_opener`` 收到 ``ProxyHandler({})`` 判为直连，收到非空代理判为回退；
     每次调用都记 ``(路线, URL, 超时)``，因此"试了几次、走的哪条、每次给了多少
     超时"三件事都能被断言。
+
+    ``proxies`` 直接决定"系统里配着什么"（默认 http+https 都配好），用来钉
+    "``no`` / 其它协议不算代理"这一类形状；``bypass`` 钉系统代理绕过表——两者
+    都是真实现会读的用户环境，测试里一律替身化。
     """
 
     def __init__(self, monkeypatch, *, direct, proxy_responses=None,
                  proxy: str | None = "http://127.0.0.1:12450",
+                 proxies: dict | None = None, bypass: bool = False,
                  clock: _LyricClock | None = None, advance: float = 0.0):
         self.direct = list(direct)
         self.proxy = list(proxy_responses or [])
         self.clock = clock
         self.advance = advance
         self.calls: list[tuple[str, str, float | None]] = []
-        monkeypatch.setattr(
-            urllib.request, "getproxies",
-            lambda: ({"http": proxy, "https": proxy} if proxy else {}),
-        )
+        if proxies is None:
+            proxies = {"http": proxy, "https": proxy} if proxy else {}
+        monkeypatch.setattr(urllib.request, "getproxies", lambda: dict(proxies))
+        monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: bypass)
         monkeypatch.setattr(urllib.request, "build_opener", self._build)
 
     def _build(self, *handlers):
@@ -1625,6 +1636,88 @@ def test_no_system_proxy_means_no_fallback(monkeypatch):
     assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
 
 
+def test_no_proxy_entry_alone_is_not_a_fallback_route(monkeypatch, caplog):
+    """``getproxies()`` 只给了 ``no``（绕过名单）时，不算"有代理"。
+
+    ``no`` 是 ``NO_PROXY`` 的绕过名单、不是代理；把它当第二条路会让"回退"实际
+    还是同一发直连，日志也会谎称走了代理。
+    """
+    stub = _RouteStub(
+        monkeypatch, proxies={"no": "c.y.qq.com,localhost"},
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("proxies", [
+    {"ftp": "http://127.0.0.1:12450"},                    # 只有其它协议的代理
+    {"http": "http://127.0.0.1:12450"},                   # https 目标配了 http 代理
+    {"all": "http://127.0.0.1:12450"},                    # all_proxy 不是 urllib 的代理条目
+    {"no": "localhost", "ftp": "http://127.0.0.1:12450"},
+])
+def test_proxy_for_other_scheme_does_not_count(monkeypatch, caplog, proxies):
+    """URL 实际协议（https）没有代理时不回退：``ProxyHandler`` 本来就分派不到，
+    再打一次等于重复直连。"""
+    stub = _RouteStub(
+        monkeypatch, proxies=proxies,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_proxy_bypass_hit_is_not_a_second_route(monkeypatch, caplog):
+    """命中系统代理绕过表的 URL：那条"代理路"其实就是直连，不能算回退。
+
+    ``ProxyHandler.proxy_open`` 会在 ``proxy_bypass`` 命中时直接放行成直连，
+    所以这里必须**只试一次**，且日志不许出现"回退系统代理成功"——即便替身代理
+    本来能返回 200。
+    """
+    stub = _RouteStub(
+        monkeypatch, bypass=True,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_fallback_success_logs_proxy_only_when_it_really_used_it(monkeypatch, caplog):
+    """成功日志不谎称代理：真走了代理才有那一行；直连成功时一行都没有。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "via-proxy"})],
+    )
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) == {"ok": "via-proxy"}
+    hits = [r.getMessage() for r in caplog.records if "回退系统代理成功" in r.getMessage()]
+    assert len(hits) == 1, hits
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+    caplog.clear()
+    direct_stub = _RouteStub(monkeypatch, direct=[("c.y.qq.com", {"ok": 1})])
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) == {"ok": 1}
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+    assert [route for route, _, _ in direct_stub.calls] == ["直连"], direct_stub.calls
+
+
 def test_transport_failure_falls_back_to_system_proxy_once(monkeypatch):
     """直连传输失败 + 本机有系统代理 → 回退一次，且回退真的走代理。"""
     stub = _RouteStub(
@@ -1640,7 +1733,8 @@ def test_transport_failure_falls_back_to_system_proxy_once(monkeypatch):
 
 @pytest.mark.parametrize("code", [500, 502, 504])
 def test_gateway_statuses_fall_back_to_system_proxy(monkeypatch, code):
-    """500/502/504 是网关类故障：直连这条路坏了，允许换系统代理再试一次。"""
+    """500/502/504（服务端内部错误 / 上游网关错误 / 网关超时）：直连这条路
+    可能坏了，允许换系统代理再试一次。无 Retry-After 时才换。"""
     stub = _RouteStub(
         monkeypatch,
         direct=[("c.y.qq.com", _http_error(code))],
@@ -1648,6 +1742,48 @@ def test_gateway_statuses_fall_back_to_system_proxy(monkeypatch, code):
     )
 
     assert music_lyric._http_get_json(_URL) == {"ok": code}
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+@pytest.mark.parametrize("retry_after", [
+    "30",                                   # 整数秒
+    "Wed, 21 Oct 2026 07:28:00 GMT",        # HTTP 日期
+    "not-a-number",                         # 解析不了的值
+    "",                                      # 头存在但值为空
+])
+@pytest.mark.parametrize("code", [500, 502, 504])
+def test_retry_after_header_blocks_fallback_even_on_gateway_statuses(
+    monkeypatch, caplog, code, retry_after
+):
+    """5xx 带上 ``Retry-After`` 一律不换路。
+
+    服务端在 5xx 里也常给这个头（整数秒或 HTTP 日期），它的意思就是"过一会儿再
+    打"；立刻从另一条路重打同样违背该请求。此前这里只看状态码，日志写着"不换路、
+    不重试"，实际却换路打了一遍。
+    """
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(code, retry_after=retry_after))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("Retry-After" in m for m in messages), messages
+
+
+def test_gateway_status_without_retry_after_still_falls_back(monkeypatch):
+    """对照：同一个 502 只要**没有** Retry-After 头，回退照常发生。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(502))],
+        proxy_responses=[("c.y.qq.com", {"ok": "via-proxy"})],
+    )
+
+    assert music_lyric._http_get_json(_URL) == {"ok": "via-proxy"}
     assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
 
 
@@ -1685,7 +1821,7 @@ def test_throttle_retry_after_is_surfaced_in_log(monkeypatch, caplog):
 
 
 def test_both_routes_failing_are_both_reported(monkeypatch, caplog):
-    """两条路都失败：返回 None，日志里两条路的异常类型都可辨。"""
+    """两条路都失败：返回 None，日志里两条路的异常类型都可辨（不写异常文本）。"""
     stub = _RouteStub(
         monkeypatch,
         direct=[("c.y.qq.com", urllib.error.URLError("隧道不通"))],
@@ -1697,9 +1833,38 @@ def test_both_routes_failing_are_both_reported(monkeypatch, caplog):
 
     messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
-    assert any(
-        "c.y.qq.com" in m and "URLError" in m and "HTTPError" in m for m in messages
-    ), messages
+    hit = [m for m in messages if "c.y.qq.com" in m]
+    assert hit, messages
+    assert any("直连 URLError" in m and "系统代理 HTTPError HTTP 502" in m for m in hit), hit
+    assert "隧道不通" not in hit[0], hit[0]
+
+
+def test_exception_text_never_reaches_the_log(monkeypatch, caplog):
+    """异常**文本**不落日志：它可能夹带内部代理地址甚至凭据。
+
+    ``URLError``/``http.client.InvalidURL`` 的消息是拼接出来的，例如
+    ``<urlopen error Unable to connect to proxy http://alice:s3cr3t@proxy.internal:8080>``；
+    日志经常被整段外贴，所以只留异常类型 + HTTP 状态 + Retry-After。
+    """
+    secret = "http://alice:s3cr3t@proxy.internal:8080"
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", urllib.error.URLError(f"<urlopen error tunnel to {secret} refused>"))],
+        proxy_responses=[
+            ("c.y.qq.com", http.client.InvalidURL(f"no host given in proxy {secret}"))
+        ],
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        assert music_lyric._http_get_json(_URL) is None
+
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "proxy.internal" not in joined, joined
+    assert "alice" not in joined and "s3cr3t" not in joined, joined
+    assert "tunnel to" not in joined, joined
+    # 两条路仍可辨
+    assert "直连 URLError" in joined and "系统代理 InvalidURL" in joined, joined
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
 
 
 def test_fallback_shares_the_deadline_budget_instead_of_doubling(monkeypatch):
