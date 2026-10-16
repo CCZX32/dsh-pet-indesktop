@@ -226,9 +226,25 @@ legacy 侧的 WARN 是一条 `logging.warning`（`_build_empty_pet_tray` 本来�
 回滚不动它们。
 
 **分支与合并**：本片开工基线是 `0b7152d`，收口前已合入 `6a68570`（#285 播放器路径）。
-合并冲突只有 `docs/INDEX.md` 一处（两方都在"PR 报告存档"表头下新增行），解法是**两行都留**：
-upstream 的 `PR-REPORT-MUSIC-PLAYER-PATHS-2026-10-16.md` 行 + 本报告行。§六 的全部门禁数字
-都是在**合并后的树**上重跑得到的。
+那一次合并冲突只有 `docs/INDEX.md` 一处（两方都在"PR 报告存档"表头下新增行），解法是
+**两行都留**：upstream 的 `PR-REPORT-MUSIC-PLAYER-PATHS-2026-10-16.md` 行 + 本报告行。
+§六 的全部门禁数字都是在**当时那棵合并后的树**上重跑得到的。
+
+**收口合并（2026-10-17）**：本片在收口时又合入了一次当前 main —— `origin/main`
+= **`056dc2a`**（含 `#287` 桌面/Android 4.3.1、`#288` 每屏合成窗与逐宠跨屏、
+`#291` 歌词直连）。**注意别被本仓库的本地 `main` 分支骗了**：本地 `main` 停在
+`99bdc7f`（落后于 `origin/main`），按它判祖先会得出"已经是最新、无需合并"的错误结论；
+判定必须用 `origin/main`。这次合并两处冲突，同样按"两边都留"解：
+
+| 冲突文件 | 两边各是什么 | 解法 |
+|---|---|---|
+| `docs/SETTINGS-CHANGE-GATES.md` | 两边都在「变更记录」顶部新增一条 | 按时间倒序并列保留（2026-10-17 本条 / 2026-10-16 `allow_cross_screen`） |
+| `pet/overlay_shell.py` `_build` 尾段 | 本片的 `self._announce_no_pets_if_empty()` / `#288` 的 `self._built = True` | 两个都留：调用在前、`_built` 在后（公告属建壳尾段；`_built` 的两个读点都在运行期路径上） |
+
+合并后专门核对了"零宠物判据在多屏模型下是否还成立"：`_build_slot_sprite` 仍维护
+`self.sprite` / `self._spawned`（同时把 sprite 挂进该屏 `pet_host.overlay`），
+所以 `_all_sprites()` 依旧是真值来源，不会因为"宠在别的屏"而误报零宠物。
+§九之六 与 §九之七 的门禁数字都是在这棵**合并后**的树上重跑的。
 
 ### 交付补记（合并后重跑的门禁）
 
@@ -415,7 +431,7 @@ PET_SRC=<tree> python .scratch/probe_perf_migration.py
 3. **内存**：无新增容器与缓存，只在栈上多一个"键→值"小字典（`copied` 键数级，
    实测 8 键）；`recovery_path` 是结果对象上的一个 `Path | None` 字段。
 
-### 九之六、门禁（本次更正）
+### 九之六、门禁（本次更正，合并 origin/main **之前**的树上）
 
 见 §六 的同一批命令在更正后的树上重跑结果，本节只记**新增**的门：
 
@@ -423,8 +439,25 @@ PET_SRC=<tree> python .scratch/probe_perf_migration.py
 - 聚焦：`pytest -q tests/test_pet_profiles.py` → **98 passed**
 - 消融（撤掉 `pet/pet_profiles.py` 的产品改动）：
   `pytest -q tests/test_pet_profiles.py -k existing_profile` → **4 failed / 1 passed**
+  （那 1 passed 是既有的 `test_slot0_migration_never_overwrites_existing_profile`，
+  它只钉"目标字节不变"，前后都该绿）
 - 受影响族（profiles + slot0_lifecycle + no_pet_startup_notice + slot0_ownership +
   slot_and_memory + config_schema）→ **227 passed**
 - 文档纪律：`pytest -q tests/test_pr_report_discipline.py tests/test_architecture.py`
 - 隔离复现（不碰真实 APPDATA）：`issue286/repro_a_no_pet.py`、`repro_e_position_corner.py`、
   `.scratch/repro_286_retention_defeated.py`、`.scratch/repro_286_backup_route.py`
+
+### 九之七、门禁（合入 `origin/main` 056dc2a **之后**的树上重跑）
+
+| 门 | 结果 |
+|---|---|
+| `ruff check pet/ tests/` | **All checks passed!** |
+| `git diff --check` | 干净 |
+| 聚焦 + 受影响族（上一节 7 个文件 + `test_overlay_shell.py` + `test_overlay_window_capabilities.py`） | **303 passed** |
+| 文档纪律 + 架构红线（`test_pr_report_discipline.py` + `test_architecture.py`） | **186 passed** |
+| 全量 | 见 `.scratch/full-suite-289-merged.log`（四分片） |
+| 隔离复现复跑（多屏模型下）：`issue286/repro_e_position_corner.py` | 三行结果与合并前**逐字相同**（A 落原位 535.2/396.8、B/C 落右下角 1775.0/959.0，迁移都没动目标）——`#288` 之后这条结论不变 |
+
+**合并后专门复核过的一件事**：`#288` 把 sprite 分散到每屏宿主，但 `_build_slot_sprite`
+仍维护 `self.sprite` / `self._spawned`，所以零宠物判据 `_all_sprites()` 不会因为
+"宠在别的屏"而误报（否则会在有宠的机器上打出假的零宠物 WARN）。
