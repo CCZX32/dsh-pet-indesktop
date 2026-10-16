@@ -934,6 +934,31 @@ $ QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:randomly \
 | 4 | 边界值 | 整数身份的三条相对关系各有用例：等于水位（同轮放行）、小于水位（判掉）、大于水位（接棒）；另一条硬边界是**10 万次操作之后的第 1 轮身份仍被判掉**（没有淘汰），以及"水位只涨不降" |
 | 5 | 新机可复现 | **没有新增依赖**（本轮删多于加：面板侧还删掉了一个标准库 import）；复现命令是 `ruff` + 上面两条 pytest 口径，naive 插件在 `.scratch/`（不进提交，需要时 `PYTHONPATH` + `-p` 挂上） |
 
+**O. mac CI 时序假红：`test_island_fps_integration` 的收口断言（2026-10-16 追补，产品代码不变）**
+
+`macos-latest` 上报 `test_the_real_collector_reaches_the_island_through_the_qt_loop`
+（`AssertionError: 会话要收到停止`，原始日志 `.scratch/ci278-macos-failed.txt`）。这是**用例侧的时序
+赌**，不是产品缺陷：退订走 `FpsHub.detach` → `FpsMonitor.unsubscribe` → `_stop_worker(wait=False)`，
+它**当场**清空 `_thread`，所以 `monitor.running` 立刻为假；worker 稍后才在 `finally` 里调
+`session.stop()`（真机上是发官方终止命令 + 有界等它退出）。慢 runner 上"`running` 已假、`stopped`
+还是假"是常态。改法（`pet/` 零改动）：替身 `_StubSession` 在 `stop` 末尾置一个 `threading.Event`
+（`stop_completed`），用例等**这个完成事件**（宽预算 + 泵 Qt），原来的两条断言逐字保留；另加一条
+**慢停闸门探针**（`_GatedStubSession`：`stop` 先发信号、再停在闸门前，闸门由用例显式开关），把那个
+窗口变成确定性复现。
+
+| 门 | 命令（仓库根） | 结果 |
+|---|---|---|
+| 探针**旧写法**取证 | 把探针里那条 `assert session.stopped is False` 换回旧写法的 `is True`（一行改动）再跑 | **1 failed**：`assert False is True`，与 mac CI 同形（`probe-old-form-red.txt`） |
+| 聚焦（新写法） | `QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_island_fps_integration.py` | **29 passed**（原 28 + 探针 1） |
+| 高负载复跑 3 遍（15 核打满） | 同一条命令 ×3 | **29 passed / 29 passed / 29 passed**（23.52 / 10.98 / 10.01 s；`focused-loaded-3x.txt`，独立空载复跑约 6.5 s） |
+| **有牙**（变体：会话收口改成不调 `session.stop`） | `PYTHONPATH=.scratch/mac-ci-fps-race-20261016 QT_QPA_PLATFORM=offscreen python -m pytest -q -p naive_no_session_stop_plugin tests/test_island_fps_integration.py -k "real_collector or slow_session_stop"` | **2 failed**——新断言不是靠放宽预算洗出来的绿（`mutation-red.txt`） |
+| 相关族 | `pytest -q tests/test_fps_monitor.py tests/test_island_fps_slot.py tests/test_game_fps.py tests/test_island_segment_render.py` | **176 passed** |
+| 静态检查 | `python -m ruff check pet tests` | **All checks passed!** |
+
+本轮只改测试文件 `tests/test_island_fps_integration.py`（`_StubSession`、那条用例的收口等待、新增
+探针与 `_GatedStubSession`），`running` / `stop` 的产品语义与"收口不 join"的选择都不动；
+`.scratch/mac-ci-fps-race-20261016/` 是取证脚本与原始输出（不进提交）。
+
 ## 七、已知限制与后续
 
 1. **真桌面与三端未验证**：见 §五第 4 条。特别是**冻结包**里 `_MEIPASS` 分支的候选序只走了替身目录
