@@ -1149,6 +1149,8 @@ class OverlayShell(QObject):
         # 累计/逐圈加速/缓动），宿主适配器把角度写进 sprite 的整帧旋转通道。
         # 懒建（默认关时不建对象、不 import golden_spin）。
         self._golden_spin = None
+        # 弹弓会话（壳内唯一一份）：所有宿主窗共用，见 _wire_host_overlay
+        self._slingshot = None
         self._golden_spin_host = _GoldenSpinSpriteHost(self)
         self._golden_spin_target = None
         # 4.3 后半：共享子系统注入（等价 PetWindow 的构造参数；None = 惰性空转）
@@ -1440,8 +1442,19 @@ class OverlayShell(QObject):
         overlay._on_sprite_click = self._on_sprite_click
         # M5e：点击触发黄金回旋路由（与 _on_sprite_click 同位置注入）
         overlay._click_route_spin = self._route_click_golden_spin
-        # 4.1c 弹弓：controller 由 OverlayWindow 自持，这里只接 config
+        # 4.1c 弹弓：controller 壳内一份（见下），这里只接 config
         # （slingshot_enabled 热读，设置页即改即生效）
+        #
+        # 会话**壳内唯一一份**：瞄准会话可能开在按下窗、而被瞄准的 sprite 已经在
+        # 另一块屏上（拖拽跨屏之后才点右键），每条宿主窗各持一个控制器就会"会话
+        # 在 A、绘制要看 B"两处对不上（B 的控制器里没有会话，A 又画在错的坐标上）。
+        # 共用一份之后，绘制/脏区由持 sprite 的那张窗负责（见 OverlayWindow
+        # ``_paint_slingshot`` / ``_refresh_slingshot_visual`` 的归属换算）。
+        if self._slingshot is None:
+            from .sprite_slingshot import SlingshotController
+
+            self._slingshot = SlingshotController()
+        overlay.slingshot = self._slingshot
         overlay.slingshot.config = self._config
         # 4.1c 全量右键菜单（facade 适配旧 context_menus 建造器）
         from .sprite_menu_facade import build_sprite_full_menu
@@ -1841,16 +1854,30 @@ class OverlayShell(QObject):
             self._slot_signature_cache = None
         return ok
 
+    def _stored_screen_name(self, config_dir, slot) -> str | None:
+        """档案里记着的**屏归属**（没有记忆/读不到 = None；只读，绝不创建）。"""
+        from . import pet_profiles
+
+        profile = pet_profiles.read_slot_profile(config_dir, slot)
+        if not profile.exists:
+            return None
+        name = str(profile.data.get("screen_name") or "")
+        return name or None
+
     def _save_child_geometry(self, sprite, *, slot=None, geometry=None) -> bool:
         """这只宠的位置自存：写 ``rx``/``ry``/``facing``/``scale``（+ 待写的屏归属）。
 
-        **``screen_name``（屏归属）只在它是"有意换屏"的结果时才写**：归属只由
-        :meth:`_remember_sprite_screen` 记一笔待写，在这里与比例**同一次原子写、
-        同一把目录锁**落盘。位置自存本身是无人值守的收尾路径——关闭跨屏时全部宠
-        被摆在启动那块屏、原来那块屏临时不在线时也一样，此时若无条件写屏名，机械
-        动作就会把用户真在多屏下摆好的归属覆盖掉（关闭再启动即丢）。
+        **比例与屏归属都属于"这只宠本该在的那块屏"**，按承载屏与归属是否一致分两路：
 
-        比例照旧更新：单屏下普通拖动持久化不受影响（不是"关闭时一律禁写"）。
+        - **一致**（常态：单屏用户、有意换屏之后）→ 照旧写比例；有"待写的屏归属"
+          （有意换屏，见 :meth:`_remember_sprite_screen`）时与比例**同一次原子写、
+          同一把目录锁**落盘；
+        - **不一致 = 临时承载**（关闭跨屏时被摆在启动那块屏、或归属那块屏临时不在线
+          ／被拔掉）→ **一个几何键都不写**：临时那块屏上的比例若落盘，用户重新开启
+          跨屏后就回不到原来那块屏上的原位置——只保住屏名不等于保住位置。
+
+        于是单屏普通拖动持久化不受影响（不是"关闭时一律禁写"），而"关闭／缺屏 →
+        再开回来"能严格回到原来的比例。
         """
         from . import pet_profiles
 
@@ -1862,13 +1889,19 @@ class OverlayShell(QObject):
         if token is None:
             logging.warning("overlay: slot-%s 没有已应用快照的 token，拒绝几何自存", slot)
             return False
+        host_name = _screen_name(self.host_for_sprite(sprite).screen)
+        pending = getattr(sprite, "_pending_screen_assignment", None)
+        assignment = pending or self._stored_screen_name(config_dir, slot)
+        if assignment is not None and assignment != host_name:
+            logging.debug("overlay: slot-%s 临时承载在 %s（归属 %s），本次几何自存跳过",
+                          slot, host_name, assignment)
+            return False
         geometry = (self._sprite_geometry(sprite, self.host_for_sprite(sprite).bounds)
                     if geometry is None else geometry)
-        assignment = getattr(sprite, "_pending_screen_assignment", None)
-        writes_assignment = bool(assignment) and bool(geometry)
+        writes_assignment = pending is not None and bool(geometry)
         if writes_assignment:
             geometry = dict(geometry)
-            geometry["screen_name"] = assignment
+            geometry["screen_name"] = pending
         result = pet_profiles.write_profile_geometry(
             config_dir, slot, geometry, generation=token)
         if result.status != "ok":
@@ -4987,6 +5020,13 @@ class OverlayShell(QObject):
         sprite.collision_enabled = bool(reader.get("collision_enabled"))
         sprite._profile_character = str(reader.get("character"))
         sprite._profile_generation = reader.generation
+        if self._cross_screen_allowed and not state.get("screen_name"):
+            # 首次落位即把屏归属钉死在这块屏上：没被换过屏的宠（尤其新生成的子宠）
+            # 若不留归属，重启时只能跟着**主宠**走——主宠单独拖到副屏后，子宠也会
+            # 跟着过去（旧默认）。只记一笔待写（见 ``_remember_sprite_screen``），
+            # 由这一次落位的几何自存落盘；关闭跨屏时**不记**（那时的落位是临时
+            # 承载，写了就把用户多屏下摆好的归属覆盖掉）。
+            self._remember_sprite_screen(sprite, pet_host.screen)
         # 这只子肥鱼自己的气泡与自己计时的自言自语（旧架构每窗各一套）
         self._ensure_sprite_bubble(sprite)
         host = self._ensure_self_talk_host(sprite)
@@ -6101,10 +6141,14 @@ class OverlayShell(QObject):
     def route_drag_to_screen(self, sprite, cursor_global) -> bool:
         """跨屏拖拽路由：该 sprite 的身体中心落在别的屏上就移交宿主。
 
-        - 判据取**身体中心**（与落位/恢复同口径）而不是光标本身：1:1 跟手时身体
-          中心越过缝才换窗，宠被两块窗各裁一半的时段最短；
-        - 落点不重算：移交只换坐标系（同一个全局位置），抓取偏移与松手初速一分
-          不改；
+        - 判据取**光标锚定的落点**（``_drag_offset`` = 光标 − 落点，换屏前后逐位
+          相同）算出的身体中心：它才是"用户把这只拽到哪儿了"。刻意**不**用身体
+          当前位置——身体被钳在本屏可用区里（弹簧档下更落后于目标几十像素），
+          它永远到不了缝上，"按实际位置换屏"等于这只宠根本拖不过去；
+        - 移交**保留实际全局位置与拖拽会话**：只换坐标系（``global_pos=None``），
+          位置、弹簧目标、轨迹一起换帧。若在这里按光标落点 ``set_pos``，拖动物理
+          开着时会把这只从当前位置瞬移到光标处（抹掉弹簧滞后）——跨屏那一帧的
+          位移会随滞后量一起变大；
         - 目标屏还没有宿主就现建一个（第一次被占用即建窗口）；
         - 身体中心不在任何屏上（错位拼接的空洞、拖出桌面）时保持当前宿主不变，
           宠不会被甩到自己不在的那块屏上。
@@ -6123,7 +6167,9 @@ class OverlayShell(QObject):
         screen = self._screen_at_global(center)
         if screen is None or screen is source.screen:
             return False
-        self.move_sprite_to_screen(sprite, screen, global_pos=desired)
+        # 只换坐标系（不给 global_pos）：位置与拖拽会话（弹簧目标/轨迹）整体换帧，
+        # 跨屏那一帧不产生"跳到光标处"的位移（拖动物理开着时那一步就是滞后量）
+        self.move_sprite_to_screen(sprite, screen)
         return True
 
     def move_sprite_to_screen(self, sprite, screen, global_pos=None) -> bool:
@@ -6231,9 +6277,21 @@ class OverlayShell(QObject):
                 global_pos - host.overlay.geometry().topLeft()))
 
     def _bind_position_listener(self, sprite) -> None:
-        """主 sprite 的 runtime 标记跟随监听（换宿主后重挂到新窗口）。"""
-        if sprite is self.sprite:
-            self.overlay.add_position_listener(sprite, self._on_main_sprite_moved)
+        """主 sprite 的 runtime 标记跟随监听（换宿主后重挂到**它自己那块屏**的窗）。
+
+        监听挂在**持有这只 sprite 的宿主窗**上（不是 ``self.overlay`` = 主宿主那张
+        窗）：主宠被拖到副屏后，主宿主那张窗不再驱动它，挂在那里等于永不触发
+        （runtime 标记停在旧位置），而且主宿主被回收时那条注册跟着窗口一起消失。
+        挂接前先摘掉其它宿主窗上的同名回调——换屏来回走时不留下影子注册。
+        """
+        if sprite is not self.sprite:
+            return
+        host = self._host_of(sprite) or self._main_host
+        for other in self._hosts:
+            if other is not host:
+                other.overlay.remove_position_listener(
+                    sprite, self._on_main_sprite_moved)
+        host.overlay.add_position_listener(sprite, self._on_main_sprite_moved)
 
     def _reap_empty_hosts(self) -> None:
         """拆掉空宿主：一块屏上的宠全走了，那张 overlay 不该留在桌面上。

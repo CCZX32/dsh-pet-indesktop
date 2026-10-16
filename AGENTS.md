@@ -65,11 +65,14 @@ profile's `screen_name`/`rx`/`ry`). The whole cross-display capability is gated 
 the global `allow_cross_screen` key (default off, snapshotted once per process like
 `stream_capture_mode`): off = every pet stays on the screen the shell started on,
 one window, drags cannot cross, no second host is created. `screen_name` is the
-pet's *screen assignment* and is written only by a deliberate cross-screen move
-(`_remember_sprite_screen`); `_save_child_geometry` writes ratios/facing/scale and
-never the screen name, so turning the switch off (or losing a display temporarily)
-does not overwrite a saved multi-screen layout — turning it back on restores each
-pet to its own screen. The topology verdict also reads the persistent
+pet's *screen assignment*: it is stamped at first placement (every pet, so a child
+never silently follows the main pet to another display) and rewritten only by a
+deliberate cross-screen move (`_remember_sprite_screen`). `_save_child_geometry`
+writes the assignment together with ratios/facing/scale **only while the pet is on
+its assigned screen**; a temporary host (switch off, or the assigned screen
+unplugged) writes no geometry key at all, so neither the assignment nor the ratios
+it recorded on its own screen are eaten — turning the switch back on and restarting
+returns each pet to its own screen at its own position. The topology verdict also reads the persistent
 `stream_capture_mode` key (main `config.json`, snapshotted once per process by
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real

@@ -15,8 +15,11 @@
 ## 〇、状态与边界（先读这一段）
 
 - **本地提交，未 push、未开 PR**：留主代理按 ops5.5 + astra 一次盲审后处置。
-- **本地三道门全过**：`ruff check pet/ tests/` 通过；全量 `pytest -q` **7835 passed /
+- **首轮门**：`ruff check pet/ tests/` 通过；全量 `pytest -q` **7835 passed /
   15 skipped / 0 failed**（23:17）；受影响时序族 **3 连跑各 193 passed**。
+- **提交前双审（ops5.5 + astra）判定 5 条确定缺陷，已全部修复并补回归**：见
+  「第二轮修正」一节（该节同时给出修复后的全量门结果）。首轮门数因此**已被取代**，
+  引用时只用第二轮的数字。
 - **真双屏未验**：本机 Qt 口径只有 **1 块活动屏**（§四之一），跨缝手感 / 异 DPI /
   负坐标拼接只有假屏逻辑证据（假屏不是 `QScreen`，见 §四）。
 - **显存未测**：只给理论缓冲估算（§三之三），明确不是实测。
@@ -281,3 +284,80 @@ FAILURES: 0
   与本刀不同（旧版本会把它当作位置的一部分在退出时改写），但不会因此启动失败。
 - **开关作为运行期降级口**：若真机上出现多屏异常，用户可以关掉跨屏开关并重启，
   回到"单屏一张窗"的旧行为，无需回滚版本。
+
+## 第二轮修正 —— 提交前双审判定的 5 条缺陷（2026-10-16 晚）
+
+> 双审（ops5.5 + astra）在提交前给出 5 条确定缺陷。本节按同一文档追加，保留首轮
+> 叙述与对照；**首轮的门数字已被本节末尾的第二轮结果取代**。
+> 基线：`1dfad90`（本轮改动 = 该提交之后的本地提交）。
+
+### 5 条缺陷、根因与修法
+
+| # | 级别 | 缺陷（双审原文口径） | 根因 | 修法 |
+|---|---|---|---|---|
+| 1 | P1 | 关闭跨屏或屏缺失时，临时承载那块屏的 `rx/ry` 会覆盖原多屏比例；保住 `screen_name` ≠ 保住位置 | `_save_child_geometry` 只要"承载屏 == 无冲突"就照写比例 | 按**承载屏 vs 屏归属**分流：不一致 = 临时承载 → **一个几何键都不写**（`_stored_screen_name` 读档案里的归属，`_remember_sprite_screen` 记的待写优先）；一致 → 照旧写比例（单屏普通拖动持久化不受影响） |
+| 2 | P1 | 新生成的子宠从没跨屏 → 无 `screen_name`；主宠单独拖到副屏后重启，子宠跟着主宠也到副屏 | 无归属的落位判据是"跟随主宠那块屏" | **首次落位即记下归属**（`_build_slot_sprite`：`_cross_screen_allowed` 且档案无 `screen_name` 时记待写 = 落位那块屏）；关闭跨屏时**不记**（那时是临时承载，记了就是缺陷 1 的覆盖） |
+| 3 | P2 | 跨屏拖到副屏后、同一次 grab 里进弹弓：`event.position()` 是本窗（A）坐标，混上 sprite（B）坐标 → 抓取偏移错一个屏原点、预览画在源窗 | 弹弓的三个入口与 UI 都直用本窗局部坐标 | ① 统一输入：`_grab_cursor_pos(event)` 把事件坐标换算成**被抓住那只的坐标系**（不给 mouseMove/release/right-press 喂原始局部坐标；不 warp 鼠标）；② 统一预览：瞄准 UI 的绘制与脏区按 `_follow_overlay` 归属到**持 sprite 的那张窗**；③ 壳内**共用一个** `SlingshotController`（会话可能开在 A 窗而 sprite 已属 B 窗，各窗一份控制器时 B 根本不知道有会话） |
+| 4 | P2 | `drag_physics` 时路由按光标落点 `set_pos` → 跨屏那一帧把这只瞬移到光标处、抹掉弹簧滞后 | 路由把"目标落点"当成了落点写进位置 | 路由只做**判据**（仍按光标锚定的落点算身体中心——身体被钳在本屏、按实际位置判就永远过不去），移交改走"只换坐标系"：位置、弹簧目标、轨迹整体换帧 |
+| 5 | P2 | `_bind_position_listener` 只挂 `self.overlay`（主宿主窗）：主宠移副屏后 runtime 标记不再更新，主宿主被回收时注册连窗口一起消失 | 监听挂"家"的窗，而不是"持这只"的窗 | 挂到 `_host_of(sprite)` 那张窗，并先摘掉其它宿主窗上的同名回调（不留影子注册、不重复注册） |
+
+### 修改文件说明（第二轮）
+
+| 文件 | 改了什么 + 为什么 | ± |
+|---|---|---|
+| `pet/overlay_shell.py` | `_stored_screen_name`（新，只读档案里的屏归属）；`_save_child_geometry` 的**临时承载分流**（缺陷 1）；`_build_slot_sprite` 的**首次归属**（缺陷 2）；`route_drag_to_screen` 改为"只换坐标系"移交 + 判据注释写清"为什么不能用实际位置"（缺陷 4）；`_bind_position_listener` 挂实际宿主窗并清旧注册（缺陷 5）；`_wire_host_overlay` 共用一份弹弓控制器 + `__init__` 的 `_slingshot` 字段（缺陷 3） | +75/−17 |
+| `pet/overlay_window.py` | `_grab_cursor_pos`（新：事件坐标 → 被抓住那只的坐标系）；瞄准移动/发射/右键进瞄准三处改用它（缺陷 3）；`_paint_slingshot` 与 `_refresh_slingshot_visual` 按归属窗绘制/刷脏区（缺陷 3） | +32/−4 |
+| `pet/settings_pet_controls.py` | 行说明与注释同步（"屏与位置都不会被清掉…仍回到各自那块屏的原位置"）——行为没变，是第二轮修复让这句更准 | +3/−3 |
+| `tests/test_overlay_hosts_multiscreen.py` | 新增 `_right_press` / `_painted` 助手与三节用例：跨屏组合手势（缺陷 3）、弹簧拖拽跨屏连续性（缺陷 4）、标记监听归属（缺陷 5） | +139 |
+| `tests/test_overlay_cross_screen_switch.py` | 新增 `_drag_on_current_screen` 助手；round trip 改成**严格比较** `rx/ry`（含关闭期间真鼠标拖动）、新增"缺屏 clamp 后严格比较"、"关闭态不盖首次归属"、"子宠不跟主宠跑"（缺陷 1/2） | +96/−38 |
+| `tests/test_overlay_independent_screens.py` | `test_each_pet_persists_its_own_screen_and_ratio` 改成新语义（首次落位就记归属） | +8/−7 |
+| `AGENTS.md` / `docs/SETTINGS-CHANGE-GATES.md` | 现行口径同步：首次落位即钉归属、临时承载不写任何几何键 | +6/−4 |
+
+### 性能分析（第二轮）
+
+- **新增路径**：`_save_child_geometry` 多一次**档案读**（只在承载屏 != 归属时才发生，
+  即关闭跨屏/缺屏这两种临时承载态；常态走 `pending` 命中，不读盘）。触发频率 = 位置
+  自存频率（拖动收尾/退出/开局落位），次数与首轮相同。
+- **少了什么**：临时承载态下**不再写盘**（少一次 3.4 ms 级单键写）；
+  弹弓控制器从"每窗一份"变成"壳内一份"（少建 N−1 个控制器对象，实测构造 ~µs 级）。
+- **没有新增**：线程、定时器、网络、系统调用一个都没加；路由那条 `set_pos` 由
+  "写目标落点"变成"写实际位置"，计算量不变。
+- **回归口径**：`tick_sim` 成本与首轮同（本轮不碰仿真段）。
+
+### 测试与验证（第二轮）
+
+- 受影响 focused：`tests/test_overlay_hosts_multiscreen.py` + `test_overlay_independent_screens.py`
+  + `test_overlay_cross_screen_switch.py` + `test_sprite_slingshot.py` 等 20 个文件
+  **392 passed**（一条一条先红后绿见下）。
+- **消融（先红后绿，逐条归属）**：撤临时承载分流 → 关闭态 round trip + 缺屏 clamp 两例红；
+  撤首次归属 → 子宠跟随那例红；弹弓输入退回 `event.position()` → 组合手势那例红；
+  弹弓绘制不做归属换算 → 同一例红（脏区/绘制断言）；路由回到按落点 `set_pos` →
+  弹簧滞后那例红；监听挂回主宿主窗 → 标记那例红。**6 条消融各自只打红它该打红的用例。**
+- **全量门（第二轮，最终）**：`QT_QPA_PLATFORM=offscreen python -m pytest -q --timeout=300`
+  → **7840 passed / 15 skipped / 0 failed / 0 error，23:00**（`EXIT=0`，
+  `.scratch/per-pet-multiscreen/full-suite-r2.log`；比首轮多 5 例 = 本轮新增用例）。
+- **受影响时序族 3 连跑**：**3 遍都是 198 passed / 0 failed**（21.56s / 22.24s / 35.95s，`EXIT=0`，`.scratch/per-pet-multiscreen/family-rerun-r2.log`）——同样只做 3 遍串行，不额外打满 CPU（用户口径）。
+
+#### 缺陷 4 的前后对照（实测，命令与日志可复现）
+
+`.scratch/per-pet-multiscreen/probe_drag_cross.py`（两块 1920×1080 假屏、两只宠、
+``drag_physics=True``、从屏中段起拖、末段一次 700px 大跳跨过缝）：
+
+| 跨屏那一帧 | 修前（按光标落点 ``set_pos``） | 修后（只换坐标系） |
+|---|---|---|
+| 实际全局 x | 840.5 → **2357.5**（+1517.0） | 840.5 → **2009.1**（+1168.7） |
+| 弹簧目标全局 x | 2300（= 光标锚定落点） | 2300（同一个） |
+| 下一帧 | 2445.5（滞后被抹平：实际≈目标） | 2145.2（滞后保留：仍落后目标 3000） |
+
+修后那一帧的位移是**把这只并入目标屏所需的最小值**（本窗钳制：身体必须完整落在
+目标屏可用区内），不是"跳到光标处"；拖动物理开着时弹簧滞后与轨迹照旧延续。
+`drag_physics=False` 的 1:1 跟随路径**逐位不变**（落点仍是光标处）。日志：
+`.scratch/per-pet-multiscreen/probe_drag_cross-prefix-ablation.log`（修前 = 临时消融态，
+跑完立即还原并复跑 ruff）、`.scratch/per-pet-multiscreen/probe_drag_cross-r2.log`（修后）。
+
+### 未验边界（第二轮补充）
+
+- 缺陷 3 的"两只窗各自裁一半"观感与异 DPI 混合缩放仍**未在真机双屏上看过**（本机只有
+  1 块活动屏）——跨屏组合手势的坐标正确性只有假屏 + 真鼠标事件证据。
+- 缺陷 4 的连续性只断言了"跨屏那一帧不跳到光标处 + 目标点换帧后全局等价"，实机手感
+  未验。

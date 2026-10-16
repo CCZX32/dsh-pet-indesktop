@@ -220,6 +220,21 @@ def test_off_keeps_a_cross_screen_drag_inside_the_single_window(tmp_path, monkey
 
 
 # ---------------------------------------------------------------- 3. 位置持久化语义
+def _drag_on_current_screen(shell, sprite, *, dx=-30.0, dy=-20.0, steps=6):
+    """在这只当前所在那块屏的窗里真鼠标拖一段（会话与宿主同一个窗）。"""
+    overlay = shell.host_for_sprite(sprite).overlay
+    origin = QPointF(overlay.geometry().topLeft())
+    _hittable(sprite)
+    hit = QPointF(sprite.rect().center())
+    overlay.mousePressEvent(_press(hit, origin + hit))
+    cursor = origin + hit
+    for _ in range(steps):
+        cursor = QPointF(cursor.x() + dx, cursor.y() + dy)
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+    overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+    return cursor
+
+
 def test_off_still_persists_ordinary_drag_ratios(tmp_path, monkeypatch):
     """关闭跨屏 ≠ 禁写位置：单屏普通拖动照旧逐次落盘（既有口径不受影响）。"""
     primary, _secondary = two_screens()
@@ -228,16 +243,7 @@ def test_off_still_persists_ordinary_drag_ratios(tmp_path, monkeypatch):
     shell = _shell(cfg, primary)
     try:
         main = shell.sprite
-        overlay = shell.overlay
-        origin = QPointF(overlay.geometry().topLeft())
-        _hittable(main)
-        hit = QPointF(main.rect().center())
-        overlay.mousePressEvent(_press(hit, origin + hit))
-        cursor = origin + hit
-        for _ in range(6):
-            cursor = QPointF(cursor.x() - 30.0, cursor.y() - 20.0)
-            overlay.mouseMoveEvent(_move(cursor - origin, cursor))
-        overlay.mouseReleaseEvent(_release(cursor - origin, cursor))
+        _drag_on_current_screen(shell, main)
 
         shell.save_position()
         profile = _profile(cfg.dir, "slot-0")
@@ -250,8 +256,35 @@ def test_off_still_persists_ordinary_drag_ratios(tmp_path, monkeypatch):
         _teardown(shell)
 
 
+def test_off_writes_no_assignment_for_a_pet_without_memory(tmp_path, monkeypatch):
+    """关闭跨屏下的首次落位**不记**归属：那时只是临时承载（比例照旧落盘）。"""
+    primary, _secondary = two_screens()
+    _install(monkeypatch, [primary, _secondary])
+    cfg = _config(tmp_path, allow_cross_screen=False)
+    shell = _shell(cfg, primary)
+    try:
+        shell.spawn_pet()
+        child = _child(shell)
+        slot = shell._spawned_slots[child]
+        _drag_on_current_screen(shell, child)
+        shell.save_position()
+        shell.save_spawned_positions()
+
+        profile = _profile(cfg.dir, f"slot-{slot}")
+        assert profile.get("screen_name") is None, (
+            "关闭态不盖归属：这一块屏只是临时承载，盖下去就吃掉真实归属")
+        assert profile["rx"] is not None and profile["ry"] is not None, (
+            "比例照旧逐只落盘（单屏普通拖动持久化不受开关影响）")
+    finally:
+        _teardown(shell)
+
+
 def test_off_and_on_round_trip_returns_pets_to_their_own_screens(tmp_path, monkeypatch):
-    """关掉再打开：各宠仍回到各自那块屏（关闭再启动不得覆盖原多屏位置）。"""
+    """关掉再打开：屏归属与**归属那块屏上的比例**都要逐位保留。
+
+    关闭跨屏期间这只被临时摆在启动那块屏上：在这块屏上拖动、收尾落盘都不许改
+    档案里那份几何——只保住屏名等于没保住位置（重开后落在错的地方）。
+    """
     primary, secondary = two_screens()
     _install(monkeypatch, [primary, secondary])
     cfg = _config(tmp_path, allow_cross_screen=True)
@@ -260,10 +293,13 @@ def test_off_and_on_round_trip_returns_pets_to_their_own_screens(tmp_path, monke
     try:
         shell.spawn_pet()
         child = _child(shell)
-        assert shell.move_sprite_to_screen(child, secondary) is True
+        assert shell.move_sprite_to_screen(
+            child, secondary, global_pos=QPointF(2500.0, 300.0)) is True
         slot = shell._spawned_slots[child]
         shell.save_spawned_positions()
-        assert _profile(cfg.dir, f"slot-{slot}")["screen_name"] == "DISPLAY2"
+        original = _profile(cfg.dir, f"slot-{slot}")
+        assert original["screen_name"] == "DISPLAY2"
+        ratio = (original["rx"], original["ry"])
     finally:
         _teardown(shell)
 
@@ -275,30 +311,42 @@ def test_off_and_on_round_trip_returns_pets_to_their_own_screens(tmp_path, monke
         off_child = _child(off_shell)
         assert off_shell.host_for_sprite(off_child).screen is primary
         assert len(off_shell.hosts()) == 1
-        off_child.set_pos(QPointF(400.0, 300.0))
+        _drag_on_current_screen(off_shell, off_child)
         off_shell.save_position()
         off_shell.save_spawned_positions()
-        profile = _profile(cfg.dir, f"slot-{slot}")
-        assert profile["screen_name"] == "DISPLAY2", (
-            "关闭跨屏期间的位置自存不得覆盖屏归属")
-        assert profile["rx"] is not None, "位置比例照旧更新"
+        kept = _profile(cfg.dir, f"slot-{slot}")
+        assert kept["screen_name"] == "DISPLAY2", "屏归属不得被临时承载改写"
+        assert (kept["rx"], kept["ry"]) == ratio, (
+            "临时承载那块屏上的比例不得落盘——否则重开后回不到原位置")
     finally:
         _teardown(off_shell)
 
-    # 重新开启 → 再重启：回到各自那块屏
+    # 重新开启 → 再重启：回到各自那块屏，且严格落在原比例上
     cfg.set("allow_cross_screen", True)
     cfg.save()
     on_shell = _shell(cfg, primary)
     try:
-        assert on_shell.host_for_sprite(_child(on_shell)).screen is secondary
+        back = _child(on_shell)
+        host = on_shell.host_for_sprite(back)
+        assert host.screen is secondary
         assert len(on_shell.hosts()) == 2
+        body = back.body_rect()
+        got = ((body.x() + body.width() / 2.0 - host.bounds.left()) / host.bounds.width(),
+               (body.y() + body.height() / 2.0 - host.bounds.top()) / host.bounds.height())
+        assert got == pytest.approx(ratio, abs=0.01), (
+            "按原比例回到原来那块屏上的原位置")
+        on_profile = _profile(cfg.dir, f"slot-{slot}")
+        assert (on_profile["rx"], on_profile["ry"]) == ratio
     finally:
         _teardown(on_shell)
 
 
-def test_a_temporarily_missing_screen_keeps_the_remembered_assignment(
-        tmp_path, monkeypatch):
-    """屏临时不在线与关闭跨屏共用同一条持久化语义：归属保留，插回来仍回原屏。"""
+def test_child_without_memory_does_not_follow_the_main_pet(tmp_path, monkeypatch):
+    """主宠单独拖到副屏后重启：从没换过屏的子宠留在自己那块屏（不跟着走）。
+
+    子宠没有归属记录时的旧默认是"跟着主宠那块屏"——主宠单独去副屏，子宠也被带到
+    副屏。首次落位即钉死归属之后，子宠留在它被生成的那块屏。
+    """
     primary, secondary = two_screens()
     _install(monkeypatch, [primary, secondary])
     cfg = _config(tmp_path, allow_cross_screen=True)
@@ -306,22 +354,72 @@ def test_a_temporarily_missing_screen_keeps_the_remembered_assignment(
     try:
         shell.spawn_pet()
         child = _child(shell)
-        assert shell.move_sprite_to_screen(child, secondary) is True
         slot = shell._spawned_slots[child]
+        assert shell.host_for_sprite(child).screen is primary
+        assert shell.move_sprite_to_screen(shell.sprite, secondary) is True
+        shell.save_position()
         shell.save_spawned_positions()
 
-        shell.handle_screen_removed(secondary)
-
-        assert shell.host_for_sprite(child).screen is primary, "拔屏后先落在活着的屏上"
-        shell.save_spawned_positions()
-        assert _profile(cfg.dir, f"slot-{slot}")["screen_name"] == "DISPLAY2", (
-            "临时缺屏是机械搬迁：不得把归属改成当前这块屏")
+        assert _profile(cfg.dir, "slot-0")["screen_name"] == "DISPLAY2"
+        assert _profile(cfg.dir, f"slot-{slot}")["screen_name"] == "DISPLAY1", (
+            "子宠首次落位就要记下自己那块屏")
     finally:
         _teardown(shell)
 
     revived = _shell(cfg, primary)
     try:
-        assert revived.host_for_sprite(_child(revived)).screen is secondary, (
-            "屏插回来，这只仍回到它自己那块屏")
+        assert revived.host_for_sprite(revived.sprite).screen is secondary, (
+            "主宠按自己的记忆回副屏")
+        assert revived.host_for_sprite(_child(revived)).screen is primary, (
+            "没换过屏的子宠不许跟着主宠跑到副屏")
+    finally:
+        _teardown(revived)
+
+
+def test_a_temporarily_missing_screen_keeps_the_remembered_assignment(
+        tmp_path, monkeypatch):
+    """屏临时不在线与关闭跨屏共用同一条持久化语义：归属与比例都保留。
+
+    拔屏后这只被并到活着的屏上，在那块屏上拖动（含贴边钳制）都不许改档案里
+    那份几何；屏插回来仍回到它自己那块屏的原位置。
+    """
+    primary, secondary = two_screens()
+    _install(monkeypatch, [primary, secondary])
+    cfg = _config(tmp_path, allow_cross_screen=True)
+    shell = _shell(cfg, primary)
+    try:
+        shell.spawn_pet()
+        child = _child(shell)
+        assert shell.move_sprite_to_screen(
+            child, secondary, global_pos=QPointF(2500.0, 300.0)) is True
+        slot = shell._spawned_slots[child]
+        shell.save_spawned_positions()
+        original = _profile(cfg.dir, f"slot-{slot}")
+        assert original["screen_name"] == "DISPLAY2"
+        ratio = (original["rx"], original["ry"])
+
+        shell.handle_screen_removed(secondary)
+
+        assert shell.host_for_sprite(child).screen is primary, "拔屏后先落在活着的屏上"
+        # 贴边拖（钳制把这只按在可用区边缘）+ 收尾落盘：都不许写档案
+        _drag_on_current_screen(shell, child, dx=60.0, dy=0.0, steps=10)
+        shell.save_spawned_positions()
+        kept = _profile(cfg.dir, f"slot-{slot}")
+        assert kept["screen_name"] == "DISPLAY2", (
+            "临时缺屏是机械搬迁：不得把归属改成当前这块屏")
+        assert (kept["rx"], kept["ry"]) == ratio, (
+            "缺屏期间钳制后的位置不得落盘——屏插回来要回原位置")
+    finally:
+        _teardown(shell)
+
+    revived = _shell(cfg, primary)
+    try:
+        back = _child(revived)
+        host = revived.host_for_sprite(back)
+        assert host.screen is secondary, "屏插回来，这只仍回到它自己那块屏"
+        body = back.body_rect()
+        got = ((body.x() + body.width() / 2.0 - host.bounds.left()) / host.bounds.width(),
+               (body.y() + body.height() / 2.0 - host.bounds.top()) / host.bounds.height())
+        assert got == pytest.approx(ratio, abs=0.01), "回到原来那块屏上的原位置"
     finally:
         _teardown(revived)

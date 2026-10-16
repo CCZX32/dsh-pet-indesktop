@@ -862,7 +862,7 @@ class OverlayWindow(QWidget):
         if self.slingshot.aiming:
             # 瞄准中：move 只更新拉拽矢量，sprite 定锚不动（不走 on_move）
             self._note_kinetic()  # M-1：瞄准移动保持 T0
-            self.slingshot.update_pull(event.position())
+            self.slingshot.update_pull(self._grab_cursor_pos(event))
             self._refresh_slingshot_visual()
             event.accept()
             return
@@ -888,7 +888,7 @@ class OverlayWindow(QWidget):
         self._note_kinetic()  # M-1：松手（甩出判定）同步升档
         if self.slingshot.aiming:
             if event.button() == Qt.MouseButton.LeftButton:
-                self._fire_slingshot(event.position())
+                self._fire_slingshot(self._grab_cursor_pos(event))
                 event.accept()
                 return
             # 右键/其它键松手：瞄准继续（左键仍按住）。右键的取消手势在
@@ -1015,6 +1015,18 @@ class OverlayWindow(QWidget):
         return self._sprite_event_pos(
             self._mouse_grab, global_pos, QPointF(self.mapFromGlobal(global_pos)))
 
+    def _grab_cursor_pos(self, event) -> QPointF:
+        """事件光标位置 → **被抓住那只 sprite 所在坐标系**的坐标。
+
+        弹弓的锚点/拉拽矢量、拖拽收尾都活在这只 sprite 的坐标系里；跨屏移交后
+        输入会话仍留在按下窗，直接喂 ``event.position()`` 会把本窗局部坐标与另一
+        块屏上的 sprite 坐标混起来（差整整一个屏原点：抓取偏移错位、橡皮带与
+        轨迹预览画在错的窗/错的位置）。本方法不 warp 鼠标，只做坐标换算。
+        """
+        grip = self._mouse_grab if self._mouse_grab is not None else self.slingshot.sprite
+        return self._sprite_event_pos(
+            grip, event.globalPosition().toPoint(), event.position())
+
     # ---------------------------------------------------------------- 弹弓会话（事件侧调和）
     def _consume_right_press_for_slingshot(self, event) -> bool:
         """右键 press 交给弹弓：进瞄准或取消瞄准；返回是否被消费。
@@ -1024,7 +1036,7 @@ class OverlayWindow(QWidget):
         会覆写它，若不清理，随后的左键松手会被壳层判成一次单击）。
         """
         if not self.slingshot.maybe_enter_on_right_press(
-                self._mouse_grab, event.position()):
+                self._mouse_grab, self._grab_cursor_pos(event)):
             return False
         self._context_menu_suppressed = True
         self._invalidate_press_discriminator()
@@ -1063,7 +1075,15 @@ class OverlayWindow(QWidget):
             self.__dict__["_press_pos"] = None
 
     def _paint_slingshot(self, painter: QPainter) -> bool:
-        """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。"""
+        """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。
+
+        跨屏：会话可能开在按下窗、而被瞄准的 sprite 已在另一块屏上（拖拽跨屏
+        之后才点右键），瞄准 UI 的坐标属于**持 sprite 的那张窗**——只有它画，
+        按下窗不画（否则带/预览按另一套局部坐标落在错的窗上）。
+        """
+        sprite = self.slingshot.sprite
+        if sprite is not None and self._follow_overlay(sprite) is not self:
+            return False
         return self.slingshot.paint(painter)
 
     def _refresh_slingshot_visual(self) -> None:
@@ -1074,7 +1094,15 @@ class OverlayWindow(QWidget):
         不是外接大矩形——预测弧能横跨大半屏，按外包框重绘会白刷几十个百分点
         的像素）。取消/发射后当前区域为空，旧区域这一笔负责把残留的带/点
         擦干净。
+
+        跨屏同 ``_paint_slingshot``：脏区归持有被瞄准 sprite 的那张窗（可能不是
+        本窗），这里把请求转过去，保持"绘制与擦除在同一个坐标系、同一条通道"。
         """
+        sprite = self.slingshot.sprite
+        owner = self._follow_overlay(sprite) if sprite is not None else self
+        if owner is not self:
+            owner._refresh_slingshot_visual()
+            return
         current = self.slingshot.visual_region(self.rect())
         dirty = current | self._slingshot_dirty
         self._slingshot_dirty = current

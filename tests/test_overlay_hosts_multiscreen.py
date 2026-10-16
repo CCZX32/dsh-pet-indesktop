@@ -15,9 +15,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import json
+
 import pytest
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtGui import QGuiApplication, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
 import tests.test_overlay_window_capabilities as cap
@@ -142,6 +144,25 @@ def _release(local, global_pos):
     return QMouseEvent(
         QEvent.Type.MouseButtonRelease, QPointF(local), QPointF(global_pos),
         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier)
+
+
+def _painted(overlay, canvas) -> bool:
+    """在该 overlay 上真跑一次瞄准 UI 绘制，返回"是否画了内容"。
+
+    画布由调用方持有：``QPainter`` 活过临时 ``QPixmap`` 会访问违例。
+    """
+    painter = QPainter(canvas)
+    try:
+        return bool(overlay._paint_slingshot(painter))
+    finally:
+        painter.end()
+
+
+def _right_press(local, global_pos):
+    return QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(local), QPointF(global_pos),
+        Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
         Qt.KeyboardModifier.NoModifier)
 
 
@@ -640,4 +661,184 @@ def test_island_wall_waits_for_a_host_on_its_screen(tmp_path, monkeypatch):
         assert shell.island_bridge.core._world is host_b.collision  # noqa: SLF001
     finally:
         shell.attach_island(None)
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 跨屏组合手势
+def test_slingshot_gesture_after_crossing_uses_one_coordinate_system(
+        tmp_path, monkeypatch):
+    """跨屏拖到副屏后、**同一次 grab** 里点右键进弹弓：输入与预览同一坐标系。
+
+    grab 留在按下窗（A），而 sprite 已经在 B：喂原始 ``event.position()`` 会把 A 的
+    局部坐标与 B 上这只的坐标混起来（差整整一个屏原点）——拉拽预览按 B 的锚点画在
+    A 的坐标系里，取消后恢复的抓取偏移也错一个屏原点（下一次移动这只被甩一整块屏）。
+    这里钉三件事：瞄准会话可用、UI 归**持这只的那张窗**画、恢复拖拽后位移量不变。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        main.set_pos(QPointF(200.0, 700.0))
+        overlay_a = shell.overlay
+        origin_a = QPointF(overlay_a.geometry().topLeft())
+        cursor, local_a = _drag_across(shell, main, steps=30, step_px=60)
+        host_b = shell.host_for_sprite(main)
+        assert host_b.screen is b, "前提：这只已经跨到副屏，而 grab 还在 A 窗"
+        assert b.geometry().contains(cursor.toPoint()), "前提：光标确实落在副屏上"
+        assert overlay_a._mouse_grab is main
+
+        # 同一次 grab 里点右键 = 进瞄准（会话活在共用控制器上）
+        overlay_a.mousePressEvent(_right_press(local_a, cursor))
+        slingshot = shell._slingshot
+        assert slingshot.aiming is True
+        assert slingshot.sprite is main
+        assert slingshot.anchor == QPointF(main.pos), "锚点就是这只在它自己坐标系里的位置"
+        # 进去时的光标也必须是 B 的坐标系：与锚点同源，才不会有整屏偏移
+        assert (slingshot.anchor_cursor - slingshot.anchor).manhattanLength() < (
+            main.rect().width() + main.rect().height()), (
+            "锚点光标与锚点同系（差一块屏的原点就会大得离谱）")
+
+        # 光标在 A 窗里向左挪 60px：拉拽矢量 = 60px（方向与坐标系无关；
+        # 60 在弹弓拉拽上限之内，不会被钳掉而掩盖算错坐标系的可能）
+        pull_cursor = cursor - QPointF(60.0, 0.0)
+        overlay_a.mouseMoveEvent(_move(pull_cursor - origin_a, pull_cursor))
+        assert slingshot.pull.x() == pytest.approx(60.0, abs=1.0)
+        assert slingshot.pull.y() == pytest.approx(0.0, abs=1.0)
+
+        # 瞄准 UI 归持这只的那张窗画：A 窗不画（否则带/预览落在错的屏上）
+        canvas = QPixmap(16, 16)   # 画布要活到 painter 结束（临时对象会崩）
+        assert _painted(host_b.overlay, canvas) is True
+        assert _painted(overlay_a, canvas) is False
+        assert shell.host_for_sprite(main).overlay._slingshot_dirty.isEmpty() is False
+        assert overlay_a._slingshot_dirty.isEmpty() is True
+
+        # 再点右键 = 取消并就地恢复拖拽：抓取偏移按当前光标重建（不差一个屏原点）
+        overlay_a.mousePressEvent(_right_press(pull_cursor - origin_a, pull_cursor))
+        assert slingshot.aiming is False
+
+        before = _global_of(shell.host_for_sprite(main), main)
+        next_cursor = pull_cursor + QPointF(40.0, 0.0)
+        overlay_a.mouseMoveEvent(_move(next_cursor - origin_a, next_cursor))
+        after = _global_of(shell.host_for_sprite(main), main)
+        assert (after - before).x() == pytest.approx(40.0, abs=2.0), (
+            "恢复拖拽后跟着光标走：错一个屏原点会整块屏地甩出去")
+
+        overlay_a.mouseReleaseEvent(_release(next_cursor - origin_a, next_cursor))
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 跨屏与弹簧拖拽
+def test_crossing_with_drag_physics_keeps_the_spring_lag(tmp_path, monkeypatch):
+    """拖动物理开着时跨屏：**不**把这只从当前位置瞬移到光标处（弹簧滞后保留）。
+
+    弹簧档的位置由阻尼积分追目标点，跨屏那一帧若按光标落点 ``set_pos``，滞后会被
+    一次抹掉（位移随滞后量一起变大，手感上就是"过缝被吸过去"）。移交只换坐标系：
+    位置与目标点、轨迹整体换帧。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"drag_physics": True})
+    try:
+        main = shell.sprite
+        # 从 A 的中段出发（不是贴边）：跨屏一帧的位移必须仍是一步之内的量
+        main.set_pos(QPointF(600.0, 600.0))
+        overlay_a = shell.overlay
+        origin_a = QPointF(overlay_a.geometry().topLeft())
+        _hittable(main)
+        hit = QPointF(main.rect().center())
+        overlay_a.mousePressEvent(_press(hit, origin_a + hit))
+        # 先走几步攒出滞后（弹簧还没积分，实际位置基本不动）
+        cursor = origin_a + hit
+        for _ in range(5):
+            cursor = QPointF(cursor.x() + 40.0, cursor.y())
+            overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
+        assert shell.host_for_sprite(main).screen is a
+        lag_before = QPointF(main._drag_spring_target) - QPointF(main.pos)
+        assert lag_before.x() > 100.0, "前提：弹簧滞后已经攒出来（拖动确实落后于目标）"
+
+        # 一大步直接跨过缝：目标点落到 B 深处
+        cursor = QPointF(cursor.x() + 1400.0, cursor.y())
+        overlay_a.mouseMoveEvent(_move(cursor - origin_a, cursor))
+        host_b = shell.host_for_sprite(main)
+        assert host_b.screen is b, "前提：这一步确实跨屏了"
+        assert main.pos.x() < host_b.overlay.width(), (
+            "跨屏不是瞬移到光标处：这只仍在它自己坐标系的前段（滞后保留）")
+        lag_after = QPointF(main._drag_spring_target) - QPointF(main.pos)
+        assert lag_after.x() > 0.0, "弹簧目标仍在前面（滞后没被抹平）"
+        # 目标点整体换帧：全局等价位置就是"光标 - 抓取偏移"（同一手势同一落点）
+        target_global = QPointF(host_b.overlay.geometry().topLeft()) + lag_after + QPointF(main.pos)
+        assert target_global.x() == pytest.approx(cursor.x() - main._drag_offset.x(),
+                                                  abs=2.0)
+
+        # 松手也成立：release 会再过一次路由，但位置不得跳（弹簧档不 snap 到光标）
+        before_release = _global_of(shell.host_for_sprite(main), main)
+        overlay_a.mouseReleaseEvent(_release(cursor - origin_a, cursor))
+        after_release = _global_of(shell.host_for_sprite(main), main)
+        assert (after_release - before_release).manhattanLength() < 2.0, (
+            "松手不得把这只从我位置挪到光标处")
+        assert main.interaction_state in ("normal", "thrown")
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- runtime 标记监听
+def test_main_pet_position_listener_follows_its_own_window(tmp_path, monkeypatch):
+    """主宠移到副屏后：位置监听挂在**那些这只的窗**上，标记照旧随位置更新。
+
+    老写法挂 ``self.overlay``（主宿主那张窗）：主宠跨屏后那张窗不再驱动它，标记
+    永不更新；主宿主被回收时连注册一起丢掉。
+    """
+    from pet import slot_manager
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a)
+    try:
+        main = shell.sprite
+        overlay_a = shell.overlay
+        assert shell._on_main_sprite_moved in overlay_a._position_listeners.get(main, [])
+
+        assert shell.move_sprite_to_screen(main, b) is True
+        host_b = shell.host_for_sprite(main)
+        assert shell._on_main_sprite_moved in host_b.overlay._position_listeners.get(
+            main, []), "监听要挂在持有这只的那张窗上"
+        assert shell._on_main_sprite_moved not in overlay_a._position_listeners.get(
+            main, []), "旧窗上的影子注册要摘掉"
+
+        def marker_x():
+            path = slot_manager.runtime_marker_path(
+                shell._config.dir, shell._config.instance_id, versioned=True)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload["x"]
+
+        main.set_pos(QPointF(600.0, 500.0))
+
+        def drift_and_fanout(dx):
+            """让这只真动起来并跑一次推进段：位置通知就在这一段扇出。
+
+            先把位置写好再跑推进段是**不会**触发通知的（推进段比的是这一次
+            advance 前后的矩形），所以这里给一段真速度让它在该次 advance 里位移。
+            """
+            shell._last_marker_write = 0.0
+            main.set_velocity(QPointF(dx * 60.0, 0.0))
+            shell.driver.advance_overlays(1 / 60.0)
+            main.set_velocity(QPointF(0.0, 0.0))
+
+        drift_and_fanout(200.0)
+        first = marker_x()
+        drift_and_fanout(400.0)
+        second = marker_x()
+        assert second - first == pytest.approx(400.0, abs=8.0), (
+            "标记跟着这只在副屏上的位置走（挂错窗就永远不动）")
+
+        # 主宿主那张窗被回收（A 上没宠）之后，标记照旧更新——监听不在它身上
+        shell._reap_empty_hosts()
+        assert shell.host_for_screen(a) is None, "前提：A 那块窗已经收掉"
+        drift_and_fanout(200.0)
+        third = marker_x()
+        assert third - second == pytest.approx(200.0, abs=8.0), (
+            "回收 A 窗不得带走这只的标记监听")
+    finally:
         _cleanup(shell)

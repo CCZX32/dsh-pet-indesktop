@@ -453,12 +453,12 @@ def test_transfer_keeps_clip_playing_and_never_broadcasts_removal(tmp_path, two_
 
 # ---------------------------------------------------------------- 8. 逐只屏记忆
 def test_each_pet_persists_its_own_screen_and_ratio(tmp_path, two_screens):
-    """落盘：有意换屏的那只记下自己的 ``screen_name``，比例相对**它自己那块屏**算。
+    """落盘：逐只记下自己的 ``screen_name`` 与比例（比例相对**它自己那块屏**算）。
 
-    ``screen_name`` 是**屏归属**：只有用户把它拖到另一块屏这种有意动作才写
-    （``_remember_sprite_screen``）。位置自存（退出/拖动收尾）只写比例与朝向——
-    没换过屏的那只档案里不留屏名，比"退出一律把当前屏写回去"更不容易把用户
-    摆好的多屏归属改掉（关闭跨屏 / 屏临时不在线时都会走到位置自存）。
+    ``screen_name`` 是**屏归属**：首次落位即钉死（没被换过屏的宠也要有归属，否则
+    重启时子宠只能跟着主宠走），之后只由"有意把它拖到另一块屏"改写。位置自存
+    （退出/拖动收尾）在承载屏 == 归属时照旧写比例，两者不一致（临时承载）时一个
+    几何键都不写——见 ``test_overlay_cross_screen_switch`` 的 round trip。
     """
     primary, secondary = two_screens
     shell, cfg = _make_shell(tmp_path, primary, collision_enabled=True)
@@ -477,10 +477,10 @@ def test_each_pet_persists_its_own_screen_and_ratio(tmp_path, two_screens):
             "前提：两只宠各有各的档案")
         main_profile = _profile(cfg.dir, shell.sprite_instance_id(main))
         child_profile = _profile(cfg.dir, shell.sprite_instance_id(child))
-        assert main_profile["screen_name"] is None, (
-            "没换过屏的那只：位置自存不写屏归属（屏名只在有意换屏时写）")
+        assert main_profile["screen_name"] == "DISPLAY1", (
+            "没换过屏的那只也在首次落位就记下自己的屏（不记就会跟着别的宠跑）")
         assert main_profile["rx"] is not None and main_profile["ry"] is not None, (
-            "没换屏不等于不落位置：比例照旧逐只更新（单屏普通拖动持久化靠它）")
+            "比例照旧逐只更新（单屏普通拖动持久化靠它）")
         assert child_profile["screen_name"] == "DISPLAY2", "子宠记的是它自己那块屏"
         assert (child_profile["rx"], child_profile["ry"]) == pytest.approx(
             expected_ratio, abs=0.01), (
