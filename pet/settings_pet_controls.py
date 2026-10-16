@@ -93,6 +93,18 @@ ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
 #: 措辞与规范 §五同源，改字就是改语义。
 ALL_PETS_SCOPE_SENTENCE = "此设置影响所有桌宠。"
 
+#: 「允许桌宠跨屏」基础文案。全局键、重启级（进程快照）——本行随时可改，但下一次
+#: 启动才按新值建窗；关闭态下位置照旧逐只落盘（比例仍更新），只是**屏幕归属**
+#: （``config-slot-N.json`` 的 ``screen_name``）原样保留，所以关掉再开回来，
+#: 各宠仍回到各自那块屏（见 ``overlay_shell`` 的位置持久化口径）。
+CROSS_SCREEN_HINT = (
+    "开启后，每块有桌宠的显示器各开一张窗口，桌宠可以被拖到别的显示器上。"
+    "关闭时所有桌宠只留在启动时那块屏，拖不过去，也不会多开窗口；"
+    "各宠原来记着的屏不会被清掉，重新开启后仍回到各自那块屏。"
+    "重启后生效。"
+    + GLOBAL_SCOPE_NOTE
+)
+
 #: 作用域标注的接线表：``(行键, 说明末尾那句原文)``——同一句既是"从说明里削掉什么"，
 #: 也是"标注显示什么"。行本身照着这张表补标注（见 ``_apply_window_scope_rows``），
 #: 因此文案仍然只有说明表一份来源，这里一个字的文案都不新写。
@@ -104,6 +116,7 @@ ALL_PETS_SCOPE_SENTENCE = "此设置影响所有桌宠。"
 GLOBAL_SCOPE_ROWS: tuple[tuple[str, str], ...] = (
     ("autostart", GLOBAL_SCOPE_NOTE),
     ("stream_capture", GLOBAL_SCOPE_NOTE),
+    ("cross_screen", GLOBAL_SCOPE_NOTE),
     ("harness_autostart", ALL_PETS_SCOPE_SENTENCE),
     ("harness_launch_target", ALL_PETS_SCOPE_SENTENCE),
 )
@@ -276,6 +289,15 @@ def build_pet_controls(host) -> None:
 
     host.on_top_check = ToggleSwitch(host)
     host.on_top_check.setChecked(bool(host.config.get("on_top", True)))
+    # 允许桌宠跨屏（全局键、重启级）：唯一消费者是 overlay 壳的宿主化路径
+    # （overlay_shell 的屏宿主分配/跨屏路由）。legacy 单窗 PetWindow 自己就是一个
+    # 真窗口，本来就能跨显示器拖动，本开关对它没有第二个读点 ⇒ 非 overlay 拓扑下
+    # 如实置灰 + 说明，不留"改了没反应"的活开关。
+    host.cross_screen_check = ToggleSwitch(host)
+    host.cross_screen_check.setChecked(bool(host.config.get("allow_cross_screen", False)))
+    if not _is_overlay_topology():
+        host.cross_screen_check.setEnabled(False)
+        host.cross_screen_check.setToolTip("仅单合成窗（overlay）拓扑生效")
     host.no_move_check = ToggleSwitch(host)
     host.no_move_check.setChecked(bool(host.config.get("no_move", False)))
     host.mouse_through_check = ToggleSwitch(host)

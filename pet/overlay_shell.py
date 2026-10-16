@@ -18,6 +18,11 @@
 - 屏事件：screenAdded/screenRemoved/primaryScreenChanged/geometryChanged →
   宿主创建/跨屏移交/逐屏几何同步，sprite 位置按 rx/ry（中心相对**它那块屏**可用区
   的比例）语义迁移；屏 DPR 变化重喂该屏 sprite.set_dpr；拖拽中拔屏先收尾拖拽再迁移；
+- 跨屏是**可关闭的全局偏好**（主配置 ``allow_cross_screen``，默认关、进程快照）：
+  关着时只有启动时那块屏有窗、跨屏路由一律拒绝（拖不过去）；**屏归属**（档案的
+  ``screen_name``）只在有意换屏时写（``_remember_sprite_screen``），位置自存
+  （``_save_child_geometry``）只写比例与朝向——于是关掉跨屏、或原来那块屏临时
+  不在线，都不会改写用户摆好的多屏归属，重新开启并重启即回到各自那块屏；
 - 会话结束（Windows 关机/注销）：复用 session_watcher 的闸门与信号链，
   收口本路径 MovieLibrary 的全部 clip（issue #111 等价链，D10 落点）。
 
@@ -1090,6 +1095,12 @@ class OverlayShell(QObject):
         # ``_initial_screen`` 只是构造期入参，建出主宿主后一切屏信息都从宿主读。
         self._hosts: list = []
         self._initial_screen = screen if screen is not None else app.primaryScreen()
+        # 允许桌宠跨屏（主配置全局键、**重启级**）：进程内快照一次，运行期不重读
+        # ——设置页改的是磁盘，勾一下就让正在跑的进程多出/收掉窗口不是这个开关的
+        # 语义（与 stream_capture_mode 同口径）。关闭时：只有启动时选定的那块屏
+        # （主宿主）有窗口，跨屏路由一律不换宿主（见 _host_for_restore /
+        # route_drag_to_screen / move_sprite_to_screen）。
+        self._cross_screen_allowed = bool(self._config.get("allow_cross_screen", False))
         self._sprite_factory = sprite_factory or (
             lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
         self._started = False
@@ -1831,6 +1842,16 @@ class OverlayShell(QObject):
         return ok
 
     def _save_child_geometry(self, sprite, *, slot=None, geometry=None) -> bool:
+        """这只宠的位置自存：写 ``rx``/``ry``/``facing``/``scale``（+ 待写的屏归属）。
+
+        **``screen_name``（屏归属）只在它是"有意换屏"的结果时才写**：归属只由
+        :meth:`_remember_sprite_screen` 记一笔待写，在这里与比例**同一次原子写、
+        同一把目录锁**落盘。位置自存本身是无人值守的收尾路径——关闭跨屏时全部宠
+        被摆在启动那块屏、原来那块屏临时不在线时也一样，此时若无条件写屏名，机械
+        动作就会把用户真在多屏下摆好的归属覆盖掉（关闭再启动即丢）。
+
+        比例照旧更新：单屏下普通拖动持久化不受影响（不是"关闭时一律禁写"）。
+        """
         from . import pet_profiles
 
         slot = self._spawned_slots.get(sprite) if slot is None else slot
@@ -1843,16 +1864,19 @@ class OverlayShell(QObject):
             return False
         geometry = (self._sprite_geometry(sprite, self.host_for_sprite(sprite).bounds)
                     if geometry is None else geometry)
-        if geometry:
+        assignment = getattr(sprite, "_pending_screen_assignment", None)
+        writes_assignment = bool(assignment) and bool(geometry)
+        if writes_assignment:
             geometry = dict(geometry)
-            geometry["screen_name"] = _screen_name(
-                getattr(sprite, "home_screen", None) or self._screen)
+            geometry["screen_name"] = assignment
         result = pet_profiles.write_profile_geometry(
             config_dir, slot, geometry, generation=token)
         if result.status != "ok":
             logging.warning("overlay: slot-%s 几何未保存：%s (%s)",
                             slot, result.status, result.reason)
             return False
+        if writes_assignment:
+            sprite._pending_screen_assignment = None
         return True
 
     def _apply_child_profile(self, slot) -> bool:
@@ -5050,6 +5074,8 @@ class OverlayShell(QObject):
     def _host_for_restore(self, slot, state):
         """这只宠该落在哪块屏（复活/生成的唯一判据）。
 
+        - **关闭跨屏**（主配置 ``allow_cross_screen`` 为假、本进程快照）→ 都在
+          启动时那块屏：记忆不采纳、不建第二张窗（见下方分支）；
         - **记忆命中的屏在线**（``screen_name`` 是已连接显示器）→ 那块屏的宿主
           （还没有就现建一个），比例也在那块屏的可用区里反解；
         - **记忆不在线 / 没有记忆** → 留在已有归属上，不搬：一段不在线的记忆
@@ -5058,6 +5084,12 @@ class OverlayShell(QObject):
           自主宠向右错开）；槽0 就是主宿主本身，它的窗口 ``self.overlay`` 始终是
           主宠的窗口（见 ``_main_host``）。
         """
+        if not self._cross_screen_allowed:
+            # 关闭跨屏：全部宠都在**启动时选定那块屏**（= 主宿主），记忆里的屏
+            # 只作参考不采纳、也不建第二张窗；记忆本身一个字节不动（见
+            # ``_save_child_geometry`` / ``_remember_sprite_screen`` 的分工），
+            # 所以重新开启跨屏并重启，各宠仍回到各自记忆里那块屏。
+            return self._main_host
         screen = self._screen_by_name(state.get("screen_name"))
         if slot == 0:
             if screen is not None and screen is not self._main_host.screen:
@@ -6079,7 +6111,7 @@ class OverlayShell(QObject):
 
         返回是否发生了移交。
         """
-        if sprite is None:
+        if sprite is None or not self._cross_screen_allowed:
             return False
         source = self._host_of(sprite)
         if source is None:
@@ -6100,8 +6132,13 @@ class OverlayShell(QObject):
         ``global_pos`` = 目标全局左上角；None = 保持当前全局位置只换坐标系。
         只动这一只：别的宠、别的屏的状态一分不变；目标宿主里现成有这块屏自己的
         行为/碰撞/物理世界，故不需要任何"重建世界"的步骤。
+
+        关闭跨屏时只有启动时那块屏有窗口，故搬到别的屏直接拒绝（不建窗、不动
+        这只）：这是**有意**改屏归属的唯一入口，拒绝在这里就是"跨不过去"。
         """
         if sprite is None or screen is None:
+            return False
+        if not self._cross_screen_allowed and screen is not self._main_host.screen:
             return False
         target = self.host_for_screen(screen)
         if target is None:
@@ -6109,6 +6146,7 @@ class OverlayShell(QObject):
         source = self._host_of(sprite)
         if source is None:
             self._place_sprite_in_host(sprite, target, global_pos=global_pos)
+            self._remember_sprite_screen(sprite, screen)
             return True
         if source is target:
             if global_pos is not None:
@@ -6116,10 +6154,30 @@ class OverlayShell(QObject):
                     global_pos - target.overlay.geometry().topLeft()))
             return False
         self._transfer_sprite(sprite, source, target, global_pos=global_pos)
+        # 有意换屏 = 改这只的屏归属（唯一写 screen_name 的地方；机械搬迁不写）
+        self._remember_sprite_screen(sprite, screen)
         # 拖拽把这块屏上最后一只带走时，源宿主就此空掉：等这次 grab 收尾再拆
         # （正在按着的那只宠的宿主绝不能当场消失）
         self._reap_empty_hosts()
         return True
+
+    def _remember_sprite_screen(self, sprite, screen) -> None:
+        """记下这只宠的**屏幕归属**（有意换屏时唯一改 ``screen_name`` 的地方）。
+
+        归属只在用户把这只**有意**拖到另一块屏时更新；被临时摆在别的屏上的宠
+        （关闭跨屏、或原来那块屏临时不在线）比例照旧更新、归属不被机械动作改写，
+        于是"关掉跨屏/临时拔屏 → 再开回来"仍回到各自那块屏。
+
+        **不在这里写盘**：本方法跑在拖拽的 mouseMove 上，而单键几何写实测中位
+        3.4 ms（p95 4.2 ms；目录锁被别人占着时最长等 ``DEFAULT_TIMEOUT_S`` = 5 s）
+        ——GUI 线程不该为一次落盘停这么久。改把待写的屏名记在**这只自己身上**，
+        由下一次几何自存与比例（同一文件、同一把锁、同一次原子写）一起落盘；
+        记在 sprite 上（同 ``_profile_generation`` / ``home_screen`` 的存法）随
+        这只的生命周期一起消失，退出/关闭路径不需要额外清理。
+        """
+        if sprite is None:
+            return
+        sprite._pending_screen_assignment = _screen_name(screen)
 
     def _transfer_sprite(self, sprite, source, target, global_pos=None) -> None:
         """宿主移交本体：换坐标系 + 过继状态。

@@ -83,6 +83,48 @@ recovery
 
 ## 变更记录
 
+### 2026-10-16 — 新增全局键 `allow_cross_screen`（「允许桌宠跨屏」行）
+
+本刀**新增 1 个持久设置键与 1 行设置项**（多屏能力的总开关），不改任何既有键的默认值、
+归属与迁移。
+
+| 项 | 本刀口径 |
+|---|---|
+| setting_id / 行键 | `cross_screen`（配置键 `allow_cross_screen`，`pet/config.py::Config._initial_data`） |
+| 归属 | 常规域（`settings`）→「窗口与系统」组，排在窗口旗标类（置顶 / 全屏隐藏 / 光标穿透 / 直播捕获）之后 |
+| 标题 / 说明 | 「允许桌宠跨屏」/ `settings_pet_controls.CROSS_SCREEN_HINT`：开启后每块有桌宠的显示器各开一张窗口、可以拖到别的显示器上；关闭时全部宠只留在启动那块屏、拖不过去也不会多开窗口；**各宠原来记着的屏不会被清掉**，重新开启后仍回到各自那块屏；**重启后生效**。文案末尾逐字带 `GLOBAL_SCOPE_NOTE`，由 `SettingRow.set_scope_note` 削进行内标注（说明表仍是唯一来源），搜索索引与 `accessibleDescription` 都保留全文 |
+| default | `False`（**关**）。关 = 单显示器口径与旧行为逐位相同：一张窗、一组控制器、拖不过缝 |
+| 保存时机 / commit_policy | `immediate`（随设置窗关闭的既有 `_write_config` 写回，不新增写盘路径）；**生效时机是重启**——壳在构造时把该键**快照一次**（`OverlayShell._cross_screen_allowed`），运行期不重读，与 `stream_capture_mode` 同口径 |
+| capability / 平台可用性 | 三端都创建（多显示器不是平台专属）；**非 overlay 拓扑（legacy 单窗 / 捕获模式）下置灰** + tooltip「仅单合成窗（overlay）拓扑生效」——legacy 的 `PetWindow` 自己就是一个真窗口、本来就能被拖到别的显示器，本键在那边没有第二个读点，摆着不置灰就是"改了没反应"的活开关 |
+| 依赖 | 无前置开关；关闭态下位置持久化照旧（比例逐次落盘），只有**屏归属**（`screen_name`）不被机械动作改写 |
+| 迁移 | **新键**：老配置没有它 → 取默认关（升级用户呈现不变）；`Config.reload` 白名单与 `_bool_or_default` 归一同步登记（`tests/test_config_schema.py` 的两份快照钉住） |
+| 恢复 | 无需恢复路径：失败面只有写盘失败，走既有设置窗关闭闸门；置灰态下控件不可改，不产生半套状态 |
+| 披露层级 | `primary`（就在首屏那一组里，不进任何折叠） |
+| 默认值标记 | 登记在 `settings_default_marks`（出厂默认 `False` 可比），因此勾选后会出现「已修改」标记与单项重置入口 |
+| 不做 | 不做"关闭时禁止写位置"（那会破坏单屏普通拖动持久化）；不做运行期热切换（重启级是刻意选择，避免勾一下当场多出/收掉窗口）；不把 `screen_name` 的归属语义扩成第二份真值（仍只有档案一处） |
+
+准出对应：
+
+1. **契约**：键、默认值、归属、依赖、平台可见性、披露层级、保存与生效时机逐条见上表；
+   失败路径沿用既有设置窗保存闸门；旧键/旧入口/旧别名无迁移问题（新键）。
+2. **TDD**：新增 `tests/test_settings_cross_screen.py` 5 例（默认关 + 保存 round trip、
+   全局作用域标注与可访问说明、非 overlay 拓扑置灰 + tooltip、默认值标记与单项重置入口、
+   四组搜索词命中）；配置侧由 `tests/test_config_schema.py` 的两份快照 + 归一化路径覆盖；
+   行为侧（开关如何影响窗口数/跨屏路由/位置归属）在
+   `tests/test_overlay_cross_screen_switch.py`（8 例，含**三个进程往返**证重启级与
+   关闭→开启 round trip）。消融：撤置灰闸令 1 例红、撤作用域登记令 1 例红、撤壳侧闸门
+   分别令 2/3/4 例红（逐条见 PR 报告 §三之五）。
+3. **布局与可访问性**：无新增控件类型、无新增 QSS（复用 `ToggleSwitch` 与 `SettingRow`）；
+   行序只在「窗口与系统」末尾追加一行（`tests/test_settings_ia_first_cut.py` 与
+   `tests/test_settings_compat_layering.py` 的行序断言同步更新）；全局作用域标注挂在
+   标签那一行、不额外占行；说明里含"重启后生效"与作用域全文，可搜索。
+4. **跨平台**：无新平台分支（三端都建行）；置灰判据是既有的拓扑判定
+   （`settings_pet_controls._is_overlay_topology`），不新增 `sys.platform` 分支。
+   真实 GUI 验收仅本机 Windows，macOS / Linux 未跑（不推断）。
+5. **视觉与文档**：本记录即变更记录；PR 报告
+   [`PR-REPORT-PER-PET-MULTISCREEN-2026-10-16.md`](PR-REPORT-PER-PET-MULTISCREEN-2026-10-16.md)
+   与 `docs/INDEX.md` 登记同步；`AGENTS.md` 多屏段落补上开关与屏归属语义。
+
 ### 2026-10-16 — 音乐播放器路径：`music_player_paths` 扩到四个播放器（**同一字典，不新增配置格式**）
 
 本刀**不新增配置键、不新增设置页分组、不改保存语义**：`music_player_paths` 仍是同一个

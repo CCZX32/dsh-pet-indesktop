@@ -91,6 +91,10 @@ def _install_screens(monkeypatch, *screens):
 
 
 def _make_shell(tmp_path, screen, values=None):
+    # 本文件测的就是"允许跨屏"下的多屏合同：开关是全局键、重启级（进程内快照），
+    # 不在这台"机器"上显式开启的话，壳体只会在启动那块屏建窗，全部多屏断言都
+    # 无从成立（默认关 = 单显示器口径）。显式值优先，便于单条用例反向覆盖。
+    values = {"allow_cross_screen": True, **(values or {})}
     config = cap.CapConfig(tmp_path, values)
     from pet import pet_profiles
 
@@ -493,7 +497,8 @@ def test_restore_puts_each_pet_back_on_its_own_screen(tmp_path, monkeypatch):
     _install_screens(monkeypatch, a, b)
     from pet import pet_profiles
 
-    config = cap.CapConfig(tmp_path, None)
+    # 复活路径同样只在"允许跨屏"下按各宠记忆的屏分窗
+    config = cap.CapConfig(tmp_path, {"allow_cross_screen": True})
     pet_profiles.write_profile_settings(tmp_path, 0, {"scale": 0.5})
     pet_profiles.write_profile_settings(tmp_path, 1, {"scale": 0.5})
     pet_profiles.save_active_set(tmp_path, [0, 1], on_broken="backup-overwrite")
@@ -527,7 +532,8 @@ def test_main_pet_restored_to_its_saved_screen_re_sites_the_home_window(
     _install_screens(monkeypatch, a, b)
     from pet import pet_profiles
 
-    config = cap.CapConfig(tmp_path, None)
+    # 复活路径同样只在"允许跨屏"下按各宠记忆的屏分窗
+    config = cap.CapConfig(tmp_path, {"allow_cross_screen": True})
     pet_profiles.write_profile_settings(tmp_path, 0, {"scale": 0.5})
     pet_profiles.write_profile_geometry(
         tmp_path, 0, {"rx": 0.5, "ry": 0.5, "screen_name": "B"})

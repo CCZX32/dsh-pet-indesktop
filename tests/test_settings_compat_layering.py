@@ -119,6 +119,7 @@ def test_cursor_passthrough_is_back_in_the_window_group(tmp_path, monkeypatch):
             "settingRow_on_top",
             "settingRow_auto_hide_fullscreen",
             "settingRow_cursor_hidden_passthrough",
+            "settingRow_cross_screen",
         ]
         assert section.advanced is False, "窗口旗标类偏好不该进高级折叠"
         assert not section.card.isHidden(), "主组默认是展开的"

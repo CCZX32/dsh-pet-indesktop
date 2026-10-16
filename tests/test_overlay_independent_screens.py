@@ -71,16 +71,19 @@ def two_screens(monkeypatch):
     """一块主屏（1920×1080）+ 一块右屏（1600×900）：本文件全部用例都在这台机器上跑。
 
     假屏不在 Qt 的屏枚举里，而产品按 ``screen_name`` 找回屏、按全局坐标判"落在
-    哪块屏"都读它——故把 ``screens()`` / ``primaryScreen()`` 在类与实例两处都换成
-    假屏，桌面上就真的只有这两块屏，没有第三块真屏漏进来。
+    哪块屏"都读它——故把 ``screens()`` / ``primaryScreen()`` 换成假屏，桌面上就
+    真的只有这两块屏，没有第三块真屏漏进来。
+
+    **只补类级的 ``QGuiApplication``**（产品读的就是这两条类级静态方法）：那两条
+    是类级静态方法，产品读的是类；补实例属性（``app.screens``）会在 PySide6 对象
+    上留下一个影子实例属性，``monkeypatch`` 撤回时写回的是"已被补成假屏的值"，
+    于是补丁泄漏到下一条用例——本文件里表现为后续用例莫名多出两块屏。
     """
     primary = FakeScreen(PRIMARY_GEO, PRIMARY_AVAIL, name="DISPLAY1")
     secondary = FakeScreen(SECONDARY_GEO, SECONDARY_AVAIL, name="DISPLAY2")
     screens = [primary, secondary]
     monkeypatch.setattr(QGuiApplication, "screens", staticmethod(lambda: list(screens)))
     monkeypatch.setattr(QGuiApplication, "primaryScreen", staticmethod(lambda: screens[0]))
-    monkeypatch.setattr(app, "screens", lambda: list(screens))
-    monkeypatch.setattr(app, "primaryScreen", lambda: screens[0])
     return primary, secondary
 
 
@@ -99,8 +102,11 @@ def _make_shell(tmp_path, screen, **values):
 
     与 ``tests.test_overlay_screen_migration._make_shell`` 同形，只把库工厂换成
     ``RichLibrary``——那条夹具的 ``CapLibrary`` 没有 ``movie()``，子宠一 tick 就炸。
+    本文件整体测"允许跨屏"下的合同，故这台"机器"上把开关显式打开（全局键、重启级
+    进程快照）；不打开的话壳体只在启动那块屏建窗，多屏断言无从成立。
     """
     cfg = Config(base=tmp_path)
+    cfg.set("allow_cross_screen", True)
     for key, value in values.items():
         cfg.set(key, value)
     cfg.save()
@@ -447,7 +453,13 @@ def test_transfer_keeps_clip_playing_and_never_broadcasts_removal(tmp_path, two_
 
 # ---------------------------------------------------------------- 8. 逐只屏记忆
 def test_each_pet_persists_its_own_screen_and_ratio(tmp_path, two_screens):
-    """落盘：两只宠各写各的 ``screen_name``；比例是相对**它自己那块屏**算的。"""
+    """落盘：有意换屏的那只记下自己的 ``screen_name``，比例相对**它自己那块屏**算。
+
+    ``screen_name`` 是**屏归属**：只有用户把它拖到另一块屏这种有意动作才写
+    （``_remember_sprite_screen``）。位置自存（退出/拖动收尾）只写比例与朝向——
+    没换过屏的那只档案里不留屏名，比"退出一律把当前屏写回去"更不容易把用户
+    摆好的多屏归属改掉（关闭跨屏 / 屏临时不在线时都会走到位置自存）。
+    """
     primary, secondary = two_screens
     shell, cfg = _make_shell(tmp_path, primary, collision_enabled=True)
     try:
@@ -465,7 +477,10 @@ def test_each_pet_persists_its_own_screen_and_ratio(tmp_path, two_screens):
             "前提：两只宠各有各的档案")
         main_profile = _profile(cfg.dir, shell.sprite_instance_id(main))
         child_profile = _profile(cfg.dir, shell.sprite_instance_id(child))
-        assert main_profile["screen_name"] == "DISPLAY1", "主宠留在主屏"
+        assert main_profile["screen_name"] is None, (
+            "没换过屏的那只：位置自存不写屏归属（屏名只在有意换屏时写）")
+        assert main_profile["rx"] is not None and main_profile["ry"] is not None, (
+            "没换屏不等于不落位置：比例照旧逐只更新（单屏普通拖动持久化靠它）")
         assert child_profile["screen_name"] == "DISPLAY2", "子宠记的是它自己那块屏"
         assert (child_profile["rx"], child_profile["ry"]) == pytest.approx(
             expected_ratio, abs=0.01), (

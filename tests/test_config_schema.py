@@ -34,6 +34,7 @@ from pet.island_segments import CPU, NETWORK
 RELOAD_WHITELIST_SNAPSHOT = frozenset(
     {
         "agent_cost_enabled",
+        "allow_cross_screen",
         "anim_menu_stay_open",
         "animation_gap_seconds",
         "auto_hide_fullscreen",
