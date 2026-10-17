@@ -141,12 +141,14 @@ features/
 - 产品侧读 `<app>/features/` 旁置包根的那条链（D4 已让构建脚本能携带包根，运行期还没人读）。
 - 验收：真冻结产物上跑通"安装→装载→启停→卸载"，而不是只在源码解释器下绿（N6 登记的缺口）；三端构建脚本的两道门保持绿。
 - 注意：Windows 安装包 GUI 实测（装/卸/升级）属于这片的人工验收部分。
+- **2026-10-17 阶段 4 进展**：官方识屏 Worker 已能冻成单文件 exe（`scripts/build_screen_worker.py`），`build_screen_package.py --worker-exe` 写入 `worker.path`；`verify_feature_package.py --official` + `build_onedir.ps1 -OfficialFeaturePackages` 让 onedir 真实携带 `<app>/features/{ai-chat,screen-understanding}`。冻结 Worker 裸跑 exit 77、冻结入口 `--worker` 未知 id exit 2 已实测；完整租约交接链路与产品 GUI 安装/启停/卸载仍未人工验收。证据：[`PR-REPORT-FROZEN-PACKAGE-BUILD-2026-10-17.md`](PR-REPORT-FROZEN-PACKAGE-BUILD-2026-10-17.md)。
 
 ### 6.4 5A Setup 适配（打包/构建片的后半）
 
 - Setup 选装器（官方 ZIP 编译期嵌入、勾选安装、首启 startup receipt）、显式便携模式。
 - 入口：`packaging/dsh-pet.iss`（本站 Inno Setup）、上游参照 `docs/plugin-phase-05-distribution/`。
 - **注意**：官方包嵌入 Setup 与便携模式在 PORT-STATUS §七 的当前判定是"不做"——开工前重新跟维护者确认是否翻案。
+- **2026-10-17 状态：受阻未做**。本机没有 `ISCC.exe`（无法编译安装包），也没有正式发布签名密钥；构建侧的官方包随包投递已具备，但 Setup 选装任务、首启 receipt、便携模式、Ed25519 发布清单均未实现/未验证。按纪律停在「可交付的一半」，不声称 Setup 已验收、不伪造签名。
 
 ### 6.5 不排期/不做（别捡起来）
 

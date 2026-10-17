@@ -88,7 +88,7 @@ SIGNATURE_IGNORED = "signature_ignored"
 def inspect(source: Path | str, *, target_platform: str = sys.platform, official: bool = False) -> dict:
     """验一份包（目录或 ZIP），返回体检报告 dict——**不抛异常**，结论都在返回值里。
 
-    ``official=True`` 走 Core 自有的官方验签策略（能力上限 = 官方登记闭集），
+    ``official=True`` 走 Core 自有的官方闭集校验策略（能力上限 = 官方登记闭集），
     用于构建期校验随包携带的官方功能包；默认的本地包口径仍拒绝官方保留 ID。
 
     报告的 ``trust_status`` 是**信任口径**（本地包恒为 ``local_user``：显式用户信任，

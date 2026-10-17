@@ -37,8 +37,13 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build_package(source: Path, output: Path) -> Path:
-    """组装官方识屏包：host/ + common/ + worker-src/→worker/ + manifest.json + ZIP。"""
+def build_package(source: Path, output: Path, *, worker_exe: Path | None = None) -> Path:
+    """组装官方识屏包：host/ + common/ + worker-src/→worker/ + manifest.json + ZIP.
+
+    ``worker_exe`` 非 None 时把冻结 Worker 复制为 ``worker/entry.exe``（POSIX 为
+    ``worker/entry``）并作为清单里的 ``worker.path``；不传则保持源码态
+    ``worker/entry.py``。
+    """
     source, output = Path(source).resolve(strict=True), Path(output).absolute()
     safe_path(output)
     if output.exists() or output.with_suffix(".zip").exists():
@@ -65,6 +70,17 @@ def build_package(source: Path, output: Path) -> Path:
     copy_tree(source / "host", "host")
     copy_tree(source / "common", "common")
     copy_tree(source / "worker-src", "worker")
+    worker_path = "worker/entry.py"
+    if worker_exe is not None:
+        frozen = Path(worker_exe).resolve(strict=True)
+        if not frozen.is_file():
+            raise ValueError(f"worker executable is not a file: {worker_exe}")
+        name = "entry.exe" if sys.platform == "win32" else "entry"
+        target = output / "worker" / name
+        data = frozen.read_bytes()
+        target.write_bytes(data)
+        files[f"worker/{name}"] = {"sha256": _digest(data), "size": len(data)}
+        worker_path = f"worker/{name}"
     manifest = {
         "format_version": 2,
         "key_id": "local-user",
@@ -78,7 +94,7 @@ def build_package(source: Path, output: Path) -> Path:
         "capabilities": sorted(OFFICIAL_FEATURES[OWNER].capabilities),
         "factory": "screen-understanding/v1",
         "execution_kind": "host-worker",
-        "worker": {"path": "worker/entry.py", "args": []},
+        "worker": {"path": worker_path, "args": []},
         "files": files,
     }
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", "utf-8")
@@ -94,9 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="打包官方识屏功能包（源码态）")
     parser.add_argument("output", type=Path, help="输出目录（同名 ZIP 一并产出）")
     parser.add_argument("--source", type=Path, default=SOURCE)
+    parser.add_argument("--worker-exe", type=Path, default=None, help="冻结 Worker 可执行文件（4B-5）")
     args = parser.parse_args(argv)
     try:
-        result = build_package(args.source, args.output)
+        result = build_package(args.source, args.output, worker_exe=args.worker_exe)
     except (ValueError, OSError) as error:
         print(f"打不了包：{error}", file=sys.stderr)
         return 2
