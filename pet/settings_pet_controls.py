@@ -98,8 +98,8 @@ ALL_PETS_SCOPE_SENTENCE = "此设置影响所有桌宠。"
 #: 启动那块屏上的几何一个键都不写），所以关掉再开回来，各宠仍回到各自那块屏的
 #: 原位置（见 ``overlay_shell._save_child_geometry`` 的分流）。
 CROSS_SCREEN_HINT = (
-    "开启后，每块有桌宠的显示器各开一张窗口，桌宠可以被拖到别的显示器上。"
-    "关闭时所有桌宠只留在启动时那块屏，拖不过去，也不会多开窗口；"
+    "开启后，一张合成窗铺满所有显示器组成的桌面，桌宠可以被直接拖到任意一块显示器上。"
+    "关闭时所有桌宠只留在启动时那块屏，拖不过去；"
     "各宠原来记着的屏与位置不会被清掉，重新开启后仍回到各自那块屏的原位置。"
     "重启后生效。"
     + GLOBAL_SCOPE_NOTE
@@ -718,13 +718,15 @@ def build_pet_controls(host) -> None:
     host.agent_sound_done_check.toggled.connect(lambda: host._update_agent_sound_subcontrols())
     host.agent_sound_error_check.toggled.connect(lambda: host._update_agent_sound_subcontrols())
 
-    # 待办提醒：偏好两键（条目在右键菜单「待办提醒」面板中管理）
+    # 待办提醒：偏好三键（条目在右键菜单「待办提醒」面板中管理）
     host.todo_reminder_check = ToggleSwitch(host)
     host.todo_reminder_check.setChecked(bool(host.config.get("todo_reminder_enabled", True)))
     host.todo_reminder_lead_spin = BrowserSpinBox(host)
     host.todo_reminder_lead_spin.setRange(0, 60)
     host.todo_reminder_lead_spin.setSuffix(" 分钟")
     host.todo_reminder_lead_spin.setValue(int(host.config.get("todo_reminder_lead_minutes", 5) or 0))
+    host.todo_reminder_speak_check = ToggleSwitch(host)
+    host.todo_reminder_speak_check.setChecked(bool(host.config.get("todo_reminder_speak", False)))
 
     appearance = host.config.get("context_menu_appearance", DEFAULT_CONTEXT_MENU_APPEARANCE)
     host.menu_theme_select = ModernSelect(host, width=132)

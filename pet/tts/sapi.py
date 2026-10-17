@@ -43,9 +43,29 @@ def _client():
     return client
 
 
+def _ensure_com() -> None:
+    """确保**当前线程**进过 COM 初始化。
+
+    COM 是线程级的：GUI 线程里 Qt 早就初始化过，后台线程没有。合成跑在
+    ``_TTSWorker`` 线程里，缺这一步时 ``CreateObject`` 直接抛
+    ``WinError -2147221008 尚未调用 CoInitialize``——报时 / 试听 / 台词语音
+    三条链路在后台合成时全部退化成「本地语音合成失败」。同线程重复调用是引用
+    计数语义，多调一次无害；调用方要么是常驻 GUI 线程，要么是短命 worker。
+    """
+    import comtypes
+
+    comtypes.CoInitialize()
+
+
 def _voice_objects():
-    """返回 SAPI 的 ``GetVoices()`` 集合（拿不到就返回 None）。"""
+    """返回 SAPI 的 ``GetVoices()`` 集合（拿不到就返回 None）。
+
+    ``_ensure_com()`` 必须在 try 内：本函数在模块导入期就会被
+    ``installed_voices()`` 调到，而 comtypes 只在 Windows 存在——放外面会让
+    非 Windows 的导入直接抛 ModuleNotFoundError。
+    """
     try:
+        _ensure_com()
         voice = _client().CreateObject("SAPI.SpVoice", dynamic=True)
         return voice, voice.GetVoices()
     except Exception:
@@ -154,6 +174,7 @@ class SapiTtsProvider(TtsProvider):
         """把文本合成到 ``out_path``（标准 wav）。失败一律转 TtsUnavailable。"""
         client = _client()
         try:
+            _ensure_com()
             voice = client.CreateObject("SAPI.SpVoice", dynamic=True)
             target = find_voice(str(plan.get("voice") or "")) or pick_default_voice(voice)
             if target is None:
