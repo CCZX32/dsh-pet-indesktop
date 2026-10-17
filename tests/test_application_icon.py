@@ -298,6 +298,7 @@ def test_the_installer_ships_the_bundled_copy_without_extra_entries():
 
     assert 'SetupIconFile=..\\' + RELATIVE_POSIX.replace("/", "\\") in text
     assert re.search(r'Source:\s*"\{#MyAppDir\}\\?\*";\s*DestDir:\s*"\{app\}";'
+                     r'(?:\s*Excludes:\s*"[^"\n]*";)?'
                      r'\s*Flags:[^"\n]*recursesubdirs[^"\n]*createallsubdirs', text), \
         "安装包里没有递归拷贝 onedir 产物，图标会被漏掉"
 
