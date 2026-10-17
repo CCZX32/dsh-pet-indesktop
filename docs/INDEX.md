@@ -140,6 +140,8 @@
 
 ## PR 报告存档
 
+- [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
+
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [`PR-REPORT-TASKBAR-TOPZORDER-2026-10-17.md`](PR-REPORT-TASKBAR-TOPZORDER-2026-10-17.md) | issue #296「启动桌宠后任务栏被所有悬浮窗挡住」的根因与修复（分支 `fix/issue-296-non-rude-hwnd`，基线 `a8593a8`）：4.3.0 默认 overlay 后，每屏一张铺满 `screen.geometry()`（含任务栏）的置顶合成窗，被 Windows Shell 的 rude window manager 按几何判成全屏应用，任务栏被移到 z 序底部；4.2.1 的 legacy 小窗不满足「铺满整屏」故无此问题。修法＝`showEvent`（真实窗探针 `IsWindowVisible=False`，满足「显示之前」）给 HWND 设官方豁免 `NonRudeHWND=HANDLE(TRUE)`，`on_top` 的 `setWindowFlag` 重建原生窗后靠下一次显示重放。实机：修复版全屏窗 `NonRudeHWND=1`、基线 `None`；**本机 22631 未复现用户可见症状**（A/B 截图任务栏都正常），需报告者在 22621 复测。 | 改 overlay 合成窗的窗口标志/几何/显示路径，或再遇「启动桌宠后任务栏掉到普通窗口下面 / 全屏透明窗被当成全屏应用」时必读。先例：铺满整块显示器的透明/点击穿透窗**仍然**会被 Shell 当全屏应用；`MarkFullscreenWindow(FALSE)` 会回落到自动检测，`NonRudeHWND` 才是关掉检测。 |
