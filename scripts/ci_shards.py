@@ -62,6 +62,7 @@ LOCAL_LOAD_SENSITIVE = [
     "tests/test_proactive_worker.py",
     "tests/test_proactive_worker_adapter.py",
     "tests/test_screen_package_worker.py",
+    "tests/test_chat_subsystem.py",
 ]
 DEFAULT_SHARDS = 4
 #: 本地默认并发：16 核 8 路约 6 分钟跑完；4 核机器自动降到 4 路。CI 显式传 --jobs 1。
