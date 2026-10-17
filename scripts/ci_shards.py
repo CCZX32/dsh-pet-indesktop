@@ -58,6 +58,7 @@ LOCAL_LOAD_SENSITIVE = [
     "tests/test_settings_page_guide.py",
     "tests/test_workers_lifecycle.py",
     "tests/test_settings_overlay_copy.py",
+    "tests/test_library_shared_media.py",
 ]
 DEFAULT_SHARDS = 4
 #: 本地默认并发：16 核 8 路约 6 分钟跑完；4 核机器自动降到 4 路。CI 显式传 --jobs 1。
