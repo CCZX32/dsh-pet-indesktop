@@ -68,6 +68,7 @@ class WorkerHarness:
         self._stdin = os.fdopen(read_fd, "rb", 0)
         self._out = io.BytesIO()
         self.frames: list[dict] = []
+        self._request_seq = 0
         self._cond = threading.Condition()
         self._error: BaseException | None = None
 
@@ -94,10 +95,14 @@ class WorkerHarness:
         return message.request_id or ""
 
     def request(self, operation: str, arguments: dict | None = None, *, generation: int = 1) -> str:
+        # ``time.monotonic_ns()`` on Windows is quantized: two requests issued
+        # inside one clock tick got the same id, and the busy check then saw the
+        # first request as its own predecessor. A counter is the only identity.
+        self._request_seq += 1
         return self.send(
             "request",
             {"operation": operation, "generation": generation, "arguments": arguments or {}},
-            request_id=f"req-{operation}-{generation}-{time.monotonic_ns()}",
+            request_id=f"req-{operation}-{generation}-{self._request_seq}",
         )
 
     def _parse(self) -> None:

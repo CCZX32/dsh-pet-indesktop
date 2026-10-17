@@ -117,7 +117,7 @@ def test_missing_key_opens_its_own_settings_and_preserves_input_and_drafts(insta
     assert not panel.dirty()
     provider = mount.runtime.config.chat_settings().active_config
     assert mount.runtime.config.resolve_provider_secret(provider) == "callback-test-secret"
-    assert "callback-test-secret" not in (mount.runtime.config.dir / "configuration.json").read_text()
+    assert "callback-test-secret" not in (mount.runtime.config.dir / "configuration.json").read_text(encoding="utf-8")
     assert json.dumps(shell.config.chat_settings().to_dict(), sort_keys=True) == before
 
 
@@ -272,14 +272,14 @@ def test_existing_settings_process_navigates_and_preserves_the_owner_draft(insta
                                  env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
         try:
             pump(lambda: (tmp_path / "settings-ready.json").exists() or child.poll() is not None)
-            assert child.poll() is None, (tmp_path / "settings-child.log").read_text()
+            assert child.poll() is None, (tmp_path / "settings-child.log").read_text(encoding="utf-8", errors="replace")
             click_settings_link(window)
             pump(lambda: (tmp_path / "settings-first.json").exists() or child.poll() is not None)
-            assert (tmp_path / "settings-first.json").exists(), (tmp_path / "settings-child.log").read_text()
+            assert (tmp_path / "settings-first.json").exists(), (tmp_path / "settings-child.log").read_text(encoding="utf-8", errors="replace")
             click_settings_link(window)
             pump(lambda: child.poll() is not None)
-            assert child.returncode == 0, (tmp_path / "settings-child.log").read_text()
-            assert json.loads((tmp_path / "settings-second.json").read_text())["draft_retained"]
+            assert child.returncode == 0, (tmp_path / "settings-child.log").read_text(encoding="utf-8", errors="replace")
+            assert json.loads((tmp_path / "settings-second.json").read_text(encoding="utf-8"))["draft_retained"]
             assert shell.instance.modern_settings_dialog is None
             assert not shell._toast_windows, "Successful navigation must not show the busy notice"
         finally:

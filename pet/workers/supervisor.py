@@ -485,7 +485,19 @@ class WorkerSupervisor(QObject):
                 if payload.get("lease_claimed") is not True:
                     self._fail_current("worker lease takeover not confirmed")
                     return
-                process_pid = int(self._process.processId()) if self._process is not None and self._process.processId() else None
+                # QProcess owns the process it created, which is not necessarily
+                # the process running the worker: a venv python.exe may be a
+                # launcher that re-execs the base interpreter. The lease record
+                # is keyed by the worker's own pid, so prefer the pid it reports
+                # in its hello frame and fall back to QProcess only without one.
+                reported_pid = payload.get("pid")
+                process_pid = None
+                if isinstance(reported_pid, int) and not isinstance(reported_pid, bool) and reported_pid > 0:
+                    process_pid = reported_pid
+                elif isinstance(reported_pid, str) and reported_pid.isdigit() and int(reported_pid) > 0:
+                    process_pid = int(reported_pid)
+                if process_pid is None and self._process is not None and self._process.processId():
+                    process_pid = int(self._process.processId())
                 if not launch.confirm_handoff(process_pid):
                     self._fail_current("worker lease takeover rejected")
                     return

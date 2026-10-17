@@ -123,7 +123,11 @@ def _worker_command(
         .replace("__CAPABILITIES__", repr(list(capabilities)))
     )
     script.write_text(preamble + "\n" + textwrap.dedent(body), encoding="utf-8")
-    return sys.executable, [str(script)], pid_file
+    # A venv's python.exe may be a launcher that re-execs the base interpreter;
+    # QProcess then owns the launcher while the script runs in its child, so
+    # ``processId()`` cannot equal the script's ``os.getpid()``. Launch the base
+    # interpreter directly: on a non-venv install the two are the same file.
+    return getattr(sys, "_base_executable", sys.executable), [str(script)], pid_file
 
 
 class _Recorder:
