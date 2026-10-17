@@ -29,7 +29,7 @@ from pet.voice_chime import (
     DEFAULT_VOLUME,
     cache_key,
 )
-from pet.voice_chime_service import VoiceChimeService
+from pet.voice_chime_service import AUX_PRECACHE_ROLE, VoiceChimeService, _cache_hit
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1095,6 +1095,144 @@ def test_precache_completion_records_path_without_playing(tmp_path, monkeypatch)
     assert service._pending_speech is None
 
 
+# ------------------------------------------------------------ 旁路预合成（precache 入口）
+# 设备/角色语义：``precache(text)`` 是给"外部功能想提前把一段合好"用的（每日一签），
+# 它与**报时预合成**共用 ``_busy`` 这一条通道闸，但**不共用占位状态**。下面两条钉住
+# 这层隔离：旁路的成败只说自己那一句，不许碰报时那一组 ``_precache_*`` 字段。
+
+def _arm_chime_precache(service):
+    """让报时预合成**已经完成**（占位 + 路径都在），返回 ``(slot, path, text)``。
+
+    09:59:30 距 10:00 只 30s，落在 60s 预合成窗口里；合成线程用 ``_WorkerSpy`` 替身，
+    完成由 ``finish()`` 驱动——不睡、不猜时序。
+    """
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+    worker = _WorkerSpy.instances[-1]
+    worker.finish()
+    _qapp().processEvents()
+    assert service._precache_slot is not None, "前提：报时预合成已占位"
+    assert service._precache_path is not None, "前提：报时预合成已完成"
+    return service._precache_slot, service._precache_path, service._precache_text
+
+
+def _start_aux_precache(service, text="今天也要认真工作呀。"):
+    """走旁路预合成入口，返回替身 worker（调用方自己决定 finish 成功还是失败）。"""
+    assert service.precache(text, log_tag="每日一签") is True, "前提：旁路预合成被受理"
+    return _WorkerSpy.instances[-1]
+
+
+@pytest.mark.parametrize("error", ["网络错误", "edge-tts-missing"],
+                         ids=["合成失败", "缺依赖"])
+def test_aux_precache_failure_leaves_the_chime_slot_intact(tmp_path, monkeypatch, error):
+    """旁路预合成失败**不许**清掉报时那一组占位——那是报时已经合好的那一段。
+
+    实测缺陷（2026-10-17）：旁路预合成曾经复用 ``role="precache"``，而失败分支按角色
+    清 ``_precache_slot/_precache_text/_precache_bubble/_precache_path``——旁路的一次
+    失败就把报时**已合成好**的缓存路径一起抹掉，到点 ``_consume_precache`` 只能回退
+    即时合成（那一段语音晚 3-8 秒才响），日志里还写着"预合成失败"。
+    """
+    from pet.voice_chime_service import EDGE_TTS_MISSING
+
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    slot, path, text = _arm_chime_precache(service)
+
+    aux = _start_aux_precache(service)
+    aux.finish(error=EDGE_TTS_MISSING if error == "edge-tts-missing" else error)
+    _qapp().processEvents()
+
+    assert service._precache_slot == slot, "报时占位的槽位被旁路预合成清掉了"
+    assert service._precache_path == path, "报时已合好的缓存路径被旁路预合成清掉了"
+    assert service._precache_text == text
+    assert service._player.plays == 0, "旁路预合成无论成败都不出声"
+
+
+def test_aux_precache_completion_never_claims_the_chime_path(tmp_path, monkeypatch):
+    """旁路预合成完成只留在自己的 cache key 上：不改 ``_precache_path``，也不出声。
+
+    实测缺陷（2026-10-17）：完成分支 ``_precache_path = str(path)`` 是按角色写的，
+    旁路完成会把这格改成**旁路那个 mp3**；随后 ``_consume_precache(报时槽位)`` 判
+    "槽位对得上 + 文件存在"就返回了，日志里报的文件名是别人的，报时那一格的用途
+    从此对不上（这次是运气好——调用方只用返回的文本重算 key）。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+    slot, path, text = _arm_chime_precache(service)
+
+    aux = _start_aux_precache(service)
+    aux.finish()
+    _qapp().processEvents()
+
+    assert service._precache_path == path, "报时那一格被旁路预合成的路径覆盖了"
+    assert service._precache_path != str(aux.out_path), "旁路的 key 与报时的不是同一个"
+    assert service._precache_slot == slot
+    assert service._precache_text == text
+    assert service._player.plays == 0, "旁路预合成不得出声（那会把预合成变成偷偷播一次）"
+    assert service._player.sources == []
+
+
+def _write_cache_for(service, text: str) -> Path:
+    """用产品自己的路径算法把一段文本标成"已有缓存"（不手拼 key：命中要看真实文件名）。"""
+    attempts = service._usable_attempts()
+    assert attempts, "前提：本环境至少有一个可用后端（CI 装 requirements.txt 后成立）"
+    service._cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = service._cache_path(text, attempts[0])
+    cached.write_bytes(b"\x00" * 32)
+    assert _cache_hit(cached)
+    return cached
+
+
+def test_aux_precache_cache_hit_neither_plays_nor_synthesizes_again(tmp_path, monkeypatch):
+    """旁路预合成撞上**已有缓存**：不起第二路合成、也不出声。
+
+    两个入口都要成立：
+    1. ``precache()`` 自己的命中分支——命中即返回 ``True``（"已可用"），连 ``_fire``
+       都不调；
+    2. ``_fire`` 的命中分支按角色早退——这条是**竞态兜底**：检查与起播之间若有别的
+       后台合成把文件写好，命中就落进 ``_fire``。缓存命中判据在 provider 化之后从
+       "一个路径"变成"逐后端一轮循"（``_cache_path`` 的扩展名与 flavor 都由 provider
+       给），早退必须留在循环里，否则"我只是想提前合好"会变成"偷偷播了一次"
+       （``show_bubble=False`` 只压气泡，压不住播放）。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    text = "今天也要认真工作呀。"
+    _write_cache_for(service, text)
+
+    # 1) 入口命中：不起合成
+    assert service.precache(text, log_tag="每日一签") is True, "已有缓存＝这次已可用"
+    assert _WorkerSpy.instances == [], "缓存命中不得再起一路合成"
+    assert service._player.plays == 0, "缓存命中不得出声（预合成永不出声）"
+
+    # 2) 竞态兜底：直接走 _fire 的缓存命中分支，预合成角色必须早退
+    service._fire(text, datetime(2026, 9, 15, 10, 0), None,
+                  show_bubble=False, role=AUX_PRECACHE_ROLE)
+    assert service._player.plays == 0, "预合成角色命中缓存后不得起播（偷偷播一次）"
+    assert service._player.sources == []
+
+
+def test_precache_reports_busy_so_the_caller_can_retry(tmp_path, monkeypatch):
+    """通道被报时预合成占着时，旁路预合成返回 False（调用方按返回值重试）。
+
+    返回值语义的另一半：**不能**"放弃也算成功"——那会让调用方以为已合好而不再重试。
+    这里同时证明旁路预合成确实共用 ``_busy`` 这条通道闸（不该有的第二路并发合成）。
+    """
+    service, _app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)
+    cfg.set("voice_chime_schedule", "hourly")
+    service.apply_config()
+
+    service._on_tick(datetime(2026, 9, 15, 9, 59, 30))
+    assert service._busy is True, "前提：报时预合成在飞"
+    started = len(_WorkerSpy.instances)
+
+    assert service.precache("今天也要认真工作呀。", log_tag="每日一签") is False
+    assert len(_WorkerSpy.instances) == started, "通道忙时不得再起一路合成"
+
+
 def test_failed_synthesis_drains_pending_speech(tmp_path, monkeypatch):
     """合成失败同样不起播：待播队列在 error 结算里出队，不滞留。
 
@@ -2016,6 +2154,91 @@ def test_audio_channel_not_created_for_self_talk_speak_alone(tmp_path):
     shell = AppShell(_qapp(), cfg, enable_chat=False)
     shell._sync_chime_service()
     assert shell.voice_chime_service is None
+
+
+def test_audio_channel_survives_on_divination_speak_alone(tmp_path):
+    """报时 / 节日语音 / 点击朗读全关、只剩「抽签时念出来」时，通道同样不能被释放。
+
+    与节日语音、点击朗读同族：通道随报时开关一起被释放，抽签语音就变成「有气泡没
+    声音」——这正是产品阻断①暴露的那条生命周期缺口。
+    """
+    from pet.app import AppShell
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", False)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("self_talk_speak_enabled", False)
+    cfg.set("click_show_self_talk", False)
+    cfg.set("divination_enabled", True)
+    cfg.set("divination_speak", True)
+    shell = AppShell(_qapp(), cfg, enable_chat=False)
+
+    shell._sync_chime_service()
+    service = shell.voice_chime_service
+    assert service is not None, "抽签语音需要这条通道"
+    assert service.is_running() is True, "通道必须真的在跑（配置才会被读进来）"
+
+    cfg.set("divination_speak", False)
+    shell._sync_chime_service()          # 保存路径先同步通道生命周期（同自测）
+    shell._sync_divination_service()
+    assert shell.voice_chime_service is None, "四个消费者都关掉后通道应释放"
+
+
+def test_divination_speak_uses_the_user_backend_on_a_lazily_created_channel(tmp_path, monkeypatch):
+    """只开抽签语音：**懒创建**的通道也必须按用户配置合成（SAPI / 不回退 / 音量 0）。
+
+    产品阻断①：``AppShell._chime_wanted()`` 不含抽签 → 通道随时被释放；抽签取通道
+    那一刻新建的 ``VoiceChimeService`` 的 ``_cfg`` 还是模块默认（edge 后端 + 允许
+    回退 + 默认音量），于是"选了本机 SAPI、关掉回退、音量 0"的主人点抽签时照旧
+    **联网 edge 合成**、按默认音量出声——三个设置项一个都不生效。
+
+    只替两个边界：合成线程（网络 / COM）与播放器（音频设备）；服务本身是真的。
+    """
+    import datetime as _dt
+
+    import pet.voice_chime_service as svc_mod
+    from pet.app import AppShell
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", False)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("self_talk_speak_enabled", False)
+    cfg.set("click_show_self_talk", False)
+    cfg.set("divination_enabled", True)
+    cfg.set("divination_speak", True)
+    cfg.set("voice_chime_tts_backend", "sapi")
+    cfg.set("voice_chime_tts_fallback", False)
+    cfg.set("voice_chime_volume", 0)
+    # 每个后端都自报"可用"：合成链路由配置决定，用例不去猜本机装没装 SAPI / edge
+    _WorkerSpy.instances = []
+    monkeypatch.setattr(svc_mod, "_TTSWorker", _WorkerSpy)
+    for provider in svc_mod.tts.providers():
+        monkeypatch.setattr(type(provider), "availability", lambda self, values: False)
+
+    shell = AppShell(_qapp(), cfg, enable_chat=False)
+    channel = shell.ensure_audio_channel()
+    assert isinstance(channel, VoiceChimeService), "必须是真服务，不是通道桩"
+    channel._player = _FakePlayer()
+    channel._audio_out = _FakeAudioOut()
+    channel._ensure_player = lambda: True
+
+    service = shell._ensure_divination_service()
+    monkeypatch.setattr(service, "_bubble", lambda text: None)   # 气泡不是本用例的被测面
+    service.draw_now(_dt.date(2026, 10, 16))
+
+    assert _WorkerSpy.instances, "抽签语音必须提交一次合成"
+    used = {a.provider for worker in _WorkerSpy.instances for a in worker.attempts}
+    assert used == {"sapi"}, f"合成链路只许出现用户选的后端，实际 {sorted(used)}"
+
+    # 预合成回来 → 排队的「抽签中...」进合成；再回来 → 交给播放器（音量必须真为 0）
+    _WorkerSpy.instances[-1].finish()
+    assert len(_WorkerSpy.instances) >= 2, "排队的「抽签中...」必须补上合成"
+    _WorkerSpy.instances[-1].finish()
+    assert channel._audio_out.volumes == [0.0], "音量 0 必须真的落到播放器上"
+
+    service.shutdown()   # 收口：投递出去的揭签闭包随停用作废，不赌用例结束时机
 
 
 def _precached_wav(cfg, text: str) -> Path:
