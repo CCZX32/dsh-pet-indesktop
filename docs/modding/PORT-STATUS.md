@@ -63,13 +63,21 @@
    `proactive_screen_worker.py` + `proactive_screen_adapter.py`、`screen_entry.py`；
    **没有** agent-link worker——主线 `pet/agent_link.py`（6303 行）+ 多 DSH 分区是现行权威，
    PLAN.md 判定「暂不移植」。
-4. **打包 / 分发链一个文件都没移植**。作者的 Setup 选装、旁置本地包、显式便携、
-   `scripts/build_{mod_example,character_mod_example,screen_worker,feature_probe,feature_release}.py`
-   在本仓库**全部不存在**；`packaging/` 与 `scripts/build_*` 里只有本站既有的 onedir / Inno
-   Setup 构建。
-   **（2026-10-14 更新）**：D4 已补这条链的**最小可用子集**（作者侧打包入口 `build_mod_example.py`、
-   发布/构建门 `verify_feature_package.py`、三端构建脚本的两道门与 `<app>/features/`）——
-   本条的判定说的是**快照基线**（HEAD `7575572`），现状见 §七。
+4. **打包 / 分发链大部分未移植（2026-10-17 复核修正）**。作者的 Setup 选装、旁置本地包、
+   显式便携、Ed25519 发布签名、冻结 worker / 原生探针构建链在本仓库**不存在**：
+   `scripts/` 里作者 57 个改动中 **34 个**没有对应物（`build_core_webm_setup.py`、
+   `validate_phase5a_{setup,delivery}.py`、`feature_release_{cli,materials,signing}.py`、
+   `release_distribution.py`、`build_screen_worker.py`、`build_feature_probe{,_native}.py`、
+   `build_feature_release.py`、`check.py` / `check_docs.py` 等），`packaging/` 12 个里缺 9 个
+   （`core_webm.iss`、两个 `*.iss.inc` 门、5 个验收 fixture 入口）。
+   **不是"少几个脚本"**：这些脚本依赖的 `pet/core_maintenance.py`、`pet/core_code_gate.py`、
+   `pet/core_uninstall.py`、`pet/runtime_layout.py`、`pet/content/`、`pet/feature_probe_*.py`、
+   `packaging/licenses/LIBSODIUM-LICENSE.txt` 在本仓库**一个都没有**——整条 Setup / 冻结 /
+   签名链的内核缺失（账本见 §十一）。
+   **已经补上的那一段**：D4 的打包入口 `scripts/build_mod_example.py` **存在**（换形移植，
+   行为多于作者版：退出码、装前子进程预检、`host/` 出现非 `.py` 直接中止）、发布/构建门
+   `scripts/verify_feature_package.py`、三端构建脚本的两道门与 `<app>/features/`；另外
+   `build_{screen,ai_chat}_package.py` 是本仓库新增的源码态包打包入口。现状见 §七。
 5. **「热插拔」这个词在作者文档里是刻意避开的**。正确说法是**「可停用 / 可卸载 / 进程级卸载」**；
    **Python 模块热卸载不承诺**——`feature_host` 一旦进入解释器，`sys.modules`、Qt 对象、回调、
    定时器、线程和第三方库全局状态都可能仍留引用，用 `stop()`/`dispose()` 撤销菜单也不能严谨地
@@ -88,16 +96,16 @@
 | 目标（作者） | [`PLUGIN-DLC-ARCHITECTURE.md`](../plugin-phase-01-foundation/PLUGIN-DLC-ARCHITECTURE.md)：`CharacterRegistry` 来源顺序、`ContentManager` 目录/ZIP 安装、manifest/`kind=content`/版本/Core/平台/路径安全/逻辑 SHA-256、staging + 多版本 + `active.json`/`previous.json` + 原子激活 + 自检回滚、Starter。§8 另列 P0 资源硬门（安装→Registry→播放、冲突清理、Starter/Core 更新保护、发布内容与派生 cache 隔离）。 |
 | 本仓库状态 | ⚠️ **半做，且换了形**。本仓库**没有 `pet/content/`**（`ContentManager` + `CharacterRegistry` + `versions/<v>/active.json/previous.json` 这套版本化布局不存在，也没有 Starter 这个资源包概念）。角色包闭环由 **MOD 中心这条腿**交付：托管布局 `characters/` `mod-disabled/` `mod-versions/<id>/<version>/`、ZIP/目录导入归一、原子发布、符号链接/越界拒绝、占用未释放就拒绝破坏性操作。 |
 | 证据落点 | `pet/mod_catalog.py`（102 行，目录枚举 + 跨进程失效令牌）、`pet/mod_management.py`（563 行，`_materialize:389`；模块 docstring 明写"本拓扑没有 `content/` 树"）、`pet/catalog.py:215 resolve_character_video_dir` / `:230 list_available_characters` / `:256 load_character_manifest`；测试 `tests/test_mod_catalog.py`、`tests/test_mod_management.py`。 |
-| 没做的原因 / 后续归属 | 作者 §8 那组 P0 硬门（Starter 归属、安装后 Registry 解析、冲突安装保留旧 active）在本仓库**没有对应物**——不是没做，是本仓库没有那套版本指针与 Starter 概念，**不适用**。「资源回滚」有对应物（`mod-versions/` + `ResourceMods.rollback`）。后续片：无，这条腿在 S1b-1 / S1b-2 已收（见 S4 前作 `.scratch/dlc-fusion/S1b-1-HANDOFF.md`、`S1b-2-HANDOFF.md`）。 |
+| 没做的原因 / 后续归属 | 作者 §8 那组 P0 硬门里，**只有"版本指针与 Starter"可以判为不适用**（本仓库没有 `content/versions/<v>+active.json` 那套布局，启用态用目录位置表达）。**其余能力不是不适用，是真缺**（2026-10-17 逐文件复核）：<br>• 任意版本激活——作者 `pet/content/manager.py:417 activate(plugin_id, version)` 可切到任一已装版本；本仓库 `pet/mod_management.py:531 rollback` 只能回"保留版里 semver 最大那个"<br>• 逻辑 SHA-256（同一内容目录与 ZIP 同 digest、跳过 `manifest.json`）——`pet/content/hashing.py:39/49/80/95`；本仓库 `pet/mod_management.py` / `mod_catalog.py` / `mod_center_controller.py` 里 `sha256` **零命中**<br>• 事务日志 + 崩溃恢复（三阶段 prepared→version_removed→pointers_committed）——`pet/content/manager.py:119/490-546`；本仓库 `transaction|journal|recover` 零命中<br>• 激活后自检 + 失败自动回退——`pet/content/manager.py:431 _self_check_active`；本仓库 `_publish` 只在换入前校验，换入后不复验<br>• manifest 严格契约（`kind`/`api_version`/`core_requires`/`platforms`/禁 entrypoint/派生 cache 必须在包外）——本仓库 `_manifest_of` 只读 id/name/version/description，版本不合法时**回落 `0.0.0` 而不是拒绝**<br>• bundled 资源包 / Starter、结构化坏包诊断、`python -m pet.content` 运维 CLI——均无对应物<br>**能对上的是**：安装与 staging、停用、删除、手动回滚、路径/可执行/符号链接/ZIP 越界拒绝。「资源回滚」有对应物（`mod-versions/` + `ResourceMods.rollback`）。后续片：这 6 条缺口归**内容硬门片**（未排期，但它是官方功能选装的前置，见 §十一）。 |
 
 ### Phase 2：Core 插件运行时（Registry / Context / EventBus / capability）
 
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`PLUGIN-RUNTIME-DESIGN.md`](../plugin-phase-02-runtime/PLUGIN-RUNTIME-DESIGN.md) + [`README.md`](../plugin-phase-02-runtime/README.md) + [`PLUGIN-RUNTIME-TEST-PLAN.md`](../plugin-phase-02-runtime/PLUGIN-RUNTIME-TEST-PLAN.md)：`PluginRegistry` / `PluginContext` / `CoreEventBus` / 配置命名空间隔离 / capability / 生命周期与错误隔离；官方节日提醒作为接口验证消费者；后续补菜单·设置·快捷键贡献的按包所有者注册与撤销。 |
-| 本仓库状态 | ❌ **未移植**。仓库内 grep `PluginRegistry` / `PluginContext` / `CoreEventBus` **零命中**（2026-10-13 22:10 复核，含工作树里那片并发落地的新模块）。 |
-| 证据落点 | HEAD 的 `pet/plugins/` 只有 `__init__.py`（13 行）+ `package_trust.py`。反向证据：`grep -rn "PluginRegistry\|CoreEventBus\|PluginContext" pet/` → 0 命中。节日提醒在本仓库是既有功能（`pet/festival*.py`），**不经插件运行时**。 |
-| 没做的原因 / 后续归属 | Phase 2 的运行时是「官方功能包宿主」的内核，而本仓库的**功能扩展宿主整层**在 HEAD 里未移植（见 Phase 4A/4B；工作树里那片并发落地的是**端口与宿主骨架**，尚未出现 Registry/Context/EventBus 这三个具名内核）。单独搬一个没有消费者的 Registry/EventBus 只会多一层死架构。后续片：随功能扩展宿主接入片一起（**未排期**，前置是 MSVC 构建片）。 |
+| 本仓库状态 | ⚠️ **半做（2026-10-17 复核修正：原判定是往悲观方向的过期结论）**。<br>✅ 底座已移植，其中 5 个文件与作者**逐字节相同**：`pet/plugins/events.py`（`CoreEventBus`/`ScopedEventBus`/`CoreEvent`/`Subscription`，154 行）、`capabilities.py`、`contributions.py`（`ContributionRegistry`/`ContributionHandle`）、`ports.py`（`CommandRegistry`/`PresentationPort`/`SchedulerPort`/`StructuredLogger`/`ContentProviderRegistry`）、`package_binding.py`；`feature_host.py` = 作者的 +93 行（把 EventBus 接进启停与故障路径）。宿主状态机 / 依赖顺序 / owner 隔离 / `fault()` / 贡献撤销由 `pet/plugins/feature_host.py:41 FeatureHost` + `lifecycle.py:FeatureHostLifecycle` 承载，实装于 `pet/feature_management.py`。<br>❌ 未移植的**四个具名件**：`PluginRegistry`、`PluginContext`（`pet/plugins/runtime.py`，530 行）、`PluginManifest`/`version_satisfies`/`PluginDiagnostic`（`pet/plugins/manifest.py`，129 行）、`PluginConfigStore` + `FESTIVAL_LEGACY_CONFIG_MAP`（`pet/plugins/config.py`，247 行）。**并且**作者 Phase 2 的唯一消费者——节日提醒插件化包装（`pet/plugins/builtin/festival_reminder/`）也未移植。 |
+| 证据落点 | `pet/plugins/` 现有 **12 个模块**（`__init__`、`capabilities`、`contributions`、`events`、`feature_host`、`feature_packages`、`lifecycle`、`package_binding`、`package_trust`、`ports`、`services`、`worker_launch`）。反向证据：`grep -rn "PluginRegistry\|PluginContext" pet/` → **0 命中**；`git cat-file -e <HEAD>:pet/plugins/{runtime,config,manifest}.py` → 全部 MISSING；`pet/plugins/builtin/` 目录不存在。节日提醒在本仓库仍是既有功能——**铁证**是作者为插件化给 `FestivalReminderService.__init__` 加了 `scheduler/presentation/audio/config_source` 四个端口参数（作者 `pet/festival_service.py:38-46`），本仓库签名仍是 `def __init__(self, app)`（`pet/festival_service.py:36`），装配点是 `pet/app.py:1841-1843` 直接构造，开关走 `pet/config.py:1271-1281` 的 11 个扁平键。 |
+| 没做的原因 / 后续归属 | 缺的是"manifest → capability → 注入"那套**自动装配**：本仓库的 `FeatureHostContext` 由 `feature_host_bindings.py` 手工注入，能力集由 `pet/feature_policy.py` 与 `package_trust` 的签名包契约给（形状是 `features/` 签名包，不是作者的 `kind=in_process` 插件）。**这不是能力倒退**——签名/TOCTOU/逐文件 sha256 比作者那套更严——但终态要求"连节日提醒都是包"，而节日提醒现在硬绑在 `AppShell` 上、`festival_service.__init__(self, app)` 这个签名就是不拆包的天花板。后续片：**Phase 2 内核收口片**（未排期；它与 §十一 的"内容硬门片"并列，都是"一切都是包"的前置）。 |
 
 ### Phase 3A：Agent Link 采集 Worker（作者已封存）
 
@@ -132,7 +140,7 @@
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`PHASE4A-SCREEN-DELIVERY-AUDIT.md`](../plugin-phase-04-updates/PHASE4A-SCREEN-DELIVERY-AUDIT.md) + [`PHASE4A-SCREEN-PACKAGE-DESIGN.md`](../plugin-phase-04-updates/PHASE4A-SCREEN-PACKAGE-DESIGN.md)：五组接口（`DesktopQueryPort`、独立视觉配置 + `CredentialVaultPort`、菜单/设置/搜索/快捷键贡献、可选识屏—聊天联动、自包含 Worker + 独立构建 + 可信加载）。 |
-| 本仓库状态 | ⚠️→✅ **识屏包线已落地（DLC 第三片，`bd3d10d` 之前一串 `feat(screen-pkg)`/`feat(plugins)` 提交）**。<br>✅ 已落：包验签与路径边界（`pet/plugins/package_trust.py`）、有界 `stage()` 与目录↔ZIP 归一（`pet/feature_package_files.py`）、探针契约（`pet/feature_package_probe.py`）、官方功能 id 与白名单（`pet/official_features.py`）；宿主骨架（`pet/plugins/*`、`pet/mod_api/`）；`pet/desktop_query.py` 与 `pet/credentials.py` 端口本体；**识屏整包 `features/screen-understanding/`（host 15 + common 4 + worker 薄入口，上游 `features/screen_understanding` 移植）、两端口的宿主注入（`bind_screen_context`：凭据/偏好/窗口/桌面）、独立视觉配置（包内 `host/config.py` + owner 作用域 vault + journal 侧车）、官方验签策略 `official_package_verifier` 与 Core 自有装配 `LocalFeatureRuntime.attach_official`、识屏—聊天联动（`sync_text`→`on_look_synced`→`AppShell.sync_look_to_chat`，聊天不变包）、源码态打包 `scripts/build_screen_package.py`**。<br>❌ 未落：`host/migration.py`（内置识屏并存，不做 legacy 迁移，包用独立新配置）、冻结 worker 打包与 Setup 投递（属打包/构建片）、`pet/plugins/runtime.py`/`services.py`（上游另一形态的宿主骨架，本仓库用 `feature_host` + `GenericModMounts` 等价承载）、MOD 中心 UI 的「安装官方包」入口（当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮属后续片）。 |
+| 本仓库状态 | ⚠️→✅ **识屏包线已落地（DLC 第三片，`bd3d10d` 之前一串 `feat(screen-pkg)`/`feat(plugins)` 提交）**。<br>✅ 已落：包验签与路径边界（`pet/plugins/package_trust.py`）、有界 `stage()` 与目录↔ZIP 归一（`pet/feature_package_files.py`）、探针契约（`pet/feature_package_probe.py`）、官方功能 id 与白名单（`pet/official_features.py`）；宿主骨架（`pet/plugins/*`、`pet/mod_api/`）；`pet/desktop_query.py` 与 `pet/credentials.py` 端口本体；**识屏整包 `features/screen-understanding/`（host 18 + common 4 + `mod.json` + `worker-src/entry.py` = 24 个文件，上游 `features/screen_understanding` 移植）、两端口的宿主注入（`bind_screen_context`：凭据/偏好/窗口/桌面）、独立视觉配置（包内 `host/config.py` + owner 作用域 vault + journal 侧车）、官方验签策略 `official_package_verifier` 与 Core 自有装配 `LocalFeatureRuntime.attach_official`、识屏—聊天联动（`sync_text`→`on_look_synced`→`AppShell.sync_look_to_chat`，聊天不变包）、源码态打包 `scripts/build_screen_package.py`**。<br>**逐文件对照（2026-10-17，作者 26 个文件）**：14 个与作者逐字节相同（`common/*` 4 个、`host/{config,contribution_settings,presentation,runtime_context,settings,settings_context,strategy_settings,worker_adapter,worker_diagnostics}.py`）；6 个同名小改（`contributions.py` 菜单工厂改两参 + 文案加"（识屏包）"、`factory.py` 改交 `ScreenPackageRuntime` 并新增 `bind_lifecycle`、`limiter.py`/`memory.py` 的 `except` 加 `StateError`、`manual.py`/`runtime.py` 的 `from ..worker import vision` → `from pet import vision`，`runtime.py` 1204 行其余逐字节相同）；3 个换形（`worker/__main__.py` → `worker-src/entry.py` 带租约认领与 fail-closed 77、`worker/runtime.py` → `pet/workers/proactive_screen_worker.py`、`worker/vision.py` → `pet/vision.py`）；3 个未移植（两个一行 docstring 的 `__init__.py` + 下一格的 `migration.py`）。作者那层 `pet/screen_understanding/` 兼容接缝（11 个 legacy 薄壳）整层去掉，语义改由「Core 端口注入 + `bind_screen_context`」承载——其中 `presentation.py` / `window_actions.py` 两个壳在作者分支本身就是零消费者。<br>❌ 未落：`host/migration.py`（`VisionMigration` / `MigrationPreview` / `source_revision` / `repair_missing_credentials` 在 DLC 全库 grep **零命中**；连带配置端口没有 `migration_source`，`features/.../host/config.py:155` 那行 `source_guard(self.config.migration_source())` 是**不可达残留**——全仓无调用方传 `source_guard`）、`manual_for` 这类"从 Core 窗口代码直接拉起手动识屏"的入口（等价能力改由包命令 `handle.invoke("look")`）、冻结 worker 打包与 Setup 投递（属打包/构建片）、MOD 中心 UI 的「安装官方包」入口（当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮属后续片）。**另有一处本仓库独有的重复**：`pet/workers/proactive_screen_adapter.py`（472 行，Core 内置识屏路径）与包内 `host/worker_adapter.py`（378 行）两份适配器并存，作者分支只有后者的别名。 |
 | 证据落点 | 正向：上面四个模块 + `tests/test_plugins_package_trust.py`（含 `VerificationLimits` / `FileStamp` 指纹 / 祖先快照）。反向（拒绝路径）：`pet/feature_package_transactions.py:772`、`pet/mod_center_controller.py:198/214`、`pet/settings_mod_domain.py:147`（`extensions()` 当前仍 `return {}`）、`pet/mod_center_controller.py:366`（拒绝语装配点）。判定主机侧"在不在"用 `git ls-tree -r --name-only HEAD`。 |
 | 没做的原因 / 后续归属 | 两条独立的阻塞：(a) 设计里的 host 侧接口是按上游的 `feature_host` + 跨进程 IPC 拓扑写的，本仓库的宿主面只有「设置页所属桌宠窗口」（`DialogModHost`），要按新拓扑重写；(b) **LPAC 原生探针沙箱未移植**——没有它，功能包连自检都过不去，接了宿主也是 fail-closed。后续片：**MSVC 构建片**（钉版 PyInstaller tarball + MSVC + libsodium + AppContainer canary）→ 然后才是宿主接入片。两片**均未排期**；触发条件是"要做功能扩展包的真安装"。 |
 
@@ -150,8 +158,8 @@
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`PHASE5A-LOCAL-DISTRIBUTION-DESIGN.md`](../plugin-phase-05-distribution/PHASE5A-LOCAL-DISTRIBUTION-DESIGN.md) + [`README.md`](../plugin-phase-05-distribution/README.md) §1：小 Core Setup 提供官方组件选择（两个官方 ZIP 编译期嵌入、勾选后无界面 preflight/apply、首次启动确认 startup receipt）、ZIP/目录显式导入、显式便携模式、Setup/ZIP/应用内共用同一套 Phase 4 事务与权威安装状态。 |
-| 本仓库状态 | ❌ **未移植——打包/分发链一个文件都没移植**。`packaging/`（`dsh-pet.iss`、`pet_entry.py`、`pet_entry_no_chat.py`）与 `scripts/build_{onedir.ps1,linux.sh,macos.sh,pyside6_fcitx_plugin.sh}` 是**本站既有**构建，不含 Setup 选装、旁置包、便携标记；作者的五个构建脚本（`build_mod_example.py` / `build_character_mod_example.py` / `build_screen_worker.py` / `build_feature_probe.py` / `build_feature_release.py`）在本仓库**全部不存在**。 |
-| 证据落点 | 反向证据：`ls scripts/build_*` → 只有四个既有脚本；`ls packaging/` → 只有三个既有文件。 |
+| 本仓库状态 | ❌ **未移植（2026-10-17 复核修正一处：作者五个构建脚本里 `build_mod_example.py` 是存在的换形移植，不是"全部不存在"）**。`packaging/`（`dsh-pet.iss`、`pet_entry.py`、`pet_entry_no_chat.py`）与 `scripts/build_{onedir.ps1,linux.sh,macos.sh,pyside6_fcitx_plugin.sh}` 是**本站既有**构建，不含 Setup 选装、旁置包、便携标记；作者的 `build_character_mod_example.py` / `build_screen_worker.py` / `build_feature_probe{,_native}.py` / `build_feature_release.py` 在本仓库**不存在**，`build_mod_example.py` **存在**（`scripts/`，换形移植，行为多于作者版）。另外作者那条链里 DLC 完全没有的还有：`core_webm.iss`（两个 `ai`/`screen` 选装 task、编译期嵌入官方 ZIP、`portable.json` 便携标记、`--core-maintenance install-packages`）、两个 `*.iss.inc` 构建门、`validate_phase5a_{setup,delivery}.py`、`feature_release_{cli,materials,signing}.py`（离线 Ed25519，掩码对话框，禁 argv/env 传密码）、`release_distribution.py`（五产物签名清单）。依赖侧决定性的旁证：`pet/core_maintenance.py`、`pet/core_code_gate.py`、`pet/core_uninstall.py`、`pet/core_registration_cleanup.py`、`pet/runtime_layout.py`、`pet/feature_probe_*.py`、`packaging/licenses/LIBSODIUM-LICENSE.txt` 在本仓库**一个都没有**。 |
+| 证据落点 | 反向证据：`ls scripts/build_*` → 6 个（`build_mod_example.py`、`build_screen_package.py`、`build_ai_chat_package.py` + 三端既有脚本），其中只有第一个是作者脚本的移植；`ls packaging/` → 3 个既有文件。作者侧 `tests/` 里这些链的 43 个用例族在本仓库**零命中**（小 Core Setup/卸载 15、Phase 5A 验收 6、发布签名分发 7、LPAC 探针 6、运行时数据导入 5，其余零散）。 |
 | 没做的原因 / 后续归属 | 依赖 Phase 4A/4B 的宿主闭环：Setup 选装要装的东西在本仓库还装不上（见 §一-1），先做安装器只会做出一个必然失败的入口。后续片：**打包 / 构建片**（在 MSVC 与宿主接入之后，未排期）。 |
 
 ### Phase 5B：官方功能推广（AI 对话与文件理解优先）
@@ -278,9 +286,14 @@ D3 的范围与验收口径（本地 ZIP 功能包导入链）与作者文档逐
 
 ## 七、D4 回写：分发 / 打包链（packaging / scripts 侧）最小可用子集
 
-作者 Phase 5A 的分发链文件（`build_variant.py`、`core_webm.iss`、`build_core_webm_setup.py`、
-`validate_phase5a_*`、`feature_release_*`、`release_distribution.py` 等）在本仓库**一个都没有**，
-D4 补的是其中**与本站拓扑对得上**的那一段。范围划分与文档口径的对照：
+作者 Phase 5A 的分发链文件（`core_webm.iss`、`build_core_webm_setup.py`、`validate_phase5a_*`、
+`feature_release_*`、`release_distribution.py` 等）在本仓库**一个都没有**，D4 补的是其中
+**与本站拓扑对得上**的那一段。
+> **2026-10-17 修正**：原文把 `build_variant.py` 也列进了"一个都没有"——它不是源文件，作者
+> `.gitignore` 与本仓库三端构建脚本都把它当**生成物**写出来（`VARIANT = '<variant>'`，无 BOM
+> UTF-8），变体注入这段行为两边等价，所以它不是缺失项。
+
+范围划分与文档口径的对照：
 
 | 作者口径（出处） | D4 落法（本仓库） |
 |---|---|
@@ -303,7 +316,10 @@ D4 补的是其中**与本站拓扑对得上**的那一段。范围划分与文�
 **明确未做（后续片边界）**：Setup 选装器与官方包链、便携模式迁移、产品侧读
 `<app>/features/` 的那条链、host-worker 的真实冻结构建（`build_mod_echo` /
 `build_feature_probe_native`）、官方包构件脚本（`build_character_mod_example.py`）、
-LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understanding`**（本轮不动）。
+LPAC 相关一切。**`official.ai-chat` / `official.screen-understanding` 已经拆了**（2026-10-17
+修正：原文写"D5 才拆"，实际两个包都在 `features/` 下，源码态打包入口
+`build_{ai_chat,screen}_package.py` 齐备；AI 包还比作者多 `mod.json`、
+`host/contributions.py`、`host/runtime_mount.py` 三个文件，见 §九 与 §十）。
 
 ---
 
@@ -410,7 +426,7 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 | MOD 中心 UI 的「装官方包」按钮 | 后续片 | 与识屏包同一状态：当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮未做。 |
 | 冻结包投递（随发行版携带预构建包） | 打包/构建片 | 与识屏包同：只有源码态打包入口。 |
 
-## 十、AI 包窗口回调接线（2026-10-15，待维护者验收）
+## 十、AI 包窗口回调接线（2026-10-15 已合入；2026-10-17 复审三条修复）
 
 交接 §6.2 第 1 项已实现：Core 注册通知和固定 AI owner 设置导航，包挂载传入
 `AiRuntime.create_window`。缺 Key 时保留输入并提供鼠标/键盘入口；认证失败通知
@@ -423,6 +439,89 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 本机基线另有 Windows 平台假设等失败，全量发布门的最终结论以报告为准。
 文件解读投喂、官方安装按钮、UI 终态对齐与 5A 均未包含在本片。
 详见 [回调接线报告](../PR-REPORT-AI-WINDOW-CALLBACKS-2026-10-15.md)。
+
+**2026-10-17 复审**：PR #282 已合入本分支（`e5788b0`）。复审出的三条缺陷已修——①带
+`extension:` 深链接冷启动时搜索索引不再收扩展面板的行（此前面板收走后每次按键抛
+`libshiboken: Internal C++ object (SettingRow) already deleted`）；②请求通过后表头还原成
+provider/model（此前配好 Key 回来仍挂着「打开 API 设置」）；③导航失败如实回 `b"no\n"`
+（此前先回 ok，面板没挂上时点击方零反馈）。红/绿对照（stash 产品文件后 3 red → 3 green）
+与边界见 [复审修复报告](../PR-REPORT-AI-CALLBACK-REVIEW-FIXES-2026-10-17.md)。
+
+---
+
+## 十一、未移植账本（2026-10-17 与作者分支逐文件核对）
+
+**核对方法**：`git diff --name-status 45619ce <作者实现分支>`（分支名与基线 SHA 属仓库内
+工作档案，见 `.scratch/dlc-fusion/PLAN.md`；本次快照的分支 HEAD 是 `11646be`，2026-10-10，
+基线 `45619ce`，2026-09-24）→ 874 个改动文件（已排除
+`content/` 素材与 `.scratch/`）。逐个用 `git cat-file -e` 判本分支存在性；同名文件用
+`git rev-parse` 比 blob 判"逐字节相同"。**本节以代码为准，不以本文旧判定为准。**
+
+### 账本：作者已完成的部分 → 本分支
+
+| 作者已完成的面 | 本分支状态 | 一句话 |
+|---|---|---|
+| Phase 1 `pet/content/`（8 文件） | ⚠️ 换形 + 6 项能力真缺 | 见 Phase 1 格：能对上安装/停用/删除/手动回滚/路径安全；缺任意版本激活、逻辑 SHA-256、事务日志与恢复、激活后自检、manifest 严格契约、bundled/Starter |
+| Phase 2 底座（`events` / `capabilities` / `contributions` / `ports` / `package_binding`） | ✅ 逐字节相同 | 5 个文件 blob 完全一致 |
+| Phase 2 具名内核（`runtime.py` / `manifest.py` / `config.py` + `builtin/festival_reminder/`） | ❌ 未移植 | `PluginRegistry` / `PluginContext` 零命中；节日提醒仍硬绑 `AppShell` |
+| Phase 3A agent-link worker（3 文件） | ⛔ 拍板不移植 | 主线 `pet/agent_link.py` 是现行权威 |
+| Phase 3B 主动识屏 worker | ⚠️ 换形 | `worker/runtime.py` → `pet/workers/proactive_screen_worker.py`；`worker/vision.py` → `pet/vision.py` |
+| Phase 4A 识屏包（26 文件） | ⚠️ 换形，3 个未移植 | 14 字节相同 / 6 同名小改 / 3 换形 / 3 未移植（含 `host/migration.py`） |
+| Phase 4B-1/2/3 事务链 | ✅ 换形移植 | `test_feature_install_state` / `test_feature_version_lease` 是作者 280 个测试改动里**仅有的两个**逐字节相同 |
+| 4B-4 管理 UI | ✅ | 「功能扩展」格已由 `LocalFeatureRuntime` 回填 |
+| 4B-5 真实冻结构建 | ❌ | 与 Phase 5A 同一缺口 |
+| Phase 5A Setup / 分发 / 签名 | ❌ | 见下方清单；**作者自己也没交付完** |
+| AI 对话包（30 文件） | ✅ 全量 | 作者 30 个全在；本分支多 `mod.json` + `host/contributions.py` + `host/runtime_mount.py` |
+| `docs/modding/*`（10 篇）、`docs/plugin-*`（28 篇）、`examples/mods/`（11） | ✅ | 逐字移植（死链已降级） |
+
+### 未移植清单（按卡路程度）
+
+1. **内容硬门片**：逻辑 SHA-256、事务日志与崩溃恢复、激活后自检、manifest 严格契约、
+   任意版本激活、bundled/Starter、结构化坏包诊断、`python -m pet.content` CLI。
+   **前置性最强**——作者的推进顺序里 4B-1.5 资源硬门排在"官方功能选装"之前。
+2. **Phase 2 内核收口片**：`PluginRegistry` / `PluginContext` / `PluginManifest` /
+   `PluginConfigStore` + 节日提醒插件化。终态"连节日提醒都是包"的直接前提；
+   `festival_service.__init__(self, app)` 这个签名就是不拆包的天花板。
+3. **冻结 / Setup / 签名链**：`scripts/` 34 个 + `packaging/` 9 个，加依赖侧的
+   `pet/core_{maintenance,code_gate,uninstall,registration_cleanup}.py`、
+   `pet/runtime_layout.py`、`pet/feature_probe_*.py`、`packaging/licenses/LIBSODIUM-LICENSE.txt`。
+   同一组里的 `check.py` / `check_docs.py`（ruff + ruff format + mypy + 离线 markdown
+   链接检查的统一入口）可以提前单独补，不依赖 Setup。
+4. **测试面**：作者新增 122 个测试里 **106 个**在本分支连同名文件都没有；另有 79 个
+   "同名但内容仍是 merge-base 旧版"（多为作者对既有测试的改动，与插件化无因果关系，
+   不算移植缺口）。
+
+### 一条必须写明的边界
+
+作者 P5A **自己也没交付**——他 roadmap 原文：「Setup 只有编译证据，真实安装更新卸载、
+冻结业务/便携、用户和干净环境门未完成，不宣布 Phase5A/5B-1 交付完成」。所以
+"本分支没移植 P5A"不等于"落后于一个已完成的上游"。
+
+---
+
+## 十二、作者分支看不到的主干减法（不是移植缺口）
+
+作者分支 HEAD 是 2026-10-10、基于 2026-09-24 的分支点。本分支随后有 **5 个提交整块删掉
+16 个文件**——它们不是移植遗漏，是本仓库更晚的主干决定。列在这里，免得下次核对再把它们
+算成缺失：
+
+| 域 | 被删载体 | 提交 | 本分支靠什么承载 / 损失 |
+|---|---|---|---|
+| Agent 事件汇报概率门 | `pet/report_gates.py`（142 行） | `8998a6c`（2026-10-06） | **无替代**。只剩固定去抖/节流 |
+| Agent 异常检测三件套 | `pet/stuck_detector.py`（574）/ `behavior_detector.py`（739）/ `exploration_watchdog.py`（718） | 同上 | **无替代**。不再推断 Agent 卡住/循环/纯探索，`intervention-recommended` 事件面消失 |
+| 检测器设置页 | `pet/exploration_watchdog_settings.py`（297） | 同上 | 设置树无该页；31 个键仍躺在 `pet/config.py:307-331 _AGENT_LINK_REMOVED_KEYS` |
+| 审批/提问回写 | `pet/dsh_responder.py`（59） | 同上 | **无替代**。气泡点"同意/拒绝"不再回写 `/api/respond` |
+| 桥接看门狗控制通道 | `pet/dsh_control.py`（140） | 同上 | **无替代**；`integrations/dsh-pet-bridge` 对 watchdog 同样零引用 |
+| 多进程碰撞 IPC | `collision_ipc.py`（1311）/ `collision_client.py`（571）/ `collision_codec.py`（262）/ `collision_debug.py`（34） | `286b275`/`acf00f5`（2026-09-23） | 换形：`pet/sprite_collision.py`（753 行）进程内每 tick 直调。保留/丢弃清单写在 `sprite_collision.py:9-33` |
+| 第二只桌宠进程 spawn | `pet/instance_launcher.py`（63）/ `child_pet_cleanup.py`（251） | 同上 | 换形：`overlay_shell.spawn_pet()` / `clear_spawned_pets()`。**没有"父宠退出后子宠继续运行"** 这条语义 |
+| 旧版右键菜单 | `pet/context_menus/legacy.py`（103）/ `menu_styles/legacy.py` / `menu_templates/{legacy,modern}.json` | `339292e`（2026-10-08） | **无替代**：单一 `modern-default-v1` + 用户可编排 `context_menu_layout`；`context_menu_template` 键读入即丢弃 |
+| Config 域 facade | `pet/config_domains.py`（118） | `703e821`（2026-10-09） | 无损失（作者自己标注"只建不用，调用点未迁移"） |
+
+**唯一有实质用户损失的是第一组**：Agent 汇报 + 三类检测 + 审批回写 + 控制通道合计
+**2669 行**（142+574+739+718+297+59+140，按上表逐项相加），全部零替代。其余要么换形等价、
+要么是作者自己都未接入的脚手架。
+
+**核对口径**：判"作者有、本分支无"时先分到这两张表——§十一 是真缺口，§十二 是主干减法。
 
 ---
 

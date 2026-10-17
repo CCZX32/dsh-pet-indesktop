@@ -108,6 +108,7 @@ features/
 | 4A 两端口 | `pet/desktop_query.py`、`pet/credentials.py`（凭据库） | `e3295fa`/`6586cf0` |
 | 识屏官方整包 | `features/screen-understanding/` + 宿主注入 + 独立视觉配置 + 识屏→聊天联动 | PORT-STATUS §二 Phase 4A 格 |
 | AI 对话官方整包 | `features/ai-chat/` + `bind_ai_context` + 呈现面 `pet/ai_bindings.py` + 装卸 e2e + 退出闸门退订收口 | PORT-STATUS §九 |
+| 包窗口回调接线 | Core 注册通知与固定 AI owner 设置导航、包侧开窗时惰性解析；PR #282 合入 `e5788b0`，2026-10-17 复审又修三条（深链接不污染设置搜索索引、请求通过还原表头、导航失败如实回否） | PORT-STATUS §十、[复审修复报告](PR-REPORT-AI-CALLBACK-REVIEW-FIXES-2026-10-17.md) |
 | 盲审修复批 | B1/M1–M4/m3/m5/n1/n2 + N1/N2/N3（冻结入口分流、ID 规范形、两段式失败装回、重试阶梯、退出补拉等） | PORT-STATUS §八 |
 
 当前分支状态：全量套件绿（唯一例外是 `test_workers_lifecycle.py` 三条负载 flake——基线上也红，单跑全绿，已登记 BACKLOG，别去"修"它们除非你打算把族隔离出主套件）。
@@ -125,7 +126,7 @@ features/
 
 ### 6.2 小包接线三件（同源后续片，可一起做，建议作为上手第一批）
 
-1. **`notifier` / `auth_callback` 接线**：`AiRuntime.create_window` 这两个参数现在传 None（效果是"未配 Key 时不能一键跳 API 设置页"）。上游参照：`bind_ai_window`。验收：包窗未配 Key 时出现跳转入口且真能跳到设置页。
+1. ✅ **`notifier` / `auth_callback` 接线——已交付**（PR #282，2026-10-16 合入 `e5788b0`；2026-10-17 补了三条复审缺陷）。Core 侧 `pet/ai_bindings.register_ai_pet_view` 一并注册通知与固定 AI owner 的设置导航，包侧 `features/ai-chat/host/runtime_mount` 每次开窗惰性解析；未配 Key 时表头变成可点（鼠标 + Tab/Return 可达）的「打开 API 设置」，已有独立设置窗口经 `pet/settings_extension_navigation` 的局部导航端点复用（保留最大化状态与草稿），通知派发读最新已保存的开关、停用/卸载后旧通知失效。**2026-10-17 补的三条**：①带 `extension:` 深链接冷启动时搜索索引不再收扩展面板的行（否则面板收走后每次按键抛 `Internal C++ object already deleted`）；②请求通过后表头还原成 provider/model（此前配好 Key 回来还挂着「打开 API 设置」）；③导航失败如实回 `b"no\n"`（此前先回 ok，面板没挂上时点击方永远等不到失败提示）。回归 `tests/test_ai_window_callbacks.py` 16 条，`docs/modding/PORT-STATUS.md` §十。
 2. **文件解读投喂**：Core 侧拖文件 → 包的 `FileInterpretController`（包侧件都在，差 Core 投喂接线；上游参照 `bind_ai_window` 的 `file_factory` + `install_file_interpreter`）。验收：真拖一个文件到包窗/桌面，走包的解读器出结果。
 3. **MOD 中心 UI「安装官方包」按钮**：当前官方包由 Core 入口 `attach_official` + 管理器驱动，UI 入口未做；识屏包同状态。验收：设置页「扩展管理」能装官方包且状态可视。
 

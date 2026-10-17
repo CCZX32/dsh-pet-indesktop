@@ -141,7 +141,8 @@ host-worker 路径需要冻结的 worker 可执行（`--worker-bundle`），本�
 6 / 7）逐项对照本仓库的落地状态，读 [`PORT-STATUS.md`](PORT-STATUS.md)**——它按作者的 phase
 结构写明 ✅ 做到 / ⚠️ 半做 / ❌ 未做、证据落点与没做的原因，也是
 [`../plugin-roadmap/`](../plugin-roadmap/) 与 [`../plugin-phase-01-foundation/`](../plugin-phase-01-foundation/)
-那批移植件的状态总表。
+那批移植件的状态总表。**只想看"作者做完了什么、本仓库还差什么"的，直接读它的 §十一
+（未移植账本，按卡路程度排序）与 §十二（作者分支看不到的主干减法——那些不算缺口）。**
 
 ## 工程入口
 
@@ -152,4 +153,7 @@ host-worker 路径需要冻结的 worker 可执行（`--worker-bundle`），本�
 
 ## 实际效果与限制
 
-这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前三条腿都在**：角色资源包（一直可用）、第三方本地功能扩展包（D2/D3：导入 → 启停 → 卸载 → 重装，打包与发布前自检在 D4 补齐），以及**官方功能包**（`official.screen-understanding` / `official.ai-chat`，Core 自有链 `attach_official`，DLC 第三/第四片）。**仍未落地的是 host-worker 的真实冻结构建与 LPAC 探针沙箱**——这两条见 [移植状态对照](PORT-STATUS.md)。
+这是本地 MOD 管理与制作入口，不是联网商店。受信任 Python MOD 不是安全沙箱，只安装可信来源；角色资源不含执行代码。公开的是 v1 薄接口，不是 Core 的全部 Python 模块。**本仓库当前三条腿都在**：角色资源包（一直可用）、第三方本地功能扩展包（D2/D3：导入 → 启停 → 卸载 → 重装，打包与发布前自检在 D4 补齐），以及**官方功能包**（`official.screen-understanding` / `official.ai-chat`，Core 自有链 `attach_official`，DLC 第三/第四片）。**仍未落地的按卡路顺序是**：内容硬门（逻辑 SHA-256 / 事务日志与恢复 / 激活后自检 / manifest
+严格契约 / 任意版本激活）、Phase 2 具名内核（`PluginRegistry` / `PluginContext` + 节日提醒
+插件化）、以及冻结 / Setup / 签名链（host-worker 真实冻结构建、`core_webm.iss` 选装、
+Ed25519 发布签名）；LPAC 探针沙箱是**拍板不做**。账本见 [移植状态对照](PORT-STATUS.md) §十一。
