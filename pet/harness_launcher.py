@@ -251,17 +251,10 @@ _HIDDEN_KWARGS: dict = (
 
 
 def _probe_cache_path() -> Path:
-    """--no-open 探测结果的落盘缓存路径（桌宠数据目录下）。"""
-    try:
-        from . import config as _config_mod
-        app_dir = str(getattr(_config_mod, "APP_DIR_NAME", "dsh-pet-standalone"))
-    except Exception:
-        app_dir = "dsh-pet-standalone"
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-    return base / app_dir / "harness_probe_cache.json"
+    """--no-open 探测结果的落盘缓存路径（桌宠数据目录下，便携态跟标记走）。"""
+    from . import runtime_layout
+
+    return runtime_layout.app_data_dir() / "harness_probe_cache.json"
 
 
 def _dsh_version(base_command: list[str]) -> str | None:

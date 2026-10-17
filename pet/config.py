@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import catalog, island_segments, music_players
+from . import catalog, island_segments, music_players, runtime_layout
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -521,6 +521,12 @@ def chat_secret_carryover(chat: Any) -> dict[str, dict]:
 
 
 def _default_base():
+    """平台数据父目录（安装态口径）。
+
+    显式便携不使用这里：数据根由 :func:`pet.runtime_layout.app_data_dir` 解析
+    （``portable.json`` 存在时是标记指定的目录）。本函数保持纯 OS 推导，测试也
+    按它做隔离注入。
+    """
     if sys.platform == "win32":
         return Path(os.environ.get("APPDATA") or Path.home())
     if sys.platform == "darwin":
@@ -1068,13 +1074,20 @@ def normalize_pet_profile_snapshot(raw: Any) -> dict:
 
 class Config:
     def __init__(self, base=None, instance_id: str | None = None):
-        base = Path(base) if isinstance(base, str) else (base or _default_base())
-        self.dir = base / APP_DIR_NAME
+        if base is None:
+            # 显式便携（exe 旁 portable.json）时数据根是标记目录本身；
+            # 安装态仍是平台数据目录 / 变体名。便携不做旧版 %APPDATA% 迁移。
+            self.dir = runtime_layout.app_data_dir()
+            legacy_base = None if runtime_layout.portable_active() else _default_base()
+        else:
+            legacy_base = Path(base)
+            self.dir = legacy_base / APP_DIR_NAME
         # 多开隔离：--instance <id> 或 DSH_PET_INSTANCE 时使用独立配置文件，
         # 位置/大小/朝向等不再互相覆盖；不传时完全保持原行为。
         self.instance_id = (os.environ.get("DSH_PET_INSTANCE", "") if instance_id is None else instance_id).strip()
         self.path = self.dir / f"config-{self.instance_id}.json" if self.instance_id else self.dir / "config.json"
-        self._migrate_legacy_config(base)
+        if legacy_base is not None:
+            self._migrate_legacy_config(legacy_base)
         # 副槽"整表落种"（把主配置整份复制成 config-slot-N.json）已随规范 §五 退役：
         # 每宠键的真值只经 ``pet_profiles.write_profile_settings`` 落进档案，生成子宠
         # 时的落种在 ``overlay_shell._build_slot_sprite`` / ``app.py`` 的 spawn 路径上

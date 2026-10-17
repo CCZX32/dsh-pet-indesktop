@@ -728,16 +728,23 @@ def _sound_cache_dir() -> Path:
     而本函数在碰撞事件链上每个合格事件都会被 ``_cache_path`` 调一次（实机密集
     碰撞每秒最多 12.5 次）。QStandardPaths 的结果在进程内稳定（首个调用发生在
     ``QApplication`` 命名之后），故缓存；测试用 ``_reset_caches_for_tests()`` 复位。
+    显式便携时不用 QStandardPaths：缓存跟 ``portable.json`` 的数据根走。
     """
     global _SOUND_CACHE_DIR
     if _SOUND_CACHE_DIR is not None:
         return _SOUND_CACHE_DIR
-    try:
-        from PySide6.QtCore import QStandardPaths
-        base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
-    except Exception:
-        base = ""
-    root = Path(base) if base else Path(tempfile.gettempdir()) / "dsh-pet"
+    from . import runtime_layout
+
+    layout = runtime_layout.portable_layout()
+    if layout is not None:
+        root = layout.data_dir
+    else:
+        try:
+            from PySide6.QtCore import QStandardPaths
+            base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+        except Exception:
+            base = ""
+        root = Path(base) if base else Path(tempfile.gettempdir()) / "dsh-pet"
     result = root / "sounds_cache"
     result.mkdir(parents=True, exist_ok=True)
     _SOUND_CACHE_DIR = result

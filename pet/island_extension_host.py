@@ -230,12 +230,12 @@ _PROVIDER_CACHE: "OrderedDict[tuple[str, int, int], tuple[Callable, Callable]]" 
 def user_root() -> Path:
     """用户可信组件根目录（沿用既有配置目录，不硬编码机器路径）。
 
-    ``pet/config.py`` 的路径算法（``_default_base`` + ``APP_DIR_NAME``）是唯一真源；
-    这里**延迟导入**它，免得 ``config`` 与本模块在 import 期互相等待。
+    ``pet.runtime_layout`` 的数据根解析是唯一真源（安装态=平台数据目录/变体，
+    便携态=exe 旁标记目录）；这里**延迟导入**它，免得 import 期互相等待。
     """
-    from .config import APP_DIR_NAME, _default_base
+    from . import runtime_layout
 
-    return Path(_default_base()) / APP_DIR_NAME / ROOT_DIR_NAME
+    return runtime_layout.app_data_dir() / ROOT_DIR_NAME
 
 
 #: 项目（源码运行时是仓库、打包后是程序目录）的可信组件根目录。

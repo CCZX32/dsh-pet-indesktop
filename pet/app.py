@@ -39,6 +39,7 @@ from . import autostart as autostart_mod
 from . import catalog
 from . import click_sound
 from . import overlay_instance_gate as overlay_gate_mod
+from . import runtime_layout
 from . import self_talk_voice
 from . import slot_manager as slot_manager_mod
 from . import updater
@@ -5006,8 +5007,14 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     from .qt_image_limits import apply_image_allocation_limit
     apply_image_allocation_limit()
 
-    # 确定配置根目录
-    config_dir = _default_base() / APP_DIR_NAME
+    # 确定配置根目录。显式便携（exe 旁 portable.json）解析失败必须当场报错：
+    # 静默回退 %APPDATA% 会让用户以为数据在便携目录里。
+    try:
+        config_dir = runtime_layout.app_data_dir(_default_base())
+    except runtime_layout.PortableLayoutError as exc:
+        logging.error("便携模式不可用: %s", exc)
+        _show_startup_error("dsh-pet-standalone", str(exc))
+        return 1
 
     # D4（PHASE4_DESIGN §4）桌宠单实例进程门：**先于** slot 竞争。两个拓扑都抢
     # （T4 Phase A）：overlay 双开 = 两个进程各自恢复全部 sprite、位置回写互踩；

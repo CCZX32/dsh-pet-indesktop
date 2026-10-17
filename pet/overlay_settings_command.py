@@ -79,12 +79,13 @@ MAX_PENDING_COMMANDS = 32
 MAX_COMMAND_ATTEMPTS = 3
 CLAIM_LEASE_S = 30.0
 
-# 配置目录口径复用 ``config`` 的既有解析（``app.main`` 的
-# ``config_dir = _default_base() / APP_DIR_NAME`` 同源）。模块级导入是有意的：
-# 拓扑门要在**测试里**能被钉到临时目录（conftest 的隔离夹具替换本模块的
-# ``_default_base``），函数内 ``from .config import ...`` 会绕开这层注入。
+# 配置目录口径复用 ``config`` 的既有解析（``runtime_layout.app_data_dir``：
+# 安装态 = ``_default_base() / APP_DIR_NAME``，便携态 = exe 旁标记目录）。模块级
+# 导入是有意的：拓扑门要在**测试里**能被钉到临时目录（conftest 的隔离夹具替换
+# 本模块的 ``_default_base``），函数内 ``from .config import ...`` 会绕开这层注入。
 # ``config`` 是零 Qt 轻模块，独立设置进程本来就 import 它（``Config``），
 # 不会让本模块失去"两侧都能 import"的定位。
+from . import runtime_layout
 from .config import APP_DIR_NAME, _default_base
 
 logger = logging.getLogger(__name__)
@@ -180,10 +181,15 @@ def env_forces_legacy() -> bool:
 def topology_config_path() -> Path:
     """主配置 ``config.json`` 的路径（复用 config 的既有目录解析，不另拼一份）。
 
-    ``app.main`` 的 ``config_dir = _default_base() / APP_DIR_NAME`` 是同一口径。
+    ``app.main`` 的 ``runtime_layout.app_data_dir(_default_base())`` 是同一口径；
+    便携模式下它会解析到 exe 旁标记目录，设置进程与主进程必须看到同一份配置。
+    安装态仍按 ``_default_base()/APP_DIR_NAME`` 拼（测试按这两个名字注入）。
     取**主配置**而不是当前 instance 的槽位配置：捕获模式是进程级（重启后整个
     进程只起主宠物）的重启级开关，槽位配置里的同名键不参与拓扑判定。
     """
+    layout = runtime_layout.portable_layout()
+    if layout is not None:
+        return layout.data_dir / "config.json"
     return _default_base() / APP_DIR_NAME / "config.json"
 
 

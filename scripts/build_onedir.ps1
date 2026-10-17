@@ -7,6 +7,12 @@
     Builds a PyInstaller --onedir variant (no runtime extraction, no _MEI cache),
     output at dist-onedir\<name>\ plus a <name>-portable.zip green package.
 
+    The portable zip carries a canonical portable.json next to the exe; running
+    from the unpacked zip keeps config/sessions/plugins/caches inside the
+    package's data\ directory instead of %APPDATA% (see pet/runtime_layout.py).
+    Pass -NoPortableMarker to produce a non-portable green zip (installed-mode
+    data layout) for comparison or rollback.
+
     Variants:
       webm-chat   - WebM assets + AI chat (default)
       webm        - WebM assets, no chat
@@ -80,6 +86,7 @@ param(
     [switch]$SkipZip,
     [switch]$SkipCheck,
     [switch]$SkipSlim,
+    [switch]$NoPortableMarker,
     [switch]$Gif
 )
 
@@ -736,6 +743,13 @@ if (-not $SkipZip) {
     $zip = Join-Path $root "dist-onedir\$name-portable.zip"
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path "$appDir\*" -DestinationPath $zip -CompressionLevel Optimal
+    # 便携线：zip 根目录必须带 portable.json（与 exe 同级），运行期才会把配置/
+    # 会话/插件写进包内 data\，而不是 %APPDATA%。标记内容由 Python 侧唯一定义，
+    # 避免 PowerShell 再抄一份 schema。安装包不写标记——Setup 的是安装态。
+    if (-not $NoPortableMarker) {
+        python scripts\write_portable_marker.py --zip $zip
+        if ($LASTEXITCODE -ne 0) { throw "[portable] failed to write portable.json into $zip" }
+    }
     Write-Host "      $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)" -ForegroundColor Green
 }
 

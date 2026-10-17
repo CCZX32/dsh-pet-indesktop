@@ -101,12 +101,19 @@ def _run_settings(config=None) -> int:
     from .qt_image_limits import apply_image_allocation_limit
     apply_image_allocation_limit()
     if config is None:
+        from . import runtime_layout
         from .config import Config
 
         # DSH_PET_INSTANCE 由主进程经环境继承下来：子肥鱼的设置进程编辑的是
         # 它自己的 config-slot-N.json，与主进程同一份文件；多窗场景由主进程
         # 追加 --instance 显式指明。
-        config = Config(instance_id=_settings_instance_id(sys.argv))
+        try:
+            config = Config(instance_id=_settings_instance_id(sys.argv))
+        except runtime_layout.PortableLayoutError as exc:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(None, "dsh-pet-standalone", str(exc))
+            return 1
     try:
         config.dir.mkdir(parents=True, exist_ok=True)
     except OSError:

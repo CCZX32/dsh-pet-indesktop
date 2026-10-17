@@ -154,10 +154,10 @@ def parse_lrc(text: str) -> list[LyricLine]:
 
 
 def cache_dir() -> Path:
-    """歌词缓存目录（不存在时创建）。"""
-    from .config import APP_DIR_NAME, _default_base
+    """歌词缓存目录（不存在时创建）；显式便携时跟随便携数据根。"""
+    from . import runtime_layout
 
-    path = Path(_default_base()) / APP_DIR_NAME / "lyrics_cache"
+    path = runtime_layout.app_data_dir() / "lyrics_cache"
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception:
