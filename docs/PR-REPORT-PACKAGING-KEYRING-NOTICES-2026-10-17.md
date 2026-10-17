@@ -208,12 +208,19 @@ probe-keyring-off      frozen_modules=  121  按新清单缺=[..., 'keyring', 't
 
 **全量状态**：本机顺序全量 **8065 passed / 16 skipped / 0 failed**（23:46；`.scratch/packaging-final-20261017/full_pytest.log`）。首次尝试被会话侧的后台任务时限截断在 49%（日志 `full_pytest_first_try.log` 保留），随后以无时限方式重跑得到上面的结果。
 
-**CI 状态**：PR #294 首轮三平台 —— macOS / Ubuntu 绿，Windows 红在
-`tests/test_music_lyric.py::test_lyric_request_bypasses_system_proxy`：
-`assert opener.calls[0][1] == music_lyric.HTTP_TIMEOUT` 实测左边是
-`7.999999999999886`（超时预算由 `deadline - monotonic()` 相减得来），是本轮**未触碰**的
-歌词链路里的浮点相等断言（本机同一条用例全量绿）。判定为既有的时序/浮点假红，不在本 PR
-修（改它属于另一条线的行为变更）；修报告时同步补齐 CI 结果。
+**CI 状态**：PR #294 两轮三平台 CI ——
+
+- 首轮（head `695e8ba`）：macOS **pass** / Ubuntu **pass** / Windows **fail**，失败是
+  `tests/test_music_lyric.py::test_lyric_request_bypasses_system_proxy` 的浮点相等断言
+  （`assert opener.calls[0][1] == music_lyric.HTTP_TIMEOUT` 实测左边 `7.999999999999886`，
+  `tests/test_music_lyric.py:1485`；超时预算是 `deadline - monotonic()` 相减得来的）。
+  这条用例在本轮**未触碰**的歌词链路里，本机全量为绿。
+- 第二轮（head `9a9387a`，本报告补数那一提交）：**macOS pass 19m26s / Ubuntu pass 13m43s /
+  Windows pass 21m56s**——首轮那条 Windows 红确认为既有的时序/浮点假红，未在本 PR 修
+  （改它属于另一条线的行为变更）。
+
+CI 只跑测试与门禁工作流，**不跑三端构建**（`build-*.yml` 只在 tag / 手动分发时触发），
+所以本轮构建脚本的改动没有 CI 侧产物证据——产物证据是 §五第 3 条的最小 onedir 探针。
 
 **断言有效性（红 → 绿）**：19 例在产品代码改动前全部红（`persisted` 不存在、构建脚本仍排除 keyring、`copy_notices` 不存在、`android/NOTICE.txt` 仍指向源码仓库、Gradle 无该输入、写失败无弹窗），改后全绿——不是"一直绿"的装饰断言。
 
