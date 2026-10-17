@@ -82,7 +82,11 @@ class _Center:
         return self.results[-1][1]
 
     def rows(self):
-        return [row for row in self.controller.entries() if row.kind == KIND_EXTENSION]
+        return [
+            row
+            for row in self.controller.entries()
+            if row.kind == KIND_EXTENSION and row.source != "official"
+        ]
 
     def import_source(self, source, **kwargs) -> bool:
         started = self.controller.import_source(source, **kwargs)

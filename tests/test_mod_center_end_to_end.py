@@ -123,7 +123,7 @@ def _install(tmp_path):
 
 
 def _extension_rows(controller):
-    return [row for row in controller.entries() if row.kind == KIND_EXTENSION]
+    return [row for row in controller.entries() if row.kind == KIND_EXTENSION and row.source != "official"]
 
 
 def _key(owner=OWNER) -> str:
