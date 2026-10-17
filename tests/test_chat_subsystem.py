@@ -2645,7 +2645,10 @@ def test_append_message_atomic_across_store_instances(tmp_path: Path):
     assert out is not None and absorbed is False
     store_a.flush()
 
-    # B 用陈旧快照发送：必须吸收 A 的消息而不是覆盖
+    # B 用陈旧快照发送：必须吸收 A 的消息而不是覆盖。
+    # 显式把快照的 updated_at 拨旧——不要依赖两次 utc_now() 落在不同的时钟 tick
+    # （Windows 上相邻调用可能得到同一个微秒，测试会偶发 absorbed=False）。
+    s.updated_at = "2000-01-01T00:00:00+00:00"
     out_b, absorbed_b = store_b.append_message(s, ChatMessage("user", "B 的消息"))
     assert out_b is not None and absorbed_b is True
     texts = [m.content for m in out_b.messages]
