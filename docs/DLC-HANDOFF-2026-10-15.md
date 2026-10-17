@@ -141,14 +141,34 @@ features/
 - 产品侧读 `<app>/features/` 旁置包根的那条链（D4 已让构建脚本能携带包根，运行期还没人读）。
 - 验收：真冻结产物上跑通"安装→装载→启停→卸载"，而不是只在源码解释器下绿（N6 登记的缺口）；三端构建脚本的两道门保持绿。
 - 注意：Windows 安装包 GUI 实测（装/卸/升级）属于这片的人工验收部分。
+  **2026-10-18**：静默装/卸/升级矩阵已验收（见 §6.4）；向导 UI 人工点击仍未做。
 - **2026-10-17 阶段 4 进展**：官方识屏 Worker 已能冻成单文件 exe（`scripts/build_screen_worker.py`），`build_screen_package.py --worker-exe` 写入 `worker.path`；`verify_feature_package.py --official` + `build_onedir.ps1 -OfficialFeaturePackages` 让 onedir 真实携带 `<app>/features/{ai-chat,screen-understanding}`。冻结 Worker 裸跑 exit 77、冻结入口 `--worker` 未知 id exit 2 已实测；完整租约交接链路与产品 GUI 安装/启停/卸载仍未人工验收。证据：[`PR-REPORT-FROZEN-PACKAGE-BUILD-2026-10-17.md`](PR-REPORT-FROZEN-PACKAGE-BUILD-2026-10-17.md)。
 
 ### 6.4 5A Setup 适配（打包/构建片的后半）
 
 - Setup 选装器（官方 ZIP 编译期嵌入、勾选安装、首启 startup receipt）、显式便携模式。
 - 入口：`packaging/dsh-pet.iss`（本站 Inno Setup）、上游参照 `docs/plugin-phase-05-distribution/`。
-- **注意**：官方包嵌入 Setup 与便携模式在 PORT-STATUS §七 的当前判定是"不做"——开工前重新跟维护者确认是否翻案。
-- **2026-10-17 状态：安装器脚本已接线，编译受阻**。`packaging/dsh-pet.iss` 已加两个官方包可选 Task（默认不勾）、基础复制 `Excludes`、Task-scoped `Source` 与 `startup-receipt.json` 回执；结构判据 `tests/test_setup_optional_features.py` 5 条绿。本机没有 `ISCC.exe`，**无法编译安装包**，安装/卸载/升级与回执消费未验收；便携模式、Ed25519 发布清单未做（无正式密钥）。按纪律停在「可交付的一半」，不声称 Setup 已验收、不伪造签名。
+- **2026-10-18 状态：Setup 已编译并完成装/卸/升级验收；便携已进入发布线；签名按用户决定不做。**
+  - 工具链：`winget install JRSoftware.InnoSetup`（6.7.3，用户级
+    `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`）；官方装不带
+    `ChineseSimplified.isl`，从 jsDelivr 镜像取回后编译无警告。
+  - `packaging/dsh-pet.iss` 现在包含：两个官方包默认不勾的 Task（`features\{ai-chat,screen-understanding}`）、
+    基础复制排除官方包目录与 `portable.json`、`skipifsilent`、只删自写回执的
+    `[UninstallDelete]`、未勾选时删掉空 `features\` 目录、按盘上 `manifest.json`
+    实际存在写首启回执（升级保留旧包时不误报）。
+  - 实机矩阵（静默、隔离 APPDATA）：不选包 install exit 0 且无 `features\`、回执
+    false/false；两包都选时两份 manifest + `worker\entry.exe` 存在、回执 true/true；
+    升级（先 AI 后仅识屏）保留 AI 包且回执 true/true；三种卸载都 exit 0 且安装目录消失；
+    安装态数据写隔离 APPDATA，安装目录内不产生 `data\`。
+  - 便携：`pet/runtime_layout.py` 是唯一解析点（标记 schema/相对路径/逃逸/reparse/
+    NTFS/可写探针，负结果缓存）；`build_onedir.ps1` 默认在便携 zip 根写 canonical
+    `portable.json`（`-NoPortableMarker` 可关）。冻结 onedir 实测 `--settings`
+    把 `settings.lock` 写进 `<exe>\data\`，隔离 APPDATA 为空。
+  - **仍未做**：Authenticode / Ed25519 发布清单（本轮明确不做，无签名产物）；
+    干净机器/新账户、其它三个变体、向导 UI 人工点击、便携跨机器/只读介质/exFAT
+    实机验收；`startup-receipt.json` 的产品侧读取与首次启动确认（下一片）。
+  - 证据：[`PR-REPORT-PORTABLE-SETUP-2026-10-18.md`](PR-REPORT-PORTABLE-SETUP-2026-10-18.md)、
+    合同 [`PORTABLE-MODE-2026-10-18.md`](PORTABLE-MODE-2026-10-18.md)。
 
 ### 6.5 不排期/不做（别捡起来）
 

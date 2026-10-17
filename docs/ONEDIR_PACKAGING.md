@@ -39,6 +39,11 @@ dist-onedir\dsh-pet-standalone-webm-chat-portable.zip
 ```
 
 绿色版用法：解压 zip 到任意盘（E:\、D:\、U 盘均可），双击 exe 即用；无安装、无缓存。
+zip 根目录带 `portable.json`（canonical 内容 `{"schema":"dsh-pet-portable/v1","data":"data"}`），
+因此它是**显式便携包**：配置/会话/插件/缓存写在解压目录的 `data\` 下，不写
+`%APPDATA%`；把整个目录搬走（同机同用户、NTFS）数据跟着走。`-NoPortableMarker`
+可产出不带标记的绿色包（安装态数据布局）。细节见
+[`PORTABLE-MODE-2026-10-18.md`](PORTABLE-MODE-2026-10-18.md)。
 
 ### 语音依赖门禁（4.3.1）
 
@@ -291,21 +296,25 @@ PresentMon 的 ETW 会话只对管理员或 `Performance Log Users`（SID `S-1-5
 
 ## 二、Inno Setup 安装包（正式分发）
 
-本机已装：`E:\tools\InnoSetup6\ISCC.exe`（便携模式，免管理员）。
+本机已装（2026-10-18，`winget install JRSoftware.InnoSetup` 用户级安装）：
+`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`。官方安装包不带
+`ChineseSimplified.isl`；网络无法直连 `raw.githubusercontent.com` 时从
+jsDelivr 镜像取同名文件放进 `<安装目录>\Languages\`（CI 走 `issrc` 原址）。
 通用脚本 `packaging\dsh-pet.iss` 用 `/D` 定义编译任意变体：
 
 ```powershell
+$iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 # webm-chat（脚本默认值）
-E:\tools\InnoSetup6\ISCC.exe packaging\dsh-pet.iss
+& $iscc packaging\dsh-pet.iss
 
 # webm
-E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-webm /DMyAppExeName=dsh-pet-standalone-webm.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-webm "/DMyAppId={{ED2590E4-A968-4E8D-B7C4-75DFE012D0E9}}" "/DMyAppDisplay=dsh-pet-standalone (WebM)" packaging\dsh-pet.iss
+& $iscc /DMyAppShortName=dsh-pet-standalone-webm /DMyAppExeName=dsh-pet-standalone-webm.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-webm "/DMyAppId={{ED2590E4-A968-4E8D-B7C4-75DFE012D0E9}}" "/DMyAppDisplay=dsh-pet-standalone (WebM)" packaging\dsh-pet.iss
 
 # gif-chat
-E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-gif-chat /DMyAppExeName=dsh-pet-standalone-gif-chat.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-gif-chat "/DMyAppId={{7FE1EEDD-91DB-4F4B-834D-894DFE782256}}" "/DMyAppDisplay=dsh-pet-standalone (GIF Chat)" packaging\dsh-pet.iss
+& $iscc /DMyAppShortName=dsh-pet-standalone-gif-chat /DMyAppExeName=dsh-pet-standalone-gif-chat.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-gif-chat "/DMyAppId={{7FE1EEDD-91DB-4F4B-834D-894DFE782256}}" "/DMyAppDisplay=dsh-pet-standalone (GIF Chat)" packaging\dsh-pet.iss
 
 # gif
-E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-gif /DMyAppExeName=dsh-pet-standalone-gif.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-gif "/DMyAppId={{308454BF-3FD5-4A30-B0FF-1D23BF31DCF1}}" "/DMyAppDisplay=dsh-pet-standalone (GIF)" packaging\dsh-pet.iss
+& $iscc /DMyAppShortName=dsh-pet-standalone-gif /DMyAppExeName=dsh-pet-standalone-gif.exe /DMyAppDir=..\dist-onedir\dsh-pet-standalone-gif "/DMyAppId={{308454BF-3FD5-4A30-B0FF-1D23BF31DCF1}}" "/DMyAppDisplay=dsh-pet-standalone (GIF)" packaging\dsh-pet.iss
 ```
 
 产物：`dist-onedir\<shortname>-setup.exe`
@@ -313,6 +322,9 @@ E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-gif /DMyAppExeN
 安装包特性：
 
 - 免管理员（`PrivilegesRequired=lowest`），默认装 `%LOCALAPPDATA%\Programs\...`，向导中**用户可自行选择任意盘符**
+- 官方功能包（AI 对话 / 识屏）是**默认不勾**的选装 Task，装到 `{app}\features\`；
+  基础复制排除这两个目录与 `portable.json`（安装态不继承便携标记），
+  装完在 `{app}\startup-receipt.json` 写一份 `dsh-pet-startup-receipt/v1` 回执
 - 创建开始菜单/桌面快捷方式；装完可选立即运行
 - 控制面板可卸载；卸载时在删除 exe **之前**调用 `--uninstall-cleanup`（自启项 /
   Claude hooks / DSH 桥接插件），退出码与失败记录见 `[Code]` 段与配置目录里的
