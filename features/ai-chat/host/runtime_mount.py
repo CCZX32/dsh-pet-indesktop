@@ -33,6 +33,16 @@ def _pet_view():
         return None
 
 
+def _window_callbacks():
+    """与呈现面同样惰性解析；独立包宿主没有 Core 呈现时允许无回调运行。"""
+    try:
+        from pet.ai_bindings import ai_window_callbacks
+
+        return ai_window_callbacks()
+    except (ImportError, AttributeError):
+        return None, None
+
+
 class AiPackageRuntime:
     def __init__(self, context):
         from .runtime import AiRuntime
@@ -52,10 +62,36 @@ class AiPackageRuntime:
     def _show(self, kind: str):
         if self._closed or not self.runtime.accepting:
             return None
-        window = self.runtime.create_window(kind, view=_pet_view())
+        notifier, auth_callback = _window_callbacks()
+        window = self.runtime.create_window(
+            kind, view=_pet_view(),
+            notifier=self._notify if notifier is not None else None,
+            auth_callback=self._open_settings if auth_callback is not None else None,
+        )
         if window is not None:
             window.show()
         return window
+
+    def _open_settings(self):
+        if self._closed or not self.runtime.accepting:
+            return
+        _notifier, callback = _window_callbacks()
+        if callback is not None:
+            callback()
+
+    def _notify(self, title, message, *, on_click=None):
+        if self._closed or not self.runtime.accepting:
+            return
+        notifier, _auth_callback = _window_callbacks()
+        if notifier is None:
+            return
+
+        def activate():
+            # 通知可能比包活得久；停用、卸载或退出后不再重新打开窗口。
+            if not self._closed and self.runtime.accepting and on_click is not None:
+                on_click()
+
+        notifier(title, message, on_click=activate)
 
     # ------------------------------------------------------------- 生命周期
     def start(self) -> None:

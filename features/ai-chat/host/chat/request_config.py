@@ -20,7 +20,9 @@ def prepare_request(config, operation="chat.send"):
     return settings, provider
 
 
-def configuration_hint(error):
+def configuration_hint(error, *, actionable=False):
+    if actionable and str(error) in {"credential_missing", "api_use_not_authorized", "api_model_required"}:
+        return '<a href="api-settings">打开 API 设置</a>'
     reasons = {
         "api_use_not_authorized": "请打开 API 设置，填写主 Key 并保存。",
         "execution_not_authorized": "AI 功能已停用，请启用后重试。",

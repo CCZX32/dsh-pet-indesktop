@@ -265,7 +265,8 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 约 −59 行），本文件只剩三处接线——`build_controls(self)`、一行 `layout.addWidget(section(…))`
 # 与保存时的 `apply_to_config(self, pro_data)`，加各自一次惰性 import。残余的 12 行就是这些
 # 接线本身，继续拆只能把调用点搬来搬去；按约定校准到实测值，不压行宽。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2413
+# 2026-10-15 DLC AI 回调：owner 设置深链接只留两行分派，主体在 settings_mod_domain。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
 
 
 def _read(name: str) -> str:

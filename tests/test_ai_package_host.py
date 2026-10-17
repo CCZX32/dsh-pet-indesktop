@@ -162,6 +162,20 @@ def test_a_stale_commit_is_refused_by_the_namespace_cas(bound):
     assert "configuration_changed" in str(getattr(excinfo.value, "code", "") or excinfo.value)
 
 
+def test_notification_reads_do_not_rebase_or_discard_an_unsaved_config(bound):
+    _host, context, _vault, handle = bound
+    module = import_pkg(handle, "host.config")
+    draft, editor = module.AiConfiguration(context), module.AiConfiguration(context)
+    draft.set("chat_follow_pet", False)
+    editor.set("system_notifications_enabled", False)
+    editor.save()
+    assert draft.notifications_enabled() is False
+    assert draft.get("chat_follow_pet") is False
+    with pytest.raises(Exception) as excinfo:
+        draft.save()
+    assert "configuration_changed" in str(getattr(excinfo.value, "code", "") or excinfo.value)
+
+
 def test_the_provider_secret_goes_through_the_credential_vault(bound):
     """API Key 只经凭据库：配置命名空间里出现明文 key 一律拒绝。"""
     _host, context, vault, handle = bound

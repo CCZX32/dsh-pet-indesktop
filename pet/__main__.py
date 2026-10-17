@@ -44,11 +44,15 @@ def _exec_settings(app, config, *, include_ai: bool = True, initial_page: str = 
     if initial_page:
         dialog_kwargs["initial_page"] = initial_page
     dialog = ModernSettingsDialog(config, parent=None, **dialog_kwargs)
+    from .settings_extension_navigation import AiSettingsReceiver
+
+    navigation = AiSettingsReceiver(config.dir, dialog)
     dialog.finished.connect(lambda _result: app.quit())
     dialog.show()
     try:
         return app.exec()
     finally:
+        navigation.close()
         lock.unlock()
 
 

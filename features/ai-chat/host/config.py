@@ -65,6 +65,11 @@ class AiConfiguration:
             raise PermissionError("preference_not_granted")
         return copy.deepcopy(self._staged.get("ui", {}).get(key, default))
 
+    def notifications_enabled(self):
+        """Read the committed switch at delivery time without changing any draft/CAS snapshot."""
+        namespace = self.context.configuration.read_namespace()
+        return bool(namespace.get("ui", {}).get("system_notifications_enabled", True))
+
     def set(self, key, value):
         if key not in UI_FIELDS:
             raise PermissionError("preference_not_granted")

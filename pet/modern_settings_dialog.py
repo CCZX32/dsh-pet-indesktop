@@ -1729,6 +1729,8 @@ class ModernSettingsDialog(QDialog):
     def select_page(self, label: str) -> bool:
         """按侧栏标题选中页面，供右键菜单/更新通知做深链接。"""
         target = str(label or "").strip()
+        if target.startswith("extension:"):
+            return settings_mod_domain.select_extension_settings(self, target.removeprefix("extension:"))
         for index in range(self.sidebar.count()):
             if self.sidebar.item(index).text() == target:
                 self.sidebar.setCurrentRow(index)

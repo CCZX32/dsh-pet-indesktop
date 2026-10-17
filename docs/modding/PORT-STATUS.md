@@ -400,7 +400,7 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
    一份。用例族跑出 14 份残留（`tests/test_async_exit.py::test_a_quit_passes_through_when_nothing_is_registered`
    被挤红），已改为 `close()` 里显式 `unregister`。
 
-**未做（本片边界）**：
+**未做（第四片交付时的边界；后续接线见 §十）**：
 
 | 未做项 | 归属 | 说明 |
 |---|---|---|
@@ -409,6 +409,20 @@ LPAC 相关一切。**D5 才拆 `official.ai-chat` / `official.screen-understand
 | 文件解读的触发接线（拖文件 → 包的解读器） | 同上 | 包侧 `FileInterpretController` 与 `create_file_interpreter` 都在，Core 侧的投喂接线（上游 `bind_ai_window` 的 `file_factory` + `install_file_interpreter`）本片未落。 |
 | MOD 中心 UI 的「装官方包」按钮 | 后续片 | 与识屏包同一状态：当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮未做。 |
 | 冻结包投递（随发行版携带预构建包） | 打包/构建片 | 与识屏包同：只有源码态打包入口。 |
+
+## 十、AI 包窗口回调接线（2026-10-15，待维护者验收）
+
+交接 §6.2 第 1 项已实现：Core 注册通知和固定 AI owner 设置导航，包挂载传入
+`AiRuntime.create_window`。缺 Key 时保留输入并提供鼠标/键盘入口；认证失败通知
+进入同一 owner 设置；停用/关闭后旧通知失效。同 owner 导航复用草稿，独立设置
+宿主使用全局配置视图，凭据作用域与进程级运行时一致。已有独立设置窗口通过
+固定 AI owner 的局部导航端点复用，保留最大化状态及草稿；通知派发读取最新已保存
+开关，未保存草稿不改变通知行为。复审两项 P2 已有红绿回归。内置聊天保持原样。
+
+真实 Cocoa 窗口、真实包生命周期、独立设置子进程与 loopback HTTP 401 已覆盖；
+本机基线另有 Windows 平台假设等失败，全量发布门的最终结论以报告为准。
+文件解读投喂、官方安装按钮、UI 终态对齐与 5A 均未包含在本片。
+详见 [回调接线报告](../PR-REPORT-AI-WINDOW-CALLBACKS-2026-10-15.md)。
 
 ---
 

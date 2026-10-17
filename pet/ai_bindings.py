@@ -10,8 +10,8 @@ Ported from the DLC branch ``pet/ai_bindings.py`` ——只搬**呈现面**那�
   菜单命令——前提是上游 Core 里已经没有内置聊天（聊天整包化）。本仓库内置 AI
   对话**不动**，包开的是自己的窗口，命令由包自己的 Runtime 提供
   （``features/ai-chat/host/runtime_mount.AiPackageRuntime.commands``）；
-* 因此包只需要 Core 给一样东西：**桌宠的呈现快照面**（在哪、头像、聊天状态、
-  位置变动通知）。它按进程级提供方注册（与识屏包的呈现提供方同一套做法，
+* 包消费**桌宠的呈现快照面**（在哪、头像、聊天状态、位置变动通知），另有
+  通知与打开本包设置两条窄回调。它们按进程级提供方注册（与识屏包同一套做法，
   见 :func:`pet.feature_host_bindings.register_screen_presentation`），
   包在每次开窗时惰性解析。
 
@@ -135,14 +135,21 @@ class AiFileView(AiPetView):
 
 #: 进程级呈现提供方工厂（AppShell 注册；``None`` = 没有呈现面，安全降级）。
 _AI_PET_VIEW: Callable[[], object] | None = None
+_AI_WINDOW_CALLBACKS: tuple[Callable | None, Callable | None] = (None, None)
 
 
-def register_ai_pet_view(factory: Callable[[], object] | None) -> None:
-    """注册/清除聊天包的桌宠呈现提供方工厂（``None`` 清除；测试收口用）。"""
-    global _AI_PET_VIEW
-    if factory is not None and not callable(factory):
-        raise TypeError("AI pet view factory must be callable")
+def register_ai_pet_view(factory: Callable[[], object] | None, *, notifier=None, auth_callback=None) -> None:
+    """注册呈现工厂及窗口回调；``None`` 一并清除，退出后不保留 Core 引用。"""
+    global _AI_PET_VIEW, _AI_WINDOW_CALLBACKS
+    if any(value is not None and not callable(value) for value in (factory, notifier, auth_callback)):
+        raise TypeError("AI presentation providers must be callable")
     _AI_PET_VIEW = factory
+    _AI_WINDOW_CALLBACKS = (notifier, auth_callback) if factory is not None else (None, None)
+
+
+def ai_window_callbacks() -> tuple[Callable | None, Callable | None]:
+    """只给通知与固定 owner 的设置导航，不暴露 Core 配置或凭据。"""
+    return _AI_WINDOW_CALLBACKS
 
 
 def ai_pet_view() -> AiPetView | None:

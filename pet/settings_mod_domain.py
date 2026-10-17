@@ -41,7 +41,9 @@ import logging
 import re
 from pathlib import Path
 
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+from shiboken6 import isValid
 
 from . import catalog
 from . import overlay_settings_command
@@ -146,9 +148,11 @@ class DialogModHost:
         runtime = getattr(self.window, "feature_runtime", None)
         if runtime is None and self.dialog.parent() is None and self.allow_own_host:
             from .feature_management import LocalFeatureRuntime
+            from .settings_slot_config import global_config_of
 
             try:
-                runtime = LocalFeatureRuntime(self.dialog.config, role="settings")
+                # 扩展运行时是进程级；凭据作用域也必须与 Core 使用的全局身份一致。
+                runtime = LocalFeatureRuntime(global_config_of(self.dialog.config), role="settings")
                 self._owns_host = True
             except Exception:
                 _LOG.exception("设置进程内装配扩展宿主失败；MOD 中心显示宿主不可用")
@@ -323,6 +327,33 @@ def build_mod_rows(dialog) -> list[SettingRow]:
 _UNSET = object()
 
 
+def select_extension_settings(dialog, owner: str) -> bool:
+    """设置深链接复用 owner 面板；再次导航不重建草稿，切 owner 先走草稿门。"""
+    from .settings_mod_panel import prepare_revocation
+
+    panel = getattr(dialog, "mod_panel", None)
+    same_owner = panel is not None and not panel.disposed and dialog.mod_panel_owner == owner
+    if not same_owner and not prepare_revocation(panel, dialog):
+        return False
+    if not dialog.select_page("扩展管理"):
+        return False
+    if not same_owner and not open_extension_settings(dialog, owner):
+        return False
+    panel = dialog.mod_panel
+
+    def reveal():
+        if not isValid(panel) or panel.disposed:
+            return
+        scroll = dialog.pages.currentWidget().findChild(QScrollArea, "settingsScroll")
+        if scroll is not None:
+            scroll.ensureWidgetVisible(panel, 0, 24)
+        panel.setFocus()
+
+    # 首开独立设置进程时需等布局完成再滚动；不是新增常驻定时器。
+    QTimer.singleShot(0, reveal)
+    return True
+
+
 def open_extension_settings(dialog, owner: str) -> bool:
     """把某个扩展自己的设置面板挂进 MOD 中心页（**按 owner 局部挂载**）。
 
@@ -345,6 +376,7 @@ def open_extension_settings(dialog, owner: str) -> bool:
     dialog.mod_panel = panel
     dialog.mod_panel_owner = str(owner)
     host_widget.layout().addWidget(panel)
+    panel.embedded.show()
     panel.show()
     return True
 
