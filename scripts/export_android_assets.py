@@ -19,6 +19,27 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 CORE_GROUPS = frozenset(("idle", "move", "turn", "click", "drag"))
 CLICK_SOUND_SOURCES = {"click_press.mp3": "Ya1.mp3", "click_release.mp3": "Ya2.mp3"}
+#: Assets shipped with the APK as license/notice files. The click sounds below are
+#: MIT assets (MeteorNOX/DeepSeek-Balance-Whale-Widget) whose full license text lives
+#: in the repository's THIRD_PARTY_NOTICES.md - a pointer to the source repository is
+#: not a copy of the material, so that file travels with the APK assets too.
+NOTICE_FILES = (
+    (ROOT / "android" / "NOTICE.txt", "NOTICE.txt"),
+    (ROOT / "android" / "LICENSE-APACHE-2.0.txt", "LICENSE-APACHE-2.0.txt"),
+    (ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
+)
+
+
+def copy_notices(output: Path) -> list[Path]:
+    """Copy the license/notice files into the APK asset root (missing one is fatal)."""
+    written = []
+    for source, name in NOTICE_FILES:
+        if not source.is_file():
+            raise FileNotFoundError(f"missing notice file: {source}")
+        destination = output / name
+        shutil.copyfile(source, destination)
+        written.append(destination)
+    return written
 
 
 def copy_click_sounds(sounds_root: Path, res_output: Path) -> list[Path]:
@@ -131,8 +152,7 @@ def main() -> int:
             raise RuntimeError(f"{source.name}: {error}")
         prepared[source] = directory
     manifest = export_prepared(videos, prepared, args.output, DEFAULT_SELF_TALK_TEXTS)
-    for notice in ("NOTICE.txt", "LICENSE-APACHE-2.0.txt"):
-        shutil.copyfile(ROOT / "android" / notice, args.output / notice)
+    copy_notices(args.output)
     if args.res_output:
         idle = next(c for c in manifest["clips"] if c["group"] == "idle")
         first = args.output / "pet" / idle["path"] / "f_0001.webp"

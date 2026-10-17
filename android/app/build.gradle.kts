@@ -38,6 +38,7 @@ val exportPetAssets by tasks.registering(Exec::class) {
     inputs.file(repository.resolve("scripts/make_icon.py"))
     inputs.file(rootProject.file("NOTICE.txt"))
     inputs.file(rootProject.file("LICENSE-APACHE-2.0.txt"))
+    inputs.file(repository.resolve("THIRD_PARTY_NOTICES.md"))
     outputs.dir(layout.buildDirectory.dir("generated/petAssets"))
     outputs.dir(layout.buildDirectory.dir("generated/petRes"))
     workingDir(repository)

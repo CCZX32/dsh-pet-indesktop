@@ -97,6 +97,12 @@ Gradle Wrapper 固定为 8.11.1（含分发包 SHA-256），AGP 8.10.1、Kotlin
   定位框或透明通道都会使构建失败。同一步把桌面默认点击音（MIT，
   `assets/sounds/duck/Ya1.mp3`+`Ya2.mp3`）拷成 `res/raw/click_press.mp3` 与
   `click_release.mp3`，缺文件同样让构建失败。生成物在 `android/app/build/`，不入库。
+- 同一步 `copy_notices()` 把三份声明拷进资产根：`android/NOTICE.txt`、
+  `android/LICENSE-APACHE-2.0.txt`，以及**仓根的 `THIRD_PARTY_NOTICES.md`**
+  （2026-10-17 起）。最后一份是内置点击音的 MIT 完整正文所在（第 1 节）；改动前
+  APK 里只有一句「MIT 正文见源码仓库的 THIRD_PARTY_NOTICES.md」——那是用户手里
+  没有的链接，不构成随复制件分发许可正文。`android/NOTICE.txt` 里的对应段落也改成
+  指向 APK 资产内那份文件。守卫见 `tests/test_packaging_keyring_notices.py`。
 - `pet/manifest.json` 的 `schema_version=1`；包含画布、身体定位框、台词和
   动画列表。每段声明稳定 ID、源路径、帧率、帧数、帧目录、对称裁剪范围、
   步幅和位移曲线。原始 `body_box` 是位置/贴边锚点。
@@ -204,5 +210,6 @@ $adb = "$env:LOCALAPPDATA/dsh-pet-android/sdk/platform-tools/adb.exe"
 超时，这是刻意的。
 
 素材署名与许可见 [第三方声明](../THIRD_PARTY_NOTICES.md) 第 1、2、9 节。
-APK 内包含 `NOTICE.txt` 和 Apache-2.0 全文，并附内置点击音的 MIT 署名；
+APK 资产内含 `NOTICE.txt`、Apache-2.0 全文（`LICENSE-APACHE-2.0.txt`）与**第三方声明
+本体**（`THIRD_PARTY_NOTICES.md`，含内置点击音 MeteorNOX 的 MIT 完整正文）；
 角色素材继续限个人非商业用途。
