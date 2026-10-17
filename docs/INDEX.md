@@ -315,6 +315,7 @@
 
 | 阶段 | 目录 | 用途 |
 |---|---|---|
+| 上游对齐 | [`DLC-UPSTREAM-SYNC-2026-10-17.md`](DLC-UPSTREAM-SYNC-2026-10-17.md) | **给上游作者看的**：本仓库把插件化移植到哪了、他按 Phase 5B 继续拆解前必须知道的三件事、两边分工与五个待确认问题。要跟上游对话前必读。 |
 | 总路线 | [`plugin-roadmap/`](plugin-roadmap/) | 查看完整阶段路线、依赖和阶段出口。 |
 | Phase 1 | [`plugin-phase-01-foundation/`](plugin-phase-01-foundation/) | 修改架构、API、资源 DLC 或 v4→v5 迁移边界前必读。 |
 | Phase 2 | [`plugin-phase-02-runtime/`](plugin-phase-02-runtime/) | 实现 Core 插件运行时前必读。 |

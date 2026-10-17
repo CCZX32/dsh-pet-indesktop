@@ -3,6 +3,9 @@
 > 写作时点：2026-10-15，分支 `dlc/mod-center-port`（HEAD `07ec46e`）。
 > 读者设定：**没接触过这个项目**的开发者 + 他的 AI 助手。读完这份文档 + 文内指路的两三份档案，应该能直接开工。
 > 本线的**唯一真相源**是 [`docs/modding/PORT-STATUS.md`](modding/PORT-STATUS.md)（逐 phase 状态对照），本文是导航、理念与操作手册；两者冲突时以 PORT-STATUS 为准。
+>
+> **给上游作者的对齐说明**见 [`DLC-UPSTREAM-SYNC-2026-10-17.md`](DLC-UPSTREAM-SYNC-2026-10-17.md)：
+> 已移植/未移植的逐项账本、他按 Phase 5B 继续拆解前必须知道的三件事、两边分工与五个待确认问题。
 
 ---
 
