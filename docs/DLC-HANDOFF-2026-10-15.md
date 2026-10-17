@@ -148,7 +148,7 @@ features/
 - Setup 选装器（官方 ZIP 编译期嵌入、勾选安装、首启 startup receipt）、显式便携模式。
 - 入口：`packaging/dsh-pet.iss`（本站 Inno Setup）、上游参照 `docs/plugin-phase-05-distribution/`。
 - **注意**：官方包嵌入 Setup 与便携模式在 PORT-STATUS §七 的当前判定是"不做"——开工前重新跟维护者确认是否翻案。
-- **2026-10-17 状态：受阻未做**。本机没有 `ISCC.exe`（无法编译安装包），也没有正式发布签名密钥；构建侧的官方包随包投递已具备，但 Setup 选装任务、首启 receipt、便携模式、Ed25519 发布清单均未实现/未验证。按纪律停在「可交付的一半」，不声称 Setup 已验收、不伪造签名。
+- **2026-10-17 状态：安装器脚本已接线，编译受阻**。`packaging/dsh-pet.iss` 已加两个官方包可选 Task（默认不勾）、基础复制 `Excludes`、Task-scoped `Source` 与 `startup-receipt.json` 回执；结构判据 `tests/test_setup_optional_features.py` 5 条绿。本机没有 `ISCC.exe`，**无法编译安装包**，安装/卸载/升级与回执消费未验收；便携模式、Ed25519 发布清单未做（无正式密钥）。按纪律停在「可交付的一半」，不声称 Setup 已验收、不伪造签名。
 
 ### 6.5 不排期/不做（别捡起来）
 

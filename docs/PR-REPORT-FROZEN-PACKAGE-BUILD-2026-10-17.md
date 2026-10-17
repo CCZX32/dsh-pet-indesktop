@@ -76,11 +76,15 @@ EXIT=2                                        # 冻结入口在 import pet.app �
 - **未验证项**：① 冻结 Worker 的**完整交接链路**（有 token、真租约、真握手）没有跑——裸跑只证明了 fail-closed；完整链路需要已安装的官方识屏包 + 宿主租约，属产品内安装后的实机验收。② 未启动桌面 GUI 做人工观感验收（本会话无可交互桌面）。③ Setup 未编译（见下）。
 - **构建环境注意**：`build_onedir.ps1` 调的是 PATH 上的 `python`；本次用 `.venv/Scripts` 前置 PATH 才满足 `edge-tts>=7.3.1` 的构建期门。这是构建机的既有前提，不是本片新增。
 
-## 四、5A Setup / 签名：受阻登记（未做）
+## 四、5A Setup / 签名：部分接线，编译受阻（未验收）
 
-- 本机没有 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`（`which iscc` 为空），**无法编译安装包**；`packaging/dsh-pet.iss` 的选装任务、首启 startup receipt、显式便携模式均未实现/未验证。
-- 没有正式发布签名密钥；Ed25519 发布清单与签名验证路径未做。文档与构建口径仍是 `local_user`（显式用户信任，不声称发布者认证），**不会伪造签名产物**。
-- 已具备的前置：构建脚本能把官方包随 onedir 携带并双门校验；`<app>/features/` 的真实读取链（`official_package_source`）在阶段 3 已落地。5A 的下一步只需要：Inno Setup 选装脚本 + 首启 receipt + 便携模式 + 正式签名密钥/发布基线。
+- **已接线的安装器脚本**（本机无 ISCC，未编译）：
+  - `packaging/dsh-pet.iss` 新增两个可选 Task：`official_ai_chat` / `official_screen`，默认不勾选；
+  - 基础 `[Files]` 用 `Excludes` 把两个官方包从整目录复制中排除，改为按 Task 的 `Source` 条目安装到 `{app}\features\...`，并带 `skipifsourcedoesntexist`（不带包的构建仍可编译）；
+  - `[Code]` 的 `CurStepChanged(ssPostInstall)` 写 `startup-receipt.json`（`dsh-pet-startup-receipt/v1` + 两个 Task 的布尔值）——只写回执，不执行包代码、不写安装状态；
+  - 结构判据 `tests/test_setup_optional_features.py` 5 条（BOM/UTF-8、Task、Excludes、Task-scoped Source、回执）全绿。
+- **仍未做**：本机没有 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`，**无法编译安装包**，因此装/卸/升级、首启回执的实际消费、显式便携模式均未验证；没有正式发布签名密钥，Ed25519 发布清单与签名验证路径未做。文档与构建口径仍是 `local_user`（显式用户信任，不声称发布者认证），**不会伪造签名产物**。
+- 已具备的前置：构建脚本能把官方包随 onedir 携带并双门校验；`<app>/features/` 的真实读取链（`official_package_source`）在阶段 3 已落地。5A 的下一步：在装有 Inno Setup 的机器上编译并做安装/卸载/升级人工验收，再决定便携模式与签名基线。
 
 ## 五、边界
 

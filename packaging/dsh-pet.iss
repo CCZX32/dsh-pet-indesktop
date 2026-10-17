@@ -65,9 +65,18 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; 5A：官方功能包选装。默认不勾选——Core 不带它们也能启动；勾选后安装到
+; {app}\features\，由产品侧的 official_package_source 读取。删除/停用走应用内
+; MOD 中心的事务链，安装器不另造安装状态。
+Name: "official_ai_chat"; Description: "AI chat package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
+Name: "official_screen"; Description: "Screen understanding package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 
 [Files]
-Source: "{#MyAppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 基础产物：排除 features\ 下两个官方包，改由下面的 [Tasks] 选装项控制。
+; skipifsourcedoesntexist 让不带包的构建（-FeaturePackages 省略）仍能编译。
+Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppDir}\features\ai-chat\*"; DestDir: "{app}\features\ai-chat"; Tasks: official_ai_chat; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#MyAppDir}\features\screen-understanding\*"; DestDir: "{app}\features\screen-understanding"; Tasks: official_screen; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"
@@ -84,6 +93,30 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppShortN
 ; 清理（见下方 [Code] 的卸载清理调用）。
 
 [Code]
+{ 5A：首启回执。安装器只写“这次装了哪些官方包”，产品侧后续按它做首启确认；
+  不在这里执行包代码，也不写安装状态。Inno 的字符串字面量保持 ASCII。}
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Receipt: String;
+  AiChat: String;
+  Screen: String;
+begin
+  if CurStep <> ssPostInstall then
+    exit;
+  if IsTaskSelected('official_ai_chat') then
+    AiChat := 'true'
+  else
+    AiChat := 'false';
+  if IsTaskSelected('official_screen') then
+    Screen := 'true'
+  else
+    Screen := 'false';
+  Receipt := '{"schema":"dsh-pet-startup-receipt/v1","ai_chat":' + AiChat +
+             ',"screen":' + Screen + '}';
+  if not SaveStringToFile(ExpandConstant('{app}\startup-receipt.json'), Receipt, False) then
+    Log('dsh-pet startup receipt could not be written');
+end;
+
 { 卸载清理必须在删除 exe 之前跑：exe 一旦被删，清理实现就没了。
   usUninstall 是卸载流程里最早的步骤，此处的 Exec 先于文件删除。
   清理只删本产品 own 的东西（自启项 / Claude hooks / DSH 桥接插件），
