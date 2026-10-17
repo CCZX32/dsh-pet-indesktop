@@ -23,22 +23,22 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pet import catalog
 from pet.mod_center_controller import KIND_EXTENSION, LiveUsage, ModCenterController, declared_manifest, unsupported_package_message
 from pet.mod_management import ModOutcome
+from tests.mod_package_fakes import write_package
+
 
 app = QApplication.instance() or QApplication([])
 
 
 def _write_package(root: Path, *, character_id: str = "demo", version: str = "1.0.0",
                    name: str = "Demo", description: str = "", extra: dict | None = None) -> Path:
-    package = root / "package"
-    videos = package / "videos"
-    videos.mkdir(parents=True, exist_ok=True)
-    (videos / "idle.webm").write_bytes(b"test-video")
-    manifest: dict[str, object] = {"id": character_id, "name": name, "version": version}
-    if description:
-        manifest["description"] = description
-    manifest.update(extra or {})
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    return package
+    return write_package(
+        root,
+        character_id=character_id,
+        version=version,
+        name=name,
+        description=description,
+        extra=extra,
+    )
 
 
 def _zip(source: Path, target: Path) -> Path:
@@ -127,6 +127,53 @@ def test_import_from_directory_is_disabled_then_enable_and_delete(env):
     assert all(outcome.success for outcome in results), [outcome.message for outcome in results]
     assert source.is_dir()
     assert not any(row.id == "demo" for row in controller.entries())
+
+
+def test_a_declared_content_kind_is_not_rejected_by_the_router(env):
+    """完整清单声明 ``kind=content`` 是资源包的正确形态；路由层不许把它当成异物。"""
+    controller, _host = _controller(env)
+    source = _write_package(env[0] / "source")
+    results = []
+    controller.result.connect(lambda _key, outcome: results.append(outcome))
+
+    assert controller.import_source(source)
+    pump(lambda: not controller.busy)
+
+    assert results and results[-1].success
+    assert any(row.id == "demo" for row in controller.entries())
+
+
+class _OfficialHost(Host):
+    def __init__(self, data_root):
+        super().__init__(data_root)
+        self.installed: list[str] = []
+
+    def official_packages(self):
+        return ("official.ai-chat",)
+
+    def install_official(self, owner):
+        self.installed.append(owner)
+        return object(), True
+
+
+def test_an_uninstalled_official_package_has_an_install_row_and_action(env):
+    host = _OfficialHost(env[0])
+    controller = ModCenterController(host)
+
+    row = next(row for row in controller.entries() if row.id == "official.ai-chat")
+    assert row.source == "official"
+    assert row.pending == "未安装"
+    assert row.managed is False
+
+    assert controller.install_official("official.ai-chat")
+    pump(lambda: not controller.busy)
+
+    assert host.installed == ["official.ai-chat"]
+
+
+def test_an_unknown_official_owner_is_refused_by_the_controller(env):
+    controller, _host = _controller(env)
+    assert not controller.install_official("official.nope")
 
 
 def test_import_from_zip_lands_disabled(env):

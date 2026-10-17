@@ -38,8 +38,12 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 from uuid import uuid4
 
+from . import __version__
 from . import catalog as pet_catalog
+from . import mod_manifest
 from .feature_state_io import StateError, safe_path
+from .mod_manifest import ManifestIssue, is_safe_package_id
+from .mod_transactions import JournalError, ModJournal, TRANSACTIONS_DIRNAME
 
 _LOG = logging.getLogger(__name__)
 
@@ -70,17 +74,19 @@ def _is_safe_id(value: str) -> bool:
 
     Deliberately permissive about non-ASCII: characters placed by hand already
     use folder names that :func:`pet.catalog.list_available_characters` accepts,
-    and refusing them here would hide them from the MOD center.
+    and refusing them here would hide them from the MOD center. The rule itself
+    lives in :mod:`pet.mod_manifest` so the strict import gate and the legacy
+    listing path cannot drift apart.
     """
-    if not value or len(value) > _MAX_ID_CHARS or value in {".", ".."}:
-        return False
-    if value != value.strip() or value.endswith("."):
-        return False
-    return not _UNSAFE_ID_CHARS.search(value) and not _DEVICE_ID.fullmatch(value)
+    return is_safe_package_id(value)
 
 
 class ModError(RuntimeError):
     """A resource MOD operation was refused; the message is user-facing."""
+
+    def __init__(self, message: str, *, issues: Iterable[ManifestIssue] = ()) -> None:
+        super().__init__(message)
+        self.issues = tuple(issues)
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,7 @@ class ModEntry:
     source: str = "installed"
     character_id: str = ""
     pending: str = ""
+    digest: str = ""
 
     @property
     def managed(self) -> bool:
@@ -110,6 +117,7 @@ class ModOutcome:
     success: bool
     message: str
     pending: bool = False
+    diagnostic: tuple[ManifestIssue, ...] = ()
 
 
 class ModSelection:
@@ -133,6 +141,7 @@ class _CharacterPackage:
     version: str
     display_name: str
     description: str
+    digest: str = ""
 
 
 def _manifest_of(root: Path) -> dict:
@@ -162,16 +171,54 @@ def _video_files(root: Path) -> list[Path]:
     return [path for path in videos.rglob("*") if path.is_file() and path.suffix.lower() in _VIDEO_SUFFIXES]
 
 
+def _issue_message(issues: Iterable[ManifestIssue]) -> str:
+    messages = [issue.message for issue in issues]
+    return "；".join(messages) if messages else "角色资源包不符合清单契约"
+
+
 def _read_package(root: Path, *, character_id: str | None = None,
-                  deep: bool = True) -> _CharacterPackage:
+                  deep: bool = True, strict: bool = False) -> _CharacterPackage:
     """Validate one character package directory, or refuse it with a reason.
 
     ``deep=False`` 是列表浅读：符号链接/可执行文件扫描只看顶层与 ``videos/`` 子树，
     不递归整包——``frameseq/`` 里可能有数万个帧文件（本机 25530 个），全树 rglob
     实测要 4.5–5.4 秒，会让设置窗打开慢十倍。安装/启用/回滚仍走 deep=True 的全量校验。
+
+    ``strict=True`` 只给**导入/托管包**用：清单必须满足
+    :func:`pet.mod_manifest.validate_resource_package` 的完整契约，版本不合法会被
+    拒绝而不是回落 ``0.0.0``。手工放进角色根、没有清单的目录继续走宽松路径。
     """
     if not root.is_dir():
         raise ModError("无效的角色资源包：不是目录")
+    if strict:
+        manifest_obj, issues, digest = mod_manifest.validate_resource_package(
+            root,
+            core_version=__version__,
+            platform_name=mod_manifest.current_platform(),
+        )
+        if manifest_obj is None or issues:
+            raise ModError(_issue_message(issues), issues=issues)
+        if len(manifest_obj.characters) != 1:
+            raise ModError(
+                "一个角色资源包只能声明一个角色",
+                issues=(ManifestIssue("characters_count", "一个角色资源包只能声明一个角色"),),
+            )
+        declared_id = manifest_obj.characters[0]
+        resolved_id = character_id or declared_id
+        if resolved_id != declared_id:
+            raise ModError(
+                "角色包目录与清单声明的角色不一致",
+                issues=(ManifestIssue("character_id_mismatch", "角色包 id 与清单声明不一致"),),
+            )
+        videos = _video_files(root)
+        return _CharacterPackage(
+            character_id=resolved_id,
+            root=root,
+            version=manifest_obj.version,
+            display_name=manifest_obj.name,
+            description=manifest_obj.description,
+            digest=digest or "",
+        )
     if deep:
         scan = list(root.rglob("*"))
     else:
@@ -281,6 +328,120 @@ class ResourceMods:
         self.staging_root = self.data_root / STAGING_DIRNAME
         self.character_roots = self._roots(character_roots)
         self.prepare_removal = prepare_removal or (lambda _entry: False)
+        self.journal = ModJournal(self.staging_root)
+        #: 恢复不了的日志不会被猜着处理；破坏性操作据此 fail-closed。
+        self.recovery_diagnostics: list[str] = []
+        self.recover_pending_operations()
+
+    # ------------------------------------------------------------ recovery
+
+    def recover_pending_operations(self) -> None:
+        """把上次进程留下的目录搬移日志收敛到一致状态。
+
+        规则（与 :mod:`pet.mod_transactions` 的阶段一一对应）：
+
+        * ``prepared``：还没搬任何东西；删掉本次的 incoming，保留目标。
+        * ``version_removed``：旧版已进保留区、目标缺位；把保留版搬回目标。
+        * ``swapped``：新版已落位；自检通过则补提交，失败则换回保留版。
+        * ``committed``：只清日志。
+        * ``remove/prepared``：还没删；清日志。``remove/deleted``：把仍存在的目标再删一次。
+
+        任何路径越界、两边都在/都不在、内容校验失败都**不猜**：保留日志、写入
+        ``recovery_diagnostics``，并在下一次破坏性操作前如实拒绝。
+        """
+        self.recovery_diagnostics = []
+        try:
+            records = self.journal.records()
+        except (JournalError, OSError, StateError) as exc:
+            self.recovery_diagnostics.append(str(exc))
+            return
+        for record in records:
+            try:
+                self._recover_record(record)
+            except (OSError, ValueError, StateError, ModError, JournalError) as exc:
+                self.recovery_diagnostics.append(f"{record.operation_id}: {exc}")
+        if not self.recovery_diagnostics:
+            self._prune_staging_root()
+
+    def _prune_staging_root(self) -> None:
+        """Remove the empty journal/staging roots so a clean install leaves no debris."""
+        for path in (self.staging_root / TRANSACTIONS_DIRNAME, self.staging_root):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+    def _recover_record(self, record) -> None:
+        if record.kind == "remove":
+            self._recover_remove(record)
+            return
+        target = self._bounded_path(record.target)
+        retained = None if record.retained is None else self._bounded_path(record.retained)
+        incoming = None if record.incoming is None else self._bounded_path(record.incoming)
+        if record.phase == "prepared":
+            if incoming is not None and incoming.exists():
+                shutil.rmtree(incoming, ignore_errors=True)
+            if target.exists():
+                self.journal.finish(record)
+                return
+            if retained is not None and retained.exists():
+                self._restore(retained, target)
+                self.journal.finish(record)
+                return
+            raise ModError("事务准备阶段的目标与保留版本都不在，无法判定")
+        if record.phase == "version_removed":
+            if target.exists():
+                # New content already landed but the phase update was lost; the
+                # swapped branch below re-checks it rather than trusting it.
+                pass
+            elif retained is not None and retained.exists():
+                self._restore(retained, target)
+                self.journal.finish(record)
+                return
+            else:
+                raise ModError("旧版已移走但目标与保留版本都不在")
+            record = self.journal.advance(record, "swapped")
+        if record.phase in {"swapped", "committed"}:
+            if record.phase == "swapped" and target.exists():
+                try:
+                    _read_package(target, character_id=record.character_id, strict=True)
+                except (ModError, OSError):
+                    if retained is not None and retained.exists():
+                        shutil.rmtree(target, ignore_errors=True)
+                        self._restore(retained, target)
+                        self.journal.finish(record)
+                        return
+                    raise
+            self.journal.finish(record)
+
+    def _recover_remove(self, record) -> None:
+        targets = [self._bounded_path(item) for item in record.targets]
+        if record.phase == "prepared":
+            # Deletion had not started (or was not recorded): leave the files.
+            self.journal.finish(record)
+            return
+        for target in targets:
+            if target.exists():
+                shutil.rmtree(target)
+        self.journal.finish(record)
+
+    def _bounded_path(self, value: str) -> Path:
+        path = Path(value)
+        if not _contains(self.data_root, path):
+            raise ModError("事务日志含越界路径")
+        safe_path(path)
+        return path
+
+    def _restore(self, source: Path, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+
+    def _ensure_no_unresolved_operations(self) -> None:
+        self.recover_pending_operations()
+        if self.recovery_diagnostics:
+            raise ModError(
+                "上一次安装/删除没有收尾，需要先处理：" + "；".join(self.recovery_diagnostics[:3])
+            )
 
     def _roots(self, character_roots: Iterable[tuple[str, Path]] | None) -> list[tuple[str, Path]]:
         if character_roots is None:
@@ -386,14 +547,26 @@ class ResourceMods:
     # --------------------------------------------------------- installation
 
     def install(self, source: Path, *, expected_id: str | None = None) -> ModEntry:
+        self._ensure_no_unresolved_operations()
         root, temporary = self._materialize(Path(source))
         try:
-            package = _read_package(root)
+            package = _read_package(root, strict=True)
             owner = package.character_id
             if expected_id is not None and owner != expected_id:
                 raise ModError("更新文件不是同一个角色包")
             old = next((row for row in self._managed_rows() if row.id == owner), None)
-            if old is not None and old.version != package.version and not self.prepare_removal(old):
+            if old is not None and old.version == package.version:
+                # Same version is an idempotent re-import only when the bytes are
+                # the same; silently replacing it would change package identity
+                # behind the retained-version bookkeeping.
+                existing = _read_package(old.path, character_id=owner, strict=True)
+                if existing.digest and package.digest and existing.digest != package.digest:
+                    raise ModError(
+                        "同版本但内容不同：请提高版本号后再导入",
+                        issues=(ManifestIssue("same_version_different_content", "同版本内容不同"),),
+                    )
+                return self._entry(owner)
+            if old is not None and not self.prepare_removal(old):
                 raise ModError("角色仍在使用：请先自然退出使用该素材的桌宠后再更新")
             self._publish(package, root, old)
             return self._entry(owner)
@@ -424,40 +597,83 @@ class ResourceMods:
         staged = work / package.character_id
         self.staging_root.mkdir(parents=True, exist_ok=True)
         retained: Path | None = None
+        record = None
         try:
             _copy_tree(root, staged)
+            if old is not None and old.version != package.version:
+                retained = self.retained_root / package.character_id / old.version
+                if not _contains(self.data_root, retained):
+                    raise ModError("保留版本边界无效")
+                retained.parent.mkdir(parents=True, exist_ok=True)
+            record = self.journal.begin(
+                kind="install",
+                character_id=package.character_id,
+                target=target,
+                retained=retained,
+                incoming=staged,
+                from_version="" if old is None else old.version,
+                to_version=package.version,
+            )
             if old is not None:
                 # The target must be free before the rename below, otherwise an
                 # interrupted publish could leave a half tree behind.
                 if old.version != package.version:
-                    retained = self.retained_root / package.character_id / old.version
-                    retained.parent.mkdir(parents=True, exist_ok=True)
-                    if retained.exists():
+                    if retained is not None and retained.exists():
                         shutil.rmtree(retained)
                     os.replace(old.path, retained)
                 else:
                     shutil.rmtree(old.path)
+                record = self.journal.advance(record, "version_removed")
             target_root.mkdir(parents=True, exist_ok=True)
-            try:
-                os.replace(staged, target)
-            except OSError:
-                if retained is not None and retained.exists() and not old.path.exists():
-                    old.path.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(retained, old.path)
-                raise
+            os.replace(staged, target)
+            record = self.journal.advance(record, "swapped")
+            self._self_check(target, package.character_id, expected_digest=package.digest)
+            record = self.journal.advance(record, "committed")
+            self.journal.finish(record)
         except (OSError, ModError, StateError, ValueError) as exc:
             _LOG.warning("MOD install failed for %s: %s", package.character_id, exc)
-            raise ModError("导入未完成：请检查文件占用或目录内容后重试") from None
+            self._recover_after_failed_publish(record, target, retained, old)
+            issues = getattr(exc, "issues", ())
+            raise ModError(
+                "导入未完成：请检查文件占用或目录内容后重试",
+                issues=issues,
+            ) from None
         finally:
             shutil.rmtree(work, ignore_errors=True)
-            try:
-                self.staging_root.rmdir()
-            except OSError:
-                pass
+            self._prune_staging_root()
+
+    def _recover_after_failed_publish(self, record, target: Path, retained: Path | None, old: ModEntry | None) -> None:
+        """Best-effort local rollback; leave an unprovable state to the journal."""
+        try:
+            if record is None:
+                return
+            if retained is not None and retained.exists():
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                self._restore(retained, target)
+            elif old is not None and not target.exists() and old.path.exists():
+                # The old copy never moved; nothing to restore.
+                return
+            elif old is None and target.exists() and record.phase in {"swapped", "version_removed"}:
+                shutil.rmtree(target, ignore_errors=True)
+            self.journal.finish(record)
+        except (OSError, ValueError, StateError, JournalError):
+            _LOG.exception("MOD install rollback left a pending journal: %s", getattr(record, "operation_id", ""))
+
+    def _self_check(self, target: Path, character_id: str, *, expected_digest: str = "") -> _CharacterPackage:
+        """Re-read the landed package; a failed check never leaves it active."""
+        package = _read_package(target, character_id=character_id, strict=True)
+        if expected_digest and package.digest and package.digest != expected_digest:
+            raise ModError(
+                "激活后内容摘要不一致",
+                issues=(ManifestIssue("content_hash_mismatch", "激活后内容摘要与导入时不一致"),),
+            )
+        return package
 
     # --------------------------------------------------------------- state
 
     def set_enabled(self, package_id: str, enabled: bool) -> ModOutcome:
+        self._ensure_no_unresolved_operations()
         entry = self._entry(package_id)
         if entry.enabled == enabled:
             return ModOutcome(True, "已启用" if enabled else "已停用")
@@ -483,6 +699,7 @@ class ResourceMods:
     # ------------------------------------------------------------- removal
 
     def remove(self, package_id: str) -> ModOutcome:
+        self._ensure_no_unresolved_operations()
         entry = self._entry(package_id)
         if not self.prepare_removal(entry):
             return ModOutcome(False, "无法释放正在使用的角色；请先自然退出相关桌宠", True)
@@ -491,11 +708,26 @@ class ResourceMods:
             targets = self._removal_targets(entry)
             for target in targets:
                 safe_path(target)
+            record = self.journal.begin(
+                kind="remove",
+                character_id=entry.character_id,
+                target=entry.path,
+                from_version=entry.version,
+                to_version="",
+                targets=targets,
+            )
+            # "deleted" means deletion started: recovery retries every target,
+            # which is safe because rmtree of a missing path is never attempted.
+            record = self.journal.advance(record, "deleted")
             for target in targets:
-                shutil.rmtree(target)
+                if target.exists():
+                    shutil.rmtree(target)
             self._prune_empty_roots()
-        except (OSError, ValueError, ModError, StateError):
+            record = self.journal.advance(record, "committed")
+            self.journal.finish(record)
+        except (OSError, ValueError, ModError, StateError, JournalError):
             return ModOutcome(False, "删除未完成：请检查文件占用或目录内容；未删除部分已保留")
+        self._prune_staging_root()
         return ModOutcome(True, "已删除安装副本；原始文件与个人数据保留")
 
     def _prune_empty_roots(self) -> None:
@@ -528,19 +760,43 @@ class ResourceMods:
 
     # ------------------------------------------------------------ rollback
 
-    def rollback(self, package_id: str) -> ModOutcome:
+    def activate(self, package_id: str, version: str) -> ModOutcome:
+        """Switch to any retained version (the directory-layout equivalent of
+        upstream's ``activate(plugin_id, version)``)."""
+        self._ensure_no_unresolved_operations()
         entry = self._entry(package_id)
+        if entry.version == version:
+            return ModOutcome(True, "已经在该版本")
+        target = self.retained_root / entry.character_id / version
+        if not target.is_dir():
+            return ModOutcome(False, "没有这个保留版本")
+        try:
+            package = _read_package(target, character_id=entry.character_id, strict=True)
+        except (ModError, OSError) as exc:
+            return ModOutcome(False, "保留版本校验失败，未切换", diagnostic=getattr(exc, "issues", ()))
         if not self.prepare_removal(entry):
             return ModOutcome(False, "请自然退出使用该角色的桌宠后重试", True)
+        try:
+            self._swap_in(entry, target, expected_digest=package.digest)
+        except (OSError, ValueError, ModError, StateError, JournalError) as exc:
+            return ModOutcome(False, "切换版本未完成：原版本已保留", diagnostic=getattr(exc, "issues", ()))
+        return ModOutcome(True, f"已切换到 {version}")
+
+    def rollback(self, package_id: str) -> ModOutcome:
+        self._ensure_no_unresolved_operations()
+        entry = self._entry(package_id)
         previous = self._retained_versions(entry.character_id)
         if not previous:
             return ModOutcome(False, "没有可回滚版本，或文件仍被占用")
-        _, target = previous[0]
+        if not self.prepare_removal(entry):
+            return ModOutcome(False, "请自然退出使用该角色的桌宠后重试", True)
+        version, target = previous[0]
         try:
-            self._swap_in(entry, target)
-        except (OSError, ValueError, ModError, StateError):
-            return ModOutcome(False, "没有可回滚版本，或文件仍被占用")
-        return ModOutcome(True, "已恢复上一版")
+            package = _read_package(target, character_id=entry.character_id, strict=True)
+            self._swap_in(entry, target, expected_digest=package.digest)
+        except (OSError, ValueError, ModError, StateError, JournalError) as exc:
+            return ModOutcome(False, "没有可回滚版本，或文件仍被占用", diagnostic=getattr(exc, "issues", ()))
+        return ModOutcome(True, f"已恢复上一版（{version}）")
 
     def _retained_versions(self, character_id: str) -> list[tuple[str, Path]]:
         parent = self.retained_root / character_id
@@ -551,7 +807,7 @@ class ResourceMods:
             if not version_dir.is_dir():
                 continue
             try:
-                package = _read_package(version_dir)
+                package = _read_package(version_dir, deep=False)
             except (ModError, OSError):
                 continue
             if package.version == version_dir.name:
@@ -559,20 +815,49 @@ class ResourceMods:
         found.sort(key=lambda item: _version_key(item[0]), reverse=True)
         return found
 
-    def _swap_in(self, entry: ModEntry, target: Path) -> None:
+    def retained_versions(self, package_id: str) -> list[str]:
+        """Retained versions other than the active one (UI/controller seam)."""
+        entry = self._entry(package_id)
+        return [version for version, _path in self._retained_versions(entry.character_id) if version != entry.version]
+
+    def _swap_in(self, entry: ModEntry, target: Path, *, expected_digest: str = "") -> None:
         target_root = self.live_root if entry.enabled else self.disabled_root
         resolved = target_root / entry.character_id
         if not _contains(self.data_root, resolved):
             raise ModError("回滚边界无效")
         stash = self.retained_root / entry.character_id / entry.version
+        if not _contains(self.data_root, stash):
+            raise ModError("回滚边界无效")
         stash.parent.mkdir(parents=True, exist_ok=True)
         if stash.exists():
             shutil.rmtree(stash)
         safe_path(entry.path)
-        os.replace(entry.path, stash)
+        record = self.journal.begin(
+            kind="activate",
+            character_id=entry.character_id,
+            target=resolved,
+            retained=stash,
+            incoming=target,
+            from_version=entry.version,
+            to_version=target.name,
+        )
         try:
+            os.replace(entry.path, stash)
+            record = self.journal.advance(record, "version_removed")
             target_root.mkdir(parents=True, exist_ok=True)
             os.replace(target, resolved)
-        except OSError:
-            os.replace(stash, entry.path)
+            record = self.journal.advance(record, "swapped")
+            self._self_check(resolved, entry.character_id, expected_digest=expected_digest)
+            record = self.journal.advance(record, "committed")
+            self.journal.finish(record)
+            self._prune_staging_root()
+        except (OSError, ValueError, ModError, StateError, JournalError):
+            try:
+                if stash.exists():
+                    if resolved.exists():
+                        shutil.rmtree(resolved, ignore_errors=True)
+                    os.replace(stash, resolved)
+                self.journal.finish(record)
+            except (OSError, ValueError, StateError, JournalError):
+                _LOG.exception("MOD version switch left a pending journal: %s", record.operation_id)
             raise

@@ -111,10 +111,10 @@ _FEATURE_MANIFEST_MARKERS = ("execution_kind", "format_version", "factory")
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _MANIFEST_NAME = "manifest.json"
 
-#: 单次 ``perform`` 允许的动作（与 DLC 同一集合）。
-ACTIONS = frozenset({"enable", "disable", "delete", "rollback", "use"})
+#: 单次 ``perform`` 允许的动作（与 DLC 同一集合；``activate`` 带版本参数）。
+ACTIONS = frozenset({"enable", "disable", "delete", "rollback", "activate", "use", "install_official"})
 #: 需要先确认「没有桌宠正在用这个包」的动作（存储层同样会调放行判据，这里提前问一次）。
-_RELEASING_ACTIONS = frozenset({"disable", "delete", "rollback"})
+_RELEASING_ACTIONS = frozenset({"disable", "delete", "rollback", "activate"})
 #: 忙等重试阶梯（毫秒），与 DLC 逐位一致；两处不同状态各记一次尝试数。
 _RETRY_DELAYS = (100, 250, 500, 1000, 2000)
 #: 事务层报「锁忙」时仍算可重试的原因（DLC 从 ``feature_package_transactions`` 取；
@@ -212,7 +212,7 @@ def unsupported_package_message(source: Path, *, extensions=()) -> str:
     manifest = declared_manifest(source)
     if declared_kind(manifest) != KIND_EXTENSION:
         kind = manifest.get("kind")
-        if isinstance(kind, str) and kind:
+        if isinstance(kind, str) and kind and kind != RESOURCE_MANIFEST_KIND:
             return "本版本只支持角色资源包；该包声明的种类是「" + kind[:32] + "」。"
         return ""
     declared_id = manifest.get("id")
@@ -322,11 +322,47 @@ class ModCenterController(QObject):
 
     def entries(self) -> list[ModEntry]:
         rows = self._extension_entries()
+        rows.extend(self._official_entries())
         try:
             rows.extend(self.resources.entries())
         except (OSError, ValueError, RuntimeError):
             _LOG.exception("MOD catalog unavailable")
         return sorted(rows, key=lambda row: (row.kind, row.name.casefold(), row.id))
+
+    def _official_entries(self) -> list[ModEntry]:
+        """官方闭集里**尚未安装**的包：给 MOD 中心一个可点的安装入口。
+
+        ``official_packages`` 是宿主**可选能力**：没有它（含全部既有测试替身）
+        行为与之前完全一致；生产宿主由 ``LocalFeatureRuntime`` 提供。
+        """
+        provider = getattr(self.host, "official_packages", None)
+        if not callable(provider):
+            return []
+        from .official_package_source import official_display_name
+
+        try:
+            owners = tuple(provider())
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("官方功能包登记不可用")
+            return []
+        rows = []
+        for owner in owners:
+            if owner in self.extensions:
+                continue
+            rows.append(
+                ModEntry(
+                    owner,
+                    KIND_EXTENSION,
+                    official_display_name(owner),
+                    "",
+                    "官方功能包（未安装）",
+                    False,
+                    Path(""),
+                    source="official",
+                    pending="未安装",
+                )
+            )
+        return rows
 
     def _extension_entries(self) -> list[ModEntry]:
         """已安装的功能扩展行（与 DLC 同判据：读安装目录里的清单做展示元数据）。"""
@@ -377,6 +413,26 @@ class ModCenterController(QObject):
             return False
         visible = {entry.key: entry for entry in self.entries()}
         return self._begin([(action, visible[key], None) for key in dict.fromkeys(keys) if key in visible])
+
+    def activate_version(self, entry: ModEntry, version: str) -> bool:
+        """Switch one managed resource package to a retained version."""
+        if not entry.managed or not version:
+            return False
+        return self._begin([("activate", entry, str(version))])
+
+    def install_official(self, owner: str) -> bool:
+        """Install one official package from the bundled/built source."""
+        if owner not in OFFICIAL_FEATURES:
+            return False
+        return self._begin([("install_official", str(owner), None)])
+
+    def retained_versions(self, entry: ModEntry) -> list[str]:
+        """Retained versions other than the current one (for the UI submenu)."""
+        try:
+            return self.resources.retained_versions(entry.id)
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("retained versions unavailable: %s", entry.id)
+            return []
 
     def import_source(self, path, expected: str | None = None) -> bool:
         """导入一个所选 ZIP / 目录；``expected`` = 被「更新」那一行的键。"""
@@ -463,6 +519,9 @@ class ModCenterController(QObject):
                 return
             self._import_feature(str(entry), source)
             return
+        if action == "install_official":
+            self._background(lambda: self._install_official(str(entry)))
+            return
         if entry.kind == KIND_EXTENSION:
             self._extension_action(action, entry)
             return
@@ -471,6 +530,10 @@ class ModCenterController(QObject):
             if refusal:
                 self._finish(ModOutcome(False, refusal, True))
                 return
+        if action == "activate":
+            version = str(source or "")
+            self._background(lambda: self.resources.activate(entry.id, version))
+            return
         self._background(lambda: self._apply(action, entry))
 
     def _extension_action(self, action: str, entry: ModEntry) -> None:
@@ -535,6 +598,19 @@ class ModCenterController(QObject):
         if not accepted:
             self._finish(ModOutcome(False, "导入未开始；该包可能正在操作中"))
 
+    def _install_official(self, owner: str) -> ModOutcome:
+        provider = getattr(self.host, "install_official", None)
+        if provider is None:
+            return ModOutcome(False, "宿主不支持官方功能包安装")
+        try:
+            _manager, accepted = provider(owner)
+        except (OSError, ValueError, RuntimeError) as exc:
+            _LOG.warning("official package install refused: %s", owner)
+            return ModOutcome(False, "官方包安装未开始：" + str(exc)[:160])
+        if accepted:
+            return ModOutcome(True, "官方包安装已开始；完成后列表会刷新")
+        return ModOutcome(False, "该包正在操作，请稍后重试")
+
     def _import_conflict(self, source: Path) -> str:
         """要替换的包正被使用时的如实拒绝（空串 = 可以继续导入）。
 
@@ -544,6 +620,11 @@ class ModCenterController(QObject):
         """
         declared = declared_manifest(source)
         target_id = declared.get("id")
+        content = declared.get("content")
+        if isinstance(content, dict):
+            characters = content.get("characters")
+            if isinstance(characters, list) and len(characters) == 1 and isinstance(characters[0], str):
+                target_id = characters[0]
         if not isinstance(target_id, str) or not target_id:
             return ""
         current = next((row for row in self.resources.entries(include_unmanaged=False)
@@ -584,6 +665,8 @@ class ModCenterController(QObject):
     def _resource_finished(self, outcome: ModOutcome) -> None:
         if not shiboken6.isValid(self):
             return
+        # 官方包安装会新建管理器；结果回到 GUI 线程后重新接线，列表才能看到它。
+        self.connect_extensions()
         try:
             self.host.catalog_changed()
         except (OSError, ValueError):

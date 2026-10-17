@@ -17,19 +17,18 @@ import pytest
 
 from pet import catalog, mod_management
 from pet.mod_management import ModEntry, ModError, ModOutcome, ModSelection, ResourceMods
+from tests.mod_package_fakes import write_package
 
 
 def _write_package(root: Path, *, character_id: str = "demo", version: str = "1.0.0",
                    name: str = "Demo", description: str | None = None) -> Path:
-    package = root / "package"
-    videos = package / "videos"
-    videos.mkdir(parents=True)
-    (videos / "idle.webm").write_bytes(b"test-video")
-    manifest: dict[str, object] = {"id": character_id, "name": name, "version": version}
-    if description is not None:
-        manifest["description"] = description
-    (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    return package
+    return write_package(
+        root,
+        character_id=character_id,
+        version=version,
+        name=name,
+        description=description or "",
+    )
 
 
 def _zip_package(source: Path, target: Path, *, prefix: str = "") -> Path:
@@ -150,13 +149,31 @@ def test_an_existing_non_ascii_character_folder_is_still_offered(tmp_path):
     assert [row.id for row in resources.entries()] == ["resource:builtin:深海小鲸鱼"]
 
 
-def test_display_metadata_is_clamped_without_hiding_the_package(tmp_path):
-    package = _write_package(tmp_path / "source", name="长" * 400, description="说明" * 4000)
-    resources = ResourceMods(tmp_path / "data")
-    entry = resources.install(package)
+def test_display_metadata_is_clamped_for_a_hand_placed_package(tmp_path):
+    """手工素材（不受管理）仍宽松：长文本只截断展示，不把包藏起来。"""
+    external = tmp_path / "external"
+    package = external / "demo"
+    (package / "videos").mkdir(parents=True)
+    (package / "videos" / "idle.webm").write_bytes(b"test-video")
+    (package / "manifest.json").write_text(
+        json.dumps({"id": "demo", "name": "长" * 400, "description": "说明" * 4000}),
+        encoding="utf-8",
+    )
+    resources = ResourceMods(tmp_path / "data", character_roots=[("external", external)])
+
+    entry = next(row for row in resources.entries() if row.source == "external")
+
     assert len(entry.name) == 256
     assert len(entry.description) == 4096
-    assert entry.id == "demo"
+    assert entry.character_id == "demo"
+    assert entry.id.startswith("resource:external:")
+
+
+def test_import_refuses_overlong_metadata_instead_of_clamping_it(tmp_path):
+    """导入包走严格契约：超长字段是清单错误，不再静默截断成一个假名字。"""
+    resources = ResourceMods(tmp_path / "data")
+    with pytest.raises(ModError, match="name"):
+        resources.install(_write_package(tmp_path / "source", name="长" * 400))
 
 
 def test_install_accepts_a_non_ascii_character_id(tmp_path):

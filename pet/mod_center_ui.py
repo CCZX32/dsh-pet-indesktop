@@ -141,6 +141,15 @@ class ModRow(QWidget):
         layout.addWidget(_label(entry.kind + " · " + source + " · " + (entry.pending or ("已启用" if entry.enabled else "未启用")), self, hint=True))
         self.description = _label((entry.description[:180] + "…" if len(entry.description) > 180 else entry.description) or "作者未提供说明", self, hint=True)
         layout.addWidget(self.description)
+        if entry.source == "official" and entry.pending == "未安装":
+            install = QPushButton("安装", self)
+            install.setAccessibleName("安装 " + entry.name)
+            install.clicked.connect(lambda: center.controller.install_official(entry.id))
+            layout.addWidget(install)
+            self.message = _label(center.messages.get(entry.key, ""), self)
+            self.message.setVisible(bool(self.message.text()))
+            layout.addWidget(self.message)
+            return
         self.toggle = QPushButton("停用" if entry.enabled else "启用", self)
         self.toggle.setEnabled(entry.managed and not entry.pending)
         self.toggle.clicked.connect(lambda: center.controller.perform("disable" if entry.enabled else "enable", [entry.key]))
@@ -162,6 +171,19 @@ class ModRow(QWidget):
         rollback = menu.addAction("回滚上一版")
         rollback.setEnabled(entry.managed and not entry.pending)
         rollback.triggered.connect(lambda: center.controller.perform("rollback", [entry.key]))
+        retained_versions = getattr(center.controller, "retained_versions", None)
+        versions = (
+            retained_versions(entry)
+            if callable(retained_versions) and entry.managed and not entry.pending
+            else []
+        )
+        switch = menu.addMenu("切换版本")
+        switch.setEnabled(bool(versions))
+        for version in versions:
+            item = switch.addAction(version)
+            item.triggered.connect(
+                lambda _checked=False, target=version: center.controller.activate_version(entry, target)
+            )
         self.more.setMenu(menu)
         layout.addWidget(ResponsiveActionRow(self.toggle, [self.settings, self.update, self.more], self))
         self.message = _label(center.messages.get(entry.key, ""), self)

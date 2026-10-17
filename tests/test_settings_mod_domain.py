@@ -26,6 +26,7 @@ from pet.config import Config
 from pet.mod_center_ui import ModCenterWidget
 from pet.modern_settings_dialog import ModernSettingsDialog, SettingRow
 from pet.settings_mod_domain import DialogModHost, USE_HINT
+from tests.mod_package_fakes import write_package
 
 app = QApplication.instance() or QApplication([])
 
@@ -45,14 +46,7 @@ class FakeWindow(QWidget):
 
 
 def _write_package(root: Path, *, character_id: str = "demo", version: str = "1.0.0") -> Path:
-    package = root / "package"
-    videos = package / "videos"
-    videos.mkdir(parents=True, exist_ok=True)
-    (videos / "idle.webm").write_bytes(b"test-video")
-    (package / "manifest.json").write_text(
-        json.dumps({"id": character_id, "name": character_id.title(), "version": version}),
-        encoding="utf-8")
-    return package
+    return write_package(root, character_id=character_id, version=version, name=character_id.title())
 
 
 @pytest.fixture

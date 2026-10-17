@@ -19,7 +19,9 @@
 只有 4 vCPU，workflow 显式传 `--jobs 1` 保持原来的串行口径。
 
 `--include-isolated` 把 CI 里单列步骤的 4 个 webm/低优先级文件也纳入：每个文件
-单独一片（崩溃只丢自己那一片，不牵连主套件）。不给这个开关时与 CI 主套件范围一致。
+单独一片（崩溃只丢自己那一片，不牵连主套件）；本机并行时另外把 2 个对 CPU 负载
+敏感的灵动岛像素文件单独成片（CI 串行主套件照常包含它们）。不给这个开关时与 CI
+主套件范围一致。
 """
 from __future__ import annotations
 
@@ -34,6 +36,10 @@ import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from typing import TextIO
 
+#: CI 的主套件步骤显式设置它；本地分片运行必须用同一平台插件，否则像素/字体
+#: 度量与 CI 不同（灵动岛 8px 状态点在真实 Windows 插件下会量成 13x12）。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 #: 主套件忽略清单：与 .github/workflows/pr-test.yml 的主套件步骤同源同内容
 #: （tests/test_ci_workflows.py 会逐条比对，改名/改内容都会红）。
 IGNORES = [
@@ -41,6 +47,17 @@ IGNORES = [
     "tests/test_webm_clip_lifecycle.py",
     "tests/test_webm_first_frame_lock.py",
     "tests/test_low_priority_warm_interaction_yield.py",
+]
+#: 本机并行全量时对 CPU 负载敏感的像素/渲染用例（不在 CI 忽略清单里）：
+#: 与重负载分片争核时会把 8px 状态点渲染成 13x12 之类的假红，隔离复跑稳定绿。
+#: 只在 ``--include-isolated`` 下单独成片，CI 的串行主套件仍照常包含它们。
+LOCAL_LOAD_SENSITIVE = [
+    "tests/test_island_status_dot.py",
+    "tests/test_island_alert_colors.py",
+    "tests/test_animation_menu_close_and_group.py",
+    "tests/test_settings_page_guide.py",
+    "tests/test_workers_lifecycle.py",
+    "tests/test_settings_overlay_copy.py",
 ]
 DEFAULT_SHARDS = 4
 #: 本地默认并发：16 核 8 路约 6 分钟跑完；4 核机器自动降到 4 路。CI 显式传 --jobs 1。
@@ -192,6 +209,38 @@ def _last_summary(path: Path) -> str:
     return ""
 
 
+def _run_isolated(
+    buckets: list[list[str]], durations: int, *, start_index: int, log_dir: Path | None = None,
+) -> list[tuple[int, int, float]]:
+    """Run load-sensitive files one at a time, after the main shards have finished.
+
+    They are already isolated from each other; the point is to keep them away from
+    the parallel CPU load, which changes font metrics / paint timing on this host.
+    """
+    results: list[tuple[int, int, float]] = []
+    for offset, shard in enumerate(buckets, start=start_index):
+        label = shard[0]
+        print(f"\n===== isolated {offset - start_index + 1}/{len(buckets)}（{label}）=====", flush=True)
+        started = time.monotonic()
+        if log_dir is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"shard-{offset:02d}.log"
+            xml_path = log_dir / f"shard-{offset:02d}.xml"
+            with log_path.open("w", encoding=LOG_ENCODING, errors="replace") as handle:
+                rc = subprocess.call(
+                    _pytest_command(shard, durations, xml_path),
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                )
+        else:
+            rc = subprocess.call(_pytest_command(shard, durations))
+        elapsed = time.monotonic() - started
+        results.append((offset, rc, elapsed))
+        status = "通过" if rc == 0 else f"失败（exit {rc}）"
+        print(f"[isolated {offset}] {status}  {elapsed:.1f}s", flush=True)
+    return results
+
+
 def _run_sequential(buckets: list[list[str]], durations: int) -> list[tuple[int, int, float]]:
     results: list[tuple[int, int, float]] = []
     for index, shard in enumerate(buckets, start=1):
@@ -265,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shards", type=int, default=0,
                         help=f"主套件分片数（默认 max({DEFAULT_SHARDS}, --jobs)）")
     parser.add_argument("--include-isolated", action="store_true",
-                        help="把 4 个 webm/低优先级文件也纳入，每个文件单独一片")
+                        help="主套件跑完后串行跑 4 个 webm/低优先级文件 + 2 个负载敏感像素文件（每个单独一片）")
     parser.add_argument("--durations", type=int, default=25,
                         help="每个分片打印前 N 个慢用例（0 关闭，默认 25）")
     args = parser.parse_args(argv)
@@ -280,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     files = _collect()
+    isolated = list(IGNORES)
+    isolated_buckets: list[list[str]] = []
+    if args.include_isolated:
+        isolated.extend(LOCAL_LOAD_SENSITIVE)
+    isolated_keys = {str(Path(path)) for path in isolated}
+    files = [item for item in files if str(Path(item[0])) not in isolated_keys]
     total_tests = sum(count for _path, count in files)
     weights = _load_weights()
     buckets = _balance(files, args.shards, weights)
@@ -288,15 +343,26 @@ def main(argv: list[str] | None = None) -> int:
           f"并发 {args.jobs}（按{mode} LPT 均衡）", flush=True)
 
     if args.include_isolated:
-        for path in IGNORES:
+        for path in isolated:
             if Path(path).is_file():
-                buckets.append([path])
+                isolated_buckets.append([path])
+    else:
+        isolated_buckets = []
 
     if args.jobs == 1:
         results = _run_sequential(buckets, args.durations)
     else:
         log_dir = Path(".scratch") / "test-shards"
         results = _run_parallel(buckets, args.jobs, args.durations, log_dir)
+    if isolated_buckets:
+        results.extend(
+            _run_isolated(
+                isolated_buckets,
+                args.durations,
+                start_index=len(results) + 1,
+                log_dir=None if args.jobs == 1 else Path(".scratch") / "test-shards",
+            )
+        )
 
     elapsed = time.monotonic() - started
     print("\n===== 汇总 =====", flush=True)

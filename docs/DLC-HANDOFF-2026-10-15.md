@@ -113,6 +113,7 @@ features/
 | AI 对话官方整包 | `features/ai-chat/` + `bind_ai_context` + 呈现面 `pet/ai_bindings.py` + 装卸 e2e + 退出闸门退订收口 | PORT-STATUS §九 |
 | 包窗口回调接线 | Core 注册通知与固定 AI owner 设置导航、包侧开窗时惰性解析；PR #282 合入 `e5788b0`，2026-10-17 复审又修三条（深链接不污染设置搜索索引、请求通过还原表头、导航失败如实回否） | PORT-STATUS §十、[复审修复报告](PR-REPORT-AI-CALLBACK-REVIEW-FIXES-2026-10-17.md) |
 | 盲审修复批 | B1/M1–M4/m3/m5/n1/n2 + N1/N2/N3（冻结入口分流、ID 规范形、两段式失败装回、重试阶梯、退出补拉等） | PORT-STATUS §八 |
+| 内容硬门（阶段 1） | 逻辑 SHA-256、严格 manifest、事务日志 + 崩溃恢复、激活后自检、任意版本激活（保留目录布局） | `docs/PR-REPORT-RESOURCE-HARD-GATE-2026-10-17.md`、PORT-STATUS Phase 1 格 |
 
 当前分支状态：全量套件绿（唯一例外是 `test_workers_lifecycle.py` 三条负载 flake——基线上也红，单跑全绿，已登记 BACKLOG，别去"修"它们除非你打算把族隔离出主套件）。
 

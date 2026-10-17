@@ -391,6 +391,11 @@ def test_pure_logic_modules_do_not_import_qt():
         # scripts/ 下跑，不该为了两个常量把 PySide6 拉起来（构建门另有一条机器判据：
         # tests/test_feature_package_gate.py 在解析期把 PySide6 置成 None 再跑一次）。
         "feature_policy.py",
+        # 2026-10-17（资源硬门）加入 mod_hashing / mod_manifest / mod_transactions：
+        # 逻辑摘要、清单契约与目录搬移日志都在**后台线程**里跑（资源导入/恢复），
+        # 也必须是 scripts/ 侧可单独导入的纯逻辑——沾上 Qt 就等于让后台线程去碰
+        # GUI 对象，或让构建门为了一个哈希拉起 PySide6。
+        "mod_hashing.py", "mod_manifest.py", "mod_transactions.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
