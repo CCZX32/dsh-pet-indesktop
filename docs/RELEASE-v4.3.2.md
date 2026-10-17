@@ -1,6 +1,7 @@
 # v4.3.2
 
-> 从 **v4.3.1 到 v4.3.2** 的**紧急补丁版**（单一修复：截图翻译把整句拆成逐词译文）。
+> 从 **v4.3.1 到 v4.3.2** 的**紧急补丁版**（**已于 2026-10-17 发布**：[`releases/tag/v4.3.2`](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.2)，tag `v4.3.2` = `322d73c`；8 个附件的 size 与 sha256 已对账进 `update.json`，发布正文由本文件的「下载 → 致谢」两段生成）。
+> **唯一产品改动**：截图翻译把整句拆成逐词译文。
 > **本版不新增功能、不新增/改名配置键、不换安装形态**（仍是 onedir 四变体）、应用标识与配置目录都不变。
 > 报告与红绿证据见 PR [#297](https://github.com/MerZlin/dsh-pet-indesktop/pull/297)（合并提交 `a8d30df`）。
 >

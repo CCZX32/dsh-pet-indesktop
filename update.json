@@ -1,15 +1,15 @@
 {
-  "version": "4.3.1",
-  "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.1",
-  "notes": "v4.3.1 是 v4.3.0 的补丁版：修复主宠设置保存后不生效、macOS 切到别的应用后桌宠消失、桌宠看得见但点不到的穿透卡死；新增 4 个播放器启动入口、多歌手曲目取词、语音后端可选（默认仍为 edge）、每日一签；设置页与截图问答另有打磨。安装形态与配置目录不变。",
+  "version": "4.3.2",
+  "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.2",
+  "notes": "v4.3.2 是 v4.3.1 的紧急补丁：截图翻译不再把整句拆成逐词译文——原文按视觉行接成整句、翻译按整句还原后再翻，深色小字截图上的「正在/处理/这些/中的/两个」不再是这个样子。本版不新增功能、不新增配置键、安装形态与配置目录不变。",
   "assets": {
     "dsh-pet-standalone-webm-chat-setup.exe": {
       "fileName": "dsh-pet-standalone-webm-chat-setup.exe",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-chat-setup.exe"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-setup.exe"
       ],
-      "size": 556524880,
-      "sha256": "0d8c569e32895c86872345baa69bfc551b9184e02a52a7986e299e530a42f818",
+      "size": 556530042,
+      "sha256": "4dc1b7234c5e8909b1b1a4ffe045d8fe6e567d36a2efe860e4eba8fe8857bc03",
       "platform": "windows",
       "kind": "installer",
       "variant": "webm-chat"
@@ -17,10 +17,10 @@
     "dsh-pet-standalone-webm-setup.exe": {
       "fileName": "dsh-pet-standalone-webm-setup.exe",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-setup.exe"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-setup.exe"
       ],
-      "size": 556293455,
-      "sha256": "3f7abdbc679b99e41e9569c47ee4c3c381419804fe366396991229a0246eba09",
+      "size": 556308652,
+      "sha256": "9c1558a6b372c50f9653062cf12783562e1bec8e67bfedb89b779dcf7871e702",
       "platform": "windows",
       "kind": "installer",
       "variant": "webm"
@@ -28,10 +28,10 @@
     "dsh-pet-standalone-webm-chat-portable.zip": {
       "fileName": "dsh-pet-standalone-webm-chat-portable.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-chat-portable.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-portable.zip"
       ],
-      "size": 634216169,
-      "sha256": "eb08d6aacb9b84da80ff8d794865980da57aa94476bce80a0f6228cd4143a79a",
+      "size": 634218215,
+      "sha256": "ff0fe584c9170477ad9029817e0685e7c22efff3c82e82b4d4683525127dff12",
       "platform": "windows",
       "kind": "archive",
       "variant": "webm-chat"
@@ -39,10 +39,10 @@
     "dsh-pet-standalone-webm-portable.zip": {
       "fileName": "dsh-pet-standalone-webm-portable.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-portable.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-portable.zip"
       ],
-      "size": 633988856,
-      "sha256": "662b900cf8d215b4f230f5740cf2887e0c2586049932d2957cc766fc94360091",
+      "size": 633989641,
+      "sha256": "326d544ac3ddbacef56b164c5c6097e199712e7fdd13b5b0ecdb6cd7f6993ecc",
       "platform": "windows",
       "kind": "archive",
       "variant": "webm"
@@ -50,10 +50,10 @@
     "dsh-pet-standalone-webm-chat-macos-arm64.zip": {
       "fileName": "dsh-pet-standalone-webm-chat-macos-arm64.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-chat-macos-arm64.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-macos-arm64.zip"
       ],
-      "size": 644042011,
-      "sha256": "5b36788e68c69092d238539392bbf695aaa4b01cdd4bdeeeaf2cc0bd4725a8f7",
+      "size": 644042715,
+      "sha256": "687ee8aee89e2fef0d19c959984e6f744926abf9a0c1bd62a8065801f9cee815",
       "platform": "macos",
       "kind": "archive",
       "variant": "webm-chat"
@@ -61,10 +61,10 @@
     "dsh-pet-standalone-webm-macos-arm64.zip": {
       "fileName": "dsh-pet-standalone-webm-macos-arm64.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-macos-arm64.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-macos-arm64.zip"
       ],
-      "size": 643538264,
-      "sha256": "14ebfc8ba1563f8ea8210b369b41b3a56d29a6f8e3529b4fd8341798ebde3353",
+      "size": 643543181,
+      "sha256": "644a1e82816b2a7cde12bdfe1f760064929d50e87d4d2f953bfbdca0202d82b5",
       "platform": "macos",
       "kind": "archive",
       "variant": "webm"
@@ -72,10 +72,10 @@
     "dsh-pet-standalone-webm-chat-linux-x86_64.zip": {
       "fileName": "dsh-pet-standalone-webm-chat-linux-x86_64.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-chat-linux-x86_64.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-linux-x86_64.zip"
       ],
-      "size": 832155674,
-      "sha256": "78667176e8986756ab98b21acaab8078b1ab6a04d4deabb4f1de29c686273c6e",
+      "size": 832157645,
+      "sha256": "c82fb53d34890cc4cfa70171a2d5d23992d02f3ef2ea6584686b704d532b45fc",
       "platform": "linux",
       "kind": "archive",
       "variant": "webm-chat"
@@ -83,10 +83,10 @@
     "dsh-pet-standalone-webm-linux-x86_64.zip": {
       "fileName": "dsh-pet-standalone-webm-linux-x86_64.zip",
       "urls": [
-        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.1/dsh-pet-standalone-webm-linux-x86_64.zip"
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-linux-x86_64.zip"
       ],
-      "size": 831660799,
-      "sha256": "c4cb8ed0a62278460a9d468a39c867ef6efdd9e2d31f3022d0f3f07f1bebdd6f",
+      "size": 831662522,
+      "sha256": "d5c323eaed10d695fa3eb3f3d82fad851b6ee925c3d64746a51fab1828b65279",
       "platform": "linux",
       "kind": "archive",
       "variant": "webm"

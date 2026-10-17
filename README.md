@@ -15,7 +15,8 @@
 
 > **发布状态**
 >
-> - **最近正式发布：v4.3.1（2026-10-17）**。Release 永久地址：[`releases/tag/v4.3.1`](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.1)，产物清单与校验值以该页面为准；说明文档见 [`docs/RELEASE-v4.3.1.md`](docs/RELEASE-v4.3.1.md)。
+> - **最近正式发布：v4.3.2（2026-10-17）**。Release 永久地址：[`releases/tag/v4.3.2`](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.2)，产物清单与校验值以该页面为准；说明文档见 [`docs/RELEASE-v4.3.2.md`](docs/RELEASE-v4.3.2.md)。
+> - **v4.3.2 是紧急补丁**：只修一件事——截图翻译不再把整句拆成逐词译文（原文按视觉行接成整句、翻译按整句还原后再翻）。不新增功能、不新增配置键、安装形态与配置目录不变。上一个版本 v4.3.1 仍可下载：[`releases/tag/v4.3.1`](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.1)。
 > - **一句话**：v4.3.1 以修为主——拖拽与点击手感、macOS 切窗后桌宠消失、主宠每宠设置「存了不生效」、多歌手歌词丢词、白底矩形色差；同时带来每日一签、四播放器入口、跨屏开关（默认关）与可插拔语音后端，逐项见发布说明。
 > - **仍未结案**：[issue #286](https://github.com/MerZlin/dsh-pet-indesktop/issues/286) 报告的 Windows 11 + 150% DPI 下桌宠不可见、鼠标整屏失效，原因**仍未定性**。本版另增加零活跃桌宠的启动提示，但这**不代表该 issue 已修复**，也不能据此解释整屏鼠标失效。
 > - **跨屏默认关闭、真机未验**：「允许桌宠跨屏」默认关、重启生效；跨缝连续性已有模拟屏幕的自动回归覆盖，**真双屏与混合 DPI 尚未实机验证**。详情见 [v4.3.1 发布说明](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.1)。
