@@ -37,7 +37,7 @@ cryptography>=43.0
 # 打包版用户无法自行 pip 安装——所以在此声明为运行时依赖，并在三个构建
 # 脚本里配 --collect-all edge_tts（它用 importlib.metadata 取版本、子模块
 # 存在动态导入，PyInstaller 静态分析收不全）。
-edge-tts>=6.1.10
+edge-tts>=7.3.1,<8
 
 # —— 歌词显示（可选）——
 # 「显示歌词」功能靠 Windows 系统媒体控制（SMTC）读取当前播放的曲目。

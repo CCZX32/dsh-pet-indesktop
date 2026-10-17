@@ -911,6 +911,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
     expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
+    expected_labels.append("抽支签")  # 每日一签（2026-10-15；设置入口在「互动 · 抽签」标签）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -936,6 +937,47 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     assert all("旧版菜单" not in action.text() for action in menu.actions())
     menu.close()
     app.processEvents()
+
+
+def test_divination_draw_reports_where_to_turn_it_back_on(tmp_path):
+    """总开关关掉时点「抽支签」不静默无反应：气泡里的落点必须是设置页的真实归属。
+
+    这句话里的「互动 · 抽签」是**外部契约**（用户照着去找）：每日一签 2026-10-15 曾
+    挂在只有一个组的「趣味」一级域，2026-10-17 按 ``docs/SETTINGS-CHANGE-GATES.md``
+    的准入（新一级域须"预计包含至少两个稳定设置组"）判不合格，行已归位到「互动」域
+    的第四个页内标签。文案不跟着改，用户就会按提示去找一个不存在的域。
+
+    只借 ``AppShell`` 的两个方法（关闭路径只碰 ``config`` / ``win`` / 懒建服务），
+    不构造真壳——素材库、ffmpeg、托盘都不需要。配置落在 ``tmp_path``，不读真实配置。
+    """
+    from types import SimpleNamespace
+
+    from pet.app import AppShell
+    from pet.config import Config
+
+    class _Win:
+        def __init__(self):
+            self.bubbles = []
+
+        def show_bubble(self, text, duration_ms=0):  # noqa: N802 - 对齐产品签名
+            self.bubbles.append(text)
+
+    config = Config(base=tmp_path)
+    config.set("divination_enabled", False)
+    assert config.save() is True
+    win = _Win()
+    host = SimpleNamespace(config=config, win=win, divination_service=None)
+    host._ensure_divination_service = lambda: AppShell._ensure_divination_service(host)
+
+    AppShell.trigger_divination_draw(host)
+
+    assert win.bubbles, "关掉总开关后点菜单必须给一句去处提示（不许静默无反应）"
+    assert "互动 · 抽签" in win.bubbles[-1], f"落点不是设置页的真实归属：{win.bubbles[-1]!r}"
+    assert "趣味" not in win.bubbles[-1], "旧域已不存在，文案不许再指向它"
+    # 关掉总开关时只报去处、**一个状态都不写**（不落「今天抽过」的假记录）。
+    # 注意 config.data 里本来就有出厂默认的空 dict（Config._initial_data），
+    # 所以这里判的是"没有被写进内容"，不是"键不存在"。
+    assert config.data.get("divination_state") in (None, {}), "关掉时不该写任何抽签状态"
 
 
 def test_pure_pet_context_menu_keeps_web_but_hides_harness():
@@ -1358,9 +1400,11 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
         "显示", "菜单外观", "对话窗口", "已配置应用", "内容与布局",
         "模型与连接", "视觉能力",
         # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒。
-        # 2026-10-08「按区直找」后两页各自拆回同类小分组（组名带页名前缀）。
-        "语音报时 · 何时报", "语音报时 · 用什么声音", "语音报时 · 说什么",
-        "节日提醒 · 开关", "节日提醒 · 时间", "节日提醒 · 文案",
+        # 2026-10-14 起两页各自**自建卡片**交给本域（语音报时 = 基础设置/合成后端/
+        # 语音/台词歌词，节日提醒 = 何时提醒/提醒哪些日子/怎么提醒/你的生日/少用项）：
+        # 不再由本域按「一组行」拼小分组，因此这里钉的是各页自己的卡片标题。
+        "语音报时", "基础设置", "合成后端", "语音", "台词/歌词",
+        "何时提醒", "提醒哪些日子", "怎么提醒", "你的生日", "少用项",
     }.issubset(set(section_titles))
     if hasattr(dialog, "pro_enabled_check"):
         # 「自动化与联动」的「主动识屏」不再是一张压平的大卡（同上）。
@@ -1466,16 +1510,20 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     dialog.ai_page.url.setText("https://example.test/v1")
     dialog.ai_page.model.setText("deepseek-test")
     dialog._save()
-    assert config.get("scale") == 0.85
-    assert config.get("on_top") is False
-    assert config.get("no_move") is True
-    assert config.get("drag_physics") is True
-    assert config.get("playback_speed") == 1.5
-    assert config.get("self_talk_bubble_style") == "paper_left"
-    assert config.get("self_talk_duration_seconds") == 8.5
-    assert config.get("self_talk_image_dir") == str(tmp_path.resolve())
-    assert config.chat_settings().active_config.base_url == "https://example.test/v1"
-    assert config.chat_settings().active_config.model == "deepseek-test"
+    # #271：空身份设置会话按 slot0 分流——每宠键落 config-slot-0.json、全局键落
+    # config.json；写盘经路由视图自己的对象，与本文件既有惯例同口径：读回用新视图。
+    loaded = _slot0_config(tmp_path)
+    global_config = Config(tmp_path)
+    assert loaded.get("scale") == 0.85
+    assert global_config.get("on_top") is False
+    assert global_config.get("no_move") is True
+    assert loaded.get("drag_physics") is True
+    assert loaded.get("playback_speed") == 1.5
+    assert loaded.get("self_talk_bubble_style") == "paper_left"
+    assert loaded.get("self_talk_duration_seconds") == 8.5
+    assert loaded.get("self_talk_image_dir") == str(tmp_path.resolve())
+    assert global_config.chat_settings().active_config.base_url == "https://example.test/v1"
+    assert global_config.chat_settings().active_config.model == "deepseek-test"
     assert autostart_values == [True]
     app.processEvents()
 
@@ -1722,6 +1770,7 @@ def test_chat_appearance_options_follow_selected_window_and_persist_independentl
     dialog.ai_page.background_fill.setCurrentData("stretch")
     dialog._save()
 
+    config.reload()  # #271：写盘经路由视图自己的主配置对象，原对象需 reload 才可见
     assert config.get("chat_background") == "builtin:whale"
     assert config.get("modern_chat_background") == modern_background
     assert config.get("chat_background_opacity") == 68
@@ -2623,6 +2672,7 @@ def test_dock_icon_visibility_defaults_on_and_is_saved_by_modern_settings(tmp_pa
     dialog = settings_mod.ModernSettingsDialog(config, include_ai=False)
     dialog.dock_icon_check.setChecked(False)
     dialog._save()
+    config.reload()  # #271：写盘经路由视图自己的主配置对象，原对象需 reload 才可见
     assert config.get("show_dock_icon") is False
     app.processEvents()
 

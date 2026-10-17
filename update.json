@@ -1,15 +1,95 @@
 {
-  "version": "4.2.0",
-  "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases",
-  "notes": "v4.2.0：自 v4.1.0 以来的功能与修复汇总——单进程多开与同角色共享解码链、设置与菜单重构（右键菜单可编排、快捷启动、主题即时生效）、边缘探头/黄金回旋/撞飞彩蛋/省电模式、待办提醒、DSH 事件层与探索 Watchdog 控制链（replan/终止/忽略）、子肥鱼「只退出不删数据」、台词模板 v2 与表达风格、高刷屏流畅度与内存专项（3 窗 181–197MB）、DLC 换角色加固；系统通知仍未接入原生弹窗（以应用内右下角气泡代替）。",
+  "version": "4.3.2",
+  "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.2",
+  "notes": "v4.3.2 是 v4.3.1 的紧急补丁：截图翻译不再把整句拆成逐词译文——原文按视觉行接成整句、翻译按整句还原后再翻，深色小字截图上的「正在/处理/这些/中的/两个」不再是这个样子。本版不新增功能、不新增配置键、安装形态与配置目录不变。",
   "assets": {
-    "dsh-pet-standalone-webm-chat-setup.exe": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-setup.exe",
-    "dsh-pet-standalone-webm-chat-portable.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-portable.zip",
-    "dsh-pet-standalone-webm-setup.exe": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-setup.exe",
-    "dsh-pet-standalone-webm-portable.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-portable.zip",
-    "dsh-pet-standalone-webm-chat-macos-arm64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-macos-arm64.zip",
-    "dsh-pet-standalone-webm-macos-arm64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-macos-arm64.zip",
-    "dsh-pet-standalone-webm-chat-linux-x86_64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-chat-linux-x86_64.zip",
-    "dsh-pet-standalone-webm-linux-x86_64.zip": "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.2.0/dsh-pet-standalone-webm-linux-x86_64.zip"
+    "dsh-pet-standalone-webm-chat-setup.exe": {
+      "fileName": "dsh-pet-standalone-webm-chat-setup.exe",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-setup.exe"
+      ],
+      "size": 556530042,
+      "sha256": "4dc1b7234c5e8909b1b1a4ffe045d8fe6e567d36a2efe860e4eba8fe8857bc03",
+      "platform": "windows",
+      "kind": "installer",
+      "variant": "webm-chat"
+    },
+    "dsh-pet-standalone-webm-setup.exe": {
+      "fileName": "dsh-pet-standalone-webm-setup.exe",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-setup.exe"
+      ],
+      "size": 556308652,
+      "sha256": "9c1558a6b372c50f9653062cf12783562e1bec8e67bfedb89b779dcf7871e702",
+      "platform": "windows",
+      "kind": "installer",
+      "variant": "webm"
+    },
+    "dsh-pet-standalone-webm-chat-portable.zip": {
+      "fileName": "dsh-pet-standalone-webm-chat-portable.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-portable.zip"
+      ],
+      "size": 634218215,
+      "sha256": "ff0fe584c9170477ad9029817e0685e7c22efff3c82e82b4d4683525127dff12",
+      "platform": "windows",
+      "kind": "archive",
+      "variant": "webm-chat"
+    },
+    "dsh-pet-standalone-webm-portable.zip": {
+      "fileName": "dsh-pet-standalone-webm-portable.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-portable.zip"
+      ],
+      "size": 633989641,
+      "sha256": "326d544ac3ddbacef56b164c5c6097e199712e7fdd13b5b0ecdb6cd7f6993ecc",
+      "platform": "windows",
+      "kind": "archive",
+      "variant": "webm"
+    },
+    "dsh-pet-standalone-webm-chat-macos-arm64.zip": {
+      "fileName": "dsh-pet-standalone-webm-chat-macos-arm64.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-macos-arm64.zip"
+      ],
+      "size": 644042715,
+      "sha256": "687ee8aee89e2fef0d19c959984e6f744926abf9a0c1bd62a8065801f9cee815",
+      "platform": "macos",
+      "kind": "archive",
+      "variant": "webm-chat"
+    },
+    "dsh-pet-standalone-webm-macos-arm64.zip": {
+      "fileName": "dsh-pet-standalone-webm-macos-arm64.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-macos-arm64.zip"
+      ],
+      "size": 643543181,
+      "sha256": "644a1e82816b2a7cde12bdfe1f760064929d50e87d4d2f953bfbdca0202d82b5",
+      "platform": "macos",
+      "kind": "archive",
+      "variant": "webm"
+    },
+    "dsh-pet-standalone-webm-chat-linux-x86_64.zip": {
+      "fileName": "dsh-pet-standalone-webm-chat-linux-x86_64.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-chat-linux-x86_64.zip"
+      ],
+      "size": 832157645,
+      "sha256": "c82fb53d34890cc4cfa70171a2d5d23992d02f3ef2ea6584686b704d532b45fc",
+      "platform": "linux",
+      "kind": "archive",
+      "variant": "webm-chat"
+    },
+    "dsh-pet-standalone-webm-linux-x86_64.zip": {
+      "fileName": "dsh-pet-standalone-webm-linux-x86_64.zip",
+      "urls": [
+        "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/v4.3.2/dsh-pet-standalone-webm-linux-x86_64.zip"
+      ],
+      "size": 831662522,
+      "sha256": "d5c323eaed10d695fa3eb3f3d82fad851b6ee925c3d64746a51fab1828b65279",
+      "platform": "linux",
+      "kind": "archive",
+      "variant": "webm"
+    }
   }
 }
