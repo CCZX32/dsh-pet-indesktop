@@ -1,5 +1,11 @@
 # v4.3.3 — 多屏改架构、待办语音播报、四条用户反馈修复
 
+> **已发布**：2026-10-18，tag `v4.3.3` = `7cd2325`。
+> Release：[`releases/tag/v4.3.3`](https://github.com/MerZlin/dsh-pet-indesktop/releases/tag/v4.3.3)。
+> 8 个附件的 size / sha256 取自 GitHub 服务端 digest，已对账进 `update.json`
+> （本轮未做逐件本地下载校验——下载实测约 1 MB/s，1.2 GB 核不完；证据链为服务端
+> digest + size + 三端构建门 frameseq/rapidocr/tts/DLL/smoke）。
+>
 > 版本日期：2026-10-18。上一个版本 v4.3.2 仍可下载。
 > 本版**改了一处架构**（多屏合成窗），其余是用户反馈修复与新功能。
 
