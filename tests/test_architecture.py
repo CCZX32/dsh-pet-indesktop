@@ -270,9 +270,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 文案落在 settings_pet_controls（`CROSS_SCREEN_HINT` 与作用域登记），本文件只留
 # 装配与接线；行内文案表仍是唯一来源。按文件约定预算只随实测校准，不为达标压缩
 # 行宽/合并语句；拆分仍是待办。
-# 2026-10-17 整合 PR267 后实测 2533（两侧叠加：该支的 2508 与 main 的 2526 都已被取代，
-# 合并后真值是 2533 = 2526 + 该支 TTS provider 化的净 +7）。仍按文件约定只随实测校准。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2533
+# 2026-10-17 累计校准到 2535：main 上 PR267 落地后实测 2533（2526 + TTS provider 化的净 +7），
+# 本支的每日一签接线再 +2，合并树实测正是 2535。抽签的页装配不在本文件——它作为「互动」
+# 域第四个页内标签由 settings_interaction 挂载（与天气同口径），避免这个"上帝对话框"再涨。
+# 仍按文件约定只随实测校准。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2535
 
 
 def _read(name: str) -> str:
