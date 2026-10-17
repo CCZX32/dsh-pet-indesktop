@@ -72,6 +72,7 @@ EXIT=2                                        # 冻结入口在 import pet.app �
 ```
 
 - **真实构建**：上述命令在本机真实执行；不是 mock、不是只读 spec。
+- **全量分片门（最终）**：`python scripts/ci_shards.py --include-isolated --jobs 6` → **21/21 分片通过**（墙钟 554.0s；日志 `.scratch/final-full-shards-5.log`）。
 - **未验证项**：① 冻结 Worker 的**完整交接链路**（有 token、真租约、真握手）没有跑——裸跑只证明了 fail-closed；完整链路需要已安装的官方识屏包 + 宿主租约，属产品内安装后的实机验收。② 未启动桌面 GUI 做人工观感验收（本会话无可交互桌面）。③ Setup 未编译（见下）。
 - **构建环境注意**：`build_onedir.ps1` 调的是 PATH 上的 `python`；本次用 `.venv/Scripts` 前置 PATH 才满足 `edge-tts>=7.3.1` 的构建期门。这是构建机的既有前提，不是本片新增。
 

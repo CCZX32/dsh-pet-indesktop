@@ -70,7 +70,7 @@ All checks passed!
 - **真目录、真事务链**：上述用例在 `tmp_path` 上真实创建/搬移/删除目录，恢复矩阵直接构造四个阶段的落盘状态；不是 mock 存储层。
 - **MOD 中心 UI**：`test_mod_center_ui.py` / `test_settings_mod_domain.py` 用真实 `ModernSettingsDialog` 与真实控件树（offscreen）验证，包括「更多 → 切换版本」子菜单的启用条件与动作派发。
 - **未做人工桌面验收**：本会话没有可交互桌面，未做「真鼠标点开设置页 → 更多 → 切换版本」的人工记录；机器判据覆盖到真实 Qt 控件与真实 `ResourceMods`，但最终观感仍列为本片未验证项。
-- **全量分片门**：见本提交前的 `.scratch/stage1-full-shards.log`（结果在提交说明中复述）。
+- **全量分片门（最终）**：`python scripts/ci_shards.py --include-isolated --jobs 6` → **21/21 分片通过**（6 主分片 + 15 个隔离文件串行；9175 条用例，墙钟 554.0s；本机 16 核 / offscreen）。日志 `.scratch/final-full-shards-5.log`。此前并行满载下的 worker/媒体/像素族假红已按 `LOCAL_LOAD_SENSITIVE` 隔离复跑。
 
 ## 四、边界与未做
 

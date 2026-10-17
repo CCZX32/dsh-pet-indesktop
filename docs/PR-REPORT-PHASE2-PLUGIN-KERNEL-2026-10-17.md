@@ -65,7 +65,7 @@ All checks passed!
 - **真 AppShell**：`test_the_festival_service_can_be_assembled_from_the_phase2_plugin` 用真实 `AppShell` + 临时 `Config`，验证插件实例、`is_running()`、关闭后 `plugin.state == "stopped"` 且 `festival_service is None`。
 - **行为等价**：`tests/test_festival.py` 的 73 条内置路径用例全绿；`test_festival_plugin.py` 在端口路径覆盖启停/提醒/旧键映射。
 - **未做人工桌面验收**：本会话没有可交互桌面；「右键提醒一次 / 到点弹气泡」的人工观感仍列为本片未验证项。机器判据覆盖真实 `FestivalReminderService` 与真实 Qt 控件。
-- **全量分片门**：见阶段提交说明与 `.scratch/stage1-full-shards-2.log`。
+- **全量分片门（最终）**：`python scripts/ci_shards.py --include-isolated --jobs 6` → **21/21 分片通过**（6 主分片 + 15 个隔离文件串行；墙钟 554.0s）。日志 `.scratch/final-full-shards-5.log`。
 
 ## 四、边界与未做
 

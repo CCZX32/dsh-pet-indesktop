@@ -70,7 +70,7 @@ All checks passed!
 - **真实包链**：`test_official_feature_install` 用真 `LocalFeatureRuntime` + 真事务链 + 真 `build_package`（识屏包），完成安装 → 启用 → 卸载；不是 mock 管理器。
 - **包窗口路由**：`test_ai_package_host` 打开真包聊天窗，断言 Core 路由计数；关窗后计数归零。
 - **未做人工桌面验收**：本会话没有可交互桌面；「从设置页点安装 → 看列表状态」「真拖文件到桌宠」的人工记录仍列为本片未验证项。机器判据覆盖真实 Qt 控件、真实包构建与真实事务链。
-- **全量分片门**：见提交说明与 `.scratch/stage1-full-shards-3.log`。
+- **全量分片门（最终）**：`python scripts/ci_shards.py --include-isolated --jobs 6` → **21/21 分片通过**（墙钟 554.0s）。日志 `.scratch/final-full-shards-5.log`。
 
 ## 四、边界与未做
 
