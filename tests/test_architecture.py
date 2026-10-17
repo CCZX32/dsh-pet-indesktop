@@ -266,7 +266,9 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 与保存时的 `apply_to_config(self, pro_data)`，加各自一次惰性 import。残余的 12 行就是这些
 # 接线本身，继续拆只能把调用点搬来搬去；按约定校准到实测值，不压行宽。
 # 2026-10-15 DLC AI 回调：owner 设置深链接只留两行分派，主体在 settings_mod_domain。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2415
+# 2026-10-17 校准 2415→2418：搜索索引快照必须先于 initial_page 深链接（扩展面板行进了索引，
+# 面板收走后搜索会撞已删除的 C++ 对象），原地加了 3 行说明性注释；没有新增控件或页面。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2418
 
 
 def _read(name: str) -> str:

@@ -965,6 +965,9 @@ class ChatWindow(QDialog):
             self.provider_label.setToolTip(configuration_hint(error))
             self.provider_label.setText(configuration_hint(error, actionable=callable(self._auth_callback)))
             return
+        # 与 widgets.py 同款：错误提示占用过表头，请求通过就还原。
+        self.provider_label.setText(self.settings.active_config.name)
+        self.provider_label.setToolTip(self.settings.active_config.name)
         self._bubble = self._add("assistant", "")
         self._bubble.set_state("streaming")
         self._bubble.retry_requested.connect(self.retry_last)

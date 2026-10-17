@@ -15,11 +15,13 @@ import pytest
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 from pet.ai_bindings import register_ai_pet_view
 from pet.app import AppShell
 from pet.config import Config
 from pet.settings_mod_domain import close_extension_settings
+from pet.settings_widgets import SettingRow
 from tests.ai_package_fakes import OWNER, MemoryVault, build_package, dispose_qobject
 
 app = QApplication.instance() or QApplication([])
@@ -410,3 +412,77 @@ def test_notification_uses_the_preference_saved_during_a_request(installed, stat
         server.server_close()
         worker.join(timeout=10)
         background.close()
+
+
+def test_deep_linked_extension_rows_never_enter_the_core_search_index(installed):
+    """带 extension: 深链接冷启动后收走面板，搜索框不许撞已删除的 C++ 行。
+
+    面板要被收走是正常操作（MOD 中心对同一扩展再点一次「设置」、包停用/卸载、
+    宿主转 fault 都会 dispose + deleteLater）。这些行若在构造期被收进
+    ``_search_rows`` 快照，收走之后每次按键都会抛
+    ``libshiboken: Internal C++ object (SettingRow) already deleted``。
+    """
+    shell, _manager, _mount = installed
+    shell.instance.open_modern_settings(initial_page="extension:official.ai-chat")
+    pump(lambda: shell.instance.modern_settings_dialog is not None)
+    dialog = shell.instance.modern_settings_dialog
+    assert dialog.mod_panel_owner == OWNER
+    panel_rows = set(dialog.mod_panel.findChildren(SettingRow))
+    assert panel_rows, "扩展面板应当自带设置行"
+    assert not panel_rows & set(dialog._search_rows), "扩展面板的行不许进 Core 搜索索引"
+    close_extension_settings(dialog)
+    pump(lambda: not isValid(next(iter(panel_rows))))
+    dialog._search_settings("api")  # 修复前：RuntimeError: Internal C++ object already deleted
+
+
+def test_a_successful_send_restores_the_provider_header(installed):
+    """配置错误提示占用过表头；请求通过后必须还原，而不是一直挂着「打开 API 设置」。"""
+    shell, _manager, mount = installed
+    window = mount.chat()
+    window.input.setPlainText("先撞一次缺 Key")
+    window.send_message()
+    assert 'href="api-settings"' in window.provider_label.text()
+    config = mount.runtime.config
+    settings = config.chat_settings()
+    provider = settings.active_config
+    provider.base_url = "http://127.0.0.1:1"
+    provider.api_key_ref = config.save_provider_secret(provider, "test-only-key")
+    config.set_chat_settings(settings)
+    config.save()
+    window.input.setPlainText("配好 Key 再发一次")
+    window.send_message()
+    assert 'href="api-settings"' not in window.provider_label.text()
+    assert window.provider_label.text() == window.settings.active_config.model
+    window.service.stop()
+    pump(lambda: window.service.is_drained)
+
+
+def test_navigation_failure_is_reported_instead_of_a_premature_ok(installed):
+    """面板没挂上（草稿门取消 / 目标包无设置界面）时，点击方必须拿到失败。
+
+    应答若在导航之前发出，点击方只会看到窗口被拉到前台、面板空白，而且
+    永远等不到 App 层的失败提示。
+    """
+    from PySide6.QtCore import QLockFile
+
+    from pet.settings_extension_navigation import AiSettingsReceiver, AiSettingsRequest
+
+    shell, _manager, _mount = installed
+    shell.instance.open_modern_settings()
+    dialog = shell.instance.modern_settings_dialog
+    assert dialog.mod_panel is None
+    failures = []
+    lock = QLockFile(str(shell.config.dir / "settings.lock"))
+    assert lock.tryLock(0)
+    receiver = AiSettingsReceiver(shell.config.dir, dialog)
+    original = dialog.select_page
+    dialog.select_page = lambda label: False if str(label).startswith("extension:") else original(label)
+    try:
+        request = AiSettingsRequest(shell.config.dir, lambda: failures.append(True))
+        pump(lambda: request.finished, timeout=15)
+        app.processEvents()
+        assert failures == [True], "面板没挂上时点击方必须拿到失败"
+    finally:
+        dialog.select_page = original
+        receiver.close()
+        lock.unlock()

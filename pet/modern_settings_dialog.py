@@ -988,9 +988,12 @@ class ModernSettingsDialog(QDialog):
         self._rebuild_domain_navigation()
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
+        # 搜索索引只收 Core 自身的设置行：扩展面板要到 initial_page 才挂载，
+        # 而面板会被收走（dispose + C++ 删除），进了索引就会在搜索时抛
+        # 「Internal C++ object already deleted」。快照必须先于初始深链接。
+        self._search_rows = self.findChildren(SettingRow)
         if self.initial_page:
             self.select_page(self.initial_page)
-        self._search_rows = self.findChildren(SettingRow)
         self._search_matches: list[SettingRow] = []
         self._search_index = -1
         self.search_edit.textChanged.connect(self._search_settings)

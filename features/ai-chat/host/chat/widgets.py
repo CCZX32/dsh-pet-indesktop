@@ -1851,6 +1851,10 @@ class ChatWindow(QDialog):
             self.provider_label.setToolTip(configuration_hint(error))
             self.provider_label.setText(configuration_hint(error, actionable=callable(self._auth_callback)))
             return
+        # 配置错误提示占用过表头：请求通过就还原成 provider/model，
+        # 否则配好 Key 回来还挂着「打开 API 设置」。
+        self.provider_label.setText(self.settings.active_config.model)
+        self.provider_label.setToolTip(self.settings.active_config.model)
         self._typewriter_timer.stop()
         self._pending_output = ""
         self._pending_finish_text = None

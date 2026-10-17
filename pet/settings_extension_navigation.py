@@ -66,11 +66,15 @@ class AiSettingsReceiver(QObject):
                     socket.abort()
                 elif buffer == _REQUEST:
                     deadline.stop()
-                    socket.write(_ACK)
-                    socket.disconnectFromServer()
-                    if not self._navigating and not self._closed:
+                    if self._closed:
+                        socket.abort()
+                    elif self._navigating:
+                        # 同一页的并发点击：导航已经在走，按同一目标应答。
+                        socket.write(_ACK)
+                        socket.disconnectFromServer()
+                    else:
                         self._navigating = True
-                        QTimer.singleShot(0, self._navigate)
+                        QTimer.singleShot(0, lambda socket=socket: self._navigate(socket))
 
             def disconnected(socket=socket):
                 self._connections.discard(socket)
@@ -80,20 +84,29 @@ class AiSettingsReceiver(QObject):
             socket.disconnected.connect(disconnected)
             receive()
 
-    def _navigate(self):
+    def _navigate(self, socket=None):
+        """应答放在导航之后：只有真的落到面板才回 ok。
+
+        草稿门拦下切 owner、或目标包挂不上设置面板时，`select_page` 返回
+        False——这时回 b"no\\n"，点击方立刻显示失败提示，而不是先收到一个
+        与事实相反的 ok。
+        """
+        navigated = False
         try:
-            if self._closed or not isValid(self.dialog):
-                return
-            if self.dialog.isMinimized():
-                self.dialog.showNormal()
-            else:
-                self.dialog.show()
-            self.dialog.raise_()
-            self.dialog.activateWindow()
-            # Reuse the same-owner draft preservation and other-owner draft gate.
-            self.dialog.select_page("extension:official.ai-chat")
+            if not self._closed and isValid(self.dialog):
+                if self.dialog.isMinimized():
+                    self.dialog.showNormal()
+                else:
+                    self.dialog.show()
+                self.dialog.raise_()
+                self.dialog.activateWindow()
+                # Reuse the same-owner draft preservation and other-owner draft gate.
+                navigated = bool(self.dialog.select_page("extension:official.ai-chat"))
         finally:
             self._navigating = False
+        if socket is not None and isValid(socket):
+            socket.write(_ACK if navigated else b"no\n")
+            socket.disconnectFromServer()
 
     def close(self):
         self._closed = True
