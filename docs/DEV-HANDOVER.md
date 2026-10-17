@@ -397,7 +397,8 @@ _on_tick(now)
 cd D:\dsh-pet
 pip install -r requirements.txt
 $env:QT_QPA_PLATFORM = "offscreen"     # 无头环境必须
-python -m pytest -q                     # 全量
+python scripts/ci_shards.py --include-isolated   # 全量（并行分片，默认 min(8, CPU) 路，约 6 分钟）
+python -m pytest -q                     # 全量（单进程串行，仅在排查分片交互时用）
 python -m pytest tests\test_voice_chime.py -q            # 语音报时族
 python -m pytest tests\test_architecture.py tests\test_config_schema.py tests\test_menu_layout.py -q
 python -m ruff check pet/ tests/        # 静态检查（仅 F 级规则）
@@ -516,7 +517,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 
 ### 8.4 变更门禁
 
-- **本地三道门（推送前必过）**：① `ruff check pet/ tests/`；② 全量 `pytest -q`；③ 受影响时序测试族高负载复跑（本地 CPU 打满跑 3 遍）。缝合/脚本化改动后**必须重跑 ruff**（重复定义、残留 import 不许交给 CI 发现）。
+- **本地三道门（推送前必过）**：① `ruff check pet/ tests/`；② 全量 `python scripts/ci_shards.py --include-isolated`（并行分片，默认 min(8, CPU) 路；单进程 `pytest -q` 只用于排查分片交互）；③ 受影响时序测试族高负载复跑（本地 CPU 打满跑 3 遍）。缝合/脚本化改动后**必须重跑 ruff**（重复定义、残留 import 不许交给 CI 发现）。
 - **交付证据门（2026-09-22 起）**：修改文件说明 + 性能分析 + 实机运行记录三份证据缺一即视为未完成（细则见 8.3，机器化校验见 `tests/test_pr_report_discipline.py`）。
 - **设置相关变更门禁**：`docs/SETTINGS-CHANGE-GATES.md` —— 准入 6 条（是否必须持久化、是否有默认值、是否进 reload 白名单、是否包 `SettingRow`、是否有测试、是否跨平台）+ 准出 5 类验证（契约、TDD、布局、跨平台、视觉）。
 - **配置键变更**：同步三处（第三章 3.3）。
@@ -731,7 +732,7 @@ python -m pet                        # 或 run.bat
 
 # 测试与检查
 $env:QT_QPA_PLATFORM = "offscreen"
-python -m pytest -q
+python scripts/ci_shards.py --include-isolated   # 全量（并行分片，默认 min(8, CPU) 路）
 python -m pytest tests\test_voice_chime.py -q
 python -m ruff check pet/ tests/
 python -m compileall pet packaging scripts

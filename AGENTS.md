@@ -162,6 +162,10 @@ CI 反复红的代价极高（每轮 5-10 分钟 + 诊断烧调用额度）。�
 - **推送前必过三道本地门**：ruff、全量 pytest、受影响时序测试族的高负载
   复跑（本地 CPU 打满跑 3 遍）。缝合/脚本化改动后必须重跑 ruff——
   重复定义/残留 import 这类一眼问题不许交给 CI 去发现。
+  - **本地全量用分片并行跑**：`python scripts/ci_shards.py --include-isolated`
+    （默认 min(8, CPU 核数) 路并发，约 60 分钟 → 6 分钟；按用例数/上次实测耗时 LPT
+    均衡，4 个 webm/低优先级文件各自单独一片）。
+    CI 的 Windows 主套件仍用 `--jobs 1` 串行（见 `.github/workflows/pr-test.yml`）。
 - **写时序测试 = CI 优先纪律**：新测试涉及真实线程/Qt 事件循环时，一律
   事件同步（Event/Condition）+ 宽预算（CI 慢 runner 是本地数倍慢），
   禁止固定 sleep 猜测时序、禁止赌目录枚举顺序、禁止用 monotonic 绝对值

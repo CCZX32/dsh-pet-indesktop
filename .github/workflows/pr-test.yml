@@ -161,7 +161,9 @@ jobs:
       # .scratch/ci243/WIN-AV-HUNT-2026-10-13.md（注：.scratch 不入库，属本地档案）。
       - name: Pytest (main suite, Windows shards)
         if: runner.os == 'Windows'
-        run: python scripts/ci_shards.py
+        # 显式 1 并发：脚本默认 --jobs 4 是给本地提速的；hosted runner 只有 4 vCPU，
+        # 分片并行会把负载 flake 放大。CI 保持原来的逐片串行口径。
+        run: python scripts/ci_shards.py --jobs 1
 
       # Linux 主套件失败后的**受限前缀**重跑（诊断，不是覆盖）：只跑收集序前缀
       # test_agent_cost → test_config_schema（44 个文件；本机 3.11 + offscreen 同口径
