@@ -73,8 +73,10 @@ Name: "official_screen"; Description: "Screen understanding package (official)";
 
 [Files]
 ; 基础产物：排除 features\ 下两个官方包，改由下面的 [Tasks] 选装项控制。
+; portable.json 也排除：安装态必须走平台数据目录，构建树里的便携标记不许
+; 被复制进安装目录（否则数据会写进 {app}，用户看不出区别）。
 ; skipifsourcedoesntexist 让不带包的构建（-FeaturePackages 省略）仍能编译。
-Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*,portable.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyAppDir}\features\ai-chat\*"; DestDir: "{app}\features\ai-chat"; Tasks: official_ai_chat; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\screen-understanding\*"; DestDir: "{app}\features\screen-understanding"; Tasks: official_screen; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
@@ -83,14 +85,19 @@ Name: "{autoprograms}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppShortName}}"; Flags: nowait postinstall
+; skipifsilent：静默安装（更新器/CI/验收脚本）不替用户拉起 GUI；普通向导仍可勾选立即运行。
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppShortName}}"; Flags: nowait postinstall skipifsilent
 
-; 注：这里刻意没有 [UninstallDelete]。
+; 注：这里刻意没有 `_MEI*` 的 [UninstallDelete]。
 ; 旧版有一条 `Type: filesandordirs; Name: "{app}\_MEI*"`，是按名字通配删除——
 ; `_MEI数字` 是 PyInstaller 的解包目录命名，安装目录里出现的同名目录并不保证是
 ; 本产品的（任何以本目录为工作目录启动的 onefile 程序都会在这里解包）。没有归属
 ; 证据就不删：本产品自己的 onefile 运行目录由 pet/runtime_cleanup.py 按归属标记
 ; 清理（见下方 [Code] 的卸载清理调用）。
+; 唯一的 [UninstallDelete] 是首启回执：它由 [Code] 写，不在 Inno 的安装文件
+; 日志里，不显式删会留下一个只剩该文件的安装目录。
+[UninstallDelete]
+Type: files; Name: "{app}\startup-receipt.json"
 
 [Code]
 { 5A：首启回执。安装器只写“这次装了哪些官方包”，产品侧后续按它做首启确认；
@@ -103,11 +110,22 @@ var
 begin
   if CurStep <> ssPostInstall then
     exit;
-  if IsTaskSelected('official_ai_chat') then
+
+  { createallsubdirs 会为被 Excludes 的官方包留下空目录；未勾选时删掉（RemoveDir
+    只删空目录，绝不会碰已安装的文件），让"没装"在盘上也真的没有 features\。}
+  if not WizardIsTaskSelected('official_ai_chat') then
+    RemoveDir(ExpandConstant('{app}\features\ai-chat'));
+  if not WizardIsTaskSelected('official_screen') then
+    RemoveDir(ExpandConstant('{app}\features\screen-understanding'));
+  RemoveDir(ExpandConstant('{app}\features'));
+
+  { 回执写"盘上实际有什么"，不是"这次勾了什么"：升级时 Inno 会保留上一版由
+    Setup 装下的包文件，仅按本次勾选写 false 会把已安装的包误报成未安装。}
+  if FileExists(ExpandConstant('{app}\features\ai-chat\manifest.json')) then
     AiChat := 'true'
   else
     AiChat := 'false';
-  if IsTaskSelected('official_screen') then
+  if FileExists(ExpandConstant('{app}\features\screen-understanding\manifest.json')) then
     Screen := 'true'
   else
     Screen := 'false';

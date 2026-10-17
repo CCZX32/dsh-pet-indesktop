@@ -426,8 +426,11 @@ def test_iss_uninstall_runs_cleanup_before_removing_files() -> None:
     assert "{#MyAppExeName}" in live
     assert "ResultCode" in live and "Log(" in live, "清理失败必须有退出码记录"
     assert "SuppressibleMsgBox" in live, "交互式卸载里失败的清理要能被用户看到"
-    # 按名字通配删除 `_MEI*` 无法保证归属：必须去掉（可能是别的应用的解包目录）
-    assert "[UninstallDelete]" not in live
+    # 只允许一条"删自写回执"的 [UninstallDelete]；按名字通配删除 `_MEI*` 仍必须禁止
+    # （可能是别的应用的解包目录）。
+    assert live.count("[UninstallDelete]") == 1
+    uninstall_delete = live.split("[UninstallDelete]", 1)[1].split("[", 1)[0]
+    assert "startup-receipt.json" in uninstall_delete
     assert "_MEI*" not in live
     # .iss 是 UTF-8 无 BOM（Inno 按 ANSI 读取）：字符串字面量必须保持 ASCII，
     # 否则用户看到的提示与卸载日志会变成乱码。中文说明留在注释里。
