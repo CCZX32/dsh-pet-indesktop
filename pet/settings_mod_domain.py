@@ -234,6 +234,23 @@ class DialogModHost:
     # --------------------------------------------------------- 只读判定
 
     def _owner_character(self) -> str:
+        # 路由视图的 ``get("character")`` 是**打开表单那一刻**的档案快照；桌宠换装
+        # 之后（或在设置页构造后被合法写者改了档案）它会过时，导致「仍在用旧角色」
+        # 的假阳性。占用判据必须跟着**当前档案**走，所以优先按槽位现读。
+        # 但档案**不存在**时 `read_slot_profile` 会给出同源默认角色（不是空串），
+        # 那不是这只宠的现状——此时仍回答路由视图里的值（表单里刚 set 的也算）。
+        from . import pet_profiles
+
+        slot_id = getattr(self.dialog.config, "slot_id", None)
+        if slot_id is not None:
+            try:
+                profile = pet_profiles.read_slot_profile(self.data_root, int(slot_id))
+            except Exception:
+                profile = None
+            if profile is not None and profile.exists:
+                character = str(profile.value("character") or "")
+                if character:
+                    return character
         try:
             return str(self.dialog.config.get("character") or "")
         except Exception:

@@ -205,6 +205,11 @@ class SlotRoutedConfig:
         return str(getattr(self._instance, "instance_id", "") or "")
 
     @property
+    def slot_id(self) -> int:
+        """这份视图路由到的固定身份槽位（0..128）。"""
+        return self._slot_id
+
+    @property
     def dir(self):
         return self._instance.dir
 
