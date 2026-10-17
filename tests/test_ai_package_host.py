@@ -542,3 +542,26 @@ def test_fake_pet_view_is_what_the_windows_receive(bound):
 
 def test_ai_feature_id_is_the_only_owner_this_package_answers_to(bound):
     assert OWNER == AI_FEATURE_ID == "official.ai-chat"
+
+
+def test_opening_a_package_window_installs_and_clears_the_file_interpret_route(bound):
+    """包窗打开 → Core 路由走包；关窗 → 计数归零（事件过滤器看 Close，不靠销毁）。"""
+    from pet.ai_bindings import register_file_interpret_router
+    from pet.file_interpret_router import FileInterpretRouter
+
+    _host, context, _vault, handle = bound
+    router = FileInterpretRouter()
+    register_file_interpret_router(router)
+    mount_module = import_pkg(handle, "host.runtime_mount")
+    runtime = mount_module.AiPackageRuntime(context)
+    try:
+        window = runtime.chat()
+        assert window is not None
+        assert router.package_open
+        window.close()
+        app.processEvents()
+        assert not router.package_open
+    finally:
+        runtime.close()
+        register_file_interpret_router(None)
+        dispose_qobject(runtime)

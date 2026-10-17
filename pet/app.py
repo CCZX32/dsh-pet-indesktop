@@ -667,7 +667,8 @@ class PetInstance:
         # 必须随每只窗的创建（启动/切角色/多窗）挂载，缺失则拖放无效。
         win.install_file_eater()
         # 拖文件解读（确认 → 新会话请求 → 进度冒泡 → 摘要），与投喂共用接缝。
-        win.install_file_interpreter()
+        # 路由：包聊天窗开着时走包，否则走内置；两种拓扑同一个 router。
+        win.install_file_interpreter(getattr(self.shell, "file_interpret_router", None))
         # 预热点击音效：首次创建 QSoundEffect/QMediaPlayer 池并等待加载完成，
         # 在显示窗口前完成，避免窗口出现后主线程被音频初始化阻塞、
         # 首次点击 Q 弹卡顿。音效关闭时不预热，避免无谓拉起 QtMultimedia 池。
@@ -1347,6 +1348,17 @@ class AppShell:
         # 与角色/slot0 健康度**解耦**：装配失败只记诊断、MOD 中心如实显示"宿主不可用"，
         # 绝不让桌宠启动失败（spec §7.2-3）。
         self.feature_runtime = self._build_feature_runtime()
+        # Phase 2：进程内官方插件（当前只有节日提醒）。默认仍走内置服务；
+        # PET_FESTIVAL_PLUGIN=1 时由插件装配，便于做行为等价对照。
+        self._festival_plugin_enabled = os.environ.get("PET_FESTIVAL_PLUGIN") == "1"
+        self.plugin_registry = self._build_plugin_registry()
+        # 拖文件解读路由：内置与 AI 包共用一个 offer 接缝；包窗开着时走包。
+        from .file_interpret_router import FileInterpretRouter
+
+        self.file_interpret_router = FileInterpretRouter()
+        from .ai_bindings import register_file_interpret_router
+
+        register_file_interpret_router(self.file_interpret_router)
         # 4.4b（T6「multi_window_shared 不删，常开化」）：进程级共享子系统
         # （agent_link / proactive / 全屏 watcher）**恒建**，各窗经 PetWindow
         # 构造参数引用同一份，崩溃/换角色不重建。sprite 拓扑里共享子系统缺位
@@ -1438,6 +1450,68 @@ class AppShell:
 
         register_ai_pet_view(self._ai_pet_view, notifier=self.system_notify, auth_callback=self._open_ai_package_settings)
         return runtime
+
+    def _build_plugin_registry(self):
+        """装配 Phase 2 进程内插件 Registry；失败只记诊断，不影响桌宠启动。
+
+        插件命名空间写 ``<data>/plugins.json``，不新增 Core 顶层配置键；节日提醒的
+        11 个旧扁平键仍由 ``legacy_config=self.config`` 读写。默认不启动插件
+        （``PET_FESTIVAL_PLUGIN=1`` 才走插件），先证明行为等价再切默认。
+        """
+        try:
+            from .plugins.builtin.festival_reminder.manifest import FESTIVAL_MANIFEST
+            from .plugins.config import JsonConfig
+            from .plugins.ports import PresentationPort
+            from .plugins.runtime import PluginRegistry
+
+            def _festival_factory(context):
+                from .plugins.builtin.festival_reminder.plugin import FestivalReminderPlugin
+
+                return FestivalReminderPlugin(context)
+
+            registry = PluginRegistry(
+                config=JsonConfig(self.config.dir / "plugins.json"),
+                legacy_config=self.config,
+                presentation=PresentationPort(
+                    show_bubble=self._plugin_show_bubble,
+                    notify=self.system_notify,
+                    speak=self._plugin_speak,
+                ),
+                host_app=self,
+            )
+            registry.register_builtin(FESTIVAL_MANIFEST, _festival_factory, enabled=None)
+            return registry
+        except Exception:
+            logging.exception("Phase 2 插件 Registry 装配失败；桌宠照常启动，使用内置服务")
+            return None
+
+    def _plugin_show_bubble(self, text, *, duration_ms=12_000, subtitle="", pet_scale=None):
+        """插件呈现端口的兜底气泡（coexistence 路径实际走 FestivalReminderService 旧逻辑）。"""
+        win = getattr(self, "win", None)
+        if win is None:
+            return False
+        try:
+            win.show_bubble(str(text), duration_ms=int(duration_ms))
+            return True
+        except Exception:
+            logging.exception("插件气泡展示失败")
+            return False
+
+    def _plugin_speak(self, text, *, log_tag="插件"):
+        """插件语音端口：复用进程内唯一音频通道。"""
+        try:
+            channel = self.ensure_audio_channel()
+        except Exception:
+            logging.exception("插件语音通道获取失败")
+            return False
+        if channel is None:
+            return False
+        try:
+            channel.speak(str(text), log_tag=str(log_tag))
+            return True
+        except Exception:
+            logging.exception("插件语音播报失败")
+            return False
 
     def _open_ai_package_settings(self):
         """DLC 聊天包只导航到自己的设置；复用独立设置进程/进程内的既有入口。"""
@@ -1876,14 +1950,58 @@ class AppShell:
         构造点，开启/试听时按需付一次。
         """
         if getattr(self, "festival_service", None) is None:
+            if getattr(self, "_festival_plugin_enabled", False):
+                plugin = self._ensure_festival_plugin()
+                if plugin is not None:
+                    self.festival_service = plugin
+                    return plugin
             from .festival_service import FestivalReminderService
 
             self.festival_service = FestivalReminderService(self)
         return self.festival_service
 
+    def _ensure_festival_plugin(self):
+        """Phase 2：从 PluginRegistry 取节日提醒插件；失败返回 None（回退内置服务）。"""
+        registry = getattr(self, "plugin_registry", None)
+        if registry is None:
+            return None
+        from .plugins.builtin.festival_reminder.manifest import FESTIVAL_PLUGIN_ID
+
+        try:
+            registry.start(FESTIVAL_PLUGIN_ID)
+        except Exception:
+            logging.exception("节日提醒插件启动失败；回退内置服务")
+            return None
+        return registry.get_instance(FESTIVAL_PLUGIN_ID)
+
     def _sync_festival_service(self) -> None:
         """按配置启停节日提醒服务；关闭时释放服务对象。"""
-        if self._festival_wanted():
+        if getattr(self, "_festival_plugin_enabled", False) and getattr(self, "plugin_registry", None) is not None:
+            from .plugins.builtin.festival_reminder.manifest import FESTIVAL_PLUGIN_ID
+
+            if self._festival_wanted():
+                plugin = self._ensure_festival_plugin()
+                if plugin is None:
+                    # Plugin assembly failed: fall back to the built-in service
+                    # for this process instead of leaving the feature dead.
+                    self._festival_plugin_enabled = False
+                    service = self._ensure_festival_service()
+                    if service is not None:
+                        if service.is_running():
+                            service.apply_config()
+                        else:
+                            service.start()
+                else:
+                    self.festival_service = plugin
+                    if plugin.is_running():
+                        plugin.apply_config()
+            elif getattr(self, "festival_service", None) is not None:
+                try:
+                    self.plugin_registry.stop(FESTIVAL_PLUGIN_ID)
+                except Exception:
+                    logging.exception("停止节日提醒插件失败")
+                self.festival_service = None
+        elif self._festival_wanted():
             service = self._ensure_festival_service()
             if service.is_running():
                 # 已在运行：设置保存只刷新配置，不重置 tick。
@@ -2525,12 +2643,14 @@ class AppShell:
             if self._slot_id is not None and callable(selector):
                 selector(self._slot_id)
             # 拖文件解读：legacy 由 PetWindow.install_file_interpreter 注入
-            # （window_optional_services.py:96-105）；overlay 无 PetWindow，
-            # 由壳作宿主（cfg/show_bubble/show_alert/resolve_alert 同名面）。
+            # （window_optional_services.py）；overlay 无 PetWindow，由壳作宿主。
+            # 两条拓扑都先经过进程级 router：包窗开着走包，否则走内置控制器。
             try:
                 from .file_interpret import FileInterpretController
-                self._overlay_shell.set_file_interpret_offer(
-                    FileInterpretController(self._overlay_shell).offer)
+
+                controller = FileInterpretController(self._overlay_shell)
+                self.file_interpret_router.set_builtin_offer(controller.offer)
+                self._overlay_shell.set_file_interpret_offer(self.file_interpret_router)
             except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
                 logging.exception("overlay: 拖文件解读接线失败")
         else:
@@ -2937,6 +3057,12 @@ class AppShell:
             register_ai_pet_view(None)
         except Exception:
             logging.exception("退出时摘除聊天包呈现面失败")
+        try:
+            from .ai_bindings import register_file_interpret_router
+
+            register_file_interpret_router(None)
+        except Exception:
+            logging.exception("退出时摘除拖文件路由失败")
         # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win

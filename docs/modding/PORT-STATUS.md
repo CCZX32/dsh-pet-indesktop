@@ -105,7 +105,7 @@
 | 目标（作者） | [`PLUGIN-RUNTIME-DESIGN.md`](../plugin-phase-02-runtime/PLUGIN-RUNTIME-DESIGN.md) + [`README.md`](../plugin-phase-02-runtime/README.md) + [`PLUGIN-RUNTIME-TEST-PLAN.md`](../plugin-phase-02-runtime/PLUGIN-RUNTIME-TEST-PLAN.md)：`PluginRegistry` / `PluginContext` / `CoreEventBus` / 配置命名空间隔离 / capability / 生命周期与错误隔离；官方节日提醒作为接口验证消费者；后续补菜单·设置·快捷键贡献的按包所有者注册与撤销。 |
 | 本仓库状态 | ⚠️ **半做（2026-10-17 复核修正：原判定是往悲观方向的过期结论）**。<br>✅ 底座已移植，其中 5 个文件与作者**逐字节相同**：`pet/plugins/events.py`（`CoreEventBus`/`ScopedEventBus`/`CoreEvent`/`Subscription`，154 行）、`capabilities.py`、`contributions.py`（`ContributionRegistry`/`ContributionHandle`）、`ports.py`（`CommandRegistry`/`PresentationPort`/`SchedulerPort`/`StructuredLogger`/`ContentProviderRegistry`）、`package_binding.py`；`feature_host.py` = 作者的 +93 行（把 EventBus 接进启停与故障路径）。宿主状态机 / 依赖顺序 / owner 隔离 / `fault()` / 贡献撤销由 `pet/plugins/feature_host.py:41 FeatureHost` + `lifecycle.py:FeatureHostLifecycle` 承载，实装于 `pet/feature_management.py`。<br>❌ 未移植的**四个具名件**：`PluginRegistry`、`PluginContext`（`pet/plugins/runtime.py`，530 行）、`PluginManifest`/`version_satisfies`/`PluginDiagnostic`（`pet/plugins/manifest.py`，129 行）、`PluginConfigStore` + `FESTIVAL_LEGACY_CONFIG_MAP`（`pet/plugins/config.py`，247 行）。**并且**作者 Phase 2 的唯一消费者——节日提醒插件化包装（`pet/plugins/builtin/festival_reminder/`）也未移植。 |
 | 证据落点 | `pet/plugins/` 现有 **12 个模块**（`__init__`、`capabilities`、`contributions`、`events`、`feature_host`、`feature_packages`、`lifecycle`、`package_binding`、`package_trust`、`ports`、`services`、`worker_launch`）。反向证据：`grep -rn "PluginRegistry\|PluginContext" pet/` → **0 命中**；`git cat-file -e <HEAD>:pet/plugins/{runtime,config,manifest}.py` → 全部 MISSING；`pet/plugins/builtin/` 目录不存在。节日提醒在本仓库仍是既有功能——**铁证**是作者为插件化给 `FestivalReminderService.__init__` 加了 `scheduler/presentation/audio/config_source` 四个端口参数（作者 `pet/festival_service.py:38-46`），本仓库签名仍是 `def __init__(self, app)`（`pet/festival_service.py:36`），装配点是 `pet/app.py:1841-1843` 直接构造，开关走 `pet/config.py:1271-1281` 的 11 个扁平键。 |
-| 没做的原因 / 后续归属 | 缺的是"manifest → capability → 注入"那套**自动装配**：本仓库的 `FeatureHostContext` 由 `feature_host_bindings.py` 手工注入，能力集由 `pet/feature_policy.py` 与 `package_trust` 的签名包契约给（形状是 `features/` 签名包，不是作者的 `kind=in_process` 插件）。**这不是能力倒退**——签名/TOCTOU/逐文件 sha256 比作者那套更严——但终态要求"连节日提醒都是包"，而节日提醒现在硬绑在 `AppShell` 上、`festival_service.__init__(self, app)` 这个签名就是不拆包的天花板。后续片：**Phase 2 内核收口片**（未排期；它与 §十一 的"内容硬门片"并列，都是"一切都是包"的前置）。 |
+| 没做的原因 / 后续归属 | 缺的是"manifest → capability → 注入"那套**自动装配**：本仓库的 `FeatureHostContext` 由 `feature_host_bindings.py` 手工注入，能力集由 `pet/feature_policy.py` 与 `package_trust` 的签名包契约给（形状是 `features/` 签名包，不是作者的 `kind=in_process` 插件）。**这不是能力倒退**——签名/TOCTOU/逐文件 sha256 比作者那套更严——但终态要求"连节日提醒都是包"，而节日提醒现在硬绑在 `AppShell` 上、`festival_service.__init__(self, app)` 这个签名就是不拆包的天花板。后续片：**Phase 2 内核收口片**（未排期；它与 §十一 的"内容硬门片"并列，都是"一切都是包"的前置）。**2026-10-17 已落地（阶段 2，见 [`PR-REPORT-PHASE2-PLUGIN-KERNEL-2026-10-17.md`](../PR-REPORT-PHASE2-PLUGIN-KERNEL-2026-10-17.md)）**：`PluginRegistry` / `PluginContext` / `PluginManifest` / `PluginConfigStore` 四个具名件与节日提醒 in-process 插件（`official.festival-reminder`）已实现；默认仍走内置服务，`PET_FESTIVAL_PLUGIN=1` 才由 Registry 装配（共存 + 可回退），默认切换待维护者拍板。 |
 
 ### Phase 3A：Agent Link 采集 Worker（作者已封存）
 
@@ -422,8 +422,8 @@ LPAC 相关一切。**`official.ai-chat` / `official.screen-understanding` 已�
 |---|---|---|
 | 包内 UI 与内置聊天的功能对齐 | 后续片（**未排期**） | 上游包是内置聊天某个较早时间点的**分叉**：缺 markdown 渲染、思考链展示、`#191` 的布局修复、联网检索等后续产品修复（`host/chat/widgets.py` 上游 2219 行 vs 内置 2532 行）。本片按"整包移植上游形态"落地，**没有**把两套实现合并（本片口径明确禁止），因此包的聊天窗在功能上落后于内置聊天窗。要对齐就得把内置那份 UI 再分叉进包（或反过来让包复用内置实现），两者都是新决策。 |
 | 包的 `notifier` / `auth_callback` 接线 | 同上 | `AiRuntime.create_window` 的这两个参数本片传 `None`（上游由 `bind_ai_window` 从 Core 取）。缺失的效果是"未配 Key 时不能一键跳到 API 设置页"，包自己的设置面板不受影响。 |
-| 文件解读的触发接线（拖文件 → 包的解读器） | 同上 | 包侧 `FileInterpretController` 与 `create_file_interpreter` 都在，Core 侧的投喂接线（上游 `bind_ai_window` 的 `file_factory` + `install_file_interpreter`）本片未落。 |
-| MOD 中心 UI 的「装官方包」按钮 | 后续片 | 与识屏包同一状态：当前由 Core 入口 `attach_official` + 管理器驱动，UI 按钮未做。 |
+| 文件解读的触发接线（拖文件 → 包的解读器） | ✅ 阶段 3（2026-10-17） | 已落地 `pet/file_interpret_router.py`：包聊天窗开着走包的 `FileInterpretController`，否则回落内置；legacy/overlay 两条投喂链共用同一路由。见 [`PR-REPORT-PACKAGE-WIRING-2026-10-17.md`](../PR-REPORT-PACKAGE-WIRING-2026-10-17.md)。 |
+| MOD 中心 UI 的「装官方包」按钮 | ✅ 阶段 3（2026-10-17） | 未安装官方包显示「安装」行；`LocalFeatureRuntime.install_official` 复用 Core 自有事务链，来源支持冻结态 `<exe>/features/`、源码态构建缓存与 `PET_OFFICIAL_PACKAGE_ROOT`。 |
 | 冻结包投递（随发行版携带预构建包） | 打包/构建片 | 与识屏包同：只有源码态打包入口。 |
 
 ## 十、AI 包窗口回调接线（2026-10-15 已合入；2026-10-17 复审三条修复）
@@ -484,6 +484,9 @@ provider/model（此前配好 Key 回来仍挂着「打开 API 设置」）；�
 2. **Phase 2 内核收口片**：`PluginRegistry` / `PluginContext` / `PluginManifest` /
    `PluginConfigStore` + 节日提醒插件化。终态"连节日提醒都是包"的直接前提；
    `festival_service.__init__(self, app)` 这个签名就是不拆包的天花板。
+   **2026-10-17 状态**：四个具名件与 `official.festival-reminder` 插件已落地
+   （阶段 2 报告）；`FestivalReminderService` 保留旧签名并新增可选端口参数，
+   默认装配仍走内置，插件路径由 `PET_FESTIVAL_PLUGIN=1` 启用。
 3. **冻结 / Setup / 签名链**：`scripts/` 34 个 + `packaging/` 9 个，加依赖侧的
    `pet/core_{maintenance,code_gate,uninstall,registration_cleanup}.py`、
    `pet/runtime_layout.py`、`pet/feature_probe_*.py`、`packaging/licenses/LIBSODIUM-LICENSE.txt`。

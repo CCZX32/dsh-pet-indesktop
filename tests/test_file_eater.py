@@ -172,8 +172,9 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
         def install_file_eater(self):
             self.file_eater_install_calls += 1
 
-        def install_file_interpreter(self):
+        def install_file_interpreter(self, router=None):
             self.file_interpret_install_calls += 1
+            self.file_interpret_router = router
 
         def set_profile_identity(self, character_id, generation=None):
             """建窗路径会经这个**公开面**绑定档案身份（架构闸不许跨模块写私有名）。"""
@@ -195,6 +196,7 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
         spy = shell.instance._build_window("shenshen", lib=FakeLibrary(), build_tray=False)
         assert spy.file_eater_install_calls == 1, "建窗路径必须调用 install_file_eater()（PR73 接线，#76 后丢失）"
         assert spy.file_interpret_install_calls == 1, "建窗路径必须调用 install_file_interpreter()（拖文件解读接线）"
+        assert spy.file_interpret_router is shell.file_interpret_router, "legacy 建窗必须接上 Core 的拖文件路由"
     finally:
         monkeypatch.setattr(app_mod, "PetWindow", real_petwindow)
 

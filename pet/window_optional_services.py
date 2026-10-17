@@ -93,16 +93,21 @@ class WindowFeatureGateMixin:
         return self._file_eater
 
     # ------------------------------------------------------------ 文件解读
-    def install_file_interpreter(self):
+    def install_file_interpreter(self, router=None):
         """挂载拖文件解读控制器（幂等）并与投喂处理器互相接线。
 
         启用与否不再走 sync：offer() 每次实时读 file_interpret.enabled，
-        设置页改动即时生效且无需同步钩子。
+        设置页改动即时生效且无需同步钩子。``router`` 非 None 时由 Core 路由
+        统一选路（包窗开着走包，否则走本控制器），否则维持旧的直连。
         """
         if self._file_interpret is None:
             from .file_interpret import FileInterpretController
             self._file_interpret = FileInterpretController(self)
-        self.install_file_eater().interpret_offer = self._file_interpret.offer
+        offer = self._file_interpret.offer
+        if router is not None:
+            router.set_builtin_offer(offer)
+            offer = router
+        self.install_file_eater().interpret_offer = offer
         return self._file_interpret
 
     # ------------------------------------------------------------ 黄金回旋/边缘探头

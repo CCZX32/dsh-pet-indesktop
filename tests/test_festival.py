@@ -847,3 +847,60 @@ def test_preview_rows_are_collected_into_domain_sections(tmp_path):
             assert holders, f"{target} 未被任何域卡片收集（历史事故：打包版不可见）"
     finally:
         dialog.close()
+
+
+def test_the_festival_service_can_be_assembled_from_the_phase2_plugin(tmp_path, monkeypatch):
+    """PET_FESTIVAL_PLUGIN=1 时走 PluginRegistry；关掉开关后插件收口、内置路径可回退。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.app import AppShell
+    from pet.config import Config
+
+    monkeypatch.setenv("PET_FESTIVAL_PLUGIN", "1")
+    QApplication.instance() or QApplication([])
+    cfg = Config(base=tmp_path)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("festival_reminder_speak", False)
+    shell = AppShell(QApplication.instance(), cfg, enable_chat=False)
+    try:
+        assert shell.plugin_registry is not None
+        cfg.set("festival_reminder_enabled", True)
+        shell._sync_festival_service()
+
+        service = shell.festival_service
+        assert service is not None
+        assert type(service).__name__ == "FestivalReminderPlugin"
+        assert service.is_running()
+
+        cfg.set("festival_reminder_enabled", False)
+        shell._sync_festival_service()
+        assert shell.festival_service is None
+        assert shell.plugin_registry.get("official.festival-reminder").state == "stopped"
+    finally:
+        shell._on_about_to_quit()
+
+
+def test_a_failed_plugin_assembly_falls_back_to_the_builtin_service(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    from pet.app import AppShell
+    from pet.config import Config
+
+    monkeypatch.setenv("PET_FESTIVAL_PLUGIN", "1")
+    QApplication.instance() or QApplication([])
+    cfg = Config(base=tmp_path)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("festival_reminder_speak", False)
+    shell = AppShell(QApplication.instance(), cfg, enable_chat=False)
+    try:
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("injected plugin failure")
+
+        monkeypatch.setattr(shell.plugin_registry, "start", fail)
+        cfg.set("festival_reminder_enabled", True)
+        shell._sync_festival_service()
+
+        assert type(shell.festival_service).__name__ == "FestivalReminderService"
+        assert shell.festival_service.is_running()
+    finally:
+        shell._on_about_to_quit()

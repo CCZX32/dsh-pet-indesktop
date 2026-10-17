@@ -17,7 +17,33 @@ from __future__ import annotations
 
 import logging
 
+from PySide6.QtCore import QEvent, QObject
+
 _LOG = logging.getLogger(__name__)
+
+
+def _file_router():
+    """Core 侧的拖文件路由器；独立包宿主没有它时返回 None。"""
+    try:
+        from pet.ai_bindings import file_interpret_router
+
+        return file_interpret_router()
+    except Exception:  # pragma: no cover - Core 面缺失时按"没有路由"降级
+        return None
+
+
+class _WindowCloseWatcher(QObject):
+    """把包窗的 Close 事件翻译成"包窗不再打开"，不依赖 WA_DeleteOnClose。"""
+
+    def __init__(self, owner, window) -> None:
+        super().__init__(window)
+        self._owner = owner
+        self._window = window
+
+    def eventFilter(self, obj, event):
+        if obj is self._window and event.type() == QEvent.Type.Close:
+            self._owner._on_package_window_closed(self._window)
+        return False
 
 
 def _pet_view():
@@ -51,6 +77,8 @@ class AiPackageRuntime:
         self.runtime = AiRuntime(context)
         self.commands = {"chat": self.chat, "quick_chat": self.quick_chat}
         self._closed = False
+        self._open_windows: dict[int, object] = {}
+        self._file_controller = None
 
     # --------------------------------------------------------------- 命令面
     def chat(self):
@@ -69,8 +97,45 @@ class AiPackageRuntime:
             auth_callback=self._open_settings if auth_callback is not None else None,
         )
         if window is not None:
+            self._on_package_window_opened(window)
             window.show()
         return window
+
+    # ------------------------------------------------------------ 文件解读路由
+    def _on_package_window_opened(self, window) -> None:
+        router = _file_router()
+        if router is None:
+            return
+        key = id(window)
+        if key in self._open_windows:
+            return
+        self._open_windows[key] = window
+        watcher = _WindowCloseWatcher(self, window)
+        window.installEventFilter(watcher)
+        window._file_interpret_watcher = watcher
+        router.set_package_offer(self.file_interpret_offer)
+        if len(self._open_windows) == 1:
+            router.package_window_opened()
+
+    def _on_package_window_closed(self, window) -> None:
+        router = _file_router()
+        key = id(window)
+        if self._open_windows.pop(key, None) is None:
+            return
+        if router is not None and not self._open_windows:
+            router.package_window_closed()
+
+    def file_interpret_offer(self, paths) -> None:
+        """The package-side interpreter for a file dragged onto the pet."""
+        if self._closed or not self.runtime.accepting:
+            return
+        if self._file_controller is None:
+            try:
+                self._file_controller = self.runtime.create_file_interpreter(_pet_view())
+            except Exception:
+                _LOG.exception("包文件解读器创建失败；本次不解读")
+                return
+        self._file_controller.offer(paths)
 
     def _open_settings(self):
         if self._closed or not self.runtime.accepting:
@@ -106,4 +171,9 @@ class AiPackageRuntime:
         if self._closed:
             return
         self._closed = True
+        router = _file_router()
+        if router is not None:
+            router.set_package_offer(None)
+        self._open_windows.clear()
+        self._file_controller = None
         self.runtime.close()

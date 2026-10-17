@@ -189,6 +189,24 @@ class DialogModHost:
             _LOG.exception("扩展注册表不可用")
             return {}
 
+    def official_packages(self) -> tuple[str, ...]:
+        """官方闭集里尚未安装的 owner（MOD 中心的「安装」行）。"""
+        runtime = self.feature_host()
+        if runtime is None:
+            return ()
+        try:
+            return tuple(runtime.official_packages())
+        except (OSError, ValueError, RuntimeError):
+            _LOG.exception("官方包登记不可用")
+            return ()
+
+    def install_official(self, owner: str):
+        """从随包/构建缓存安装一个官方包（Core 自有链）。"""
+        runtime = self.feature_host()
+        if runtime is None:
+            raise RuntimeError("功能扩展宿主未接入")
+        return runtime.install_official(owner)
+
     def feature_route(self, source):
         """包声明路由：读一次有界清单，为它建好管理器（不导入、不执行）。
 

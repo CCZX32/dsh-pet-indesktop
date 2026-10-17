@@ -136,6 +136,7 @@ class AiFileView(AiPetView):
 #: 进程级呈现提供方工厂（AppShell 注册；``None`` = 没有呈现面，安全降级）。
 _AI_PET_VIEW: Callable[[], object] | None = None
 _AI_WINDOW_CALLBACKS: tuple[Callable | None, Callable | None] = (None, None)
+_FILE_INTERPRET_ROUTER = None
 
 
 def register_ai_pet_view(factory: Callable[[], object] | None, *, notifier=None, auth_callback=None) -> None:
@@ -150,6 +151,17 @@ def register_ai_pet_view(factory: Callable[[], object] | None, *, notifier=None,
 def ai_window_callbacks() -> tuple[Callable | None, Callable | None]:
     """只给通知与固定 owner 的设置导航，不暴露 Core 配置或凭据。"""
     return _AI_WINDOW_CALLBACKS
+
+
+def register_file_interpret_router(router) -> None:
+    """Register the process-wide drag-file router (``None`` clears it on exit)."""
+    global _FILE_INTERPRET_ROUTER
+    _FILE_INTERPRET_ROUTER = router
+
+
+def file_interpret_router():
+    """The router Core installed, or ``None`` when the package runs standalone."""
+    return _FILE_INTERPRET_ROUTER
 
 
 def ai_pet_view() -> AiPetView | None:

@@ -27,6 +27,7 @@
     python scripts/verify_feature_package.py <包目录或 ZIP> [<包> ...]
     python scripts/verify_feature_package.py --bundle-root <包根>          # 根下每一份都验
     python scripts/verify_feature_package.py --bundle-root <包根> --target-platform linux
+    python scripts/verify_feature_package.py --bundle-root <包根> --official   # 随包官方包
     python scripts/verify_feature_package.py --json
 
 ``--bundle-root`` 的候选是谁**不猜**：根下的**每个直接子目录**与**每个 ``*.zip``**
@@ -51,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pet import feature_package_files  # noqa: E402
 from pet.feature_package_preflight import LocalPackageProbe  # noqa: E402
-from pet.feature_policy import DEFAULT_LIMITS, local_package_verifier  # noqa: E402
+from pet.feature_policy import DEFAULT_LIMITS, local_package_verifier, official_package_verifier  # noqa: E402
 from pet.local_package_intents import route_local_package  # noqa: E402
 from pet.plugins.package_trust import PackageVerificationError  # noqa: E402
 
@@ -62,6 +63,7 @@ REASONS = frozenset(
         "source_missing",       # 路径不存在，或既不是目录也不是文件
         "route_rejected",       # 有界清单读不出来（缺 manifest.json / 形状不合路由契约）
         "official_reserved",    # 官方保留 owner：本地包占不了这个名字
+        "not_official",         # --official 模式下候选不是官方登记包
         "platform_mismatch",    # 清单声明的 platforms 不含目标平台
         "verification_failed",  # 校验链拒：结构 / 兼容性 / 路径边界 / 摘要 / 指纹
     }
@@ -83,8 +85,11 @@ SIGNATURE_IGNORED = "signature_ignored"
 # --------------------------------------------------------------------------- 单份包
 
 
-def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
+def inspect(source: Path | str, *, target_platform: str = sys.platform, official: bool = False) -> dict:
     """验一份包（目录或 ZIP），返回体检报告 dict——**不抛异常**，结论都在返回值里。
+
+    ``official=True`` 走 Core 自有的官方验签策略（能力上限 = 官方登记闭集），
+    用于构建期校验随包携带的官方功能包；默认的本地包口径仍拒绝官方保留 ID。
 
     报告的 ``trust_status`` 是**信任口径**（本地包恒为 ``local_user``：显式用户信任，
     未做发布者认证），``warnings`` 是不构成拒绝的如实告知（见
@@ -138,7 +143,12 @@ def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
         manifest_digest=route.manifest_digest,
         platforms=list(route.platforms),
     )
-    if route.is_official:
+    if official:
+        if not route.is_official:
+            report["reason"] = "not_official"
+            report["problems"].append(f"{route.feature_id} 不在官方登记闭集里；--official 只验官方包")
+            return report
+    elif route.is_official:
         report["reason"] = "official_reserved"
         report["problems"].append(f"{route.feature_id} 是官方保留 ID：那条链是 Core 自有的，本地包不能占用它")
         return report
@@ -149,7 +159,11 @@ def inspect(source: Path | str, *, target_platform: str = sys.platform) -> dict:
         )
         return report
 
-    verifier = local_package_verifier(route.feature_id, platform=target_platform)
+    verifier = (
+        official_package_verifier(route.feature_id, platform=target_platform)
+        if official
+        else local_package_verifier(route.feature_id, platform=target_platform)
+    )
     try:
         # 解包目录要活到探针跑完（探针按 descriptor.root 重新验一遍）——所以整段
         # "完整校验 + 预检"都在这个上下文里，ZIP 的临时解包目录不能被提前回收。
@@ -261,7 +275,7 @@ def _duplicate_ids(packages: list[dict]) -> list[tuple[str, list[str]]]:
     return sorted((feature_id, sorted(items)) for feature_id, items in names.items() if len(items) > 1)
 
 
-def inspect_bundle(root: Path | str, *, target_platform: str = sys.platform) -> dict:
+def inspect_bundle(root: Path | str, *, target_platform: str = sys.platform, official: bool = False) -> dict:
     """验一个包根下的**每一份**候选包，返回 ``{root, ok, packages, problems}``。
 
     除逐份结论之外，包根本身也要过两条：**不许有非候选条目**（复制范围 = 验证范围），
@@ -270,7 +284,7 @@ def inspect_bundle(root: Path | str, *, target_platform: str = sys.platform) -> 
     """
     root = Path(root)
     candidates = bundle_candidates(root)
-    packages = [inspect(candidate, target_platform=target_platform) for candidate in candidates]
+    packages = [inspect(candidate, target_platform=target_platform, official=official) for candidate in candidates]
     problems = [
         f"{Path(report['source']).name}: {problem}" for report in packages for problem in report["problems"]
     ]
@@ -348,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bundle-root", type=Path, default=None, help="包根：根下每一份候选包都验一遍")
     parser.add_argument("--target-platform", default=sys.platform, help="目标平台（构建脚本按产物平台传，默认本机）")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    parser.add_argument("--official", action="store_true", help="按官方闭集校验（构建期随包携带的官方功能包）")
     args = parser.parse_args(argv)
 
     if not args.sources and args.bundle_root is None:
@@ -361,18 +376,18 @@ def main(argv: list[str] | None = None) -> int:
     problems: list[str] = []
     bundle_problems: list[str] = []
     if args.bundle_root is not None:
-        bundle = inspect_bundle(args.bundle_root, target_platform=args.target_platform)
+        bundle = inspect_bundle(args.bundle_root, target_platform=args.target_platform, official=args.official)
         packages.extend(bundle["packages"])
         problems.extend(bundle["problems"])
         bundle_problems.extend(bundle["bundle_problems"])
     for source in args.sources:
-        report = inspect(source, target_platform=args.target_platform)
+        report = inspect(source, target_platform=args.target_platform, official=args.official)
         packages.append(report)
         problems.extend(f"{Path(report['source']).name}: {problem}" for problem in report["problems"])
 
-    ok = bool(packages) and not problems
+    ok = bool(packages) and not problems and not bundle_problems
     if args.json:
-        print(json.dumps({"ok": ok, "target_platform": args.target_platform, "packages": packages, "problems": problems}, ensure_ascii=True, indent=2))
+        print(json.dumps({"ok": ok, "target_platform": args.target_platform, "packages": packages, "problems": problems, "bundle_problems": bundle_problems}, ensure_ascii=True, indent=2))
     else:
         for index, report in enumerate(packages):
             if index:

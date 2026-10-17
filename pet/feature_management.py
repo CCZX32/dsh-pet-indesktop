@@ -645,6 +645,63 @@ class LocalFeatureRuntime:
         manager.bootstrap()
         return manager
 
+    # ----------------------------------------------------- 官方包本地安装入口
+
+    def official_source(self, owner: str, *, allow_build: bool = True):
+        """Resolve the built package root for one official owner."""
+        from .official_package_source import resolve_official_package
+
+        return resolve_official_package(owner, config_dir=self.config.dir, allow_build=allow_build)
+
+    def official_packages(self) -> tuple[str, ...]:
+        """Official owners that have no active installed version right now."""
+        from .official_features import OFFICIAL_FEATURES
+
+        rows: list[str] = []
+        for owner in OFFICIAL_FEATURES:
+            manager = self.managers.get(owner)
+            if manager is None:
+                rows.append(owner)
+                continue
+            try:
+                if manager.service.inspect().active is None:
+                    rows.append(owner)
+            except (OSError, ValueError, RuntimeError):
+                rows.append(owner)
+        return tuple(rows)
+
+    def install_official(self, owner: str, source=None):
+        """Install a bundled/built official package through the Core-owned chain.
+
+        Returns ``(manager, accepted)``; the manager then runs its normal transaction
+        and the MOD center observes the persisted state. A missing source raises
+        ``ValueError`` with the resolver's actionable reason.
+        """
+        from pathlib import Path
+
+        manager = self.attach_official(owner)
+        if manager is None:
+            raise RuntimeError("official_feature_unavailable")
+        if source is None:
+            resolved = self.official_source(owner)
+            if not resolved.found:
+                raise ValueError(resolved.reason or "official_package_missing")
+            source = resolved.path
+        return manager, manager.submit("import_disabled", Path(source), auto_apply=True)
+
+    def uninstall_official(self, owner: str) -> bool:
+        manager = self.managers.get(owner)
+        if manager is None:
+            return False
+        return bool(manager.submit("uninstall"))
+
+    def set_official_enabled(self, owner: str, enabled: bool) -> bool:
+        manager = self.managers.get(owner)
+        if manager is None:
+            return False
+        info = manager.service.inspect()
+        return bool(manager.submit("enable", bool(enabled), expected_revision=info.revision))
+
     def route(self, source) -> str | None:
         """读一次包自己的**有界清单**（不导入、不执行），为它建好管理器。
 

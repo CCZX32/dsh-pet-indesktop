@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 <#
 .SYNOPSIS
     dsh-pet-standalone onedir build + portable zip packaging.
@@ -75,6 +75,7 @@
 param(
     [string]$Variant = 'webm-chat',
     [string]$FeaturePackages = '',
+    [switch]$OfficialFeaturePackages,
     [switch]$SkipBuild,
     [switch]$SkipZip,
     [switch]$SkipCheck,
@@ -162,7 +163,9 @@ if ($nodeExe) {
 # 不在本轮范围，别把没带包的构建读成"功能扩展不可用"。
 if ($FeaturePackages) {
     Write-Host "[features] verifying the feature package root (source side)..." -ForegroundColor Cyan
-    python scripts\verify_feature_package.py --bundle-root $FeaturePackages --target-platform win32
+    $verifyArgs = @('scripts\verify_feature_package.py', '--bundle-root', $FeaturePackages, '--target-platform', 'win32')
+    if ($OfficialFeaturePackages) { $verifyArgs += '--official' }
+    python @verifyArgs
     if ($LASTEXITCODE -ne 0) { throw "verify_feature_package failed on the source root: $LASTEXITCODE" }
     Write-Host "[features] source package root OK" -ForegroundColor Green
 }
@@ -721,7 +724,9 @@ if ($FeaturePackages) {
     if (Test-Path $featuresDir) { Remove-Item $featuresDir -Recurse -Force }
     Copy-Item $FeaturePackages $featuresDir -Recurse -Force
     Write-Host "[features] verifying the bundled package copies..." -ForegroundColor Cyan
-    python scripts\verify_feature_package.py --bundle-root (Join-Path $appDir 'features') --target-platform win32
+    $verifyArgs = @('scripts\verify_feature_package.py', '--bundle-root', (Join-Path $appDir 'features'), '--target-platform', 'win32')
+    if ($OfficialFeaturePackages) { $verifyArgs += '--official' }
+    python @verifyArgs
     if ($LASTEXITCODE -ne 0) { throw "[features] bundled feature packages missing or corrupt" }
     Write-Host "[features] bundle carries verified feature packages under features\" -ForegroundColor Green
 }

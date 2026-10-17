@@ -33,10 +33,18 @@ class FestivalReminderService:
     TICK_INTERVAL_MS = 30_000
     BUBBLE_DURATION_MS = 12_000
 
-    def __init__(self, app) -> None:
+    def __init__(self, app=None, *, scheduler=None, presentation=None, audio=None,
+                 config_source=None) -> None:
         from PySide6.QtCore import QTimer
 
         self._app = app
+        # Phase 2：四个端口可由插件上下文注入；不传时沿用 AppShell 旧路径，
+        # 生产装配在切换默认前两边都可用（共存优先，行为不变）。
+        self._scheduler = scheduler
+        self._presentation = presentation
+        self._audio = audio
+        self._config_source = config_source
+        self._timer_handle = None
         # 契约形状由纯逻辑层定义（enabled/cn/solar_terms/west/mode/count/times/...）
         self._cfg: dict = normalize_festival_config(None)
         # 当天已触发的槽位；跨天自动清空（槽位本身含日期，这里只是防集合无界增长）
@@ -46,17 +54,36 @@ class FestivalReminderService:
         self._timer.setInterval(self.TICK_INTERVAL_MS)
         self._timer.timeout.connect(self._on_tick)
 
+    def _config_object(self):
+        source = getattr(self, "_config_source", None)
+        if source is not None:
+            return source
+        return getattr(self._app, "config", None)
+
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
         self.apply_config()
         self._catch_up()
-        self._timer.start()
+        scheduler = getattr(self, "_scheduler", None)
+        if scheduler is not None:
+            self._timer_handle = scheduler.call_repeating(self._on_tick, self.TICK_INTERVAL_MS)
+        else:
+            self._timer.start()
 
     def stop(self) -> None:
+        handle = getattr(self, "_timer_handle", None)
+        if handle is not None:
+            try:
+                handle.cancel()
+            finally:
+                self._timer_handle = None
         self._timer.stop()
 
     def is_running(self) -> bool:
         """调度 tick 是否在跑（AppShell 的懒启停门控据此决定重启还是只刷配置）。"""
+        handle = getattr(self, "_timer_handle", None)
+        if handle is not None:
+            return bool(handle.is_active())
         return bool(self._timer.isActive())
 
     def apply_config(self) -> None:
@@ -66,7 +93,7 @@ class FestivalReminderService:
         且 config.json 被手改成非法值时回落默认而不是抛异常（本方法在
         start() 路径上执行，抛异常等于功能在启动期直接失败）。
         """
-        config = getattr(self._app, "config", None)
+        config = self._config_object()
         self._cfg = normalize_festival_config(config if config is not None else {})
 
     # ------------------------------------------------------------ 对外入口
@@ -97,7 +124,7 @@ class FestivalReminderService:
         恰好在节假日整点启动），用缓存值会让让位判定在该窗口内失效，从而两个
         功能同时出声。这里每次从 app.config 重新清洗，代价是每分钟至多一次。
         """
-        config = getattr(self._app, "config", None)
+        config = self._config_object()
         cfg = normalize_festival_config(config if config is not None else {})
         if not (cfg.get("enabled") and cfg.get("speak")):
             return False
@@ -166,6 +193,13 @@ class FestivalReminderService:
         """
         if not self._cfg.get("speak") or not text:
             return
+        audio = getattr(self, "_audio", None)
+        if audio is not None:
+            try:
+                audio(text, log_tag="节日提醒")
+            except Exception:
+                logger.exception("节日提醒语音播报失败（插件端口）")
+            return
         getter = getattr(self._app, "ensure_audio_channel", None)
         if not callable(getter):
             logger.warning("音频通道不可用，节日提醒仅出气泡")
@@ -197,6 +231,15 @@ class FestivalReminderService:
         import：本模块顶层不 import Qt，见文件头）。
         """
         if not text:
+            return
+        presentation = getattr(self, "_presentation", None)
+        if presentation is not None:
+            try:
+                if presentation.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS):
+                    return
+                presentation.notify("节日提醒", text)
+            except Exception:
+                logger.exception("节日提醒气泡展示失败（插件端口）")
             return
         from . import window_alerts
         app = self._app

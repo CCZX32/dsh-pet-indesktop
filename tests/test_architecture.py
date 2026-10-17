@@ -396,6 +396,14 @@ def test_pure_logic_modules_do_not_import_qt():
         # 也必须是 scripts/ 侧可单独导入的纯逻辑——沾上 Qt 就等于让后台线程去碰
         # GUI 对象，或让构建门为了一个哈希拉起 PySide6。
         "mod_hashing.py", "mod_manifest.py", "mod_transactions.py",
+        # 2026-10-17（Phase 2）加入 plugins/manifest、plugins/config、plugins/runtime：
+        # 插件清单/命名空间/Registry 都要能在无 GUI 的单测与独立 runtime 里跑；
+        # QTimer 只在 SchedulerPort 真正创建定时器时惰性导入（见 plugins/ports.py）。
+        "plugins/manifest.py", "plugins/config.py", "plugins/runtime.py",
+        "plugins/builtin/festival_reminder/manifest.py",
+        # 2026-10-17（阶段 3）加入拖文件路由与官方包来源解析：前者在投喂链上
+        # 只做一次纯调用；后者在设置页后台/启动子进程里解析来源，都不该拉 Qt。
+        "file_interpret_router.py", "official_package_source.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
