@@ -9,8 +9,12 @@
 服务名与 chat 的 SecretStore 保持一致（``dsh-pet-standalone``），因此凭据统一
 落在同一个「Windows 凭据管理器 → 通用凭据」条目下，用户不会看到两处。
 
-keyring 不可用（未安装 / 系统拒绝写入）时退化为**进程内存**：本次运行有效，
-重启即丢。调用方（设置页）据 ``set()`` 的返回值决定是否提示「仅本次运行有效」。
+keyring 不可用（未随包 / 系统拒绝写入）时退化为**写它的那个进程**的内存：重启即丢，
+且**别的进程读不到**。这不是细节——设置页默认跑在独立进程（``settings_process_isolation``，
+见 pet/config.py），真正合成的 ``VoiceChimeService`` 在主宠进程，所以这条兜底在
+「设置页存、主程序用」那条链路上等于没存。调用方（设置页）据 ``set()`` 的返回值与
+``persisted()`` 判断该怎么告诉用户，**不许**把内存里的值说成「已保存」或
+「本次运行有效」。这也是所有提供收费后端的变体都必须随包带 keyring 的原因。
 """
 
 from __future__ import annotations
@@ -31,9 +35,21 @@ def _keyring_module():
     return keyring
 
 
-def available() -> bool:
-    """系统钥匙串是否可用（决定凭据能否持久化）。"""
-    return _keyring_module() is not None
+def persisted(ref: str) -> bool:
+    """该凭据是否真的躺在系统钥匙串里（内存兜底不算持久化）。
+
+    ``get()`` 会连内存兜底一起读，所以它无法回答「这条凭据重启后还在不在」；
+    设置页据本函数决定行状态，从而不会把「写失败、只在内存」说成「已保存」。
+    """
+    if not ref:
+        return False
+    module = _keyring_module()
+    if module is None:
+        return False
+    try:
+        return bool(module.get_password(SERVICE_NAME, ref))
+    except Exception:
+        return False
 
 
 def get(ref: str) -> str:

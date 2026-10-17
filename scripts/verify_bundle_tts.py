@@ -49,6 +49,11 @@ from packaging.version import InvalidVersion, Version
 
 # 底部兜底清单：即使闭包测量退化（例如打包机装了 edge-tts 但 import 抛错被吞），
 # 这些模块也必须在包里。`tabulate` 在列——它是 PYZ-only 的那类依赖。
+#
+# `keyring` 在列（2026-10-17）：语音报时的收费后端（MiMo / 豆包）把 API Key 存系统
+# 钥匙串，而 **no-chat 变体原先把它和 `pet.chat` 一起排除**——用户填了 Key、界面报
+# 「已保存」，主宠进程读到的却是空串，收费后端永远自报「没配 Key」。静默、且看不见，
+# 所以放进这份清单：任何变体少带它，构建期就判红（退出码 4）。
 MINIMUM_MODULES = (
     "edge_tts",
     "edge_tts.communicate",
@@ -57,6 +62,7 @@ MINIMUM_MODULES = (
     "aiohttp",
     "aiohttp.client",
     "certifi",
+    "keyring",
 )
 
 

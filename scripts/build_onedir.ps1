@@ -48,6 +48,16 @@
       (excluding them made OCR unusable in the frozen bundle - measured
       2026-10-13).
 
+    Credential store + bundled notices (2026-10-17):
+      Every variant collects keyring, including the no-chat ones: the voice-chime
+      settings page and its paid TTS backends (MiMo / Doubao API keys) exist in all
+      four variants, and a bundle without keyring can only keep a key in the memory
+      of the process that wrote it (settings pages run in their own process), so the
+      main pet process never sees it while the UI says "saved". The repo-root LICENSE
+      and THIRD_PARTY_NOTICES.md are bundled too: the click sounds under
+      assets\sounds\duck are MIT assets whose license text only lives in the notices
+      file, so shipping the assets without it ships the material without the license.
+
     Examples:
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm -SkipZip
@@ -132,8 +142,12 @@ if ($nodeExe) {
 
 # GIF builds ship assets/characters_gif (webm dir must NOT be bundled, else runtime prefers webm)
 $datas = if ($isGif) { 'assets/characters_gif;assets/characters_gif' } else { 'assets/characters;assets/characters' }
-# No-chat builds exclude the chat subsystem and keyring (kept out of the bundle)
-$excludes = if ($noChat) { @('--exclude-module', 'pet.chat', '--exclude-module', 'keyring') } else { @() }
+# no-chat 变体只排 chat 子系统本体（2026-10-17 起不再排 keyring）：
+# 语音报时设置页与它的收费 TTS 后端（MiMo / 豆包都要 API Key）在四个变体里都在，
+# 少了 keyring 的变体只能把 Key 留在**写它的那个进程**的内存里——而设置页跑在独立
+# 进程（--settings），主程序读不到，界面却报「已保存」。四个变体三个平台都由
+# tests/test_packaging_keyring_notices.py 钉住。
+$excludes = if ($noChat) { @('--exclude-module', 'pet.chat') } else { @() }
 # PyOpenGL 与本应用无关（Qt 用自带 OpenGL），但其 freeglut_README.txt 是
 # CP1252 编码，会触发 check_bundle_encoding 的 UTF-8 严格校验（该自检针对
 # 中文资源，第三方 README 属误伤）；排除后包体也更小。
@@ -189,8 +203,16 @@ foreach ($m in @('matplotlib','matplotlib_inline','seaborn','IPython','ipykernel
 foreach ($m in @('django','hypothesis')) {
     $excludes += @('--exclude-module', $m)
 }
-# Chat 版必须显式收集 keyring（API Key 系统安全存储）；no-chat 不收集
-$keyringCollect = if ($noChat) { @() } else { @('--collect-all', 'keyring') }
+# keyring 必须显式收集，且**四个变体都要**（API Key 的系统安全存储）：no-chat 变体把
+# pet.chat 排掉了，静态分析因此摸不到 keyring（chat 的 SecretStore 是它原来的唯一入口），
+# 而语音报时的收费后端（pet/tts/mimo、pet/tts/doubao）照旧收 API Key。少了它，凭据只能
+# 留在写它的进程内存里，主程序永远读不到（见上面 $excludes 那段）。
+$keyringCollect = @('--collect-all', 'keyring')
+# 随包分发的许可与声明：assets\sounds\duck 下的内置点击音是 MeteorNOX 的 MIT 素材，
+# 许可正文写在仓根 THIRD_PARTY_NOTICES.md 第 1 节——只打 assets\sounds 等于只分发素材、
+# 不分发许可。两份都落在 _internal（onedir 的数据根），安装包整目录拷贝即随分发。
+# 这两行刻意写成内联的 --add-data（同 assets\icon.ico 那行）：漏掉不报错，只在产物里
+# 静默少一份声明，所以它要待在参数段里一眼看得见（守卫：tests/test_packaging_keyring_notices.py）。
 $chatData = if ($noChat) { @() } else {
     @(
         '--add-data', 'pet\chat\legacy_styles.qss;pet\chat',
@@ -355,6 +377,8 @@ if (-not $SkipBuild) {
         --add-data "assets\sounds;assets\sounds" `
         --add-data "assets\chat;assets\chat" `
         --add-data "assets\icon.ico;assets" `
+        --add-data "LICENSE;." `
+        --add-data "THIRD_PARTY_NOTICES.md;." `
         --add-data "integrations;integrations" `
         --add-data "resources\presentmon;resources\presentmon" `
         @rapidocrData `
