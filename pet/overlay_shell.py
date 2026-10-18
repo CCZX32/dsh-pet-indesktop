@@ -6828,6 +6828,9 @@ class OverlayShell(QObject):
             self._connect_host_screen(each)
         self._sync_host_geometry()
         self._refresh_tick_interval()  # 拔掉的那块屏不再参与刷新率取数
+        # 岛的墙可能挂在刚被拆掉的那块屏的宿主世界里：拔屏后主动重绑一次，不等岛
+        # 自己下一次几何事件（否则拔屏到岛下一次移动之间，宠撞不到岛）。
+        self._rebind_island_host()
 
     def handle_primary_screen_changed(self, screen) -> None:
         """主屏变更：**不迁宠**（用户把哪块屏设成主屏是系统级操作，与桌宠落位无关；
