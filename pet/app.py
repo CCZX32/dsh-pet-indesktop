@@ -1627,14 +1627,21 @@ class AppShell:
     def _self_talk_speak_wanted(self) -> bool:
         """点击自言自语朗读是否开启——它同样复用报时服务的音频通道。
 
-        只要求「点击触发自言自语」+ 本朗读开关：点击自言自语是独立开关，不与
-        「气泡自言自语」总开关（周期气泡）耦合，否则只想点击听声的用户永远拿不到
-        音频通道。避免给用不到的场景常驻一条音频通道。
+        ``self_talk_speak_enabled`` 与 ``click_show_self_talk`` 都在
+        ``pet_profiles.PER_PET_KEYS`` 里（**每宠键**）：真值在各自的 slot 档案，
+        主配置那份只是 slot0 兜底。读主配置会让"设置页明明打开了、运行期看不到"
+        ——音频通道根本不建，点击静默无声、连一行日志都没有（v4.3.3 用户实测：
+        设置里勾着「点击台词朗读」，`config-slot-0.json` 也有值，就是不朗读）。
         """
-        return bool(
-            self.config.get("self_talk_speak_enabled", False)
-            and self.config.get("click_show_self_talk", False)
-        )
+        for cfg in self._self_talk_voice_configs():
+            try:
+                speaks = bool(cfg.get("self_talk_speak_enabled", False))
+                shows = bool(cfg.get("click_show_self_talk", False))
+            except Exception:  # noqa: BLE001 - 单个视图读失败不该拖垮通道判据
+                continue
+            if speaks and shows:
+                return True
+        return False
 
     def _divination_speak_wanted(self) -> bool:
         """抽签语音播报是否开启——它同样复用报时服务的音频通道。
@@ -1805,9 +1812,13 @@ class AppShell:
         悄悄回退在线合成（音色变成另一个人）。
         """
         overlay = getattr(self, "_overlay_shell", None)
-        if overlay is not None:
-            return [overlay._sprite_config(sprite) for sprite in overlay._all_sprites()]
-        return [inst.config for inst in self._instances]
+        all_sprites = getattr(overlay, "_all_sprites", None)
+        sprite_cfg = getattr(overlay, "_sprite_config", None)
+        if callable(all_sprites) and callable(sprite_cfg):
+            return [sprite_cfg(sprite) for sprite in all_sprites()]
+        # ``_instances`` 是底层表（``instances`` 只是它的 property）：``__new__``
+        # 造出来的测试桩没有这张表，读不到时当作"没有活跃宠"。
+        return [inst.config for inst in getattr(self, "_instances", ())]
 
     def _sync_chime_service(self) -> None:
         """按配置启停语音报时服务；关闭时释放服务对象。"""

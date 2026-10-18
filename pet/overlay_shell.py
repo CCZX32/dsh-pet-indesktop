@@ -1076,6 +1076,7 @@ class OverlayShell(QObject):
         # B7b per-slot 取源：逐 sprite 的配置视图（配置同步边界重建）与子 sprite
         # 的各自主气泡跟随器/自言自语宿主/ pet 形宿主。
         self._drag_relaxed_sprite = None  # 拖拽期间被放宽域的那只（收尾时恢复）
+        self._mixed_dpr_logged = False  # 混合缩放退化只提示一次
         self._sprite_cfg_cache: dict = {}
         self._bubble_followers: dict = {}
         self._sprite_hosts: dict = {}
@@ -1378,7 +1379,15 @@ class OverlayShell(QObject):
         窗口矩形取各屏**可用工作区**的并集包围矩形（见 ``_desktop_bounds``）；
         ``screen`` 只是"家那块屏"的记录（关闭跨屏时它决定唯一活动区）。
         """
-        desktop = self._desktop_bounds()
+        if self._mixed_dpr() and not self._mixed_dpr_logged:
+            self._mixed_dpr_logged = True
+            ratios = sorted({round(float(s.devicePixelRatio() or 1.0), 3)
+                             for s in self._screens()})
+            logging.warning(
+                "多屏缩放不一致（DPR %s）：一张合成窗只能有一个 DPR，"
+                "为免桌宠画到屏幕外，窗口退化为启动屏，跨屏本次不可用",
+                ratios)
+        desktop = self._desktop_bounds(screen)
         bounds = QRect(0, 0, desktop.width(), desktop.height())
         overlay = ShellOverlayWindow(screen, driver=self.driver)
         overlay._desktop_bounds = self._desktop_bounds  # noqa: SLF001 - 同模块协作面
@@ -1520,13 +1529,31 @@ class OverlayShell(QObject):
         """当前屏集合（窗口矩形、活动区与屏归属的取数源）。"""
         return list(self._screen_list)
 
-    def _desktop_bounds(self) -> QRect:
+    def _mixed_dpr(self) -> bool:
+        """各屏设备像素比是否不一致（混合缩放）。
+
+        一张合成窗只有一个 DPR：混合缩放下按并集铺窗，绘制会按**单一** DPR 缩放，
+        与实际屏位置错位——实机表现是桌宠完全不可见、点不到（issue #307：主屏
+        1920×1080@100% + 副屏 3200×2000@200%，把副屏调成 100% 就正常）。
+        """
+        ratios = {round(float(screen.devicePixelRatio() or 1.0), 3)
+                  for screen in self._screens()}
+        return len(ratios) > 1
+
+    def _desktop_bounds(self, home=None) -> QRect:
         """窗口全局矩形 = 各屏**可用工作区**的并集包围矩形。
 
         用 availableGeometry 而不是 virtualGeometry：后者含每屏任务栏，窗口铺满
         它就是以"全屏矩形"存在，Wallpaper Engine / TrafficMonitor 这类按窗口矩形
         自判全屏的软件会把桌宠当成全屏应用（WE 暂停壁纸、TM 隐藏悬浮窗，#302）。
+
+        **混合 DPR 时退化为家屏可用区**：宁可失去跨屏，也不能看不见（#307）。
         """
+        # ``home`` 参数只为建壳期（宿主还没建、``self._screen`` 还是 None）
+        if home is None:
+            home = self._screen
+        if home is not None and self._mixed_dpr():
+            return QRect(home.availableGeometry())
         rect = None
         for screen in self._screens():
             avail = QRect(screen.availableGeometry())
@@ -1544,13 +1571,15 @@ class OverlayShell(QObject):
 
         各屏可用工作区平移到窗口局部坐标后是**一组**矩形而不是并集：错位拼接
         的屏间空洞没有显示器，单矩形会让宠走进看不见的地方。关闭跨屏时只留家那
-        块屏——窗仍铺满全桌面，但宠出不去。
+        块屏——窗仍铺满全桌面，但宠出不去；混合 DPR 时同样只留家那块（窗口本身
+        已退化为家屏，见 ``_desktop_bounds``）。
         """
         screens = self._screens()
         home = self._screen
+        mixed = self._mixed_dpr()
         rects = []
         for screen in screens:
-            if not self._cross_screen_allowed and screen is not home:
+            if screen is not home and (not self._cross_screen_allowed or mixed):
                 continue
             rects.append((screen, self._screen_rect(screen)))
         return rects
@@ -2211,12 +2240,18 @@ class OverlayShell(QObject):
 
     @property
     def cfg(self):
-        """PetWindow 同名的配置面。
+        """PetWindow 同名的配置面：**主宠那份每宠视图**。
 
-        host 形消费者（``MusicLyricController`` / ``window_alerts`` 的若干分支）
-        直接读 ``win.cfg``；本壳内部用 ``_config``，这里补一个只读别名，避免
-        为了别名去改那些共享实现。
+        host 形消费者（``MusicLyricController`` / ``window_alerts`` 的各种分支）
+        直接读 ``win.cfg``。旧架构一窗一宠，``win.cfg`` 天然就是那只宠的视图；本壳
+        是单例，直接回主配置会让每宠键（``self_talk_texts`` / ``click_show_self_talk``
+        / ``self_talk_speak_enabled`` / ``character`` …）一律读成主配置里的缺省值
+        ——设置页写进 slot 档案、运行期却看不到。实机表现：开着「点击台词朗读」，
+        点击出气泡但**不朗读、也没有任何日志**（v4.3.3 用户实测 #307）。
         """
+        sprite = getattr(self, "sprite", None)
+        if sprite is not None:
+            return self._sprite_config(sprite)
         return self._config
 
     @property
@@ -6171,7 +6206,10 @@ class OverlayShell(QObject):
         """
         if sprite is None or screen is None or screen not in self._screens():
             return False
-        if not self._cross_screen_allowed and screen is not self._screen:
+        host = self._main_host
+        # 能去哪儿只看**活动区**：关闭跨屏时只有家那块屏，混合 DPR 时窗口已退化为
+        # 家屏（#307）——两种情况下目标屏都不在活动区里，直接拒绝。
+        if host is None or screen not in {s for s, _rect in host.activity}:
             return False
         if global_pos is not None:
             moved = self._place_sprite_at(sprite, QPointF(global_pos))

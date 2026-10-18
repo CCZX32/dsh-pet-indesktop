@@ -415,19 +415,27 @@ def test_switching_screen_keeps_clip_and_driver_running(tmp_path, monkeypatch):
         _cleanup(shell)
 
 
-def test_dpr_follows_the_target_screen(tmp_path, monkeypatch):
-    """一张窗只有一个 DPR，但逐只按**它自己那块屏**重建 pixmap/命中图。"""
+def test_mixed_dpr_falls_back_to_the_home_screen(tmp_path, monkeypatch):
+    """缩放不一致时窗口退化为家屏：宁可失去跨屏，也不能看不见（#307）。
+
+    一张合成窗只能有一个 DPR。铺满整个虚拟桌面时，绘制按单一 DPR 缩放、与实际
+    屏位置错位——实机表现是桌宠完全不可见、点不到（主屏 100% + 副屏 200%）。
+    """
     a, b = _two_screens()
     b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
     _install_screens(monkeypatch, a, b)
-    shell = _make_shell(tmp_path, a)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
     try:
-        shell.spawn_pet()
-        child = shell._spawned[0]
+        assert shell.overlay.geometry() == QRect(a.availableGeometry()), (
+            "混合 DPR 下窗口必须退化为家屏可用区")
+        assert [screen for screen, _rect in shell._main_host.activity] == [a], (
+            "混合 DPR 下活动区只剩家那块屏")
+        child = shell._spawned[0] if shell._spawned else None
+        if child is None:
+            shell.spawn_pet()
+            child = shell._spawned[0]
+        assert shell.move_sprite_to_screen(child, b) is False, "跨屏在混合 DPR 下不可用"
         assert child.dpr == 1.0
-        shell.move_sprite_to_screen(child, b)
-        assert child.dpr == 2.0
-        assert shell.sprite.dpr == 1.0, "另一只在主屏上，仍是 1.0"
     finally:
         _cleanup(shell)
 
