@@ -87,6 +87,9 @@ for _name, _vk in _NAMED_KEYS.items():
     preferred = {
         0x0D: "Enter", 0x1B: "Esc", 0x2E: "Delete", 0x21: "PageUp",
         0x22: "PageDown", 0x2C: "PrintScreen",
+        # 三个锁键按用户看得懂的原名回显（否则 canonical 会给出 "Capslock" 这种
+        # 大小写不对的写法，跟解析表里的写法不一致，往返就对不上）。
+        0x14: "CapsLock", 0x90: "NumLock", 0x91: "ScrollLock",
     }.get(_vk)
     if preferred is not None:
         _VK_NAMES[_vk] = preferred
@@ -131,6 +134,8 @@ def parse(text) -> tuple[int, int] | None:
     raw = str(text or "").strip()
     if not raw or len(raw) > _MAX_TEXT:
         return None
+    # 旧写法 "num+" 与分隔符 "+" 冲突：入口先归一化，老值仍能解析成 numplus。
+    raw = raw.replace("num+", "numplus").replace("NUM+", "numplus")
     parts = [p.strip() for p in raw.replace(" ", "").split("+")]
     parts = [p for p in parts if p]
     if len(parts) < 2:

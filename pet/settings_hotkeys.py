@@ -102,6 +102,9 @@ def chord_to_text(sequence) -> str:
         # 用户按小键盘不会触发（绑的是另一颗键）。
         return hotkey_spec.canonical(mods, 0x60 + (key - int(Qt.Key.Key_0))) or ""
     if keypad:
+        # 乘号在不同 Qt/键盘上可能报 Key_multiply(×) 或 Key_Asterisk(*)，两个都认。
+        if key in (int(Qt.Key.Key_multiply), int(Qt.Key.Key_Asterisk)):
+            return hotkey_spec.canonical(mods, 0x6A) or ""
         for vk, qt_name in _VK_NUMPAD_OPS.items():
             if key == int(getattr(Qt.Key, qt_name)):
                 return hotkey_spec.canonical(mods, vk) or ""

@@ -1759,3 +1759,66 @@ def test_duplicate_screen_names_prefer_the_screen_the_pet_stands_on(
         assert shell._screen_of_sprite(main) is b, "翻转后仍在该屏"
     finally:
         _cleanup(shell)
+
+
+def test_three_screens_converge_when_one_host_cannot_be_created(
+        tmp_path, monkeypatch, caplog):
+    """某块屏的宿主**建不起来**时：不许空转、不许吞掉，留日志等下次信号。
+
+    上一版这里有两个缺陷：`_reconcile_hosts_for_dpi` 的早退还用"数量 > 1"判据
+    （三屏只有两张宿主时直接 return，连几何同步都被跳过）；补偿用递归，每层都
+    重新拿到预算，遇到持续翻转能一路递归下去。现在是有界循环 + 集合判据 + 日志。
+    """
+    import logging as _logging
+
+    a, b, c = _three_screens()
+    _install_screens(monkeypatch, a, b, c)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original = shell._create_host
+
+        def flaky(screen):
+            if screen is c:
+                raise RuntimeError("这张宿主演不出来")
+            return original(screen)
+
+        monkeypatch.setattr(shell, "_create_host", flaky)
+        c.set_rects((3840, 0, 1920, 1080), (3840, 0, 960, 520), dpr=2.0)
+        with caplog.at_level(_logging.WARNING):
+            for _ in range(3):        # 连续信号：不许递归、不许越拆越多
+                shell._feed_screen_dpr()
+
+        assert shell._topology_txn is False, "闸门必须复位"
+        assert len(shell.hosts()) <= 3
+        assert any("屏拓扑未能对齐" in record.getMessage() for record in caplog.records), (
+            "收敛不了要留日志，不能静默")
+    finally:
+        _cleanup(shell)
+
+
+def test_consecutive_reentries_do_not_recurse(tmp_path, monkeypatch):
+    """事务里**连续多次**翻转：补偿循环有界，不会层层递归。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original = shell._adopt_new_host
+        flips = {"left": 6}
+
+        def adopt(screen, *, visible):
+            original(screen, visible=visible)
+            if flips["left"] > 0:
+                flips["left"] -= 1
+                # 反复在"多窗/单窗"之间横跳，逼补偿循环
+                dpr = 2.0 if flips["left"] % 2 == 0 else 1.0
+                b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=dpr)
+                shell._feed_screen_dpr()
+
+        monkeypatch.setattr(shell, "_adopt_new_host", adopt)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()      # 不许 RecursionError
+
+        assert shell._topology_txn is False
+        assert isinstance(shell.hosts(), list)
+    finally:
+        _cleanup(shell)

@@ -787,6 +787,10 @@ def _crop_icon_pixmap(pm: QPixmap, size: int) -> QPixmap:
                      Qt.TransformationMode.SmoothTransformation)
 
 
+#: 屏拓扑重排一次调用最多跑几轮（事务期间到达的信号会触发重做；有界防抖动）
+_TOPOLOGY_MAX_PASSES = 4
+
+
 class ShellOverlayWindow(OverlayWindow):
     """4.1a 产品 overlay：挂进程级驱动器 + 单击/拖拽区分。
 
@@ -6873,9 +6877,13 @@ class OverlayShell(QObject):
     def _connect_host_screen(self, host) -> None:
         """把**全部**屏的几何/DPI/刷新率变化接到每一张合成窗上。
 
-        注意订阅范围：每个宿主都订阅**所有**屏，不只是自己承载的那一块——因为
-        缩放/几何变化会让判定翻转（单窗 ↔ 每屏一窗），任何一块屏的变化都可能
-        需要整组重排；回调因此驱动的是全局同步，不是"只动自己"。
+        注意两件事，别按单窗形态脑补：
+        1. **订阅范围**：每个宿主都订阅**所有**屏，不只是自己承载的那一块——缩放/
+           几何变化会让判定翻转（单窗 ↔ 每屏一窗），任何一块屏的变化都可能需要整组
+           重排，回调驱动的是全局同步，不是"只动自己"；
+        2. **承载范围**：单窗形态下这张窗确实铺满整张虚拟桌面（一片窗含多块屏），
+           每屏一窗形态下每张窗只取**自己那块屏的工作区**（见 `_host_window_rect`）
+           ——本方法对两种形态都成立。
 
         窗覆盖整个虚拟桌面，所以任何一块屏的几何、任务栏、缩放变化都要重算窗口
         矩形与活动区——只挂家那块屏的话，别的屏在窗里留下的那块矩形会停在旧值。
@@ -7061,33 +7069,47 @@ class OverlayShell(QObject):
         DPR 会留下错位：单窗却按多窗算几何（副屏没有窗，那边的宠被按主宿主重新
         落位）、多窗却按单窗算（旧副屏宿主仍挂着成员，主窗又按整桌面铺开）。
 
-        两个方向共用一套"先记归属屏 + 屏内比例，改完再回位"的事务：只回位被搬动的
-        那几只是不够的——留在主宿主的宠会被 `_sync_host_geometry` 用**旧**主宿主
+        两个方向共用一套"先记归属屏 + 屏内比例，改完再回位"的事务：只回位被搬动
+        的那几只是不够的——留在主宿主的宠会被 `_sync_host_geometry` 用**旧**主宿主
         的整桌面 bounds 量比例，再落进新主屏的单屏 bounds，位置直接跑偏。
+
+        **有界循环，不是递归**：事务期间到达的信号会置 ``_topology_recheck``，
+        这里循环重做；每轮都重新用**集合判据**判断，并且"这一轮有没有真推进"
+        作为退出条件——递归会在每层重新拿到预算，遇到持续翻转能一路递归下去。
+        循环结束仍有缺口时留一次 pending 并留日志（不静默吞掉）。
         """
         if self._main_host is None:
             return
         if self._topology_txn:
             # 同一事务已经在上层跑：不在一半状态（宿主建了/拆了但几何还没同步）
-            # 上再开一层，否则 capture 会量到中间态的矩形。记一笔，事务收口时补做。
+            # 上再开一层，否则 capture 会量到中间态的矩形。记一笔，上层收口时补做。
             self._topology_recheck = True
             return
+        for _attempt in range(_TOPOLOGY_MAX_PASSES):
+            if not self._topology_needs_reconcile() and not self._topology_recheck:
+                return
+            self._topology_recheck = False
+            if not self._run_topology_pass():
+                break  # 没推进就别空转
+        if self._topology_needs_reconcile():
+            # 收敛不了（例如某块屏的宿主建不起来）：留 pending 等下一次信号重试，
+            # 并且**留一条日志**——静默失败会让"副屏没有窗"变成查不出原因的现象。
+            self._topology_recheck = True
+            logging.warning("overlay: 屏拓扑未能对齐（宿主 %d 张 / 需要 %s），下次屏信号再试",
+                            len(self._hosts),
+                            "每屏一张" if self._multi_window() else "一张")
+
+    def _run_topology_pass(self) -> bool:
+        """跑一轮拓扑事务；返回**这一轮有没有真的推进**（宿主集合变了）。"""
         want_multi = self._multi_window()
-        if want_multi == (len(self._hosts) > 1):
-            return  # 已经是目标形态，没有宿主集合要重排
+        before = [(host, host.screen) for host in self._hosts]
         self._topology_txn = True
         try:
             self._reconcile_hosts_locked(want_multi)
         finally:
             self._topology_txn = False
-        # 事务期间若又有信号进来（被闸门挡掉），这里补一次；次数封顶防抖动。
-        for _attempt in range(2):
-            if not self._topology_recheck:
-                break
-            self._topology_recheck = False
-            if not self._topology_needs_reconcile():
-                break
-            self._reconcile_hosts_for_dpi()
+        after = [(host, host.screen) for host in self._hosts]
+        return before != after
 
     def _reconcile_hosts_locked(self, want_multi: bool) -> None:
         """拓扑重排事务本体（调用方已置 ``_topology_txn`` 闸）。"""
@@ -7098,7 +7120,13 @@ class OverlayShell(QObject):
                        if screen is not None
                        and not any(host.screen is screen for host in self._hosts)]
             for screen in missing:
-                self._adopt_new_host(screen, visible=was_visible)
+                # 单块屏建窗失败不许把整次重排（以及调用它的屏信号）打崩：记下来、
+                # 跳过，剩下的交给调用方的有界循环与"未能对齐"日志。
+                try:
+                    self._adopt_new_host(screen, visible=was_visible)
+                except Exception:
+                    logging.exception("overlay: 为 %s 建宿主窗失败",
+                                      _screen_name(screen))
         else:
             home = self._main_host
             for host in list(self._hosts):
@@ -7249,7 +7277,11 @@ class OverlayShell(QObject):
         if not self._topology_txn and self._topology_needs_reconcile():
             self._reconcile_hosts_for_dpi()
             return
-        if self._multi_window():
+        # 分支按**实际宿主集合**选，不按判定：拓扑对齐失败时（某块屏的宿主建不起来）
+        # 按判定选分支会拿整桌面 bounds 当单屏分母，把位置算坏——那比"几何暂缓"
+        # 更糟。宿主集合是"我现在真有几张窗"，几何只能按它算。
+        multi = len(self._hosts) > 1
+        if multi:
             # 多窗：每张窗跟**自己那块屏**的可用区走；探头边界同样用虚拟桌面
             # 拖拽中的会话先收尾：拖拽域（放宽到虚拟桌面）、投影、弹簧目标全是
             # 按旧几何算出来的，换域之后它们指向窗外，松手会把这只丢在无显示器的

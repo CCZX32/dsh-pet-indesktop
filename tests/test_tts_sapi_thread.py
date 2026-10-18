@@ -77,3 +77,50 @@ def test_sapi_synth_writes_a_wav_from_a_background_thread(tmp_path):
         # 断言，产物大小只在本机真实语音环境里才有意义。
         pytest.skip(f"本机 SAPI 未真正产出音频（{out.stat().st_size} 字节）")
     assert out.stat().st_size > 1024
+
+
+def test_worker_thread_releases_com_on_exit(monkeypatch):
+    """合成 worker 收尾时配对释放本线程的 COM（只在**我们自己的短命线程**里）。"""
+    from pet import tts
+    from pet import voice_chime_service as vcs
+
+    calls: list[str] = []
+
+    def fake_release():
+        calls.append("release")
+
+    monkeypatch.setattr(tts.sapi, "release_thread_com", fake_release, raising=False)
+    worker = vcs._TTSWorker("文本", [], [], lambda *_a, **_k: None)
+    worker.run()   # attempts 为空 → 正常退出
+
+    assert calls == ["release"], "worker 收尾必须调用一次配对释放"
+
+
+def test_release_thread_com_is_noop_when_thread_never_initialized():
+    """本线程没初始化过 COM 时释放是 no-op（edge/mimo 后端走的就是这条）。
+
+    判据是 thread-local 标记：没经过 `_ensure_com` 的线程直接返回，不碰 comtypes。
+    """
+    import threading
+
+    from pet import tts
+
+    calls: list[str] = []
+
+    class _FakeComtypes:
+        @staticmethod
+        def CoUninitialize():
+            calls.append("uninit")
+
+    original = getattr(tts.sapi, "comtypes", None)
+    tts.sapi.comtypes = _FakeComtypes
+    tts.sapi._com_ready = threading.local()
+    try:
+        tts.sapi.release_thread_com()
+    finally:
+        tts.sapi._com_ready = threading.local()
+        if original is None:
+            delattr(tts.sapi, "comtypes")
+        else:
+            tts.sapi.comtypes = original
+    assert calls == []

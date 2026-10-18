@@ -281,3 +281,28 @@ def test_second_service_instance_is_reported(qapp_, caplog):
     del hk
     first.uninstall()
     second.uninstall()
+
+
+@pytest.mark.parametrize("text", ["Ctrl+num*", "Ctrl+numplus", "Ctrl+num-",
+                                  "Ctrl+num.", "Ctrl+num/", "Ctrl+num5",
+                                  "Ctrl+CapsLock", "Ctrl+NumLock", "Ctrl+ScrollLock"])
+def test_numpad_and_lock_keys_round_trip(text):
+    """小键盘运算符与三个锁键：录入 → 保存 → 回显必须闭环。
+
+    这些键在 Win32 侧是独立虚拟键码，在 Qt 侧是"普通键 + KeypadModifier"；任一方向
+    漏映射都会变成"绑上了但框里显示空"。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet import settings_hotkeys
+
+    qapp = QApplication.instance() or QApplication([])
+    sequence = settings_hotkeys.text_to_sequence(text)
+    assert not sequence.isEmpty(), f"{text} 必须能回显"
+    assert settings_hotkeys.chord_to_text(sequence) == text
+
+
+def test_legacy_num_plus_spelling_still_parses():
+    """旧写法 ``Ctrl+num+``（与分隔符冲突）在入口归一化后仍能解析。"""
+    assert spec.parse("Ctrl+num+") == (spec.MOD_CONTROL, 0x6B)
+    assert spec.normalize("ctrl+NUM+") == "Ctrl+numplus"

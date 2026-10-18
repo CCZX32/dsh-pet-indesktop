@@ -75,9 +75,10 @@ def release_thread_com() -> None:
     """本线程若因本模块进过 COM，就配对 ``CoUninitialize`` 释放。
 
     只在**我们自己的短命线程**（合成 worker）的收尾里调用：那种线程的生命周期由
-    本进程掌握，配对释放是干净的。常驻 GUI 线程不调——它那一份计数跟着进程活，
-    在那里释放反而可能让 Qt 后续的 COM 调用落进未初始化的 apartment。
-    线程从未初始化过时是 no-op。
+    本进程掌握，配对释放是干净的。常驻 GUI 线程不调——注意口径：配对释放只撤掉
+    **本模块自己加的那一次**计数，不会撤销 Qt 自己持有的另一份初始化；不在 GUI 线程
+    释放的理由是那里没有"线程结束"这个收尾点，提前释放反而可能让同一线程上后续的
+    COM 调用落进已拆除的 apartment。线程从未初始化过时是 no-op。
     """
     if getattr(_com_ready, "value", None) is not True:
         return
