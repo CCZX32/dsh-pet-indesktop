@@ -285,3 +285,23 @@ Windows 少带它仍以退出码 4 中止。**能力边界**：门禁校验的�
 `c4f2e43` 的**提交标题写错了因果**（"没打进包"）。它做的事仍然要留——显式收集把一条
 隐式的 PyInstaller hook 行为变成构建期可知的一件事，凭据读写失败不再静默也是对的——
 但它**不是那次 401 的根因修复**。发布稿第七节已按实测重写这一段，读者以那里为准。
+
+### 8.5 一次全量 segfault 的调查与收口（2026-10-19）
+
+第一次最终全量（`572bb44`，**与 PyInstaller 构建并行**跑）在 64% 处
+`Windows fatal exception: access violation`，崩点是
+`tests/test_quiet_mode.py::test_ticker_keeps_retrying_until_delivery_is_confirmed`
+里的 `qapp.processEvents()`（`_spin`）。
+
+| 步骤 | 结果 |
+|---|---|
+| 崩点单文件复跑 | `tests/test_quiet_mode.py` 60 passed（8.6 s），单独跑复现不出 |
+| 崩溃线程快照 | `mem_debug._tick_loop`（`while True: sleep`）与 `_self_talk_loader_loop`（`queue.get` 阻塞）都不碰 Qt；`tests/conftest.py` 的 autouse fixture 每例复位 `mem_debug`/quiet/webm session latch |
+| 干净环境全量（无并行构建） | **8377 passed, 14 skipped, 0 failed**（24:18），64% 那个点干净越过 |
+| 高负载复跑（本机 CPU 打满，`test_quiet_mode.py` × 3） | 60 / 60 / 60 passed（40.8 s / 13.5 s / 13.8 s，首遍即满负载） |
+
+**结论与边界**：**未复现，也没定性**。现有证据指向"全量 + 构建并行把 CPU 打满 →
+`processEvents()` 里撞上偶发竞态"，但 access violation 不带 Python 帧，没有能定性的
+栈。按仓库纪律已做高负载复跑，仍记为**已知偶发风险**，不写成"已修"。后续若再现，
+排查入口是 `test_quiet_mode` 的 `_spin` / `_pump`（两者都是 `processEvents()` +
+`sleep(0.005)` 的宽预算轮询），以及同一进程里残留的 `mem_debug` ticker 线程。
