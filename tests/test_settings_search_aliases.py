@@ -268,7 +268,15 @@ def test_alias_reset_defaults_and_excluded_terms_are_documented(tmp_path, monkey
             matches = _matches(dialog, token)
             keys = _keys(matches)
             assert keys, f"别名「{token}」没有命中任何行（别名字典 → 行键的指向已失效）"
-            for target in targets:
+            # 只要求**本平台真实存在**的那几行命中：有的别名会并列指到一个平台
+            # 专属行（「自动化与联动」并列指主动识屏 + 待办提醒，而主动识屏整页只在
+            # Windows 构造），拿本平台不存在的行去要求命中是假要求。
+            present = [
+                target for target in targets
+                if dialog.findChild(SettingRow, f"settingRow_{target}") is not None
+            ]
+            assert present, f"别名「{token}」的落点全都按平台闸门不存在"
+            for target in present:
                 assert f"settingRow_{target}" in keys, (
                     f"别名「{token}」必须命中 settingRow_{target}"
                 )
