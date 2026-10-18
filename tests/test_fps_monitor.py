@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import tempfile
@@ -1218,9 +1219,10 @@ SomeOtherCapture                        Trace                         Running
 class _FakeLogman:
     """``logman`` 调用替身（注意：不是进程替身，这里只关心 argv 与返回码）。"""
 
-    def __init__(self, listing: str = "", stop_rc: int = 0):
+    def __init__(self, listing: str = "", stop_rc: int = 0, query_rc: int = 0):
         self.listing = listing
         self.stop_rc = stop_rc
+        self.query_rc = query_rc
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
@@ -1228,14 +1230,15 @@ class _FakeLogman:
         self.calls.append(argv)
         is_query = len(argv) > 1 and argv[1] == "query"
         return subprocess.CompletedProcess(
-            argv, 0 if is_query else self.stop_rc,
+            argv, self.query_rc if is_query else self.stop_rc,
             self.listing if is_query else "", "")
 
 
 @pytest.fixture
 def sweep_gate(monkeypatch):
-    """每条用例都从「本进程还没扫过」开始（产品里这是一次性闸门）。"""
+    """每条用例都从「本进程还没扫过、也没建过会话」开始（产品里都是一次性状态）。"""
     monkeypatch.setattr(fm, "_swept_stale_sessions", False)
+    monkeypatch.setattr(fm, "_own_session_names", set())
 
 
 def test_sweep_stale_sessions_stops_only_own_prefix_and_spares_current(
@@ -1284,3 +1287,43 @@ def test_default_session_sweeps_before_building_the_session(monkeypatch, tmp_pat
     session = fm.default_session(1, "g.exe", "sess-1", backend=_backend_file(tmp_path))
     assert sweeps == ["sess-1"]
     assert session.session_name == "sess-1"
+
+
+def test_sweep_never_stops_a_session_this_process_created(monkeypatch, sweep_gate):
+    """本进程建过的会话一律不碰——只排除"本次要开的那个名字"不够。
+
+    重叠时序：``stop(wait=False)`` 之后立刻 ``start()``，旧 worker 还卡在 970ms 的
+    ``logman query`` 里，新 worker 已经把采集会话起来了；旧查询若只排除自己那个
+    尚未启动的名字，就会把**新会话当残留停掉**，FPS 当场断掉。
+    """
+    listing = _SWEEP_LISTING + "dsh-pet-fps-9-9-ours                Trace    Running\n"
+    fake = _FakeLogman(listing)
+    monkeypatch.setattr(fm.subprocess, "run", fake)
+    fm.sweep_stale_sessions("dsh-pet-fps-9-9-ours")  # 本进程的这一场
+    fm.sweep_stale_sessions("dsh-pet-fps-3-3-next", once=False)
+    stopped = [call[2] for call in fake.calls if call[1] == "stop"]
+    assert "dsh-pet-fps-9-9-ours" not in stopped
+    assert set(stopped) == {"dsh-pet-fps-1-1-aabbccdd", "dsh-pet-fps-2-2-11223344"}
+
+
+def test_sweep_failure_leaves_the_gate_open(monkeypatch, sweep_gate):
+    """查询失败不关闸：下一次开会话还会再试，不会"失败一次就永久不清理"。"""
+    def boom(argv, **kwargs):
+        raise OSError("logman 不存在")
+
+    monkeypatch.setattr(fm.subprocess, "run", boom)
+    assert fm.sweep_stale_sessions("a") == []
+    assert fm._swept_stale_sessions is False
+
+
+def test_sweep_closes_the_gate_even_when_logman_reports_failure(
+        monkeypatch, sweep_gate, caplog):
+    """``logman`` 返回非零（会话表读不到）：不清理、但要留一条诊断。"""
+    fake = _FakeLogman(_SWEEP_LISTING, query_rc=1)
+    monkeypatch.setattr(fm.subprocess, "run", fake)
+    with caplog.at_level(logging.WARNING):
+        assert fm.sweep_stale_sessions("s") == []
+    assert fm._swept_stale_sessions is True
+    assert [call[1] for call in fake.calls] == ["query"], "读不到表就别去乱停"
+    assert any("列出残留 ETW 会话失败" in record.getMessage()
+               for record in caplog.records)

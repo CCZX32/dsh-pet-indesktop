@@ -1940,6 +1940,29 @@ class OverlayShell(QObject):
             return getattr(self, "_bubble_follower", None)
         return self._bubble_followers.get(sprite)
 
+    def _rebind_bubble_follower(self, sprite, host) -> None:
+        """精灵换窗后把它的气泡跟随器也换到新窗（跨屏移交的唯一收口）。
+
+        ``remove_sprite`` 会摘掉该 sprite 的全部位置监听，跟随器又缓存着旧窗原点：
+        不重绑的话气泡停在旧位置、之后也不再跟宠走——实机表现就是"气泡漂在另一块
+        屏"。主宠的跟随器不在 ``_bubble_followers`` 里（那是子宠表），必须经
+        :meth:`_bubble_for` 取，否则主宠跨屏时这一步会被静默跳过。
+        """
+        follower = self._bubble_for(sprite)
+        if follower is None or host is None:
+            return
+        overlay = host.overlay
+        rebind = getattr(follower, "rebind", None)
+        try:
+            if callable(rebind):
+                rebind(overlay, overlay.geometry().topLeft())
+            else:  # 兼容只有 set_origin 的替身
+                setter = getattr(follower, "set_origin", None)
+                if callable(setter):
+                    setter(overlay.geometry().topLeft())
+        except Exception:
+            logging.debug("overlay: 气泡跟随器换窗失败", exc_info=True)
+
     def _show_bubble_text_for(self, sprite, text: str, duration_ms: int,
                               **kwargs) -> bool:
         """把一条气泡发给**指定 sprite** 的那只气泡（主 sprite 走壳的原路径）。
@@ -3797,12 +3820,12 @@ class OverlayShell(QObject):
         bridge = getattr(self, "island_bridge", None)
         if island is None or bridge is None:
             return
-        multi = getattr(self, "_multi_window", None)
-        if not callable(multi) or not multi():
-            return  # 单窗（同 DPI 的绝大多数形态）：一张窗一套坐标，没宿主可换
         host = self._island_screen_host(island)
         if host is None or host is getattr(self, "_island_host", None):
             return
+        # **不按 ``_multi_window()`` 早退**：拔掉混合缩放的副屏后只剩一块屏，
+        # 多窗塌回单窗，但桥此刻可能仍绑在被拆宿主的世界上（拔屏到岛下次移动
+        # 之间，宠撞不到岛）。是否重绑只看"目标宿主是不是当前绑的那个"。
         self._island_host = host  # rebind 内部会再回调一次本方法：先记账才不递归
         bridge.rebind(host.collision, host.overlay)
 
@@ -4981,13 +5004,12 @@ class OverlayShell(QObject):
             return
         if self._multi_window():
             # 多窗：拖拽中必须允许身体**画到窗外的相邻屏**，否则一半身体被本窗
-            # 裁掉（用户看到"被窗口挡住"）。宽松域 = 整张虚拟桌面换算到本窗局部，
-            # 相邻窗用投影补另一半（见 _sync_drag_projection）。
-            desktop = self._virtual_work_area()
-            if desktop.isEmpty():
+            # 裁掉（用户看到"被窗口挡住"）。宽松域 = 全部屏的**物理**外接矩形换算
+            # 到本窗局部，相邻窗用投影补另一半（见 _sync_drag_projection）。
+            domain = self._drag_domain_local(host)
+            if domain is None:
                 return
-            origin = host.overlay.geometry().topLeft()
-            sprite.set_clamp_rects((QRectF(desktop.translated(-origin.x(), -origin.y())),))
+            sprite.set_clamp_rects((domain,))
             self._drag_relaxed_sprite = sprite
             return
         bounds = host.bounds
@@ -4995,6 +5017,41 @@ class OverlayShell(QObject):
             return
         sprite.set_clamp_rects((QRectF(bounds),))
         self._drag_relaxed_sprite = sprite
+
+    def _drag_domain_local(self, host) -> QRectF | None:
+        """拖拽放宽域（源窗局部）：全部屏的**物理**外接矩形换算到源窗局部。
+
+        逻辑坐标不能直接用：混合缩放下 Qt 的逻辑桌面是 islands-of-screens，一块
+        1920 物理 @200% 的屏只占 960 逻辑宽；而源窗局部的单位是它自己的逻辑像素
+        （DPR 1.0 时就是物理像素）。拿各屏**逻辑**矩形求并集会把高 DPI 屏的物理
+        范围算小，实机表现是宠拖到那块屏中段就跟不上鼠标（鼠标还在动，宠被域钳住）。
+        物理空洞包含在内是有意的——拖拽期间允许身体经过无显示器的缝，松手才按
+        真实屏钳回来。
+        """
+        if not self._hosts or host is None:
+            return None
+        p_src = self._window_physical_origin(host.overlay)
+        d_src = float(host.overlay.devicePixelRatioF()) or 1.0
+        left = top = right = bottom = None
+        for other in self._hosts:
+            origin = self._window_physical_origin(other.overlay)
+            d_dst = float(other.overlay.devicePixelRatioF()) or 1.0
+            geometry = other.overlay.geometry()
+            width_px = geometry.width() * d_dst
+            height_px = geometry.height() * d_dst
+            x0 = (origin.x() - p_src.x()) / d_src
+            y0 = (origin.y() - p_src.y()) / d_src
+            x1 = (origin.x() + width_px - p_src.x()) / d_src
+            y1 = (origin.y() + height_px - p_src.y()) / d_src
+            left = x0 if left is None else min(left, x0)
+            top = y0 if top is None else min(top, y0)
+            right = x1 if right is None else max(right, x1)
+            bottom = y1 if bottom is None else max(bottom, y1)
+        if left is None or right is None or top is None or bottom is None:
+            return None
+        if right <= left or bottom <= top:
+            return None
+        return QRectF(left, top, right - left, bottom - top)
 
     def _sync_drag_projection(self, sprite=None) -> None:
         """拖拽期间让**相邻窗**把这只的另一半也画出来（跨窗拼接）。
@@ -5060,10 +5117,7 @@ class OverlayShell(QObject):
             # 旧窗原点：不补这两步，气泡会停在旧位置、以后也不再跟宠走（实机表现
             # 就是"气泡漂到另一块屏"）。
             self._bind_position_listener(sprite)
-            follower = self._bubble_followers.get(sprite)
-            setter = getattr(follower, "set_origin", None)
-            if callable(setter):
-                setter(other.overlay.geometry().topLeft())
+            self._rebind_bubble_follower(sprite, other)
             if persist:
                 # 归属只在**用户动作**里改写（拖拽收尾/显式移屏）。每拍兜底跑到
                 # 这里说明是机械变化（拔屏、几何变化），改写会把用户记住的屏吃掉。
@@ -5159,6 +5213,11 @@ class OverlayShell(QObject):
         sprite.set_pos(local)
         target_host.apply_activity(sprite)
         sprite.home_screen = target_host.screen
+        if source is not target_host:
+            # 换窗必然摘掉了位置监听（见 ``_place_sprite_in_physical_screen`` 同款
+            # 说明）：runtime 标记与气泡跟随器都要改挂到目标窗。
+            self._bind_position_listener(sprite)
+            self._rebind_bubble_follower(sprite, target_host)
         return True
 
     def _on_grab_finished(self) -> None:
@@ -6670,14 +6729,18 @@ class OverlayShell(QObject):
         sprite._pending_screen_assignment = _screen_name(screen)
 
     def _bind_position_listener(self, sprite) -> None:
-        """主 sprite 的 runtime 标记跟随监听（挂在唯一合成窗上）。
+        """主 sprite 的 runtime 标记跟随监听（挂在它**当前所在**那张窗上）。
 
         sprite 不是窗口、没有 moveEvent，runtime 标记靠窗口的位置监听扇出更新。
+        必须按 ``_host_of`` 取窗：跨窗移交后仍写死主窗的话，标记会跟着一张已经不
+        承载这只的窗走（主宠拖到副屏后 runtime 标记不再跟目标窗）。
         """
         if sprite is not self.sprite:
             return
-        self._main_host.overlay.add_position_listener(
-            sprite, self._on_main_sprite_moved)
+        host = self._host_of(sprite) or self._main_host
+        if host is None:
+            return
+        host.overlay.add_position_listener(sprite, self._on_main_sprite_moved)
 
     # ---------------------------------------------------------------- 屏事件
     def _wire_screen_signals(self) -> None:
@@ -6763,6 +6826,40 @@ class OverlayShell(QObject):
         for each in list(self._hosts):
             each.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
         self._refresh_self_talk_image_cache_for_dpr()
+        self._reconcile_hosts_for_dpi()
+
+    def _reconcile_hosts_for_dpi(self) -> None:
+        """缩放变化会翻转「单窗 ↔ 每屏一窗」：把宿主集合与新拓扑对齐。
+
+        ``_multi_window()`` 判的是**当前**屏幕 DPR，而宿主只在建壳与插拔屏时建。
+        运行中改显示缩放（控制面板把副屏从 100% 拖到 125%）会让判定翻转，只喂
+        DPR 会留下两种错位：单窗却按多窗算几何（副屏没有窗，那边的宠被按主宿主
+        重新落位）、多窗却按单窗算（旧副屏宿主仍挂着成员，主窗又按整桌面铺开）。
+        """
+        if self._main_host is None:
+            return
+        if self._multi_window():
+            missing = [screen for screen in self._screens()
+                       if screen is not None
+                       and not any(host.screen is screen for host in self._hosts)]
+            if not missing:
+                return
+            for screen in missing:
+                self._create_host(screen)
+            self._show_all_hosts()
+            # 新窗就位后按**物理**身体中心把每只送回它此刻真正所在那块屏；机械
+            # 变化不改归属（同每拍兜底的口径），用户记住的屏名不能被吃掉。
+            for sprite in self._all_sprites():
+                self._place_sprite_in_physical_screen(sprite, persist=False)
+        else:
+            if len(self._hosts) <= 1:
+                return
+            home = self._main_host
+            for host in list(self._hosts):
+                if host is home:
+                    continue
+                self._dismantle_host(host, home.screen)
+        self._sync_host_geometry()
 
     def _refresh_tick_interval(self) -> None:
         """某块屏的刷新率变了（或屏集合变了）：重读刷新率重算 tick 间隔。
@@ -6801,6 +6898,9 @@ class OverlayShell(QObject):
             target.apply_activity(sprite)
             sprite.home_screen = target.screen
             self._place_body_ratio(sprite, rx, ry, target.bounds)
+            # 换窗摘掉了位置监听（移除即 pop）：跟随面全部改挂到并进去的宿主。
+            self._bind_position_listener(sprite)
+            self._rebind_bubble_follower(sprite, target)
         self._disconnect_host_screen(dead)
         dead.overlay.hide()
         dead.overlay.close()

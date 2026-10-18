@@ -26,9 +26,42 @@
 
 产品代码（净改动）：
 
+逐文件增删（`git diff --numstat origin/main..HEAD`，产品代码 21 个文件 +1370/−250，
+测试 18 个文件 +1514/−51，合计 +3142/−301 含文档）：
+
+| 文件 | +/− | 一句话 |
+|---|---|---|
+| `pet/overlay_shell.py` | +582/−58 | 每屏一窗、跨屏投影与会话、逐宿主几何/DPR/岛/弹弓、缩放翻转重排宿主 |
+| `pet/self_talk_voice.py` | +144/−35 | 缓存键改 flavor 指纹、预缓存补跑与取消 |
+| `pet/app.py` | +120/−42 | 每宠视图（点击朗读判据 / chat 角色 / 身份）、音频通道生命周期 |
+| `pet/overlay_window.py` | +98/−7 | 投影绘制与旧矩形记账、刷新率/几何、气泡跟随换窗 |
+| `pet/fps_monitor.py` | +56/−1 | 残留 ETW 会话清理（进程内一次） |
+| `pet/todo_reminder.py` | +50/−22 | 气泡未送达改道通知、每日跨午夜宽限 |
+| `pet/island_bridge.py` | +45/−1 | 墙按岛所在屏绑定/重绑 |
+| `pet/voice_chime_service.py` | +42/−21 | 缓存键 resolved attempt、气泡被占不静默 |
+| `pet/festival_service.py` | +35/−19 | 与报时同型修复 |
+| `pet/game_fps.py` | +34/−0 | `parse_session_names` / `stale_session_names` / `stop_session_args`（纯函数） |
+| `pet/modern_settings_dialog.py` | +32/−10 | 点击内容设置显隐解耦 |
+| `pet/proactive.py` | +25/−5 | 角色身份走 provider |
+| `pet/sprite_slingshot.py` | +25/−3 | 会话记 owner，只有 owner 画/Esc 路由 |
+| `pet/dynamic_island.py` | +21/−2 | 岛名走身份视图 |
+| `pet/sprite_menu_facade.py` | +20/−6 | 右键菜单按宿主取控制器、图标取帧 |
+| `pet/voice_chime.py` | +11/−4 | `cache_key` 接受 `values=` |
+| `pet/window.py` | +10/−5 | legacy `show_bubble` 返回布尔 |
+| `pet/settings_interaction.py` | +8/−3 | 同上显隐解耦的设置面 |
+| `pet/multi_window_shared.py` | +6/−3 | 扇出目标取壳 |
+| `pet/sprite_sound.py` | +5/−2 | 点击音效多文件现挑（#308） |
+| `pet/__init__.py` | +1/−1 | 版本号 4.3.4 |
+
+测试：18 个文件 +1514/−51，新增回归约 60 条（`test_overlay_hosts_multiscreen.py`
+新增 8 条含缩放翻转与物理拖拽域、`test_island_multiscreen_hosts.py` 新增拔屏重绑、
+`test_fps_monitor.py` 新增 6 条清理闸门/前缀/失败路径），另有两条旧断言按新契约改写
+（空洞钳制点移到松手、拖动中的钳制域改为整窗）。
+
+
 | 文件 | 改了什么 + 为什么 |
 |---|---|
-| `pet/overlay_shell.py` | `cfg` 改回**主宠每宠视图**（点击朗读/台词池/角色都读它）；新增 `_mixed_dpr()` / `_multi_window()`：混合缩放 + 允许跨屏时**每块屏一张窗**（一窗只能一个 DPR），跨屏 = 把这只连同位置交给目标窗（局部坐标经全局中转，拖拽中按光标所在屏实时移交），关闭跨屏时仍单窗退化为家屏；`_activity_rects` 多窗下按宿主；拖拽收尾补记屏幕归属并**松手即落盘**（且只在原归属屏仍在线时算有意换屏，拔屏的临时承载不动归属）；`move_sprite_to_screen` 改按活动区判定；全屏订阅 `refreshRateChanged` 并接/摘一致 |
+| `pet/overlay_shell.py` | `cfg` 改回**主宠每宠视图**（点击朗读/台词池/角色都读它）；新增 `_mixed_dpr()` / `_multi_window()`：混合缩放 + 允许跨屏时**每块屏一张窗**（一窗只能一个 DPR），跨屏 = **拖拽期间不换窗**（这只仍在源窗积分），邻窗挂带缩放的只读投影补另一半、松手才按物理位置提交归属（局部坐标经全局中转）；关闭跨屏时仍单窗并退化为家屏；`_activity_rects` 多窗下按宿主；拖拽收尾补记屏幕归属并**松手即落盘**（且只在原归属屏仍在线时算有意换屏，拔屏的临时承载不动归属）；`move_sprite_to_screen` 改按活动区判定；全屏订阅 `refreshRateChanged` 并接/摘一致 |
 | `pet/app.py` | `_self_talk_speak_wanted` 改读每宠视图；`_self_talk_voice_configs` 修正底层表名（`_instances`）与测试桩容错；`_sync_chat_sessions` 的角色走 `_identity_config()`；`_identity_config()` 新增，供灵动岛/托盘/识屏取当前呈现身份 |
 | `pet/todo_reminder.py` | 气泡返回 False 时改道系统通知（不再吞掉）；`_daily_due` 枚举昨天/今天/明天，跨午夜宽限窗生效 |
 | `pet/window.py` | legacy `show_bubble` 返回布尔，与 overlay 同契约 |
@@ -51,11 +84,11 @@
 | 路径 | 开销 | 触发频率 |
 |---|---|---|
 | 拖拽收尾多一次几何自存 | 中位 3.4 ms（一次性原子写） | 用户每次拖拽结束 |
-| `_mixed_dpr()` | 每屏一次 `devicePixelRatio()` 比较 | 建壳 + 几何同步（非每拍） |
-| 台词点击查找 | 0.071 → 0.265 ms（flavor 解析 0.038 ms，且不再读钥匙串；磁盘侧由整目录 glob 变 ≤3 次精确 stat） | 每次点击 |
+| `_mixed_dpr()` | 每屏一次 `devicePixelRatio()` 比较（屏集合通常在个位数） | 建壳、几何同步，**以及每拍**：`_advance_screen_sync` → `_screen_of_sprite` → `_multi_window()` 这条链每 tick 判一次 |
+| 台词点击查找 | 0.071 → 0.265 ms（flavor 解析 0.038 ms，且不再读钥匙串；磁盘侧由整目录 glob 变按 flavor 键的精确查找，每次查找内含 `stat` + 打开文件读 12 字节头校验） | 每次点击 |
 | `_attempts` 每轮解析 | 0.7–1.6 ms | 每次预缓存批次（一次，非每句） |
 | `refreshRateChanged` 接线 | 每块屏一条信号连接 | 改刷新率/插拔屏 |
-| 残留 ETW 会话清理 | `logman query -ets` 实测 **970 ms** 中位（5 次）、每个残留会话 1 次 `logman stop` **56 ms**（均不需管理员）；**一个进程只跑一次**，总计 ≤1 次查询 + N 次停止 | 进程内第一次开采集会话时（历史现场 N=11，约 1.6 s 一次性） |
+| 残留 ETW 会话清理 | `logman query -ets` 实测 **970 ms** 中位（Windows 11 + Python 3.13 + `subprocess.run` 采样 5 次，本机空闲态；首末次 965–978 ms），每个残留会话 1 次 `logman stop <name> -ets` **56 ms**（均不需管理员）；**一个进程只跑一次** | 进程内第一次开采集会话时（历史现场 N=11，约 1.6 s 一次性，跑在 `FpsMonitor._run` 工作线程上） |
 
 无新增线程、定时器、网络请求；常驻内存无增长路径（`deque` 上限均在模块常量里，清理只读命令输出）。
 
@@ -74,7 +107,7 @@
   真合成 60 872 字节 wav。
 - 混合缩放（#307 问题一、#286 的相邻症状）：把左侧副屏调到 **125%**（物理 1920×1020、
   逻辑 1536×816）后实机验证——跨屏拖拽连续过缝、到副屏后能继续拖、跨窗投影位置跟随
-  光标、副屏子宠动画正常。验证期间暴露并修掉的一批多窗缺口见 §六点五。
+  光标、副屏子宠动画正常。验证期间暴露并修掉的一批多窗缺口见发布稿 `docs/RELEASE-v4.3.4.md` §六点五。
 - FPS 不出数的现场证据：`logman query -ets` 实抓到 **11 个** `Running` 的
   `dsh-pet-fps-*` 残留会话（`-15520-37-b4e46ca9`、`-17840-14`、`-33764-85`、
   `-31060-20`、`-33980-7`、`-9956-16`、`-33764-62`、`-24896-1`、`-30960-12`、
@@ -83,7 +116,41 @@
   修复已随包部署，**用户开游戏复核尚未回**——本条按「代码级 + 现场证据」记录，
   不声称已实测出数。
 
-## 五、已知未修（如实）
+## 五、测试与验证
+
+全部命令都在本机（Windows 11 / Python 3.13 / `QT_QPA_PLATFORM=offscreen`）执行，
+`-p no:randomly` 固定顺序以便复现：
+
+| 命令 | 结果 |
+|---|---|
+| `python -m pytest -q -p no:randomly`（全量） | `8264 passed, 14 skipped`（28 分 01 秒，日志 `.scratch/full-final4.log`；该轮之后又落了两条改动，见下） |
+| 交付前收尾两轮的聚焦族（`test_fps_monitor.py` `test_game_fps.py`） | 126 passed |
+| 多屏族（`test_overlay_hosts_multiscreen` `test_island_multiscreen_hosts` `test_sprite_bubble` `test_overlay_seam_passage` `test_overlay_cross_screen_switch` `test_overlay_virtual_desktop` `test_overlay_independent_screens`） | 159 passed |
+| `docs/test_pr_report_discipline` 系 | 197 passed |
+| `ruff check pet/ tests/` | All checks passed |
+
+**先红后绿**：本轮收尾新增的 5 条用例（主宠气泡换窗重绑、主宠 runtime 监听换窗、
+运行中改缩放翻转拓扑后重排宿主、拖拽域覆盖高 DPI 屏物理范围、拔屏后岛墙重绑）
+在还原 `pet/overlay_shell.py` / `pet/sprite_bubble.py` 到修复前状态时全部失败，
+恢复修复后全部通过。
+
+**没跑到的那一轮要说清**：最后两条改动（多窗日志文案按真实路径分流、残留清理改一个
+进程一次）之后没有再跑全量——按用户指示直接进入交付审查。它们的影响面是
+`overlay_shell._create_host` 的一条日志与 `fps_monitor` 的清理时机，
+相关族已单跑通过（多屏族 159 条、FPS 族 126 条）。
+
+## 六、风险与回滚
+
+- **回滚方式**：整版回退到 `v4.3.3` 即可（无配置格式变更、无键改名、无迁移，
+  新旧版本读同一份配置与素材）。
+- **多窗是行为级改动**：混合缩放下从一张窗变成每屏一窗。API 未变，但窗口数量与
+  枚举形态变了——OBS 等按窗口捕获的工具在 overlay 拓扑下本来就只能看到「一个有标题
+  的窗口」（捕获模式另算），本版未改这条语义。
+- **最坏情况**：多窗在某些三方 DPI 工具（如非整数缩放的强制覆盖）下几何取不到，
+  代码回退到逻辑原点并在日志留 warning；此时跨屏投影会偏。留了
+  `_window_physical_origin` 的 fallback 分支与日志，便于现场定位。
+
+## 七、已知未修（如实）
 
 - **#286**（150% DPI 下点不到、legacy 拖不动）需要该缩放环境 + 现场探针；报告者的
   「活跃清单启动不注册」经核为代码注释写明的有意设计（启动期不替用户改盘）。

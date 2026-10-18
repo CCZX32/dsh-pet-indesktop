@@ -407,6 +407,9 @@ _foreground_api = None
 #: 残留清理的"一个进程只扫一次"闸门（``logman query -ets`` 实测约 970ms）。
 _swept_stale_sessions = False
 
+#: 本进程创建过的全部采集会话名：清理时**一律不碰**（见 ``sweep_stale_sessions``）。
+_own_session_names: set[str] = set()
+
 
 def sweep_stale_sessions(session_name: str, *, once: bool = True) -> list[str]:
     """开会话前清掉**自己前缀**的历史残留 ETW 会话，返回停掉的名字。
@@ -416,19 +419,21 @@ def sweep_stale_sessions(session_name: str, *, once: bool = True) -> list[str]:
     （系统资源不足）——实机现场：整段 FPS 不出数，日志只有一行 1450，而用户
     以前单屏玩游戏能出数（权限没变，是我们自己的会话攒满了）。
 
-    只停 ``dsh-pet-fps-`` 前缀且不是本次会话的那些名字：绝不用通配去抢别人的
-    采集会话（同 ``new_session_name`` 的纪律）。清理是尽力而为，任何失败都只
-    放弃清理，绝不影响随后真正要开的采集会话。
+    只停 ``dsh-pet-fps-`` 前缀、且**不是本进程建过的任何一场会话**的名字：绝不用
+    通配去抢别人的采集会话（同 ``new_session_name`` 的纪律）。只排除"本次要开的
+    那个名字"是不够的——``stop(wait=False)`` 之后立刻 ``start()`` 时，旧 worker 可能
+    还卡在这次查询里，新的采集会话已经起来了，只认本次名字就会把它当残留停掉。
+    清理是尽力而为，任何失败都只放弃清理，绝不影响随后真正要开的采集会话。
 
-    ``once=True``（产品路径）：**一个进程只扫一次**。残留只可能来自上一个被强杀
-    的进程（本进程每次停止都走官方 ``--terminate_existing_session``），而
-    ``logman query -ets`` 实测 970ms 中位、``logman stop`` 56ms——每换一次游戏
-    目标就重付一次查询没有收益。``once=False`` 供测试与显式排查复扫。
+    ``once=True``（产品路径）：**一个进程只成功扫一次**。残留只可能来自上一个
+    被强杀的进程，而 ``logman query -ets`` 实测 970ms 中位、``logman stop`` 56ms
+    ——每换一次游戏目标重付一次查询没有收益。查询失败时闸门不关，下一次还会再试。
+    ``once=False`` 供测试与显式排查复扫。
     """
     global _swept_stale_sessions
+    _own_session_names.add(str(session_name))
     if once and _swept_stale_sessions:
         return []
-    _swept_stale_sessions = True
     try:
         listed = subprocess.run(  # noqa: S603 - 固定 argv，绝不过 shell
             ["logman", "query", "-ets"],
@@ -437,7 +442,15 @@ def sweep_stale_sessions(session_name: str, *, once: bool = True) -> list[str]:
             creationflags=_creation_flags())
     except (OSError, subprocess.SubprocessError):
         return []
-    names = game_fps.stale_session_names(listed.stdout or "", keep=session_name)
+    # 闸门在**查询真的返回之后**才关：失败不关闸，下一次会话再试一次。
+    _swept_stale_sessions = True
+    if listed.returncode != 0:
+        logging.warning("帧率采集：列出残留 ETW 会话失败（logman rc=%s），本次不清理",
+                        listed.returncode)
+        return []
+    names = [name for name in
+             game_fps.stale_session_names(listed.stdout or "", keep=session_name)
+             if name not in _own_session_names]
     stopped: list[str] = []
     for name in names:
         try:

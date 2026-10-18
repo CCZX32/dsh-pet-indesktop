@@ -234,3 +234,29 @@ def test_show_pets_from_island_chat_restores_secondary_pets(tmp_path, monkeypatc
         assert AppShell._overlay_sprite_visible(shell) is True
     finally:
         _cleanup(shell)
+
+
+def test_unplugging_the_secondary_screen_rebinds_the_island_wall(tmp_path, monkeypatch):
+    """拔掉混合缩放的副屏后，墙必须重绑到存活宿主（不能因为塌回单窗就早退）。
+
+    拔屏后只剩一块屏 → ``_multi_window()`` 变假。原先``_rebind_island_host`` 在那
+    一点直接 return，于是桥继续引用**已拆宿主**的碰撞世界：拔屏到岛下一次移动
+    之间，存活屏上的宠撞不到岛（拖岛拍鱼也没有碰撞事件）。
+    """
+    shell, a, b = _mixed_shell(tmp_path, monkeypatch)
+    try:
+        island = _Island(b, QRect(2300, 100, 400, 80))
+        shell.attach_island(island)
+        dead = shell.host_for_screen(b)
+        assert shell._island_host is dead, "前提：墙此刻绑在副屏宿主"
+
+        island._screen = a                     # 系统把岛搬回存活屏
+        shell.handle_screen_removed(b)         # 副屏被拔掉（含屏集合收缩）
+
+        assert len(shell.hosts()) == 1, "前提：多窗已塌回单窗"
+        assert shell._island_host is shell._main_host, "墙必须重绑到存活宿主"
+        assert shell.island_bridge.core._world is shell.collision  # noqa: SLF001
+        assert ISLAND_MEMBER in shell.collision._static_members  # noqa: SLF001
+    finally:
+        shell.attach_island(None)
+        _cleanup(shell)

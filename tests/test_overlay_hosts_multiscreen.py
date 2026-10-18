@@ -1226,3 +1226,101 @@ def test_screen_removed_finishes_the_inflight_session_once(tmp_path, monkeypatch
         _cleanup(shell)
 
 
+# ---------------------------------------------------------------- 交付前审查的三条（4.3.4 收尾）
+class _RecordingFollower:
+    """气泡跟随器替身：只记 rebind / set_origin 调用。"""
+
+    def __init__(self):
+        self.rebinds = []
+        self.origins = []
+
+    def rebind(self, overlay, origin=None):
+        self.rebinds.append((overlay, origin))
+
+    def set_origin(self, origin):
+        self.origins.append(origin)
+
+
+def test_main_pet_bubble_follower_rebinds_to_the_target_window(tmp_path, monkeypatch):
+    """主宠跨屏后，它的气泡跟随器必须改挂到**目标窗**。
+
+    ``remove_sprite`` 会摘掉该 sprite 的全部位置监听，跟随器又缓存着旧窗原点：
+    只调 ``set_origin`` 不会重新注册，气泡从此不跟宠走。主宠的跟随器不在子宠表
+    ``_bubble_followers`` 里，取错表就等于整段静默跳过（实机"气泡漂到另一块屏"）。
+    """
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        follower = _RecordingFollower()
+        shell._bubble_follower = follower
+        assert shell._bubble_for(main) is follower, "前提：主宠取的是壳的主跟随器"
+
+        assert shell.move_sprite_to_screen(main, b) is True
+
+        host_b = shell.host_for_screen(b)
+        assert follower.rebinds, "换窗必须重绑，不能只 update 原点"
+        overlay, _origin = follower.rebinds[-1]
+        assert overlay is host_b.overlay, "要挂到目标窗，不是原来那张"
+    finally:
+        _cleanup(shell)
+
+
+def test_main_pet_runtime_listener_follows_the_target_window(tmp_path, monkeypatch):
+    """主宠跨屏后 runtime 标记的位置监听要挂在**它现在所在**那张窗上。"""
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        assert shell.move_sprite_to_screen(main, b) is True
+        host_b = shell.host_for_screen(b)
+        host_a = shell.host_for_screen(a)
+        assert main in host_b.overlay._position_listeners
+        assert main not in host_a.overlay._position_listeners
+    finally:
+        _cleanup(shell)
+
+
+def test_runtime_dpr_change_flips_topology_and_reconciles_hosts(tmp_path, monkeypatch):
+    """运行中改缩放会翻转「单窗 ↔ 每屏一窗」，宿主集合必须跟着重排。
+
+    同 DPI 双屏启动只有一张窗；把副屏改成 200% 后 ``_multi_window()`` 变真，若只
+    喂 DPR 不重排宿主，副屏没有窗、那边的宠被按主宿主重新落位。反向（改回同 DPI）
+    则必须拆掉多出来的宿主，否则它挂着成员而主窗又按整桌面铺开。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        assert len(shell.hosts()) == 1, "前提：同 DPI 只有一张窗"
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+        shell._feed_screen_dpr()
+        assert len(shell.hosts()) == 2, "缩放变成混合 DPI 后必须补出副屏的窗"
+        assert shell.host_for_screen(b) is not None
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+        shell._feed_screen_dpr()
+        assert len(shell.hosts()) == 1, "缩放改回一致后必须拆掉多出来的宿主"
+        assert shell.host_for_screen(b) is shell._main_host, (
+            "单窗下任何在连的屏都由唯一那张窗承载")
+    finally:
+        _cleanup(shell)
+
+
+def test_drag_domain_covers_the_physical_extent_of_a_high_dpi_screen(
+        tmp_path, monkeypatch):
+    """拖拽放宽域按**物理**外接矩形算，别按逻辑桌面（高 DPI 屏会被算小）。
+
+    副屏 1920 物理 @200% 在 Qt 里只有 960 逻辑宽。按逻辑求并集时源窗局部右缘只到
+    1920+960=2880，而那块屏的物理右缘是 1920+1920=3840 —— 宠拖到中段就跟不上
+    鼠标（鼠标还在动，位置被域钳住）。
+    """
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        host_a = shell.host_for_screen(a)
+        domain = shell._drag_domain_local(host_a)
+        assert domain is not None
+        assert domain.right() >= 1920 + 1920 - 1, (
+            "放宽域必须覆盖副屏的物理右缘（3840），而不是逻辑右缘（2880）")
+        assert domain.left() <= 0
+    finally:
+        _cleanup(shell)
