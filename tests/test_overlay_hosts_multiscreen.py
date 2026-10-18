@@ -1591,3 +1591,35 @@ def test_scale_change_that_also_shrinks_the_work_area_keeps_the_screen_ratio(
             f"必须留在副屏正中（比例 0.5），实际 {ratio:.2f}")
     finally:
         _cleanup(shell)
+
+
+def test_geometry_signal_before_the_dpi_flip_keeps_positions(tmp_path, monkeypatch):
+    """**几何信号先到、DPI 信号后到**时位置同样要保住（真实缩放的常见次序）。
+
+    `availableGeometryChanged` 直接调 `_sync_host_geometry()`，而它原先按
+    `_multi_window()` 选分支——此时判定已翻转、宿主集合还是旧的一张窗，于是整桌面
+    bounds 被当成单屏比例分母（主屏正中 960 → 480），并把活动区一起覆盖；随后到达
+    的 DPI 重排只能读到这个已损坏的状态，救不回原比例。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+        body = main.body_rect()
+        assert body.x() + body.width() / 2.0 == pytest.approx(960.0, abs=2.0), (
+            "前提：身体中心在主屏正中")
+
+        # 副屏改 200%：工作区同时减半。几何信号先到，DPI 信号后到
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell.handle_geometry_changed()
+        shell._feed_screen_dpr()
+
+        assert len(shell.hosts()) == 2, "前提：最终拆成每屏一窗"
+        assert shell._screen_of_sprite(main) is a
+        body = main.body_rect()
+        assert body.x() + body.width() / 2.0 == pytest.approx(960.0, abs=3.0), (
+            "主屏那只必须仍在主屏正中")
+    finally:
+        _cleanup(shell)

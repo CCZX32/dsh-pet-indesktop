@@ -1118,7 +1118,7 @@ class OverlayShell(QObject):
         #: 每块屏**上一次真正应用**的矩形（宿主窗局部坐标）。缩放变化时
         #: `screen.availableGeometry()` 已经变成**新**尺寸，而精灵坐标还是旧形态；
         #: 比例定标必须用这份旧值，否则会把 0.5 量成 1.0（见 _capture_screen_ratios）。
-        self._applied_screen_rects: dict[str, QRect] = {}
+        self._applied_screen_rects: dict[str, tuple[object, QRect]] = {}
         self._sprite_cfg_cache: dict = {}
         self._bubble_followers: dict = {}
         self._sprite_hosts: dict = {}
@@ -6952,7 +6952,7 @@ class OverlayShell(QObject):
             host = self._host_of_screen(screen)
         if host is None:
             return
-        self._applied_screen_rects[name] = self._compute_screen_rect_in_host(screen, host)
+        self._applied_screen_rects[name] = (host, self._compute_screen_rect_in_host(screen, host))
 
     def _host_of_screen(self, screen):
         for host in self._hosts:
@@ -6984,8 +6984,10 @@ class OverlayShell(QObject):
             if candidate is screen:
                 return QRect(rect)
         cached = self._applied_screen_rects.get(_screen_name(screen))
-        if cached is not None and not cached.isEmpty():
-            return QRect(cached)
+        # 缓存要连**宿主身份**一起对：同名屏、或宿主被拆掉重建后，旧条目属于另一个
+        # 坐标系原点，直接拿来量比例会错位。
+        if cached is not None and cached[0] is host and not cached[1].isEmpty():
+            return QRect(cached[1])
         return self._compute_screen_rect_in_host(screen, host)
 
     def _restore_screen_ratios(self, plan: list[tuple]) -> None:
@@ -7170,6 +7172,13 @@ class OverlayShell(QObject):
         """
         host = self._main_host
         if host is None:
+            return
+        # 拓扑与判定不一致（缩放变化时几何信号可能先到、DPI 信号后到）：先把宿主
+        # 集合补齐/拆掉，再由那次调用按新拓扑算几何。不先对齐就按**判定**选分支，
+        # 单窗的整桌面 bounds 会被当成单屏比例分母——主屏正中的宠直接掉到 25%
+        # 处，而且这次错误结果还会把活动区一起覆盖掉，后面的重排再也救不回原比例。
+        if self._multi_window() != (len(self._hosts) > 1):
+            self._reconcile_hosts_for_dpi()
             return
         if self._multi_window():
             # 多窗：每张窗跟**自己那块屏**的可用区走；探头边界同样用虚拟桌面
