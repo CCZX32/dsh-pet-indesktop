@@ -40,7 +40,7 @@ from __future__ import annotations
 import sys
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QCursor, QPainter, QRegion, QScreen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -574,30 +574,56 @@ class OverlayWindow(QWidget):
             self._sprite_removed_listeners.append(cb)
 
     # ---------------------------------------------------------------- 位置监听（Phase 3b）
-    def set_projection(self, sprite, offset) -> None:
-        """登记/更新一只**属于别的窗**的 sprite 在本窗的只读投影。
+    def set_projection(self, sprite, offset, scale: float = 1.0) -> None:
+        """登记/更新一只**属于别的窗**的 sprite 在本窗的只读视图。
 
-        ``offset`` = 归属窗原点 − 本窗原点（把这只的局部坐标搬进本窗坐标系的平移
-        量）。只读：本窗只借 painter 平移重画它的当前帧，不持有它的驱动权。
+        ``offset`` = 这只的左上角落在本窗坐标系里的位置。**必须由物理坐标换算**，
+        不能拿两个窗的逻辑原点相减——混合 DPI 下那样整体位移几百像素（Qt 官方文档
+        的 islands-of-screens：屏的位置不随缩放变，逻辑桌面不是连续平面）。
+        ``scale`` = 源窗 DPR / 本窗 DPR，把它的物理尺寸换算到本窗的逻辑尺寸。
+
+        只读：本窗只借 painter 平移 + 缩放重画它的当前帧，不持有驱动权。
+        **登记、更新、清除都报脏**——不报脏时旧像素会留到下一次别的原因重绘
+        （实机表现："主屏还留着半截身子，点一下才消失"）。
         """
-        self._projections[sprite] = QPointF(offset)
+        old = self.projection_rect(sprite)
+        self._projections[sprite] = (QPointF(offset), float(scale))
+        new = self.projection_rect(sprite)
+        for rect in (old, new):
+            if not rect.isNull():
+                self.update(rect)
 
     def clear_projection(self, sprite) -> bool:
-        """摘掉一只投影（返回是否原本有）。"""
-        return self._projections.pop(sprite, None) is not None
+        """摘掉一只投影并刷新它原来占的像素（返回是否原本有）。"""
+        old = self.projection_rect(sprite)
+        if self._projections.pop(sprite, None) is None:
+            return False
+        if not old.isNull():
+            self.update(old)
+        return True
 
     def projection_offset(self, sprite):
-        """该投影的映射偏移（没投影返回 None）。"""
-        return self._projections.get(sprite)
+        """该投影在本窗坐标系的落点（没投影返回 None）。"""
+        entry = self._projections.get(sprite)
+        return None if entry is None else QPointF(entry[0])
+
+    def projection_scale(self, sprite) -> float:
+        entry = self._projections.get(sprite)
+        return 1.0 if entry is None else float(entry[1])
 
     def projection_rect(self, sprite) -> QRect:
         """该投影在本窗坐标系里的绘制外接矩形（脏区映射用它）。"""
-        offset = self._projections.get(sprite)
-        if offset is None:
+        entry = self._projections.get(sprite)
+        if entry is None:
             return QRect()
-        rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
-                else sprite.rect())
-        return rect.translated(int(offset.x()), int(offset.y()))
+        offset, scale = entry
+        paint = getattr(sprite, "paint_bounds", None)
+        rect = paint() if callable(paint) else sprite.rect()
+        scaled = QRectF(rect.x() * scale, rect.y() * scale,
+                        rect.width() * scale, rect.height() * scale)
+        return scaled.translated(offset.x(), offset.y()).toRect()
+
+    # ---------------------------------------------------------------- 位置监听（Phase 3b）
 
     def add_position_listener(self, sprite, cb) -> None:
         """注册 sprite 位置监听：tick 推进后 rect 变化时回调 cb(sprite)。
@@ -708,16 +734,15 @@ class OverlayWindow(QWidget):
         # 跨屏投影：不属于本窗、但身体有一部分落在本屏的那只，按映射平移重画。
         # 画在本窗自己的 sprite 之上（正在被拖的那只是活动对象，压在别人上面）。
         # 本窗裁剪天然只留落在自己屏里的那一部分——这就是"两边各画一半"的拼接。
-        for sprite, offset in list(self._projections.items()):
+        for sprite, (offset, scale) in list(self._projections.items()):
             if not getattr(sprite, "visible", True):
                 continue
-            rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
-                    else sprite.rect()).translated(int(offset.x()), int(offset.y()))
-            if not region.intersects(rect):
+            if not region.intersects(self.projection_rect(sprite)):
                 continue
             painter.save()
             try:
                 painter.translate(offset)
+                painter.scale(scale, scale)
                 sprite.paint(painter)
             finally:
                 painter.restore()
