@@ -1586,6 +1586,14 @@ class OverlayShell(QObject):
         """
         return self._cross_screen_allowed and self._mixed_dpr()
 
+    def _virtual_work_area(self) -> QRect:
+        """所有屏可用工作区的并集（全局逻辑坐标）——多窗拖拽的宽松域用。"""
+        rect = None
+        for screen in self._screens():
+            avail = QRect(screen.availableGeometry())
+            rect = avail if rect is None else rect.united(avail)
+        return rect if rect is not None else QRect()
+
     def _host_window_rect(self, screen) -> QRect:
         """该宿主窗口的全局矩形（多窗模式 = 该屏可用区）。"""
         if self._multi_window() and screen is not None:
@@ -4837,14 +4845,59 @@ class OverlayShell(QObject):
         # 它本该待着的这块屏（关闭语义是"拖不过去"）。
         if not self._cross_screen_allowed:
             return
+        if self._multi_window():
+            # 多窗：拖拽中必须允许身体**画到窗外的相邻屏**，否则一半身体被本窗
+            # 裁掉（用户看到"被窗口挡住"）。宽松域 = 整张虚拟桌面换算到本窗局部，
+            # 相邻窗用投影补另一半（见 _sync_drag_projection）。
+            desktop = self._virtual_work_area()
+            if desktop.isEmpty():
+                return
+            origin = host.overlay.geometry().topLeft()
+            sprite.set_clamp_rects((QRectF(desktop.translated(-origin.x(), -origin.y())),))
+            self._drag_relaxed_sprite = sprite
+            return
         bounds = host.bounds
         if bounds.width() <= 0 or bounds.height() <= 0:
             return
         sprite.set_clamp_rects((QRectF(bounds),))
         self._drag_relaxed_sprite = sprite
 
+    def _sync_drag_projection(self, sprite=None) -> None:
+        """拖拽期间让**相邻窗**把这只的另一半也画出来（跨窗拼接）。
+
+        每屏一窗后，被拖的这只只能画在自己宿主那张窗里；身体跨在缝上时另一半
+        会被窗口裁掉——实机观感就是"被一个窗口挡住"。这里给相邻窗登记只读投影：
+        它只按映射平移重画当前帧，本窗裁剪天然只留落在自己屏里的那半。
+        """
+        target = sprite if sprite is not None else self._drag_relaxed_sprite
+        own = self._host_of(target) if target is not None else None
+        for host in self._hosts:
+            overlay = host.overlay
+            if target is None or own is None or host is own:
+                if target is not None:
+                    overlay.clear_projection(target)
+                continue
+            own_origin = own.overlay.geometry().topLeft()
+            paint = getattr(target, "paint_bounds", None)
+            body = QRectF(paint() if callable(paint) else target.rect())
+            body_global = body.translated(own_origin.x(), own_origin.y())
+            if not body_global.intersects(QRectF(overlay.geometry())):
+                overlay.clear_projection(target)
+                continue
+            overlay.set_projection(
+                target, QPointF(own_origin) - QPointF(overlay.geometry().topLeft()))
+
+    def _clear_drag_projection(self) -> None:
+        """拖拽收尾：把所有窗上的投影摘干净（否则会留下幽灵残影）。"""
+        sprite = self._drag_relaxed_sprite
+        if sprite is None:
+            return
+        for host in self._hosts:
+            host.overlay.clear_projection(sprite)
+
     def _restore_drag_domain(self) -> None:
         """拖拽收尾：恢复多矩形活动区，并把落脚点钳回真正有显示器的屏。"""
+        self._clear_drag_projection()
         sprite = self._drag_relaxed_sprite
         self._drag_relaxed_sprite = None
         if sprite is None:
@@ -4880,12 +4933,23 @@ class OverlayShell(QObject):
         """
         if not self._multi_window() or sprite is None:
             return False
-        screen = self._screen_at_global(global_pos)
-        target = self.host_for_screen(screen) if screen is not None else None
         source = self._host_of(sprite)
-        if target is None or source is None or target is source:
+        if source is None:
             return False
-        return self._hand_over_sprite(sprite, target, global_pos)
+        # 按**身体中心**判移交，不按光标：``drag_physics`` 弹簧档下身体本来就滞后
+        # 于光标，按光标移交会把还没过缝的身体换算到目标窗、被钳到窗边——实机就是
+        # "突然瞬移过去"。身体中心真进了那块屏才换窗，位置才连续。
+        origin = source.overlay.geometry().topLeft()
+        body = sprite.body_rect()
+        center = QPointF(origin.x() + body.x() + body.width() / 2.0,
+                         origin.y() + body.y() + body.height() / 2.0)
+        screen = self._screen_at_global(center)
+        target = self.host_for_screen(screen) if screen is not None else None
+        moved = False
+        if target is not None and target is not source:
+            moved = self._hand_over_sprite(sprite, target)
+        self._sync_drag_projection(sprite)
+        return moved
 
     def _hand_over_sprite(self, sprite, target_host, global_pos=None) -> bool:
         """把这只**连同当前身体位置**从源窗交给目标窗（多窗的唯一跨屏入口）。
