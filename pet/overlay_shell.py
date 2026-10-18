@@ -1604,14 +1604,38 @@ class OverlayShell(QObject):
                   for screen in self._screens()}
         return len(ratios) > 1
 
+    def _scaled_multi_screen(self) -> bool:
+        """多屏且**任意一块**屏的 DPR ≠ 1（单窗坐标系在这种机器上不可靠）。
+
+        Qt 6.12 在 Windows 上对**负原点屏**报的是混合坐标系：原点是原生像素、宽高
+        是逻辑像素（本机实测，左侧副屏 1920×1080@125%：Win32 原生
+        ``(-1920,0,1920,1080)``，Qt 报 ``(-1920,0,1536,864)``——x 差 384）。把这些
+        矩形放进同一张窗的坐标空间时，屏与屏之间会凭空多出一段"无显示器空洞"、
+        屏自己的外侧边缘反而没有边界：宠被钳在半块屏里、或走到看不见的地方
+        （issue #310：双 4K@150%，A 在左）。
+        """
+        screens = self._screens()
+        if len(screens) < 2:
+            return False
+        for screen in screens:
+            if abs(round(float(screen.devicePixelRatio() or 1.0), 3) - 1.0) > 1e-6:
+                return True
+        return False
+
     def _multi_window(self) -> bool:
-        """是否走「每块屏一张合成窗」（仅：混合缩放 + 允许跨屏）。
+        """是否走「每块屏一张合成窗」（允许跨屏 + 多屏且缩放不是 1:1）。
 
         一张窗只能有一个 ``devicePixelRatio``：窗口横跨两种缩放的屏时，必有一侧按
-        错的倍率渲染（#307 实机：整只画到可见区之外）。所以混合缩放时回到每屏一窗
-        ——每张窗的 DPR 天然正确；同 DPI 的绝大多数情况仍是单窗，零变化。
+        错的倍率渲染（#307 实机：整只画到可见区之外）。
+
+        缩放全为 1:1 的多屏仍是单窗（Qt 的原点即原生原点，坐标系没有问题）；
+        只要有一块屏缩放不是 1:1，就每屏一窗——每张窗只落在自己那块屏上，Qt 的
+        原点映射与屏的实际原生位置一致（本机验证：Qt 矩形 ``(-1920,0,1536,816)``
+        落成原生 ``(-1920,0,1920,1020)``，正好盖住副屏），那个坏坐标根本不进入
+        单窗坐标系里参与运算（issue #310 的正解）。
         """
-        return self._cross_screen_allowed and self._mixed_dpr()
+        return self._cross_screen_allowed and (
+            self._mixed_dpr() or self._scaled_multi_screen())
 
     @staticmethod
     def _window_physical_origin(overlay) -> QPoint:
@@ -1697,7 +1721,10 @@ class OverlayShell(QObject):
         # ``home`` 参数只为建壳期（宿主还没建、``self._screen`` 还是 None）
         if home is None:
             home = self._screen
-        if home is not None and self._mixed_dpr() and not self._multi_window():
+        # 多屏且缩放不是 1:1、又没开跨屏：退化到启动那块屏。单窗在这种机器上
+        # 铺整张虚拟桌面会把 Qt 那个混合坐标系（负原点屏的原生 x + 逻辑宽高，
+        # 见 _scaled_multi_screen）当成真实桌面，宠被画到屏外（issue #310）。
+        if home is not None and self._scaled_multi_screen() and not self._multi_window():
             return QRect(home.availableGeometry())
         rect = None
         for screen in self._screens():
@@ -5070,13 +5097,15 @@ class OverlayShell(QObject):
                 continue
             if own.overlay is overlay:
                 continue
-            d_src = float(own.overlay.devicePixelRatioF()) or 1.0
-            d_dst = float(overlay.devicePixelRatioF()) or 1.0
-            scale = d_src / d_dst
+            # 投影按**逻辑尺寸**画（scale=1）＝松手换窗后的观感，不是按物理像素对齐。
+            # 按 d_src/d_dst 画设备采样比更接近 1:1，但会让这只在目标屏上先大 1.5 倍、
+            # 松手瞬间缩回原生尺寸——4K@150% → 1080p@100% 的用户直接报成「拖过去缩放
+            # 不对/很怪」。宠的逻辑尺寸跨屏不变，投影就该照逻辑尺寸画。
+            scale = 1.0
             target_local = self._sprite_pos_in(target, own.overlay, overlay)
-            # ``sprite.paint()`` 自己会用 ``sprite.pos`` 画，所以这里必须传**平移量**
-            # 而不是最终位置：平移 = 目标位置 − pos × scale（否则 pos 被加两次，
-            # 实机就是"投影甩到鼠标左边很远"）。
+            # ``sprite.paint()`` 自己会用 ``sprite.pos`` 画，所以这里传**平移量**而不是
+            # 最终位置：平移 = 目标位置 − pos（否则 pos 被加两次，实机就是"投影甩到
+            # 鼠标左边很远"）。
             offset = QPointF(target_local.x() - target.pos.x() * scale,
                              target_local.y() - target.pos.y() * scale)
             overlay.set_projection(target, offset, scale)

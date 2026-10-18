@@ -1324,3 +1324,84 @@ def test_drag_domain_covers_the_physical_extent_of_a_high_dpi_screen(
         assert domain.left() <= 0
     finally:
         _cleanup(shell)
+
+
+def test_drag_projection_keeps_logical_size_across_mixed_dpi(tmp_path, monkeypatch):
+    """跨混合 DPI 拖拽时投影按**逻辑尺寸**画：松手前后宠一样大。
+
+    按物理像素对齐（``scale = d_src/d_dst``）设备采样比更接近 1:1，但会让这只在
+    目标屏上先大 1.5 倍、松手瞬间缩回原生尺寸——4K@150% → 1080p@100% 的用户直接
+    报成「拖过去缩放不对/很怪」。宠的逻辑尺寸跨屏不变，投影照逻辑尺寸画。
+    """
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        host_a = shell.host_for_screen(a)
+        host_b = shell.host_for_screen(b)
+        assert host_a is not host_b
+        monkeypatch.setattr(host_a.overlay, "devicePixelRatioF", lambda: 1.5)
+        monkeypatch.setattr(host_b.overlay, "devicePixelRatioF", lambda: 1.0)
+        monkeypatch.setattr(shell, "_window_physical_origin", lambda overlay: QPoint(0, 0))
+
+        shell._sync_drag_projection(main)
+
+        entry = host_b.overlay._projections.get(main)
+        assert entry is not None, "目标窗必须挂上这只的投影"
+        _offset, scale, _last = entry
+        assert scale == pytest.approx(1.0), "投影按逻辑尺寸画，不按物理像素放大"
+
+        before = main.rect().width()
+        projected = host_b.overlay.projection_rect(main).width()
+        assert projected == before, "投影宽度 = 宠的逻辑宽度（松手后一样大）"
+    finally:
+        _cleanup(shell)
+
+
+def test_same_nonunit_dpr_still_uses_one_window_per_screen(tmp_path, monkeypatch):
+    """两块屏缩放**相同但不是 1:1**（双 4K@150% 就是这么配的）：同样每屏一窗。
+
+    Qt 6.12 在 Windows 上对负原点屏报「原生原点 + 逻辑尺寸」的混合坐标系。
+    ``_mixed_dpr()`` 在两块屏 DPR 相同时为假，于是单窗把两块屏的矩形放进同一
+    坐标空间 → 屏间多出一段无显示器的空洞、屏外侧反而没边界，宠被钳在半块屏里
+    或走出可见区（issue #310）。每屏一窗时那个坏坐标根本不参与运算。
+    """
+    a, b = _two_screens()
+    a.set_rects((0, 0, 2560, 1440), (0, 0, 2560, 1392), dpr=1.5)
+    b.set_rects((2560, 0, 2560, 1440), (2560, 0, 2560, 1392), dpr=1.5)
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        assert shell._mixed_dpr() is False, "前提：两屏 DPR 相同"
+        assert shell._scaled_multi_screen() is True
+        assert len(shell.hosts()) == 2, "非 1:1 缩放的机器必须每屏一窗"
+        assert shell.host_for_screen(b) is not None
+    finally:
+        _cleanup(shell)
+
+
+def test_same_nonunit_dpr_without_cross_screen_stays_on_home_screen(
+        tmp_path, monkeypatch):
+    """关闭跨屏时退回**启动那块屏**的单窗，绝不铺满那张坏坐标系的虚拟桌面。"""
+    a, b = _two_screens()
+    a.set_rects((0, 0, 2560, 1440), (0, 0, 2560, 1392), dpr=1.5)
+    b.set_rects((-2560, 0, 2560, 1440), (-2560, 0, 2560, 1392), dpr=1.5)
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": False})
+    try:
+        assert len(shell.hosts()) == 1
+        assert shell.overlay.geometry() == QRect(a.availableGeometry()), (
+            "退化到启动屏，而不是两屏并集")
+    finally:
+        _cleanup(shell)
+
+
+def test_unit_dpr_multi_screen_keeps_the_single_window(tmp_path, monkeypatch):
+    """全 1:1 的多屏仍是单窗：Qt 的原点就是原生原点，没有那个坐标系问题。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        assert shell._scaled_multi_screen() is False
+        assert len(shell.hosts()) == 1, "1:1 的多屏零变化"
+    finally:
+        _cleanup(shell)

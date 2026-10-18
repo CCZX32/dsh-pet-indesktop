@@ -746,6 +746,10 @@ class OverlayWindow(QWidget):
                 continue
             painter.save()
             try:
+                # 降采样/放大都要平滑：投影跨混合 DPI 时目标窗的 DPR 与源帧的
+                # devicePixelRatio 不同，默认最近邻会出锯齿（用户直接说"很糊"）。
+                painter.setRenderHint(
+                    QPainter.RenderHint.SmoothPixmapTransform, True)
                 painter.translate(offset)
                 painter.scale(scale, scale)
                 sprite.paint(painter)

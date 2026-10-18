@@ -3213,6 +3213,15 @@ class AppShell:
             if body is not None:
                 body.stop()
             return
+        # 岛本身没启用（``self.island is None``）时不该建碰撞体：墙的每一个判据
+        # 都要问岛（可见性/几何/模式），没有岛就只有"永远不生效"这一种结果，
+        # 却会给每只宠挂上 ``_island_clamp_body`` 钩子——历史上那条钩子里的
+        # 判空缺失曾让移动整体静默失效（issue #311）。
+        if getattr(self, "island", None) is None:
+            body = getattr(self, "island_collision", None)
+            if body is not None:
+                body.stop()
+            return
         if body is None:
             from .island_collision import IslandCollisionBody
 
