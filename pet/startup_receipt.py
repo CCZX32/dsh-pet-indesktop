@@ -27,6 +27,8 @@ from .official_features import (
     ACCOUNT_USAGE_FEATURE_ID,
     AI_FEATURE_ID,
     MUSIC_FEATURE_ID,
+    PERSONA_PHRASES_FEATURE_ID,
+    QUICK_LAUNCH_FEATURE_ID,
     SCREEN_FEATURE_ID,
     VOICE_CHIME_FEATURE_ID,
 )
@@ -46,6 +48,8 @@ _PACKAGES = (
     ("account_usage", ACCOUNT_USAGE_FEATURE_ID, "account-usage"),
     ("music", MUSIC_FEATURE_ID, "music"),
     ("voice_chime", VOICE_CHIME_FEATURE_ID, "voice-chime"),
+    ("persona_phrases", PERSONA_PHRASES_FEATURE_ID, "persona-phrases"),
+    ("quick_launch", QUICK_LAUNCH_FEATURE_ID, "quick-launch"),
 )
 
 

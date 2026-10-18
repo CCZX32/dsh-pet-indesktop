@@ -31,6 +31,8 @@ from pet.official_features import (  # noqa: E402
     ACCOUNT_USAGE_FEATURE_ID,
     AI_FEATURE_ID,
     MUSIC_FEATURE_ID,
+    PERSONA_PHRASES_FEATURE_ID,
+    QUICK_LAUNCH_FEATURE_ID,
     SCREEN_FEATURE_ID,
     VOICE_CHIME_FEATURE_ID,
 )
@@ -41,6 +43,8 @@ _PACKAGES = {
     "account-usage": ACCOUNT_USAGE_FEATURE_ID,
     "music": MUSIC_FEATURE_ID,
     "voice-chime": VOICE_CHIME_FEATURE_ID,
+    "persona-phrases": PERSONA_PHRASES_FEATURE_ID,
+    "quick-launch": QUICK_LAUNCH_FEATURE_ID,
 }
 
 

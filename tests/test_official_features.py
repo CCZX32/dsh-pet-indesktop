@@ -21,6 +21,8 @@ def test_the_registry_is_closed_and_frozen():
         of.ACCOUNT_USAGE_FEATURE_ID,
         of.MUSIC_FEATURE_ID,
         of.VOICE_CHIME_FEATURE_ID,
+        of.PERSONA_PHRASES_FEATURE_ID,
+        of.QUICK_LAUNCH_FEATURE_ID,
     }
     assert of.SCREEN_OWNER == of.SCREEN_FEATURE_ID and of.AI_OWNER == of.AI_FEATURE_ID
     with pytest.raises(TypeError):
@@ -42,7 +44,11 @@ def test_each_registration_matches_its_declared_contract():
     voice = of.official_feature(of.VOICE_CHIME_FEATURE_ID)
     assert (voice.factory, voice.execution_kind) == ("voice-chime/v1", "host-only")
     assert voice.capabilities == frozenset({"settings.contribute", "menu.contribute", "audio.speak"})
-    assert len({screen.id, chat.id, account.id, music.id, voice.id}) == 5
+    persona = of.official_feature(of.PERSONA_PHRASES_FEATURE_ID)
+    assert (persona.factory, persona.execution_kind) == ("persona-phrases/v1", "host-only")
+    quick = of.official_feature(of.QUICK_LAUNCH_FEATURE_ID)
+    assert (quick.factory, quick.execution_kind) == ("quick-launch/v1", "host-only")
+    assert len({screen.id, chat.id, account.id, music.id, voice.id, persona.id, quick.id}) == 7
 
 
 def test_an_unknown_or_malformed_owner_is_refused():

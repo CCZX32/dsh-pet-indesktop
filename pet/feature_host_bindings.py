@@ -54,6 +54,8 @@ from .official_features import (
     ACCOUNT_USAGE_FEATURE_ID,
     AI_FEATURE_ID,
     MUSIC_FEATURE_ID,
+    PERSONA_PHRASES_FEATURE_ID,
+    QUICK_LAUNCH_FEATURE_ID,
     SCREEN_FEATURE_ID,
     VOICE_CHIME_FEATURE_ID,
     is_valid_feature_id,
@@ -846,6 +848,89 @@ def bind_voice_context(
         presentation=_bind_presentation(),
         scheduler=_BoundScheduler(),
         audio=_BoundAudio(_resolve_feature_audio),
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
+    )
+
+
+#: 日常台词包的偏好字段集。
+_PERSONA_PREFERENCE_FIELDS = frozenset({"custom_phrases", "speak"})
+
+
+def bind_persona_context(
+    cfg,
+    *,
+    owner: str = PERSONA_PHRASES_FEATURE_ID,
+) -> FeatureHostContext:
+    """官方日常台词包的宿主绑定：偏好 + 呈现 + 音频提交。"""
+    if owner != PERSONA_PHRASES_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    def read_display() -> Mapping:
+        return MappingProxyType({"character": cfg.get("character")})
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        preferences=_BoundPreferences(root / "preferences.json", _PERSONA_PREFERENCE_FIELDS),
+        documents=MappingProxyType({}),
+        state_documents=MappingProxyType({}),
+        desktop=None,
+        window=None,
+        presentation=_bind_presentation(),
+        scheduler=_BoundScheduler(),
+        audio=_BoundAudio(_resolve_feature_audio),
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
+    )
+
+
+#: 快捷启动包的偏好字段集：最多 5 个「名称 + 可执行文件路径」。
+_QUICK_LAUNCH_PREFERENCE_FIELDS = frozenset({"entries"})
+
+
+def bind_quick_launch_context(
+    cfg,
+    *,
+    owner: str = QUICK_LAUNCH_FEATURE_ID,
+) -> FeatureHostContext:
+    """官方快捷启动包的宿主绑定：偏好 + 呈现 + ``process.spawn`` 声明。"""
+    if owner != QUICK_LAUNCH_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    def read_display() -> Mapping:
+        return MappingProxyType({"character": cfg.get("character")})
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        preferences=_BoundPreferences(root / "preferences.json", _QUICK_LAUNCH_PREFERENCE_FIELDS),
+        documents=MappingProxyType({}),
+        state_documents=MappingProxyType({}),
+        desktop=None,
+        window=None,
+        presentation=_bind_presentation(),
+        scheduler=_BoundScheduler(),
         api=None,
         user_data=FeatureUserDataPort(
             root,

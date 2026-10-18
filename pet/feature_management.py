@@ -56,6 +56,8 @@ from .feature_host_bindings import (
     bind_ai_context,
     bind_local_context,
     bind_music_context,
+    bind_persona_context,
+    bind_quick_launch_context,
     bind_screen_context,
     bind_voice_context,
 )
@@ -921,6 +923,8 @@ def _official_binder(owner: str):
         ACCOUNT_USAGE_FEATURE_ID,
         AI_FEATURE_ID,
         MUSIC_FEATURE_ID,
+        PERSONA_PHRASES_FEATURE_ID,
+        QUICK_LAUNCH_FEATURE_ID,
         SCREEN_FEATURE_ID,
         VOICE_CHIME_FEATURE_ID,
     )
@@ -935,6 +939,10 @@ def _official_binder(owner: str):
         return lambda cfg, *, authorized, host: bind_music_context(cfg)
     if owner == VOICE_CHIME_FEATURE_ID:
         return lambda cfg, *, authorized, host: bind_voice_context(cfg)
+    if owner == PERSONA_PHRASES_FEATURE_ID:
+        return lambda cfg, *, authorized, host: bind_persona_context(cfg)
+    if owner == QUICK_LAUNCH_FEATURE_ID:
+        return lambda cfg, *, authorized, host: bind_quick_launch_context(cfg)
     raise ValueError("unsupported official feature")
 
 

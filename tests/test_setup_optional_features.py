@@ -30,7 +30,9 @@ def test_official_packages_are_optional_tasks():
     assert 'Name: "official_account_usage"' in text
     assert 'Name: "official_music"' in text
     assert 'Name: "official_voice_chime"' in text
-    assert text.count('GroupDescription: "Official feature packages:"') == 5
+    assert 'Name: "official_persona_phrases"' in text
+    assert 'Name: "official_quick_launch"' in text
+    assert text.count('GroupDescription: "Official feature packages:"') == 7
     assert "Flags: unchecked" in text
 
 
@@ -42,6 +44,8 @@ def test_the_base_files_entry_excludes_the_optional_packages():
     assert "features\\account-usage\\*" in base
     assert "features\\music\\*" in base
     assert "features\\voice-chime\\*" in base
+    assert "features\\persona-phrases\\*" in base
+    assert "features\\quick-launch\\*" in base
     # 安装态绝不能继承便携标记：构建树里若残留 portable.json，装出来的应用会
     # 把数据写进安装目录而不是 %APPDATA%，用户与支持人员都看不出区别。
     assert "portable.json" in base
@@ -54,7 +58,9 @@ def test_each_optional_package_has_its_own_task_scoped_source():
     assert 'DestDir: "{app}\\features\\account-usage"; Tasks: official_account_usage' in text
     assert 'DestDir: "{app}\\features\\music"; Tasks: official_music' in text
     assert 'DestDir: "{app}\\features\\voice-chime"; Tasks: official_voice_chime' in text
-    assert text.count("skipifsourcedoesntexist") >= 5
+    assert 'DestDir: "{app}\\features\\persona-phrases"; Tasks: official_persona_phrases' in text
+    assert 'DestDir: "{app}\\features\\quick-launch"; Tasks: official_quick_launch' in text
+    assert text.count("skipifsourcedoesntexist") >= 7
 
 
 def test_silent_installs_do_not_launch_the_app():
@@ -71,6 +77,8 @@ def test_unselected_tasks_leave_no_empty_feature_directories():
     assert "RemoveDir(ExpandConstant('{app}\\features\\account-usage'))" in text
     assert "RemoveDir(ExpandConstant('{app}\\features\\music'))" in text
     assert "RemoveDir(ExpandConstant('{app}\\features\\voice-chime'))" in text
+    assert "RemoveDir(ExpandConstant('{app}\\features\\persona-phrases'))" in text
+    assert "RemoveDir(ExpandConstant('{app}\\features\\quick-launch'))" in text
     assert "RemoveDir(ExpandConstant('{app}\\features'))" in text
 
 
@@ -90,6 +98,8 @@ def test_the_receipt_reports_what_is_actually_on_disk():
     assert "FileExists(ExpandConstant('{app}\\features\\account-usage\\manifest.json'))" in text
     assert "FileExists(ExpandConstant('{app}\\features\\music\\manifest.json'))" in text
     assert "FileExists(ExpandConstant('{app}\\features\\voice-chime\\manifest.json'))" in text
+    assert "FileExists(ExpandConstant('{app}\\features\\persona-phrases\\manifest.json'))" in text
+    assert "FileExists(ExpandConstant('{app}\\features\\quick-launch\\manifest.json'))" in text
 
 
 def test_the_installer_writes_a_startup_receipt():

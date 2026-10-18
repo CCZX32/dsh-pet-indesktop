@@ -25,6 +25,8 @@ from .official_features import (
     AI_FEATURE_ID,
     MUSIC_FEATURE_ID,
     OFFICIAL_FEATURES,
+    PERSONA_PHRASES_FEATURE_ID,
+    QUICK_LAUNCH_FEATURE_ID,
     SCREEN_FEATURE_ID,
     VOICE_CHIME_FEATURE_ID,
 )
@@ -35,6 +37,8 @@ _DISPLAY = {
     ACCOUNT_USAGE_FEATURE_ID: "账户用量",
     MUSIC_FEATURE_ID: "音乐启动器",
     VOICE_CHIME_FEATURE_ID: "语音报时",
+    PERSONA_PHRASES_FEATURE_ID: "日常台词",
+    QUICK_LAUNCH_FEATURE_ID: "快捷启动",
 }
 
 _SHORT = {
@@ -43,6 +47,8 @@ _SHORT = {
     ACCOUNT_USAGE_FEATURE_ID: "account-usage",
     MUSIC_FEATURE_ID: "music",
     VOICE_CHIME_FEATURE_ID: "voice-chime",
+    PERSONA_PHRASES_FEATURE_ID: "persona-phrases",
+    QUICK_LAUNCH_FEATURE_ID: "quick-launch",
 }
 
 _BUILDERS = {
@@ -51,6 +57,8 @@ _BUILDERS = {
     ACCOUNT_USAGE_FEATURE_ID: ("scripts.build_account_usage_package", "features/account-usage"),
     MUSIC_FEATURE_ID: ("scripts.build_music_package", "features/music"),
     VOICE_CHIME_FEATURE_ID: ("scripts.build_voice_chime_package", "features/voice-chime"),
+    PERSONA_PHRASES_FEATURE_ID: ("scripts.build_persona_phrases_package", "features/persona-phrases"),
+    QUICK_LAUNCH_FEATURE_ID: ("scripts.build_quick_launch_package", "features/quick-launch"),
 }
 
 

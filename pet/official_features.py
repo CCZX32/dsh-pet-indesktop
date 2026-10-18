@@ -17,6 +17,8 @@ AI_FEATURE_ID = "official.ai-chat"
 ACCOUNT_USAGE_FEATURE_ID = "official.account-usage"
 MUSIC_FEATURE_ID = "official.music"
 VOICE_CHIME_FEATURE_ID = "official.voice-chime"
+PERSONA_PHRASES_FEATURE_ID = "official.persona-phrases"
+QUICK_LAUNCH_FEATURE_ID = "official.quick-launch"
 
 #: ID 的**规范形**。这个串会变成 ``feature-data/<id>/`` 与 ``plugins/<id>/`` 下的目录名，
 #: 所以"另一个拼法"必须被判成非法，而不是当成另一个 owner：
@@ -103,6 +105,18 @@ OFFICIAL_FEATURES = MappingProxyType(
             "voice-chime/v1",
             "host-only",
             frozenset({"settings.contribute", "menu.contribute", "audio.speak"}),
+        ),
+        PERSONA_PHRASES_FEATURE_ID: FeatureRegistration(
+            PERSONA_PHRASES_FEATURE_ID,
+            "persona-phrases/v1",
+            "host-only",
+            frozenset({"settings.contribute", "menu.contribute", "audio.speak"}),
+        ),
+        QUICK_LAUNCH_FEATURE_ID: FeatureRegistration(
+            QUICK_LAUNCH_FEATURE_ID,
+            "quick-launch/v1",
+            "host-only",
+            frozenset({"settings.contribute", "menu.contribute", "process.spawn"}),
         ),
     }
 )

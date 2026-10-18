@@ -1,0 +1,8 @@
+{
+  "id": "official.quick-launch",
+  "name": "快捷启动",
+  "description": "独立形态的快捷启动：最多五个用户指定的程序入口，从右键菜单直接打开。与 Core 的 Harness/快捷对话解耦，可装可卸。",
+  "version": "1.0.0",
+  "factory": "quick-launch/v1",
+  "execution_kind": "host-only"
+}

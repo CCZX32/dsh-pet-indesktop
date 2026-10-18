@@ -73,18 +73,22 @@ Name: "official_screen"; Description: "Screen understanding package (official)";
 Name: "official_account_usage"; Description: "Account usage package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 Name: "official_music"; Description: "Music launcher package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 Name: "official_voice_chime"; Description: "Voice chime package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
+Name: "official_persona_phrases"; Description: "Persona phrases package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
+Name: "official_quick_launch"; Description: "Quick launch package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 
 [Files]
-; 基础产物：排除 features\ 下五个官方包，改由下面的 [Tasks] 选装项控制。
+; 基础产物：排除 features\ 下七个官方包，改由下面的 [Tasks] 选装项控制。
 ; portable.json 也排除：安装态必须走平台数据目录，构建树里的便携标记不许
 ; 被复制进安装目录（否则数据会写进 {app}，用户看不出区别）。
 ; skipifsourcedoesntexist 让不带包的构建（-FeaturePackages 省略）仍能编译。
-Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*,features\account-usage\*,features\music\*,features\voice-chime\*,portable.json"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*,features\account-usage\*,features\music\*,features\voice-chime\*,features\persona-phrases\*,features\quick-launch\*,portable.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyAppDir}\features\ai-chat\*"; DestDir: "{app}\features\ai-chat"; Tasks: official_ai_chat; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\screen-understanding\*"; DestDir: "{app}\features\screen-understanding"; Tasks: official_screen; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\account-usage\*"; DestDir: "{app}\features\account-usage"; Tasks: official_account_usage; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\music\*"; DestDir: "{app}\features\music"; Tasks: official_music; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\voice-chime\*"; DestDir: "{app}\features\voice-chime"; Tasks: official_voice_chime; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#MyAppDir}\features\persona-phrases\*"; DestDir: "{app}\features\persona-phrases"; Tasks: official_persona_phrases; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#MyAppDir}\features\quick-launch\*"; DestDir: "{app}\features\quick-launch"; Tasks: official_quick_launch; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"
@@ -116,6 +120,8 @@ var
   AccountUsage: String;
   Music: String;
   VoiceChime: String;
+  PersonaPhrases: String;
+  QuickLaunch: String;
 begin
   if CurStep <> ssPostInstall then
     exit;
@@ -132,6 +138,10 @@ begin
     RemoveDir(ExpandConstant('{app}\features\music'));
   if not WizardIsTaskSelected('official_voice_chime') then
     RemoveDir(ExpandConstant('{app}\features\voice-chime'));
+  if not WizardIsTaskSelected('official_persona_phrases') then
+    RemoveDir(ExpandConstant('{app}\features\persona-phrases'));
+  if not WizardIsTaskSelected('official_quick_launch') then
+    RemoveDir(ExpandConstant('{app}\features\quick-launch'));
   RemoveDir(ExpandConstant('{app}\features'));
 
   { 回执写"盘上实际有什么"，不是"这次勾了什么"：升级时 Inno 会保留上一版由
@@ -156,9 +166,19 @@ begin
     VoiceChime := 'true'
   else
     VoiceChime := 'false';
+  if FileExists(ExpandConstant('{app}\features\persona-phrases\manifest.json')) then
+    PersonaPhrases := 'true'
+  else
+    PersonaPhrases := 'false';
+  if FileExists(ExpandConstant('{app}\features\quick-launch\manifest.json')) then
+    QuickLaunch := 'true'
+  else
+    QuickLaunch := 'false';
   Receipt := '{"schema":"dsh-pet-startup-receipt/v1","ai_chat":' + AiChat +
              ',"screen":' + Screen + ',"account_usage":' + AccountUsage +
-             ',"music":' + Music + ',"voice_chime":' + VoiceChime + '}';
+             ',"music":' + Music + ',"voice_chime":' + VoiceChime +
+             ',"persona_phrases":' + PersonaPhrases +
+             ',"quick_launch":' + QuickLaunch + '}';
   if not SaveStringToFile(ExpandConstant('{app}\startup-receipt.json'), Receipt, False) then
     Log('dsh-pet startup receipt could not be written');
 end;

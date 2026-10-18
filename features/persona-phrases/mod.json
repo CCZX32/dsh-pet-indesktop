@@ -1,0 +1,8 @@
+{
+  "id": "official.persona-phrases",
+  "name": "日常台词",
+  "description": "独立形态的日常台词：按日期轮换内置句子，可自定义中文台词并选择是否朗读。与内置台词系统并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "persona-phrases/v1",
+  "execution_kind": "host-only"
+}
