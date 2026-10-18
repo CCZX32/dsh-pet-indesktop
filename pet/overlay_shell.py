@@ -1746,15 +1746,20 @@ class OverlayShell(QObject):
             rect = avail if rect is None else rect.united(avail)
         return rect if rect is not None else QRect()
 
-    def _screen_rect(self, screen) -> QRect:
-        """某屏可用工作区在窗口局部坐标里的矩形（活动区的一块；比例/落位同源）。"""
+    def _screen_rect(self, screen, *, multi=None) -> QRect:
+        """某屏可用工作区在窗口局部坐标里的矩形（活动区的一块；比例/落位同源）。
+
+        ``multi``：**几何事务**里要按"实际有几张窗"传，不能让它自己读判定——
+        拓扑对齐失败时（某块屏的宿主建不起来）判定说多窗、实际只有一张窗，两套
+        坐标系混用会把家屏的活动区写成窗口原点，(位置直接算坏)。
+        """
         avail = QRect(screen.availableGeometry())
-        if self._multi_window():
+        if self._multi_window() if multi is None else multi:
             return QRect(0, 0, avail.width(), avail.height())
         desktop = self._desktop_bounds()
         return QRect(avail.translated(-desktop.x(), -desktop.y()))
 
-    def _activity_rects(self) -> list:
+    def _activity_rects(self, *, multi=None) -> list:
         """活动区（精灵可站立域）：``((screen, 局部矩形) ...)``。
 
         各屏可用工作区平移到窗口局部坐标后是**一组**矩形而不是并集：错位拼接
@@ -1769,7 +1774,7 @@ class OverlayShell(QObject):
         for screen in screens:
             if screen is not home and (not self._cross_screen_allowed or mixed):
                 continue
-            rects.append((screen, self._screen_rect(screen)))
+            rects.append((screen, self._screen_rect(screen, multi=multi)))
         return rects
 
     def _screen_at_global(self, point):
@@ -5715,11 +5720,12 @@ class OverlayShell(QObject):
         if host is None:
             return None
         body = sprite.body_rect()
-        cx, cy = body.x() + body.width() / 2.0, body.y() + body.height() / 2.0
-        for screen, rect in getattr(host, "activity", ()) or ():
-            if QRectF(rect).contains(QPointF(cx, cy)):
-                return screen
-        return getattr(host, "screen", None)
+        origin = host.overlay.geometry().topLeft()
+        point = QPointF(origin.x() + body.x() + body.width() / 2.0,
+                        origin.y() + body.y() + body.height() / 2.0)
+        # 与 `_screen_at_global` 同一套判据（可用区包含 → 最近屏兜底）：两套包含关系
+        # 各判一次会在接缝/空洞上给出不同答案。
+        return self._screen_at_global(point) or getattr(host, "screen", None)
 
     def _screen_by_name(self, name, *, prefer=None):
         """已连接显示器里按名字取（与 ``window_placement.screen_available`` 同口径）。
@@ -6883,7 +6889,8 @@ class OverlayShell(QObject):
            重排，回调驱动的是全局同步，不是"只动自己"；
         2. **承载范围**：单窗形态下这张窗确实铺满整张虚拟桌面（一片窗含多块屏），
            每屏一窗形态下每张窗只取**自己那块屏的工作区**（见 `_host_window_rect`）
-           ——本方法对两种形态都成立。
+           ——本方法对两种形态都成立。下面几行说的是单窗形态的几何口径，多窗下
+           窗口不铺整个虚拟桌面。
 
         窗覆盖整个虚拟桌面，所以任何一块屏的几何、任务栏、缩放变化都要重算窗口
         矩形与活动区——只挂家那块屏的话，别的屏在窗里留下的那块矩形会停在旧值。
@@ -6949,11 +6956,42 @@ class OverlayShell(QObject):
         避让隐藏中把宠放出来——而 `_on_fullscreen_changed` 见 `_auto_hidden` 已置位
         就不会再 hide，那一屏的宠会一直露在游戏上面。
         """
-        host = self._create_host(screen)
-        self._apply_host_window_caps(host)
-        if visible:
-            host.overlay.show()
-            host.overlay.start()
+        try:
+            host = self._create_host(screen)
+            self._apply_host_window_caps(host)
+            if visible:
+                host.overlay.show()
+                host.overlay.start()
+        except Exception:
+            # **半成品宿主必须撤干净**：`_create_host` 先把宿主登记进 `_hosts`，
+            # 之后的接线/能力下发/显示任一失败都会留下"登记了但没初始化好"的窗。
+            # 完整性判据只认"该屏有没有宿主"，不清掉就会被当成补齐成功——不再重试，
+            # 而且回位时会把宠搬进一张没 show 过的窗。
+            partial = host if "host" in locals() else next(
+                (candidate for candidate in self._hosts if candidate.screen is screen), None)
+            if partial is not None and partial in self._hosts:
+                self._discard_partial_host(partial)
+            raise
+
+    def _discard_partial_host(self, host) -> None:
+        """撤掉一张建到一半的宿主（摘表、断信号、关窗、从驱动器摘下来）。"""
+        try:
+            self._disconnect_host_screen(host)
+        except Exception:
+            logging.debug("overlay: 摘半成品宿主的屏信号失败", exc_info=True)
+        if self.driver is not None:
+            try:
+                self.driver.detach(host.overlay)
+            except Exception:
+                logging.debug("overlay: 从驱动器摘半成品宿主失败", exc_info=True)
+        try:
+            host.overlay.hide()
+            host.overlay.close()
+        except Exception:
+            logging.debug("overlay: 关闭半成品宿主窗失败", exc_info=True)
+        if host in self._hosts:
+            self._hosts.remove(host)
+        self._applied_screen_rects.pop(_screen_name(host.screen), None)
 
     def _capture_screen_ratios(self) -> list[tuple]:
         """记下每只的（屏归属，该屏内比例）；拓扑变化前调用，变化后按它回位。
@@ -7320,10 +7358,10 @@ class OverlayShell(QObject):
             # ——按空矩形同步会把每只宠钳到 (0,0)。
             return
         old_origin = host.overlay.geometry().topLeft()
-        plan = self._geometry_plan(host)
+        plan = self._geometry_plan(host, multi=multi)
         host.overlay.setGeometry(desktop)
         host.set_bounds(QRect(0, 0, desktop.width(), desktop.height()))
-        host.set_activity(self._activity_rects())
+        host.set_activity(self._activity_rects(multi=multi))
         # 单窗下每块屏在窗里的位置也是"已应用状态"，同样要刷新给下一次比例定标用。
         for screen in self._screens():
             self._remember_applied_screen_rect(screen, host)
@@ -7334,7 +7372,7 @@ class OverlayShell(QObject):
         self._sync_sprite_screens()
         self._refresh_self_talk_image_cache_for_dpr()
 
-    def _geometry_plan(self, host) -> list:
+    def _geometry_plan(self, host, *, multi=None) -> list:
         """(sprite, rx, ry, 新矩形)：几何变化前的**一次性取数**，必须在换域之前。
 
         比例取自换域之前的身体位置（换域会就地钳一次，那时旧比例已经没了）；新
@@ -7342,7 +7380,7 @@ class OverlayShell(QObject):
         （拔屏）就落到家那块屏，家也没了就落到整张窗。
         """
         desktop = self._desktop_bounds()
-        new_rects = {screen: rect for screen, rect in self._activity_rects()}
+        new_rects = {screen: rect for screen, rect in self._activity_rects(multi=multi)}
         fallback = new_rects.get(self._screen, QRect(0, 0, desktop.width(),
                                                      desktop.height()))
         plan = []

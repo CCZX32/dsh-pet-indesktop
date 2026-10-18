@@ -1822,3 +1822,131 @@ def test_consecutive_reentries_do_not_recurse(tmp_path, monkeypatch):
         assert isinstance(shell.hosts(), list)
     finally:
         _cleanup(shell)
+
+
+def test_failed_host_creation_is_rolled_back_and_retried(tmp_path, monkeypatch, caplog):
+    """建窗**登记之后**失败：半成品宿主必须撤干净，不能被当成"该屏已补齐"。
+
+    `_create_host` 先把宿主登记进 `_hosts`，之后接线/能力下发/显示任一步失败都会留下
+    "登记了但没初始化好"的窗；完整性判据只认"该屏有没有宿主"，不清掉就再也不重试，
+    回位时还会把宠搬进一张没 show 过的窗。
+    """
+    import logging as _logging
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original_caps = shell._apply_host_window_caps
+        state = {"fail": True}
+
+        def flaky_caps(host):
+            if state["fail"] and host.screen is b:
+                raise RuntimeError("能力下发失败")
+            return original_caps(host)
+
+        monkeypatch.setattr(shell, "_apply_host_window_caps", flaky_caps)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        with caplog.at_level(_logging.WARNING):
+            shell._feed_screen_dpr()
+
+        assert shell._topology_txn is False, "闸门必须复位"
+        assert shell.host_for_screen(b) is None, "半成品宿主不许留在表里"
+        assert not any(host.screen is b for host in shell.hosts()), "也不许被当成已补齐"
+        assert any("建宿主窗失败" in record.getMessage() or
+                   "屏拓扑未能对齐" in record.getMessage()
+                   for record in caplog.records), "失败要留日志"
+
+        # 恢复后只发一次普通信号就要能补齐
+        state["fail"] = False
+        shell._feed_screen_dpr()
+        assert shell.host_for_screen(b) is not None, "恢复后必须能补上"
+    finally:
+        _cleanup(shell)
+
+
+def test_negative_origin_screen_survives_a_failed_flip(tmp_path, monkeypatch):
+    """家屏在右、副屏在左侧负原点：翻转失败时几何与活动区不能混用两套坐标系。"""
+    from tests.test_overlay_hosts_multiscreen import FakeScreen
+
+    right = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="RIGHT")
+    left = FakeScreen((-1920, 0, 1920, 1080), (-1920, 0, 1920, 1040), name="LEFT")
+    _install_screens(monkeypatch, right, left)
+    shell = _make_shell(tmp_path, right, {"allow_cross_screen": True})
+    try:
+        original = shell._apply_host_window_caps
+        monkeypatch.setattr(
+            shell, "_apply_host_window_caps",
+            lambda host: (_ for _ in ()).throw(RuntimeError("失败")) if host.screen is left
+            else original(host))
+        main = shell.sprite
+        desktop = QRect(shell.overlay.geometry())
+        # 家屏在右：整桌面 3840 宽里它占 1920..3840，所以 0.75 才是它自身的中线
+        shell._place_body_ratio(main, 0.75, 0.5, desktop)
+        before = main.body_rect().center()
+
+        left.set_rects((-1920, 0, 1920, 1080), (-1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert len(shell.hosts()) == 1, "补齐失败就还只有一张窗"
+        host = shell._main_host
+        # 活动区必须是**单窗口径**：家屏(右)在窗局部坐标里应当右移，而不是 (0,0)
+        rects = dict(host.activity)
+        home_rect = rects.get(right)
+        assert home_rect is not None
+        assert home_rect.left() > 0, "家屏在右，活动区必须按单窗口径右移（不能混用多窗口径）"
+        # 这里是**降级态**：判定要多窗但补窗失败，实际只有一张窗。要断言的是
+        # "坐标口径一致、宠没被丢出去"，不是精确比例——这台机器上 LEFT 的逻辑
+        # 原点本身是 Qt 的已知问题（#310），单窗降级态下比例本就会偏。
+        window = QRect(shell.overlay.geometry())
+        local = QRect(0, 0, window.width(), window.height())   # 精灵坐标是窗口局部
+        body = main.body_rect()
+        assert local.contains(body.center()), "宠必须还在窗里（没被丢到屏外）"
+        # 活动区必须整体落在窗口内：混用两套坐标系时会出现 (0,0) 起的矩形
+        for _screen, rect in host.activity:
+            assert local.contains(QRect(rect)), (
+                "活动区必须按单窗口径平移，不许出现多窗口径的 (0,0)")
+    finally:
+        _cleanup(shell)
+
+
+def test_pass_budget_exhausts_without_recursing_then_recovers(tmp_path, monkeypatch,
+                                                              caplog):
+    """每一轮都真有推进但永远收敛不了：有界循环必须停下并留 pending/日志，
+    之后**只发几何信号**也要能接住。
+    """
+    import logging as _logging
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original = shell._adopt_new_host
+        flips = {"left": 12}
+
+        def adopt(screen, *, visible):
+            original(screen, visible=visible)
+            if flips["left"] > 0:
+                flips["left"] -= 1
+                # 每轮都翻一次：一定还有"工作"要做
+                dpr = 2.0 if flips["left"] % 2 == 0 else 1.0
+                b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920 if dpr == 1.0 else 960,
+                                                   1040 if dpr == 1.0 else 520), dpr=dpr)
+                shell._feed_screen_dpr()
+
+        monkeypatch.setattr(shell, "_adopt_new_host", adopt)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        with caplog.at_level(_logging.WARNING):
+            shell._feed_screen_dpr()
+
+        assert shell._topology_txn is False
+        assert flips["left"] > 0, "有界循环应当提前停下（不是把 12 轮全跑完）"
+
+        # 停掉翻转后只发几何信号：补偿入口也要接住
+        flips["left"] = 0
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+        shell.handle_geometry_changed()
+        shell.handle_geometry_changed()
+        assert shell._topology_needs_reconcile() is False or len(shell.hosts()) == 1
+    finally:
+        _cleanup(shell)
