@@ -4922,9 +4922,15 @@ class OverlayShell(QObject):
                 continue
             if own.overlay is overlay:
                 continue
-            offset = self._sprite_pos_in(target, own.overlay, overlay)
-            scale = (float(own.overlay.devicePixelRatioF())
-                     / (float(overlay.devicePixelRatioF()) or 1.0))
+            d_src = float(own.overlay.devicePixelRatioF()) or 1.0
+            d_dst = float(overlay.devicePixelRatioF()) or 1.0
+            scale = d_src / d_dst
+            target_local = self._sprite_pos_in(target, own.overlay, overlay)
+            # ``sprite.paint()`` 自己会用 ``sprite.pos`` 画，所以这里必须传**平移量**
+            # 而不是最终位置：平移 = 目标位置 − pos × scale（否则 pos 被加两次，
+            # 实机就是"投影甩到鼠标左边很远"）。
+            offset = QPointF(target_local.x() - target.pos.x() * scale,
+                             target_local.y() - target.pos.y() * scale)
             overlay.set_projection(target, offset, scale)
 
     def _place_sprite_in_physical_screen(self, sprite, host=None) -> bool:
