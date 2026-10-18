@@ -2264,11 +2264,15 @@ class OverlayShell(QObject):
         if token is None:
             logging.warning("overlay: slot-%s 没有已应用快照的 token，拒绝几何自存", slot)
             return False
-        if self._topology_needs_reconcile():
-            # **形态没达成**（补窗失败等降级态）：此时窗口按单窗铺、屏按目标算，比例
-            # 用哪一套都可能是错的。宁可不写——落盘一个越界比例（实测 1.5 / 0.08）
-            # 会在补窗成功或重启时把宠推到屏边/别的屏上，比"这次没存"糟得多。
-            logging.debug("overlay: slot-%s 屏拓扑尚未对齐，本次几何自存跳过", slot)
+        if self._topology_txn or self._topology_needs_reconcile():
+            # **形态没达成 / 事务进行中**：两种时刻都不能落盘。
+            # - 降级态（补窗失败）：窗口按单窗铺、屏按目标算，比例用哪套都可能是错
+            #   的（实测会写 1.5 / 0.08）；
+            # - **事务进行中**：宿主已补齐、几何还没应用那一段，`_active_multi()` 已经
+            #   是多窗、精灵坐标还是旧单窗的，量出来同样越界。
+            # 落盘一个越界比例会在补窗成功或重启时把宠推到屏边，比"这次没存"糟得多。
+            logging.debug("overlay: slot-%s 屏拓扑尚未对齐（事务中=%s），本次几何自存跳过",
+                          slot, self._topology_txn)
             return False
         pet_screen = self._screen_of_sprite(sprite)
         host_name = _screen_name(pet_screen)
@@ -7044,13 +7048,19 @@ class OverlayShell(QObject):
         if getattr(self, "_island_host", None) is host:
             self._island_host = None
             self._rebind_island_host()
-        # 会话通知是"按 HWND 注册、新的会顶掉旧的"：这张窗在 `_apply_host_window_caps`
-        # 里可能已经把注册抢过去，撤掉后要把存活宿主重新登记一遍。
+        # 会话通知是"按 HWND 注册、新的会顶掉旧的"（见 session_watcher 的注册口径）：
+        # 这张窗在能力下发时可能已经把注册抢过去，撤掉后必须把存活宿主**显式登记
+        # 回来**。不能只调 `_apply_host_window_caps`——置顶标志没变化时它会早退，
+        # 早退路径不碰通知注册（用户设了 on_top=False 时就是这条）。
         if survivor is not None:
             try:
                 self._apply_host_window_caps(survivor)
             except Exception:
                 logging.debug("overlay: 撤宿主后恢复存活宿主的窗口能力失败", exc_info=True)
+            try:
+                self._register_session_notifications(survivor)
+            except Exception:
+                logging.debug("overlay: 撤宿主后重新登记会话通知失败", exc_info=True)
 
     def _capture_screen_ratios(self) -> list[tuple]:
         """记下每只的（屏归属，该屏内比例）；拓扑变化前调用，变化后按它回位。

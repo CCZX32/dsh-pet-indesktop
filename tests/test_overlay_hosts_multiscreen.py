@@ -2023,3 +2023,79 @@ def test_degraded_state_saves_the_home_screen_ratio(tmp_path, monkeypatch):
             f"绝不许把越界比例写进档案，实际 {rx}")
     finally:
         _cleanup(shell)
+
+
+def test_save_is_refused_while_the_topology_transaction_is_running(
+        tmp_path, monkeypatch):
+    """**事务进行中**（宿主已补齐、几何还没应用）拖拽收尾不许落盘。
+
+    这段时间 `_active_multi()` 已经翻成多窗、精灵坐标还是旧单窗的，量出来的比例是
+    越界值（实测 1.5）。落盘后补窗成功或重启就会把宠推到屏边。
+    """
+    from pet import pet_profiles
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+        # 建宠时已经存过一次默认几何，这里记下"翻转前"的快照，比对用
+        before = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+
+        original = shell._adopt_new_host
+        results = {}
+
+        def adopt(screen, *, visible):
+            original(screen, visible=visible)
+            # 宿主已补齐、`_sync_host_geometry` 还没跑：模拟拖拽在这一刻收尾
+            results["saved"] = shell._save_child_geometry(main, slot=0, geometry=None)
+            results["in_txn"] = shell._topology_txn
+            results["active_multi"] = shell._active_multi()
+
+        monkeypatch.setattr(shell, "_adopt_new_host", adopt)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert results["in_txn"] is True, "前提：那一刻确实在事务里"
+        assert results["active_multi"] is True, "前提：形态标志已翻成多窗"
+        assert results["saved"] is False, "事务进行中不许落盘"
+        assert dict(pet_profiles.read_slot_profile(tmp_path, 0).data) == before, (
+            "事务进行中那次保存不许改动档案")
+
+        # 事务收口后再存：这次要成功，而且比例正确
+        shell._place_body_ratio(main, 0.5, 0.5, shell._screen_rect(a))
+        assert shell._save_child_geometry(main, slot=0, geometry=None) is True
+        rx = float(pet_profiles.read_slot_profile(tmp_path, 0).data["rx"])
+        assert rx == pytest.approx(0.5, abs=0.05)
+    finally:
+        _cleanup(shell)
+
+
+def test_rollback_puts_session_notifications_back_on_the_survivor(
+        tmp_path, monkeypatch):
+    """撤掉半成品宿主后，会话通知要**显式**登记回存活宿主。
+
+    通知是"按 HWND 注册、新的顶掉旧的"；用户设了 on_top=False 时再下发一遍窗口能力
+    会早退（同值），早退路径不碰通知注册——只调能力下发是不够的。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True, "on_top": False})
+    try:
+        registered: list = []
+        monkeypatch.setattr(shell, "_register_session_notifications",
+                            lambda host=None: registered.append(host))
+        original = shell._apply_host_window_caps
+        monkeypatch.setattr(
+            shell, "_apply_host_window_caps",
+            lambda host: (_ for _ in ()).throw(RuntimeError("失败")) if host.screen is b
+            else original(host))
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert shell._main_host in registered, (
+            "撤宿主后必须把会话通知登记回存活宿主（不能只靠能力下发，那里会早退）")
+    finally:
+        _cleanup(shell)
