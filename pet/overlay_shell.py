@@ -6324,10 +6324,15 @@ class OverlayShell(QObject):
             pass
 
     def _connect_host_screen(self, host) -> None:
-        """把**每一块**屏的几何/DPI 变化接到唯一合成窗的同步上。
+        """把**每一块**屏的几何/DPI/刷新率变化接到唯一合成窗上。
 
         窗覆盖整个虚拟桌面，所以任何一块屏的几何、任务栏、缩放变化都要重算窗口
         矩形与活动区——只挂家那块屏的话，别的屏在窗里留下的那块矩形会停在旧值。
+
+        刷新率同理：tick 间隔取**全部**屏的最高档（``TickDriver._refresh_rate``），
+        失效通知就必须覆盖同一范围。整片窗只归属一块屏（Qt 按窗口左上角判），
+        只挂那块屏的 ``refreshRateChanged`` 会让副屏升/降刷静默失效——升刷时
+        宠物卡在旧频率，降刷时继续按高频空转唤醒。
         """
         if host is None:
             return
@@ -6335,6 +6340,8 @@ class OverlayShell(QObject):
         geometry = host._geometry_slot = (
             lambda *args: self._sync_host_geometry())
         dpr = host._dpr_slot = lambda *args: self._feed_screen_dpr()
+        refresh = host._refresh_slot = (
+            lambda *args: self._refresh_tick_interval())
         screens = host._signal_screens = list(self._screens())
         for screen in screens:
             for name in ("geometryChanged", "availableGeometryChanged"):
@@ -6342,13 +6349,16 @@ class OverlayShell(QObject):
             for name in ("logicalDotsPerInchChanged",
                          "physicalDotsPerInchChanged"):
                 self._connect_screen_signal(screen, name, dpr)
+            self._connect_screen_signal(screen, "refreshRateChanged", refresh)
 
     def _disconnect_host_screen(self, host) -> None:
         geometry = getattr(host, "_geometry_slot", None)
         dpr = getattr(host, "_dpr_slot", None)
+        refresh = getattr(host, "_refresh_slot", None)
         screens = getattr(host, "_signal_screens", ())
         host._geometry_slot = None
         host._dpr_slot = None
+        host._refresh_slot = None
         host._signal_screens = ()
         for screen in screens:
             for name in ("geometryChanged", "availableGeometryChanged"):
@@ -6356,6 +6366,7 @@ class OverlayShell(QObject):
             for name in ("logicalDotsPerInchChanged",
                          "physicalDotsPerInchChanged"):
                 self._disconnect_screen_signal(screen, name, dpr)
+            self._disconnect_screen_signal(screen, "refreshRateChanged", refresh)
 
     def _feed_screen_dpr(self) -> None:
         """某块屏的显示缩放变了：逐只按自己那块屏重喂 DPR + 配图缓存换尺寸。"""
@@ -6364,6 +6375,16 @@ class OverlayShell(QObject):
             return
         host.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
         self._refresh_self_talk_image_cache_for_dpr()
+
+    def _refresh_tick_interval(self) -> None:
+        """某块屏的刷新率变了（或屏集合变了）：重读刷新率重算 tick 间隔。
+
+        QTimer 只是改间隔，不新增定时器、不轮询：通知到即重算，与驱动器
+        ``refresh_tick_interval`` 的 M-1 语义（只改满速档，不打回降档）一致。
+        """
+        driver = self.driver
+        if driver is not None:
+            driver.refresh_tick_interval()
 
     def handle_geometry_changed(self, *args) -> None:
         """屏几何变化入口（真信号与测试直调共用）：几何同步 + DPR 重喂。"""
@@ -6376,6 +6397,7 @@ class OverlayShell(QObject):
             self._screen_list.append(screen)
         self._connect_host_screen(self._main_host)
         self._sync_host_geometry()
+        self._refresh_tick_interval()  # 屏集合变了，刷新率取数范围跟着变
 
     def handle_screen_removed(self, screen) -> None:
         """屏拔出：收尾在途拖拽 → 家那块屏没了就换家 → 重算窗口与活动区。
@@ -6393,6 +6415,7 @@ class OverlayShell(QObject):
             self._migrate_to_screen(self._fallback_screen(screen))
         self._connect_host_screen(host)
         self._sync_host_geometry()
+        self._refresh_tick_interval()  # 拔掉的那块屏不再参与刷新率取数
 
     def handle_primary_screen_changed(self, screen) -> None:
         """主屏变更：**不迁宠**（用户把哪块屏设成主屏是系统级操作，与桌宠落位无关；
