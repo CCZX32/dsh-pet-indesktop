@@ -1499,3 +1499,60 @@ def test_topology_flip_rebinds_the_island_wall(tmp_path, monkeypatch):
     finally:
         shell.attach_island(None)
         _cleanup(shell)
+
+
+def test_split_into_per_screen_windows_keeps_pets_in_place(tmp_path, monkeypatch):
+    """单窗拆成每屏一窗：**留在主窗的那只不许被按整桌面比例缩着挪**。
+
+    拆窗时只回位"被搬走的"那几只是不够的：留在主宿主的宠会被几何事务用**旧**主宿主
+    的整桌面 bounds 量比例，再落进新主屏的单屏 bounds。两块 1920 屏、宠在主屏正中
+    （整桌面 x=960）时，翻转后会落到 x≈480。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        desktop = QRect(shell.overlay.geometry())
+        assert desktop.width() == 3840, "前提：单窗铺满两张 1920 屏"
+        # 摆到主屏正中（= 整桌面的 25%）
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, desktop.height()))
+        body = main.body_rect()
+        before = body.x() + body.width() / 2.0
+        assert before == pytest.approx(960.0, abs=2.0), "前提：身体中心在主屏正中"
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert len(shell.hosts()) == 2, "前提：已拆成每屏一窗"
+        assert shell._screen_of_sprite(main) is a
+        body = main.body_rect()
+        after = body.x() + body.width() / 2.0
+        assert after == pytest.approx(960.0, abs=3.0), (
+            f"主屏那只必须留在主屏正中（原 {before:.0f} → 现 {after:.0f}）")
+    finally:
+        _cleanup(shell)
+
+
+def test_hotplugged_screen_host_inherits_caps_and_visibility(tmp_path, monkeypatch):
+    """热插一块屏补出来的宿主：caps 与显隐同样要继承（与缩放翻转同一口径）。"""
+    a, b = _two_screens()
+    b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True,
+                                      "lock_position": True,
+                                      "shift_drag": True})
+    try:
+        c = FakeScreen((3840, 0, 1920, 1080), (3840, 0, 1920, 1040), name="C")
+        _install_screens(monkeypatch, a, b, c)
+        shell._hide_all_hosts()
+
+        shell.handle_screen_added(c)
+
+        created = shell.host_for_screen(c)
+        assert created is not None, "前提：新屏补出了宿主"
+        assert created.overlay.lock_position is True, "锁定位要下发到热插的窗"
+        assert created.overlay.shift_drag_required is True, "SHIFT 门要下发"
+        assert created.overlay.isVisible() is False, "隐藏状态必须被继承"
+    finally:
+        _cleanup(shell)

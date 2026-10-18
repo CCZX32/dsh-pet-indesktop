@@ -106,10 +106,14 @@ def _key_code(token: str) -> int | None:
         return None
     low = token.lower()
     if len(token) == 1:
+        # 先判**本字符**是不是 ASCII：只看 ``upper()`` 不够——``"ı".upper() == "I"``、
+        # ``"ſ".upper() == "S"``，那会把 dotless-i / long-s 悄悄注册成 I / S。
+        if not token.isascii():
+            return None  # 非 ASCII 单字符（é / ² / ß / ı / ſ …）一律不认
         upper = token.upper()
         if upper in _ASCII_LETTERS or upper in _ASCII_DIGITS:
             return ord(upper)  # 字母/数字的 vk 就是大写 ASCII
-        return None  # 非 ASCII 单字符（é / ² / ß …）一律不认
+        return None
     return _NAMED_KEYS.get(low)
 
 

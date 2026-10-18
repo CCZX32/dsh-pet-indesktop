@@ -2187,6 +2187,10 @@ class OverlayShell(QObject):
             for screen in self._screens():
                 if _screen_name(screen) == pending:
                     return screen
+            # 待写归属指向的屏不在线：**返回 None**，不要退回档案里的旧屏名。
+            # 旧值是被这次换屏替换掉的过期意图，拿它当"归属"会让后续机械重排
+            # 把宠搬到用户早就离开的那块屏，还会把 pending 一起改写掉。
+            return None
         slot = self._spawned_slots.get(sprite)
         if slot is None and sprite is getattr(self, "sprite", None):
             slot = 0
@@ -6699,7 +6703,16 @@ class OverlayShell(QObject):
             target = self.host_for_screen(screen)
             if target is None:
                 return False
+            # 不给全局位置 = "保持这只在屏内的相对位置"（与单窗分支同一句契约）。
+            # 直接交给 `_hand_over_sprite` 是按**全局位置**落位的：目标窗在右边时
+            # 本地坐标会被算成负值（实机表现：宠落到目标窗外、下一拍再被钳到边上）。
+            rx = ry = None
+            if global_pos is None:
+                rx, ry = self._body_ratio(
+                    sprite, self._screen_rect(self._screen_of_sprite(sprite) or screen))
             moved = self._hand_over_sprite(sprite, target, global_pos)
+            if moved and rx is not None:
+                self._place_body_ratio(sprite, rx, ry, self._screen_rect(screen))
             if moved:
                 self._remember_sprite_screen(sprite, screen)
             return moved
@@ -6882,72 +6895,105 @@ class OverlayShell(QObject):
         self._refresh_self_talk_image_cache_for_dpr()
         self._reconcile_hosts_for_dpi()
 
+    def _adopt_new_host(self, screen, *, visible: bool) -> None:
+        """运行期补一张宿主窗：建窗 + 下发窗口级配置 + **继承**当前显隐。
+
+        两条入口共用（缩放翻转补窗、热插屏补窗）。漏了 caps 那张窗停在出厂默认
+        （关了置顶它照样盖在最上面、锁定位在副屏不生效）；漏了显隐继承会在全屏
+        避让隐藏中把宠放出来——而 `_on_fullscreen_changed` 见 `_auto_hidden` 已置位
+        就不会再 hide，那一屏的宠会一直露在游戏上面。
+        """
+        host = self._create_host(screen)
+        self._apply_host_window_caps(host)
+        if visible:
+            host.overlay.show()
+            host.overlay.start()
+
+    def _capture_screen_ratios(self) -> list[tuple]:
+        """记下每只的（屏归属，该屏内比例）；拓扑变化前调用，变化后按它回位。
+
+        比例按**归属屏**的矩形算，不按宿主 ``bounds`` 算：单窗下 ``bounds`` 是整个
+        虚拟桌面，多窗下才是单块屏——同一只宠在拓扑翻转前后用这两种口径量出来的
+        比例不是一回事，直接拿宿主 bounds 会在拆窗时把它挪到主屏中间（实测
+        1920 屏 + 1920 屏、身体中心 x=960，翻转后落到 x≈480）。
+        """
+        plan: list[tuple] = []
+        for sprite in self._all_sprites():
+            host = self._host_of(sprite)
+            if host is None:
+                continue
+            assigned = self._assigned_screen(sprite) or host.screen
+            if assigned is None or assigned not in self._screens():
+                continue
+            # 比例必须在**这只所在宿主的坐标系**里量。两种形态不能混用：
+            # - 每屏一窗时，那张窗的原点就是该屏原点 → 归属屏在当地是 (0,0,w,h)；
+            # - 单窗时所有屏共用一张窗，归属屏在当地是"可用区相对窗原点的平移"。
+            # 而且这里不能读 `_multi_window()`：缩放信号到达时判定已经翻转，而
+            # 精灵的坐标还是**旧**形态的（实测：拆窗时按新判定量出 0.25 而不是 0.5，
+            # 宠从主屏正中掉到 25% 处）。
+            rect = self._screen_rect_in_host(assigned, host)
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            rx, ry = self._body_ratio(sprite, rect)
+            plan.append((sprite, assigned, rx, ry))
+        return plan
+
+    @staticmethod
+    def _screen_rect_in_host(screen, host) -> QRect:
+        """某块屏在**指定宿主窗**坐标系里的矩形（只看那张窗的原点，不看拓扑判定）。"""
+        if screen is None or host is None:
+            return QRect()
+        origin = host.overlay.geometry().topLeft()
+        return QRect(screen.availableGeometry()).translated(-origin.x(), -origin.y())
+
+    def _restore_screen_ratios(self, plan: list[tuple]) -> None:
+        """按 :meth:`_capture_screen_ratios` 的结果把每只放回自己那块屏的同一位置。"""
+        for sprite, assigned, _rx, _ry in plan:
+            host = self.host_for_screen(assigned)
+            if host is None or host is self._host_of(sprite):
+                continue
+            # 先交出宿主（这一步只保证"在哪块屏"，精确位置下一步写）
+            self.move_sprite_to_screen(sprite, assigned)
+        for sprite, assigned, rx, ry in plan:
+            host = self.host_for_screen(assigned)
+            if host is None:
+                continue
+            self._place_body_ratio(
+                sprite, rx, ry, self._screen_rect_in_host(assigned, host))
+
     def _reconcile_hosts_for_dpi(self) -> None:
         """缩放变化会翻转「单窗 ↔ 每屏一窗」：把宿主集合与新拓扑对齐。
 
         ``_multi_window()`` 判的是**当前**屏幕 DPR，而宿主只在建壳与插拔屏时建。
         运行中改显示缩放（控制面板把副屏从 100% 拖到 125%）会让判定翻转，只喂
-        DPR 会留下两种错位：单窗却按多窗算几何（副屏没有窗，那边的宠被按主宿主
-        重新落位）、多窗却按单窗算（旧副屏宿主仍挂着成员，主窗又按整桌面铺开）。
+        DPR 会留下错位：单窗却按多窗算几何（副屏没有窗，那边的宠被按主宿主重新
+        落位）、多窗却按单窗算（旧副屏宿主仍挂着成员，主窗又按整桌面铺开）。
+
+        两个方向共用一套"先记归属屏 + 屏内比例，改完再回位"的事务：只回位被搬动的
+        那几只是不够的——留在主宿主的宠会被 `_sync_host_geometry` 用**旧**主宿主
+        的整桌面 bounds 量比例，再落进新主屏的单屏 bounds，位置直接跑偏。
         """
         if self._main_host is None:
             return
-        if self._multi_window():
+        want_multi = self._multi_window()
+        if want_multi == (len(self._hosts) > 1):
+            return  # 已经是目标形态，没有宿主集合要重排
+        plan = self._capture_screen_ratios()
+        if want_multi:
+            was_visible = any(host.overlay.isVisible() for host in self._hosts)
             missing = [screen for screen in self._screens()
                        if screen is not None
                        and not any(host.screen is screen for host in self._hosts)]
-            if not missing:
-                return
-            # 显隐要**继承**：整组隐藏中（全屏避让 / 用户隐藏）翻出新的屏，不能顺手
-            # 把宠全放出来——`_on_fullscreen_changed` 看到 `_auto_hidden` 已置位就不会
-            # 再 hides，那一屏的宠会一直露在游戏上面。
-            was_visible = any(host.overlay.isVisible() for host in self._hosts)
             for screen in missing:
-                host = self._create_host(screen)
-                # 窗口级配置（置顶/穿透/锁位/不透明度）也要逐张下发，否则运行期新
-                # 建出来的那张窗停在出厂默认：用户关了置顶它照样盖在最上面。
-                self._apply_host_window_caps(host)
-                if was_visible:
-                    host.overlay.show()
-                    host.overlay.start()
-            # 每只按**档案里记的屏归属**回到自己那块屏（`screen_name` 是用户的意图，
-            # 比"按当前物理中心落"更符合预期，也避免机械重排把宠搬到别的屏）；
-            # 没有归属记录或那块屏仍不在的，保持原位——不改归属。
-            for sprite in self._all_sprites():
-                assigned = self._assigned_screen(sprite)
-                if assigned is None:
-                    continue
-                if self._host_of(sprite) is self.host_for_screen(assigned):
-                    continue
-                self.move_sprite_to_screen(sprite, assigned)
+                self._adopt_new_host(screen, visible=was_visible)
         else:
-            if len(self._hosts) <= 1:
-                return
-            # 合回单窗：先把每只的**归属屏 + 屏内比例**记下来。`_dismantle_host` 是
-            # 拔屏用的"临时并入主屏"算法，直接拿它当合窗用会把副屏的宠永久搬到主屏
-            # ——可那块屏还在线，用户只改了缩放。
-            plan: list[tuple] = []
-            for sprite in self._all_sprites():
-                host = self._host_of(sprite)
-                if host is None or host.bounds.width() <= 0 or host.bounds.height() <= 0:
-                    continue
-                assigned = self._assigned_screen(sprite) or host.screen
-                rx, ry = self._body_ratio(sprite, host.bounds)
-                plan.append((sprite, assigned, rx, ry))
             home = self._main_host
             for host in list(self._hosts):
                 if host is home:
                     continue
                 self._dismantle_host(host, home.screen)
-            self._sync_host_geometry()
-            for sprite, assigned, rx, ry in plan:
-                if assigned is None or assigned not in self._screens():
-                    continue
-                self._place_body_ratio(sprite, rx, ry, self._screen_rect(assigned))
-            # 拓扑重排后墙的宿主也可能变了：统一重绑一次，别只指望拔屏那条入口。
-            self._rebind_island_host()
-            return
         self._sync_host_geometry()
+        self._restore_screen_ratios(plan)
         # 宿主集合变了 ⇒ 岛墙绑的那张窗可能已经不在了（岛自己没有几何事件就不会
         # 自己重绑）。所有重排事务收口都补一次。
         self._rebind_island_host()
@@ -7006,9 +7052,10 @@ class OverlayShell(QObject):
             self._screen_list.append(screen)
         if (self._multi_window() and screen is not None
                 and not any(h.screen is screen for h in self._hosts)):
-            # 多窗：新插进来的屏也要有自己的窗，否则拖不过去
-            self._create_host(screen)
-            self._show_all_hosts()
+            # 多窗：新插进来的屏也要有自己的窗，否则拖不过去。caps 与显隐两条
+            # 继承口径与缩放翻转补窗完全一致（见 `_adopt_new_host`）。
+            was_visible = any(host.overlay.isVisible() for host in self._hosts)
+            self._adopt_new_host(screen, visible=was_visible)
         for each in list(self._hosts):
             self._connect_host_screen(each)
         self._sync_host_geometry()
