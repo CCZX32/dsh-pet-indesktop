@@ -309,6 +309,12 @@ class SpriteBubbleFollower:
         timer = getattr(self, "_follow_timer", None)
         if timer is not None:
             try:
+                # 换父之前先停一拍。两个理由：①在飞的那一拍属于**旧窗**的原点，
+                # 跨窗后执行会用新锚点做一次错误 flush；②它正要把 timer 的 C++
+                # 父对象换掉，留一个已排队的激活拍跨过 `setParent` 是原生层最容易
+                # 出事的形态（父对象销毁/换绑与 pending timeout 交错）。停掉即可，
+                # 下一次 `_on_sprite_moved` 会按需重新 start。
+                timer.stop()
                 timer.setParent(overlay)
             except Exception:
                 logger.debug("overlay: 跟随定时器换父对象失败", exc_info=True)

@@ -292,7 +292,9 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-19 上调到 2594（搜索框 ↑/↓ 逐条翻命中，本文件净 +14：`_search_settings`
 # 改成 `advance: int` 步长并补 docstring、`eventFilter` 四键映射）。这一改只动键盘
 # 交互，没有新页面/新控件组可拆，按「拆不动则校准到实测」处理。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2594
+# 2026-10-19 上调到 2600（同一处再 +6：`eventFilter` 加修饰键闸门——只拦裸键/小键盘键，
+# 带 Ctrl/Alt/Shift 的 ↑↓ 透传，避免抢走输入法候选导航）。仍是键盘边界，同上处理。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2600
 
 
 def _read(name: str) -> str:
