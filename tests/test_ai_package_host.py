@@ -540,6 +540,49 @@ def test_fake_pet_view_is_what_the_windows_receive(bound):
         dispose_qobject(runtime)
 
 
+def test_uninstalling_while_a_window_is_open_clears_the_file_interpret_route(bound):
+    """卸载/宿主关闭必须当场摘掉包路由，不能等窗口自己收到 Close。"""
+    from pet.ai_bindings import register_file_interpret_router
+    from pet.file_interpret_router import FileInterpretRouter
+
+    _host, context, _vault, handle = bound
+    router = FileInterpretRouter()
+    seen: list[str] = []
+    router.set_builtin_offer(lambda _paths: seen.append("builtin"))
+    register_file_interpret_router(router)
+    mount_module = import_pkg(handle, "host.runtime_mount")
+    runtime = mount_module.AiPackageRuntime(context)
+    try:
+        assert runtime.chat() is not None
+        assert router.package_open
+
+        runtime.close()
+
+        assert not router.package_open
+        router(["a"])
+        assert seen == ["builtin"], "包卸载后拖文件必须回落到内置解读器"
+    finally:
+        runtime.close()
+        register_file_interpret_router(None)
+        dispose_qobject(runtime)
+
+
+def test_a_paused_package_does_not_create_a_file_interpreter(bound):
+    """停用（pause）后 offer 早退：不建解读器、不弹确认。"""
+    _host, context, _vault, handle = bound
+    mount_module = import_pkg(handle, "host.runtime_mount")
+    runtime = mount_module.AiPackageRuntime(context)
+    try:
+        runtime.stop()
+
+        runtime.file_interpret_offer(["a.txt"])
+
+        assert runtime._file_controller is None
+    finally:
+        runtime.close()
+        dispose_qobject(runtime)
+
+
 def test_ai_feature_id_is_the_only_owner_this_package_answers_to(bound):
     assert OWNER == AI_FEATURE_ID == "official.ai-chat"
 

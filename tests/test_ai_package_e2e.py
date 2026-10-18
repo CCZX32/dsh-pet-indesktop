@@ -118,6 +118,62 @@ def _ai_group(tmp_path, runtime):
     return group
 
 
+def test_install_official_enabled_starts_the_package_in_one_action(tmp_path, monkeypatch):
+    """Setup 回执的语义：勾选 = 启用意图，安装与启用必须一次完成。"""
+    from pet.feature_management import LocalFeatureRuntime
+
+    monkeypatch.setattr("pet.credentials.secure_backend", lambda: _MemoryVault())
+    fake = FakePetView()
+    register_ai_pet_view(lambda: fake)
+    runtime = LocalFeatureRuntime(Config(base=tmp_path), role="core")
+    try:
+        built = build_package(tmp_path / "pkg-enabled" / "built")
+        manager, accepted = runtime.install_official(OWNER, source=built, enabled=True)
+        assert accepted is True
+        _settle(manager)
+        info = manager.service.inspect()
+        assert info.active == "1.0.0"
+        assert info.enabled is True
+        assert runtime.host.enabled(OWNER) is True
+        assert runtime.menu_owners() == (OWNER,)
+    finally:
+        register_ai_pet_view(None)
+        dispose_qobject(runtime.mounts.runtimes.get(OWNER) if runtime.mounts else None)
+        runtime.close()
+
+
+def test_without_the_package_there_is_no_ai_entry_or_runtime_state(tmp_path):
+    """5B-2 无包状态：没有 entry、没有挂载、没有菜单贡献。"""
+    from pet.feature_management import LocalFeatureRuntime
+
+    runtime = LocalFeatureRuntime(Config(base=tmp_path), role="core")
+    try:
+        assert runtime.host.state(OWNER) == "absent"
+        assert runtime.menu_owners() == ()
+        menu = _legacy_menu(tmp_path, runtime)
+        assert not any("AI 对话" in text for text in _texts(menu)), _texts(menu)
+    finally:
+        runtime.close()
+
+
+def test_reinstall_restores_personal_preferences(installed, tmp_path):
+    """5B-2 卸载默认留数据：重装后偏好文件原样还在。"""
+    runtime, manager, _fake = installed
+    preferences = _feature_data(tmp_path) / "preferences.json"
+    preferences.write_text(json.dumps({"accent": "blue"}), encoding="utf-8")
+
+    assert manager.submit("uninstall") is True
+    _settle(manager)
+    assert runtime.host.state(OWNER) == "absent"
+    assert json.loads(preferences.read_text(encoding="utf-8")) == {"accent": "blue"}
+
+    built = build_package(tmp_path / "pkg-prefs" / "built")
+    assert manager.submit("import_disabled", built, auto_apply=True) is True
+    _settle(manager)
+    assert manager.service.inspect().active == "1.0.0"
+    assert json.loads(preferences.read_text(encoding="utf-8")) == {"accent": "blue"}
+
+
 # --------------------------------------------------------------- 装载/启停/卸载
 
 
