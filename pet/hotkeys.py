@@ -55,6 +55,11 @@ ACTION_LABELS: dict[str, str] = {
 #: 注册 id 基址（进程内唯一即可；不与 Windows 预定义热键冲突）
 _BASE_ID = 0xA5D0
 
+#: 存活的服务实例（弱引用）：**热键 id 是进程级的**，两个实例会互相覆盖同一批 id。
+#: 产品里只有 AppShell 一个创建点，这里加一条"出现第二个就告警"的护栏，
+#: 免得将来有人顺手在别处再建一个、静默把前一个的绑定顶掉。
+_LIVE_SERVICES: list = []
+
 
 def is_supported() -> bool:
     """当前平台能否注册系统级热键（只有 Windows 有这条路）。"""
@@ -105,6 +110,13 @@ class GlobalHotkeyService(QObject, QAbstractNativeEventFilter):
             return True
         if not self._supported:
             return False
+        import weakref
+
+        _LIVE_SERVICES[:] = [ref for ref in _LIVE_SERVICES if ref() not in (None, self)]
+        if any(ref() is not None for ref in _LIVE_SERVICES):
+            logger.warning("全局快捷键：进程内出现了第二个服务实例——热键 id 是进程级的，"
+                           "后装的会把先装的绑定顶掉（产品应只有 AppShell 一个创建点）")
+        _LIVE_SERVICES.append(weakref.ref(self))
         if self._app is None:
             return False
         if self._install_native_filter:

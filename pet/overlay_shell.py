@@ -1119,6 +1119,9 @@ class OverlayShell(QObject):
         #: `screen.availableGeometry()` 已经变成**新**尺寸，而精灵坐标还是旧形态；
         #: 比例定标必须用这份旧值，否则会把 0.5 量成 1.0（见 _capture_screen_ratios）。
         self._applied_screen_rects: dict[str, tuple[object, QRect]] = {}
+        #: 拓扑重排事务的重入闸：`_sync_host_geometry` 与 `_reconcile_hosts_for_dpi`
+        #: 互相调用，靠它保证"一次事务只跑一层"，不会在一半状态上再开一层。
+        self._topology_txn = False
         self._sprite_cfg_cache: dict = {}
         self._bubble_followers: dict = {}
         self._sprite_hosts: dict = {}
@@ -2187,11 +2190,12 @@ class OverlayShell(QObject):
         落盘就是这么存的），再看档案。只看档案的话，刚拖过去、还没触发几何自存的那只
         会被当成"没归属"，缩放翻转重排时按当前宿主落位——等于把用户刚做的换屏吃掉。
         """
+        host_screen = getattr(self._host_of(sprite), "screen", None)
         pending = str(getattr(sprite, "_pending_screen_assignment", "") or "")
         if pending:
-            for screen in self._screens():
-                if _screen_name(screen) == pending:
-                    return screen
+            found = self._screen_by_name(pending, prefer=host_screen)
+            if found is not None:
+                return found
             # 待写归属指向的屏不在线：**返回 None**，不要退回档案里的旧屏名。
             # 旧值是被这次换屏替换掉的过期意图，拿它当"归属"会让后续机械重排
             # 把宠搬到用户早就离开的那块屏，还会把 pending 一起改写掉。
@@ -2204,10 +2208,7 @@ class OverlayShell(QObject):
         name = self._stored_screen_name(self._spawn_config_dir(), slot)
         if not name:
             return None
-        for screen in self._screens():
-            if _screen_name(screen) == name:
-                return screen
-        return None
+        return self._screen_by_name(name, prefer=host_screen)
 
     def _save_child_geometry(self, sprite, *, slot=None, geometry=None) -> bool:
         """这只宠的位置自存：写 ``rx``/``ry``/``facing``/``scale``（+ 待写的屏归属）。
@@ -5698,17 +5699,27 @@ class OverlayShell(QObject):
 
         return self._create_library_for(character, fallback_writer=fallback)
 
-    def _screen_by_name(self, name):
-        """已连接显示器里按名字取（与 ``window_placement.screen_available`` 同口径）。"""
+    def _screen_by_name(self, name, *, prefer=None):
+        """已连接显示器里按名字取（与 ``window_placement.screen_available`` 同口径）。
+
+        ``prefer``：**同名屏**时优先返回这一块（调用方通常传"这只当前所在那屏"）。
+        驱动重装 / 虚拟显示器可能让两块屏报同一个名字，那时"取第一块匹配"可能拿到
+        另一块，后续机械重排会把宠搬到它其实不在的那块屏上。
+        """
         if not name:
             return None
+        first = None
         for screen in QGuiApplication.screens():
             try:
-                if screen.name() == name:
-                    return screen
+                if screen.name() != name:
+                    continue
             except RuntimeError:
                 continue
-        return None
+            if prefer is not None and screen is prefer:
+                return screen
+            if first is None:
+                first = screen
+        return first
 
     def _restore_screen(self, slot, state):
         """这只宠该落在哪块屏（复活/生成的唯一判据）。
@@ -6842,7 +6853,7 @@ class OverlayShell(QObject):
             pass
 
     def _connect_host_screen(self, host) -> None:
-        """把**每一块**屏的几何/DPI/刷新率变化接到唯一合成窗上。
+        """把**每一块**屏的几何/DPI/刷新率变化接到承载它的那张合成窗上（每屏一窗时逐张接）。
 
         窗覆盖整个虚拟桌面，所以任何一块屏的几何、任务栏、缩放变化都要重算窗口
         矩形与活动区——只挂家那块屏的话，别的屏在窗里留下的那块矩形会停在旧值。
@@ -7019,9 +7030,21 @@ class OverlayShell(QObject):
         """
         if self._main_host is None:
             return
+        if self._topology_txn:
+            # 同一事务已经在上层跑：不在一半状态（宿主建了/拆了但几何还没同步）
+            # 上再开一层，否则 capture 会量到中间态的矩形。
+            return
         want_multi = self._multi_window()
         if want_multi == (len(self._hosts) > 1):
             return  # 已经是目标形态，没有宿主集合要重排
+        self._topology_txn = True
+        try:
+            self._reconcile_hosts_locked(want_multi)
+        finally:
+            self._topology_txn = False
+
+    def _reconcile_hosts_locked(self, want_multi: bool) -> None:
+        """拓扑重排事务本体（调用方已置 ``_topology_txn`` 闸）。"""
         plan = self._capture_screen_ratios()
         if want_multi:
             was_visible = any(host.overlay.isVisible() for host in self._hosts)
@@ -7177,7 +7200,7 @@ class OverlayShell(QObject):
         # 集合补齐/拆掉，再由那次调用按新拓扑算几何。不先对齐就按**判定**选分支，
         # 单窗的整桌面 bounds 会被当成单屏比例分母——主屏正中的宠直接掉到 25%
         # 处，而且这次错误结果还会把活动区一起覆盖掉，后面的重排再也救不回原比例。
-        if self._multi_window() != (len(self._hosts) > 1):
+        if not self._topology_txn and self._multi_window() != (len(self._hosts) > 1):
             self._reconcile_hosts_for_dpi()
             return
         if self._multi_window():

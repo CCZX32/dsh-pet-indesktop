@@ -62,6 +62,11 @@ _QT_KEYS = {
     Qt.Key.Key_Down: 0x28,
     Qt.Key.Key_Print: 0x2C,
     Qt.Key.Key_Pause: 0x13,
+    # `hotkey_spec` 认这三个锁键，回显表也得认——否则手写进来的 Ctrl+CapsLock 在
+    # 录入框里显示成空（看着像没设），而它其实已经注册了。
+    Qt.Key.Key_CapsLock: 0x14,
+    Qt.Key.Key_NumLock: 0x90,
+    Qt.Key.Key_ScrollLock: 0x91,
 }
 
 

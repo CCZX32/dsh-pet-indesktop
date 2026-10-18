@@ -1623,3 +1623,66 @@ def test_geometry_signal_before_the_dpi_flip_keeps_positions(tmp_path, monkeypat
             "主屏那只必须仍在主屏正中")
     finally:
         _cleanup(shell)
+
+
+def test_three_screens_flip_both_ways_and_keep_every_pet_in_place(tmp_path, monkeypatch):
+    """三屏、只改其中一块的缩放：两个方向都要保住每只的屏归属与屏内比例。"""
+    a, b, c = _three_screens()
+    _install_screens(monkeypatch, a, b, c)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        desktop = QRect(shell.overlay.geometry())
+        assert desktop.width() == 5760, "前提：三块 1920 屏共用一张窗"
+        main = shell.sprite
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        # 三只分别摆在 A / B / C 的中间（整桌面 5760 的 1/6、1/2、5/6）
+        shell._place_body_ratio(main, 1 / 6, 0.5, desktop)
+        shell._place_body_ratio(child, 0.5, 0.5, desktop)
+        shell._remember_sprite_screen(main, a)
+        shell._remember_sprite_screen(child, b)
+
+        # 只有 B 改成 200%（工作区同时减半）→ 每屏一窗
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+        assert len(shell.hosts()) == 3, "三块屏都该有自己的窗"
+        for sprite, screen in ((main, a), (child, b)):
+            assert shell._screen_of_sprite(sprite) is screen
+            host = shell.host_for_screen(screen)
+            rect = shell._screen_rect_in_host(screen, host)
+            body = sprite.body_rect()
+            ratio = (body.x() + body.width() / 2.0 - rect.x()) / rect.width()
+            assert ratio == pytest.approx(0.5, abs=0.08), (
+                f"{screen.name()} 上的这只必须仍在屏内中央附近，实际 {ratio:.2f}")
+
+        # B 改回 100% → 合回单窗，三只各自回屏
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+        shell._feed_screen_dpr()
+        assert len(shell.hosts()) == 1, "回到单窗"
+        for sprite, screen in ((main, a), (child, b)):
+            assert shell._screen_of_sprite(sprite) is screen
+    finally:
+        _cleanup(shell)
+
+
+def test_repeated_topology_notifications_are_idempotent(tmp_path, monkeypatch):
+    """重复/交错通知不许反复拆建宿主，也不许把位置越推越远。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        for _ in range(3):
+            shell.handle_geometry_changed()
+            shell._feed_screen_dpr()
+            shell.handle_geometry_changed()
+
+        assert len(shell.hosts()) == 2, "重复通知不许越拆越多"
+        body = main.body_rect()
+        center = body.x() + body.width() / 2.0
+        assert center == pytest.approx(960.0, abs=3.0), "位置也不许被推走"
+    finally:
+        _cleanup(shell)

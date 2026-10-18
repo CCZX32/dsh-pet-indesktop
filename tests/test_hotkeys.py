@@ -21,6 +21,12 @@ from pet import hotkeys
 from pet.hotkeys import GlobalHotkeyService
 
 
+@pytest.fixture
+def qapp_():
+    app = QApplication.instance() or QApplication([])
+    return app
+
+
 # ---------------------------------------------------------------- 文本口径
 @pytest.mark.parametrize("text,expected", [
     ("Ctrl+Alt+P", (spec.MOD_CONTROL | spec.MOD_ALT, 0x50)),
@@ -254,3 +260,24 @@ def test_unicode_variants_never_register_another_ascii_key(text):
     """
     assert spec.parse(text) is None, f"{text} 不许被当成合法热键"
     assert spec.normalize(text) == ""
+
+
+def test_second_service_instance_is_reported(qapp_, caplog):
+    """进程内出现第二个服务实例要告警（热键 id 是进程级的，会互相顶掉）。"""
+    import logging as _logging
+
+    from pet import hotkeys as hk
+
+    user32 = _FakeUser32()
+    first = GlobalHotkeyService(app=qapp_, user32=user32, install_native_filter=False,
+                                supported=True)
+    second = GlobalHotkeyService(app=qapp_, user32=user32, install_native_filter=False,
+                                 supported=True)
+    with caplog.at_level(_logging.WARNING):
+        first.install()
+        second.install()
+
+    assert any("第二个服务实例" in record.getMessage() for record in caplog.records)
+    del hk
+    first.uninstall()
+    second.uninstall()
