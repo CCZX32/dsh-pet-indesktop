@@ -2387,6 +2387,8 @@ class AppShell:
         sampled = self._config_signature()
         self.config.reload()
         try:
+            # 设置页是独立进程：热键改完要在这里重新注册，不能等下次启动。
+            self._apply_global_hotkeys()
             self._apply_external_config_change()
         except Exception:
             logging.exception("应用外部配置变更失败")
@@ -2506,6 +2508,8 @@ class AppShell:
         # ——它要在关机窗口期到来**之前**就位，才能抢在会话拆除前关掉 ffmpeg
         # 派生（否则系统会弹 0xc0000142 阻塞关机）。
         self._install_session_watcher()
+        # 全局快捷键：壳已就绪才装（分发目标是壳的三个既有入口），默认全不绑。
+        self._install_global_hotkeys()
         self._announce_slot0_profile_problem()
 
     def _announce_slot0_profile_problem(self) -> None:
@@ -2553,6 +2557,76 @@ class AppShell:
             self.precache_self_talk_voice("启动时")
         except Exception:
             logging.exception("启动时预缓存台词语音失败")
+
+    # ------------------------------------------------------------ 全局快捷键
+    def _install_global_hotkeys(self) -> None:
+        """装系统级热键服务（幂等；非 Windows 或装不上时只保留引用供诊断）。"""
+        service = getattr(self, "_hotkeys", None)
+        if service is None:
+            try:
+                from .hotkeys import GlobalHotkeyService
+
+                service = GlobalHotkeyService(self.app)
+                self._hotkeys = service  # 先保活：装原生过滤器要求对象常驻
+                service.install()
+            except Exception:
+                logging.exception("安装全局快捷键失败（右键菜单仍可用）")
+                return
+        self._apply_global_hotkeys()
+
+    def _apply_global_hotkeys(self) -> None:
+        """按当前配置重新注册全部热键（改键/启动/外部配置变更后调用）。"""
+        service = getattr(self, "_hotkeys", None)
+        if service is None or not getattr(service, "installed", False):
+            return
+        from .hotkeys import ACTIONS
+
+        try:
+            failures = service.apply(
+                {action: self.config.get(key) for action, key in ACTIONS.items()},
+                {
+                    "open_chat": self._hotkey_open_chat,
+                    "look_screen": self._hotkey_look_screen,
+                    "screen_capture": self._hotkey_screen_capture,
+                })
+        except Exception:
+            logging.exception("注册全局快捷键失败（右键菜单仍可用）")
+            return
+        for action, text, reason in failures:
+            logging.warning("全局快捷键未生效：%s（%s）%s", action, text, reason)
+
+    def _hotkey_overlay(self):
+        return getattr(self, "_overlay_shell", None)
+
+    def _hotkey_open_chat(self) -> None:
+        """AI 对话：与右键「AI 对话」同一条入口（内部已处理 overlay 拓扑的回退）。"""
+        opener = getattr(self.instance, "open_chat", None)
+        if callable(opener):
+            opener()
+            return
+        quick = getattr(self._hotkey_overlay(), "open_quick_chat", None)
+        if callable(quick):
+            quick()
+
+    def _hotkey_look_screen(self) -> None:
+        """看看屏幕：与右键「看看屏幕」同一条入口（不传 sprite = 主宠）。"""
+        look = getattr(self._hotkey_overlay(), "look_at_screen", None)
+        if callable(look):
+            look()
+            return
+        legacy = getattr(getattr(self.instance, "win", None), "look_at_screen", None)
+        if callable(legacy):
+            legacy()
+
+    def _hotkey_screen_capture(self) -> None:
+        """截图提问：与右键「截图提问」同一条入口。"""
+        capture = getattr(self._hotkey_overlay(), "on_screen_capture", None)
+        if callable(capture):
+            capture()
+            return
+        legacy = getattr(getattr(self.instance, "win", None), "on_screen_capture", None)
+        if callable(legacy):
+            legacy()
 
     def _install_session_watcher(self) -> None:
         """安装会话结束探测器（幂等；实例属性强引用保活，不跨实例共享）。"""
@@ -2951,6 +3025,12 @@ class AppShell:
             logging.exception("退出时关闭会话写盘 worker 失败")
         # 批5.2a：进程级共享子系统收口（agent_link / proactive / 全屏 watcher）。
         # 单窗关闭（退出这只）不触发——只有「全部退出」才停共享子系统。
+        hotkeys = getattr(self, "_hotkeys", None)
+        if hotkeys is not None:
+            try:
+                hotkeys.uninstall()
+            except Exception:
+                logging.debug("注销全局快捷键失败", exc_info=True)
         if self._shared is not None:
             try:
                 self._shared.stop_all()

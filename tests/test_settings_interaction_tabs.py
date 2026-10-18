@@ -25,11 +25,13 @@ EXPECTED_SIDEBAR = [
 # 「天气」（issue #209，2026-10-07）与「点击显示余额」同族——都是"桌宠替你看一眼
 # 外部数据"的互动面，故挂在同一个域里当第三个同级任务，而不是新开侧栏域；
 # 「抽签」（每日一签，2026-10-15）同族（用户主动拉一次、桌宠给一个结果），是第四个。
+# 「快捷键」（2026-10-18）是第五个：用户怎么唤出这三个动作，同属"人宠交互"面。
 EXPECTED_TABS = (("click", "点击与音效"), ("self_talk", "自言自语"), ("weather", "天气"),
-                 ("divination", "趣味"))
+                 ("divination", "趣味"), ("hotkeys", "快捷键"))
 
 # 每组行各自应该落在哪个标签
 ROWS_BY_TAB = {
+    "hotkeys": ("hotkey_open_chat", "hotkey_look_screen", "hotkey_screen_capture"),
     "click": (
         "mouse_through", "click_sound", "click_sound_pack", "click_sound_volume",
         "click_sound_preview", "click_balance", "click_self_talk", "click_self_talk_speak",

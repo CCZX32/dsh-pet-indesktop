@@ -284,7 +284,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 与 `_update_self_talk_controls` / `_update_click_self_talk_controls` 两处调用的接线，
 # 行数即这两个函数的净增。显隐规则必须贴着这两处开关的 toggled 接线（拆成外部函数
 # 反而把"哪一档跟哪个开关"这条唯一契约切散），故按文件约定校准到实测值。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2561
+# 2026-10-18 上调到 2563（互动域新增「快捷键」页内标签，本文件净 +2：一行 import
+# + 保存路径一行 `save_hotkey_settings`）。行的装配在 settings_hotkeys（新模块），
+# 本文件只留接线——这是既定口径（settings_quiet/weather/divination 同形）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2563
 
 
 def _read(name: str) -> str:

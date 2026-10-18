@@ -28,8 +28,8 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .settings_widgets import SettingRow, SettingsSection, SettingsTabContainer
 
-TAB_KEYS = ("click", "self_talk", "weather", "divination")
-TAB_LABELS = ("点击与音效", "自言自语", "天气", "趣味")
+TAB_KEYS = ("click", "self_talk", "weather", "divination", "hotkeys")
+TAB_LABELS = ("点击与音效", "自言自语", "天气", "趣味", "快捷键")
 
 
 def _page(dialog, title: str, sections: list[tuple[str, list[SettingRow]]]) -> QWidget:
@@ -184,4 +184,12 @@ def build_interaction_domain(dialog) -> QWidget:
     from .settings_divination import build_divination_tab
 
     tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
+    # 第五个同级任务：全局快捷键（"用户怎么唤出它"）。默认全不绑，见 settings_hotkeys。
+    from .settings_hotkeys import build_hotkey_rows
+
+    tabs.addTab(
+        TAB_KEYS[4],
+        TAB_LABELS[4],
+        _page(dialog, TAB_LABELS[4], [("快捷键", build_hotkey_rows(dialog))]),
+    )
     return tabs

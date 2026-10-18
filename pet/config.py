@@ -1321,6 +1321,12 @@ class Config:
             # 只会让第一次点击撞上一句"功能已关闭"。默认**不猜城市**：气泡永远会
             # 把城市名报出来，与其猜一个大概率不对的城市，不如给一句可执行的引导
             # （"还没选天气城市：右键菜单 → 天气城市 → 添加城市…"）。
+            # 全局快捷键（进程级，不随每宠不同）：空串 = 未绑定。
+            # 三个动作见 pet/hotkeys.py 的 ACTIONS；写进来时按 hotkey_spec 收成
+            # 规范形式，不认识的一律清空（配置里不存脏值）。
+            "hotkey_open_chat": "",
+            "hotkey_look_screen": "",
+            "hotkey_screen_capture": "",
             "weather_enabled": True,  # 天气功能总开关
             "weather_city": "",  # 当前城市（空 = 还没选，菜单会引导去添加）
             "weather_city_list": [],  # 城市清单（全局，上限 12，见 weather.MAX_CITIES）
@@ -1611,6 +1617,9 @@ class Config:
             "ffmpeg_recycle_minutes",
             "experimental_shared_decode",
             "settings_process_isolation",
+            "hotkey_open_chat",
+            "hotkey_look_screen",
+            "hotkey_screen_capture",
         ):
             if key not in raw:
                 continue
@@ -1929,6 +1938,12 @@ class Config:
         self.data["anim_menu_stay_open"] = _bool_or_default(
             self.data.get("anim_menu_stay_open"), False)
         self.data["quick_launch_apps"] = _clean_quick_launch_apps(self.data.get("quick_launch_apps"))
+        # 全局快捷键：收成规范形式（顺序/大小写统一），不认识/残缺 → 空串。
+        # 归一化放在这里而不是只靠设置页，是因为配置文件可能被手改。
+        from . import hotkey_spec as _hotkey_spec
+        for _hotkey_key in ("hotkey_open_chat", "hotkey_look_screen",
+                            "hotkey_screen_capture"):
+            self.data[_hotkey_key] = _hotkey_spec.normalize(self.data.get(_hotkey_key))
         # 枚举键必须先 str() 再判成员：直接 `x not in {...}` 遇到 list/dict 抛
         # TypeError: unhashable type（json 合法脏值），Config() 构造失败 → 启动崩、
         # 连独立设置页都进不去。同族写法一律抄这一行。

@@ -83,6 +83,26 @@ recovery
 
 ## 变更记录
 
+### 2026-10-18 — 新增「互动 · 快捷键」页内标签 + 3 个全局快捷键键（默认全空）
+
+用户需求原文：「可以给 AI 对话 / 看看屏幕 / 截图提问这三个功能增加快捷键吗？默认空，
+需要用户自己设置。」
+
+| 项 | 内容 |
+|---|---|
+| 新增键（3） | `hotkey_open_chat` / `hotkey_look_screen` / `hotkey_screen_capture`，**默认 `""`（不绑）** |
+| 作用域 | **全局**（主 `config.json`）：三个动作都是进程级的，不随每只宠不同；不进 `PER_PET_KEYS`（进了就是双真值，全局写盘会无条件剔除） |
+| 归属 | 「互动」域的**第五个页内标签「快捷键」**（不新开一级域：侧栏在 800×560 下只剩 ~17px 余量，且新域须 ≥2 稳定组） |
+| 默认安全性 | 空默认 = 未注册任何系统级热键，行为与加这个功能之前**逐位相同** |
+| 归一化 | `pet/hotkey_spec.normalize()`：顺序/大小写统一，不认识或残缺一律清空——配置里不存脏值 |
+| 必填判据 | 必须含至少一个修饰键（Ctrl/Alt/Shift/Win）：无修饰的系统级热键会抢走普通打字 |
+| 独占失败 | Windows 全局热键表是独占的；`RegisterHotKey` 失败记 warning 并让该项不生效，不假装成功 |
+| 平台 | 只有 Windows 能注册；其它平台设置项照常可见可存，但不注册（`hotkeys.is_supported()`） |
+| 实现面 | 新增 `pet/hotkey_spec.py`（纯文本口径）/ `pet/hotkeys.py`（Win32 注册 + `WM_HOTKEY` 分发）/ `pet/settings_hotkeys.py`（三行）；`pet/platform_win.py` 加两个 ctypes 封装；`pet/app.py` 三处接线（启动装、外部配置变更重注册、退出注销） |
+
+不复制动作实现：三个回调分别落到右键菜单同一条入口（`PetInstance.open_chat` /
+`OverlayShell.look_at_screen` / `OverlayShell.on_screen_capture`）。
+
 ### 2026-10-17（第二轮）— 「互动 · 抽签」标签改名「趣味」+ 新增一级域准入守卫（无新增/删除设置项）
 
 本刀**不改任何配置键、不改默认值、不改设置行**，改的是**页内标签名**与**准入判据的执行方式**。

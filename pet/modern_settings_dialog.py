@@ -177,6 +177,7 @@ from . import settings_music
 from . import settings_network
 from . import settings_page_guide
 from . import settings_divination
+from . import settings_hotkeys
 from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
@@ -2462,6 +2463,7 @@ class ModernSettingsDialog(QDialog):
         settings_quiet.save_quiet_settings(self)
         settings_weather.save_weather_settings(self)
         settings_divination.save_divination_settings(self)
+        settings_hotkeys.save_hotkey_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 
