@@ -1482,7 +1482,11 @@ def test_lyric_request_bypasses_system_proxy(monkeypatch):
     handlers = [h for h in built[0] if isinstance(h, urllib.request.ProxyHandler)]
     assert handlers, "直连 opener 必须显式传 ProxyHandler({})，否则仍继承系统代理"
     assert handlers[0].proxies == {}, handlers[0].proxies
-    assert opener.calls and opener.calls[0][1] == music_lyric.HTTP_TIMEOUT
+    # 剩余预算按 deadline 算，`deadline - monotonic()` 在个别平台会差最后几位
+    # （CI ubuntu-latest 实测 7.999999999999943）：这里要比的是「用的是 HTTP_TIMEOUT
+    # 这个量级」，不是浮点位模式。
+    assert opener.calls and opener.calls[0][1] == pytest.approx(
+        music_lyric.HTTP_TIMEOUT, abs=1e-3), opener.calls
 
 
 def test_lyric_request_failure_is_logged_at_warning(monkeypatch, caplog):
