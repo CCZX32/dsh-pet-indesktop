@@ -309,11 +309,14 @@ class SpriteBubbleFollower:
         timer = getattr(self, "_follow_timer", None)
         if timer is not None:
             try:
-                # 换父之前先停一拍。两个理由：①在飞的那一拍属于**旧窗**的原点，
-                # 跨窗后执行会用新锚点做一次错误 flush；②它正要把 timer 的 C++
-                # 父对象换掉，留一个已排队的激活拍跨过 `setParent` 是原生层最容易
-                # 出事的形态（父对象销毁/换绑与 pending timeout 交错）。停掉即可，
-                # 下一次 `_on_sprite_moved` 会按需重新 start。
+                # 换父之前先停一拍：在飞的那一拍是**旧窗**的节流任务，跨窗后执行等于
+                # 拿新锚点补一次旧节奏的 flush。停掉即可，下一次 `_on_sprite_moved`
+                # 会按需重新 start，跟随不会断。
+                #
+                # **不要**把这里写成"这就是长跑原生崩溃的原因"：加了本行之后，单进程
+                # 全量长跑不再复现 access violation（4 次未崩、其中 3 次全绿），但没有
+                # 原生栈、也没有"只撤掉这一行"的反向实验——因果未证明，属"生命周期防护
+                # 后未再复现"。边界写在 docs/RELEASE-v4.3.4.md 第七节。
                 timer.stop()
                 timer.setParent(overlay)
             except Exception:
