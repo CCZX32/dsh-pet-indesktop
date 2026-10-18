@@ -1452,7 +1452,7 @@ class OverlayShell(QObject):
         # 边缘探头（edge_probe 移植）：tick 尾段（姿态最终写入口）；config 键
         # edge_probe_enabled（默认 False）世界内每次进入判定前热读，设置页即切即生效
         from .sprite_edge_probe import create_edge_probe_world
-        host.probe = create_edge_probe_world(self._config, QRect(host.bounds))
+        host.probe = create_edge_probe_world(self._config, self._probe_bounds(host))
         # throw_egg 彩蛋：探头被撞飞头部跟随速度（extras 尾段，读物理结算后的
         # 速度——落地兜底依赖 physics 已切回 normal，顺序天然满足）
         from .sprite_throw_egg import create_throw_egg_world
@@ -1634,6 +1634,22 @@ class OverlayShell(QObject):
         if self._multi_window() and screen is not None:
             return QRect(screen.availableGeometry())
         return self._desktop_bounds(screen)
+
+    def _probe_bounds(self, host) -> QRect:
+        """边缘探头世界的边界。
+
+        单窗：就是本窗（覆盖整桌面）。**多窗（混合缩放）：必须是整张虚拟桌面
+        换算到本窗局部**——否则窗的左缘会被当成"屏幕边缘"，而那里其实是与相邻屏
+        相接的缝：探头的进入判定会在缝上触发，把宠物推到窗外、切成静止站姿
+        （实机："那只子宠不动了、没有动画"）。
+        """
+        if not self._multi_window():
+            return QRect(host.bounds)
+        desktop = self._virtual_work_area()
+        if desktop.isEmpty():
+            return QRect(host.bounds)
+        origin = host.overlay.geometry().topLeft()
+        return QRect(desktop.translated(-origin.x(), -origin.y()))
 
     def _host_activity(self, host) -> list:
         """该宿主自己的活动区（多窗模式只有它那块屏，局部原点即本窗原点）。"""
@@ -6733,6 +6749,20 @@ class OverlayShell(QObject):
         """
         host = self._main_host
         if host is None:
+            return
+        if self._multi_window():
+            # 多窗：每张窗跟**自己那块屏**的可用区走；探头边界同样用虚拟桌面
+            for each in list(self._hosts):
+                rect = QRect(each.screen.availableGeometry())
+                if rect.isEmpty():
+                    continue
+                each.overlay.setGeometry(rect)
+                each.set_bounds(QRect(0, 0, rect.width(), rect.height()))
+                each.set_activity(self._host_activity(each))
+                if each.probe is not None:
+                    each.probe.set_bounds(self._probe_bounds(each))
+                each.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
+            self._sync_sprite_screens()
             return
         desktop = self._desktop_bounds()
         if desktop.isEmpty():
