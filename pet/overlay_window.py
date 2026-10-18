@@ -704,6 +704,11 @@ class OverlayWindow(QWidget):
         if callable(cb):
             cb(self.mouse_through)
 
+    def _sprite_local(self, local_pos):
+        """事件坐标 → 被拖 sprite 当前宿主窗的局部坐标（单窗时原样返回）。"""
+        convert = getattr(self, "_sprite_space_pos", None)
+        return convert(local_pos) if callable(convert) else local_pos
+
     def sprite_at(self, local_pos: QPoint | QPointF):
         """逐像素联合命中：z-order 顶层往下，绘制外接矩形粗筛 + alpha 细判。
 
@@ -781,7 +786,7 @@ class OverlayWindow(QWidget):
                 # （旧 window.py:3224-3225 同语义），否则菜单会被误吞一次
                 self._context_menu_suppressed = False
             if self._mouse_grab is not None:
-                self._finish_grab(event.position())
+                self._finish_grab(self._sprite_local(event.position()))
             # 只有左键进拖拽 grab——右键语义是弹菜单（contextMenuEvent），
             # 若进 grab，松手会被当成一次"原地放下"的拖拽（PetWindow 旧语义）
             event.ignore()
@@ -902,9 +907,13 @@ class OverlayWindow(QWidget):
         # 先判升级再喂移动：on_move 在 begin_drag 之前是 no-op（点击候选不挪窝）
         global_pos = event.globalPosition().toPoint()
         self._commit_drag_if_threshold_crossed(global_pos)
+        # 多窗（混合缩放）：拖到另一块屏就把这只交给那块屏的窗，再照常喂移动
+        handover = getattr(self, "_handover_cb", None)
+        if callable(handover) and self._drag_committed:
+            handover(self._mouse_grab, global_pos)
         # grab 期间事件直达被按住的 sprite（光标移出/落到别的 sprite 上不换手）；
-        # 坐标按 sprite 所在坐标系换算（跨屏移交后已不是本窗局部坐标）
-        self._mouse_grab.on_move(event.position())
+        # 坐标按 sprite **当前宿主窗**换算——跨窗移交后它已不在本窗坐标系里
+        self._mouse_grab.on_move(self._sprite_local(event.position()))
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -919,7 +928,7 @@ class OverlayWindow(QWidget):
             event.accept()
             return
         grab = self._mouse_grab
-        self._finish_grab(event.position())
+        self._finish_grab(self._sprite_local(event.position()))
         if grab is None:
             event.ignore()
             return

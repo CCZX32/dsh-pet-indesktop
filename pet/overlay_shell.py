@@ -795,6 +795,22 @@ class ShellOverlayWindow(OverlayWindow):
         """该 sprite 的边缘探头世界（单窗：本窗口那一个）。"""
         return self.edge_probe
 
+    def _sprite_space_pos(self, local_pos):
+        """本窗局部坐标 → 被拖 sprite **当前宿主窗**的局部坐标。
+
+        多窗（混合缩放）下拖拽跨屏时，这只已经交给另一块屏的窗，而鼠标仍被本窗
+        捕获——事件坐标必须换算到它的新坐标系，否则位置会跳回本窗局部。
+        """
+        resolver = getattr(self, "_host_for_sprite", None)
+        grab = self._mouse_grab
+        if not callable(resolver) or grab is None:
+            return QPointF(local_pos)
+        host = resolver(grab)
+        if host is None or host.overlay is self:
+            return QPointF(local_pos)
+        delta = self.geometry().topLeft() - host.overlay.geometry().topLeft()
+        return QPointF(local_pos) + QPointF(delta)
+
     def _on_real_drag_started(self, sprite) -> None:
         probe = self._probe_of(sprite)
         if probe is not None:
@@ -1215,6 +1231,10 @@ class OverlayShell(QObject):
         保留这一面是因为它同时是"这只宠画在哪"的公开回答：尚未落到窗上的
         sprite（spawn 建库期/已退出的对象）同样回落到唯一宿主，不会拿到 None。
         """
+        if sprite is not None:
+            for host in self._hosts:
+                if sprite in host.overlay.sprites:
+                    return host
         return self._main_host
 
     def host_for_screen(self, screen):
@@ -1224,13 +1244,18 @@ class OverlayShell(QObject):
             return None
         if screen not in self._screens():
             return None
+        if self._multi_window():
+            for host in self._hosts:
+                if host.screen is screen:
+                    return host
+            return None
         return self._main_host
 
     def _host_of(self, sprite):
         """持有该 sprite 的宿主；不在窗上返回 None（不回落）。"""
-        host = self._main_host
-        if host is not None and sprite in host.overlay.sprites:
-            return host
+        for host in self._hosts:
+            if sprite in host.overlay.sprites:
+                return host
         return None
 
     # ---------------------------------------------------------------- 构建
@@ -1242,7 +1267,16 @@ class OverlayShell(QObject):
         # **这一拍的实际身体位置**（弹簧档的位移发生在 advance 里，事件时刻读到的
         # 是上一拍的位置）。跨屏本身不需要任何路由——同一张窗内自由移动。
         self.driver.set_post_advance(self._advance_screen_sync)
-        host = self._create_host(self._initial_screen)
+        if self._multi_window():
+            # 混合缩放：每块屏一张窗（一窗只能一个 DPR）。家屏先建，保证
+            # ``_main_host`` 仍是"启动那块屏"。
+            order = [self._initial_screen]
+            order += [s for s in self._screens() if s is not self._initial_screen]
+            host = self._create_host(order[0])
+            for extra in order[1:]:
+                self._create_host(extra)
+        else:
+            host = self._create_host(self._initial_screen)
         # 4.1c 音效：点击 + 碰撞（click_sound 默认包，静默降级）。门/音量/音源都按
         # **触发 sprite** 的身份配置取源（B7b）：碰撞事件带成员 id，由壳解析成
         # sprite；点击由壳在 _on_sprite_click(sprite) 里带身份调用。播放器进程级
@@ -1387,7 +1421,7 @@ class OverlayShell(QObject):
                 "多屏缩放不一致（DPR %s）：一张合成窗只能有一个 DPR，"
                 "为免桌宠画到屏幕外，窗口退化为启动屏，跨屏本次不可用",
                 ratios)
-        desktop = self._desktop_bounds(screen)
+        desktop = self._host_window_rect(screen)
         bounds = QRect(0, 0, desktop.width(), desktop.height())
         overlay = ShellOverlayWindow(screen, driver=self.driver)
         overlay._desktop_bounds = self._desktop_bounds  # noqa: SLF001 - 同模块协作面
@@ -1396,7 +1430,7 @@ class OverlayShell(QObject):
         host = ScreenHost(screen, overlay, bounds)
         self._hosts.append(host)
         # 活动区要在宿主进表之后算：家那块屏（关闭跨屏时唯一活动区）从宿主读
-        host.set_activity(self._activity_rects())
+        host.set_activity(self._host_activity(host))
         self._wire_host(host)
         return host
 
@@ -1452,6 +1486,9 @@ class OverlayShell(QObject):
             lambda target: build_sprite_full_menu(self, target))
         overlay._through_changed = self._on_user_through_changed
         overlay._grab_finished_cb = self._on_grab_finished
+        # 多窗（混合缩放）跨屏：拖到另一块屏就把这只交给那块屏的窗
+        overlay._handover_cb = self._hand_over_drag
+        overlay._host_for_sprite = self.host_for_sprite
         # 真拖拽升级（过 DRAG_THRESHOLD）：窗口先取消探头会话，再把这只的钳制域
         # 放宽到整张窗——两件事都在壳层做，因为放宽/恢复要碰宿主的活动区。
         overlay._drag_committed_cb = self._on_drag_committed
@@ -1540,6 +1577,28 @@ class OverlayShell(QObject):
                   for screen in self._screens()}
         return len(ratios) > 1
 
+    def _multi_window(self) -> bool:
+        """是否走「每块屏一张合成窗」（仅：混合缩放 + 允许跨屏）。
+
+        一张窗只能有一个 ``devicePixelRatio``：窗口横跨两种缩放的屏时，必有一侧按
+        错的倍率渲染（#307 实机：整只画到可见区之外）。所以混合缩放时回到每屏一窗
+        ——每张窗的 DPR 天然正确；同 DPI 的绝大多数情况仍是单窗，零变化。
+        """
+        return self._cross_screen_allowed and self._mixed_dpr()
+
+    def _host_window_rect(self, screen) -> QRect:
+        """该宿主窗口的全局矩形（多窗模式 = 该屏可用区）。"""
+        if self._multi_window() and screen is not None:
+            return QRect(screen.availableGeometry())
+        return self._desktop_bounds(screen)
+
+    def _host_activity(self, host) -> list:
+        """该宿主自己的活动区（多窗模式只有它那块屏，局部原点即本窗原点）。"""
+        if self._multi_window():
+            bounds = host.bounds
+            return [(host.screen, QRect(0, 0, bounds.width(), bounds.height()))]
+        return self._activity_rects()
+
     def _desktop_bounds(self, home=None) -> QRect:
         """窗口全局矩形 = 各屏**可用工作区**的并集包围矩形。
 
@@ -1552,7 +1611,7 @@ class OverlayShell(QObject):
         # ``home`` 参数只为建壳期（宿主还没建、``self._screen`` 还是 None）
         if home is None:
             home = self._screen
-        if home is not None and self._mixed_dpr():
+        if home is not None and self._mixed_dpr() and not self._multi_window():
             return QRect(home.availableGeometry())
         rect = None
         for screen in self._screens():
@@ -1562,8 +1621,10 @@ class OverlayShell(QObject):
 
     def _screen_rect(self, screen) -> QRect:
         """某屏可用工作区在窗口局部坐标里的矩形（活动区的一块；比例/落位同源）。"""
-        desktop = self._desktop_bounds()
         avail = QRect(screen.availableGeometry())
+        if self._multi_window():
+            return QRect(0, 0, avail.width(), avail.height())
+        desktop = self._desktop_bounds()
         return QRect(avail.translated(-desktop.x(), -desktop.y()))
 
     def _activity_rects(self) -> list:
@@ -1605,9 +1666,11 @@ class OverlayShell(QObject):
 
     def _screen_of_sprite(self, sprite):
         """这只身体中心所在的屏（屏归属/逐只 DPR 的唯一判据）。"""
-        host = self._main_host
+        host = self._host_of(sprite) or self._main_host
         if host is None or sprite is None:
             return self._initial_screen
+        if self._multi_window():
+            return host.screen
         origin = host.overlay.geometry().topLeft()
         body = sprite.body_rect()
         return self._screen_at_global(
@@ -1631,15 +1694,13 @@ class OverlayShell(QObject):
         ``sprite.home_screen``（档案 ``screen_name`` 的来源）与逐只 DPR（一张窗
         只有一个 DPR，每只的 pixmap/命中图按自己那块屏重建）。
         """
-        host = self._main_host
-        if host is None:
-            return
-        for sprite in list(host.overlay.sprites):
-            screen = self._screen_of_sprite(sprite)
-            if screen is None:
-                continue
-            sprite.home_screen = screen
-        host.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
+        for host in self._hosts:
+            for sprite in list(host.overlay.sprites):
+                screen = self._screen_of_sprite(sprite)
+                if screen is None:
+                    continue
+                sprite.home_screen = screen
+            host.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
 
     @staticmethod
     def _default_corner_pos(bounds: QRect, rect: QRect) -> QPointF:
@@ -4812,6 +4873,49 @@ class OverlayShell(QObject):
             # 换来「拖完直接重启/被杀」也不丢位置——不能只依赖关闭主宠那条路径。
             self._save_child_geometry(sprite, slot=slot)
 
+    def _hand_over_drag(self, sprite, global_pos) -> bool:
+        """拖拽中把这只交给光标所在那块屏的窗（仅多窗模式）。
+
+        单窗模式恒 False——同一张窗内自由移动，没有"交给谁"这回事。
+        """
+        if not self._multi_window() or sprite is None:
+            return False
+        screen = self._screen_at_global(global_pos)
+        target = self.host_for_screen(screen) if screen is not None else None
+        source = self._host_of(sprite)
+        if target is None or source is None or target is source:
+            return False
+        return self._hand_over_sprite(sprite, target, global_pos)
+
+    def _hand_over_sprite(self, sprite, target_host, global_pos=None) -> bool:
+        """把这只**连同当前身体位置**从源窗交给目标窗（多窗的唯一跨屏入口）。
+
+        局部坐标经全局中转：源窗局部 → 全局 → 目标窗局部。拖拽偏移
+        （``sprite._drag_offset``）是指针相对精灵的差、与窗无关，移交时不动它。
+        ``remove_sprite(release_clip=False)`` 保住解码 clip——移交不是"放生"。
+        """
+        source = self._host_of(sprite)
+        if source is None or target_host is None:
+            return False
+        origin_src = source.overlay.geometry().topLeft()
+        origin_dst = target_host.overlay.geometry().topLeft()
+        if global_pos is not None:
+            grab = getattr(sprite, "_drag_offset", None)
+            local = QPointF(global_pos) - QPointF(origin_dst)
+            if grab is not None:
+                local -= QPointF(grab)
+        else:
+            body = sprite.body_rect()
+            local = QPointF(origin_src.x() + body.x() - origin_dst.x(),
+                            origin_src.y() + body.y() - origin_dst.y())
+        if source is not target_host:
+            source.overlay.remove_sprite(sprite, release_clip=False)
+            target_host.overlay.add_sprite(sprite)
+        sprite.set_pos(local)
+        target_host.apply_activity(sprite)
+        sprite.home_screen = target_host.screen
+        return True
+
     def _on_grab_finished(self) -> None:
         """拖拽收尾（overlay._finish_grab 钩子）：收放宽域 + 冲刷光标恢复滞留。
 
@@ -5112,11 +5216,14 @@ class OverlayShell(QObject):
         lib = self._create_sprite_library(reader._values, slot)
         scale = self._config_scale(reader)
         pet_screen = self._restore_screen(slot, state)
+        # 多窗（混合缩放）下这只可能属于**别的屏**的窗：窗口边界、活动区、成员表
+        # 都按目标宿主取，不能一律塞进主宿主。
+        target_host = self.host_for_screen(pet_screen) or self._main_host
         try:
             sprite = self._sprite_factory(lib, QPointF(0, 0), scale)
             sprite.home_screen = pet_screen
-            sprite.set_bounds(QRect(self._bounds))
-            self._main_host.apply_activity(sprite)
+            sprite.set_bounds(QRect(target_host.bounds))
+            target_host.apply_activity(sprite)
             sprite.set_pos(self._spawn_sprite_pos(sprite, state, pet_screen))
         except Exception:
             self._shutdown_library(lib, "failed-spawn-before-registration")
@@ -5124,8 +5231,8 @@ class OverlayShell(QObject):
         facing = state.get("facing")
         if facing in ("left", "right"):
             sprite.facing = facing
-        self._main_host.overlay.add_sprite(sprite)
-        self._main_host.apply_activity(sprite)
+        target_host.overlay.add_sprite(sprite)
+        target_host.apply_activity(sprite)
         # O3：新 sprite 的播放节拍按**当前有效可播性**初始化——PetSprite 默认
         # 未暂停，隐藏/挂起期生成的子宠若不在这里压住，行为链一起播就按帧率
         # 解码，而窗口根本没有像素要上屏。``visible`` 不动（它逻辑上仍是可见
@@ -5253,9 +5360,10 @@ class OverlayShell(QObject):
             return home
         screen = self._screen_by_name(state.get("screen_name"))
         if screen is not None:
-            if slot == 0:
-                # 主宠的记忆即"家"：建壳期窗口还没装宠，只需换家的记录（活动区
-                # 与几何都还没装东西，没有要迁移的对象）
+            if slot == 0 and not self._multi_window():
+                # 单窗：主宠的记忆即"家"——窗口就那一张，活动区跟着家走。
+                # 多窗（混合缩放）：每块屏都有自己的窗，家是启动那块屏，不改宿主；
+                # 这只落在哪个宿主由它加到谁的 overlay 决定。
                 self._main_host.screen = screen
             return screen
         if slot == 0 or self.sprite is None:
@@ -6222,9 +6330,17 @@ class OverlayShell(QObject):
         """
         if sprite is None or screen is None or screen not in self._screens():
             return False
+        if self._multi_window():
+            # 混合缩放：每块屏有独立的窗，跨屏 = 把这只交给目标窗
+            target = self.host_for_screen(screen)
+            if target is None:
+                return False
+            moved = self._hand_over_sprite(sprite, target, global_pos)
+            if moved:
+                self._remember_sprite_screen(sprite, screen)
+            return moved
         host = self._main_host
-        # 能去哪儿只看**活动区**：关闭跨屏时只有家那块屏，混合 DPR 时窗口已退化为
-        # 家屏（#307）——两种情况下目标屏都不在活动区里，直接拒绝。
+        # 单窗：能去哪儿只看**活动区**（关闭跨屏时只有家那块屏）
         if host is None or screen not in {s for s, _rect in host.activity}:
             return False
         if global_pos is not None:

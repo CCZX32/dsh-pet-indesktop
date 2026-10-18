@@ -421,31 +421,49 @@ def test_switching_screen_keeps_clip_and_driver_running(tmp_path, monkeypatch):
         _cleanup(shell)
 
 
-def test_mixed_dpr_falls_back_to_the_home_screen(tmp_path, monkeypatch):
-    """缩放不一致时窗口退化为家屏：宁可失去跨屏，也不能看不见（#307）。
+def test_mixed_dpr_uses_one_window_per_screen(tmp_path, monkeypatch):
+    """混合缩放 + 允许跨屏：**每块屏一张窗**，跨屏交给目标窗（#307 的正解）。
 
-    一张合成窗只能有一个 DPR。铺满整个虚拟桌面时，绘制按单一 DPR 缩放、与实际
-    屏位置错位——实机表现是桌宠完全不可见、点不到（主屏 100% + 副屏 200%）。
+    一张窗只能有一个 ``devicePixelRatio``：横跨两种缩放时必有一侧按错的倍率渲染
+    （实机：整只画到可见区之外）。每屏一窗后每张窗的 DPR 天然正确，跨屏 = 把这只
+    连同位置交给目标窗（局部坐标经全局中转）。
     """
     a, b = _two_screens()
     b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
     _install_screens(monkeypatch, a, b)
     shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
     try:
-        assert shell.overlay.geometry() == QRect(a.availableGeometry()), (
-            "混合 DPR 下窗口必须退化为家屏可用区")
-        assert [screen for screen, _rect in shell._main_host.activity] == [a], (
-            "混合 DPR 下活动区只剩家那块屏")
+        assert len(shell.hosts()) == 2, "混合缩放必须每屏一窗"
+        assert shell.overlay.geometry() == QRect(a.availableGeometry())
+        b_host = shell.host_for_screen(b)
+        assert b_host is not None
+        assert b_host.overlay.geometry() == QRect(b.availableGeometry())
+        assert b_host.overlay is not shell.overlay
+
         child = shell._spawned[0] if shell._spawned else None
         if child is None:
             shell.spawn_pet()
             child = shell._spawned[0]
-        assert shell.move_sprite_to_screen(child, b) is False, "跨屏在混合 DPR 下不可用"
-        assert child.dpr == 1.0
+        assert shell.move_sprite_to_screen(child, b) is True
+        assert shell.host_for_sprite(child) is b_host, "跨屏后归目标宿主"
+        assert shell._screen_of_sprite(child) is b
+        assert child.dpr == 2.0, "目标窗的 DPR 天然正确"
     finally:
         _cleanup(shell)
 
 
+def test_mixed_dpr_without_cross_screen_stays_single_window(tmp_path, monkeypatch):
+    """混合缩放但**关闭跨屏**：不必多开窗，仍单窗退化为家屏。"""
+    a, b = _two_screens()
+    b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": False})
+    try:
+        assert len(shell.hosts()) == 1
+        assert shell.overlay.geometry() == QRect(a.availableGeometry()), (
+            "不出家屏就只开一张窗，且退化为家屏可用区")
+    finally:
+        _cleanup(shell)
 def test_single_window_driver_membership_and_stop(tmp_path, monkeypatch):
     """单窗：驱动器成员恒为一个；停表/起表只经壳的显隐与收口入口。"""
     a, b = _two_screens()
