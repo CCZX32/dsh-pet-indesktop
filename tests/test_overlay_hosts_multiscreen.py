@@ -16,6 +16,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
+import logging
 
 import pytest
 from PySide6.QtCore import (
@@ -479,6 +480,47 @@ def test_mixed_dpr_without_cross_screen_stays_single_window(tmp_path, monkeypatc
             "不出家屏就只开一张窗，且退化为家屏可用区")
     finally:
         _cleanup(shell)
+
+
+def test_mixed_dpr_multi_window_log_does_not_claim_cross_screen_unavailable(
+        tmp_path, monkeypatch, caplog):
+    """多窗真的生效时，日志不许再喊「跨屏本次不可用」。
+
+    实机证据（125% 副屏 + 100% 主屏）：进程确实开了两张 overlay ——
+    ``(-1920,0,1920,1020)`` 与 ``(0,0,2560,1392)``，但启动日志仍打
+    「窗口退化为启动屏，跨屏本次不可用」：那条文案只判了 ``_mixed_dpr()``，
+    没判是否真的走了多窗（``_multi_window()``）。用户看日志会以为功能没生效。
+    """
+    a, b = _two_screens()
+    b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+    _install_screens(monkeypatch, a, b)
+    with caplog.at_level(logging.INFO):
+        shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "跨屏本次不可用" not in text, "多窗已生效，这句是假警报"
+        assert "退化为启动屏" not in text
+        assert "每块屏一张合成窗" in text, "要说清实际走的是哪种"
+    finally:
+        _cleanup(shell)
+
+
+def test_mixed_dpr_single_window_log_names_the_degradation(
+        tmp_path, monkeypatch, caplog):
+    """混合缩放但没开跨屏：退化成一张窗，日志要如实说「退化为启动屏」。"""
+    a, b = _two_screens()
+    b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+    _install_screens(monkeypatch, a, b)
+    with caplog.at_level(logging.INFO):
+        shell = _make_shell(tmp_path, a, {"allow_cross_screen": False})
+    try:
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "退化为启动屏" in text
+        assert "每块屏一张合成窗" not in text, "没走多窗就不许说走了多窗"
+    finally:
+        _cleanup(shell)
+
+
 def test_single_window_driver_membership_and_stop(tmp_path, monkeypatch):
     """单窗：驱动器成员恒为一个；停表/起表只经壳的显隐与收口入口。"""
     a, b = _two_screens()

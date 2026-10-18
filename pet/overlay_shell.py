@@ -739,6 +739,22 @@ def _screen_name(screen) -> str:
         return "?"
 
 
+def mixed_dpr_notice(ratios, *, multi_window: bool) -> str:
+    """混合缩放的一句话说明（一次启动只打一次）。
+
+    「一张合成窗只能有一个 DPR」是 #307 的真因，但处理方式有两种，日志必须说实话：
+    走多窗时每块屏各一张、跨屏照常拖；只有没开「允许桌宠跨屏」时才退化成启动屏
+    那一张。v4.3.3 的旧文案两种情况都喊「跨屏本次不可用」——多窗已经生效时那是
+    假警报（实机：125% 副屏下进程确实开了两张窗，日志却说跨屏不可用）。
+    """
+    shown = sorted({round(float(ratio or 1.0), 3) for ratio in ratios})
+    if multi_window:
+        return ("多屏缩放不一致（DPR {}）：每块屏一张合成窗，"
+                "跨屏照常直接拖过去".format(shown))
+    return ("多屏缩放不一致（DPR {}）：没开「允许桌宠跨屏」，"
+            "只开一张窗并退化为启动屏".format(shown))
+
+
 def _sprite_current_pixmap(sprite):
     """sprite 已渲染帧 → 当前 clip 的 ``currentImage()`` → ``None``（帧未就绪）。
 
@@ -1421,12 +1437,12 @@ class OverlayShell(QObject):
         """
         if self._mixed_dpr() and not self._mixed_dpr_logged:
             self._mixed_dpr_logged = True
-            ratios = sorted({round(float(s.devicePixelRatio() or 1.0), 3)
-                             for s in self._screens()})
-            logging.warning(
-                "多屏缩放不一致（DPR %s）：一张合成窗只能有一个 DPR，"
-                "为免桌宠画到屏幕外，窗口退化为启动屏，跨屏本次不可用",
-                ratios)
+            multi_window = self._multi_window()
+            notice = mixed_dpr_notice(
+                [s.devicePixelRatio() for s in self._screens()],
+                multi_window=multi_window)
+            # 多窗是正解（正常路径），只作说明；退化才是需要用户注意的情况。
+            (logging.info if multi_window else logging.warning)(notice)
         desktop = self._host_window_rect(screen)
         bounds = QRect(0, 0, desktop.width(), desktop.height())
         overlay = ShellOverlayWindow(screen, driver=self.driver)
