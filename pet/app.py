@@ -1715,17 +1715,20 @@ class AppShell:
     def self_talk_voice_file(self, text: str) -> Path | None:
         """预缓存台词音频的查找路径；没有就返回 None。
 
-        键与产出侧是**同一个实现**（``self_talk_voice.cached_audio`` →
-        ``cache_path``）：``<配置目录>/self_talk_voice/<md5(文本)[:16]>.<扩展名>``，
-        扩展名由产出它的合成后端决定。刻意放配置目录而不是仓库 assets —— 它属于
-        用户数据（换资源包/更新不该丢），与报时缓存 voice_chime_cache 同级。
+        键与产出侧是**同一个实现**（``self_talk_voice.find_audio`` → ``cached_audio``
+        → ``cache_path_for`` / ``cache_path``），查找顺序：当前配置（合成后端 + 音色
+        + 语速）解析出的 flavor 缓存 → 经典文本缓存
+        ``<配置目录>/self_talk_voice/<md5(文本)[:16]>.<扩展名>``（外部产出脚本那条
+        兼容来源）。刻意放配置目录而不是仓库 assets —— 它属于用户数据（换资源包/
+        更新不该丢），与报时缓存 voice_chime_cache 同级。
 
-        分成两份实现曾经是隐患：算法漂移没有交叉测试兜着，表现只有"声音怎么变了"。
+        分成两份实现曾经是隐患：算法漂移没有交叉测试兜着，表现只有"声音怎么变了"；
+        只按文本命键则是"试听换了新声音、点击台词还是旧声音"。
         """
         directory = getattr(getattr(self, "config", None), "dir", None)
         if directory is None:
             return None
-        return self_talk_voice.cached_audio(directory, text)
+        return self_talk_voice.find_audio(directory, text, self.config)
 
     def speak_self_talk(self, text: str = "") -> bool:
         """点击自言自语朗读：把同一句话送进报时服务的音频通道。
@@ -1782,7 +1785,9 @@ class AppShell:
         ``self_talk_voice_precache_enabled`` 默认关闭——开一次要在本机写几十个音频
         文件，不开的用户不该付这笔合成开销。
 
-        返回是否真的起了新一轮（开关关着、或上一轮没跑完时返回 False，不排队）。
+        返回是否真的起了新一轮。开关关着返回 False（一个请求都不发）；上一轮没跑完
+        也返回 False，但这次请求会被记为**待处理快照**，当前批结束后按它补跑一轮
+        （合成期间追加的台词不会错过这一轮）。
         """
         if not self_talk_voice.enabled(self.config):
             # 关着时连每宠名单都不读：slot 档案的读取不该为关掉的功能付费。

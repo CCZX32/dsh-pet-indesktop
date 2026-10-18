@@ -904,8 +904,13 @@ class VoiceChimeService:
         self._bubble(note)
 
     def _cache_path(self, text: str, attempt: tts.TtsAttempt) -> Path:
-        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。"""
-        key = cache_key(text, self._cfg, provider_id=attempt.provider)
+        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。
+
+        键取**这个 attempt 自己**的 provider + values（``_usable_attempts`` 已跑过
+        ``preflight``）：即时合成、预合成、缓存查找三处传的都是同一份 resolved
+        attempt，音色被自动回退后产物仍按实际合成输入命名，不会挂在配置原音色名下。
+        """
+        key = cache_key(text, provider_id=attempt.provider, values=attempt.values)
         return self._cache_dir / f"{key}.{attempt.ext}"
 
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,

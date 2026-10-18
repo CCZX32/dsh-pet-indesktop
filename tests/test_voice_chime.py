@@ -784,7 +784,7 @@ def test_maybe_precache_respects_window_busy_and_slot(monkeypatch, tmp_path):
         "build_chime_sentence",
         lambda _now, _cfg: "现在是下午三点整。",
     )
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "fixed-key")
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, *_a, **_kw: "fixed-key")
     monkeypatch.setattr(svc_mod, "chime_slot", lambda dt, _cfg: "2026-09-15T15:00#hourly")
     svc = _make_svc()
     svc._cache_dir = tmp_path
@@ -814,7 +814,7 @@ def test_maybe_precache_outside_window_does_nothing(monkeypatch, tmp_path):
         "build_chime_sentence",
         lambda _now, _cfg: "x",
     )
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "k")
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, *_a, **_kw: "k")
     monkeypatch.setattr(svc_mod, "chime_slot", lambda dt, _cfg: "slot")
     svc = _make_svc()
     svc._cache_dir = tmp_path
@@ -844,7 +844,7 @@ def test_fire_cache_hit_uses_bubble_sentence(monkeypatch, tmp_path):
     import pet.voice_chime_service as svc_mod
 
     monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "hit")
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, *_a, **_kw: "hit")
     seen = []
     svc = _make_svc({"volume": 100})
     svc._cache_dir = tmp_path
