@@ -1126,6 +1126,10 @@ class OverlayShell(QObject):
         #: 拓扑重排事务的重入闸：`_sync_host_geometry` 与 `_reconcile_hosts_for_dpi`
         #: 互相调用，靠它保证"一次事务只跑一层"，不会在一半状态上再开一层。
         self._topology_txn = False
+        #: **已应用**的宿主形态（True = 每屏一窗）。由建壳与拓扑事务维护，是几何 /
+        #: 坐标 / 屏归属 / 落盘的唯一口径；`_multi_window()` 只是"按当前屏幕缩放
+        #: 想要什么"。两者不一致 = 需要重排（或重排失败后的降级态）。
+        self._multi_mode = False
         #: 事务进行中被挡下的重排请求（收口时补做一次）
         self._topology_recheck = False
         self._sprite_cfg_cache: dict = {}
@@ -1279,7 +1283,7 @@ class OverlayShell(QObject):
             return None
         if screen not in self._screens():
             return None
-        if self._multi_window():
+        if self._active_multi():
             for host in self._hosts:
                 if host.screen is screen:
                     return host
@@ -1302,8 +1306,9 @@ class OverlayShell(QObject):
         # **这一拍的实际身体位置**（弹簧档的位移发生在 advance 里，事件时刻读到的
         # 是上一拍的位置）。跨屏本身不需要任何路由——同一张窗内自由移动。
         self.driver.set_post_advance(self._advance_screen_sync)
-        if self._multi_window():
-            # 混合缩放：每块屏一张窗（一窗只能一个 DPR）。家屏先建，保证
+        self._multi_mode = bool(self._multi_window())
+        if self._multi_mode:
+            # 每块屏一张窗（一窗只能一个 DPR）。家屏先建，保证
             # ``_main_host`` 仍是"启动那块屏"。
             order = [self._initial_screen]
             order += [s for s in self._screens() if s is not self._initial_screen]
@@ -1636,6 +1641,19 @@ class OverlayShell(QObject):
                 return True
         return False
 
+    def _active_multi(self) -> bool:
+        """**此刻已经应用**的是每屏一窗形态吗（``_multi_mode`` 模型标志）。
+
+        与 :meth:`_multi_window` 的分工必须分清：那个是"**想要**什么形态"（按当前
+        屏幕缩放算出来的目标），这个是"现在实际有几张窗"。拓扑重排的**决定**用前者，
+        **坐标 / 几何 / 屏归属 / 落盘**一律用后者。
+
+        混用的后果不是理论问题：补窗失败时（想要多窗、实际一张）窗口自己按单窗铺整张
+        桌面，活动区却按多窗给 `(0,0,w,h)`——宠被算到别的屏，落盘还会把 1.5 这种
+        错误比例写进档案。
+        """
+        return bool(self._multi_mode)
+
     def _multi_window(self) -> bool:
         """是否走「每块屏一张合成窗」（允许跨屏 + 多屏且缩放不是 1:1）。
 
@@ -1696,7 +1714,7 @@ class OverlayShell(QObject):
 
     def _host_window_rect(self, screen) -> QRect:
         """该宿主窗口的全局矩形（多窗模式 = 该屏可用区）。"""
-        if self._multi_window() and screen is not None:
+        if self._active_multi() and screen is not None:
             return QRect(screen.availableGeometry())
         return self._desktop_bounds(screen)
 
@@ -1708,7 +1726,7 @@ class OverlayShell(QObject):
         相接的缝：探头的进入判定会在缝上触发，把宠物推到窗外、切成静止站姿
         （实机："那只子宠不动了、没有动画"）。
         """
-        if not self._multi_window():
+        if not self._active_multi():
             return QRect(host.bounds)
         desktop = self._virtual_work_area()
         if desktop.isEmpty():
@@ -1718,7 +1736,7 @@ class OverlayShell(QObject):
 
     def _host_activity(self, host) -> list:
         """该宿主自己的活动区（多窗模式只有它那块屏，局部原点即本窗原点）。"""
-        if self._multi_window():
+        if self._active_multi():
             bounds = host.bounds
             return [(host.screen, QRect(0, 0, bounds.width(), bounds.height()))]
         return self._activity_rects()
@@ -1754,7 +1772,7 @@ class OverlayShell(QObject):
         坐标系混用会把家屏的活动区写成窗口原点，(位置直接算坏)。
         """
         avail = QRect(screen.availableGeometry())
-        if self._multi_window() if multi is None else multi:
+        if self._active_multi() if multi is None else multi:
             return QRect(0, 0, avail.width(), avail.height())
         desktop = self._desktop_bounds()
         return QRect(avail.translated(-desktop.x(), -desktop.y()))
@@ -1801,7 +1819,7 @@ class OverlayShell(QObject):
         host = self._host_of(sprite) or self._main_host
         if host is None or sprite is None:
             return self._initial_screen
-        if self._multi_window():
+        if self._active_multi():
             return host.screen
         origin = host.overlay.geometry().topLeft()
         body = sprite.body_rect()
@@ -1821,7 +1839,7 @@ class OverlayShell(QObject):
         # 拖拽中：弹簧每拍都在动，投影必须跟着刷新，否则缝上的另一半会定格
         if self._drag_relaxed_sprite is not None:
             self._sync_drag_projection()
-        if self._multi_window():
+        if self._active_multi():
             for host in list(self._hosts):
                 for sprite in list(host.overlay.sprites):
                     if not getattr(sprite, "_dragging", False):
@@ -2245,6 +2263,12 @@ class OverlayShell(QObject):
         token = getattr(sprite, "_profile_generation", None)
         if token is None:
             logging.warning("overlay: slot-%s 没有已应用快照的 token，拒绝几何自存", slot)
+            return False
+        if self._topology_needs_reconcile():
+            # **形态没达成**（补窗失败等降级态）：此时窗口按单窗铺、屏按目标算，比例
+            # 用哪一套都可能是错的。宁可不写——落盘一个越界比例（实测 1.5 / 0.08）
+            # 会在补窗成功或重启时把宠推到屏边/别的屏上，比"这次没存"糟得多。
+            logging.debug("overlay: slot-%s 屏拓扑尚未对齐，本次几何自存跳过", slot)
             return False
         pet_screen = self._screen_of_sprite(sprite)
         host_name = _screen_name(pet_screen)
@@ -5075,7 +5099,7 @@ class OverlayShell(QObject):
         # 它本该待着的这块屏（关闭语义是"拖不过去"）。
         if not self._cross_screen_allowed:
             return
-        if self._multi_window():
+        if self._active_multi():
             # 多窗：拖拽中必须允许身体**画到窗外的相邻屏**，否则一半身体被本窗
             # 裁掉（用户看到"被窗口挡住"）。宽松域 = 全部屏的**物理**外接矩形换算
             # 到本窗局部，相邻窗用投影补另一半（见 _sync_drag_projection）。
@@ -5202,7 +5226,7 @@ class OverlayShell(QObject):
 
     def _hand_over_at_release(self, sprite) -> bool:
         """松手后的归属落地（拖拽期间不换窗，见 ``_hand_over_drag``）。"""
-        if not self._multi_window():
+        if not self._active_multi():
             return False
         return self._place_sprite_in_physical_screen(sprite, persist=True)
 
@@ -5218,7 +5242,7 @@ class OverlayShell(QObject):
         """拖拽收尾：恢复多矩形活动区，并把落脚点钳回真正有显示器的屏。"""
         self._clear_drag_projection()
         sprite = self._drag_relaxed_sprite
-        if self._multi_window() and sprite is not None:
+        if self._active_multi() and sprite is not None:
             # 松手才换窗（拖拽期间不换，见 _hand_over_drag）
             self._hand_over_at_release(sprite)
         self._drag_relaxed_sprite = None
@@ -5253,7 +5277,7 @@ class OverlayShell(QObject):
 
         单窗模式恒 False——同一张窗内自由移动，没有"交给谁"这回事。
         """
-        if not self._multi_window() or sprite is None:
+        if not self._active_multi() or sprite is None:
             return False
         # 拖拽期间**不换窗**：这只始终在源窗积分（弹簧目标/轨迹/偏移都是那一套
         # 坐标系），别的窗只挂带缩放的只读投影。换窗会改写一整组弹簧状态，且
@@ -5766,7 +5790,7 @@ class OverlayShell(QObject):
             return home
         screen = self._screen_by_name(state.get("screen_name"))
         if screen is not None:
-            if slot == 0 and not self._multi_window():
+            if slot == 0 and not self._active_multi():
                 # 单窗：主宠的记忆即"家"——窗口就那一张，活动区跟着家走。
                 # 多窗（混合缩放）：每块屏都有自己的窗，家是启动那块屏，不改宿主；
                 # 这只落在哪个宿主由它加到谁的 overlay 决定。
@@ -6742,7 +6766,7 @@ class OverlayShell(QObject):
         """
         if sprite is None or screen is None or screen not in self._screens():
             return False
-        if self._multi_window():
+        if self._active_multi():
             # 混合缩放：每块屏有独立的窗，跨屏 = 把这只交给目标窗
             target = self.host_for_screen(screen)
             if target is None:
@@ -6974,7 +6998,28 @@ class OverlayShell(QObject):
             raise
 
     def _discard_partial_host(self, host) -> None:
-        """撤掉一张建到一半的宿主（摘表、断信号、关窗、从驱动器摘下来）。"""
+        """撤掉一张建到一半的宿主：摘表、断信号、**把成员交回主宿主**、关窗。
+
+        顺序讲究：先把成员与岛桥交回存活宿主，再关窗——否则精灵会留在一张已关闭的
+        窗里（``_host_of`` 之后就找不到它），气泡跟随器也还挂着旧 overlay。
+        关窗失败要留日志继续收尾，不能因为 ``hide()`` 抛了就跳过 ``close()``。
+        """
+        if host is None:
+            return
+        survivor = next((other for other in self._hosts if other is not host), None)
+        if survivor is not None:
+            for sprite in list(host.overlay.sprites):
+                try:
+                    rx, ry = self._body_ratio(sprite, host.bounds)
+                    host.overlay.remove_sprite(sprite, release_clip=False)
+                    survivor.overlay.add_sprite(sprite)
+                    survivor.apply_activity(sprite)
+                    sprite.home_screen = survivor.screen
+                    self._place_body_ratio(sprite, rx, ry, survivor.bounds)
+                    self._bind_position_listener(sprite)
+                    self._rebind_bubble_follower(sprite, survivor)
+                except Exception:
+                    logging.exception("overlay: 撤宿主时交回成员失败")
         try:
             self._disconnect_host_screen(host)
         except Exception:
@@ -6986,12 +7031,26 @@ class OverlayShell(QObject):
                 logging.debug("overlay: 从驱动器摘半成品宿主失败", exc_info=True)
         try:
             host.overlay.hide()
+        except Exception:
+            logging.debug("overlay: 隐藏半成品宿主窗失败", exc_info=True)
+        try:
             host.overlay.close()
         except Exception:
             logging.debug("overlay: 关闭半成品宿主窗失败", exc_info=True)
         if host in self._hosts:
             self._hosts.remove(host)
         self._applied_screen_rects.pop(_screen_name(host.screen), None)
+        # 岛墙若绑在这张窗上，撤掉后必须改绑，否则桥引用的是已关闭宿主的世界。
+        if getattr(self, "_island_host", None) is host:
+            self._island_host = None
+            self._rebind_island_host()
+        # 会话通知是"按 HWND 注册、新的会顶掉旧的"：这张窗在 `_apply_host_window_caps`
+        # 里可能已经把注册抢过去，撤掉后要把存活宿主重新登记一遍。
+        if survivor is not None:
+            try:
+                self._apply_host_window_caps(survivor)
+            except Exception:
+                logging.debug("overlay: 撤宿主后恢复存活宿主的窗口能力失败", exc_info=True)
 
     def _capture_screen_ratios(self) -> list[tuple]:
         """记下每只的（屏归属，该屏内比例）；拓扑变化前调用，变化后按它回位。
@@ -7091,7 +7150,7 @@ class OverlayShell(QObject):
         创建失败，hosts 是 2、判定要 3，数量判据却认为"已经是多窗"而永久不再补。
         """
         want_multi = self._multi_window()
-        if want_multi != (len(self._hosts) > 1):
+        if want_multi != self._active_multi():
             return True
         if not want_multi:
             return False
@@ -7141,11 +7200,24 @@ class OverlayShell(QObject):
         """跑一轮拓扑事务；返回**这一轮有没有真的推进**（宿主集合变了）。"""
         want_multi = self._multi_window()
         before = [(host, host.screen) for host in self._hosts]
+        # 先按**目标**形态置标志：建窗期 `_host_window_rect` 就要按目标算几何。
+        # 这一轮若没做到（补窗失败），finally 里回落到实际张数——降级态必须让
+        # 窗口、活动区、归属、落盘四者口径一致。
+        self._multi_mode = bool(want_multi)
         self._topology_txn = True
         try:
             self._reconcile_hosts_locked(want_multi)
         finally:
             self._topology_txn = False
+            applied = len(self._hosts) > 1
+            changed = applied != self._multi_mode
+            self._multi_mode = applied
+            if changed:
+                # 这一轮没达成目标（例如补窗失败）：按**实际**形态把几何重算一遍，
+                # 否则会留下"窗口按多窗、活动区按单窗"的混合口径。直接调
+                # `_apply_geometry` 而不是 `_sync_host_geometry`——后者会再次进入
+                # 拓扑对齐，和本循环互相递归。
+                self._apply_geometry()
         after = [(host, host.screen) for host in self._hosts]
         return before != after
 
@@ -7315,10 +7387,19 @@ class OverlayShell(QObject):
         if not self._topology_txn and self._topology_needs_reconcile():
             self._reconcile_hosts_for_dpi()
             return
-        # 分支按**实际宿主集合**选，不按判定：拓扑对齐失败时（某块屏的宿主建不起来）
-        # 按判定选分支会拿整桌面 bounds 当单屏分母，把位置算坏——那比"几何暂缓"
-        # 更糟。宿主集合是"我现在真有几张窗"，几何只能按它算。
-        multi = len(self._hosts) > 1
+        self._apply_geometry()
+
+    def _apply_geometry(self) -> None:
+        """按**已应用形态**重算几何（``_sync_host_geometry`` 的对齐前置之后）。
+
+        分支取 `_active_multi()`（模型标志），不取 `_multi_window()`（目标）：拓扑
+        对齐失败时两者会不一致，按目标选分支会拿整桌面 bounds 当单屏分母，把位置
+        算坏。
+        """
+        host = self._main_host
+        if host is None:
+            return
+        multi = self._active_multi()
         if multi:
             # 多窗：每张窗跟**自己那块屏**的可用区走；探头边界同样用虚拟桌面
             # 拖拽中的会话先收尾：拖拽域（放宽到虚拟桌面）、投影、弹簧目标全是

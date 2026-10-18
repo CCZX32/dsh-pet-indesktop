@@ -1851,8 +1851,10 @@ def test_failed_host_creation_is_rolled_back_and_retried(tmp_path, monkeypatch, 
             shell._feed_screen_dpr()
 
         assert shell._topology_txn is False, "闸门必须复位"
-        assert shell.host_for_screen(b) is None, "半成品宿主不许留在表里"
-        assert not any(host.screen is b for host in shell.hosts()), "也不许被当成已补齐"
+        # 单窗形态下 host_for_screen 对任何在线屏都返回主宿主（那是既有语义），
+        # 所以这里看的是"有没有一张**属于 b** 的宿主"。
+        assert not any(host.screen is b for host in shell.hosts()), "半成品宿主不许留在表里"
+        assert shell._active_multi() is False, "降级后已应用形态必须回到单窗"
         assert any("建宿主窗失败" in record.getMessage() or
                    "屏拓扑未能对齐" in record.getMessage()
                    for record in caplog.records), "失败要留日志"
@@ -1948,5 +1950,76 @@ def test_pass_budget_exhausts_without_recursing_then_recovers(tmp_path, monkeypa
         shell.handle_geometry_changed()
         shell.handle_geometry_changed()
         assert shell._topology_needs_reconcile() is False or len(shell.hosts()) == 1
+    finally:
+        _cleanup(shell)
+
+
+def test_degraded_state_survives_the_window_own_geometry_callback(
+        tmp_path, monkeypatch):
+    """降级态下窗口**自己订阅的**屏事件不许再把窗口缩回家屏。
+
+    `overlay._desktop_rect()` 走注入的 `_host_window_rect(screen)`，而它原先只看
+    `_multi_window()`（目标形态）；补窗失败时目标是多窗、实际一张窗，于是一次刷新率/
+    几何事件就会把窗口从整桌面缩回家屏，而活动区仍是整桌面窗口的局部坐标。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original = shell._apply_host_window_caps
+        monkeypatch.setattr(
+            shell, "_apply_host_window_caps",
+            lambda host: (_ for _ in ()).throw(RuntimeError("失败")) if host.screen is b
+            else original(host))
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+        assert shell._active_multi() is False, "前提：已降级为单窗"
+        union = QRect(shell.overlay.geometry())
+
+        # 窗口自己订阅的路径：屏刷新率/几何变化
+        shell.overlay._on_screen_geometry_changed()
+
+        assert QRect(shell.overlay.geometry()) == union, (
+            "降级态下窗口必须仍是整桌面（不能被自己缩回家屏）")
+        host = shell._main_host
+        local = QRect(0, 0, union.width(), union.height())
+        for _screen, rect in host.activity:
+            assert local.contains(QRect(rect)), "活动区必须仍是单窗口径"
+    finally:
+        _cleanup(shell)
+
+
+def test_degraded_state_saves_the_home_screen_ratio(tmp_path, monkeypatch):
+    """降级态落盘要用**单窗**的屏矩形：家屏正中不许被写成 1.5 这种越界比例。"""
+    from pet import pet_profiles
+    from tests.test_overlay_hosts_multiscreen import FakeScreen
+
+    right = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="RIGHT")
+    left = FakeScreen((-1920, 0, 1920, 1080), (-1920, 0, 1920, 1040), name="LEFT")
+    _install_screens(monkeypatch, right, left)
+    shell = _make_shell(tmp_path, right, {"allow_cross_screen": True})
+    try:
+        original = shell._apply_host_window_caps
+        monkeypatch.setattr(
+            shell, "_apply_host_window_caps",
+            lambda host: (_ for _ in ()).throw(RuntimeError("失败")) if host.screen is left
+            else original(host))
+        main = shell.sprite
+        # 家屏（右）的中线：整桌面 3840 里的 0.75
+        shell._place_body_ratio(main, 0.75, 0.5, QRect(shell.overlay.geometry()))
+
+        left.set_rects((-1920, 0, 1920, 1080), (-1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+        assert shell._active_multi() is False, "前提：已降级为单窗"
+
+        saved = shell._save_child_geometry(main, slot=0, geometry=None)
+
+        # 降级态下"窗口按单窗、屏按目标"两套口径并存，比例用哪套都可能是错的
+        # （实测会写出 1.5 / 0.08）。这里的正确行为是**不写**，等拓扑恢复再存。
+        assert saved is False, "拓扑未对齐时不许落盘几何"
+        profile = pet_profiles.read_slot_profile(tmp_path, 0)
+        rx = profile.data.get("rx")
+        assert rx is None or 0.0 <= float(rx) <= 1.0, (
+            f"绝不许把越界比例写进档案，实际 {rx}")
     finally:
         _cleanup(shell)
