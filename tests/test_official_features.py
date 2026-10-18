@@ -19,6 +19,7 @@ def test_the_registry_is_closed_and_frozen():
         of.SCREEN_FEATURE_ID,
         of.AI_FEATURE_ID,
         of.ACCOUNT_USAGE_FEATURE_ID,
+        of.MUSIC_FEATURE_ID,
     }
     assert of.SCREEN_OWNER == of.SCREEN_FEATURE_ID and of.AI_OWNER == of.AI_FEATURE_ID
     with pytest.raises(TypeError):
@@ -34,7 +35,10 @@ def test_each_registration_matches_its_declared_contract():
     account = of.official_feature(of.ACCOUNT_USAGE_FEATURE_ID)
     assert (account.factory, account.execution_kind) == ("account-usage/v1", "host-only")
     assert account.capabilities == frozenset({"network.http", "settings.contribute", "menu.contribute"})
-    assert chat.id != screen.id != account.id
+    music = of.official_feature(of.MUSIC_FEATURE_ID)
+    assert (music.factory, music.execution_kind) == ("music/v1", "host-only")
+    assert music.capabilities == frozenset({"settings.contribute", "menu.contribute", "process.spawn"})
+    assert len({screen.id, chat.id, account.id, music.id}) == 4
 
 
 def test_an_unknown_or_malformed_owner_is_refused():

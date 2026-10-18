@@ -1,0 +1,8 @@
+{
+  "id": "official.music",
+  "name": "音乐启动器",
+  "description": "独立形态的音乐播放器启动器：自动发现网易云 / QQ音乐 / 酷狗 / 汽水音乐，也可手动指定程序路径。与内置音乐菜单并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "music/v1",
+  "execution_kind": "host-only"
+}

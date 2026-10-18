@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from pet import startup_receipt as sr
-from pet.official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID
+from pet.official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, MUSIC_FEATURE_ID, SCREEN_FEATURE_ID
 
 
 class FakeRuntime:
@@ -124,6 +124,17 @@ def test_account_usage_receipt_key_maps_to_its_owner_and_directory(tmp_path):
     assert runtime.installed == [ACCOUNT_USAGE_FEATURE_ID]
     assert runtime.enabled_flags == [(ACCOUNT_USAGE_FEATURE_ID, True)]
     assert result.installed == (ACCOUNT_USAGE_FEATURE_ID,)
+
+
+def test_music_receipt_key_maps_to_its_owner_and_directory(tmp_path):
+    _write_receipt(tmp_path, _receipt(music=True))
+    _features(tmp_path, "music")
+    runtime = FakeRuntime()
+
+    result = sr.consume(tmp_path, runtime)
+
+    assert runtime.installed == [MUSIC_FEATURE_ID]
+    assert result.installed == (MUSIC_FEATURE_ID,)
 
 
 def test_receipt_true_without_the_package_files_is_reported_missing(tmp_path):

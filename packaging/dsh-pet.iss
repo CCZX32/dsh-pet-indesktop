@@ -71,16 +71,18 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "official_ai_chat"; Description: "AI chat package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 Name: "official_screen"; Description: "Screen understanding package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 Name: "official_account_usage"; Description: "Account usage package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
+Name: "official_music"; Description: "Music launcher package (official)"; GroupDescription: "Official feature packages:"; Flags: unchecked
 
 [Files]
-; 基础产物：排除 features\ 下三个官方包，改由下面的 [Tasks] 选装项控制。
+; 基础产物：排除 features\ 下四个官方包，改由下面的 [Tasks] 选装项控制。
 ; portable.json 也排除：安装态必须走平台数据目录，构建树里的便携标记不许
 ; 被复制进安装目录（否则数据会写进 {app}，用户看不出区别）。
 ; skipifsourcedoesntexist 让不带包的构建（-FeaturePackages 省略）仍能编译。
-Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*,features\account-usage\*,portable.json"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppDir}\*"; DestDir: "{app}"; Excludes: "features\ai-chat\*,features\screen-understanding\*,features\account-usage\*,features\music\*,portable.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyAppDir}\features\ai-chat\*"; DestDir: "{app}\features\ai-chat"; Tasks: official_ai_chat; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\screen-understanding\*"; DestDir: "{app}\features\screen-understanding"; Tasks: official_screen; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#MyAppDir}\features\account-usage\*"; DestDir: "{app}\features\account-usage"; Tasks: official_account_usage; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "{#MyAppDir}\features\music\*"; DestDir: "{app}\features\music"; Tasks: official_music; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppShortName}"; Filename: "{app}\{#MyAppExeName}"
@@ -110,6 +112,7 @@ var
   AiChat: String;
   Screen: String;
   AccountUsage: String;
+  Music: String;
 begin
   if CurStep <> ssPostInstall then
     exit;
@@ -122,6 +125,8 @@ begin
     RemoveDir(ExpandConstant('{app}\features\screen-understanding'));
   if not WizardIsTaskSelected('official_account_usage') then
     RemoveDir(ExpandConstant('{app}\features\account-usage'));
+  if not WizardIsTaskSelected('official_music') then
+    RemoveDir(ExpandConstant('{app}\features\music'));
   RemoveDir(ExpandConstant('{app}\features'));
 
   { 回执写"盘上实际有什么"，不是"这次勾了什么"：升级时 Inno 会保留上一版由
@@ -138,8 +143,13 @@ begin
     AccountUsage := 'true'
   else
     AccountUsage := 'false';
+  if FileExists(ExpandConstant('{app}\features\music\manifest.json')) then
+    Music := 'true'
+  else
+    Music := 'false';
   Receipt := '{"schema":"dsh-pet-startup-receipt/v1","ai_chat":' + AiChat +
-             ',"screen":' + Screen + ',"account_usage":' + AccountUsage + '}';
+             ',"screen":' + Screen + ',"account_usage":' + AccountUsage +
+             ',"music":' + Music + '}';
   if not SaveStringToFile(ExpandConstant('{app}\startup-receipt.json'), Receipt, False) then
     Log('dsh-pet startup receipt could not be written');
 end;

@@ -50,7 +50,7 @@ from .feature_ports import (
     FeatureWindowState,
 )
 from .feature_state_io import StateError, atomic_write, open_kernel_lock, read_bytes, safe_path
-from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
+from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, MUSIC_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
 
 _LOG = logging.getLogger(__name__)
 
@@ -685,6 +685,52 @@ def bind_account_context(
         preferences=_BoundPreferences(root / "preferences.json", _ACCOUNT_PREFERENCE_FIELDS),
         documents=MappingProxyType({"memory": _bind_document(root / "memory.json")}),
         state_documents=MappingProxyType({"state": _bind_state_document(root / "state.json")}),
+        desktop=None,
+        window=None,
+        presentation=_bind_presentation(),
+        scheduler=_BoundScheduler(),
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
+    )
+
+
+#: 音乐启动器包的偏好字段集：手动播放器路径（键 → 路径）。
+_MUSIC_PREFERENCE_FIELDS = frozenset({"player_paths", "enabled"})
+
+
+def bind_music_context(
+    cfg,
+    *,
+    owner: str = MUSIC_FEATURE_ID,
+) -> FeatureHostContext:
+    """官方音乐启动器包的宿主绑定：偏好 + 呈现 + 定时器。
+
+    ``process.spawn`` 是声明式能力（包在用户点击后启动用户自己安装的播放器）；
+    包不拿 Core 的播放器注册表，也不碰歌词/正在播放链路——这一片只做
+    "找到并打开播放器"。
+    """
+    if owner != MUSIC_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    def read_display() -> Mapping:
+        return MappingProxyType({"character": cfg.get("character")})
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        preferences=_BoundPreferences(root / "preferences.json", _MUSIC_PREFERENCE_FIELDS),
+        documents=MappingProxyType({}),
+        state_documents=MappingProxyType({}),
         desktop=None,
         window=None,
         presentation=_bind_presentation(),
