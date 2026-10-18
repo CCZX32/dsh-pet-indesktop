@@ -1232,7 +1232,14 @@ class _FakeLogman:
             self.listing if is_query else "", "")
 
 
-def test_sweep_stale_sessions_stops_only_own_prefix_and_spares_current(monkeypatch):
+@pytest.fixture
+def sweep_gate(monkeypatch):
+    """每条用例都从「本进程还没扫过」开始（产品里这是一次性闸门）。"""
+    monkeypatch.setattr(fm, "_swept_stale_sessions", False)
+
+
+def test_sweep_stale_sessions_stops_only_own_prefix_and_spares_current(
+        monkeypatch, sweep_gate):
     fake = _FakeLogman(_SWEEP_LISTING)
     monkeypatch.setattr(fm.subprocess, "run", fake)
     stopped = fm.sweep_stale_sessions("dsh-pet-fps-2-2-11223344")
@@ -1241,12 +1248,27 @@ def test_sweep_stale_sessions_stops_only_own_prefix_and_spares_current(monkeypat
     assert fake.calls[1] == ["logman", "stop", "dsh-pet-fps-1-1-aabbccdd", "-ets"]
 
 
-def test_sweep_stale_sessions_survives_logman_failure(monkeypatch):
+def test_sweep_stale_sessions_survives_logman_failure(monkeypatch, sweep_gate):
     def boom(argv, **kwargs):
         raise OSError("logman 不存在")
 
     monkeypatch.setattr(fm.subprocess, "run", boom)
     assert fm.sweep_stale_sessions("s") == [], "清理失败绝不影响随后的采集启动"
+
+
+def test_sweep_stale_sessions_runs_once_per_process(monkeypatch, sweep_gate):
+    """一个进程只查一次：``logman query -ets`` 实测 970ms 中位。
+
+    残留只可能来自上一个被强杀的进程（本进程每次停止都走官方 terminate），
+    所以每换一次游戏目标都重查一遍纯属白付。
+    """
+    fake = _FakeLogman(_SWEEP_LISTING)
+    monkeypatch.setattr(fm.subprocess, "run", fake)
+    first = fm.sweep_stale_sessions("dsh-pet-fps-2-2-11223344")
+    second = fm.sweep_stale_sessions("dsh-pet-fps-3-3-99999999")
+    assert first == ["dsh-pet-fps-1-1-aabbccdd"]
+    assert second == []
+    assert [c[1] for c in fake.calls].count("query") == 1
 
 
 def test_default_session_sweeps_before_building_the_session(monkeypatch, tmp_path):

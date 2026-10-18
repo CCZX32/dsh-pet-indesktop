@@ -39,7 +39,7 @@
 | `pet/dynamic_island.py` / `pet/proactive.py` / `pet/multi_window_shared.py` | 角色身份经 provider 取，不再读全局 `character` |
 | `pet/modern_settings_dialog.py` / `pet/settings_interaction.py` | 点击内容设置（文本/配图目录/概率/时长）改为「周期或点击任一开启」即显示；节奏项仍只跟周期 |
 | `pet/game_fps.py` | 新增 `parse_session_names` / `stale_session_names` / `stop_session_args`（纯函数）：按 `dsh-pet-fps-` 前缀列出本应用自己的 ETW 会话、排除本次会话名、生成精确停止命令 |
-| `pet/fps_monitor.py` | 新增模块级 `sweep_stale_sessions(session_name)`，由会话工厂 `default_session()` 在**建会话之前**调用：清掉异常退出遗留的残留 ETW 会话（Windows trace 会话有上限，攒满后新会话报 `error 1450`）。放在工厂而不是 `FpsSession.start()`：清残留是「准备新采集」的前置动作，且它要再起两个 `logman` 子进程，不该被会话自己的进程替身记账 |
+| `pet/fps_monitor.py` | 新增模块级 `sweep_stale_sessions(session_name)`，由会话工厂 `default_session()` 在**建会话之前**调用：清掉异常退出遗留的残留 ETW 会话（Windows trace 会话有上限，攒满后新会话报 `error 1450`）。放在工厂而不是 `FpsSession.start()`：清残留是「准备新采集」的前置动作，且它要再起两个 `logman` 子进程，不该被会话自己的进程替身记账。**一个进程只扫一次**（查询实测 970 ms，残留只来自上一个被强杀的进程） |
 
 测试：新增 `tests/test_process_service_identity.py`；改写两条把 bug 写成契约的断言
 （`test_precache_worker_uses_resolved_voice` 用旧 `_cfg` 造 expected；
@@ -55,7 +55,7 @@
 | 台词点击查找 | 0.071 → 0.265 ms（flavor 解析 0.038 ms，且不再读钥匙串；磁盘侧由整目录 glob 变 ≤3 次精确 stat） | 每次点击 |
 | `_attempts` 每轮解析 | 0.7–1.6 ms | 每次预缓存批次（一次，非每句） |
 | `refreshRateChanged` 接线 | 每块屏一条信号连接 | 改刷新率/插拔屏 |
-| 残留 ETW 会话清理 | 1 次 `logman query -ets` + 每个残留会话 1 次 `logman stop`（均为已存在的系统命令） | **每次开采集会话**（换游戏目标），跑在 FPS 工作线程 `FpsMonitor._run` 上，不占 GUI 线程 |
+| 残留 ETW 会话清理 | `logman query -ets` 实测 **970 ms** 中位（5 次）、每个残留会话 1 次 `logman stop` **56 ms**（均不需管理员）；**一个进程只跑一次**，总计 ≤1 次查询 + N 次停止 | 进程内第一次开采集会话时（历史现场 N=11，约 1.6 s 一次性） |
 
 无新增线程、定时器、网络请求；常驻内存无增长路径（`deque` 上限均在模块常量里，清理只读命令输出）。
 
@@ -64,6 +64,10 @@
 - 本机双屏（主屏 2560×1440 avail 1392 @170Hz + 左侧副屏 1920×1080 avail 1032 @60Hz，
   DPR 均为 1.0）：部署 v4.3.3 后实测合成窗 `(-1920,0,4480,1392)`、tick 6ms、帧序列
   106 段，跨屏拖拽/探头/设置说明均正常（用户当场确认「用起来正常了」）。
+- 混合缩放部署后核验（125% 副屏）：枚举进程全部可见顶层窗，得到
+  `(-1920,0,1920×1020)` 与 `(0,0,2560×1392)` —— 每块屏一张、各自物理尺寸正确；
+  整屏截图（虚拟桌面 `-1920,0 4480×1440`）确认三只桌宠分别画在对应屏上、
+  无裁切、无错位；工作集 215 MB。
 - 台词语音：用用户真实配置（slot0 档案 22 句）跑预缓存 → **22 句全成、0 失败**，
   26.5 s；`cached_audio` 命中验证通过。
 - SAPI 线程 COM：修复前后台线程 `WinError -2147221008`，修复后同线程取到 3 个音色、

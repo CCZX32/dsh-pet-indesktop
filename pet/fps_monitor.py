@@ -404,8 +404,11 @@ class FpsSession:
 # ---------------------------------------------------------------- 目标解析（系统面）
 _foreground_api = None
 
+#: 残留清理的"一个进程只扫一次"闸门（``logman query -ets`` 实测约 970ms）。
+_swept_stale_sessions = False
 
-def sweep_stale_sessions(session_name: str) -> list[str]:
+
+def sweep_stale_sessions(session_name: str, *, once: bool = True) -> list[str]:
     """开会话前清掉**自己前缀**的历史残留 ETW 会话，返回停掉的名字。
 
     残留来自异常退出（进程被强杀/崩溃时走不到 ``--terminate_existing_session``）。
@@ -416,7 +419,16 @@ def sweep_stale_sessions(session_name: str) -> list[str]:
     只停 ``dsh-pet-fps-`` 前缀且不是本次会话的那些名字：绝不用通配去抢别人的
     采集会话（同 ``new_session_name`` 的纪律）。清理是尽力而为，任何失败都只
     放弃清理，绝不影响随后真正要开的采集会话。
+
+    ``once=True``（产品路径）：**一个进程只扫一次**。残留只可能来自上一个被强杀
+    的进程（本进程每次停止都走官方 ``--terminate_existing_session``），而
+    ``logman query -ets`` 实测 970ms 中位、``logman stop`` 56ms——每换一次游戏
+    目标就重付一次查询没有收益。``once=False`` 供测试与显式排查复扫。
     """
+    global _swept_stale_sessions
+    if once and _swept_stale_sessions:
+        return []
+    _swept_stale_sessions = True
     try:
         listed = subprocess.run(  # noqa: S603 - 固定 argv，绝不过 shell
             ["logman", "query", "-ets"],
