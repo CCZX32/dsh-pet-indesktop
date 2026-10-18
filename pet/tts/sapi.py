@@ -71,6 +71,25 @@ def _ensure_com() -> None:
     _com_ready.value = True
 
 
+def release_thread_com() -> None:
+    """本线程若因本模块进过 COM，就配对 ``CoUninitialize`` 释放。
+
+    只在**我们自己的短命线程**（合成 worker）的收尾里调用：那种线程的生命周期由
+    本进程掌握，配对释放是干净的。常驻 GUI 线程不调——它那一份计数跟着进程活，
+    在那里释放反而可能让 Qt 后续的 COM 调用落进未初始化的 apartment。
+    线程从未初始化过时是 no-op。
+    """
+    if getattr(_com_ready, "value", None) is not True:
+        return
+    _com_ready.value = False
+    try:
+        import comtypes
+
+        comtypes.CoUninitialize()
+    except Exception:  # pragma: no cover - 非 Windows / 库缺失
+        pass
+
+
 def _voice_objects():
     """返回 SAPI 的 ``GetVoices()`` 集合（拿不到就返回 None）。
 

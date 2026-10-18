@@ -1636,31 +1636,41 @@ def test_three_screens_flip_both_ways_and_keep_every_pet_in_place(tmp_path, monk
         main = shell.sprite
         shell.spawn_pet()
         child = shell._spawned[0]
+        shell.spawn_pet()
+        third = shell._spawned[1]
         # 三只分别摆在 A / B / C 的中间（整桌面 5760 的 1/6、1/2、5/6）
         shell._place_body_ratio(main, 1 / 6, 0.5, desktop)
         shell._place_body_ratio(child, 0.5, 0.5, desktop)
+        shell._place_body_ratio(third, 5 / 6, 0.5, desktop)
         shell._remember_sprite_screen(main, a)
         shell._remember_sprite_screen(child, b)
+        shell._remember_sprite_screen(third, c)
+        wants = ((main, a), (child, b), (third, c))
+
+        def ratio_in_screen(sprite, screen) -> float:
+            host = shell.host_for_screen(screen)
+            assert host is not None
+            rect = shell._screen_rect_in_host(screen, host)
+            body = sprite.body_rect()
+            return (body.x() + body.width() / 2.0 - rect.x()) / rect.width()
 
         # 只有 B 改成 200%（工作区同时减半）→ 每屏一窗
         b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
         shell._feed_screen_dpr()
         assert len(shell.hosts()) == 3, "三块屏都该有自己的窗"
-        for sprite, screen in ((main, a), (child, b)):
-            assert shell._screen_of_sprite(sprite) is screen
-            host = shell.host_for_screen(screen)
-            rect = shell._screen_rect_in_host(screen, host)
-            body = sprite.body_rect()
-            ratio = (body.x() + body.width() / 2.0 - rect.x()) / rect.width()
-            assert ratio == pytest.approx(0.5, abs=0.08), (
-                f"{screen.name()} 上的这只必须仍在屏内中央附近，实际 {ratio:.2f}")
+        for sprite, screen in wants:
+            assert shell._screen_of_sprite(sprite) is screen, "屏归属不许变"
+            assert ratio_in_screen(sprite, screen) == pytest.approx(0.5, abs=0.08), (
+                f"{screen.name()} 上的这只必须仍在屏内中央附近")
 
-        # B 改回 100% → 合回单窗，三只各自回屏
+        # B 改回 100% → 合回单窗：三只各自回屏，**比例也要回来**
         b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
         shell._feed_screen_dpr()
         assert len(shell.hosts()) == 1, "回到单窗"
-        for sprite, screen in ((main, a), (child, b)):
+        for sprite, screen in wants:
             assert shell._screen_of_sprite(sprite) is screen
+            assert ratio_in_screen(sprite, screen) == pytest.approx(0.5, abs=0.08), (
+                f"合窗后 {screen.name()} 上这只的比例也要保住")
     finally:
         _cleanup(shell)
 
@@ -1684,5 +1694,68 @@ def test_repeated_topology_notifications_are_idempotent(tmp_path, monkeypatch):
         body = main.body_rect()
         center = body.x() + body.width() / 2.0
         assert center == pytest.approx(960.0, abs=3.0), "位置也不许被推走"
+    finally:
+        _cleanup(shell)
+
+
+def test_signal_arriving_during_the_topology_transaction_is_reapplied(
+        tmp_path, monkeypatch):
+    """事务进行中又收到一次缩放信号：那个请求不许被闸门静默吞掉。
+
+    真实机器上几何/DPI 信号可以交错到达；事务期间的重入会被闸门挡下（否则会在一半
+    状态上再开一层）。挡下之后必须在收口时补做，否则最终拓扑和判定不一致——例如
+    "拆到一半时缩放又改回去了"，宿主就永远多留一张。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        original = shell._adopt_new_host
+        state = {"armed": True}
+
+        def adopt(screen, *, visible):
+            original(screen, visible=visible)
+            if state["armed"]:
+                state["armed"] = False
+                # 事务进行中：副屏缩放又改回去了（信号交错）
+                b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+                shell._feed_screen_dpr()
+
+        monkeypatch.setattr(shell, "_adopt_new_host", adopt)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert shell._topology_txn is False, "事务收口必须复位闸门"
+        assert shell._topology_needs_reconcile() is False, "最终拓扑必须与判定一致"
+        assert len(shell.hosts()) == 1, "缩放改回去了，多出来的宿主必须被拆掉"
+    finally:
+        _cleanup(shell)
+
+
+def test_duplicate_screen_names_prefer_the_screen_the_pet_stands_on(
+        tmp_path, monkeypatch):
+    """两块屏**同名**时，归属判定要选"这只脚下那块"，不是宿主那屏。
+
+    同名屏在实践中很少但可能（驱动重装、虚拟显示器）：单窗下宿主屏是"家那块"，
+    若一律用宿主屏作为优先项，站在同名另一块屏上的宠会被算成在主屏，
+    拓扑翻转时比例按错的那块量、位置跳到别的屏。
+    """
+    from tests.test_overlay_hosts_multiscreen import FakeScreen
+
+    a = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="SAME")
+    b = FakeScreen((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), name="SAME")
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        # 站到"同名的那块"（B）上，并让归属也写成同名
+        shell._place_body_ratio(main, 0.75, 0.5, QRect(shell.overlay.geometry()))
+        shell._remember_sprite_screen(main, b)
+
+        assert shell._assigned_screen(main) is b, "同名时要选脚下那块，而不是宿主那屏"
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+        assert shell._screen_of_sprite(main) is b, "翻转后仍在该屏"
     finally:
         _cleanup(shell)

@@ -73,7 +73,9 @@ _NAMED_KEYS = {
     "scrolllock": 0x91,
     "num0": 0x60, "num1": 0x61, "num2": 0x62, "num3": 0x63, "num4": 0x64,
     "num5": 0x65, "num6": 0x66, "num7": 0x67, "num8": 0x68, "num9": 0x69,
-    "num*": 0x6A, "num+": 0x6B, "num-": 0x6D, "num.": 0x6E, "num/": 0x6F,
+    # 小键盘运算符：**不用 "+" 做名字**（本模块用 "+" 分隔组合键，"num+" 会被切坏），
+    # 统一写成 numplus。这些键与数字键一样，Qt 侧靠 KeypadModifier 表达。
+    "num*": 0x6A, "numplus": 0x6B, "num-": 0x6D, "num.": 0x6E, "num/": 0x6F,
 }
 for _n in range(1, 25):
     _NAMED_KEYS[f"f{_n}"] = 0x70 + (_n - 1)

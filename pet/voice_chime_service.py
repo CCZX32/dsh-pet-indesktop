@@ -298,6 +298,18 @@ class _TTSWorker(threading.Thread):
         self._temp_paths = [_temp_cache_path(Path(path)) for path in self._paths]
 
     def run(self) -> None:  # noqa: D102
+        try:
+            self._synthesize_attempts()
+        finally:
+            # 本线程是短命的、生命周期由本进程掌握：SAPI 若在这个线程上初始化过 COM，
+            # 收尾时配对释放（常驻 GUI 线程不释放——那份计数跟着进程活）。
+            try:
+                tts.sapi.release_thread_com()
+            except Exception:  # pragma: no cover - 非 Windows / 库缺失
+                pass
+
+    def _synthesize_attempts(self) -> None:
+        """按尝试链逐个合成（``run`` 的本体；收尾的 COM 释放由 ``run`` 负责）。"""
         errors: list[str] = []
         for index, (attempt, path) in enumerate(zip(self._attempts, self._paths)):
             temp_path = self._temp_paths[index]

@@ -70,6 +70,16 @@ _QT_KEYS = {
 }
 
 
+#: 小键盘运算符：Qt 侧是"普通运算符键 + KeypadModifier"，Win32 侧是独立虚拟键码。
+_VK_NUMPAD_OPS = {
+    0x6A: "Key_multiply",
+    0x6B: "Key_Plus",
+    0x6D: "Key_Minus",
+    0x6E: "Key_Period",
+    0x6F: "Key_Slash",
+}
+
+
 def chord_to_text(sequence) -> str:
     """``QKeySequence`` → 规范字符串；不支持/无修饰键 → ``""``（= 未设置）。
 
@@ -91,6 +101,10 @@ def chord_to_text(sequence) -> str:
         # 小键盘数字与主键盘数字是不同的虚拟键码：Ctrl+小键盘5 存成 Ctrl+5 的话，
         # 用户按小键盘不会触发（绑的是另一颗键）。
         return hotkey_spec.canonical(mods, 0x60 + (key - int(Qt.Key.Key_0))) or ""
+    if keypad:
+        for vk, qt_name in _VK_NUMPAD_OPS.items():
+            if key == int(getattr(Qt.Key, qt_name)):
+                return hotkey_spec.canonical(mods, vk) or ""
     vk = _QT_KEYS.get(key)
     if vk is None:
         if int(Qt.Key.Key_A) <= key <= int(Qt.Key.Key_Z):
@@ -134,6 +148,15 @@ def text_to_sequence(text) -> QKeySequence:
     if 0x60 <= vk <= 0x69:
         keypad = True
         vk = 0x30 + (vk - 0x60)
+    elif vk in _VK_NUMPAD_OPS:
+        keypad = True
+        qt_key = int(getattr(Qt.Key, _VK_NUMPAD_OPS[vk]))
+        mods_and = {qt_mod for qt_mod, win_mod in _QT_MODS if mods & win_mod}
+        qt_mods = Qt.KeyboardModifier.NoModifier
+        for qt_mod in mods_and:
+            qt_mods |= qt_mod
+        qt_mods |= Qt.KeyboardModifier.KeypadModifier
+        return QKeySequence(QKeyCombination(qt_mods, Qt.Key(qt_key)))
     qt_key = _vk_to_qt_key(vk)
     if qt_key is None:
         return QKeySequence()
