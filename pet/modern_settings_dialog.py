@@ -24,6 +24,8 @@ from PySide6.QtGui import (
     QColor,
     QClipboard,
     QFontDatabase,
+    QKeySequence,
+    QShortcut,
     QIcon,
     QImageReader,
     QPainter,
@@ -1009,10 +1011,20 @@ class ModernSettingsDialog(QDialog):
         self.sidebar.setCurrentRow(0)
         if self.initial_page:
             self.select_page(self.initial_page)
-        self._search_rows = self.findChildren(SettingRow)
+        # 索引口径：标准设置行 + 「更新」页的作者账号行（后者不是 SettingRow，
+        # 但暴露同名的 label/hint_label，故同一套匹配函数就能覆盖；侧栏命令类
+        # 控件仍不进索引——那是 docs/SETTINGS-CHANGE-GATES.md 里的既有决定）。
+        from .settings_about import AuthorRow
+
+        self._search_rows = self.findChildren(SettingRow) + self.findChildren(AuthorRow)
         self._search_matches: list[SettingRow] = []
         self._search_index = -1
         self.search_edit.textChanged.connect(self._search_settings)
+        # Ctrl+F：设置窗内任意位置把光标送进搜索框（浏览器/编辑器的一致习惯）。
+        # 不抢输入框自己的按键：焦点已经在搜索框时 Qt 不会再触发这条快捷方式。
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._focus_search_box)
 
         self.self_talk_check.toggled.connect(self._update_self_talk_controls)
         self.menu_translucent_check.toggled.connect(self._update_translucency_controls)
@@ -2129,6 +2141,11 @@ class ModernSettingsDialog(QDialog):
                 row.setProperty("searchMatch", False)
                 row.style().unpolish(row)
                 row.style().polish(row)
+
+    def _focus_search_box(self) -> None:
+        """把焦点送进侧栏搜索框并全选（Ctrl+F；不改变已输入的内容之外的状态）。"""
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
 
     def _search_settings(self, query: str, *, advance: bool = False) -> None:
         query = query.strip().lower()

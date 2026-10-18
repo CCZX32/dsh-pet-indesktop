@@ -433,3 +433,69 @@ def test_existing_keyword_searches_still_reach_their_rows(tmp_path, monkeypatch)
         assert dialog.agent_link_box.isAncestorOf(_current_match(dialog))
     finally:
         dialog.close()
+
+
+# ---------------------------------------------------------------- Ctrl+F 与索引口径
+def test_ctrl_f_focuses_the_search_box(tmp_path, monkeypatch):
+    """设置窗里注册了 Ctrl+F，触发后光标进搜索框（浏览器/编辑器的一致习惯）。
+
+    不模拟真实按键：offscreen 平台不把 ``QTest.keyClick`` 派发给快捷方式，那样的
+    用例会在 CI 上假绿/假红。这里断言两件真事——**绑定的是 ``StandardKey.Find``
+    且作用域覆盖子控件**，以及**触发后焦点确实落到搜索框**。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.show()
+        finders = [
+            shortcut for shortcut in dialog.findChildren(QShortcut)
+            if shortcut.key().matches(QKeySequence.StandardKey.Find)
+            == QKeySequence.SequenceMatch.ExactMatch
+        ]
+        assert finders, "设置窗必须注册 Ctrl+F"
+        shortcut = finders[0]
+        assert shortcut.context() == Qt.ShortcutContext.WidgetWithChildrenShortcut, (
+            "焦点在任意子控件上时都要能触发")
+        assert shortcut.key().toString() == "Ctrl+F"
+
+        dialog.self_talk_check.setFocus()
+        assert dialog.focusWidget() is not dialog.search_edit, "前提：焦点不在搜索框"
+
+        shortcut.activated.emit()
+
+        assert dialog.focusWidget() is dialog.search_edit, "Ctrl+F 应该把焦点送进搜索框"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_author_rows_are_searchable_and_jump_to_the_update_page(tmp_path, monkeypatch):
+    """「更新」页的作者账号行也进搜索索引：搜 BiliBili / 抖音 能跳过去。
+
+    它们不是 SettingRow（没有配置键），但按同形暴露 label/hint_label，所以同一套
+    匹配函数就能覆盖——不必为"可搜"改掉那一块的排版。
+    """
+    from pet import settings_search
+    from pet.settings_about import AuthorRow
+
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        rows = dialog._search_rows
+        assert any(isinstance(row, AuthorRow) for row in rows), "作者行必须进索引"
+
+        matches = settings_search.find_matches(rows, "bilibili")
+        assert matches, "搜平台名要有命中"
+        assert all(isinstance(row, AuthorRow) for row in matches)
+
+        handles = settings_search.find_matches(rows, "快乐小咸鱼")
+        assert handles, "搜账号名也要有命中"
+
+        dialog._search_settings("bilibili")
+        page = dialog.pages.currentWidget()
+        assert page is not None and page.isAncestorOf(matches[0]), (
+            "命中项在「更新」页，翻页要跳过去")
+    finally:
+        dialog.close()
+        dialog.deleteLater()

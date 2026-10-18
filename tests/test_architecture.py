@@ -287,7 +287,9 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-18 上调到 2563（互动域新增「快捷键」页内标签，本文件净 +2：一行 import
 # + 保存路径一行 `save_hotkey_settings`）。行的装配在 settings_hotkeys（新模块），
 # 本文件只留接线——这是既定口径（settings_quiet/weather/divination 同形）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2563
+# 2026-10-18 上调到 2580（Ctrl+F 聚焦搜索框 + 搜索索引纳入「更新」页作者行，本文件
+# 净 +17：两条 import、`_focus_search_box` 槽与其接线、索引来源多一类候选）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2580
 
 
 def _read(name: str) -> str:
