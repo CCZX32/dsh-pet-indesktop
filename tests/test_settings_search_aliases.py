@@ -328,7 +328,12 @@ def test_domain_names_land_on_their_representative_rows(tmp_path, monkeypatch):
         "桌面组件": ["settingRow_dynamic_island_enabled"],
         "AI 与对话": ["settingRow_provider_list", "settingRow_chat_ui_style"],
         "ai 与对话": ["settingRow_provider_list", "settingRow_chat_ui_style"],
-        "自动化与联动": ["settingRow_proactive_enabled"],
+        # 「主动识屏」页只在 Windows 建（`sys.platform == "win32" and include_ai`
+        # 闸门），macOS/Linux 上那一行不存在，只剩该域第一组的「待办提醒」。
+        # 命中顺序按行序，而「待办提醒」组在域里排在前面，所以 Windows 上也先命中它。
+        "自动化与联动": (
+            ["settingRow_todo_reminder_enabled", "settingRow_proactive_enabled"]
+            if sys.platform == "win32" else ["settingRow_todo_reminder_enabled"]),
         "文件识别": ["settingRow_file_interpret_enabled"],
     }
     dialog = _dialog(tmp_path, monkeypatch)

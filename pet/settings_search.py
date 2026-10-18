@@ -129,8 +129,11 @@ ROW_ALIASES: dict[str, tuple[str, ...]] = {
     #    键写小写：查询在 ``find_matches`` 里已 lowered，别名表按小写比对（同 ``dry-run``）。
     "ai 与对话": ("provider_list", "chat_ui_style"),
     #    自动化与联动 = 「开启主动识屏」（该域里最大的一块自动化，也是它的主开关；
-    #    待办提醒、免打扰、编程助手提示音都是并列的配角，选谁当落点都不如它代表"自动"）；
-    "自动化与联动": ("proactive_enabled",),
+    #    待办提醒、免打扰、编程助手提示音都是并列的配角，选谁当落点都不如它代表"自动"）。
+    #    **但「主动识屏」页只在 Windows 建**（`modern_settings_dialog.py` 的
+    #    `sys.platform == "win32" and include_ai` 闸门），macOS/Linux 上那一行根本不存在、
+    #    查询会 0 命中。所以并列补上该域第一组「待办提醒」作跨平台落点。
+    "自动化与联动": ("proactive_enabled", "todo_reminder_enabled"),
     #    文件识别 = 「拖文件后询问解读」（该域只有 2 行，它就是整个域的功能本体，
     #    「进度汇报间隔」是它的从属参数）。
     "文件识别": ("file_interpret_enabled",),

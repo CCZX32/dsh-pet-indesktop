@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import http.client
+from email.message import Message
 import json
 import logging
 import time
@@ -1551,7 +1552,13 @@ class _LyricClock:
 
 
 def _http_error(code: int, *, retry_after: str | None = None) -> urllib.error.HTTPError:
-    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    # 用 ``email.message.Message`` 而不是 dict：真实 ``urllib`` 交给 ``HTTPError`` 的是
+    # ``http.client.HTTPMessage``（Message 子类），``.get()`` 两者都支持；而塞 dict 走的是
+    # 宽松兼容路径，``HTTPError`` 上 ``headers`` 是否还等于这个 dict 取决于平台/版本——
+    # 实测那档「含逗号的 HTTP 日期」在 macOS CI 上读不到 header，于是换路、用例红。
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
     return urllib.error.HTTPError(
         "https://c.y.qq.com/x", code, f"HTTP Error {code}", headers, None
     )
