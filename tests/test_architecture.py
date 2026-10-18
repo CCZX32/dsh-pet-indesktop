@@ -278,7 +278,13 @@ WINDOW_PY_LINE_BUDGET = 4671
 # `SettingRow("todo_reminder_speak", ...)`（行装配 3 行 + 保存回写 1 行；claim 表那行
 # 只是多一个 id，不增行）。控件本体在 settings_pet_controls，文案只有行内这一份来源。
 # 仍按文件约定只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2539
+# 2026-10-18 上调到 2561（自言自语内容项显隐解耦，本文件净 +22）：周期气泡的细项
+# 显隐拆成「节奏项只跟周期开关」+「内容项（显示时间/候选内容/图片目录/配图概率）
+# 跟周期或点击任一开启」——新增 `_update_self_talk_content_controls`（含 docstring）
+# 与 `_update_self_talk_controls` / `_update_click_self_talk_controls` 两处调用的接线，
+# 行数即这两个函数的净增。显隐规则必须贴着这两处开关的 toggled 接线（拆成外部函数
+# 反而把"哪一档跟哪个开关"这条唯一契约切散），故按文件约定校准到实测值。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2561
 
 
 def _read(name: str) -> str:

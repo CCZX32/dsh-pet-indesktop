@@ -1334,23 +1334,44 @@ class ModernSettingsDialog(QDialog):
         点击侧（``click_self_talk*`` / ``click_talk_bindings``）**不在这里**：它们是
         独立开关的后续项，见 :meth:`_update_click_self_talk_controls`。绑在一起会让
         「只想点击听声」的用户在设置页里连开关都看不到。
+
+        节奏项（最短/最长间隔、配图大小）只属于周期链路，仍只跟本开关；内容项
+        （显示时间/候选内容/图片目录/配图概率）两条链路**共读同一份配置**——点击
+        自言自语落地的 ``window_alerts.show_click_self_talk`` 读的正是这批键——所以
+        它们跟 :meth:`_update_self_talk_content_controls` 走「任一开启」。
         """
-        keys = (
-            "self_talk_duration",
-            "self_talk_min",
-            "self_talk_max",
-            "self_talk_texts",
-            "self_talk_images",
-            "self_talk_image_scale",
-            "self_talk_image_chance",
+        self._set_setting_rows_visible(
+            ("self_talk_min", "self_talk_max", "self_talk_image_scale"),
+            enabled,
+            dependency="self_talk",
         )
-        self._set_setting_rows_visible(keys, enabled)
+        self._update_self_talk_content_controls(enabled)
+
+    def _update_self_talk_content_controls(self, self_talk_enabled: bool) -> None:
+        """内容项显隐：周期气泡与点击自言自语**任一**开启就显示。
+
+        这些键是两条链路共用的内容源（候选文本 / 图片目录 / 配图概率 / 显示时长）。
+        旧模型把显隐整组挂在周期开关上，只开点击的用户必须先打开一个他不用的周期
+        功能才能编辑候选文本——消费侧早已解耦（``show_click_self_talk`` 不看
+        ``self_talk_enabled``），显隐跟着解耦。
+        """
+        self._set_setting_rows_visible(
+            (
+                "self_talk_duration",
+                "self_talk_texts",
+                "self_talk_images",
+                "self_talk_image_chance",
+            ),
+            self_talk_enabled or self.click_self_talk_check.isChecked(),
+            dependency="self_talk_content",
+        )
 
     def _update_click_self_talk_controls(self, enabled: bool) -> None:
         """点击自言自语（``click_self_talk``）的后续项显隐。
 
         预缓存也跟这里：只有点击链路才会把台词**读出来**（周期气泡只显示不朗读），
-        所以点击开关关着时预缓存没有意义。
+        所以点击开关关着时预缓存没有意义。内容项与周期气泡共用，见
+        :meth:`_update_self_talk_content_controls`（任一开启即显示）。
         """
         keys = (
             "click_self_talk_speak",
@@ -1358,6 +1379,7 @@ class ModernSettingsDialog(QDialog):
             "click_talk_bindings",
         )
         self._set_setting_rows_visible(keys, enabled, dependency="click_self_talk")
+        self._update_self_talk_content_controls(self.self_talk_check.isChecked())
 
     def _update_island_controls(self, enabled: bool) -> None:
         settings_pet_controls._update_island_controls(self, enabled)
