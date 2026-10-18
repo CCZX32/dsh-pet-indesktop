@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -134,13 +136,52 @@ class SecretStore:
         try: import keyring
         except Exception: keyring=None
         self._keyring=keyring
+        self._usable=None   # 惰性探测一次（后端在进程生命周期内不会换）
+
+    def _backend_usable(self) -> bool:
+        """**后端**真的能用吗（不只是 `import keyring` 成功）。
+
+        冻结包里最容易踩的坑：`keyring` 在、它的 Windows 后端依赖（`win32ctypes`）
+        不在，于是 `get_password/set_password` 抛 ``NoKeyringError``——模块能 import、
+        写凭据却永远失败。实测症状：界面说"已保存"、重启后主进程读到空串，聊天报
+        `401 Authentication Fails, Your api key: ****xxxx is invalid`。
+        """
+        if self._keyring is None:
+            return False
+        try:
+            backend = self._keyring.get_keyring()
+        except Exception:
+            return False
+        name = type(backend).__module__ + "." + type(backend).__name__
+        low = name.lower()
+        # keyring 的"没有可用后端"就是这两个占位实现
+        return "fail" not in low and "null" not in low
+
     @property
-    def available(self): return self._keyring is not None
+    def available(self):
+        """可用 = 模块在 **且** 后端可用（两者缺一都是"存不了凭据"）。"""
+        if self._usable is None:
+            self._usable = self._backend_usable()
+            if not self._usable:
+                logging.getLogger("dsh-pet-standalone").warning(
+                    "凭据存储不可用（系统钥匙串没有可用后端）：API Key 只能留在内存里，"
+                    "重启后需要重新填写。打包版通常是 keyring 的 Windows 后端依赖"
+                    "（pywin32-ctypes / win32ctypes）没随包进来。")
+        return self._usable
+
     def get(self,ref):
-        if not self._keyring or not ref: return ''
+        if not self.available or not ref: return ''
         try: return str(self._keyring.get_password(self.service_name,ref) or '')
-        except Exception: return ''
+        except Exception as exc:
+            logging.getLogger("dsh-pet-standalone").warning(
+                "读取凭据失败（%s）：%s", ref, type(exc).__name__)
+            return ''
+
     def set(self,ref,value):
-        if not self._keyring or not ref: return False
+        if not self.available or not ref: return False
         try: self._keyring.set_password(self.service_name,ref,value); return True
-        except Exception: return False
+        except Exception as exc:
+            # 失败不能静默：界面会显示"已保存"，用户下次启动就发现 Key 没了
+            logging.getLogger("dsh-pet-standalone").warning(
+                "保存凭据失败（%s）：%s", ref, type(exc).__name__)
+            return False

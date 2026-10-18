@@ -262,3 +262,26 @@ def test_windows_build_script_keeps_its_utf8_bom():
     assert PS1.read_bytes().startswith(b"\xef\xbb\xbf"), (
         "build_onedir.ps1 的 UTF-8 BOM 丢了；PowerShell 5.1 会按 ANSI 码页读它"
     )
+
+
+# ==================================================== 四、keyring 的 Windows 后端依赖
+def test_build_scripts_collect_keyring_windows_backend_dependency():
+    """`--collect-all keyring` **收不到** keyring 的 Windows 后端依赖。
+
+    `keyring.backends.Windows` 里 `import win32ctypes.pywin32.win32cred` 是"后端被选中"
+    时才发生的动态 import，PyInstaller 的 collect-all 只收 keyring 自己的模块。实测
+    4.3.3 的 `_internal`：有 `keyring`、没有 `win32ctypes` —— 于是冻结包里钥匙串后端
+    不可用，API Key 只活在写它的那个设置进程内存里，主进程读到空（界面还显示已保存）。
+    """
+    repo = Path(__file__).resolve().parents[1]
+    script = (repo / "scripts" / "build_onedir.ps1").read_text(encoding="utf-8")
+    assert "win32ctypes" in script, "构建脚本必须显式收集 win32ctypes"
+    assert "--collect-all', 'win32ctypes'" in script, (
+        "要以 --collect-all 收集（它自己的子模块也要带）")
+
+    verifier = (repo / "scripts" / "verify_bundle_tts.py").read_text(encoding="utf-8")
+    assert "win32ctypes.pywin32.win32cred" in verifier, (
+        "构建期兜底清单要钉住它：缺了就以退出码 4 中止")
+
+    requires = (repo / "requirements.txt").read_text(encoding="utf-8")
+    assert "pywin32-ctypes" in requires, "运行时依赖要显式声明（不靠 keyring 带）"

@@ -6,6 +6,12 @@ PySide6>=6.5; sys_platform != "linux"
 imageio-ffmpeg>=0.6
 Pillow>=10.3
 keyring>=25
+# keyring 的 **Windows 后端**实现依赖（import 名 `win32ctypes`，PyPI 名 pywin32-ctypes）。
+# 它是 keyring 自己的传递依赖，但这里显式声明并按仓库口径在构建脚本里 --collect-all：
+# 后端是**动态 import**（被选中时才 import win32ctypes.pywin32.win32cred），
+# `--collect-all keyring` 收不到它。实测 4.3.3 的冻结包里只有 keyring、没有 win32ctypes
+# → 钥匙串后端不可用 → API Key 只活在写它的设置进程内存里（界面说"已保存"，主进程读到空）。
+pywin32-ctypes>=0.2.0; platform_system == "Windows"
 certifi>=2024.0.0
 pycaw>=0.0.13; platform_system == "Windows"
 tzdata>=2024.1

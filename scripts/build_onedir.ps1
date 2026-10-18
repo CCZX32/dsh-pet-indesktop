@@ -208,6 +208,13 @@ foreach ($m in @('django','hypothesis')) {
 # 而语音报时的收费后端（pet/tts/mimo、pet/tts/doubao）照旧收 API Key。少了它，凭据只能
 # 留在写它的进程内存里，主程序永远读不到（见上面 $excludes 那段）。
 $keyringCollect = @('--collect-all', 'keyring')
+# **keyring 的 Windows 后端要 win32ctypes**（pywin32-ctypes 包，import 名 `win32ctypes`）：
+# `keyring.backends.Windows` 里 `import win32ctypes.pywin32.win32cred` 是**后端被选中时**
+# 才发生的动态 import，`--collect-all keyring` 收不到它的依赖。实测（4.3.3 的包）：
+# `_internal` 里有 `keyring`、没有 `win32ctypes` → 钥匙串后端不可用 → API Key 只活在
+# 写它的那个设置进程内存里，主进程永远读到空（界面还显示"已保存"）。
+# 显式收集并进构建期兜底清单（`scripts/verify_bundle_tts.py` 的 MINIMUM_MODULES）。
+$keyringCollect += @('--collect-all', 'win32ctypes')
 # 随包分发的许可与声明：assets\sounds\duck 下的内置点击音是 MeteorNOX 的 MIT 素材，
 # 许可正文写在仓根 THIRD_PARTY_NOTICES.md 第 1 节——只打 assets\sounds 等于只分发素材、
 # 不分发许可。两份都落在 _internal（onedir 的数据根），安装包整目录拷贝即随分发。

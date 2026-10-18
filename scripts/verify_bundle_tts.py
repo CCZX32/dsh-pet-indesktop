@@ -63,6 +63,10 @@ MINIMUM_MODULES = (
     "aiohttp.client",
     "certifi",
     "keyring",
+    # keyring 的 **Windows 后端**依赖（pywin32-ctypes）：没有它，钥匙串后端在冻结包里
+    # 直接不可用，凭据只能留在写它的进程内存里——界面说"已保存"，主程序读到空串。
+    # 它是动态 import（后端被选中时才发生），`--collect-all keyring` 收不到。
+    "win32ctypes.pywin32.win32cred",
 )
 
 

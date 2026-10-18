@@ -3671,3 +3671,71 @@ def test_close_during_typewriter_drain_saves_reply_and_resets(tmp_path):
     assert window.status.text() == "就绪"
     window.close()
     app.processEvents()
+
+
+class _FailBackend:
+    """keyring 的"没有可用后端"占位实现（`keyring.backends.fail.Keyring` 同形）。"""
+
+    def get_password(self, service, ref):
+        raise RuntimeError("NoKeyringError")
+
+    def set_password(self, service, ref, value):
+        raise RuntimeError("NoKeyringError")
+
+
+def test_secret_store_counts_a_missing_backend_as_unavailable(caplog):
+    """`import keyring` 成功但**后端不可用**时，`available` 必须是 False。
+
+    冻结包最常踩的坑：keyring 在、它的 Windows 后端依赖（win32ctypes）不在 → 写凭据
+    永远抛 NoKeyringError。此前 `available` 只看"模块 import 成功"，于是界面说"已保存"、
+    重启后主进程读到空串，聊天报 `401 ... your api key is invalid`。
+    """
+    import logging as _logging
+
+    from pet.chat import models as chat_models
+
+    store = chat_models.SecretStore()
+
+    class _FakeKeyring:
+        @staticmethod
+        def get_keyring():
+            return type("Keyring", (), {"__module__": "keyring.backends.fail"})()
+
+        @staticmethod
+        def set_password(*_a, **_k):
+            raise RuntimeError("NoKeyringError")
+
+    store._keyring = _FakeKeyring
+    store._usable = None
+    with caplog.at_level(_logging.WARNING):
+        assert store.available is False
+        assert store.set("k", "v") is False
+        assert store.get("k") == ""
+    assert any("凭据存储不可用" in r.getMessage() for r in caplog.records), (
+        "不可用要留一条日志（静默降级就是这个 bug 的成因）")
+
+
+def test_secret_store_reports_a_working_backend_as_available():
+    from pet.chat import models as chat_models
+
+    store = chat_models.SecretStore()
+    written = {}
+
+    class _FakeKeyring:
+        @staticmethod
+        def get_keyring():
+            return type("Keyring", (), {"__module__": "keyring.backends.Windows"})()
+
+        @staticmethod
+        def set_password(service, ref, value):
+            written[ref] = value
+
+        @staticmethod
+        def get_password(service, ref):
+            return written.get(ref, "")
+
+    store._keyring = _FakeKeyring
+    store._usable = None
+    assert store.available is True
+    assert store.set("k", "v") is True
+    assert store.get("k") == "v"
