@@ -110,14 +110,16 @@ def test_hide_stops_through_polling_and_show_resumes():
 
 @pytest.mark.skipif(os.name != "nt", reason="本组用例的替身打的是 Windows 控制器入口")
 def test_hidden_overlay_polls_nothing(monkeypatch):
-    """隐藏 0.4s 内 0 次 refresh；可见窗口跑同一时长必须真在轮询（对照）。"""
+    """可见窗口必须真在轮询（对照），隐藏 0.4s 内 0 次 refresh。"""
     cursor = _CountingCursor(QPoint(-500, -500))
     monkeypatch.setattr(platform_win, "QCursor", cursor)
     clicks = _CountingClickThrough()
     monkeypatch.setattr(platform_win, "_set_windows_click_through", clicks)
     overlay = _overlay()
     try:
-        _pump(400)
+        # 可见期用宽预算：200ms 轮询在并发跑全量时可能被调度延迟，0.4s 只够
+        # 一轮；这里要验证的是"在跑"，不是精确频率。
+        _pump(1200)
         visible_calls = cursor.calls
         assert visible_calls >= 2, "前提：可见期轮询在跑"
         overlay.hide()

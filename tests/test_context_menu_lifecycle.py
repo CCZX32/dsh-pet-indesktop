@@ -145,7 +145,9 @@ def test_delete_when_idle_timer_drops_after_menu_destroyed(app, tmp_path, monkey
     win._show_context_menu(QPoint(100, 100))
     assert built, "菜单必须经 populate 构建"
     menu = built[0]
-    assert pool.calls == 1, "worker 未结束：首轮轮询后应已重挂 50ms 定时器"
+    # 负载下主线程可能被调度走不止一个 50ms 周期：这里只要求"至少跑过一轮
+    # 且 worker 未结束"，不把调用次数钉死（钉死会在并发跑全量时变成 flake）。
+    assert pool.calls >= 1, "worker 未结束：首轮轮询后应已重挂 50ms 定时器"
 
     # 窗口/菜单在轮询途中销毁：context 绑定的定时器必须随 menu 失效被丢弃，
     # 未绑定则继续触发并对已删 C++ 对象 deleteLater（RuntimeError）。
