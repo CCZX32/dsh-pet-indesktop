@@ -195,6 +195,8 @@
 | | `pet/chat/models.py` | +22/−6 | `_is_placeholder_backend()`：只认 `keyring.backends.fail` / `.null` 两个占位类 |
 | | `tests/test_verify_bundle_tts.py` | +47 | 三条门禁用例：linux/darwin 不要求、win32 必须要求、`platform_modules` 归零 |
 | | `tests/test_chat_subsystem.py` | +53 | 七条：第三方 `failover` 后端保留、`null` 后端拒绝、五个真实平台后端保留 |
+| `1e89d9f` | `pet/modern_settings_dialog.py` | +17/−4 | 设置页搜索：`_search_settings` 改成 `advance: int` 步长，eventFilter 加 ↑/↓（首条按 ↑ 回绕） |
+| | `tests/test_settings_search_aliases.py` | +41 | 两条方向键用例（↓ 前进两条再 ↑ 退回；第一条 ↑ 回绕到最后） |
 
 ### 8.2 红绿（本轮，先红后绿实测）
 
