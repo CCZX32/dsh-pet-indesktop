@@ -51,7 +51,14 @@ from pathlib import Path
 import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from .feature_host_bindings import bind_account_context, bind_ai_context, bind_local_context, bind_music_context, bind_screen_context
+from .feature_host_bindings import (
+    bind_account_context,
+    bind_ai_context,
+    bind_local_context,
+    bind_music_context,
+    bind_screen_context,
+    bind_voice_context,
+)
 from .feature_package_preflight import LocalPackageProbe
 from .feature_package_startup import ProductionFeatureStartup
 from .feature_package_transactions import LOCK_BUSY_REASONS, FeaturePackageTransactionService
@@ -910,7 +917,13 @@ def _official_binder(owner: str):
     那几样——这样"包需要什么"和"宿主给什么"的对照只有一处，也不会把没人用的实参
     留在绑定函数的签名里。
     """
-    from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, MUSIC_FEATURE_ID, SCREEN_FEATURE_ID
+    from .official_features import (
+        ACCOUNT_USAGE_FEATURE_ID,
+        AI_FEATURE_ID,
+        MUSIC_FEATURE_ID,
+        SCREEN_FEATURE_ID,
+        VOICE_CHIME_FEATURE_ID,
+    )
 
     if owner == SCREEN_FEATURE_ID:
         return lambda cfg, *, authorized, host: bind_screen_context(cfg, authorized=authorized, host=host)
@@ -920,6 +933,8 @@ def _official_binder(owner: str):
         return lambda cfg, *, authorized, host: bind_account_context(cfg)
     if owner == MUSIC_FEATURE_ID:
         return lambda cfg, *, authorized, host: bind_music_context(cfg)
+    if owner == VOICE_CHIME_FEATURE_ID:
+        return lambda cfg, *, authorized, host: bind_voice_context(cfg)
     raise ValueError("unsupported official feature")
 
 

@@ -50,7 +50,14 @@ from .feature_ports import (
     FeatureWindowState,
 )
 from .feature_state_io import StateError, atomic_write, open_kernel_lock, read_bytes, safe_path
-from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, MUSIC_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
+from .official_features import (
+    ACCOUNT_USAGE_FEATURE_ID,
+    AI_FEATURE_ID,
+    MUSIC_FEATURE_ID,
+    SCREEN_FEATURE_ID,
+    VOICE_CHIME_FEATURE_ID,
+    is_valid_feature_id,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -735,6 +742,110 @@ def bind_music_context(
         window=None,
         presentation=_bind_presentation(),
         scheduler=_BoundScheduler(),
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
+    )
+
+
+# ------------------------------------------------------------ 语音报时包
+#
+# 语音报时把"什么时候说、说什么"放进包，把"怎么合成、怎么播放、免打扰"
+# 留在 Core 唯一音频通道。包只拿一个提交面（``audio.speak``），不持播放器、
+# 不碰 TTS 凭据，因此不可能和节日语音/自言自语叠音。
+
+
+_FEATURE_AUDIO: Callable[[], object] | None = None
+
+
+def register_feature_audio(factory: Callable[[], object] | None) -> None:
+    """注册/清除官方语音包的音频提交提供方（``None`` 清除；测试收口用）。"""
+    global _FEATURE_AUDIO
+    if factory is not None and not callable(factory):
+        raise TypeError("feature audio factory must be callable")
+    _FEATURE_AUDIO = factory
+
+
+def _resolve_feature_audio():
+    factory = _FEATURE_AUDIO
+    return factory() if factory is not None else None
+
+
+class _BoundAudio:
+    def __init__(self, factory: Callable[[], object]) -> None:
+        self._factory = factory
+
+    def _provider(self):
+        try:
+            return self._factory()
+        except Exception:
+            _LOG.exception("功能包音频提供方解析失败")
+            return None
+
+    def speak(self, text: str) -> bool:
+        callback = getattr(self._provider(), "speak", None)
+        if not callable(callback):
+            return False
+        try:
+            return bool(callback(str(text)))
+        except Exception:
+            _LOG.exception("功能包语音提交失败")
+            return False
+
+    def stop(self) -> None:
+        callback = getattr(self._provider(), "stop", None)
+        if callable(callback):
+            try:
+                callback()
+            except Exception:
+                _LOG.exception("功能包语音停止失败")
+
+
+#: 语音报时包的偏好字段集。
+_VOICE_PREFERENCE_FIELDS = frozenset(
+    {
+        "enabled",
+        "schedule",
+        "custom_times",
+        "show_bubble",
+        "quotes_zh",
+        "quotes_en",
+    }
+)
+
+
+def bind_voice_context(
+    cfg,
+    *,
+    owner: str = VOICE_CHIME_FEATURE_ID,
+) -> FeatureHostContext:
+    """官方语音报时包的宿主绑定：调度偏好 + Core 唯一音频通道的提交面。"""
+    if owner != VOICE_CHIME_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    def read_display() -> Mapping:
+        return MappingProxyType({"character": cfg.get("character")})
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        preferences=_BoundPreferences(root / "preferences.json", _VOICE_PREFERENCE_FIELDS),
+        documents=MappingProxyType({}),
+        state_documents=MappingProxyType({"state": _bind_state_document(root / "state.json")}),
+        desktop=None,
+        window=None,
+        presentation=_bind_presentation(),
+        scheduler=_BoundScheduler(),
+        audio=_BoundAudio(_resolve_feature_audio),
         api=None,
         user_data=FeatureUserDataPort(
             root,

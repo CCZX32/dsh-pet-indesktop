@@ -1,0 +1,8 @@
+{
+  "id": "official.voice-chime",
+  "name": "语音报时",
+  "description": "独立形态的语音报时：整点/间隔/自定义时间点，台词轮换与气泡开关；合成与播放复用 Core 唯一音频通道，不叠音。与内置报时并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "voice-chime/v1",
+  "execution_kind": "host-only"
+}

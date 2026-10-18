@@ -36,6 +36,7 @@ __all__ = [
     "FeatureConfigurationPort",
     "FeatureDocumentPort",
     "FeatureHostContext",
+    "FeatureAudioPort",
     "FeaturePreferencesPort",
     "FeaturePresentationPort",
     "FeatureSchedulerPort",
@@ -99,6 +100,19 @@ class FeaturePresentationPort(Protocol):
     def hold_bubble(self, seconds: float) -> None: ...
 
     def notify(self, title: str, message: str, *, on_click: Callable[[], None] | None = None) -> None: ...
+
+
+class FeatureAudioPort(Protocol):
+    """Owner-scoped speech submission to Core's single audio channel.
+
+    The channel owns synthesis, playback, queuing and quiet-mode semantics; a
+    feature only supplies text and never opens its own player. ``speak`` is
+    non-blocking and returns False only for an empty text.
+    """
+
+    def speak(self, text: str) -> bool: ...
+
+    def stop(self) -> None: ...
 
 
 class FeatureSchedulerPort(Protocol):
@@ -197,5 +211,7 @@ class FeatureHostContext:
     presentation: FeaturePresentationPort | None = None
     #: owner 作用域的定时器；官方 host-only 包按需注入，``close`` 取消全部定时器。
     scheduler: FeatureSchedulerPort | None = None
+    #: Core 唯一音频通道的提交面（语音报时包用）；不授予播放器或 TTS 配置。
+    audio: FeatureAudioPort | None = None
     #: owner 自己的数据根 + 只读展示快照；仅官方聊天绑定注入，本地 MOD 恒 None。
     user_data: FeatureUserDataPort | None = None
