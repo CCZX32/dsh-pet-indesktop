@@ -2148,10 +2148,13 @@ class ModernSettingsDialog(QDialog):
         self.search_edit.selectAll()
 
     def _search_settings(self, query: str, *, advance: int = 0) -> None:
-        """执行搜索；``advance`` 是**步长**（回车/↓ = +1、↑ = -1，0 = 重新开始）。
+        """执行搜索；``advance`` 是**步长**（回车/↓ = +1、↑ = -1、0 = 不主动翻页）。
 
         用步长而不是"要不要前进"的布尔：↑ 需要反方向，取模天然支持回绕
         （第一条上按 ↑ 落到最后一条），不必为回绕写特判。
+
+        ``advance=0`` 是"不主动翻页"，**不是"重新开始"**：命中集合没变时保持当前
+        索引，只有集合变了（`:2166` 那支）才归零。
         """
         query = query.strip().lower()
         self._clear_search_matches()
@@ -2210,17 +2213,20 @@ class ModernSettingsDialog(QDialog):
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.search_edit and event.type() == QEvent.Type.KeyPress:
-            # 回车 / ↓ 前进、↑ 后退。单行 QLineEdit 里 ↑/↓ 没有默认行为，不会和
-            # 光标移动抢键；回绕由 `_search_settings` 的取模负责。
-            step = {
-                Qt.Key.Key_Return: 1,
-                Qt.Key.Key_Enter: 1,
-                Qt.Key.Key_Down: 1,
-                Qt.Key.Key_Up: -1,
-            }.get(event.key())
-            if step is not None:
-                self._search_settings(self.search_edit.text(), advance=step)
-                return True
+            # 回车 / ↓ 前进、↑ 后退。只在**裸键**（或小键盘键）时拦：带 Ctrl/Alt/Shift
+            # 的 ↑/↓ 一律透传——输入法候选导航、以及将来可能加的组合键，不该被搜索抢走。
+            # 单行 QLineEdit 里裸 ↑/↓ 本来没有默认行为，拦掉不损失任何既有操作。
+            if event.modifiers() in (Qt.KeyboardModifier.NoModifier,
+                                     Qt.KeyboardModifier.KeypadModifier):
+                step = {
+                    Qt.Key.Key_Return: 1,
+                    Qt.Key.Key_Enter: 1,
+                    Qt.Key.Key_Down: 1,
+                    Qt.Key.Key_Up: -1,
+                }.get(event.key())
+                if step is not None:
+                    self._search_settings(self.search_edit.text(), advance=step)
+                    return True
         return super().eventFilter(watched, event)
 
     def _apply_selected_theme(self, *_args) -> None:

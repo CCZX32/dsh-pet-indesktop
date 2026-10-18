@@ -34,6 +34,11 @@ _ACTION_HINTS = {
     "screen_capture": "按一下进入截图提问（框选区域后发给模型）。",
 }
 
+#: 占用说明（只在支持全局热键的平台上拼进 hint）。
+#: 注册发生在**主进程**里，而设置页是独立进程（`--settings`），拿不到注册结果——
+#: 所以界面能做到的是**提前把后果说清**，而不是显示一个它无法确认的"已生效"。
+_OCCUPIED_HINT = " 若这个组合键已被其他程序占用，它不会生效（日志里会记一条）。"
+
 #: Qt 修饰位 → Win32 修饰位
 _QT_MODS = (
     (Qt.KeyboardModifier.ControlModifier, hotkey_spec.MOD_CONTROL),
@@ -234,8 +239,8 @@ def build_hotkey_rows(dialog) -> list[SettingRow]:
     supported = is_supported()
     rows = []
     for action in ACTIONS:
-        hint = _ACTION_HINTS[action] if supported else (
-            _ACTION_HINTS[action] + _UNSUPPORTED_HINT)
+        hint = _ACTION_HINTS[action] + (
+            _OCCUPIED_HINT if supported else _UNSUPPORTED_HINT)
         row = SettingRow(ACTIONS[action], ACTION_LABELS[action], hint,
                          _row_control(dialog, action))
         # 热键是进程级（全局键），与"影响所有桌宠"的其他全局项同一口径标注

@@ -279,6 +279,114 @@ def test_alias_reset_defaults_and_excluded_terms_are_documented(tmp_path, monkey
         dialog.close()
 
 
+# --------------------------------------------- ②b 用户视角实测的 0 命中词（2026-10-18）
+def test_hotkey_words_reach_all_three_action_rows(tmp_path, monkeypatch):
+    """「快捷键 / 热键」→ 三个 `hotkey_*` 行全部进候选。
+
+    行标题只写三个动作名、说明里写「组合键」，整份设置页没有「快捷键」「热键」
+    这两个词，于是用户视角实测 0 命中。三个动作是三行，别名必须**全指**：只指一行
+    等于替用户挑了一个动作。首条命中是行序第一项（AI 对话），与右键菜单的顺序一致。
+    """
+    expected = [
+        "settingRow_hotkey_open_chat",
+        "settingRow_hotkey_look_screen",
+        "settingRow_hotkey_screen_capture",
+    ]
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query in ("快捷键", "热键", "全局快捷键在哪"):
+            assert _keys(_matches(dialog, query)) == expected, query
+            assert _search(dialog, query).objectName() == expected[0]
+            assert dialog.search_status.text() == "1/3 · AI 对话"
+    finally:
+        dialog.close()
+
+
+def test_secondary_display_words_reach_the_cross_screen_row(tmp_path, monkeypatch):
+    """「副屏 / 多屏」→ 跨屏开关（「跨屏 / 显示器」本来就能命中，这里补的是口语）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query in ("副屏", "多屏", "副屏怎么开"):
+            row = _search(dialog, query)
+            assert row.objectName() == "settingRow_cross_screen", query
+            assert _keys(dialog._search_matches) == ["settingRow_cross_screen"]
+            assert dialog.search_status.text() == "1/1 · 允许桌宠跨屏"
+    finally:
+        dialog.close()
+
+
+def test_domain_names_land_on_their_representative_rows(tmp_path, monkeypatch):
+    """照着侧栏念域名也要搜得到：10 个域名里用户最常念的 4 个各给一个落点。
+
+    侧栏域名是导航标签（``SETTINGS_DOMAIN_NAV``），不在行文案里，因此关键词路径
+    永远 0 命中。落点选该域**最有代表性**的那一行（逐条理由写在别名表里）：
+    桌面组件 = 灵动岛主开关；AI 与对话 = 「API 列表」（域首行 = 模型与连接抬头）+
+    对话窗口（域名里「对话」那半边）；自动化与联动 = 主动识屏主开关；
+    文件识别 = 拖文件后询问解读（该域只有两行，它就是功能本体）。
+    """
+    expected = {
+        "桌面组件": ["settingRow_dynamic_island_enabled"],
+        "AI 与对话": ["settingRow_provider_list", "settingRow_chat_ui_style"],
+        "ai 与对话": ["settingRow_provider_list", "settingRow_chat_ui_style"],
+        "自动化与联动": ["settingRow_proactive_enabled"],
+        "文件识别": ["settingRow_file_interpret_enabled"],
+    }
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query, keys in expected.items():
+            assert _keys(_matches(dialog, query)) == keys, query
+            row = _search(dialog, query)
+            assert row.objectName() == keys[0]
+            # 命中后确实翻到了那个域（不是只在别的页里高亮）
+            assert _current_page(dialog).isAncestorOf(row), query
+    finally:
+        dialog.close()
+
+
+def test_check_update_is_a_command_and_stays_out_of_the_index(tmp_path, monkeypatch):
+    """「检查更新」是按钮不是设置行：按既有口径不进索引，不为它破例。
+
+    它是「更新」页上的 ``QPushButton``（`pet/update_settings.py`），与侧栏的
+    「恢复默认设置 / 保存并退出」同类——候选集只装 ``SettingRow``，命令给不出行
+    落点。要让它可搜得先给按钮建落点模型，那是另一件事。
+    """
+    from pet.settings_search import ROW_ALIASES
+
+    assert not any("检查更新" in token for token in ROW_ALIASES), (
+        "别名表不该为命令类控件破例")
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        assert _matches(dialog, "检查更新") == []
+        assert dialog.search_status.text() == "未找到匹配的设置"
+    finally:
+        dialog.close()
+
+
+def test_new_aliases_keep_the_existing_first_hits(tmp_path, monkeypatch):
+    """补别名**只能追加**候选：补之前已正确的首条命中逐条不变。
+
+    「密钥 → API Key」是最容易被新词挤掉的一条（「AI 与对话」也指向 AI 域），
+    所以这里把既有正例整表钉住，而不是抽一两条。
+    """
+    expected = {
+        "密钥": "settingRow_api_key",
+        "跨屏": "settingRow_cross_screen",
+        "显示器": "settingRow_cross_screen",
+        "网速": "settingRow_island_network",
+        "上行": "settingRow_island_network",
+        "开机启动": "settingRow_autostart",
+        "壁纸": "settingRow_chat_background_file",
+        "帧数": "settingRow_island_fps",
+        "信息槽": "settingRow_dynamic_island_info",
+    }
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        for query, key in expected.items():
+            assert _search(dialog, query).objectName() == key, query
+    finally:
+        dialog.close()
+
+
 def test_collapsible_box_title_query_reaches_the_rows_inside_the_box(tmp_path, monkeypatch):
     """搜默认折叠框名（「自定义台词」）：框内行也进候选，命中后框自动展开。"""
     dialog = _dialog(tmp_path, monkeypatch)
@@ -549,6 +657,36 @@ def test_arrow_up_from_the_first_match_wraps_to_the_last(tmp_path, monkeypatch):
         app.processEvents()
         assert dialog.search_status.text().startswith(f"{total}/"), "↑ 从第一条回绕到最后"
         assert _current_match(dialog) is dialog._search_matches[-1]
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_arrow_with_a_modifier_is_not_swallowed_by_search(tmp_path, monkeypatch):
+    """带修饰键的 ↑/↓ 必须透传给输入框，不许被搜索翻页抢走。
+
+    输入法候选导航（尤其中文输入法预编辑态）与将来可能加的 Ctrl+↑ 类组合键，都不该
+    被搜索拦掉；只有裸键（和小键盘方向键）才是"翻命中"的语义。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.show()
+        dialog.search_edit.setText("对话")
+        app.processEvents()
+        assert len(dialog._search_matches) >= 3
+        assert dialog.search_status.text().startswith("1/")
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("1/"), "Ctrl+↓ 不该翻页"
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Up, Qt.KeyboardModifier.ShiftModifier)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("1/"), "Shift+↑ 不该翻页"
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Down, Qt.KeyboardModifier.AltModifier)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("1/"), "Alt+↓ 不该翻页"
     finally:
         dialog.close()
         dialog.deleteLater()
