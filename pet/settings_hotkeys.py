@@ -19,12 +19,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QKeyCombination, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QHBoxLayout, QKeySequenceEdit, QPushButton, QWidget
 
 from . import hotkey_spec
-from .hotkeys import ACTIONS, ACTION_LABELS
+from .hotkeys import ACTIONS, ACTION_LABELS, is_supported
 from .settings_widgets import SettingRow
 
 #: 动作 → 给用户的一句说明（行 hint）
@@ -81,6 +81,11 @@ def chord_to_text(sequence) -> str:
     if not mods:
         return ""
     key = int(combination.key())
+    keypad = bool(combination.keyboardModifiers() & Qt.KeyboardModifier.KeypadModifier)
+    if keypad and int(Qt.Key.Key_0) <= key <= int(Qt.Key.Key_9):
+        # 小键盘数字与主键盘数字是不同的虚拟键码：Ctrl+小键盘5 存成 Ctrl+5 的话，
+        # 用户按小键盘不会触发（绑的是另一颗键）。
+        return hotkey_spec.canonical(mods, 0x60 + (key - int(Qt.Key.Key_0))) or ""
     vk = _QT_KEYS.get(key)
     if vk is None:
         if int(Qt.Key.Key_A) <= key <= int(Qt.Key.Key_Z):
@@ -92,6 +97,48 @@ def chord_to_text(sequence) -> str:
     if vk is None:
         return ""
     return hotkey_spec.canonical(mods, vk) or ""
+
+
+def _vk_to_qt_key(vk: int) -> int | None:
+    """虚拟键码 → Qt 键码（``_QT_KEYS`` 的反向表 + 字母/数字/F 键）。"""
+    for qt_key, mapped in _QT_KEYS.items():
+        if mapped == vk:
+            return int(qt_key)
+    if 0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39:
+        return vk
+    if 0x70 <= vk <= 0x87:                     # F1..F24
+        return int(Qt.Key.Key_F1) + (vk - 0x70)
+    return None
+
+
+def text_to_sequence(text) -> QKeySequence:
+    """规范字符串 → ``QKeySequence``（录入框回显用）。
+
+    不能用 ``QKeySequence("Win+F1")``：我们自己的写法（``Win`` / ``num5``）不是 Qt
+    保证能解析的文本格式，实测那些写法解析出来是空序列——控件会显示"未设置"，
+    而配置里明明有值。所以按 ``(mods, vk)`` 反构造键组合。
+    """
+    parsed = hotkey_spec.parse(text)
+    if parsed is None:
+        return QKeySequence()
+    mods, vk = parsed
+    # 小键盘数字：Qt 没有「Keypad5」这种独立键码，它用小键盘修饰位 + 主键码表示。
+    # 反构造时要把修饰位补回去，否则 Ctrl+小键盘5 会显示成 Ctrl+5（而绑的其实是
+    # 小键盘那颗键）。
+    keypad = False
+    if 0x60 <= vk <= 0x69:
+        keypad = True
+        vk = 0x30 + (vk - 0x60)
+    qt_key = _vk_to_qt_key(vk)
+    if qt_key is None:
+        return QKeySequence()
+    qt_mods = Qt.KeyboardModifier.NoModifier
+    for qt_mod, win_mod in _QT_MODS:
+        if mods & win_mod:
+            qt_mods |= qt_mod
+    if keypad:
+        qt_mods |= Qt.KeyboardModifier.KeypadModifier
+    return QKeySequence(QKeyCombination(qt_mods, Qt.Key(qt_key)))
 
 
 def create_hotkey_controls(dialog) -> None:
@@ -108,7 +155,7 @@ def create_hotkey_controls(dialog) -> None:
         stored = hotkey_spec.normalize(dialog.config.get(ACTIONS[action]))
         dialog._hotkey_values[action] = stored
         if stored:
-            edit.setKeySequence(QKeySequence(stored))
+            edit.setKeySequence(text_to_sequence(stored))
         dialog._hotkey_edits[action] = edit
 
 
@@ -146,15 +193,24 @@ def _row_control(dialog, action: str) -> QWidget:
     return holder
 
 
+#: 非 Windows 平台下追加在行说明后面的一句（否则"设了却没反应"且毫无提示）
+_UNSUPPORTED_HINT = "（当前系统不支持系统级快捷键：这里可以保存，但不会生效。）"
+
+
 def build_hotkey_rows(dialog) -> list[SettingRow]:
     """「互动 · 快捷键」一节的行装配（三项）。"""
     create_hotkey_controls(dialog)
+    supported = is_supported()
     rows = []
     for action in ACTIONS:
-        row = SettingRow(ACTIONS[action], ACTION_LABELS[action], _ACTION_HINTS[action],
+        hint = _ACTION_HINTS[action] if supported else (
+            _ACTION_HINTS[action] + _UNSUPPORTED_HINT)
+        row = SettingRow(ACTIONS[action], ACTION_LABELS[action], hint,
                          _row_control(dialog, action))
         # 热键是进程级（全局键），与"影响所有桌宠"的其他全局项同一口径标注
         row.set_scope_note("影响所有桌宠")
+        if not supported:
+            dialog._hotkey_edits[action].setEnabled(False)
         rows.append(row)
     return rows
 

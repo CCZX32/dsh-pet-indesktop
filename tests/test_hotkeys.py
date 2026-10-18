@@ -196,3 +196,45 @@ def test_hotkey_rows_exist_and_save_round_trips(tmp_path, monkeypatch):
     finally:
         dialog.deleteLater()
         qapp.processEvents()
+
+
+# ---------------------------------------------------------------- 审查补的边界
+@pytest.mark.parametrize("text", ["Ctrl+ß", "Ctrl+é", "Ctrl+²", "Ctrl+中"])
+def test_parse_never_raises_on_non_ascii_single_characters(text):
+    """非 ASCII 单字符：``"ß".isalpha()`` 为真但 `"ß".upper() == "SS"`，`ord("SS")` 会抛
+    TypeError——那异常发生在 ``Config.__init__`` 的归一化里，一条手改配置就能让主程序
+    和设置页都起不来。这里断言"绝不抛、且判为不支持"。"""
+    assert spec.parse(text) is None
+    assert spec.normalize(text) == ""
+
+
+def test_config_survives_a_unicode_hotkey_value(tmp_path):
+    """手写一个非法热键进配置文件，Config 必须能构造出来并清空它。"""
+    from pet.config import Config
+
+    payload = tmp_path / "config.json"
+    payload.write_text('{"hotkey_open_chat": "Ctrl+ß"}', encoding="utf-8")
+    config = Config(base=tmp_path)  # 不许抛
+    assert config.get("hotkey_open_chat") == ""
+
+
+@pytest.mark.parametrize("text", ["Ctrl+Alt+P", "Win+F1", "Ctrl+num5",
+                                  "Ctrl+PrintScreen", "Ctrl+PageUp", "Alt+Space"])
+def test_our_notation_round_trips_through_the_edit_widget(text):
+    """录入框回显必须走 ``(mods, vk)`` 反构造，不能 ``QKeySequence(text)``。
+
+    后者对我们自己的写法（``Win`` / ``num5``）实测解析成空序列——控件显示"未设置"
+    而配置里明明有值。这里断言"文本 → 序列 → 文本"回到同一个规范写法。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet import settings_hotkeys
+
+    qapp = QApplication.instance() or QApplication([])
+    sequence = settings_hotkeys.text_to_sequence(text)
+    assert not sequence.isEmpty(), f"{text} 必须能回显到录入框"
+    assert settings_hotkeys.chord_to_text(sequence) == text
+    # 小键盘数字要用小键盘的虚拟键码，不能悄悄变成主键盘数字
+    if "num" in text:
+        assert spec.parse(settings_hotkeys.chord_to_text(sequence))[1] >= 0x60
+    del qapp

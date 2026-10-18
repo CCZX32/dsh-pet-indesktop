@@ -92,7 +92,7 @@ QLabel#imagePreviewEmpty { color: #9999a2; }
 QPushButton#imagePreviewClose { background: transparent; border: none; font-size: 20px; }
 QPushButton#imagePreviewClose:hover { background: #393940; }
 QLabel#settingLabel:disabled, QLabel#settingHint:disabled { color: #66666e; }
-SettingRow[searchMatch="true"] { background: #2c3a4e; }
+SettingRow[searchMatch="true"], AuthorRow[searchMatch="true"] { background: #2c3a4e; }
 QListWidget#quickLaunchList { background: #26262c; border: 1px solid #3c3c44; }
 QListWidget#quickLaunchList::item:selected { background: #3a3a46; color: #ffffff; }
 QTreeWidget#menuLayoutTree, QTreeWidget#menuLayoutPreview {
@@ -326,7 +326,7 @@ QLabel#settingHint {
     color: #777777;
 }
 QLabel#settingLabel:disabled, QLabel#settingHint:disabled { color: #a6a8ac; }
-SettingRow[searchMatch="true"] {
+SettingRow[searchMatch="true"], AuthorRow[searchMatch="true"] {
     background: #eaf3ff;
     border-radius: 8px;
 }

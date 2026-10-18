@@ -1405,3 +1405,97 @@ def test_unit_dpr_multi_screen_keeps_the_single_window(tmp_path, monkeypatch):
         assert len(shell.hosts()) == 1, "1:1 的多屏零变化"
     finally:
         _cleanup(shell)
+
+
+def test_runtime_host_creation_inherits_window_caps(tmp_path, monkeypatch):
+    """运行期补出来的宿主也要吃到窗口级配置（置顶/锁位/SHIFT 门/不透明度）。
+
+    漏下发的话那张窗停在出厂默认：用户关了置顶它照样盖在最上面，锁定位在副屏
+    不生效——这正是 `_apply_host_window_caps` docstring 里写的"运行期新建的屏也走
+    这一处"，而实际只有整组刷新会调它。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True,
+                                      "lock_position": True,
+                                      "shift_drag": True})
+    try:
+        assert len(shell.hosts()) == 1, "前提：同 DPI 只有一张窗"
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        created = shell.host_for_screen(b)
+        assert created is not None
+        assert created.overlay.lock_position is True, "锁定位要下发到新窗"
+        assert created.overlay.shift_drag_required is True, "SHIFT 门要下发到新窗"
+    finally:
+        _cleanup(shell)
+
+
+def test_topology_flip_keeps_the_group_hidden(tmp_path, monkeypatch):
+    """整组隐藏中翻出新的屏，不能顺手把宠全放出来（全屏避让会被打穿）。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        shell._hide_all_hosts()
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        created = shell.host_for_screen(b)
+        assert created is not None
+        assert created.overlay.isVisible() is False, "隐藏状态必须被继承"
+    finally:
+        _cleanup(shell)
+
+
+def test_collapsing_back_to_single_window_keeps_pets_on_their_screen(
+        tmp_path, monkeypatch):
+    """缩放改回一致后合窗，副屏的宠要留在副屏（不能被并到主屏）。
+
+    `_dismantle_host` 是拔屏用的"临时并入主屏"算法；拿它当合窗用会把宠永久搬到
+    主屏——可那块屏还在线，用户只是改了缩放。
+    """
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        assert shell.move_sprite_to_screen(main, b) is True
+        assert shell._screen_of_sprite(main) is b
+
+        # 两侧缩放改成一致 → 拓扑翻回单窗
+        a.set_rects((0, 0, 1920, 1080), (0, 0, 1920, 1040), dpr=1.0)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+        shell._feed_screen_dpr()
+
+        assert len(shell.hosts()) == 1, "前提：已合回单窗"
+        body = main.body_rect()
+        center = QPointF(body.x() + body.width() / 2.0, body.y() + body.height() / 2.0)
+        assert shell._screen_at_global(QPointF(
+            shell.overlay.geometry().topLeft()) + center) is b, (
+            "合窗后这只必须还在副屏那块屏的范围内")
+    finally:
+        _cleanup(shell)
+
+
+def test_topology_flip_rebinds_the_island_wall(tmp_path, monkeypatch):
+    """宿主集合重排后岛墙要重绑（岛自己没有几何事件，不会自己发现宿主变了）。"""
+    from tests.test_island_multiscreen_hosts import ISLAND_MEMBER, _Island
+
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        host_b = shell.host_for_screen(b)
+        island = _Island(b, QRect(2300, 100, 400, 80))
+        shell.attach_island(island)
+        assert shell._island_host is host_b, "前提：墙绑在副屏宿主"
+
+        a.set_rects((0, 0, 1920, 1080), (0, 0, 1920, 1040), dpr=1.0)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+        shell._feed_screen_dpr()
+
+        assert shell._island_host is shell._main_host, "重排后墙必须重绑到存活宿主"
+        assert ISLAND_MEMBER in shell.collision._static_members  # noqa: SLF001
+    finally:
+        shell.attach_island(None)
+        _cleanup(shell)

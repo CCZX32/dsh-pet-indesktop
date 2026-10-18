@@ -88,6 +88,10 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "game_fps_target_mode",
         "golden_spin_direct",
         "golden_spin_on_click",
+        # 全局快捷键（进程级；空串 = 不绑）
+        "hotkey_open_chat",
+        "hotkey_look_screen",
+        "hotkey_screen_capture",
         "harness_autostart",
         "harness_launch_target",
         "idle_low_fps_enabled",

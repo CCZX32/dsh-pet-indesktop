@@ -26,6 +26,10 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
+#: 文本长度上限：快捷键写法最长也就 ``Ctrl+Alt+Shift+Win+PrintScreen``，
+#: 超长的只可能是脏数据/容器 stringify，没必要解析。
+_MAX_TEXT = 64
+
 #: 修饰键的书写形式 → Win32 位（别名收全：用户可能手写成 Control / Meta）
 _MODIFIERS = {
     "ctrl": MOD_CONTROL,
@@ -88,14 +92,24 @@ for _name, _vk in _NAMED_KEYS.items():
         _VK_NAMES[_vk] = _name.capitalize() if not _name.startswith("num") else _name
 
 
+#: 允许的字符键：**只认 ASCII**。不能用 ``str.isalpha()``——``"ß".isalpha()`` 为真
+#: 而 ``"ß".upper() == "SS"``，``ord("SS")`` 直接抛 TypeError；那个异常发生在
+#: ``Config.__init__`` 的归一化里，等于一条手改配置让主程序和设置页都起不来。
+_ASCII_LETTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_ASCII_DIGITS = frozenset("0123456789")
+
+
 def _key_code(token: str) -> int | None:
-    """单个按键写法 → 虚拟键码（字母/数字/白名单）。"""
+    """单个按键写法 → 虚拟键码（ASCII 字母/数字 + 白名单命名键）。"""
     token = token.strip()
     if not token:
         return None
     low = token.lower()
-    if len(low) == 1 and (low.isalpha() or low.isdigit()):
-        return ord(low.upper())  # 字母/数字的 vk 就是大写 ASCII
+    if len(token) == 1:
+        upper = token.upper()
+        if upper in _ASCII_LETTERS or upper in _ASCII_DIGITS:
+            return ord(upper)  # 字母/数字的 vk 就是大写 ASCII
+        return None  # 非 ASCII 单字符（é / ² / ß …）一律不认
     return _NAMED_KEYS.get(low)
 
 
@@ -105,7 +119,7 @@ def parse(text) -> tuple[int, int] | None:
     合法性：至少一个修饰键 + **恰好一个**普通键；普通键必须在白名单里。
     """
     raw = str(text or "").strip()
-    if not raw:
+    if not raw or len(raw) > _MAX_TEXT:
         return None
     parts = [p.strip() for p in raw.replace(" ", "").split("+")]
     parts = [p for p in parts if p]

@@ -442,12 +442,13 @@ def sweep_stale_sessions(session_name: str, *, once: bool = True) -> list[str]:
             creationflags=_creation_flags())
     except (OSError, subprocess.SubprocessError):
         return []
-    # 闸门在**查询真的返回之后**才关：失败不关闸，下一次会话再试一次。
-    _swept_stale_sessions = True
     if listed.returncode != 0:
+        # 读不到会话表 = 这次没扫成，**闸门不关**，下一次开会话再试（与发布稿
+        # 「查询失败不关闸」一致；只有真正拿到表才算扫过）。
         logging.warning("帧率采集：列出残留 ETW 会话失败（logman rc=%s），本次不清理",
                         listed.returncode)
         return []
+    _swept_stale_sessions = True
     names = [name for name in
              game_fps.stale_session_names(listed.stdout or "", keep=session_name)
              if name not in _own_session_names]

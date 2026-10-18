@@ -1316,14 +1316,25 @@ def test_sweep_failure_leaves_the_gate_open(monkeypatch, sweep_gate):
     assert fm._swept_stale_sessions is False
 
 
-def test_sweep_closes_the_gate_even_when_logman_reports_failure(
+def test_sweep_keeps_the_gate_open_when_logman_reports_failure(
         monkeypatch, sweep_gate, caplog):
-    """``logman`` 返回非零（会话表读不到）：不清理、但要留一条诊断。"""
+    """``logman`` 返回非零（会话表读不到）：不清理、留诊断，**闸门不关**。
+
+    与发布稿「查询失败不关闸，下一次开会话再试」一致：只有真的拿到会话表才算扫过。
+    闸门提前关掉的话，一次瞬时失败会让这个进程此后再也不清残留。
+    """
     fake = _FakeLogman(_SWEEP_LISTING, query_rc=1)
     monkeypatch.setattr(fm.subprocess, "run", fake)
     with caplog.at_level(logging.WARNING):
         assert fm.sweep_stale_sessions("s") == []
-    assert fm._swept_stale_sessions is True
+    assert fm._swept_stale_sessions is False, "失败不关闸，下次还要再试"
     assert [call[1] for call in fake.calls] == ["query"], "读不到表就别去乱停"
     assert any("列出残留 ETW 会话失败" in record.getMessage()
                for record in caplog.records)
+
+    # 下一次开会话再试：这次读到了，就该真清理并关闸
+    ok = _FakeLogman(_SWEEP_LISTING)
+    monkeypatch.setattr(fm.subprocess, "run", ok)
+    assert fm.sweep_stale_sessions("s") == ["dsh-pet-fps-1-1-aabbccdd",
+                                           "dsh-pet-fps-2-2-11223344"]
+    assert fm._swept_stale_sessions is True

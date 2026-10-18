@@ -1899,10 +1899,14 @@ class AppShell:
     def _apply_external_config_change(self) -> None:
         """把「配置已在别处落盘」同步到运行期（独立设置进程 / watcher 路径）。
 
+        全局快捷键也在这里重注册：关掉进程隔离时设置页就在本进程里保存、**没有**
+        watcher，改键要立刻生效就只能挂在这条共用入口上（watcher 路径同样走这里）。
+
         与进程内对话框 finished 的应用链同源（PetInstance._modern_settings_finished
         在真实壳上委托到这里）；多实例时扇出到每个 PetInstance 的窗口，而不是
         只看主窗——外部改配置的那个实例不一定是主窗。
         """
+        self._apply_global_hotkeys()
         for inst in getattr(self, "_instances", []):
             win = getattr(inst, "win", None)
             if win is not None:
@@ -2387,8 +2391,6 @@ class AppShell:
         sampled = self._config_signature()
         self.config.reload()
         try:
-            # 设置页是独立进程：热键改完要在这里重新注册，不能等下次启动。
-            self._apply_global_hotkeys()
             self._apply_external_config_change()
         except Exception:
             logging.exception("应用外部配置变更失败")
