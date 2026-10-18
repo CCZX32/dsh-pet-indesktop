@@ -6088,7 +6088,10 @@ class OverlayShell(QObject):
         # 遍历**全部宿主**的成员：``self.overlay`` 只是主窗的别名，多窗（混合缩放）
         # 下副屏窗里的精灵走不到这里就等于永远等不到 resume——实机表现是"那只
         # 子宠完全静止、连帧都不换"（它 spawn/移交时被判不可播先压住，之后没人放行）。
-        for sprite in list(self._all_sprites()):
+        # 取**每张窗的成员表**而不是壳的记账列表：生产上覆盖全部宿主，测试/裸装配
+        # 里直接挂到窗上的成员也照得到。
+        for sprite in [sp for host in self._hosts
+                       for sp in list(host.overlay.sprites)]:
             if not paused and not self._sprite_visible(sprite):
                 continue
             self._set_sprite_clip_paused(sprite, paused)
