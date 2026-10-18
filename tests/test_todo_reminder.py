@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from pathlib import Path
 
@@ -190,6 +191,36 @@ def test_daily_lead_window_crosses_midnight():
     assert due_stamped[0]["fired_due_slot"] == "2026-09-05T00:02#due"
 
 
+def test_daily_grace_window_survives_midnight():
+    """每日 23:59 + 10 分钟宽限：跨过午夜后**昨天那次**的正点档仍在窗内。
+
+    旧行为：daily 只按 ``now.date()`` 组当天（必要时次日）那一次 occurrence，昨天
+    那次压根不在候选里——电脑 23:59 睡着、00:00 醒来时只晚一分钟，这一条被算成
+    "今天 23:59 还没到"，用户收不到任何提醒也没有补发；00:10 之后（出窗）才该静默。
+    """
+    cases = {
+        datetime(2026, 9, 5, 0, 0): True,    # 刚过午夜，正点档仍在窗内
+        datetime(2026, 9, 5, 0, 4): True,    # 宽限内（23:59 + 10 分钟 = 00:09）
+        datetime(2026, 9, 5, 0, 10): False,  # 出窗
+    }
+    for now, in_window in cases.items():
+        fires, stamped = advance_todo_state([_daily("23:59")], _prefs(lead=0), now)
+        assert [f["phase"] for f in fires] == (["due"] if in_window else []), now
+        assert stamped[0]["fired_due_slot"] == (
+            "2026-09-04T23:59#due" if in_window else None), now
+
+    # 窗内发过之后不重复（跨午夜重启同一档只提醒一次）
+    _, stamped = advance_todo_state([_daily("23:59")], _prefs(lead=0), datetime(2026, 9, 5, 0, 0))
+    again, _ = advance_todo_state(stamped, _prefs(lead=0), datetime(2026, 9, 5, 0, 5))
+    assert again == []
+    # 当天晚上那一次照旧（昨天的宽限不影响今天）
+    tonight, tonight_items = advance_todo_state(
+        stamped, _prefs(lead=0), datetime(2026, 9, 5, 23, 59)
+    )
+    assert [f["phase"] for f in tonight] == ["due"]
+    assert tonight_items[0]["fired_due_slot"] == "2026-09-05T23:59#due"
+
+
 def test_daily_lead_zero_does_not_use_next_day():
     """lead=0 的 daily 不受跨午夜取次日影响：当天正点档过期仍按原语义静默盖戳。"""
     fires, stamped = advance_todo_state([_daily("00:02")], _prefs(lead=0), datetime(2026, 9, 4, 23, 57))
@@ -336,13 +367,18 @@ def _qapp():
 class _FakeWin:
     def __init__(self, visible: bool = True) -> None:
         self.visible = visible
+        # 气泡位被审批提醒占着：普通气泡让路（真宿主此时返回 False）
+        self.occupied = False
         self.bubbles: list[str] = []
 
     def isVisible(self) -> bool:
         return self.visible
 
-    def show_bubble(self, text, duration_ms=3200, subtitle=None):
+    def show_bubble(self, text, duration_ms=3200, subtitle=None) -> bool:
+        if self.occupied:
+            return False
         self.bubbles.append(text)
+        return True
 
 
 class _FakeApp:
@@ -445,6 +481,33 @@ def test_service_daily_cross_midnight_lead_fires_before_midnight(tmp_path):
     assert len(app.win.bubbles) == 2
 
 
+def test_service_daily_grace_across_midnight_still_bubbles(tmp_path):
+    """服务级：每日 23:59 的待办在次日 00:00 醒来时照旧冒泡（不是静默丢）。
+
+    纯函数用例钉的是判定，这条钉的是它落到用户眼前那一步：昨天那次的正点档仍在
+    宽限窗内，tick 必须冒泡并把昨天的槽位盖戳落盘（重启后不再重复）。
+    """
+    _qapp()
+    app = _FakeApp(tmp_path, visible=True)
+    store = TodoStore(todo_items_path(app.config.dir))
+    store.save([new_todo_item("关灯", "daily", "23:59")])
+    app.config.set("todo_reminder_lead_minutes", 0)
+    service = TodoReminderService(app)
+    service.apply_config()
+
+    service._on_tick(now=datetime(2026, 9, 5, 0, 0))
+    assert len(app.win.bubbles) == 1, "跨午夜宽限内的正点档必须冒泡"
+    assert "关灯" in app.win.bubbles[0]
+    assert store.load()[0]["fired_due_slot"] == "2026-09-04T23:59#due", "盖戳需落盘"
+
+    # 重启后同一档不补发第二次；出窗（00:10 之后）什么都不冒
+    service2 = TodoReminderService(app)
+    service2.apply_config()
+    service2._on_tick(now=datetime(2026, 9, 5, 0, 5))
+    service2._on_tick(now=datetime(2026, 9, 5, 0, 10))
+    assert len(app.win.bubbles) == 1
+
+
 def test_service_notify_gated_by_system_notifications(tmp_path):
     """桌宠隐藏 + 系统通知总开关关闭 → 桌面通知分支静默（与 chat 调用方同规）。"""
     _qapp()
@@ -456,6 +519,47 @@ def test_service_notify_gated_by_system_notifications(tmp_path):
     service._on_tick(now=datetime(2026, 9, 4, 10, 6))
     assert app.win.bubbles == []
     assert app.notifies == []
+
+
+def test_service_notifies_when_alert_occupies_bubble(tmp_path):
+    """审批提醒占着气泡位时，到点待办必须改道系统通知，不能静默吞掉。
+
+    旧行为：``show_bubble`` 在有提醒展示时让路并返回 False，而调度侧不看返回值
+    → 戳已盖、气泡没出、通知也没发，这条提醒永久消失（语音关掉时用户完全无感）。
+    """
+    _qapp()
+    app = _FakeApp(tmp_path, visible=True)
+    app.win.occupied = True
+    _due_item_in_store(app.config.dir)
+    service = TodoReminderService(app)
+    service.apply_config()
+
+    service._on_tick(now=datetime(2026, 9, 4, 10, 6))
+
+    assert app.win.bubbles == [], "宿主让路，气泡确实没上屏（前置）"
+    assert len(app.notifies) == 1, "气泡没上屏就必须改道桌面通知"
+    assert "站会" in app.notifies[0][1]
+    assert app.notifies[0][2] == app.open_todo_panel, "通知点击仍落到待办面板"
+    # 盖戳语义不变：同一档仍只提醒一次，不搞重复轰炸
+    service._on_tick(now=datetime(2026, 9, 4, 10, 6, 30))
+    assert len(app.notifies) == 1
+
+
+def test_service_warns_when_bubble_blocked_and_notify_off(tmp_path, caplog):
+    """气泡被占且桌面通知总开关关闭：至少留一条 warning，不许静默无痕。"""
+    _qapp()
+    app = _FakeApp(tmp_path, visible=True)
+    app.win.occupied = True
+    _due_item_in_store(app.config.dir)
+    app.config.set("system_notifications_enabled", False)
+    service = TodoReminderService(app)
+    service.apply_config()
+
+    with caplog.at_level(logging.WARNING, logger="pet.todo_reminder"):
+        service._on_tick(now=datetime(2026, 9, 4, 10, 6))
+
+    assert app.win.bubbles == [] and app.notifies == []
+    assert any("站会" in record.getMessage() for record in caplog.records), "未交付也不能静默"
 
 
 def test_service_master_off_is_silent(tmp_path):

@@ -102,33 +102,52 @@ def clean_todo_items(value) -> list[dict]:
     return items
 
 
-def _fire_datetimes(item: dict, lead_minutes: int, now: datetime):
+def _daily_due(now: datetime, hour: int, minute: int, lead_minutes: int,
+               grace: timedelta) -> datetime:
+    """daily 该判哪一次 occurrence：默认"今天"那次，两个跨日例外。
+
+    - 昨天那次的正点档**仍在宽限窗内** → 判昨天那次。每日 23:59 + 10 分钟宽限，
+      电脑 23:59 睡着、次日 00:00 醒来时只晚一分钟：只看 ``now.date()`` 会把昨天
+      那次当成不存在（"今天 23:59 还没到"），用户既收不到提醒也没有补发。
+    - 今天那次的**正点档已过**、且明天那次的**提前档**已经到点 → 判明天那次
+      （每日 00:02 + 提前 5 分钟，23:57 看的就是明天的提前档）。缺这一步时跨午夜
+      的提前提醒被当成"今天那次已出窗"静默盖戳，用户要等过午夜才收到贴着正点的
+      提醒（迟到的提前量）；这时明天的正点档还没到，不会提前盖戳。
+
+    三次 occurrence 相隔整 24h、宽限远小于 24h，任一时刻最多只有一次落在窗内，
+    所以三选一不会让两次 occurrence 各自触发（不会双发）。
+    """
+    today = datetime(now.year, now.month, now.day, hour, minute)
+    yesterday = today - timedelta(days=1)
+    if now <= yesterday + grace:
+        return yesterday
+    if today <= now:
+        tomorrow = today + timedelta(days=1)
+        first_tomorrow = (
+            tomorrow - timedelta(minutes=lead_minutes) if lead_minutes > 0 else tomorrow
+        )
+        if now >= first_tomorrow:
+            return tomorrow
+    return today
+
+
+def _fire_datetimes(item: dict, lead_minutes: int, now: datetime,
+                    grace: timedelta = timedelta(minutes=DEFAULT_GRACE_MINUTES)):
     """返回 (lead_dt|None, due_dt|None)。
 
-    daily 取"与 now 相关的那一次 occurrence"：当天那次还没过就用当天；当天已过
-    且次日那次的**提前档**已经到点（每日 00:02 + 提前 5 分钟，23:57 看的就是次日
-    的提前档）则取次日。缺这一步时跨午夜的提前提醒会被当成"当天已过"的出窗档
-    静默盖戳，用户要等过了午夜才收到贴着正点的提醒（迟到的提前量）。
-
-    取次日只在到期档到来前发生（now < 次日 due），所以不会当天与次日双发：
-    提前档的盖戳键按**触发时刻**的日期，23:57 与 00:00 算出来是同一个键。
+    daily 的 occurrence 选择见 :func:`_daily_due`（昨天/今天/明天三选一）；
+    盖戳键按**触发时刻**的日期算，所以 23:57 与 00:00 算出的是同一个键，不会
+    同一档发两次。
 
     once 用条目自己的日期（缺失/非法时返回 (None, None)，视为不可触发），
-    过期即出窗静默盖戳——语义不受上面这步影响。
+    过期即出窗静默盖戳——语义不受上面那步影响，也不读 grace。
     """
     time_text = _normalize_hhmm(item.get("time"))
     if not time_text:
         return None, None
     hour, minute = (int(part) for part in time_text.split(":"))
     if item.get("kind") == "daily":
-        due = datetime(now.year, now.month, now.day, hour, minute)
-        if due <= now:
-            next_due = due + timedelta(days=1)
-            next_trigger = (
-                next_due - timedelta(minutes=lead_minutes) if lead_minutes > 0 else next_due
-            )
-            if now >= next_trigger:
-                due = next_due
+        due = _daily_due(now, hour, minute, lead_minutes, grace)
     else:
         day_text = _normalize_iso_date(item.get("date"))
         if not day_text:
@@ -162,7 +181,7 @@ def advance_todo_state(items, prefs, now: datetime, *,
         if not isinstance(item, dict) or not item.get("enabled"):
             new_items.append(item)
             continue
-        lead_dt, due_dt = _fire_datetimes(item, lead_minutes, now)
+        lead_dt, due_dt = _fire_datetimes(item, lead_minutes, now, grace)
         time_text = _normalize_hhmm(item.get("time")) or str(item.get("time") or "")
         for phase, fire_dt, slot_key in (
             ("lead", lead_dt, "fired_lead_slot"),
@@ -289,8 +308,9 @@ class TodoReminderService:
     同 ProactiveScreenWatcher：本类不继承 QObject（Qt 在 __init__ 内惰性
     导入，模块顶层保持无 Qt），持有无主 QTimer，由 AppShell 持有引用保证
     生命周期。tick → 纯函数 advance_todo_state → 桌宠可见且设置未抑制时
-    冒气泡，否则走 app.system_notify 桌面通知（受
-    system_notifications_enabled 全局门控，关闭时该分支静默）；盖戳/归档
+    冒气泡；气泡**没上屏**（返回 False，典型是有审批提醒占着气泡位）或宿主不可见
+    时改道 app.system_notify 桌面通知（受 system_notifications_enabled 全局门控），
+    两者都不成时留一条 warning——绝不把"调用没抛异常"当成已交付。盖戳/归档
     仅在条目变化时落盘。todo_reminder_speak 打开时，气泡/通知之后还会把同一句
     话交给音频通道念一遍（见 _speak_fire）；免打扰那条早退分支不出声也不补播。
     """
@@ -388,13 +408,21 @@ class TodoReminderService:
                 # 进暂存队列，结束（到时/提前/退出全屏）后统一汇报。
                 window_alerts.defer_quiet(text)
                 return
+        # 交付确认制（同 window_alerts.report_quiet_summary）：show_bubble 返回
+        # False = 没上屏（最常见的原因是有审批/问题提醒正占着气泡位，普通气泡
+        # 让路），此时**不许**当成已送达——戳已经盖过了，用户就再也等不到这一条。
+        delivered = False
         if win is not None and win.isVisible() and not self._bubble_suppressed():
-            win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS)
-        elif self._notify_enabled:
+            delivered = bool(win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS))
+        if not delivered and self._notify_enabled:
             notify = getattr(app, "system_notify", None)
             if callable(notify):
                 notify("待办提醒", f"{fire['title']}（{fire['time']}）",
                        on_click=getattr(app, "open_todo_panel", None))
+                delivered = True
+        if not delivered:
+            # 气泡让路且桌面通知也发不出去（总开关关闭）：至少留痕，不静默吞掉
+            logger.warning("待办提醒既未上屏也未发出桌面通知：%s", text)
         self._speak_fire(fire)
 
     def _speak_fire(self, fire: dict) -> None:
