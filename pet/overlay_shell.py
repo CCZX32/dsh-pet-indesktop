@@ -4795,17 +4795,22 @@ class OverlayShell(QObject):
         # set_clamp_rects 按契约不补钳制，而松手点可能正落在屏间空洞里——
         # 不补这一次，宠会停在没有显示器的地方（看起来凭空消失）。
         sprite.set_pos(QPointF(sprite.pos))
-        # 拖到另一块屏上松手 = **用户有意换屏**：补记归属。不记的话几何自存会把它
-        # 当成「临时承载」（盘上 screen_name 与实际屏不符）整段跳过——拖过去当场
-        # 正常、重启却回旧屏。只在这一条路径记：拔屏/关闭跨屏的机械迁移走不到这里。
-        target = self._screen_of_sprite(sprite)
-        self._remember_sprite_screen(sprite, target)
-        # 顺手落一次盘：一次拖拽只是用户动作级的一次原子写（实测中位 3.4 ms），
-        # 换来「拖完直接重启/被杀」也不丢位置——不能只依赖关闭主宠那条路径。
         slot = self._spawned_slots.get(sprite)
         if slot is None and sprite is getattr(self, "sprite", None):
             slot = 0
-        self._save_child_geometry(sprite, slot=slot)
+        target = self._screen_of_sprite(sprite)
+        stored = (None if slot is None
+                  else self._stored_screen_name(self._spawn_config_dir(), slot))
+        online = {_screen_name(screen) for screen in self._screens()}
+        # 只有「原归属那块屏还活着」时，这次拖拽才算**有意换屏**。拔屏后的临时承载
+        # （以及关闭跨屏）下拖动都是机械位置变化——改写归属会让那块屏插回来后回不到
+        # 原位置，所以那条路径只记位置、不动归属。
+        if stored is None or stored in online:
+            self._remember_sprite_screen(sprite, target)
+        if slot is not None:
+            # 顺手落一次盘：一次拖拽只是用户动作级的一次原子写（实测中位 3.4 ms），
+            # 换来「拖完直接重启/被杀」也不丢位置——不能只依赖关闭主宠那条路径。
+            self._save_child_geometry(sprite, slot=slot)
 
     def _on_grab_finished(self) -> None:
         """拖拽收尾（overlay._finish_grab 钩子）：收放宽域 + 冲刷光标恢复滞留。
