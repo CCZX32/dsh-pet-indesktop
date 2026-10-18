@@ -4795,6 +4795,10 @@ class OverlayShell(QObject):
         # set_clamp_rects 按契约不补钳制，而松手点可能正落在屏间空洞里——
         # 不补这一次，宠会停在没有显示器的地方（看起来凭空消失）。
         sprite.set_pos(QPointF(sprite.pos))
+        # 拖到另一块屏上松手 = **用户有意换屏**：补记归属。不记的话几何自存会把它
+        # 当成「临时承载」（盘上 screen_name 与实际屏不符）整段跳过——拖过去当场
+        # 正常、重启却回旧屏。只在这一条路径记：拔屏/关闭跨屏的机械迁移走不到这里。
+        self._remember_sprite_screen(sprite, self._screen_of_sprite(sprite))
 
     def _on_grab_finished(self) -> None:
         """拖拽收尾（overlay._finish_grab 钩子）：收放宽域 + 冲刷光标恢复滞留。
