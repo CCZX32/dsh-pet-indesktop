@@ -359,7 +359,13 @@ if (-not $SkipBuild) {
     #    import——本参数是不依赖这种巧合的那一份保证，产物侧的门会把它验回来。
     $rapidocrHidden = @(
         '--hidden-import', 'pet.screen_capture.ocr',
-        '--hidden-import', 'pet.screen_capture.ocr_worker'
+        '--hidden-import', 'pet.screen_capture.ocr_worker',
+        # 官方功能包（AI 对话/识屏）的 host 代码在包加载器里才 `from pet.mod_api.v1
+        # import FeatureDefinition`；Core 自身没有静态导入，PyInstaller 因此不会收它。
+        # 冻结包里缺这个模块的后果不是"少个功能"：装前预检直接 import_failed，
+        # 回执/ MOD 中心的安装全被拒（2026-10-18 实测：probe_import_failed）。
+        '--hidden-import', 'pet.mod_api',
+        '--hidden-import', 'pet.mod_api.v1'
     )
 
     # DLL 冲突隔离（issue: Qt6Core "procedure not found" / 找不到指定的程序）：
@@ -735,6 +741,12 @@ if ($FeaturePackages) {
     if ($OfficialFeaturePackages) { $officialArgs = @('--official') }
     python scripts\verify_feature_package.py --bundle-root (Join-Path $appDir 'features') --target-platform win32 @officialArgs
     if ($LASTEXITCODE -ne 0) { throw "[features] bundled feature packages missing or corrupt" }
+    # 源码侧清单/摘要门通过 ≠ 冻结 exe 能 import 包 host：`--feature-package-probe` 才是
+    # 真实子进程预检（缺 pet.mod_api 这类只在包里出现的模块时，安装会被统一拒成
+    # import_failed）。直接在构建产物上逐包跑一遍。
+    Write-Host "[features] probing bundled packages through the frozen exe..." -ForegroundColor Cyan
+    python scripts\verify_frozen_mod_api.py --exe (Join-Path $appDir "$name.exe") --features $featuresDir
+    if ($LASTEXITCODE -ne 0) { throw "[features] frozen probe rejected a bundled package" }
     Write-Host "[features] bundle carries verified feature packages under features\" -ForegroundColor Green
 }
 

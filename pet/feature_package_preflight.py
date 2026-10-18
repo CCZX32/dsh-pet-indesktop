@@ -413,8 +413,11 @@ def _probe(payload: Mapping) -> dict:
 
     try:
         handle = FeaturePackageLoader(verifier).load_host(descriptor)
-    except BaseException:
+    except BaseException as exc:
         # 包代码在导入期抛什么都在这里收口；异常文本不进回执（只给固定原因码）。
+        # 本地排障可显式打开 DSH_PET_PROBE_DEBUG=1：只写 stderr，不进回执/上游。
+        if os.environ.get("DSH_PET_PROBE_DEBUG") == "1":
+            sys.stderr.write(f"feature package probe import failed: {type(exc).__name__}: {exc}\n")
         return _verdict(False, "import_failed")
     try:
         try:
