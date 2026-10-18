@@ -266,12 +266,13 @@ def test_windows_build_script_keeps_its_utf8_bom():
 
 # ==================================================== 四、keyring 的 Windows 后端依赖
 def test_build_scripts_collect_keyring_windows_backend_dependency():
-    """`--collect-all keyring` **收不到** keyring 的 Windows 后端依赖。
+    """`--collect-all keyring` 收的是 keyring 自己，不带它的 Windows 后端依赖。
 
-    `keyring.backends.Windows` 里 `import win32ctypes.pywin32.win32cred` 是"后端被选中"
-    时才发生的动态 import，PyInstaller 的 collect-all 只收 keyring 自己的模块。实测
-    4.3.3 的 `_internal`：有 `keyring`、没有 `win32ctypes` —— 于是冻结包里钥匙串后端
-    不可用，API Key 只活在写它的那个设置进程内存里，主进程读到空（界面还显示已保存）。
+    归因纠正（2026-10-19 实测 PYZ）：4.3.3 的包**并不缺** `win32ctypes`——`_internal`
+    目录里没有，但 exe 内嵌 PYZ 里有 27 个 `win32ctypes.*` 模块（PyInstaller 自带的
+    hook 收的），冻结包里可以正常导入。所以"缺这个模块"不是那次 401 的根因。
+    显式收集仍然要留：隐式 hook 一旦与 keyring 版本失配就会静默丢，症状是钥匙串后端
+    不可用（凭据只活在写它的进程内存里）。
     """
     repo = Path(__file__).resolve().parents[1]
     script = (repo / "scripts" / "build_onedir.ps1").read_text(encoding="utf-8")
@@ -280,8 +281,8 @@ def test_build_scripts_collect_keyring_windows_backend_dependency():
         "要以 --collect-all 收集（它自己的子模块也要带）")
 
     verifier = (repo / "scripts" / "verify_bundle_tts.py").read_text(encoding="utf-8")
-    assert "win32ctypes.pywin32.win32cred" in verifier, (
-        "构建期兜底清单要钉住它：缺了就以退出码 4 中止")
+    assert "WINDOWS_ONLY_MODULES" in verifier and "win32ctypes.pywin32.win32cred" in verifier, (
+        "构建期兜底清单要钉住它（按目标平台生效）：Windows 包缺了就以退出码 4 中止")
 
     requires = (repo / "requirements.txt").read_text(encoding="utf-8")
     assert "pywin32-ctypes" in requires, "运行时依赖要显式声明（不靠 keyring 带）"

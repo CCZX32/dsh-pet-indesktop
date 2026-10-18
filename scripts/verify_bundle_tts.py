@@ -63,11 +63,29 @@ MINIMUM_MODULES = (
     "aiohttp.client",
     "certifi",
     "keyring",
-    # keyring 的 **Windows 后端**依赖（pywin32-ctypes）：没有它，钥匙串后端在冻结包里
-    # 直接不可用，凭据只能留在写它的进程内存里——界面说"已保存"，主程序读到空串。
-    # 它是动态 import（后端被选中时才发生），`--collect-all keyring` 收不到。
+)
+
+# **平台专用**兜底：只在"目标平台就是它"时要求。
+#
+# 三端共用一个 `verify()`：`build_linux.sh` / `build_macos.sh` 调的就是这个函数。
+# 干净的 Linux/macOS 构建不会安装下面这些 Windows-only 依赖，无条件要求会把本来
+# 正确的产物判红（astra 第 13 轮指出的跨平台回归）。要修的是"条件"，不是给另外两个
+# 平台也补一份收集参数。
+#
+# `win32ctypes`（pywin32-ctypes）是 keyring 的 Windows 后端依赖：没有它，钥匙串后端
+# 在冻结包里不可用，凭据只能留在写它的进程内存里——界面说"已保存"、主程序读到空串。
+# `--collect-all keyring` 收不到它（`keyring.backends.Windows` 里的 import 要等后端被
+# 加载才发生），所以必须在 Windows 构建期钉住。
+WINDOWS_ONLY_MODULES = (
     "win32ctypes.pywin32.win32cred",
 )
+
+
+def platform_modules(platform: str | None = None) -> tuple[str, ...]:
+    """目标平台必须随包的平台专用模块（纯函数，便于按平台直接断言）。"""
+    target = sys.platform if platform is None else platform
+    return WINDOWS_ONLY_MODULES if target.startswith("win") else ()
+
 
 
 def required_version() -> str:
@@ -272,7 +290,8 @@ def verify(app_dir: Path | None, exe: Path | None) -> tuple[int, dict]:
                     "只警告不报错，产物会静默缺 TTS）",
             "exe": str(exe),
         }
-    required = set(MINIMUM_MODULES) | {m for m in closure if m == "edge_tts" or m.startswith("edge_tts.")}
+    required = (set(MINIMUM_MODULES) | set(platform_modules())
+                | {m for m in closure if m == "edge_tts" or m.startswith("edge_tts.")})
     # 闭包里其余的第三方依赖（aiohttp / tabulate / certifi 及其传递依赖）也要在包里。
     required |= {m.split(".")[0] for m in closure}
 

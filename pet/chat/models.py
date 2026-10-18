@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -130,6 +131,34 @@ class ChatSession:
     def title(self, value):
         self.custom_title = str(value or '')
 
+# keyring 的"没有可用后端"占位实现：**全名精确匹配**，不扫名字子串。
+# 扫子串（原来的 `"fail" not in low`）会误杀合法第三方后端——一个名为
+# `company.failover.Keyring` 的可写后端会被判成不可用，等于把本来能存凭据的环境
+# 判死（astra 第 13 轮）。这类判据只该认 keyring 自己的两个占位类。
+_PLACEHOLDER_BACKENDS = frozenset({
+    "keyring.backends.fail.Keyring",
+    "keyring.backends.null.Keyring",
+})
+
+
+def _is_placeholder_backend(backend) -> bool:
+    """这个后端只是"这台机器没有钥匙串"的占位实现（`fail` / `null`）吗？"""
+    backend_type = type(backend)
+    if f"{backend_type.__module__}.{backend_type.__name__}" in _PLACEHOLDER_BACKENDS:
+        return True
+    # 全名对不上时再看**类身份**：占位实现可能被继承/包装，或在别的模块路径下重导出。
+    # 只比类、不猜名字，所以仍然不会误杀第三方后端。
+    for module_name in ("keyring.backends.fail", "keyring.backends.null"):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001 - 子系统不在就是"没有可比对的对象"
+            continue
+        placeholder = getattr(module, "Keyring", None)
+        if isinstance(placeholder, type) and isinstance(backend, placeholder):
+            return True
+    return False
+
+
 class SecretStore:
     def __init__(self,service_name='dsh-pet-standalone'):
         self.service_name=service_name
@@ -141,10 +170,10 @@ class SecretStore:
     def _backend_usable(self) -> bool:
         """**后端**真的能用吗（不只是 `import keyring` 成功）。
 
-        冻结包里最容易踩的坑：`keyring` 在、它的 Windows 后端依赖（`win32ctypes`）
-        不在，于是 `get_password/set_password` 抛 ``NoKeyringError``——模块能 import、
-        写凭据却永远失败。实测症状：界面说"已保存"、重启后主进程读到空串，聊天报
-        `401 Authentication Fails, Your api key: ****xxxx is invalid`。
+        模块在、后端不可用时，`get_password/set_password` 抛 ``NoKeyringError``：
+        界面说"已保存"、重启后主进程读到空串。**这是"读取为空"的成因，不是
+        "key 被服务端拒绝"的成因**——服务端回 401 并显示具体 key 尾号，说明凭据
+        确实被送到了服务端（那是 key 本身的问题），别把两者混为一谈。
         """
         if self._keyring is None:
             return False
@@ -152,10 +181,7 @@ class SecretStore:
             backend = self._keyring.get_keyring()
         except Exception:
             return False
-        name = type(backend).__module__ + "." + type(backend).__name__
-        low = name.lower()
-        # keyring 的"没有可用后端"就是这两个占位实现
-        return "fail" not in low and "null" not in low
+        return not _is_placeholder_backend(backend)
 
     @property
     def available(self):
@@ -165,8 +191,9 @@ class SecretStore:
             if not self._usable:
                 logging.getLogger("dsh-pet-standalone").warning(
                     "凭据存储不可用（系统钥匙串没有可用后端）：API Key 只能留在内存里，"
-                    "重启后需要重新填写。打包版通常是 keyring 的 Windows 后端依赖"
-                    "（pywin32-ctypes / win32ctypes）没随包进来。")
+                    "重启后需要重新填写。打包版可能是 keyring 的 Windows 后端依赖"
+                    "（pywin32-ctypes / win32ctypes）没随包进来，也可能只是这台机器的"
+                    "系统钥匙串没启用/被策略禁用。")
         return self._usable
 
     def get(self,ref):

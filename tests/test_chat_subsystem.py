@@ -3686,9 +3686,9 @@ class _FailBackend:
 def test_secret_store_counts_a_missing_backend_as_unavailable(caplog):
     """`import keyring` 成功但**后端不可用**时，`available` 必须是 False。
 
-    冻结包最常踩的坑：keyring 在、它的 Windows 后端依赖（win32ctypes）不在 → 写凭据
-    永远抛 NoKeyringError。此前 `available` 只看"模块 import 成功"，于是界面说"已保存"、
-    重启后主进程读到空串，聊天报 `401 ... your api key is invalid`。
+    后端不可用（`fail`/`null` 占位后端，或后端依赖缺失）时 `set_password` 永远抛
+    NoKeyringError。此前 `available` 只看"模块 import 成功"，于是界面说"已保存"、
+    重启后主进程读到空串。
     """
     import logging as _logging
 
@@ -3739,3 +3739,77 @@ def test_secret_store_reports_a_working_backend_as_available():
     assert store.available is True
     assert store.set("k", "v") is True
     assert store.get("k") == "v"
+
+
+def test_secret_store_keeps_a_third_party_backend_whose_name_mentions_fail():
+    """类名里带 `fail` 的**合法第三方后端**不许被判成"没有钥匙串"（astra 第 13 轮）。
+
+    旧判据扫名字子串（`"fail" not in low and "null" not in low`），于是一个叫
+    `company.failover.Keyring` 的**可写**后端会被判成不可用——能存凭据的环境被
+    判死，API Key 从此每次重启都要重填。判据只该认 keyring 自己的两个占位类。
+    """
+    from pet.chat import models as chat_models
+
+    store = chat_models.SecretStore()
+    written = {}
+
+    class _ThirdPartyKeyring:
+        @staticmethod
+        def get_keyring():
+            return type("Keyring", (), {"__module__": "company.failover"})()
+
+        @staticmethod
+        def set_password(service, ref, value):
+            written[ref] = value
+
+        @staticmethod
+        def get_password(service, ref):
+            return written.get(ref, "")
+
+    store._keyring = _ThirdPartyKeyring
+    store._usable = None
+    assert store.available is True
+    assert store.set("k", "v") is True
+    assert store.get("k") == "v"
+
+
+def test_secret_store_rejects_the_null_backend():
+    """`keyring.backends.null.Keyring` 写进去不记任何东西，必须判不可用。
+
+    它不抛异常、也不叫 `fail`——只按"能不能存"来判断会漏掉这一档。
+    """
+    from pet.chat import models as chat_models
+
+    store = chat_models.SecretStore()
+
+    class _NullKeyring:
+        @staticmethod
+        def get_keyring():
+            return type("Keyring", (), {"__module__": "keyring.backends.null"})()
+
+    store._keyring = _NullKeyring
+    store._usable = None
+    assert store.available is False
+
+
+@pytest.mark.parametrize("module,name", [
+    ("keyring.backends.Windows", "WinVaultKeyring"),
+    ("keyring.backends.macOS", "Keyring"),
+    ("keyring.backends.SecretService", "Keyring"),
+    ("keyring.backends.kwallet", "DBusKeyring"),
+    ("keyring.backends.libsecret", "Keyring"),
+])
+def test_secret_store_accepts_every_real_platform_backend(module, name):
+    """三平台常见后端都必须是"可用"（别把判据收紧成只认 Windows）。"""
+    from pet.chat import models as chat_models
+
+    store = chat_models.SecretStore()
+
+    class _PlatformKeyring:
+        @staticmethod
+        def get_keyring():
+            return type(name, (), {"__module__": module})()
+
+    store._keyring = _PlatformKeyring
+    store._usable = None
+    assert store.available is True

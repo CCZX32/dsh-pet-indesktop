@@ -168,3 +168,70 @@
 - 待办 fire 的「每档一次」戳语义未改：气泡+通知双不通时只留 warning，不无限重试。
 - 跨窗拖拽期间没有碰撞（拖到另一块屏、仍按着鼠标时能与那只屏上的宠重叠，松手归窗后才分离）；
   岛横跨两屏缝上时墙只建在岛所在那块屏的世界里。两条都由用户明确同意留到下一版。
+
+## 八、10-19 补充：快捷键 / Ctrl+F / 打包与凭据（astra 第 13–14 轮）
+
+首轮报告封稿之后又落了三个功能提交与一轮审查修正，这里补齐它们的修改文件与证据。
+前七节结论不受影响。
+
+### 8.1 修改文件
+
+| 提交 | 文件 | +/− | 一句话 |
+|---|---|---|---|
+| `69d5dfe` | `pet/hotkey_spec.py`（新） | +162 | 键位口径：解析/规范化/VK 表，零 Qt、零 Win32，可纯函数测 |
+| | `pet/hotkeys.py`（新） | +225 | `GlobalHotkeyService`：`RegisterHotKey` + 原生 `WM_HOTKEY` 过滤，被占用/失败可见 |
+| | `pet/settings_hotkeys.py`（新） | +168 | 互动域第五个页内标签「快捷键」，三行录入 |
+| | `pet/platform_win.py` | +33 | 注册/注销两个 ctypes 封装 |
+| | `pet/app.py` | +80 | 三处接线：安装 / 外部配置变更后重装 / 退出注销 |
+| | `pet/config.py` | +15 | `hotkey_open_chat`、`hotkey_look_screen`、`hotkey_screen_capture`（默认 `""`） |
+| | `pet/settings_interaction.py`、`pet/settings_page_guide.py`、`pet/modern_settings_dialog.py` | +15 | 标签注册与搜索索引 |
+| `aeb9854` | `pet/modern_settings_dialog.py` | +19 | `Ctrl+F` → 聚焦搜索框（Qt6 里 `QShortcut` 在 QtGui） |
+| | `pet/settings_about.py` | +21 | 作者行按 `SettingRow` 同形暴露 `label`/`hint_label`，进搜索索引（排版不变） |
+| `c4f2e43` | `pet/chat/models.py` | +51 | 凭据存储不可用/读写失败不再静默；后端判据从「能 import」升级为「后端可用」 |
+| | `scripts/build_onedir.ps1` | +7 | Windows 构建期 `--collect-all win32ctypes` |
+| | `scripts/verify_bundle_tts.py` | +4 | 产物门禁加 keyring 的 Windows 后端依赖 |
+| | `requirements.txt` | +6 | 显式声明 `pywin32-ctypes`（不靠 keyring 带） |
+| 本轮 | `scripts/verify_bundle_tts.py` | +23/−8 | `WINDOWS_ONLY_MODULES` + `platform_modules()`：Windows-only 依赖只在该平台目标上要求 |
+| | `pet/chat/models.py` | +22/−6 | `_is_placeholder_backend()`：只认 `keyring.backends.fail` / `.null` 两个占位类 |
+| | `tests/test_verify_bundle_tts.py` | +47 | 三条门禁用例：linux/darwin 不要求、win32 必须要求、`platform_modules` 归零 |
+| | `tests/test_chat_subsystem.py` | +53 | 七条：第三方 `failover` 后端保留、`null` 后端拒绝、五个真实平台后端保留 |
+
+### 8.2 红绿（本轮，先红后绿实测）
+
+把 `pet/chat/models.py` 与 `scripts/verify_bundle_tts.py` 暂退回 HEAD 再跑：
+
+```
+FAILED test_verify_bundle_tts.py::test_platform_modules_is_empty_off_windows
+FAILED test_verify_bundle_tts.py::test_windows_only_modules_are_not_required_on_other_targets[linux]
+FAILED test_verify_bundle_tts.py::test_windows_only_modules_are_not_required_on_other_targets[darwin]
+FAILED test_verify_bundle_tts.py::test_windows_target_still_requires_its_backend_dependency
+FAILED test_chat_subsystem.py::test_secret_store_keeps_a_third_party_backend_whose_name_mentions_fail
+   （旧判据下 `assert False is True`：`company.failover.Keyring` 被判成"没有钥匙串"）
+6 failed
+```
+
+恢复产品代码后：`test_verify_bundle_tts.py + test_packaging_keyring_notices.py` 33 passed；
+`test_chat_subsystem.py + test_config_key_migration.py + test_settings_reset_defaults.py`
+186 passed, 1 skipped；`ruff check` 全过。
+
+### 8.3 产物与真机证据（本轮补，均为只读/可逆）
+
+- **旧包 PYZ 核验（推翻了原归因）**：`CArchiveReader` 读
+  `D:\dsh-pet\dsh-pet-standalone-webm-chat.exe` → PYZ 2902 个模块，其中
+  `win32ctypes` 27 个、`win32ctypes.pywin32.win32cred` 1 个、`win32ctypes.core` 21 个。
+  新构建产物同样具备（2912 个模块 / 34 个 `win32ctypes.*`）。→ **4.3.3 并不缺这个
+  模块**，"缺模块导致 401"不成立。
+- **冻结包内可导入**：以产物 `_internal` 作 `sys.path`、`python -S` 隔离 site-packages，
+  `import win32ctypes.pywin32.win32cred` 成功（`_internal\win32ctypes\pywin32\win32cred.py`）。
+- **跨进程凭据往返（本机真机）**：后端 `keyring.backends.Windows.WinVaultKeyring`；
+  进程 A 写入临时探针凭据 → 进程 B 读回值一致（`MATCH = True`）→ 删除后读回 `None`。
+  用的是 `probe-<uuid>` 探针串，**未触碰用户的真 Key**。
+- **三端门禁不再互相污染**：`platform_modules("linux") == platform_modules("darwin") == ()`，
+  `platform_modules("win32")` 仍要求 `win32ctypes.pywin32.win32cred`，反向用例保证
+  Windows 少带它仍以退出码 4 中止。
+
+### 8.4 结论修正
+
+`c4f2e43` 的**提交标题写错了因果**（"没打进包"）。它做的事仍然要留——显式收集把一条
+隐式的 PyInstaller hook 行为变成构建期可知的一件事，凭据读写失败不再静默也是对的——
+但它**不是那次 401 的根因修复**。发布稿第七节已按实测重写这一段，读者以那里为准。
