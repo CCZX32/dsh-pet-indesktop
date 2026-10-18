@@ -37,6 +37,8 @@ __all__ = [
     "FeatureDocumentPort",
     "FeatureHostContext",
     "FeaturePreferencesPort",
+    "FeaturePresentationPort",
+    "FeatureSchedulerPort",
     "FeatureStateDocumentPort",
     "FeatureUserDataPort",
     "FeatureWindowPorts",
@@ -82,6 +84,37 @@ class FeatureStateDocumentPort(FeatureDocumentPort, Protocol):
     """一份可跨实例互斥的状态文档（锁策略由宿主决定）。"""
 
     def locked(self) -> AbstractContextManager[None]: ...
+
+
+class FeaturePresentationPort(Protocol):
+    """Owner-scoped desktop presentation: text bubble and system notification.
+
+    The port carries no window handle. Implementations resolve the current
+    presentation target on every call and degrade to a no-op when no pet
+    window is visible; a feature can therefore never keep a stale widget.
+    """
+
+    def show_bubble(self, text: str, *, duration_ms: int = 3200) -> None: ...
+
+    def hold_bubble(self, seconds: float) -> None: ...
+
+    def notify(self, title: str, message: str, *, on_click: Callable[[], None] | None = None) -> None: ...
+
+
+class FeatureSchedulerPort(Protocol):
+    """Owner-scoped timers; the binding creates them on the GUI thread.
+
+    ``close`` must cancel everything the owner scheduled. A feature calls it
+    from its own ``close``/``stop``; the host never reuses a closed port.
+    """
+
+    def call_later(self, delay_ms: int, callback: Callable[[], None]) -> object: ...
+
+    def call_repeating(self, interval_ms: int, callback: Callable[[], None]) -> object: ...
+
+    def cancel(self, handle: object) -> None: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,5 +193,9 @@ class FeatureHostContext:
     preferences: FeaturePreferencesPort | None = None
     #: 窗口操作面（快照/气泡/聊天联动/生命周期）；仅官方识屏绑定注入。
     window: FeatureWindowPorts | None = None
+    #: 呈现面（气泡/通知）；官方 host-only 包按需注入，没有可见目标时静默降级。
+    presentation: FeaturePresentationPort | None = None
+    #: owner 作用域的定时器；官方 host-only 包按需注入，``close`` 取消全部定时器。
+    scheduler: FeatureSchedulerPort | None = None
     #: owner 自己的数据根 + 只读展示快照；仅官方聊天绑定注入，本地 MOD 恒 None。
     user_data: FeatureUserDataPort | None = None

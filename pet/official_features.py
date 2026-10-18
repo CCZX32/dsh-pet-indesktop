@@ -14,6 +14,7 @@ from types import MappingProxyType
 
 SCREEN_FEATURE_ID = "official.screen-understanding"
 AI_FEATURE_ID = "official.ai-chat"
+ACCOUNT_USAGE_FEATURE_ID = "official.account-usage"
 
 #: ID 的**规范形**。这个串会变成 ``feature-data/<id>/`` 与 ``plugins/<id>/`` 下的目录名，
 #: 所以"另一个拼法"必须被判成非法，而不是当成另一个 owner：
@@ -82,6 +83,12 @@ OFFICIAL_FEATURES = MappingProxyType(
             "ai-chat/v1",
             "host-only",
             frozenset({"network.http", "settings.contribute", "menu.contribute", "chat.contribute", "files.user-selected.read"}),
+        ),
+        ACCOUNT_USAGE_FEATURE_ID: FeatureRegistration(
+            ACCOUNT_USAGE_FEATURE_ID,
+            "account-usage/v1",
+            "host-only",
+            frozenset({"network.http", "settings.contribute", "menu.contribute"}),
         ),
     }
 )

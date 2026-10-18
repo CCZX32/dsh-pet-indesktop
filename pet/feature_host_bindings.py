@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,9 @@ from .feature_ports import (
     FeatureWindowState,
 )
 from .feature_state_io import StateError, atomic_write, open_kernel_lock, read_bytes, safe_path
-from .official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
+from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID, is_valid_feature_id
+
+_LOG = logging.getLogger(__name__)
 
 #: 一份作者文档 / 配置的有界读取上限（与验签清单同一量级的保守值）。
 _DOCUMENT_LIMIT = 1 << 20
@@ -498,6 +501,194 @@ def bind_ai_context(
         state_documents=MappingProxyType({}),
         desktop=None,
         window=None,
+        api=None,
+        user_data=FeatureUserDataPort(
+            root,
+            str(getattr(cfg, "instance_id", "") or ""),
+            read_display,
+            lambda character: str(cfg.character_alias(character) or ""),
+        ),
+    )
+
+
+# ------------------------------------------------------- 官方 host-only 通用面
+#
+# 账户用量（以及后续音乐 / 语音报时）是 host-only 包：没有 Worker、没有窗口
+# 句柄，只需要三样 Core 能力——把结果说给用户听（呈现面）、按时间做周期动作
+# （定时器）、取自己那把凭据（凭据库）。前两样是本片新增的端口；契约在
+# :mod:`pet.feature_ports`，实现按 owner 惰性绑定，Core 侧没有注册提供方时
+# 一律安全降级，不让包把启动流程拖死。
+
+
+_FEATURE_PRESENTATION: Callable[[], object] | None = None
+
+
+def register_feature_presentation(factory: Callable[[], object] | None) -> None:
+    """注册/清除官方 host-only 包的呈现提供方工厂（``None`` 清除；测试收口用）。
+
+    提供方每次调用都经工厂惰性解析，语义面与
+    :class:`pet.feature_ports.FeaturePresentationPort` 对齐；生产由
+    ``AppShell`` 注册到当前可见桌宠的呈现代理。
+    """
+    global _FEATURE_PRESENTATION
+    if factory is not None and not callable(factory):
+        raise TypeError("feature presentation factory must be callable")
+    _FEATURE_PRESENTATION = factory
+
+
+class _BoundPresentation:
+    """呈现端口的 owner 作用域实现：不持窗，调用时解析当前可见目标。"""
+
+    def __init__(self, factory: Callable[[], object]) -> None:
+        self._factory = factory
+
+    def _provider(self):
+        try:
+            return self._factory()
+        except Exception:
+            _LOG.exception("功能包呈现提供方解析失败")
+            return None
+
+    def show_bubble(self, text: str, *, duration_ms: int = 3200) -> None:
+        callback = getattr(self._provider(), "show_bubble", None)
+        if callable(callback):
+            try:
+                callback(str(text), duration_ms=int(duration_ms))
+            except Exception:
+                _LOG.exception("功能包气泡投递失败")
+
+    def hold_bubble(self, seconds: float) -> None:
+        callback = getattr(self._provider(), "hold_bubble", None)
+        if callable(callback):
+            try:
+                callback(float(seconds))
+            except Exception:
+                _LOG.exception("功能包气泡保持失败")
+
+    def notify(self, title: str, message: str, *, on_click: Callable[[], None] | None = None) -> None:
+        callback = getattr(self._provider(), "notify", None)
+        if callable(callback):
+            try:
+                callback(str(title), str(message), on_click=on_click)
+            except Exception:
+                _LOG.exception("功能包通知投递失败")
+
+
+def _resolve_feature_presentation():
+    factory = _FEATURE_PRESENTATION
+    return factory() if factory is not None else None
+
+
+def _bind_presentation() -> object:
+    # 工厂在**每次调用**时解析：绑定发生在 AppShell 注册之前也不丢呈现面；
+    # 没有提供方时 ``_BoundPresentation`` 自己安全降级。
+    return _BoundPresentation(_resolve_feature_presentation)
+
+
+class _BoundScheduler:
+    """owner 作用域 QTimer 包装；回调异常只记日志并停掉该定时器。"""
+
+    def __init__(self) -> None:
+        self._timers: set[object] = set()
+        self._closed = False
+
+    def _schedule(self, interval_ms: int, callback: Callable[[], None], *, single: bool):
+        if self._closed:
+            return None
+        from PySide6.QtCore import QTimer
+
+        timer = QTimer()
+        timer.setSingleShot(single)
+        timer.setInterval(max(0, int(interval_ms)))
+
+        def fire() -> None:
+            if single:
+                self._timers.discard(timer)
+            try:
+                callback()
+            except Exception:
+                _LOG.exception("功能包定时回调失败")
+                if not single:
+                    self.cancel(timer)
+
+        timer.timeout.connect(fire)
+        self._timers.add(timer)
+        timer.start()
+        return timer
+
+    def call_later(self, delay_ms: int, callback: Callable[[], None]):
+        return self._schedule(delay_ms, callback, single=True)
+
+    def call_repeating(self, interval_ms: int, callback: Callable[[], None]):
+        return self._schedule(max(1, int(interval_ms)), callback, single=False)
+
+    def cancel(self, handle) -> None:
+        if handle is None:
+            return
+        self._timers.discard(handle)
+        try:
+            handle.stop()
+            handle.deleteLater()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        for timer in tuple(self._timers):
+            self.cancel(timer)
+        self._closed = True
+
+
+#: 账户用量包的偏好字段集：包只 stage 这些键，密钥另行进凭据库。
+_ACCOUNT_PREFERENCE_FIELDS = frozenset(
+    {
+        "enabled",
+        "base_url",
+        "refresh_minutes",
+        "verify_ssl",
+        "credential_ref",
+    }
+)
+
+
+def bind_account_context(
+    cfg,
+    *,
+    owner: str = ACCOUNT_USAGE_FEATURE_ID,
+    vault=None,
+) -> FeatureHostContext:
+    """官方账户用量包的宿主绑定：偏好 + 凭据（``balance.query``）+ 呈现 + 定时器。
+
+    包拿不到 Core 的 ``config.json``，也拿不到内置聊天那把 key：它自己的
+    ``base_url`` / 刷新周期在 ``feature-data/<owner>/preferences.json``，
+    API Key 走 owner 作用域的凭据库，操作集只开放 ``balance.query``。
+    """
+    if owner != ACCOUNT_USAGE_FEATURE_ID or not is_valid_feature_id(owner):
+        raise ValueError("invalid_feature_owner")
+    from .credentials import CredentialVaultPort
+
+    root = Path(cfg.dir) / _DATA_DIRECTORY / owner
+    safe_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    safe_path(root)
+
+    if vault is None:
+        scope = str(Path(cfg.path).resolve()) if hasattr(cfg, "path") else str(root.resolve())
+        vault = CredentialVaultPort(owner, scope, operations=frozenset({"balance.query"}))
+
+    def read_display() -> Mapping:
+        return MappingProxyType({"character": cfg.get("character")})
+
+    return FeatureHostContext(
+        owner=owner,
+        configuration=_bind_configuration(root / "configuration.json"),
+        credentials=vault,
+        preferences=_BoundPreferences(root / "preferences.json", _ACCOUNT_PREFERENCE_FIELDS),
+        documents=MappingProxyType({"memory": _bind_document(root / "memory.json")}),
+        state_documents=MappingProxyType({"state": _bind_state_document(root / "state.json")}),
+        desktop=None,
+        window=None,
+        presentation=_bind_presentation(),
+        scheduler=_BoundScheduler(),
         api=None,
         user_data=FeatureUserDataPort(
             root,

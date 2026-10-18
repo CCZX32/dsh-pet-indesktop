@@ -1,0 +1,8 @@
+{
+  "id": "official.account-usage",
+  "name": "账户用量",
+  "description": "独立形态的账户余额查询：自带服务地址、刷新周期与凭据库引用，按周期把余额气泡给当前桌宠。与内置余额查询并存，可装可卸。",
+  "version": "1.0.0",
+  "factory": "account-usage/v1",
+  "execution_kind": "host-only"
+}

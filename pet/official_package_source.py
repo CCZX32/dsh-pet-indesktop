@@ -20,21 +20,24 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .official_features import AI_FEATURE_ID, OFFICIAL_FEATURES, SCREEN_FEATURE_ID
+from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, OFFICIAL_FEATURES, SCREEN_FEATURE_ID
 
 _DISPLAY = {
     SCREEN_FEATURE_ID: "屏幕理解",
     AI_FEATURE_ID: "AI 对话",
+    ACCOUNT_USAGE_FEATURE_ID: "账户用量",
 }
 
 _SHORT = {
     SCREEN_FEATURE_ID: "screen-understanding",
     AI_FEATURE_ID: "ai-chat",
+    ACCOUNT_USAGE_FEATURE_ID: "account-usage",
 }
 
 _BUILDERS = {
     SCREEN_FEATURE_ID: ("scripts.build_screen_package", "features/screen-understanding"),
     AI_FEATURE_ID: ("scripts.build_ai_chat_package", "features/ai-chat"),
+    ACCOUNT_USAGE_FEATURE_ID: ("scripts.build_account_usage_package", "features/account-usage"),
 }
 
 

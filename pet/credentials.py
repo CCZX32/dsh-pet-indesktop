@@ -123,10 +123,22 @@ class _ScopedVault:
 class CredentialVaultPort(_ScopedVault):
     OPERATIONS = frozenset({"manual_look", "analyze_frame"})
 
-    def __init__(self, feature: str, instance: str, *, backend: SecureBackend | None = None):
+    def __init__(
+        self,
+        feature: str,
+        instance: str,
+        *,
+        backend: SecureBackend | None = None,
+        operations: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+    ):
         if not is_valid_feature_id(feature):
             raise CredentialError("scope_invalid")
-        operations = frozenset({"chat.send", "files.interpret"}) if feature == AI_FEATURE_ID else self.OPERATIONS
+        if operations is None:
+            operations = frozenset({"chat.send", "files.interpret"}) if feature == AI_FEATURE_ID else self.OPERATIONS
+        else:
+            operations = frozenset(operations)
+            if any(not isinstance(operation, str) or not operation for operation in operations):
+                raise CredentialError("operation_invalid")
         super().__init__(feature, instance, operations, backend=backend)
 
 

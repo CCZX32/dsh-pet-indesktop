@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from .official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID
+from .official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID
 
 RECEIPT_NAME = "startup-receipt.json"
 SCHEMA = "dsh-pet-startup-receipt/v1"
@@ -37,6 +37,7 @@ _LOG = logging.getLogger(__name__)
 _PACKAGES = (
     ("ai_chat", AI_FEATURE_ID, "ai-chat"),
     ("screen", SCREEN_FEATURE_ID, "screen-understanding"),
+    ("account_usage", ACCOUNT_USAGE_FEATURE_ID, "account-usage"),
 )
 
 

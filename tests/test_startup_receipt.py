@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from pet import startup_receipt as sr
-from pet.official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID
+from pet.official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID
 
 
 class FakeRuntime:
@@ -30,7 +30,7 @@ class FakeRuntime:
         self.fail = set(fail)
 
     def official_packages(self):
-        return tuple(owner for owner in (AI_FEATURE_ID, SCREEN_FEATURE_ID) if owner not in self.active)
+        return tuple(owner for _key, owner, _directory in sr._PACKAGES if owner not in self.active)
 
     def install_official(self, owner, *, enabled=False):
         if owner in self.fail:
@@ -112,6 +112,18 @@ def test_selected_packages_are_installed_once_then_the_receipt_is_gone(tmp_path)
     assert result.installed == (AI_FEATURE_ID, SCREEN_FEATURE_ID)
     assert result.removed is True
     assert not (tmp_path / sr.RECEIPT_NAME).exists()
+
+
+def test_account_usage_receipt_key_maps_to_its_owner_and_directory(tmp_path):
+    _write_receipt(tmp_path, _receipt(account_usage=True))
+    _features(tmp_path, "account-usage")
+    runtime = FakeRuntime()
+
+    result = sr.consume(tmp_path, runtime)
+
+    assert runtime.installed == [ACCOUNT_USAGE_FEATURE_ID]
+    assert runtime.enabled_flags == [(ACCOUNT_USAGE_FEATURE_ID, True)]
+    assert result.installed == (ACCOUNT_USAGE_FEATURE_ID,)
 
 
 def test_receipt_true_without_the_package_files_is_reported_missing(tmp_path):

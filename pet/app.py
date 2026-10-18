@@ -1450,9 +1450,13 @@ class AppShell:
         # 官方识屏包的呈现提供方（DLC 识屏包线）：注册的是惰性工厂，``_shared``
         # 的构建晚于本方法，运行时每次调用时才读当前 proxy；bubble/聊天同步经它
         # 扇出到首个可见窗（与共享 proactive 同一张呈现面）。
-        from .feature_host_bindings import register_screen_presentation
+        from .feature_host_bindings import register_feature_presentation, register_screen_presentation
 
-        register_screen_presentation(lambda: self._shared.proxy if getattr(self, "_shared", None) is not None else None)
+        _presentation_factory = lambda: self._shared.proxy if getattr(self, "_shared", None) is not None else None
+        register_screen_presentation(_presentation_factory)
+        # host-only 官方包（账户用量等）的通用呈现面：同一个可见桌宠代理，
+        # 没有实例时端口返回 None，包侧按静默降级处理。
+        register_feature_presentation(_presentation_factory)
         # 官方聊天包的桌宠形呈现面（DLC 聊天包线）：同样是惰性工厂——包**每次开窗**
         # 才解析一次，拿到的是本实例的聊天宿主（legacy = PetWindow 本体；overlay =
         # sprite 壳的 pet 形 ``_OverlayChatHost``，与内置聊天窗用的是同一个宿主），
@@ -3056,11 +3060,12 @@ class AppShell:
                 logging.exception("退出时关闭功能扩展宿主失败")
         # 识屏包的呈现提供方随宿主一起摘（进程退出后迟到回调不投递）。
         try:
-            from .feature_host_bindings import register_screen_presentation
+            from .feature_host_bindings import register_feature_presentation, register_screen_presentation
 
             register_screen_presentation(None)
+            register_feature_presentation(None)
         except Exception:
-            logging.exception("退出时摘除识屏呈现提供方失败")
+            logging.exception("退出时摘除官方包呈现提供方失败")
         # 聊天包的桌宠呈现面同理：宿主一关，包不该再拿到这只桌宠的几何。
         try:
             from .ai_bindings import register_ai_pet_view

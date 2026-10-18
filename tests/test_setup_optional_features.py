@@ -27,7 +27,8 @@ def test_official_packages_are_optional_tasks():
     text = _text()
     assert 'Name: "official_ai_chat"' in text
     assert 'Name: "official_screen"' in text
-    assert text.count('GroupDescription: "Official feature packages:"') == 2
+    assert 'Name: "official_account_usage"' in text
+    assert text.count('GroupDescription: "Official feature packages:"') == 3
     assert "Flags: unchecked" in text
 
 
@@ -36,6 +37,7 @@ def test_the_base_files_entry_excludes_the_optional_packages():
     base = next(line for line in text.splitlines() if line.startswith('Source: "{#MyAppDir}\\*"'))
     assert "features\\ai-chat\\*" in base
     assert "features\\screen-understanding\\*" in base
+    assert "features\\account-usage\\*" in base
     # 安装态绝不能继承便携标记：构建树里若残留 portable.json，装出来的应用会
     # 把数据写进安装目录而不是 %APPDATA%，用户与支持人员都看不出区别。
     assert "portable.json" in base
@@ -45,7 +47,8 @@ def test_each_optional_package_has_its_own_task_scoped_source():
     text = _text()
     assert 'DestDir: "{app}\\features\\ai-chat"; Tasks: official_ai_chat' in text
     assert 'DestDir: "{app}\\features\\screen-understanding"; Tasks: official_screen' in text
-    assert text.count("skipifsourcedoesntexist") >= 2
+    assert 'DestDir: "{app}\\features\\account-usage"; Tasks: official_account_usage' in text
+    assert text.count("skipifsourcedoesntexist") >= 3
 
 
 def test_silent_installs_do_not_launch_the_app():
@@ -59,6 +62,7 @@ def test_unselected_tasks_leave_no_empty_feature_directories():
     text = _text()
     assert "RemoveDir(ExpandConstant('{app}\\features\\ai-chat'))" in text
     assert "RemoveDir(ExpandConstant('{app}\\features\\screen-understanding'))" in text
+    assert "RemoveDir(ExpandConstant('{app}\\features\\account-usage'))" in text
     assert "RemoveDir(ExpandConstant('{app}\\features'))" in text
 
 
@@ -75,6 +79,7 @@ def test_the_receipt_reports_what_is_actually_on_disk():
     text = _text()
     assert "FileExists(ExpandConstant('{app}\\features\\ai-chat\\manifest.json'))" in text
     assert "FileExists(ExpandConstant('{app}\\features\\screen-understanding\\manifest.json'))" in text
+    assert "FileExists(ExpandConstant('{app}\\features\\account-usage\\manifest.json'))" in text
 
 
 def test_the_installer_writes_a_startup_receipt():

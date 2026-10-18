@@ -15,7 +15,11 @@ from pet import official_features as of
 
 
 def test_the_registry_is_closed_and_frozen():
-    assert set(of.OFFICIAL_FEATURES) == {of.SCREEN_FEATURE_ID, of.AI_FEATURE_ID}
+    assert set(of.OFFICIAL_FEATURES) == {
+        of.SCREEN_FEATURE_ID,
+        of.AI_FEATURE_ID,
+        of.ACCOUNT_USAGE_FEATURE_ID,
+    }
     assert of.SCREEN_OWNER == of.SCREEN_FEATURE_ID and of.AI_OWNER == of.AI_FEATURE_ID
     with pytest.raises(TypeError):
         of.OFFICIAL_FEATURES["official.other"] = None
@@ -27,7 +31,10 @@ def test_each_registration_matches_its_declared_contract():
     assert "screen.capture" in screen.capabilities
     chat = of.official_feature(of.AI_FEATURE_ID)
     assert (chat.factory, chat.execution_kind) == ("ai-chat/v1", "host-only")
-    assert chat.id != screen.id
+    account = of.official_feature(of.ACCOUNT_USAGE_FEATURE_ID)
+    assert (account.factory, account.execution_kind) == ("account-usage/v1", "host-only")
+    assert account.capabilities == frozenset({"network.http", "settings.contribute", "menu.contribute"})
+    assert chat.id != screen.id != account.id
 
 
 def test_an_unknown_or_malformed_owner_is_refused():

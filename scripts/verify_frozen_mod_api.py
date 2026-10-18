@@ -27,11 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pet.feature_package_preflight import PROBE_SCHEMA, probe_policy  # noqa: E402
 from pet.feature_policy import official_package_verifier  # noqa: E402
-from pet.official_features import AI_FEATURE_ID, SCREEN_FEATURE_ID  # noqa: E402
+from pet.official_features import ACCOUNT_USAGE_FEATURE_ID, AI_FEATURE_ID, SCREEN_FEATURE_ID  # noqa: E402
 
 _PACKAGES = {
     "ai-chat": AI_FEATURE_ID,
     "screen-understanding": SCREEN_FEATURE_ID,
+    "account-usage": ACCOUNT_USAGE_FEATURE_ID,
 }
 
 
