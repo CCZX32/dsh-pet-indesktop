@@ -670,8 +670,12 @@ class LocalFeatureRuntime:
                 rows.append(owner)
         return tuple(rows)
 
-    def install_official(self, owner: str, source=None):
+    def install_official(self, owner: str, source=None, *, enabled: bool = False):
         """Install a bundled/built official package through the Core-owned chain.
+
+        ``enabled=False``（默认）保持 MOD 中心「安装」的既有语义：先装成停用，
+        由用户决定何时启用。Setup 回执驱动的安装传 ``enabled=True``——用户在
+        安装器里勾选就是启用意图，首启后入口应当直接可用。
 
         Returns ``(manager, accepted)``; the manager then runs its normal transaction
         and the MOD center observes the persisted state. A missing source raises
@@ -687,7 +691,8 @@ class LocalFeatureRuntime:
             if not resolved.found:
                 raise ValueError(resolved.reason or "official_package_missing")
             source = resolved.path
-        return manager, manager.submit("import_disabled", Path(source), auto_apply=True)
+        command = "install" if enabled else "import_disabled"
+        return manager, manager.submit(command, Path(source), auto_apply=True)
 
     def uninstall_official(self, owner: str) -> bool:
         manager = self.managers.get(owner)

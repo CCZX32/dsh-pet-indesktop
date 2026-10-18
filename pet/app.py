@@ -1349,6 +1349,16 @@ class AppShell:
         # 与角色/slot0 健康度**解耦**：装配失败只记诊断、MOD 中心如实显示"宿主不可用"，
         # 绝不让桌宠启动失败（spec §7.2-3）。
         self.feature_runtime = self._build_feature_runtime()
+        # 5B-1：Setup 首启回执。安装器把"这次装了哪些官方包"写进 {app}；
+        # 这里延后到事件循环启动后消费一次（拷贝包文件不能卡住 AppShell 构造）。
+        # 没有回执/宿主不可用都是空操作，失败只记日志。
+        if self.feature_runtime is not None:
+            try:
+                from .startup_receipt import schedule_consume
+
+                schedule_consume(self.feature_runtime)
+            except Exception:
+                logging.exception("启动回执消费装配失败；桌宠照常启动")
         # Phase 2：进程内官方插件（当前只有节日提醒）。默认仍走内置服务；
         # PET_FESTIVAL_PLUGIN=1 时由插件装配，便于做行为等价对照。
         self._festival_plugin_enabled = os.environ.get("PET_FESTIVAL_PLUGIN") == "1"
