@@ -143,7 +143,10 @@ class SpriteSoundPlayer:
 
         两路口径不同（旧契约 window.py:3514-3523 / :3525-3540）：
 
-        - 点击门：候选列表的**第一个**（现状不动）；
+        - 点击门：同样 ``choose_sound`` **现挑**——候选列表缓存、随机结果不缓存。
+          旧契约是"点击固定取第一个"，而设置页对「自定义文件夹（随机）」的承诺就是
+          随机播放；两者打架时以用户可见文案为准（issue #308：9 个文件的目录永远只
+          播文件名排序第一那个，整个进程内不变）。
         - 碰撞门：``resolve_click_sound_pair`` 优先（duck 包 = press，已转码 wav，
           winmm 直放），未命中才 ``choose_sound`` 在候选列表里**现挑**——候选
           列表缓存、随机结果不缓存，否则多文件包会被缓存钉死成固定一个。
@@ -175,7 +178,7 @@ class SpriteSoundPlayer:
             candidates = self._candidates(gate, pack, data_dir)
             return click_sound.choose_sound(candidates) if candidates else None
         candidates = self._candidates(gate, pack, data_dir)
-        return candidates[0] if candidates else None
+        return click_sound.choose_sound(candidates) if candidates else None
 
     def _candidates(self, gate: str, pack, data_dir) -> list:
         """候选列表（按 (gate, pack, data_dir) 缓存）：解析失败 = 空表，静默降级。"""
