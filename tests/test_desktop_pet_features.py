@@ -911,7 +911,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
     expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
-    expected_labels.append("抽支签")  # 每日一签（2026-10-15；设置入口在「互动 · 抽签」标签）
+    expected_labels.append("抽支签")  # 每日一签（2026-10-15；设置入口在「互动 · 趣味」标签）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -942,10 +942,11 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
 def test_divination_draw_reports_where_to_turn_it_back_on(tmp_path):
     """总开关关掉时点「抽支签」不静默无反应：气泡里的落点必须是设置页的真实归属。
 
-    这句话里的「互动 · 抽签」是**外部契约**（用户照着去找）：每日一签 2026-10-15 曾
+    这句话里的「互动 · 趣味」是**外部契约**（用户照着去找）：每日一签 2026-10-15 曾
     挂在只有一个组的「趣味」一级域，2026-10-17 按 ``docs/SETTINGS-CHANGE-GATES.md``
     的准入（新一级域须"预计包含至少两个稳定设置组"）判不合格，行已归位到「互动」域
-    的第四个页内标签。文案不跟着改，用户就会按提示去找一个不存在的域。
+    的第四个页内标签（该标签原叫「抽签」，2026-10-18 改回「趣味」）。文案不跟着改，
+    用户就会按提示去找一个不存在的标签。
 
     只借 ``AppShell`` 的两个方法（关闭路径只碰 ``config`` / ``win`` / 懒建服务），
     不构造真壳——素材库、ffmpeg、托盘都不需要。配置落在 ``tmp_path``，不读真实配置。
@@ -972,8 +973,8 @@ def test_divination_draw_reports_where_to_turn_it_back_on(tmp_path):
     AppShell.trigger_divination_draw(host)
 
     assert win.bubbles, "关掉总开关后点菜单必须给一句去处提示（不许静默无反应）"
-    assert "互动 · 抽签" in win.bubbles[-1], f"落点不是设置页的真实归属：{win.bubbles[-1]!r}"
-    assert "趣味" not in win.bubbles[-1], "旧域已不存在，文案不许再指向它"
+    assert "互动 · 趣味" in win.bubbles[-1], f"落点不是设置页的真实归属：{win.bubbles[-1]!r}"
+    assert "抽签" not in win.bubbles[-1], "标签已改名「趣味」，文案不许再指向旧名"
     # 关掉总开关时只报去处、**一个状态都不写**（不落「今天抽过」的假记录）。
     # 注意 config.data 里本来就有出厂默认的空 dict（Config._initial_data），
     # 所以这里判的是"没有被写进内容"，不是"键不存在"。
