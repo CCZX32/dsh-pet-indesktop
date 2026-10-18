@@ -1573,6 +1573,10 @@ def test_click_self_talk_rows_follow_their_own_toggle(tmp_path, monkeypatch):
     本轮用户反馈的直接原因：默认配置（两个开关都关）下这三个开关连同「点击触发
     自言自语」一起被隐藏，新功能在设置页里等于不存在。现在只有周期气泡的细项随
     「气泡自言自语」，点击侧跟随它自己的开关。
+
+    「细项」的分界点见 :func:`test_click_only_self_talk_exposes_the_shared_content_rows`：
+    节奏项（最短/最长间隔、配图大小）只属于周期链路；两条链路**共读**的内容项
+    （显示时间/候选内容/图片目录/配图概率）任一开启即显示。
     """
     from PySide6.QtWidgets import QApplication
 
@@ -1599,16 +1603,95 @@ def test_click_self_talk_rows_follow_their_own_toggle(tmp_path, monkeypatch):
 
     dialog.click_self_talk_check.setChecked(True)
     assert all(not row(key).isHidden() for key in click_side)
-    # 周期气泡仍关着：它的细项保持隐藏，互不牵连
-    assert row("self_talk_duration").isHidden()
+    # 周期气泡仍关着：只属于周期链路的节奏项保持隐藏（内容项见下一个用例）
+    assert row("self_talk_min").isHidden()
 
     dialog.self_talk_check.setChecked(True)
-    assert not row("self_talk_duration").isHidden()
+    assert not row("self_talk_min").isHidden()
     assert all(not row(key).isHidden() for key in click_side)
 
     dialog.click_self_talk_check.setChecked(False)
     assert all(row(key).isHidden() for key in click_side)
-    assert not row("self_talk_duration").isHidden()
+    assert not row("self_talk_min").isHidden()
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_click_only_self_talk_exposes_the_shared_content_rows(tmp_path, monkeypatch):
+    """只开「点击触发自言自语」时，点击链路真正会用的那批内容项必须可直接编辑。
+
+    两条链路读的是**同一份**内容配置：``window_alerts.show_click_self_talk`` 落到
+    ``_show_random_self_talk``，那里取 ``self_talk_texts`` / ``self_talk_images`` /
+    ``self_talk_image_chance``，显示时长取 ``self_talk_duration_seconds``。显隐旧模型
+    却整组挂在「气泡自言自语」上——只想要点击出内容的用户，必须先打开一个他不用
+    的周期功能才能改候选文本。
+
+    新契约：这四项按「周期或点击任一开启」显示且可编辑；节奏两项（最短/最长间隔）
+    只属于周期链路。显隐切换不得改变保存写回的键（不新增配置键）。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    dialog = settings_mod.ModernSettingsDialog(_slot0_config(tmp_path), include_ai=True)
+
+    def row(key: str):
+        found = dialog.findChild(settings_mod.SettingRow, f"settingRow_{key}")
+        assert found is not None, key
+        return found
+
+    def stored_keys():
+        """两份配置文件的**键集**（全局 config.json + 这只宠的 slot0 档案）。"""
+        base = Config(base=tmp_path).dir
+        profile = json.loads((base / "config-slot-0.json").read_text(encoding="utf-8"))
+        return set(Config(base=tmp_path).data), set(profile)
+
+    content_rows = (
+        "self_talk_duration", "self_talk_texts",
+        "self_talk_images", "self_talk_image_chance",
+    )
+    rhythm_rows = ("self_talk_min", "self_talk_max")
+
+    # 两个开关都关：内容项与节奏项都藏起来（没有链路会用到它们）
+    assert all(row(key).isHidden() for key in content_rows + rhythm_rows)
+
+    dialog.click_self_talk_check.setChecked(True)
+    assert all(not row(key).isHidden() for key in content_rows), (
+        "只开点击时，点击链路要用的内容项必须显示")
+    assert all(row(key).isHidden() for key in rhythm_rows), (
+        "节奏项只属于周期链路，点击链路不用它，不该跟着冒出来")
+
+    # 可编辑：不是只画出来，控件本身要能改（用户就是来改这些的）
+    editors = {
+        "self_talk_duration": dialog.self_talk_duration_spin,
+        "self_talk_texts": dialog.texts_edit,
+        "self_talk_images": dialog.self_talk_image_dir_picker,
+        "self_talk_image_chance": dialog.self_talk_image_chance_spin,
+    }
+    for key, widget in editors.items():
+        assert widget.isEnabled(), key
+    assert dialog.texts_edit.isReadOnly() is False
+
+    # 改动可落盘：内容项写回原位（键不变、值跟着控件走）
+    dialog.texts_edit.setPlainText("只开点击写的候选")
+    dialog.self_talk_image_chance_spin.setValue(70)
+    dialog.self_talk_duration_spin.setValue(6.0)
+    assert dialog._write_config() is True
+    keys_when_visible = stored_keys()
+
+    dialog.click_self_talk_check.setChecked(False)
+    assert all(row(key).isHidden() for key in content_rows)
+    assert dialog._write_config() is True
+    assert stored_keys() == keys_when_visible, "显隐切换不得引入新的配置键"
+
+    reloaded = _slot0_config(tmp_path)
+    assert reloaded.get("self_talk_texts") == ["只开点击写的候选"]
+    assert reloaded.get("self_talk_image_chance") == 70
+    assert reloaded.get("self_talk_duration_seconds") == 6.0
 
     dialog.close()
     app.processEvents()

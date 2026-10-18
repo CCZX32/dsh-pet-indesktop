@@ -3146,6 +3146,9 @@ class AppShell:
             # 岛图标默认取鱼本体头像（图片路径不碰 emoji 字体栈，见 dynamic_island
             # 的 _icon_pixmap 注释）；帧未就绪时岛侧只画底圈并稍后重试
             self.island.set_icon_provider(self._island_icon_pixmap)
+            # 岛名是**当前身份**的名字：角色身份走每宠视图，不是进程级配置
+            # （换完角色岛名还停在默认那只，见 _identity_config）
+            self.island.set_identity_provider(self._identity_config)
             self.island.clicked.connect(self._toggle_pet_from_island)
             self.island.toggle_pet_requested.connect(self._toggle_pet_from_island)
             self.island.open_chat_requested.connect(self._open_chat_from_island)
@@ -3301,6 +3304,31 @@ class AppShell:
         """
         config = getattr(getattr(self, "instance", None), "config", None)
         return config if config is not None else self.config
+
+    def _identity_config(self):
+        """进程级服务的**角色身份**取源：当前呈现身份的每宠视图。
+
+        ``character`` 属 ``PER_PET_KEYS``，真值在 ``config-slot-N.json``；全局面那个
+        ``character`` 是出厂默认的残留（slot0 迁移与 ``Config.save`` 都会把每宠键从
+        ``config.json`` 清掉）。所以灵动岛名、托盘「切换角色」勾选、主动识屏的
+        ``pet_name`` 三条进程级读点一律经这里取当前身份——不是「没有值」，是**稳定
+        读到错的默认值**（2026-10-19 用户反馈：换完角色，灵动岛名还是默认那只）。
+
+        两条拓扑各自的"该宠此刻真正在用的那份视图"，不另造读取口径：
+
+        - overlay：主宠是 sprite，取壳的 ``_sprite_config(主 sprite)``（配置同步边界
+          会作废它的快照，换角色后立刻是新值）；
+        - legacy：``PetInstance.config`` 那条 slot0 路由视图。
+
+        overlay 壳还没有主 sprite（启动期、slot0 档案被降级、退出收口后）时退回同一条
+        slot0 视图：两者读的都是 slot0 档案，不会给出第二个真值。
+        """
+        overlay = getattr(self, "_overlay_shell", None)
+        sprite = getattr(overlay, "sprite", None)
+        sprite_config = getattr(overlay, "_sprite_config", None)
+        if sprite is not None and callable(sprite_config):
+            return sprite_config(sprite)
+        return self._chat_identity_config()
 
     def _show_island_chat(self, *, activate: bool = True,
                           reply_text: str | None = None) -> None:
@@ -4579,7 +4607,9 @@ class AppShell:
         add_tray_action(menu, '桌宠设置', self.instance.open_modern_settings)
 
         m_char = track_menu(menu.addMenu('切换角色'))
-        current = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
+        # 勾选态标**当前身份**的角色（换角色后本菜单会重建，见 _refresh_tray_menu）；
+        # 读进程级配置会让勾永远停在出厂默认那只（与岛名同源缺陷）
+        current = str(self._identity_config().get('character', catalog.DEFAULT_CHARACTER))
         for cid in catalog.list_available_characters():
             act = add_tray_action(
                 m_char, cid, lambda cid=cid: self.instance.switch_character(cid))
