@@ -2175,6 +2175,21 @@ class OverlayShell(QObject):
         name = str(profile.data.get("screen_name") or "")
         return name or None
 
+    def _assigned_screen(self, sprite):
+        """这只在档案里记的屏归属（``screen_name`` → QScreen；没有记录/屏不在 = None）。"""
+        slot = self._spawned_slots.get(sprite)
+        if slot is None and sprite is getattr(self, "sprite", None):
+            slot = 0
+        if slot is None:
+            return None
+        name = self._stored_screen_name(self._spawn_config_dir(), slot)
+        if not name:
+            return None
+        for screen in self._screens():
+            if _screen_name(screen) == name:
+                return screen
+        return None
+
     def _save_child_geometry(self, sprite, *, slot=None, geometry=None) -> bool:
         """这只宠的位置自存：写 ``rx``/``ry``/``facing``/``scale``（+ 待写的屏归属）。
 
@@ -6876,10 +6891,16 @@ class OverlayShell(QObject):
             for screen in missing:
                 self._create_host(screen)
             self._show_all_hosts()
-            # 新窗就位后按**物理**身体中心把每只送回它此刻真正所在那块屏；机械
-            # 变化不改归属（同每拍兜底的口径），用户记住的屏名不能被吃掉。
+            # 每只按**档案里记的屏归属**回到自己那块屏（`screen_name` 是用户的意图，
+            # 比"按当前物理中心落"更符合预期，也避免机械重排把宠搬到别的屏）；
+            # 没有归属记录或那块屏仍不在的，保持原位——不改归属。
             for sprite in self._all_sprites():
-                self._place_sprite_in_physical_screen(sprite, persist=False)
+                assigned = self._assigned_screen(sprite)
+                if assigned is None:
+                    continue
+                if self._host_of(sprite) is self.host_for_screen(assigned):
+                    continue
+                self.move_sprite_to_screen(sprite, assigned)
         else:
             if len(self._hosts) <= 1:
                 return
