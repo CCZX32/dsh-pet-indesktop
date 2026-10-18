@@ -38,6 +38,8 @@
 | `pet/voice_chime.py` | `cache_key` 接受 `values=`（三处调用共用同一份 resolved attempt） |
 | `pet/dynamic_island.py` / `pet/proactive.py` / `pet/multi_window_shared.py` | 角色身份经 provider 取，不再读全局 `character` |
 | `pet/modern_settings_dialog.py` / `pet/settings_interaction.py` | 点击内容设置（文本/配图目录/概率/时长）改为「周期或点击任一开启」即显示；节奏项仍只跟周期 |
+| `pet/game_fps.py` | 新增 `parse_session_names` / `stale_session_names` / `stop_session_args`（纯函数）：按 `dsh-pet-fps-` 前缀列出本应用自己的 ETW 会话、排除本次会话名、生成精确停止命令 |
+| `pet/fps_monitor.py` | 新增模块级 `sweep_stale_sessions(session_name)`，由会话工厂 `default_session()` 在**建会话之前**调用：清掉异常退出遗留的残留 ETW 会话（Windows trace 会话有上限，攒满后新会话报 `error 1450`）。放在工厂而不是 `FpsSession.start()`：清残留是「准备新采集」的前置动作，且它要再起两个 `logman` 子进程，不该被会话自己的进程替身记账 |
 
 测试：新增 `tests/test_process_service_identity.py`；改写两条把 bug 写成契约的断言
 （`test_precache_worker_uses_resolved_voice` 用旧 `_cfg` 造 expected；
@@ -53,8 +55,9 @@
 | 台词点击查找 | 0.071 → 0.265 ms（flavor 解析 0.038 ms，且不再读钥匙串；磁盘侧由整目录 glob 变 ≤3 次精确 stat） | 每次点击 |
 | `_attempts` 每轮解析 | 0.7–1.6 ms | 每次预缓存批次（一次，非每句） |
 | `refreshRateChanged` 接线 | 每块屏一条信号连接 | 改刷新率/插拔屏 |
+| 残留 ETW 会话清理 | 1 次 `logman query -ets` + 每个残留会话 1 次 `logman stop`（均为已存在的系统命令） | **每次开采集会话**（换游戏目标），跑在 FPS 工作线程 `FpsMonitor._run` 上，不占 GUI 线程 |
 
-无新增线程、定时器、网络请求；常驻内存无增长路径。
+无新增线程、定时器、网络请求；常驻内存无增长路径（`deque` 上限均在模块常量里，清理只读命令输出）。
 
 ## 四、实机运行记录
 
@@ -65,8 +68,16 @@
   26.5 s；`cached_audio` 命中验证通过。
 - SAPI 线程 COM：修复前后台线程 `WinError -2147221008`，修复后同线程取到 3 个音色、
   真合成 60 872 字节 wav。
-- 混合缩放 / 150% DPI（#307 问题一、#286）：**本机不具备**（两屏同 DPR、100%），
-  只做到代码级退化路径与自动化用例，未声称实机验证。
+- 混合缩放（#307 问题一、#286 的相邻症状）：把左侧副屏调到 **125%**（物理 1920×1020、
+  逻辑 1536×816）后实机验证——跨屏拖拽连续过缝、到副屏后能继续拖、跨窗投影位置跟随
+  光标、副屏子宠动画正常。验证期间暴露并修掉的一批多窗缺口见 §六点五。
+- FPS 不出数的现场证据：`logman query -ets` 实抓到 **11 个** `Running` 的
+  `dsh-pet-fps-*` 残留会话（`-15520-37-b4e46ca9`、`-17840-14`、`-33764-85`、
+  `-31060-20`、`-33980-7`、`-9956-16`、`-33764-62`、`-24896-1`、`-30960-12`、
+  `-38784-1`、`-22572-1`），而 `logman stop <名字> -ets` **不需要管理员**即成功。
+  这解释了新会话 `error 1450`（`ERROR_NO_SYSTEM_RESOURCES`）：不是权限不够。
+  修复已随包部署，**用户开游戏复核尚未回**——本条按「代码级 + 现场证据」记录，
+  不声称已实测出数。
 
 ## 五、已知未修（如实）
 
@@ -75,4 +86,5 @@
 - `VoiceChimeService.apply_config()` 不中止**已起飞**的合成：已提交的句子用旧音色
   播完属可接受契约，未改。
 - 待办 fire 的「每档一次」戳语义未改：气泡+通知双不通时只留 warning，不无限重试。
-- 混合 DPI 下跨屏不可用（窗口退化），未做按 DPR 分组拆窗。
+- 跨窗拖拽期间没有碰撞（拖到另一块屏、仍按着鼠标时能与那只屏上的宠重叠，松手归窗后才分离）；
+  岛横跨两屏缝上时墙只建在岛所在那块屏的世界里。两条都由用户明确同意留到下一版。
