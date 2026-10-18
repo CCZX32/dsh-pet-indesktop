@@ -18,8 +18,23 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import json
 
 import pytest
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent, QPainter, QPixmap
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QGuiApplication,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import QApplication
 
 import tests.test_overlay_window_capabilities as cap
@@ -833,6 +848,166 @@ def test_slingshot_gesture_after_crossing_uses_one_coordinate_system(
             "恢复拖拽后跟着光标走")
 
         overlay.mouseReleaseEvent(_release(next_cursor - origin, next_cursor))
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 多窗弹弓的坐标所有者
+def _mixed_dpr_shell(tmp_path, monkeypatch):
+    """混合缩放的双屏壳（副屏 DPR=2 → 每屏一窗）与其两块屏。"""
+    a, b = _two_screens()
+    b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=2.0)
+    _install_screens(monkeypatch, a, b)
+    return _make_shell(tmp_path, a, {"allow_cross_screen": True}), a, b
+
+
+def _aim_on_host(shell, sprite) -> None:
+    """在 sprite **当前宿主窗**上按下左键、再点右键进瞄准（真鼠标事件）。"""
+    host = shell.host_for_sprite(sprite)
+    overlay = host.overlay
+    _hittable(sprite)
+    origin = QPointF(overlay.geometry().topLeft())
+    hit = QPointF(sprite.rect().center())
+    overlay.mousePressEvent(_press(hit, origin + hit))
+    cursor = origin + hit + QPointF(10.0, 0.0)
+    overlay.mousePressEvent(_right_press(cursor - origin, cursor))
+
+
+def test_slingshot_ui_only_paints_on_the_owning_window(tmp_path, monkeypatch):
+    """多窗：弹弓瞄准 UI **只由源窗**画，别家窗一笔不画（不再画幽灵弹弓）。
+
+    会话是壳内共享的一份（``shell._slingshot``），但每张窗有自己的局部坐标系：
+    副屏瞄准时按"本地坐标相同位置"重画，主窗上就会出现一条错位的幽灵橡皮带。
+    改为会话显式记录 owner，非 owner 窗直接跳过这一段绘制。
+    """
+    shell, a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        assert shell.move_sprite_to_screen(main, b) is True
+        host_b = shell.host_for_sprite(main)
+        assert host_b.screen is b, "前提：这只在副屏的窗里"
+        overlay_b = host_b.overlay
+        overlay_a = shell.host_for_screen(a).overlay
+        assert overlay_a is not overlay_b
+
+        _aim_on_host(shell, main)
+
+        slingshot = shell._slingshot
+        assert slingshot.aiming is True
+        canvas = QPixmap(16, 16)     # 画布要活到 painter 结束（临时对象会崩）
+        assert _painted(overlay_b, canvas) is True, "源窗照常画橡皮带 + 轨迹"
+        assert _painted(overlay_a, canvas) is False, "非源窗不得画弹弓（幽灵）"
+        assert slingshot.owner is overlay_b, "会话必须记下接输入的那张窗"
+    finally:
+        _cleanup(shell)
+
+
+def test_global_escape_cancels_the_owning_window_session(tmp_path, monkeypatch):
+    """多窗：全局 Esc 必须路由到 owner——源窗的 grab/press 状态同时被收掉。
+
+    共享会话却固定调主窗 ``_cancel_slingshot`` 时，副屏瞄准按下 Esc 只会取消会话
+    本身：副屏的 ``_mouse_grab``/``_press_global`` 仍在，随后松手会走普通点击分支。
+    """
+    shell, _a, b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        assert shell.move_sprite_to_screen(main, b) is True
+        overlay_b = shell.host_for_sprite(main).overlay
+        _aim_on_host(shell, main)
+        assert shell._slingshot.aiming is True
+        assert overlay_b._mouse_grab is main
+
+        shell.eventFilter(shell.overlay, QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+            Qt.KeyboardModifier.NoModifier))
+
+        assert shell._slingshot.aiming is False
+        assert overlay_b._mouse_grab is None, "源窗的 grab 必须一起收"
+        assert overlay_b._press_global is None
+        assert overlay_b._press_click_only is False
+        assert main.interaction_state == "normal"
+        assert shell._slingshot.owner is None
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 多窗几何变化
+def test_multi_window_geometry_change_keeps_ratio_and_bubble_origin(
+        tmp_path, monkeypatch):
+    """多窗：某屏可用区变化后宠按比例落位，气泡跟随器的原点跟着换。
+
+    多窗分支此前只 setGeometry/set_bounds/set_activity 就返回：宠留在旧绝对位置
+    （分辨率一变比例就走样），气泡跟随器仍缓存在旧原点（屏一平移气泡就留在旧
+    全局坐标上）。这条用例钉住"每张窗都走完整事务"。
+    """
+    shell, a, _b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        sprite = shell.sprite
+        host = shell.host_for_sprite(sprite)
+        assert host.screen is a
+        old_bounds = QRect(host.bounds)
+        rect = sprite.rect()
+        sprite.set_pos(QPointF(old_bounds.x() + 0.3 * old_bounds.width()
+                               - rect.width() / 2.0,
+                               old_bounds.y() + 0.4 * old_bounds.height()
+                               - rect.height() / 2.0))
+        body = sprite.body_rect()
+        ratio = ((body.x() + body.width() / 2.0 - old_bounds.x()) / old_bounds.width(),
+                 (body.y() + body.height() / 2.0 - old_bounds.y()) / old_bounds.height())
+        follower = shell._bubble_follower
+        assert follower._origin == QPoint(0, 0)
+        dpr_refreshes = []
+        monkeypatch.setattr(shell, "_refresh_self_talk_image_cache_for_dpr",
+                            lambda: dpr_refreshes.append(1))
+
+        # 屏整体平移 + 可用区变窄变矮（分辨率/任务栏同时变）
+        a.set_rects((120, 80, 1920, 1080), (120, 80, 1600, 900))
+        a.availableGeometryChanged.emit(a.availableGeometry())
+
+        new_bounds = QRect(shell.host_for_sprite(sprite).bounds)
+        assert new_bounds == QRect(0, 0, 1600, 900)
+        body = sprite.body_rect()
+        got = ((body.x() + body.width() / 2.0 - new_bounds.x()) / new_bounds.width(),
+               (body.y() + body.height() / 2.0 - new_bounds.y()) / new_bounds.height())
+        assert got[0] == pytest.approx(ratio[0], abs=0.02), "身体中心比例不保"
+        assert got[1] == pytest.approx(ratio[1], abs=0.02)
+        assert follower._origin == QPoint(120, 80), "气泡跟随器原点必须跟着窗换"
+        assert dpr_refreshes, "配图 DPR 缓存同一次事务里刷新"
+    finally:
+        _cleanup(shell)
+
+
+def test_multi_window_geometry_change_finishes_inflight_drag(tmp_path, monkeypatch):
+    """多窗：拖拽中发生几何变化 → 先把在途会话收尾，再按比例重新落位。
+
+    拖拽期间这只的钳制域被放宽到整张虚拟桌面、别的窗还挂着带缩放的只读投影；
+    换域之后这套东西全是按旧几何算的（指向窗外的空洞），所以几何变化必须先走
+    ``_end_drag`` 收尾，再按比例落进新域。
+    """
+    shell, a, _b = _mixed_dpr_shell(tmp_path, monkeypatch)
+    try:
+        main = shell.sprite
+        overlay = shell.host_for_sprite(main).overlay
+        _hittable(main)
+        origin = QPointF(overlay.geometry().topLeft())
+        hit = QPointF(main.rect().center())
+        overlay.mousePressEvent(_press(hit, origin + hit))
+        cursor = origin + hit + QPointF(120.0, 0.0)     # 过 DRAG_THRESHOLD
+        overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+        assert overlay._drag_committed is True, "前提：已升级为真拖拽"
+        assert shell._drag_relaxed_sprite is main, "前提：拖拽域已放宽"
+
+        a.set_rects((0, 0, 1920, 1080), (0, 0, 1600, 900))
+        a.availableGeometryChanged.emit(a.availableGeometry())
+
+        assert overlay._mouse_grab is None, "几何变化必须先收尾在途拖拽"
+        assert overlay._press_global is None
+        assert overlay._press_click_only is False
+        assert shell._drag_relaxed_sprite is None, "放宽域必须收回"
+        new_bounds = QRect(shell.host_for_sprite(main).bounds)
+        assert new_bounds == QRect(0, 0, 1600, 900)
+        body = main.body_rect()
+        assert new_bounds.contains(QRect(body)), "收尾后必须落在新可用区内"
     finally:
         _cleanup(shell)
 

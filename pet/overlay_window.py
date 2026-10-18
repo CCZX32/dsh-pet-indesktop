@@ -1127,9 +1127,12 @@ class OverlayWindow(QWidget):
         消费成功即刷新脏区 + 抑制随之而来的右键菜单 + 作废子类的
         点击/拖拽判别状态（``ShellOverlayWindow._press_pos``：右键 press
         会覆写它，若不清理，随后的左键松手会被壳层判成一次单击）。
+
+        会话记下 ``owner=self``：多窗共用一个控制器时，只有本窗有这套局部坐标，
+        绘制与 Esc 取消都按它路由（见 ``_paint_slingshot`` 与壳的 eventFilter）。
         """
         if not self.slingshot.maybe_enter_on_right_press(
-                self._mouse_grab, self._grab_cursor_pos(event)):
+                self._mouse_grab, self._grab_cursor_pos(event), owner=self):
             return False
         self._context_menu_suppressed = True
         self._invalidate_press_discriminator()
@@ -1170,8 +1173,14 @@ class OverlayWindow(QWidget):
     def _paint_slingshot(self, painter: QPainter) -> bool:
         """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。
 
-        会话与 sprite 同在一张合成窗、同一套局部坐标，直接画。
+        只由会话的 owner 画：多窗时同一个控制器被所有窗共享，而每张窗只有自己
+        那套局部坐标——别的窗照着画只会得到一条错位的幽灵弹弓。故非 owner 窗在
+        这里直接返回（脏区也不登记，取消后没有残留要擦）。裸控制器的直调用例
+        owner 为 None，照常绘制。
         """
+        owner = self.slingshot.owner
+        if owner is not None and owner is not self:
+            return False
         return self.slingshot.paint(painter)
 
     def _refresh_slingshot_visual(self) -> None:

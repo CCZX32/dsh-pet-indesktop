@@ -3716,13 +3716,15 @@ class OverlayShell(QObject):
     def attach_island(self, island) -> None:
         """岛创建/重建/启停后接线（AppShell._sync_dynamic_island 调用）。
 
-        幂等可重复调；island=None 即摘桥。墙挂唯一合成窗的碰撞世界与窗口：
-        一张窗一套局部坐标，岛与全部宠同源，岛落在哪块屏都一样。
+        幂等可重复调；island=None 即摘桥。墙挂**岛所在屏**那个宿主的碰撞世界与
+        窗口（同 DPI 单窗下就是唯一宿主；混合缩放一屏一窗，岛跨屏时由
+        ``_rebind_island_host`` 重绑）。
 
         ``kinetic`` 接 ``self.driver.note_kinetic``（M-1）：桌宠静止时 tick 已降到
         T2/T3（不跑仿真），而岛拖拽是几何回调驱动的用户输入、不经过 overlay 的
         鼠标事件（岛是独立顶层窗）——没有这条通道，快速甩岛过鱼可能整个手势
         期间一次碰撞结算都没发生。driver 未起（测试宿主/启动早期）时不强接。
+        ``on_sync`` 接 ``_rebind_island_host``：岛换屏时把墙换到新宿主的世界上。
         """
         bridge = getattr(self, "island_bridge", None)
         if bridge is not None:
@@ -3738,13 +3740,55 @@ class OverlayShell(QObject):
         from .island_bridge import IslandWindowBridge
         self.island_bridge = IslandWindowBridge(
             island, host.collision, host.overlay, sound=self._sound,
-            kinetic=kinetic if callable(kinetic) else None)
+            kinetic=kinetic if callable(kinetic) else None,
+            on_sync=self._rebind_island_host)
         self._island_host = host
 
     def _island_screen_host(self, island):
-        """岛所在屏的宿主：唯一合成窗覆盖整个虚拟桌面，岛落在哪块屏都在同一张窗
-        里（局部坐标同源），故永远有落点。"""
-        return self._main_host
+        """岛所在屏的宿主：岛是独立顶层窗，有**自己**的屏。
+
+        混合缩放下一块屏一张合成窗，每张窗一份碰撞世界与局部坐标原点（见
+        ``_multi_window``）。墙绑错宿主 = 岛在副屏而墙在主屏的世界里：副屏那只
+        宠在另一份世界/坐标系里，直接穿过岛（拖岛拍鱼也不产生碰撞事件）。
+
+        岛左上角跨在两块屏之间的缝上时只绑**左上角所在那屏**（保守口径：墙只在
+        那一侧生效，不做跨缝的双世界映射——岛与宠不是同一生命周期，宁可少一堵
+        也不凭空多一堵）。
+
+        岛自己的选屏口径（``DynamicIsland._current_screen``，与夹取/停靠同一处
+        判据）优先，其次 Qt 顶层窗的 ``screen()``；两者都没有的岛替身回落到主宿主。
+        """
+        screen = None
+        probe = getattr(island, "_current_screen", None)
+        if callable(probe):
+            screen = probe()
+        if screen is None:
+            probe = getattr(island, "screen", None)
+            if callable(probe):
+                screen = probe()
+        host = self.host_for_screen(screen) if screen is not None else None
+        return host if host is not None else self._main_host
+
+    def _rebind_island_host(self) -> None:
+        """岛换屏 → 墙换到新屏的宿主（碰撞世界与局部原点一起换）。
+
+        岛桥每次几何/显隐同步前回调本方法（``IslandWindowBridge`` 的 ``on_sync``
+        口）：岛移动、跨屏拖拽、被夹回屏内、换主屏都会发几何回调，故"屏变化"没有
+        第二条通知面。宠的跨窗移交**不**走这里——岛是独立顶层窗，它的屏与原点只
+        认它自己，不随宠的生命周期换。
+        """
+        island = getattr(self, "_island", None)
+        bridge = getattr(self, "island_bridge", None)
+        if island is None or bridge is None:
+            return
+        multi = getattr(self, "_multi_window", None)
+        if not callable(multi) or not multi():
+            return  # 单窗（同 DPI 的绝大多数形态）：一张窗一套坐标，没宿主可换
+        host = self._island_screen_host(island)
+        if host is None or host is getattr(self, "_island_host", None):
+            return
+        self._island_host = host  # rebind 内部会再回调一次本方法：先记账才不递归
+        bridge.rebind(host.collision, host.overlay)
 
     # ---------------------------------------------------------------- 生命周期
     def _warm_sound_effects_once(self) -> None:
@@ -3838,18 +3882,22 @@ class OverlayShell(QObject):
           逐位等价，见 tests/test_overlay_shell_event_filter.py）；
         - 不消费的 KeyPress 同样就地返回 False；
         - 消费分支（瞄准中 Esc）逐位保留原行为：取消会话 + 返回 True 吞掉
-          事件。
-
+          事件。**目标是会话的 owner 窗**（多窗时输入可能接在副屏那张窗上）：
+          取消只改会话状态，源窗的 grab/按下状态必须由它自己收，否则 Esc 之后
+          那只窗仍扣着 grab，随后的松手会被当成一次普通点击。
         """
         if event.type() != QEvent.Type.KeyPress:
             return False
         if event.key() != Qt.Key.Key_Escape:
             return False
         overlay = getattr(self, "overlay", None)
-        if overlay is not None and overlay.slingshot.aiming:
-            overlay._cancel_slingshot(resume_drag=False)
-            return True
-        return False
+        if overlay is None:
+            return False
+        slingshot = overlay.slingshot
+        if not slingshot.aiming:
+            return False
+        (slingshot.owner or overlay)._cancel_slingshot(resume_drag=False)
+        return True
 
     def _run_exit_step(self, label: str, step) -> None:
         """退出收口的一步一隔离（缺陷 13）：单步异常只记日志，不中断后续步骤。
@@ -6688,11 +6736,16 @@ class OverlayShell(QObject):
             self._disconnect_screen_signal(screen, "refreshRateChanged", refresh)
 
     def _feed_screen_dpr(self) -> None:
-        """某块屏的显示缩放变了：逐只按自己那块屏重喂 DPR + 配图缓存换尺寸。"""
-        host = self._main_host
-        if host is None:
+        """某块屏的显示缩放变了：逐只按自己那块屏重喂 DPR + 配图缓存换尺寸。
+
+        逐**宿主**喂：多窗（混合缩放）下每张窗的 DPR 各自不同，只喂主宿主时副屏
+        那张窗里的精灵不会立刻换 DPI（几何变化的路径已经逐 host 喂过了，这里补齐
+        缩放信号这条）。
+        """
+        if not self._hosts:
             return
-        host.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
+        for each in list(self._hosts):
+            each.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
         self._refresh_self_talk_image_cache_for_dpr()
 
     def _refresh_tick_interval(self) -> None:
@@ -6821,17 +6874,35 @@ class OverlayShell(QObject):
             return
         if self._multi_window():
             # 多窗：每张窗跟**自己那块屏**的可用区走；探头边界同样用虚拟桌面
+            # 拖拽中的会话先收尾：拖拽域（放宽到虚拟桌面）、投影、弹簧目标全是
+            # 按旧几何算出来的，换域之后它们指向窗外，松手会把这只丢在无显示器的
+            # 空洞里。
+            for each in list(self._hosts):
+                self._end_drag(each)
             for each in list(self._hosts):
                 rect = QRect(each.screen.availableGeometry())
                 if rect.isEmpty():
                     continue
+                # 比例必须在换域**之前**取：``set_bounds`` 会就地按新域钳一次，
+                # 那时旧比例已经没了（实测宽 1920→1600：比例被钳成绝对位置的比例）
+                old_bounds = QRect(each.bounds)
+                plan = [(sprite, *self._body_ratio(sprite, old_bounds))
+                        for sprite in list(each.overlay.sprites)]
+                old_origin = each.overlay.geometry().topLeft()
                 each.overlay.setGeometry(rect)
                 each.set_bounds(QRect(0, 0, rect.width(), rect.height()))
                 each.set_activity(self._host_activity(each))
                 if each.probe is not None:
                     each.probe.set_bounds(self._probe_bounds(each))
+                # 落点必须在换域**之后**写（``set_pos`` 受当前域钳制）
+                for sprite, rx, ry in plan:
+                    self._place_body_ratio(sprite, rx, ry, QRect(each.bounds))
+                # 气泡跟随器/岛墙把窗原点缓存在自己身上：原点变了不同步就会留在
+                # 旧全局坐标上（屏平移后气泡停在原地）
+                self._sync_bubble_origin(each, old_origin)
                 each.overlay._feed_dpr()  # noqa: SLF001 - 同模块协作面
             self._sync_sprite_screens()
+            self._refresh_self_talk_image_cache_for_dpr()
             return
         desktop = self._desktop_bounds()
         if desktop.isEmpty():
