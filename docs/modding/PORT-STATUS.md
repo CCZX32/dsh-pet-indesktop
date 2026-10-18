@@ -167,8 +167,8 @@
 | 项 | 内容 |
 |---|---|
 | 目标（作者） | [`README.md`](../plugin-phase-05-distribution/README.md) §2 + [`PLUGIN-FEATURE-DELIVERY-MATRIX.md`](../plugin-roadmap/PLUGIN-FEATURE-DELIVERY-MATRIX.md)：屏幕理解样板稳定后，**AI 对话与文件理解是下一项主要拆包目标**，随后 Agent 及其余领域；11 个逻辑领域不等于 11 个 ZIP。 |
-| 本仓库状态 | ⚠️ **包线已落地（DLC 第四片），但落地形态与作者文档不同**。作者要的是"AI 与文件理解端口化后拆包，11 个逻辑领域不等于 11 个 ZIP"；本仓库落的是**共存**形态：`features/ai-chat/` 是官方 `host-only` 包（上游 `features/ai_chat` 整包移植，自带 provider / 会话 / 窗口 / 文件解读），与**未动过**的内置域 `pet/chat/` 并存，两套各持一本配置与会话账。逐项见 §九。 |
-| 证据落点 | `features/ai-chat/`（30 文件）、`pet/feature_host_bindings.py::bind_ai_context`、`pet/ai_bindings.py`、`scripts/build_ai_chat_package.py`；用例 `tests/test_ai_package_e2e.py`（装卸链）、`tests/test_ai_package_host.py`（包侧核）、`tests/test_ai_host_binding.py`、`tests/test_ai_bindings.py`。反向证据：`pet/chat/` 无包声明（内置聊天仍是核心域），包目录里不出现 `from pet.chat` 的引用。 |
+| 本仓库状态 | ⚠️ **包线已落地（DLC 第四片），但落地形态与作者文档不同**。作者要的是"AI 与文件理解端口化后拆包，11 个逻辑领域不等于 11 个 ZIP"；本仓库落的是**共存**形态：`features/ai-chat/` 是官方 `host-only` 包（上游 `features/ai_chat` 整包移植，自带 provider / 会话 / 窗口 / 文件解读），与**未动过**的内置域 `pet/chat/` 并存，两套各持一本配置与会话账。逐项见 §九。**2026-10-18 Phase 5B 前四片**：✅ 5B-1 Setup 回执消费（`pet/startup_receipt.py`，首启按盘上 manifest 幂等安装，单包失败不阻塞）；✅ 5B-2 AI 包补「无包无入口 / 重装保留偏好」；✅ 5B-3 文件理解补「卸载当场摘路由 / 停用不建解读器」；✅ 5B-4 十二领域交付矩阵 [`PLUGIN-DOMAIN-DELIVERY-MATRIX-2026-10-18.md`](../PLUGIN-DOMAIN-DELIVERY-MATRIX-2026-10-18.md)。**同时修掉冻结交付阻塞**：PyInstaller 漏收 `pet.mod_api` 导致官方包 probe 全部 `import_failed`，已加 hidden-import + 构建期用产物 exe 跑真实 probe 门。 |
+| 证据落点 | `features/ai-chat/`（30 文件）、`pet/feature_host_bindings.py::bind_ai_context`、`pet/ai_bindings.py`、`scripts/build_ai_chat_package.py`；用例 `tests/test_ai_package_e2e.py`（装卸链 + 无包/重装偏好）、`tests/test_ai_package_host.py`（包侧核 + 卸载摘路由/停用不建解读器）、`tests/test_ai_host_binding.py`、`tests/test_ai_bindings.py`、`tests/test_startup_receipt.py`、`tests/test_bundle_official_probe.py`、`scripts/verify_frozen_mod_api.py`。反向证据：`pet/chat/` 无包声明（内置聊天仍是核心域），包目录里不出现 `from pet.chat` 的引用。 |
 | 没做的原因 / 后续归属 | 上游把 AI **整包化**（Core 里不再有内置聊天），本仓库选择**并存**——内置聊天是现行权威且带着后续产品修复，整包化会把那些修复又一次分叉。代价写进 §九的"未做"表：包的 UI 落后于内置 UI（后续片）。 |
 
 ### Phase 6：第三方 SDK 与社区生态（作者标注"条件阶段"）
