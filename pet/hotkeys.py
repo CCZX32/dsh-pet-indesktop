@@ -178,13 +178,21 @@ class GlobalHotkeyService(QObject, QAbstractNativeEventFilter):
         return failures
 
     def clear(self) -> None:
-        """注销全部已注册热键（幂等；不摘过滤器）。"""
+        """注销全部已注册热键（幂等；不摘过滤器）。
+
+        注销失败（API 返回 False 或抛异常）只记日志并照旧丢弃记账：热键 id 到期
+        由进程回收，硬留着记账反而会挡住后续重新注册同一个 id。
+        """
         for hotkey_id in list(self._id_to_action):
             try:
-                platform_win._unregister_windows_hotkey(  # noqa: SLF001 - 同包协作面
+                ok = platform_win._unregister_windows_hotkey(  # noqa: SLF001 - 同包协作面
                     hotkey_id, 0, self._user32)
             except Exception:
-                logger.debug("全局快捷键：注销失败 id=%s", hotkey_id, exc_info=True)
+                logger.warning("全局快捷键：注销失败 id=%s", hotkey_id, exc_info=True)
+                continue
+            if not ok:
+                logger.warning("全局快捷键：注销返回失败 id=%s（可能已被系统回收）",
+                               hotkey_id)
         self._id_to_action.clear()
         self._active.clear()
 

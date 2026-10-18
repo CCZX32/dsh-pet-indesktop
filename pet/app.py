@@ -3087,6 +3087,15 @@ class AppShell:
                     shell.todo_service = None
                 if getattr(shell, "_shared", None) is not None:
                     shell._shared.stop_all()
+                # 全局热键是**系统级**注册：测试里直接 start() 过的壳不摘，注册会活到
+                # 进程结束（后面的用例、甚至开发机上真热键都会被它占着）。
+                hotkeys = getattr(shell, "_hotkeys", None)
+                if hotkeys is not None:
+                    try:
+                        hotkeys.uninstall()
+                    except Exception:
+                        logging.debug("测试收口注销全局快捷键失败", exc_info=True)
+                    shell._hotkeys = None
                 service = getattr(shell, "voice_chime_service", None)
                 if service is not None:
                     try:
