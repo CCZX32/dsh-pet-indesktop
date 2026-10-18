@@ -7222,7 +7222,6 @@ class OverlayShell(QObject):
         # 窗口、活动区、归属、落盘四者口径一致。
         self._multi_mode = bool(want_multi)
         self._topology_txn = True
-        self._geometry_save_after_txn = None
         try:
             self._reconcile_hosts_locked(want_multi)
         finally:
@@ -7271,23 +7270,35 @@ class OverlayShell(QObject):
         self._rebind_island_host()
         # 事务里的 `_end_drag` 走过一次拖拽收尾，但那时拒写（防错误比例）。记下这只，
         # 事务收口后补存——"这次不写"是为了不写错，不是永远不写。
-        if dragged is not None:
+        if dragged is not None and self._geometry_save_after_txn is None:
+            # 已有待补存记录时不覆盖：多轮事务里第一轮就记下了，而 `_drag_relaxed_sprite`
+            # 在几何事务里已被清掉——这一轮的 `dragged` 是 None，覆盖会把它丢掉。
             self._geometry_save_after_txn = dragged
 
     def _flush_deferred_geometry_save(self) -> None:
-        """拓扑事务收口后，把被拒写的拖拽位置补存一次（拓扑已对齐时才有意义）。"""
+        """拓扑事务收口后，把被拒写的拖拽位置补存一次（拓扑已对齐时才有意义）。
+
+        **记录只在"真的存上"或"对象已经不存在"时才消费**：未对齐就原样留着等下一次
+        信号——先清记录再判条件，会把"这次没对齐"变成"这次没存过"，补窗成功后也没人
+        再补。
+        """
         sprite = getattr(self, "_geometry_save_after_txn", None)
-        self._geometry_save_after_txn = None
         if sprite is None or self._topology_txn:
             return
-        if self._topology_needs_reconcile():
-            return  # 还没对齐：留着等下一次（`_save_child_geometry` 自己也会拒）
         if sprite not in self._all_sprites():
+            self._geometry_save_after_txn = None   # 这只已经被关掉：记录作废
             return
+        if self._topology_needs_reconcile():
+            return                                 # 仍未对齐：留着，不消费
         try:
-            self._save_child_geometry(sprite)
+            saved = self._save_child_geometry(sprite)
         except Exception:
             logging.debug("overlay: 拓扑事务后补存拖拽位置失败", exc_info=True)
+            return
+        if saved:
+            self._geometry_save_after_txn = None
+        else:
+            logging.debug("overlay: 拖拽位置补存未落盘（会被下次事务或关闭时再试）")
 
     def _refresh_tick_interval(self) -> None:
         """某块屏的刷新率变了（或屏集合变了）：重读刷新率重算 tick 间隔。

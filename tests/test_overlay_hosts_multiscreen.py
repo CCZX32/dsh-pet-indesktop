@@ -2130,3 +2130,84 @@ def test_interrupted_drag_is_saved_after_the_topology_transaction(
         assert rx == pytest.approx(0.5, abs=0.1)
     finally:
         _cleanup(shell)
+
+
+def test_deferred_drag_save_survives_a_multi_pass_transaction(tmp_path, monkeypatch):
+    """一次重排需要**多轮**时，第一轮记下的补存记录不许被后面的轮次吃掉。
+
+    每轮开始都清记录的话：第一轮记下被拖那只 → 第二轮 `_drag_relaxed_sprite` 已被
+    几何事务清空 → 记不上 → 收敛成功也补不了存。这条路径是"最终成功却漏存"。
+    """
+    from pet import pet_profiles
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+        shell._drag_relaxed_sprite = main
+        before = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+
+        original = shell._adopt_new_host
+        state = {"once": True}
+
+        def adopt(screen, *, visible):
+            original(screen, visible=visible)
+            if state["once"]:
+                state["once"] = False
+                # 事务内把缩放改回去：这一轮结束后判定又变回单窗 → 必须**再跑一轮**
+                # 把多出来的宿主拆掉。第二轮时 `_drag_relaxed_sprite` 已被几何事务
+                # 清空，靠的就是第一轮记下的那条待补存记录。
+                b.set_rects((1920, 0, 1920, 1080), (1920, 0, 1920, 1040), dpr=1.0)
+
+        monkeypatch.setattr(shell, "_adopt_new_host", adopt)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert shell._topology_needs_reconcile() is False, "先确认最终是收敛的"
+        assert len(shell.hosts()) == 1, "前提：确实跑了第二轮把宿主拆回去"
+        after = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+        assert after != before, "收敛后必须补存（多轮也要）"
+        rx = float(after["rx"])
+        assert rx == pytest.approx(0.5, abs=0.1)
+    finally:
+        _cleanup(shell)
+
+
+def test_deferred_drag_save_is_kept_when_the_topology_is_still_broken(
+        tmp_path, monkeypatch):
+    """未收敛时补存记录**不许被消费**：先清记录再判条件，等于把"这次没对齐"变成
+    "这次没存过"，补窗成功后也没人再补。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+        shell._drag_relaxed_sprite = main
+        original_caps = shell._apply_host_window_caps
+        state = {"fail": True}
+
+        def flaky(host):
+            if state["fail"] and host.screen is b:
+                raise RuntimeError("建窗失败")
+            return original_caps(host)
+
+        monkeypatch.setattr(shell, "_apply_host_window_caps", flaky)
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        assert shell._topology_needs_reconcile() is True, "前提：确实没对齐"
+        assert shell._geometry_save_after_txn is main, "未对齐时必须留着这条待补存记录"
+
+        # 恢复后下一次信号应当把这次位置补存掉
+        state["fail"] = False
+        from pet import pet_profiles
+        before = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+        shell._feed_screen_dpr()
+        after = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+        assert after != before, "对齐后要补存那次被打断的拖拽"
+        assert shell._geometry_save_after_txn is None, "存上了才消费记录"
+    finally:
+        _cleanup(shell)
