@@ -238,3 +238,19 @@ def test_our_notation_round_trips_through_the_edit_widget(text):
     if "num" in text:
         assert spec.parse(settings_hotkeys.chord_to_text(sequence))[1] >= 0x60
     del qapp
+
+
+@pytest.mark.parametrize("text", [
+    "Ctrl+ı", "Ctrl+ſ", "Ctrl+CapsLocK", "Ctrl+NumLocK", "Ctrl+BacKspace",
+    "Ctrl+Ａ", "Ctrl+中",
+])
+def test_unicode_variants_never_register_another_ascii_key(text):
+    """非 ASCII 变体一律不支持——包括「小写化后变成 ASCII」的那些。
+
+    - ``"ı".upper() == "I"``、``"ſ".upper() == "S"``（单字符分支）
+    - ``"K".lower() == "k"``：``"CapsLocK"`` 小写化后是纯 ASCII，会命中 CapsLock
+      （多字符分支）
+    两条分支都必须看**原始串**是不是 ASCII，否则这些字符会静默绑到别的键上。
+    """
+    assert spec.parse(text) is None, f"{text} 不许被当成合法热键"
+    assert spec.normalize(text) == ""

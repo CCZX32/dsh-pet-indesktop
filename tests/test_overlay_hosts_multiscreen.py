@@ -1556,3 +1556,38 @@ def test_hotplugged_screen_host_inherits_caps_and_visibility(tmp_path, monkeypat
         assert created.overlay.isVisible() is False, "隐藏状态必须被继承"
     finally:
         _cleanup(shell)
+
+
+def test_scale_change_that_also_shrinks_the_work_area_keeps_the_screen_ratio(
+        tmp_path, monkeypatch):
+    """缩放变化**同时把逻辑工作区变小**时，比例要按旧尺寸定标。
+
+    缩放信号到达那一刻 ``availableGeometry()`` 已经是新尺寸（1920 → 960），而宠的
+    坐标还在旧窗里。拿新宽高除旧坐标会把"副屏正中"量成 1.0，回位时把它扔到屏边。
+    所以比例定标必须读"上次已应用"的那份矩形，不是现算。
+    """
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        # 把它摆到副屏正中并记下归属（等价于"用户把它拖过去、松手已完成"）
+        shell._place_body_ratio(main, 0.75, 0.5, QRect(shell.overlay.geometry()))
+        shell._remember_sprite_screen(main, b)
+        body = main.body_rect()
+        assert body.x() + body.width() / 2.0 == pytest.approx(2880.0, abs=3.0), (
+            "前提：身体中心在副屏正中（整桌面 3840 的 75%）")
+
+        # 副屏改成 200%：逻辑工作区同时减半，且与主屏不再一致 → 拆窗
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        host_b = shell.host_for_screen(b)
+        assert host_b is not None and len(shell.hosts()) == 2, "前提：已拆成每屏一窗"
+        rect = shell._screen_rect_in_host(b, host_b)
+        body = main.body_rect()
+        ratio = (body.x() + body.width() / 2.0 - rect.x()) / rect.width()
+        assert ratio == pytest.approx(0.5, abs=0.06), (
+            f"必须留在副屏正中（比例 0.5），实际 {ratio:.2f}")
+    finally:
+        _cleanup(shell)

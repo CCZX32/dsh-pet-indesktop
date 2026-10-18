@@ -114,6 +114,10 @@ def _key_code(token: str) -> int | None:
         if upper in _ASCII_LETTERS or upper in _ASCII_DIGITS:
             return ord(upper)  # 字母/数字的 vk 就是大写 ASCII
         return None
+    # 判**原始 token**（不是小写化结果）：Kelvin 符号 K 的 ``lower()`` 就是 "k"，
+    # 所以 "CapsLocK" 这种小写化后全 ASCII、会命中 CapsLock —— 必须看原串。
+    if not token.isascii():
+        return None
     return _NAMED_KEYS.get(low)
 
 

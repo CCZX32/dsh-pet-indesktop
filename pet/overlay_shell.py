@@ -1115,6 +1115,10 @@ class OverlayShell(QObject):
         # 的各自主气泡跟随器/自言自语宿主/ pet 形宿主。
         self._drag_relaxed_sprite = None  # 拖拽期间被放宽域的那只（收尾时恢复）
         self._mixed_dpr_logged = False  # 混合缩放退化只提示一次
+        #: 每块屏**上一次真正应用**的矩形（宿主窗局部坐标）。缩放变化时
+        #: `screen.availableGeometry()` 已经变成**新**尺寸，而精灵坐标还是旧形态；
+        #: 比例定标必须用这份旧值，否则会把 0.5 量成 1.0（见 _capture_screen_ratios）。
+        self._applied_screen_rects: dict[str, QRect] = {}
         self._sprite_cfg_cache: dict = {}
         self._bubble_followers: dict = {}
         self._sprite_hosts: dict = {}
@@ -1458,6 +1462,7 @@ class OverlayShell(QObject):
         self._hosts.append(host)
         # 活动区要在宿主进表之后算：家那块屏（关闭跨屏时唯一活动区）从宿主读
         host.set_activity(self._host_activity(host))
+        self._remember_applied_screen_rect(screen, host)
         self._wire_host(host)
         return host
 
@@ -6938,13 +6943,50 @@ class OverlayShell(QObject):
             plan.append((sprite, assigned, rx, ry))
         return plan
 
+    def _remember_applied_screen_rect(self, screen, host=None) -> None:
+        """登记某块屏**此刻真正被应用**的宿主窗局部矩形（比例定标的唯一旧值来源）。"""
+        if screen is None:
+            return
+        name = _screen_name(screen)
+        if host is None:
+            host = self._host_of_screen(screen)
+        if host is None:
+            return
+        self._applied_screen_rects[name] = self._compute_screen_rect_in_host(screen, host)
+
+    def _host_of_screen(self, screen):
+        for host in self._hosts:
+            if host.screen is screen:
+                return host
+        return self._main_host
+
     @staticmethod
-    def _screen_rect_in_host(screen, host) -> QRect:
-        """某块屏在**指定宿主窗**坐标系里的矩形（只看那张窗的原点，不看拓扑判定）。"""
+    def _compute_screen_rect_in_host(screen, host) -> QRect:
+        """现算：某块屏在指定宿主窗坐标系里的矩形（只看那张窗的原点，不看拓扑判定）。"""
         if screen is None or host is None:
             return QRect()
         origin = host.overlay.geometry().topLeft()
         return QRect(screen.availableGeometry()).translated(-origin.x(), -origin.y())
+
+    def _screen_rect_in_host(self, screen, host) -> QRect:
+        """某块屏在**指定宿主窗**坐标系里的矩形。
+
+        取**上次已应用**的那份（``_applied_screen_rects``）：缩放信号到达时
+        ``availableGeometry()`` 已经是新尺寸，而精灵坐标还是旧形态，现算会把旧坐标
+        除以新宽高（实测 0.5 → 1.0，宠被扔到屏边）。缓存没有时才现算。
+        """
+        if screen is None or host is None:
+            return QRect()
+        # 首选**宿主当前活动区**里那块屏的矩形：它就是"上一次真正应用"的局部矩形
+        # （物理/碰撞都在用它），缩放信号到达时它还是旧值，而 availableGeometry()
+        # 已经变新了 —— 这正是比例定标需要的那份旧状态。
+        for candidate, rect in getattr(host, "activity", ()) or ():
+            if candidate is screen:
+                return QRect(rect)
+        cached = self._applied_screen_rects.get(_screen_name(screen))
+        if cached is not None and not cached.isEmpty():
+            return QRect(cached)
+        return self._compute_screen_rect_in_host(screen, host)
 
     def _restore_screen_ratios(self, plan: list[tuple]) -> None:
         """按 :meth:`_capture_screen_ratios` 的结果把每只放回自己那块屏的同一位置。"""
@@ -7148,6 +7190,7 @@ class OverlayShell(QObject):
                 old_origin = each.overlay.geometry().topLeft()
                 each.overlay.setGeometry(rect)
                 each.set_bounds(QRect(0, 0, rect.width(), rect.height()))
+                self._remember_applied_screen_rect(each.screen, each)
                 each.set_activity(self._host_activity(each))
                 if each.probe is not None:
                     each.probe.set_bounds(self._probe_bounds(each))
@@ -7171,6 +7214,9 @@ class OverlayShell(QObject):
         host.overlay.setGeometry(desktop)
         host.set_bounds(QRect(0, 0, desktop.width(), desktop.height()))
         host.set_activity(self._activity_rects())
+        # 单窗下每块屏在窗里的位置也是"已应用状态"，同样要刷新给下一次比例定标用。
+        for screen in self._screens():
+            self._remember_applied_screen_rect(screen, host)
         for sprite, rx, ry, target_rect in plan:
             self._place_body_ratio(sprite, rx, ry, target_rect)
         self._sync_bubble_origin(host, old_origin)
