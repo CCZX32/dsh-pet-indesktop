@@ -1126,6 +1126,8 @@ class OverlayShell(QObject):
         #: 拓扑重排事务的重入闸：`_sync_host_geometry` 与 `_reconcile_hosts_for_dpi`
         #: 互相调用，靠它保证"一次事务只跑一层"，不会在一半状态上再开一层。
         self._topology_txn = False
+        #: 事务打断的拖拽：收口后补存（见 `_flush_deferred_geometry_save`）
+        self._geometry_save_after_txn = None
         #: **已应用**的宿主形态（True = 每屏一窗）。由建壳与拓扑事务维护，是几何 /
         #: 坐标 / 屏归属 / 落盘的唯一口径；`_multi_window()` 只是"按当前屏幕缩放
         #: 想要什么"。两者不一致 = 需要重排（或重排失败后的降级态）。
@@ -7192,12 +7194,17 @@ class OverlayShell(QObject):
             # 上再开一层，否则 capture 会量到中间态的矩形。记一笔，上层收口时补做。
             self._topology_recheck = True
             return
-        for _attempt in range(_TOPOLOGY_MAX_PASSES):
-            if not self._topology_needs_reconcile() and not self._topology_recheck:
-                return
-            self._topology_recheck = False
-            if not self._run_topology_pass():
-                break  # 没推进就别空转
+        try:
+            for _attempt in range(_TOPOLOGY_MAX_PASSES):
+                if not self._topology_needs_reconcile() and not self._topology_recheck:
+                    return
+                self._topology_recheck = False
+                if not self._run_topology_pass():
+                    break  # 没推进就别空转
+        finally:
+            # 无论是"对齐完就 return"还是"跑满预算"，都要把事务里被拒写的那次拖拽
+            # 位置补存掉（`finally` 保证早退路径不漏）。
+            self._flush_deferred_geometry_save()
         if self._topology_needs_reconcile():
             # 收敛不了（例如某块屏的宿主建不起来）：留 pending 等下一次信号重试，
             # 并且**留一条日志**——静默失败会让"副屏没有窗"变成查不出原因的现象。
@@ -7215,6 +7222,7 @@ class OverlayShell(QObject):
         # 窗口、活动区、归属、落盘四者口径一致。
         self._multi_mode = bool(want_multi)
         self._topology_txn = True
+        self._geometry_save_after_txn = None
         try:
             self._reconcile_hosts_locked(want_multi)
         finally:
@@ -7233,6 +7241,9 @@ class OverlayShell(QObject):
 
     def _reconcile_hosts_locked(self, want_multi: bool) -> None:
         """拓扑重排事务本体（调用方已置 ``_topology_txn`` 闸）。"""
+        # 先记下"正被拖的那只"：下面的几何事务会调 `_end_drag`，它会把
+        # `_drag_relaxed_sprite` 清掉，之后再记就永远是 None。
+        dragged = self._drag_relaxed_sprite
         plan = self._capture_screen_ratios()
         if want_multi:
             was_visible = any(host.overlay.isVisible() for host in self._hosts)
@@ -7258,6 +7269,25 @@ class OverlayShell(QObject):
         # 宿主集合变了 ⇒ 岛墙绑的那张窗可能已经不在了（岛自己没有几何事件就不会
         # 自己重绑）。所有重排事务收口都补一次。
         self._rebind_island_host()
+        # 事务里的 `_end_drag` 走过一次拖拽收尾，但那时拒写（防错误比例）。记下这只，
+        # 事务收口后补存——"这次不写"是为了不写错，不是永远不写。
+        if dragged is not None:
+            self._geometry_save_after_txn = dragged
+
+    def _flush_deferred_geometry_save(self) -> None:
+        """拓扑事务收口后，把被拒写的拖拽位置补存一次（拓扑已对齐时才有意义）。"""
+        sprite = getattr(self, "_geometry_save_after_txn", None)
+        self._geometry_save_after_txn = None
+        if sprite is None or self._topology_txn:
+            return
+        if self._topology_needs_reconcile():
+            return  # 还没对齐：留着等下一次（`_save_child_geometry` 自己也会拒）
+        if sprite not in self._all_sprites():
+            return
+        try:
+            self._save_child_geometry(sprite)
+        except Exception:
+            logging.debug("overlay: 拓扑事务后补存拖拽位置失败", exc_info=True)
 
     def _refresh_tick_interval(self) -> None:
         """某块屏的刷新率变了（或屏集合变了）：重读刷新率重算 tick 间隔。

@@ -2099,3 +2099,34 @@ def test_rollback_puts_session_notifications_back_on_the_survivor(
             "撤宿主后必须把会话通知登记回存活宿主（不能只靠能力下发，那里会早退）")
     finally:
         _cleanup(shell)
+
+
+def test_interrupted_drag_is_saved_after_the_topology_transaction(
+        tmp_path, monkeypatch):
+    """事务打断的拖拽：当场拒写（防错误比例），**收口后要补存**。
+
+    原先的取舍是"这次不写"——安全但不完整：拓扑切换打断拖拽后用户重启/被强杀，
+    位置就丢了。收口后拓扑已对齐，这时再存一次才是正确的口径。
+    """
+    from pet import pet_profiles
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a, {"allow_cross_screen": True})
+    try:
+        main = shell.sprite
+        shell._place_body_ratio(main, 0.25, 0.5, QRect(0, 0, 3840, 1040))
+        # 模拟"正在拖这只"：事务里的 `_end_drag` 会走一次收尾并尝试保存
+        shell._drag_relaxed_sprite = main
+        before = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+
+        b.set_rects((1920, 0, 1920, 1080), (1920, 0, 960, 520), dpr=2.0)
+        shell._feed_screen_dpr()
+
+        after = dict(pet_profiles.read_slot_profile(tmp_path, 0).data)
+        assert after != before, "事务收口后必须把这次位置补存下来"
+        rx = float(after["rx"])
+        assert 0.0 <= rx <= 1.0, f"补存的比例也必须合法，实际 {rx}"
+        assert rx == pytest.approx(0.5, abs=0.1)
+    finally:
+        _cleanup(shell)
