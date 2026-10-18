@@ -210,11 +210,50 @@ class FpsSession:
         """本场会话的采集命令行（证据与测试用；每次按当前参数现算）。"""
         return game_fps.build_capture_args(session_name=self.session_name, pid=self.pid)
 
+    def sweep_stale_sessions(self) -> list[str]:
+        """启动前清掉**自己前缀**的历史残留 ETW 会话，返回停掉的名字。
+
+        残留来自异常退出（进程被强杀/崩溃时走不到 ``--terminate_existing_session``）。
+        Windows 的 trace 会话有上限，攒到十几个以后新会话直接报 ``error 1450``
+        （系统资源不足）——实机现场：整段 FPS 不出数，日志只有一行 1450，而用户
+        以前单屏玩游戏能出数（权限没变，是我们自己的会话攒满了）。
+
+        只停 ``dsh-pet-fps-`` 前缀且不是本次会话的那些名字：绝不用通配去抢别人的
+        采集会话（同 ``new_session_name`` 的纪律）。
+        """
+        try:
+            listed = subprocess.run(  # noqa: S603 - 固定 argv，绝不过 shell
+                ["logman", "query", "-ets"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
+                creationflags=_creation_flags())
+        except (OSError, subprocess.SubprocessError):
+            return []
+        names = game_fps.stale_session_names(listed.stdout or "",
+                                             keep=self.session_name)
+        stopped: list[str] = []
+        for name in names:
+            try:
+                done = subprocess.run(  # noqa: S603 - 固定 argv
+                    game_fps.stop_session_args(name),
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=10,
+                    creationflags=_creation_flags())
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if done.returncode == 0:
+                stopped.append(name)
+        if stopped:
+            logging.warning("帧率采集：清理 %d 个残留 ETW 会话（异常退出留下的）：%s",
+                            len(stopped), ", ".join(stopped))
+        return stopped
+
     def start(self) -> None:
         """起采集进程并挂上读线程。后端不可用/进程起不来都抛 FpsSessionError。"""
         problem = game_fps.backend_problem(self.backend)
         if problem:
             raise FpsSessionError(problem)
+        self.sweep_stale_sessions()
         argv = [str(self.backend)] + self.argv
         try:
             proc = subprocess.Popen(  # noqa: S603 - 参数逐个拼装，绝不过 shell
