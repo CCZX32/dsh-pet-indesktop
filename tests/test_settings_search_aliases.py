@@ -499,3 +499,56 @@ def test_author_rows_are_searchable_and_jump_to_the_update_page(tmp_path, monkey
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+# ---------------------------------------------------------------- 方向键翻命中
+def test_arrow_down_advances_and_arrow_up_goes_back(tmp_path, monkeypatch):
+    """搜索框里 ↓/↑ 逐条翻命中（回车之外的第二条直觉路径）。
+
+    通用预期：浏览器查找栏、VSCode、Windows 设置搜索都用 ↑/↓ 翻结果，按回车循环
+    反而少见。单行 QLineEdit 里 ↑/↓ 本来没有默认行为，不会和光标移动抢键。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.show()
+        dialog.search_edit.setText("对话")
+        app.processEvents()
+        total = len(dialog._search_matches)
+        assert total >= 3, f"前提：这个查询要多于两条命中（实际 {total}）"
+        assert dialog.search_status.text().startswith("1/")
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Down)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("2/"), "↓ 应该前进一条"
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Down)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("3/"), "↓ 再前进一条"
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Up)
+        app.processEvents()
+        assert dialog.search_status.text().startswith("2/"), "↑ 应该后退一条"
+        assert _current_match(dialog) is dialog._search_matches[1]
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_arrow_up_from_the_first_match_wraps_to_the_last(tmp_path, monkeypatch):
+    """第一条上按 ↑ 回绕到最后一条（取模天然支持，不需要特判分支）。"""
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.show()
+        dialog.search_edit.setText("对话")
+        app.processEvents()
+        total = len(dialog._search_matches)
+        assert total >= 3
+        assert dialog.search_status.text().startswith("1/")
+
+        QTest.keyClick(dialog.search_edit, Qt.Key.Key_Up)
+        app.processEvents()
+        assert dialog.search_status.text().startswith(f"{total}/"), "↑ 从第一条回绕到最后"
+        assert _current_match(dialog) is dialog._search_matches[-1]
+    finally:
+        dialog.close()
+        dialog.deleteLater()
