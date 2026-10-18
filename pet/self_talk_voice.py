@@ -13,13 +13,23 @@
 文件都没有"（issue #305）。自建服务只剩一个可选覆盖：``DSH_PET_TTS_URL`` 指向它时先走，
 它不在线就**落回注册表**，不再静默收工。
 
-**与外部的契约**（改动等于把已有缓存全部作废，测试已钉死）：
+**与外部的契约**（外部脚本按它产出，测试已钉死）：
 
-    <配置目录>/self_talk_voice/<md5(文本 utf-8)[:16]>.<扩展名>
+    <配置目录>/self_talk_voice/<md5(文本 utf-8)[:16]>.<扩展名>       ← 经典文本缓存
+    <配置目录>/self_talk_voice/<cache_key(文本, flavor)>.<扩展名>    ← 注册表产物
 
-扩展名由产出它的后端决定（edge/doubao → mp3，sapi/mimo 与外部产出脚本
-``F:\\dsh\\tts\\build_self_talk_voice.py`` → wav）；查找侧按 ``<md5>.*`` 枚举，不认死
-扩展名，外部脚本那份 wav 照样命中。
+两种来源的身份是**分开**的，查找顺序「当前配置的产物 → 经典文本缓存」：
+
+- 注册表生成的音频按 ``text + provider.flavor(实际合成输入的 values)`` 命名（与
+  ``voice_chime`` 的报时缓存同一个 ``cache_key``）：换音色 / 语速 / 后端就换键，
+  旧句子不会被当成"已缓存"，点击也不会命中另一把嗓子；
+- 外部产出脚本（``F:\\dsh\\tts\\build_self_talk_voice.py``）与自建服务覆盖模式没有
+  flavor，仍按纯文本命中（``cache_path`` 的老算法），**不能**因升级作废；但它也
+  不能凌驾于当前配置生成的产物之上（否则换了音色仍旧播老声音）。
+
+扩展名由产出它的后端决定（edge/doubao → mp3，sapi/mimo 与外部脚本 → wav）；
+经典缓存的查找按 ``<md5>.*`` 枚举，不认死扩展名，外部脚本那份 wav 照样命中。
+
 
 **名单**：每只宠**自己 slot 档案**里的自言自语（``self_talk_texts`` 是每宠键）＋该宠
 各角色**点击动画绑定**台词（``character_profiles.<角色>.click_talk_bindings.<动画id>``），
@@ -82,7 +92,7 @@ _HAPPY_HINTS = ("啦", "呀", "吧", "～", "~", "加油", "真棒", "好耶")
 
 
 def cache_path(config_dir, text: str, ext: str = "wav") -> Path:
-    """预缓存文件的查找路径（桌宠与外部产出脚本共用同一算法）。
+    """**经典**文本缓存路径（外部产出脚本与自建服务覆盖模式用；不含 flavor）。
 
     前后空白先剥掉：配置里手写的台词常带尾空格，不剥就会出现"同一句两个文件"，
     点击时命中不到缓存、悄悄回落到联网合成。``ext`` 默认 wav 是外部脚本的产出扩展名；
@@ -91,6 +101,18 @@ def cache_path(config_dir, text: str, ext: str = "wav") -> Path:
     stripped = str(text).strip()
     name = hashlib.md5(stripped.encode("utf-8")).hexdigest()[:16]
     return Path(config_dir) / CACHE_DIR_NAME / f"{name}.{ext}"
+
+
+def cache_path_for(config_dir, text: str, attempt) -> Path:
+    """注册表产物路径：键 = 文本 + **该 attempt 的** provider flavor（实际合成输入）。
+
+    ``attempt`` 必须是解析过的那一份（provider + preflight 校正后的 values）：产物
+    与文件身份同源，音色被自动回退时不至于把回退的声音挂在原音色名下。
+    """
+    from .voice_chime import cache_key
+
+    key = cache_key(str(text).strip(), provider_id=attempt.provider, values=attempt.values)
+    return Path(config_dir) / CACHE_DIR_NAME / f"{key}.{attempt.ext}"
 
 
 def _has_audio(path: Path) -> bool:
@@ -118,8 +140,8 @@ def _has_audio(path: Path) -> bool:
     return size >= int.from_bytes(header[4:8], "little") + 8
 
 
-def cached_audio(config_dir, text: str) -> Path | None:
-    """该句已缓存的音频文件；None = 还没合出来（或只剩残片）。
+def _classic_audio(config_dir, text: str) -> Path | None:
+    """经典文本缓存（外部脚本 / 自建服务产出）：按 ``<md5>.*`` 枚举。
 
     按 ``<md5>.*`` 枚举而不是拼死一个扩展名：扩展名由产出它的后端决定（mp3/wav），
     点击侧不该关心是谁合的。临时文件以 ``.`` 开头（见 ``_temp_path``），不进这个
@@ -130,6 +152,33 @@ def cached_audio(config_dir, text: str) -> Path | None:
         if _has_audio(path):
             return path
     return None
+
+
+def _flavor_audio(config_dir, text: str, attempts=()) -> Path | None:
+    """当前配置的产物（按 flavor 键）；``attempts`` 为空时没有这种来源。"""
+    for attempt in attempts:
+        path = cache_path_for(config_dir, text, attempt)
+        if _has_audio(path):
+            return path
+    return None
+
+
+def cached_audio(config_dir, text: str, attempts=()) -> Path | None:
+    """该句已缓存的音频文件；None = 还没合出来（或只剩残片）。
+
+    顺序是**当前配置的产物 → 经典文本缓存**：``attempts`` 是当前配置解析出的合成
+    尝试（``_flavor_attempts`` / ``_attempts``），按它们的 flavor 键先找；都没有才
+    落回纯文本的经典缓存（外部脚本那条来源）。``attempts`` 为空时只看经典缓存，
+    那是"没有配置上下文"的调用方的语义。
+    """
+    stripped = str(text).strip()
+    return (_flavor_audio(config_dir, stripped, attempts)
+            or _classic_audio(config_dir, stripped))
+
+
+def find_audio(config_dir, text: str, config) -> Path | None:
+    """点击路径的查找：按**当前配置**解析出的 flavor 键 → 经典文本缓存。"""
+    return cached_audio(config_dir, text, _flavor_attempts(config))
 
 
 def pick_voice(text: str) -> str:
@@ -213,9 +262,22 @@ def collect_all_lines(configs) -> list[tuple[str, str]]:
     return out
 
 
-def _pending(config_dir, lines) -> list[tuple[str, str]]:
-    """只留还没有可播本地音频的句子。"""
-    return [(text, source) for text, source in lines if cached_audio(config_dir, text) is None]
+def _pending(config_dir, lines, attempts=()) -> list[tuple[str, str]]:
+    """只留**当前配置**还没有产物的句子（查找口径与点击侧同一份）。
+
+    判据刻意不收经典文本缓存：那是外部脚本 / 自建服务的来源，没有 flavor，认它
+    等于"换了音色也算已缓存"——正是缺陷 A 的成因。有了当前配置的产物之后，点击侧
+    自然会优先命中它。``attempts`` 为空（自建服务覆盖模式）时才按经典缓存判。
+    """
+    if not attempts:
+        return [
+            (text, source) for text, source in lines
+            if _classic_audio(config_dir, text) is None
+        ]
+    return [
+        (text, source) for text, source in lines
+        if _flavor_audio(config_dir, text, attempts) is None
+    ]
 
 
 # --------------------------------------------------------------- 网络边界（测试打桩点）
@@ -278,6 +340,28 @@ def _publish(target: Path, write) -> Path:
 # --------------------------------------------------------------- 合成后端
 
 
+def _flavor_attempts(config) -> tuple:
+    """只为了算缓存键的尝试链：provider + ``preflight`` 校正后的 values。
+
+    与 :func:`_attempts` 的差别只有两点，且都不改变键：不读凭据（``flavor`` 按红线
+    不含密钥，见 ``pet/tts/base.py``），也不判可用性。于是**点击侧不依赖运行期
+    可用性**：后端此刻不可用（依赖被卸、Key 被清）时，已经合出来的音频照样能播，
+    这是"断网可用"这条产品承诺的一部分；顺带省掉每次点击的钥匙串读取。
+    """
+    from . import tts
+    from .voice_chime import normalize_chime_config, synth_attempts
+
+    out = []
+    for attempt in synth_attempts(normalize_chime_config(config)):
+        provider = tts.get(attempt.provider)
+        if provider is None:
+            continue
+        values, _note = provider.preflight(attempt.values)
+        out.append(tts.TtsAttempt(
+            provider=attempt.provider, values=values, plan=provider.plan(values)))
+    return tuple(out)
+
+
 def _attempts(config) -> tuple:
     """当前配置下可用的合成尝试链（与「试听」同一条：同一后端、同一音色）。
 
@@ -318,7 +402,7 @@ def _synth_with_backends(config_dir, text: str, attempts) -> Path:
     errors: list[str] = []
     for attempt in attempts:
         provider = tts.get(attempt.provider)
-        target = cache_path(config_dir, text, attempt.ext)
+        target = cache_path_for(config_dir, text, attempt)
         try:
             return _publish(
                 target, lambda temp, p=provider, a=attempt: p.synth(text, a.plan, temp))
@@ -356,24 +440,43 @@ def run_precache(config, *, configs=None, server: str | None = None) -> dict:
     自建服务（``DSH_PET_TTS_URL`` 或显式 ``server``）先走；它不在线就**落回注册表**：
     不允许再出现"服务不在，于是一个文件都没有、用户也看不到任何提示"的静默结局
     （issue #305）。单句合成失败不影响其余句子，也不动已缓存的句子。
+
+    开关在**句间**复查：合成一批要几分钟，期间用户关掉开关就立刻停止开新请求
+    （已发出的那一次不取消——那是 provider 自己的超时）。
     """
     stats = {"checked": 0, "made": 0, "failed": 0, "skipped": 0, "reason": ""}
     config_dir = config.dir
     lines = collect_all_lines([config] if configs is None else configs)
-    pending = _pending(config_dir, lines)
     stats["checked"] = len(lines)
-    stats["skipped"] = len(lines) - len(pending)
-    if not pending:
-        stats["reason"] = "up-to-date"
-        return stats
 
     endpoint = server or os.environ.get(SERVER_ENV, "")
     if endpoint and not _server_ready(endpoint):
         logger.warning("台词语音预缓存：本地 TTS 服务 %s 不可用，改用配置的合成后端", endpoint)
         endpoint = ""
 
-    if endpoint:
-        for text, source in pending:
+    # "还缺哪句"的判据与写入侧同名：注册表产物按 flavor 命键（经典文本缓存是外部
+    # 脚本的来源，不算当前配置的产物，否则换了音色也照样跳过）；自建服务覆盖模式
+    # 没有 flavor，只认经典文本缓存——否则服务产出的文件永远不会被自己算成"已缓存"，
+    # 每轮都重合成一遍。
+    attempts = () if endpoint else _attempts(config)
+    pending = _pending(config_dir, lines, attempts)
+    stats["skipped"] = len(lines) - len(pending)
+    if not pending:
+        stats["reason"] = "up-to-date"
+        return stats
+    if not endpoint and not attempts:
+        logger.warning(
+            "台词语音预缓存无法进行：没有可用的合成后端"
+            "（先在「语音报时」里点一次试听确认能出声，台词语音用的是同一个后端）")
+        stats["reason"] = "no-backend"
+        return stats
+
+    for index, (text, source) in enumerate(pending):
+        if not enabled(config):
+            logger.info("台词语音预缓存：开关已关闭，句间停止（还剩 %d 句）", len(pending) - index)
+            stats["reason"] = "switched-off"
+            break
+        if endpoint:
             try:
                 _publish(cache_path(config_dir, text),
                          lambda temp: temp.write_bytes(_synth_server(endpoint, text)))
@@ -383,17 +486,7 @@ def run_precache(config, *, configs=None, server: str | None = None) -> dict:
                 continue
             stats["made"] += 1
             logger.info("台词语音预缓存完成：%s（%s，自建服务）", text, source)
-        return stats
-
-    attempts = _attempts(config)
-    if not attempts:
-        logger.warning(
-            "台词语音预缓存无法进行：没有可用的合成后端"
-            "（先在「语音报时」里点一次试听确认能出声，台词语音用的是同一个后端）")
-        stats["reason"] = "no-backend"
-        return stats
-
-    for text, source in pending:
+            continue
         try:
             target = _synth_with_backends(config_dir, text, attempts)
         except Exception:
@@ -415,6 +508,8 @@ def enabled(config) -> bool:
 
 _active: threading.Thread | None = None
 _lock = threading.Lock()
+#: 上一轮在跑时收到的最新一次请求：当前批结束后按它补跑一轮（再来的覆盖它）。
+_pending_run: tuple | None = None
 
 
 def start_precache(config, *, configs=None, server: str | None = None) -> bool:
@@ -422,12 +517,17 @@ def start_precache(config, *, configs=None, server: str | None = None) -> bool:
 
     ``configs`` 是每只活跃宠的配置视图（台词名单是每宠键）。返回是否真的起了新一轮；
     调用方（保存设置 / 启动）不需要等它。
+
+    单飞不等于丢弃：上一轮还在跑时不并发，但把这次请求记为**待处理快照**，当前批
+    结束后由 ``_run_quietly`` 按它补跑一轮——否则合成期间追加的台词要等到下次保存
+    设置或重启才有缓存。
     """
-    global _active
+    global _active, _pending_run
     if not enabled(config):
         return False
     with _lock:
         if _active is not None and _active.is_alive():
+            _pending_run = (config, configs, server)
             return False
         thread = threading.Thread(
             target=_run_quietly, args=(config, configs, server),
@@ -439,7 +539,16 @@ def start_precache(config, *, configs=None, server: str | None = None) -> bool:
 
 
 def _run_quietly(config, configs, server) -> None:
-    try:
-        run_precache(config, configs=configs, server=server)
-    except Exception:
-        logger.exception("台词语音预缓存线程异常（不影响点击）")
+    """跑完当前批后，若期间又收到请求（最新快照）就按它补跑一轮。"""
+    global _active, _pending_run
+    while True:
+        try:
+            run_precache(config, configs=configs, server=server)
+        except Exception:
+            logger.exception("台词语音预缓存线程异常（不影响点击）")
+        with _lock:
+            next_run, _pending_run = _pending_run, None
+            if next_run is None or not enabled(next_run[0]):
+                _active = None
+                return
+            config, configs, server = next_run

@@ -2,9 +2,13 @@
 """点击台词 / 绑定台词「本地语音预缓存」的聚焦回归。
 
 产品契约：
-- 命名约定 ``<配置目录>/self_talk_voice/<md5(文本 utf-8)[:16]>.<扩展名>`` 必须与外部
-  产出脚本（F:\\dsh\\tts\\build_self_talk_voice.py）一致 —— 桌宠按同一算法查找，
-  改了就等于把已有缓存全部作废，所以这里把约定钉死（默认 wav = 脚本的产出扩展名）；
+- 注册表生成的音频按 ``text + provider.flavor(实际合成输入)`` 命名（与 ``voice_chime``
+  的报时缓存同一个 ``cache_key``）：换音色/语速/后端就换键，旧句子不会被当成已缓存；
+  preflight 把音色换掉之后，键按**替换后**的音色算；
+- 命名约定 ``<配置目录>/self_talk_voice/<md5(文本 utf-8)[:16]>.<扩展名>`` 是**经典
+  文本缓存**（外部产出脚本 ``F:\\dsh\\tts\\build_self_talk_voice.py`` 与自建服务覆盖
+  模式）：没有 flavor、仍按纯文本命中，升级不作废它；但查找顺序是「当前配置的产物 →
+  经典文本缓存」，它不凌驾于当前配置生成的产物之上；
 - 合成走「设置 → 语音报时」同一条链路（``pet/tts`` 注册表 + 同一音色），所以「试听
   有声音」等价于「台词语音能生成」；自建 CosyVoice 只剩 ``DSH_PET_TTS_URL`` 这条可选
   覆盖，且它不在线时必须落回注册表而不是静默收工（issue #305）；
@@ -12,7 +16,8 @@
   各角色**点击动画绑定**台词，跨宠按文本去重（读错作用域 → 在别人的名单上生成、
   点击命中不到 → 回退在线合成，音色变成另一个人）；
 - 落盘原子：残片/空文件既不上账也不被查找侧当成命中；
-- 开关默认关闭：未开启时一个合成请求都不发。
+- 开关默认关闭：未开启时一个合成请求都不发；一轮合成期间关掉开关，句间就停手；
+- 单飞不等于丢弃：合成期间再次保存台词，当前批结束后按最新名单补跑一轮。
 
 纪律：全部用例不打网络（``_get_json`` / ``_post_json`` 局部打桩，合成后端用假
 provider），线程用例用 Event 同步 + 宽预算，不固定 sleep 猜时序。
@@ -31,6 +36,7 @@ import pytest
 from pet import self_talk_voice as stv
 from pet import tts
 from pet.config import Config
+from pet.voice_chime import cache_key
 
 # --------------------------------------------------------------- 替身与夹具
 
@@ -48,27 +54,42 @@ def _wav(payload: bytes = b"\x00\x00" * 16) -> bytes:
 
 
 class _FakeProvider(tts.TtsProvider):
-    """假合成后端：不联网，写一段结构自洽的 wav（可按文本失败或只写残片）。"""
+    """假合成后端：不联网，写一段结构自洽的 wav（可按文本失败或只写残片）。
+
+    ``voice`` 参与 ``flavor``：与真实 provider 同一口径（flavor 只放影响音频内容的
+    参数），因此换音色就换缓存键。
+    """
 
     id = "faketts"
     label = "假合成后端（测试）"
-    fields = ()
+    fields = (
+        tts.TtsField(name="voice", key="fake_voice", label="音色", default="v1"),
+    )
     is_fallback = False
 
-    def __init__(self, *, fail=(), truncate=(), unavailable: str = "") -> None:
+    def __init__(self, *, fail=(), truncate=(), unavailable: str = "",
+                 dead=(), resolved: str = "v-default") -> None:
         self.fail = set(fail)
         self.truncate = set(truncate)
         self.unavailable = unavailable
+        self.dead = set(dead)
+        self.resolved = resolved
         self.calls: list[str] = []
 
     def plan(self, values):
         return {"ext": "wav"}
 
     def flavor(self, values):
-        return "fake"
+        return f"fake|{values.get('voice') or ''}"
 
     def availability(self, values):
         return self.unavailable
+
+    def preflight(self, values):
+        """配置里的音色"已下架"时换默认音色（与 edge 的 preflight 同语义）。"""
+        if values.get("voice") in self.dead:
+            return {**values, "voice": self.resolved}, "音色已下架，改用默认音色"
+        return values, ""
 
     def synth(self, text, plan, out_path):
         self.calls.append(text)
@@ -101,6 +122,10 @@ def _cfg(tmp_path, *, backend: str = "", **extra) -> Config:
     cfg.set("self_talk_texts", ["好女孩……", "再陪你一会儿。"])
     # 第二条与全局台词重复：名单必须去重，同一句不该合成两遍。
     cfg.set_click_talk_bindings("shenshen", {"click-1": ["绑定的专属台词。", "好女孩……"]})
+    # 预缓存开关默认关着（产品默认），这里默认打开：本文件的 `run_precache` 用例
+    # 验的都是"开关开着时这一批怎么跑"，关着那一侧由 start_precache / AppShell 的
+    # 用例单独守。
+    cfg.set("self_talk_voice_precache_enabled", True)
     if backend:
         cfg.set("voice_chime_tts_backend", backend)
         cfg.set("voice_chime_tts_fallback", False)
@@ -186,6 +211,102 @@ def test_cached_audio_ignores_in_flight_temp_files(tmp_path):
     assert stv.cached_audio(tmp_path, "好女孩……") is None
 
 
+# ------------------------------------------- 键 = 实际合成输入的指纹（缺陷 A / B）
+
+
+def test_changing_the_voice_marks_the_old_line_as_uncached(tmp_path, fake_tts):
+    """① 换音色后旧句子不能再被当成"已缓存"，点击侧也不能命中另一把嗓子。
+
+    缺陷 A：键里只有文本时，试听已经换了新声音、点击台词仍是旧声音，而且保存设置 /
+    重启 / 重开预缓存都不会重合成（"有文件＝已缓存"永远成立）。键带上 provider
+    flavor 之后，换音色就等于换键。
+    """
+    provider = fake_tts()
+    cfg = _cfg(tmp_path, backend=provider.id, fake_voice="v1")
+    stv.run_precache(cfg)
+    first = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert first is not None, "首次预缓存必须落出可播音频"
+
+    cfg.set("fake_voice", "v2")  # 用户换了音色
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) is None, (
+        "换音色后旧音频不算命中——否则就是「试听换了声音、点击还是旧声音」")
+
+    provider.calls.clear()
+    stats = stv.run_precache(cfg)
+    assert "好女孩……" in provider.calls, "新音色必须重新合成"
+    assert stats["made"] == 3
+    second = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert second is not None and second != first, "新音色的产物落在新键上"
+
+
+def test_classic_text_wav_still_hits_but_never_outranks_the_current_flavor(tmp_path, fake_tts):
+    """② 兼容不丢：外部脚本的经典文本 wav 仍命中，但当前配置的产物优先于它。
+
+    两种来源的身份是分开的：经典缓存没有 flavor（纯文本命中），注册表产物按 flavor
+    命名。查找顺序「当前配置 → 经典」，所以经典缓存既不会作废，也不会挡住新音色
+    （合成侧的"还缺什么"只认当前配置的产物，不拿经典缓存当已缓存）。
+    """
+    provider = fake_tts()
+    cfg = _cfg(tmp_path, backend=provider.id)
+    classic = stv.cache_path(cfg.dir, "好女孩……")
+    classic.parent.mkdir(parents=True, exist_ok=True)
+    classic.write_bytes(_wav())
+
+    assert stv.cached_audio(cfg.dir, "好女孩……") == classic, "外部脚本的老缓存必须仍命中"
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) == classic, "当前配置还没产物时回退经典缓存"
+
+    provider.calls.clear()
+    stats = stv.run_precache(cfg)
+
+    assert "好女孩……" in provider.calls, "经典缓存不能压掉按当前音色的合成"
+    assert stats["made"] == 3
+    fresh = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert fresh is not None and fresh != classic, "当前配置的产物优先于经典缓存"
+
+
+def test_cached_line_still_plays_after_the_backend_became_unavailable(tmp_path, fake_tts):
+    """后端此后不可用（依赖被卸 / Key 被清）时，已合出来的台词照样能播。
+
+    "断网可用"是这条产品承诺的核心：查找只按当前配置算键（preflight 同源），不判
+    运行期可用性——否则 edge-tts 一坏，几十个已经下好的音频文件全部变成"没声音"。
+    """
+    provider = fake_tts()
+    cfg = _cfg(tmp_path, backend=provider.id)
+    stv.run_precache(cfg)
+    produced = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert produced is not None
+
+    provider.unavailable = "fake_missing"
+
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) == produced
+
+
+def test_precache_names_the_file_after_the_resolved_voice(tmp_path, fake_tts):
+    """③ 缺陷 B 的台词侧：preflight 回退后，键必须按**实际合成**的音色算。
+
+    按配置原音色命名会让产物与文件身份不符：用户显式改成那把回退音色时要再合一遍，
+    将来原音色恢复又可能继续命中回退的声音。
+    """
+    provider = fake_tts(dead={"dead-voice"})
+    cfg = _cfg(tmp_path, backend=provider.id, fake_voice="dead-voice")
+
+    stv.run_precache(cfg)
+
+    resolved_key = cache_key("好女孩……", provider_id=provider.id,
+                             values={"voice": provider.resolved})
+    configured_key = cache_key("好女孩……", provider_id=provider.id,
+                               values={"voice": "dead-voice"})
+    assert resolved_key != configured_key, "两种音色必须是两个键"
+    assert (_cache_dir(cfg.dir) / f"{resolved_key}.wav").is_file(), "产物按实际合成的音色命名"
+    assert not (_cache_dir(cfg.dir) / f"{configured_key}.wav").exists(), (
+        "按配置原音色命名会让回退产物与文件身份不符")
+
+    provider.calls.clear()
+    cfg.set("fake_voice", provider.resolved)  # 用户显式改成同一把嗓子
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) is not None
+    assert provider.calls == [], "同一把嗓子不该因为换了写法再合一遍"
+
+
 # --------------------------------------------------------------- 名单与音色
 
 
@@ -261,24 +382,23 @@ def test_run_precache_synthesizes_with_the_configured_backend(tmp_path, fake_tts
     stats = stv.run_precache(cfg)
 
     assert stats["made"] == 3 and stats["failed"] == 0 and stats["skipped"] == 0
-    target = stv.cache_path(cfg.dir, "好女孩……")
-    assert target.is_file()
-    assert stv.cached_audio(cfg.dir, "好女孩……") == target
+    target = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert target is not None and target.is_file()
     assert sorted(provider.calls) == ["再陪你一会儿。", "好女孩……", "绑定的专属台词。"]
 
 
 def test_run_precache_skips_lines_that_already_have_audio(tmp_path, fake_tts):
     provider = fake_tts()
     cfg = _cfg(tmp_path, backend=provider.id)
-    cached = stv.cache_path(cfg.dir, "绑定的专属台词。")
-    cached.parent.mkdir(parents=True, exist_ok=True)
-    cached.write_bytes(_wav())
+    stv.run_precache(cfg)  # 先按当前音色补齐，拿到"当前配置的产物"
+    cached = stv.find_audio(cfg.dir, "绑定的专属台词。", cfg)
+    provider.calls.clear()
 
     stats = stv.run_precache(cfg)
 
-    assert stats["made"] == 2 and stats["skipped"] == 1
-    assert cached.read_bytes() == _wav(), "已缓存的句子不该被重合成覆盖"
-    assert "绑定的专属台词。" not in provider.calls
+    assert stats["made"] == 0 and stats["skipped"] == 3
+    assert cached is not None and cached.read_bytes() == _wav(), "已缓存的句子不该被重合成覆盖"
+    assert provider.calls == []
 
 
 def test_run_precache_keeps_going_after_one_failure(tmp_path, fake_tts):
@@ -288,8 +408,8 @@ def test_run_precache_keeps_going_after_one_failure(tmp_path, fake_tts):
     stats = stv.run_precache(cfg)
 
     assert stats["made"] == 2 and stats["failed"] == 1
-    assert stv.cached_audio(cfg.dir, "再陪你一会儿。") is not None
-    assert stv.cached_audio(cfg.dir, "好女孩……") is None
+    assert stv.find_audio(cfg.dir, "再陪你一会儿。", cfg) is not None
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) is None
 
 
 def test_run_precache_never_publishes_a_truncated_clip(tmp_path, fake_tts):
@@ -300,7 +420,7 @@ def test_run_precache_never_publishes_a_truncated_clip(tmp_path, fake_tts):
     stats = stv.run_precache(cfg)
 
     assert stats["failed"] == 1 and stats["made"] == 2
-    assert stv.cached_audio(cfg.dir, "好女孩……") is None
+    assert stv.find_audio(cfg.dir, "好女孩……", cfg) is None
     leftovers = [p.name for p in _cache_dir(cfg.dir).iterdir() if p.name.startswith(stv.TEMP_PREFIX)]
     assert leftovers == [], f"临时文件没清干净：{leftovers}"
 
@@ -412,6 +532,7 @@ def test_start_precache_is_single_flight(tmp_path, monkeypatch):
     release = threading.Event()
     entered = threading.Event()
     monkeypatch.setattr(stv, "_active", None)
+    monkeypatch.setattr(stv, "_pending_run", None)
 
     def slow_run(*_a, **_k):
         entered.set()
@@ -423,6 +544,81 @@ def test_start_precache_is_single_flight(tmp_path, monkeypatch):
     assert entered.wait(5.0)
     assert stv.start_precache(cfg) is False, "上一轮还在跑时不该再起一轮"
     release.set()
+
+
+def _wait_until(predicate, budget: float = 10.0) -> bool:
+    """轮询等待状态收敛（宽预算、事件式判据，不固定 sleep 猜时序）。"""
+    import time
+
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_lines_added_during_a_run_are_picked_up_after_the_batch(tmp_path, fake_tts, monkeypatch):
+    """④ 缺陷 C 前半：合成中追加台词并保存，当前批结束后必须补跑一轮。
+
+    旧实现单飞时直接丢弃新请求，而名单只在本轮开始时取一次：新台词要等到下次保存
+    设置或重启才有缓存（用户看到的是"刚加的台词点了没声音/走了联网合成"）。
+    """
+    provider = fake_tts()
+    cfg = _cfg(tmp_path, backend=provider.id)
+    cfg.set("self_talk_voice_precache_enabled", True)
+    monkeypatch.setattr(stv, "_active", None)
+    monkeypatch.setattr(stv, "_pending_run", None)
+
+    started = threading.Event()
+    release = threading.Event()
+    synth = provider.synth
+
+    def slow_synth(text, plan, out_path):
+        started.set()
+        assert release.wait(10.0), "第一批的合成没被放行"
+        synth(text, plan, out_path)
+
+    provider.synth = slow_synth
+
+    try:
+        assert stv.start_precache(cfg, configs=[cfg]) is True
+        assert started.wait(10.0), "第一批合成没开始"
+
+        cfg.set("self_talk_texts", ["好女孩……", "再陪你一会儿。", "合成期间新加的一句。"])
+        assert stv.start_precache(cfg, configs=[cfg]) is False, "单飞保留：不并发起第二轮"
+
+        release.set()
+        assert _wait_until(
+            lambda: stv.find_audio(cfg.dir, "合成期间新加的一句。", cfg) is not None), (
+            "当前批结束后必须按最新名单补跑，新台词不能永久错过")
+    finally:
+        release.set()
+        _wait_until(lambda: not (stv._active and stv._active.is_alive()))
+
+
+def test_switching_the_setting_off_stops_starting_new_syntheses(tmp_path, fake_tts):
+    """⑤ 缺陷 C 后半：合成期间关掉开关，句间就停手，不再发后续请求。
+
+    不要求取消已发出的那一次（那是 provider 自己的超时），只要求"不再开新的"：
+    关掉开关之后一条都不该再发出去。
+    """
+    provider = fake_tts()
+    cfg = _cfg(tmp_path, backend=provider.id)
+    cfg.set("self_talk_voice_precache_enabled", True)
+    synth = provider.synth
+
+    def synth_and_switch_off(text, plan, out_path):
+        synth(text, plan, out_path)
+        cfg.set("self_talk_voice_precache_enabled", False)  # 用户在合成期间关掉
+
+    provider.synth = synth_and_switch_off
+
+    stats = stv.run_precache(cfg, configs=[cfg])
+
+    assert provider.calls == ["好女孩……"], "句间检查：关掉开关后不许再开新的合成"
+    assert stats["made"] == 1
+    assert stats["reason"] == "switched-off"
 
 
 # --------------------------------------------------------------- 设置
@@ -501,6 +697,7 @@ def test_appshell_precache_passes_every_pet_view_to_the_entry(tmp_path, monkeypa
 def test_precache_stays_off_until_the_switch_is_on(tmp_path, monkeypatch):
     """开关关着时连每宠名单都不读（每宠档案读取不该为关着的功能付费）。"""
     cfg = _cfg(tmp_path)
+    cfg.set("self_talk_voice_precache_enabled", False)
     shell = _appshell(cfg)
     seen: list = []
     monkeypatch.setattr(stv, "start_precache",
@@ -558,6 +755,7 @@ def test_external_settings_save_starts_the_precache(tmp_path, monkeypatch):
     import pet.app as app_mod
 
     cfg = _cfg(tmp_path)
+    cfg.set("self_talk_voice_precache_enabled", False)
     shell = _appshell(cfg)
     shell._sync_dynamic_island = lambda: None
     shell._apply_balance_timer = lambda: None
@@ -600,5 +798,7 @@ def test_producer_output_is_what_the_click_path_plays(tmp_path, fake_tts):
 
     assert shell.speak_self_talk("好女孩……") is True
 
-    assert played == [str(stv.cache_path(cfg.dir, "好女孩……"))]
-    assert shell.self_talk_voice_file("好女孩……") == stv.cached_audio(cfg.dir, "好女孩……")
+    produced = stv.find_audio(cfg.dir, "好女孩……", cfg)
+    assert played == [str(produced)]
+    assert produced != stv.cache_path(cfg.dir, "好女孩……"), "注册表产物按 flavor 命名"
+    assert shell.self_talk_voice_file("好女孩……") == produced
