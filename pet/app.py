@@ -1462,7 +1462,10 @@ class AppShell:
         # 没有实例时端口返回 None，包侧按静默降级处理。
         register_feature_presentation(_presentation_factory)
         # 语音报时包只拿 Core 唯一音频通道的提交面；通道按需懒创建。
-        register_feature_audio(self.ensure_audio_channel)
+        # 测试里的最小 AppShell 替身没有音频通道：没有可注册的提供方就跳过。
+        _audio_factory = getattr(self, "ensure_audio_channel", None)
+        if callable(_audio_factory):
+            register_feature_audio(_audio_factory)
         # 官方聊天包的桌宠形呈现面（DLC 聊天包线）：同样是惰性工厂——包**每次开窗**
         # 才解析一次，拿到的是本实例的聊天宿主（legacy = PetWindow 本体；overlay =
         # sprite 壳的 pet 形 ``_OverlayChatHost``，与内置聊天窗用的是同一个宿主），

@@ -19,8 +19,10 @@ class VoiceChimeRuntime:
         self._closed = False
 
     def speak_now(self) -> None:
-        if not self._closed:
-            self._emit(datetime.now())
+        if self._closed:
+            return
+        self.config.reload()
+        self._emit(datetime.now())
 
     def _emit(self, now: datetime) -> None:
         text = clock_sentence(now) + pick_quote(now, self.config.quotes_zh, self.config.quotes_en)
@@ -44,6 +46,7 @@ class VoiceChimeRuntime:
         if self._closed or not self._armed:
             return
         self._timer = None
+        self.config.reload()
         self._emit(datetime.now())
         self._schedule_next()
 
@@ -55,6 +58,7 @@ class VoiceChimeRuntime:
     def start(self) -> None:
         if self._closed:
             return
+        self.config.reload()
         self._armed = True
         self._schedule_next()
 

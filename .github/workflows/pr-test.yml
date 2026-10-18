@@ -166,7 +166,7 @@ jobs:
         run: python scripts/ci_shards.py --jobs 1
 
       # Linux 主套件失败后的**受限前缀**重跑（诊断，不是覆盖）：只跑收集序前缀
-      # test_agent_cost → test_config_schema（44 个文件；本机 3.11 + offscreen 同口径
+      # test_account_usage_package_build → test_config_schema（48 个文件；本机 3.11 + offscreen 同口径
       # 实测 948 passed / 7 skipped / 2:27 全绿）。第三轮那次 abort 就落在该前缀的最后
       # 一个文件里（tests/test_config_schema.py::
       # test_reload_whitelist_snapshot_matches_current，面包屑只有 [call] 没有
@@ -192,6 +192,10 @@ jobs:
           DSPET_TEST_DIAG_DIR: ${{ runner.temp }}/dspet-pytest-diag-linux-prefix
         run: >-
           python -m pytest --capture=tee-sys -vv
+          tests/test_account_usage_package_build.py
+          tests/test_account_usage_package_e2e.py
+          tests/test_account_usage_package_host.py
+          tests/test_account_usage_package_structure.py
           tests/test_agent_cost.py
           tests/test_agent_event_protocol.py
           tests/test_agent_link.py

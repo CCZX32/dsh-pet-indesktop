@@ -362,7 +362,7 @@ class TestPrTestCaptureAndFailureDiagnostics:
         step = _step_block(_text(PR_TEST), self.PREFIX_DIAGNOSTICS)
         run = _run_text(step)
         files = re.findall(r"tests/[A-Za-z0-9_]+\.py", run)
-        assert files[0] == "tests/test_agent_cost.py", "前缀起点必须是收集序首个测试文件"
+        assert files[0] == "tests/test_account_usage_package_build.py", "前缀起点必须是收集序首个测试文件"
         assert files[-1] == "tests/test_config_schema.py", "前缀终点是 test_config_schema.py"
         assert files == sorted(set(files)), "前缀清单必须按收集序去重升序（顺序决定 nodeid 对齐）"
         # 有界性：升序 + 终点 = test_config_schema.py 已经保证清单不会越到该文件之后
@@ -370,7 +370,7 @@ class TestPrTestCaptureAndFailureDiagnostics:
         # 一改（新增更靠前的测试文件）前缀起点就得跟着改，以及清单里的文件必须真的
         # 存在（改名后这一步会当场 exit 4，不会静默跑了个空）。
         names = sorted(path.name for path in (ROOT / "tests").glob("test_*.py"))
-        assert names[: names.index("test_config_schema.py") + 1][0] == "test_agent_cost.py", (
+        assert names[: names.index("test_config_schema.py") + 1][0] == "test_account_usage_package_build.py", (
             "收集序首文件变了，前缀起点要跟着改"
         )
         for name in files:

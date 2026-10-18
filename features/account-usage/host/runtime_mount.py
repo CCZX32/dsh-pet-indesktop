@@ -44,6 +44,7 @@ class AccountUsageRuntime:
     def show(self):
         if self._closed:
             return
+        self.config.reload()
         cached = self._read_cache()
         if cached is not None and time.time() - cached[0] < CACHE_TTL_SECONDS:
             self._bubble(cached[1])
@@ -53,6 +54,8 @@ class AccountUsageRuntime:
     def refresh(self):
         if self._closed:
             return
+        self.config.reload()
+        self._schedule()
         self._query()
 
     # --------------------------------------------------------------- 生命周期

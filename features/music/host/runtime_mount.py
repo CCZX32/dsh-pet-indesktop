@@ -33,6 +33,7 @@ class MusicRuntime:
     def launch(self, player_key: str) -> None:
         if self._closed:
             return
+        self.config.reload()
         label = player_label(player_key)
         manual = self.config.manual_path(player_key)
 
