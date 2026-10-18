@@ -289,7 +289,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 本文件只留接线——这是既定口径（settings_quiet/weather/divination 同形）。
 # 2026-10-18 上调到 2580（Ctrl+F 聚焦搜索框 + 搜索索引纳入「更新」页作者行，本文件
 # 净 +17：两条 import、`_focus_search_box` 槽与其接线、索引来源多一类候选）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2580
+# 2026-10-19 上调到 2594（搜索框 ↑/↓ 逐条翻命中，本文件净 +14：`_search_settings`
+# 改成 `advance: int` 步长并补 docstring、`eventFilter` 四键映射）。这一改只动键盘
+# 交互，没有新页面/新控件组可拆，按「拆不动则校准到实测」处理。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2594
 
 
 def _read(name: str) -> str:
