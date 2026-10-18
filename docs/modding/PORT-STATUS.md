@@ -171,6 +171,15 @@
 | 证据落点 | `features/ai-chat/`（30 文件）、`pet/feature_host_bindings.py::bind_ai_context`、`pet/ai_bindings.py`、`scripts/build_ai_chat_package.py`；用例 `tests/test_ai_package_e2e.py`（装卸链 + 无包/重装偏好）、`tests/test_ai_package_host.py`（包侧核 + 卸载摘路由/停用不建解读器）、`tests/test_ai_host_binding.py`、`tests/test_ai_bindings.py`、`tests/test_startup_receipt.py`、`tests/test_bundle_official_probe.py`、`scripts/verify_frozen_mod_api.py`。反向证据：`pet/chat/` 无包声明（内置聊天仍是核心域），包目录里不出现 `from pet.chat` 的引用。 |
 | 没做的原因 / 后续归属 | 上游把 AI **整包化**（Core 里不再有内置聊天），本仓库选择**并存**——内置聊天是现行权威且带着后续产品修复，整包化会把那些修复又一次分叉。代价写进 §九的"未做"表：包的 UI 落后于内置 UI（后续片）。 |
 
+### Phase 5C：Core / DLC 架构重构（2026-10-18）
+
+| 项 | 内容 |
+|---|---|
+| 目标 | 按交付矩阵让可拆领域成为官方包，Core 只保留宿主能力；core-bound 领域给出保持证据 |
+| 本仓库状态 | ✅ **7 个官方包**：AI 对话、文件理解（随 AI）、屏幕理解、账户用量、音乐启动器、语音报时、日常台词、快捷启动（其中文件理解随 AI 包）。新增 `presentation` / `scheduler` / `audio` 三个包端口与显式凭据操作集、`process.spawn` 声明式能力；每个包都有结构 / 构建 / 绑定 / 安装闭环测试。**保持 Core**：Agent（外部桥接契约 + 无 OS 钩子端口）、灵动岛（多屏拓扑 + 无主槽贡献端口）、趣味互动（无窗口/素材端口）、Harness（托盘与进程清理生命周期）；生活提醒保持 Phase-2 进程内插件（默认切换属产品决策）。 |
+| 证据落点 | `features/{account-usage,music,voice-chime,persona-phrases,quick-launch}/`、`pet/feature_ports.py`（新端口）、`pet/feature_host_bindings.py`（`bind_account/music/voice/persona/quick_launch_context`）、`scripts/build_host_package.py` 与各包构建器、`tests/test_*_package*.py`、矩阵 [`PLUGIN-DOMAIN-DELIVERY-MATRIX-2026-10-18.md`](../PLUGIN-DOMAIN-DELIVERY-MATRIX-2026-10-18.md)、审计 [`DLC-ARCHITECTURE-AUDIT-2026-10-18.md`](../DLC-ARCHITECTURE-AUDIT-2026-10-18.md)。 |
+| 没做的原因 / 后续归属 | 包菜单仍只落在「扩展」子菜单；歌词富气泡、灵动岛主槽贡献、趣味互动窗口端口均需新能力模型，见审计 §3。 |
+
 ### Phase 6：第三方 SDK 与社区生态（作者标注"条件阶段"）
 
 | 项 | 内容 |
