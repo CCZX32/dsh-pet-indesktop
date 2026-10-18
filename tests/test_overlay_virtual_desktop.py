@@ -354,8 +354,8 @@ def test_dragging_onto_the_secondary_screen_remembers_the_assignment(tmp_path, m
         _tick(shell)
 
         assert shell._screen_of_sprite(sprite) is left, "前提：身体已经在副屏"
-        assert getattr(sprite, "_pending_screen_assignment", None) == left.name(), (
-            "松手后必须把换屏归属记在这只身上")
+        assert shell._stored_screen_name(shell._spawn_config_dir(), 0) == left.name(), (
+            "松手即落盘：盘上的屏幕归属必须是副屏")
         assert shell._save_child_geometry(sprite, slot=0) is True, (
             "归属与承载屏一致时几何自存必须真的写盘")
     finally:

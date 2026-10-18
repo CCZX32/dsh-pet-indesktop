@@ -1179,7 +1179,11 @@ class PetInstance:
             from .chat.session_store import SessionStore
 
             store = SessionStore(self.config.dir, getattr(self.config, "instance_id", ""))
-            character_id = str(self.config.get("character", catalog.DEFAULT_CHARACTER))
+            # ``character`` 是每宠键：会话按角色隔离，读主配置会稳定拿到出厂默认
+            # 角色，slot≠0 的宠聊天就串到默认角色的会话里（同族缺陷：进程级服务
+            # 读每宠键）。身份统一经 ``_identity_config()`` 取当前呈现身份。
+            character_id = str(self._identity_config().get(
+                "character", catalog.DEFAULT_CHARACTER))
             sessions = store.list(character_id)
             if sessions:
                 session = sessions[0]
