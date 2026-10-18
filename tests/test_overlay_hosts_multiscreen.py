@@ -35,6 +35,7 @@ class FakeScreen(QObject):
 
     geometryChanged = Signal(QRect)
     availableGeometryChanged = Signal(QRect)
+    refreshRateChanged = Signal(float)
 
     def __init__(self, geo, avail, *, dpr=1.0, refresh=60.0, name="A"):
         super().__init__()
@@ -49,6 +50,11 @@ class FakeScreen(QObject):
         self._avail = QRect(*avail)
         if dpr is not None:
             self._dpr = float(dpr)
+
+    def set_refresh(self, rate):
+        """同分辨率下切刷新率（60↔180）：几何不变，只发 refreshRateChanged。"""
+        self._refresh = float(rate)
+        self.refreshRateChanged.emit(self._refresh)
 
     def geometry(self):
         return QRect(self._geo)
@@ -526,6 +532,63 @@ def test_unplugging_the_home_screen_moves_home_to_a_survivor(tmp_path, monkeypat
         assert _screen_of(shell, shell.sprite) is b
         assert shell.sprite.home_screen is b
         assert shell.hosts() == [shell._main_host]
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 屏事件：刷新率
+def _refresh_calls(monkeypatch, shell):
+    """把"重算 tick 间隔"换成本地计数：接/摘线直接看调用次数，不看间隔推。"""
+    calls = []
+    monkeypatch.setattr(shell, "_refresh_tick_interval",
+                        lambda: calls.append(1))
+    return calls
+
+
+def test_refresh_rate_change_on_a_non_home_screen_retargets_tick(
+        tmp_path, monkeypatch):
+    """非窗口归属屏改刷新率：统一 tick 跟着改。
+
+    单合成窗铺满整个虚拟桌面，``_refresh_rate`` 取**全部**屏的最高档（v4.3.3
+    口径）；失效通知若仍只挂在窗口自己那块屏上，改副屏刷新率就永远收不到通知，
+    宠物按旧频率跑（升刷不动、降刷继续空转唤醒）。
+    """
+    a, b = _two_screens()  # 两块 60Hz
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a)
+    try:
+        driver = shell.driver
+        assert driver.timer.interval() == 16, "60Hz 起步"
+
+        b.set_refresh(180.0)  # 副屏（非窗口归属屏）
+
+        assert driver.timer.interval() == 6
+
+        b.set_refresh(60.0)
+
+        assert driver.timer.interval() == 16, "降回 60Hz 也要跟上"
+    finally:
+        _cleanup(shell)
+
+
+def test_screen_removal_detaches_the_refresh_rate_signal(tmp_path, monkeypatch):
+    """拔屏后刷新率信号必须摘掉；插回来只接一次（不泄漏、不重复接线）。"""
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a)
+    try:
+        _install_screens(monkeypatch, a)
+        shell.handle_screen_removed(b)
+        calls = _refresh_calls(monkeypatch, shell)
+
+        b.set_refresh(180.0)
+        assert calls == [], "拔掉的屏不再触发重算"
+
+        _install_screens(monkeypatch, a, b)
+        shell.handle_screen_added(b)
+        assert len(calls) == 1, "插屏后明确刷新一次（取数范围变了）"
+        b.set_refresh(170.0)
+        assert len(calls) == 2, "插回来只接一次（重复接线会翻倍）"
     finally:
         _cleanup(shell)
 
