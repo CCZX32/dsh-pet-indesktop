@@ -28,7 +28,7 @@
 
 | 文件 | 改了什么 + 为什么 |
 |---|---|
-| `pet/overlay_shell.py` | `cfg` 改回**主宠每宠视图**（点击朗读/台词池/角色都读它）；新增 `_mixed_dpr()`，混合缩放时 `_desktop_bounds` 退化为家屏可用区（一张窗只能一个 DPR）；`_activity_rects` 同步只留家屏；拖拽收尾补记屏幕归属并**松手即落盘**（且只在原归属屏仍在线时算有意换屏，拔屏的临时承载不动归属）；`move_sprite_to_screen` 改按活动区判定；全屏订阅 `refreshRateChanged` 并接/摘一致 |
+| `pet/overlay_shell.py` | `cfg` 改回**主宠每宠视图**（点击朗读/台词池/角色都读它）；新增 `_mixed_dpr()` / `_multi_window()`：混合缩放 + 允许跨屏时**每块屏一张窗**（一窗只能一个 DPR），跨屏 = 把这只连同位置交给目标窗（局部坐标经全局中转，拖拽中按光标所在屏实时移交），关闭跨屏时仍单窗退化为家屏；`_activity_rects` 多窗下按宿主；拖拽收尾补记屏幕归属并**松手即落盘**（且只在原归属屏仍在线时算有意换屏，拔屏的临时承载不动归属）；`move_sprite_to_screen` 改按活动区判定；全屏订阅 `refreshRateChanged` 并接/摘一致 |
 | `pet/app.py` | `_self_talk_speak_wanted` 改读每宠视图；`_self_talk_voice_configs` 修正底层表名（`_instances`）与测试桩容错；`_sync_chat_sessions` 的角色走 `_identity_config()`；`_identity_config()` 新增，供灵动岛/托盘/识屏取当前呈现身份 |
 | `pet/todo_reminder.py` | 气泡返回 False 时改道系统通知（不再吞掉）；`_daily_due` 枚举昨天/今天/明天，跨午夜宽限窗生效 |
 | `pet/window.py` | legacy `show_bubble` 返回布尔，与 overlay 同契约 |
