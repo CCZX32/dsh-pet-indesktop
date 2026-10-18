@@ -210,50 +210,11 @@ class FpsSession:
         """本场会话的采集命令行（证据与测试用；每次按当前参数现算）。"""
         return game_fps.build_capture_args(session_name=self.session_name, pid=self.pid)
 
-    def sweep_stale_sessions(self) -> list[str]:
-        """启动前清掉**自己前缀**的历史残留 ETW 会话，返回停掉的名字。
-
-        残留来自异常退出（进程被强杀/崩溃时走不到 ``--terminate_existing_session``）。
-        Windows 的 trace 会话有上限，攒到十几个以后新会话直接报 ``error 1450``
-        （系统资源不足）——实机现场：整段 FPS 不出数，日志只有一行 1450，而用户
-        以前单屏玩游戏能出数（权限没变，是我们自己的会话攒满了）。
-
-        只停 ``dsh-pet-fps-`` 前缀且不是本次会话的那些名字：绝不用通配去抢别人的
-        采集会话（同 ``new_session_name`` 的纪律）。
-        """
-        try:
-            listed = subprocess.run(  # noqa: S603 - 固定 argv，绝不过 shell
-                ["logman", "query", "-ets"],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=10,
-                creationflags=_creation_flags())
-        except (OSError, subprocess.SubprocessError):
-            return []
-        names = game_fps.stale_session_names(listed.stdout or "",
-                                             keep=self.session_name)
-        stopped: list[str] = []
-        for name in names:
-            try:
-                done = subprocess.run(  # noqa: S603 - 固定 argv
-                    game_fps.stop_session_args(name),
-                    capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=10,
-                    creationflags=_creation_flags())
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if done.returncode == 0:
-                stopped.append(name)
-        if stopped:
-            logging.warning("帧率采集：清理 %d 个残留 ETW 会话（异常退出留下的）：%s",
-                            len(stopped), ", ".join(stopped))
-        return stopped
-
     def start(self) -> None:
         """起采集进程并挂上读线程。后端不可用/进程起不来都抛 FpsSessionError。"""
         problem = game_fps.backend_problem(self.backend)
         if problem:
             raise FpsSessionError(problem)
-        self.sweep_stale_sessions()
         argv = [str(self.backend)] + self.argv
         try:
             proc = subprocess.Popen(  # noqa: S603 - 参数逐个拼装，绝不过 shell
@@ -444,14 +405,57 @@ class FpsSession:
 _foreground_api = None
 
 
+def sweep_stale_sessions(session_name: str) -> list[str]:
+    """开会话前清掉**自己前缀**的历史残留 ETW 会话，返回停掉的名字。
+
+    残留来自异常退出（进程被强杀/崩溃时走不到 ``--terminate_existing_session``）。
+    Windows 的 trace 会话有上限，攒到十几个以后新会话直接报 ``error 1450``
+    （系统资源不足）——实机现场：整段 FPS 不出数，日志只有一行 1450，而用户
+    以前单屏玩游戏能出数（权限没变，是我们自己的会话攒满了）。
+
+    只停 ``dsh-pet-fps-`` 前缀且不是本次会话的那些名字：绝不用通配去抢别人的
+    采集会话（同 ``new_session_name`` 的纪律）。清理是尽力而为，任何失败都只
+    放弃清理，绝不影响随后真正要开的采集会话。
+    """
+    try:
+        listed = subprocess.run(  # noqa: S603 - 固定 argv，绝不过 shell
+            ["logman", "query", "-ets"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10,
+            creationflags=_creation_flags())
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = game_fps.stale_session_names(listed.stdout or "", keep=session_name)
+    stopped: list[str] = []
+    for name in names:
+        try:
+            done = subprocess.run(  # noqa: S603 - 固定 argv
+                game_fps.stop_session_args(name),
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
+                creationflags=_creation_flags())
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0:
+            stopped.append(name)
+    if stopped:
+        logging.warning("帧率采集：清理 %d 个残留 ETW 会话（异常退出留下的）：%s",
+                        len(stopped), ", ".join(stopped))
+    return stopped
+
+
 def default_session(pid: int, name: str, session_name: str, backend: Any = None) -> FpsSession:
     """普通权限会话的构造（:class:`FpsMonitor` 与岛侧的替换点共用）。
 
     采集只有这一条路：没有第二个后端可选，所以内置后端的解析只在这里实现一份，
-    测试替身与产品走的是同一个入口。
+    测试替身与产品走的是同一个入口。开新会话前先清自己前缀的残留会话——这一步
+    放在工厂而不是 ``FpsSession.start()``：清残留是"准备新采集"的前置动作，
+    不是某个会话的生命周期，且它要再起两个 ``logman`` 子进程，不该被会话自身
+    的进程替身记账。
     """
     if backend is None:
         backend = game_fps.bundled_backend_path()
+    sweep_stale_sessions(session_name)
     return FpsSession(pid=pid, name=name, backend=backend, session_name=session_name)
 
 
