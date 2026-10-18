@@ -214,21 +214,69 @@ FAILED test_chat_subsystem.py::test_secret_store_keeps_a_third_party_backend_who
 `test_chat_subsystem.py + test_config_key_migration.py + test_settings_reset_defaults.py`
 186 passed, 1 skipped；`ruff check` 全过。
 
-### 8.3 产物与真机证据（本轮补，均为只读/可逆）
+### 8.3 产物与真机证据（本轮补，只读/可逆；每条标明执行宿主与命令）
 
-- **旧包 PYZ 核验（推翻了原归因）**：`CArchiveReader` 读
-  `D:\dsh-pet\dsh-pet-standalone-webm-chat.exe` → PYZ 2902 个模块，其中
-  `win32ctypes` 27 个、`win32ctypes.pywin32.win32cred` 1 个、`win32ctypes.core` 21 个。
-  新构建产物同样具备（2912 个模块 / 34 个 `win32ctypes.*`）。→ **4.3.3 并不缺这个
-  模块**，"缺模块导致 401"不成立。
-- **冻结包内可导入**：以产物 `_internal` 作 `sys.path`、`python -S` 隔离 site-packages，
-  `import win32ctypes.pywin32.win32cred` 成功（`_internal\win32ctypes\pywin32\win32cred.py`）。
-- **跨进程凭据往返（本机真机）**：后端 `keyring.backends.Windows.WinVaultKeyring`；
-  进程 A 写入临时探针凭据 → 进程 B 读回值一致（`MATCH = True`）→ 删除后读回 `None`。
-  用的是 `probe-<uuid>` 探针串，**未触碰用户的真 Key**。
-- **三端门禁不再互相污染**：`platform_modules("linux") == platform_modules("darwin") == ()`，
-  `platform_modules("win32")` 仍要求 `win32ctypes.pywin32.win32cred`，反向用例保证
-  Windows 少带它仍以退出码 4 中止。
+**证据分三层，层次不可互相代替**——`a` 是"包里有什么"，`b` 是"同版本解释器能加载包内文件"，
+`c` 是"这台机器的 OS 凭据库能跨进程持久"。**没有一条是在冻结 exe 进程里跑的**。
+
+**a. 旧部署 exe 的内嵌 PYZ 清单**（执行宿主：打包机 CPython 3.13，脚本见下）
+
+```python
+from PyInstaller.archive.readers import CArchiveReader
+r = CArchiveReader(r"D:\dsh-pet\dsh-pet-standalone-webm-chat.exe")
+mods = set()
+for name, entry in r.toc.items():
+    if entry[-1] == "z":
+        mods |= set(r.open_embedded_archive(name).toc.keys())
+```
+
+原始输出：
+
+```
+== D:\dsh-pet\dsh-pet-standalone-webm-chat.exe  (PYZ modules: 2902)
+   keyring                            OK 28
+   keyring.backends.Windows           OK 1
+   win32ctypes                        OK 27
+   win32ctypes.pywin32.win32cred      OK 1
+   win32ctypes.core                   OK 21
+== dist-onedir\...\dsh-pet-standalone-webm-chat.exe  (PYZ modules: 2912)
+   win32ctypes                        OK 34
+```
+
+→ **4.3.3 与 4.3.4 的包都带着这个依赖**，"缺模块导致 401"不成立。
+
+**b. 包内文件的外部解释器导入**（执行宿主：打包机 CPython 3.13，cwd 为产物目录）
+
+```
+python -S -c "import sys; sys.path.insert(0,'_internal'); import win32ctypes.pywin32.win32cred as m; print(m.__file__)"
+→ frozen pyd import OK: \win32ctypes\pywin32\win32cred.py
+```
+
+`-S` 屏蔽系统 site-packages，所以加载的是包内那份源码。**边界**：这是"同版本解释器
+能加载包内文件"，`keyring` 本体在此路径下会因 `jaraco` 只在 PYZ 里而 ImportError——
+这正说明这条路径**不等于冻结运行时**，不要拿它当"冻结进程已验证"。
+
+**c. 跨进程凭据往返**（执行宿主：打包机 CPython 3.13，三个独立 `python -c` 进程；
+用的是 `probe-<uuid>` 探针串，**未触碰任何真实 API Key**）
+
+```
+BACKEND = keyring.backends.Windows.WinVaultKeyring
+write -> ok (pid differs next call)
+read back in a NEW process: 'secret-probe-097025eb...'
+MATCH = True
+cleaned: True
+```
+
+这证明"本机 Windows 凭据库 + keyring 25.7.0 的 WinVault 后端"跨进程持久正常。
+**尚未做**：在冻结 exe 进程内完成写→读→删。冻结 exe 没有可注入代码的通用入口
+（只有 `--settings` / `--settings-page` / `--ocr-worker` / `--uninstall-cleanup`），
+不加调试入口就自动化不了。这一条转由实机验收覆盖：填一次 Key → 重启 → 设置页仍显示
+已保存、日志无「凭据存储不可用」。是**未覆盖**，不是"已验证"。
+
+**d. 三端门禁不再互相污染**：`platform_modules("linux") == platform_modules("darwin") == ()`，
+`platform_modules("win32")` 仍要求 `win32ctypes.pywin32.win32cred`，反向用例保证
+Windows 少带它仍以退出码 4 中止。**能力边界**：门禁校验的是模块名在不在，不校验父包
+完整性与实际可导入性（这是既有清单校验的边界，不是本轮条件化引入的）。
 
 ### 8.4 结论修正
 

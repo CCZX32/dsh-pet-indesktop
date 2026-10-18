@@ -170,10 +170,11 @@ class SecretStore:
     def _backend_usable(self) -> bool:
         """**后端**真的能用吗（不只是 `import keyring` 成功）。
 
-        模块在、后端不可用时，`get_password/set_password` 抛 ``NoKeyringError``：
-        界面说"已保存"、重启后主进程读到空串。**这是"读取为空"的成因，不是
-        "key 被服务端拒绝"的成因**——服务端回 401 并显示具体 key 尾号，说明凭据
-        确实被送到了服务端（那是 key 本身的问题），别把两者混为一谈。
+        模块在、后端不可用时写凭据会失败（`fail` 后端抛 ``NoKeyringError``，
+        `null` 后端不抛但什么都不记）：界面说"已保存"、重启后主进程读到空串。
+        **这是"读取为空"的成因，不是"服务端拒绝"的成因**——服务端回 401 并显示
+        具体 key 尾号，只说明发出去的是非空凭据，具体为什么无效（key 失效 / 填错 /
+        provider 不匹配 / 选错了旧的凭据条目）需要另查，别把两者混为一谈。
         """
         if self._keyring is None:
             return False

@@ -210,10 +210,15 @@ foreach ($m in @('django','hypothesis')) {
 $keyringCollect = @('--collect-all', 'keyring')
 # **keyring 的 Windows 后端要 win32ctypes**（pywin32-ctypes 包，import 名 `win32ctypes`）。
 #
-# 注意归因（2026-10-19 核验，纠正先前的说法）：4.3.3 的包**并不缺它**。`_internal`
-# 目录里看不到 `win32ctypes/`，但 exe 内嵌的 PYZ 里有 27 个 `win32ctypes.*` 模块
-# （PyInstaller 自带的 hook-win32ctypes 收集的），用 `_internal` 作 sys.path 实测可以
-# 导入 `win32ctypes.pywin32.win32cred`。所以"缺这个模块"不是那次 401 的根因。
+# 注意归因（2026-10-19 核验，纠正先前的说法）：4.3.3 的包**并不缺它**。两项证据要分开看：
+# ① 产物层：`CArchiveReader` 读 4.3.3 部署 exe 的内嵌 PYZ，里面有 27 个 `win32ctypes.*`
+#    模块（PyInstaller 自带 hook-win32ctypes 收的；`_internal` 目录里看不到它只是"纯 Python
+#    模块进 PYZ"的正常表现）。
+# ② 模块层（**不是**冻结进程）：以产物 `_internal` 作 sys.path、`python -S` 隔离系统
+#    site-packages，`import win32ctypes.pywin32.win32cred` 成功——这只说明包内那份源码能被
+#    同版本解释器加载，不能当成"冻结运行时已验证"（keyring 本体会因 jaraco 只在 PYZ 里而
+#    在这条路径下 ImportError）。
+# 所以"缺这个模块"不是那次 401 的根因。
 #
 # 仍然显式收集，理由换成加固：那条收集是**隐式**的，依赖 PyInstaller hook 与 keyring
 # 版本恰好的配合；hook 消失或依赖布局变化就静默丢，症状是钥匙串后端不可用（凭据只活在

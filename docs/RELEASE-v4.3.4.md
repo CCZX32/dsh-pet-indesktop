@@ -203,23 +203,35 @@ Windows 对同时存在的 trace 会话有上限，攒到十几个以后新会�
 - **跨窗拖拽期间没有碰撞**：从 A 拖一只到 B、仍按着鼠标时，它能与 B 的宠重叠，松手归窗后才分离。要做得引入跨窗物理代理，留到 4.3.5。
 - **岛横跨两屏缝上时只绑一侧**：岛正好压在接缝上（一半主屏一半副屏）时，墙只建在岛所在那块屏的世界里，另一侧的宠会穿过去。只有把岛精确拖到缝上横跨才触发。
 
-**那条 `401`「AI 对话请求失败」没定位到代码缺陷**（用户反馈，转来三条，核验后一真两假）：
+**那条 `401`「AI 对话请求失败」没定位到代码缺陷**（用户反馈共三条：`thinking` 参数格式与
+「重写 config 清空活跃宠」两条核验为不成立；`401` 这条原先判"真"，**但根因后来被推翻了**，
+原文的 `win32ctypes 缺包` 结论作废，现在只能是"现象真、根因未定位"）：
 
-- **本版加的是加固，不是那次的根因修复。** 原先的判断是「4.3.3 的冻结包缺
-  `win32ctypes`，钥匙串后端不可用，读到的 Key 是空串」——**这条核验后不成立**：
-  读 4.3.3 部署包的 exe 内嵌 PYZ，里面有 27 个 `win32ctypes.*` 模块（PyInstaller
-  自带 hook 收的），以 `_internal` 作 `sys.path` 实测可以导入
-  `win32ctypes.pywin32.win32cred`；`_internal` 目录里看不到它只是「纯 Python 模块
-  进 PYZ」的正常表现。
-- **截图证据相反**：服务端回的是 `401 Authentication Fails, Your api key: ****cdeb
-  is invalid` 并带 `request id`——它拿到的是一个**具体 key**（尾号 4 位），不是空串。
-  空 Key 的症状不是这条。所以最可能是那个 Key 本身失效/填错/服务商不匹配。
+- **本版加的是加固，不是那次的根因修复。** 原先的判断「4.3.3 的冻结包缺 `win32ctypes`，
+  钥匙串后端不可用，读到的 Key 是空串」**不成立**。证据分两项，别混看：
+  - **旧部署 exe 的清单检查（产物层）**：用 `PyInstaller.archive.readers.CArchiveReader`
+    读 `D:\dsh-pet\dsh-pet-standalone-webm-chat.exe` 的 exe 头 TOC → 打开内嵌 PYZ →
+    2902 个模块名，其中 `win32ctypes` 27 个、`win32ctypes.pywin32.win32cred` 1 个、
+    `win32ctypes.core` 21 个。**旧包有这个依赖。**（`_internal` 目录里看不到它只是
+    「纯 Python 模块进 PYZ」的正常表现，不是缺包。）
+  - **新产物目录的外部解释器导入（模块层，不是冻结进程）**：以
+    `dist-onedir/.../\_internal` 作 `sys.path`、`python -S` 隔离系统 site-packages，
+    `import win32ctypes.pywin32.win32cred` 成功。这证明**包内那份 `.py` 能被同版本
+    解释器加载**，不等于"在冻结进程里验证过"。
+- **截图证据方向相反**：服务端回的是 `401 Authentication Fails, Your api key: ****cdeb
+  is invalid` 并带 `request id`——它拿到的是一个**非空的具体 key**（尾号 4 位），不是空串。
+  空 Key 的症状不是这条。至于那个 key 为何无效（失效 / 填错 / 服务商不匹配 / 选中了旧
+  凭据条目），**没有证据支持任何单一结论**，如实留作未定位。
 - 因此本版做的是：Windows 构建期显式收集并门禁 `win32ctypes`（防将来 hook 失配时
   静默丢）、凭据存储不可用/读写失败时**不再静默**（写 warning），并在判定后端时只
   认 `fail`/`null` 两个占位类。**遇到 401，先核对 Key 与 base_url，再重填一次。**
-- 复核用的真机证据（本机，只读）：后端实为
-  `keyring.backends.Windows.WinVaultKeyring`；独立进程写入一条临时凭据、**另一个
-  进程读回一致**、随后删除——跨进程持久正常。用的是临时探针值，不涉及用户的真 Key。
+- **复核用的真机证据（本机，探针值）**：用打包机上的 CPython 3.13（与打包同版本）
+  跑三个独立进程，后端 `keyring.backends.Windows.WinVaultKeyring`；进程 A
+  `keyring.set_password('dsh-pet-standalone','probe-<uuid>', ...)` → 进程 B
+  `get_password` 读回一致（`MATCH = True`）→ 进程 C 删除后读回 `None`。这证明**本机
+  OS 凭据库 + 该 keyring 后端**跨进程持久正常；**未在冻结 exe 进程内自动验证**（冻结
+  exe 没有可注入代码的通用入口），这一条由实机验收覆盖：填一次 Key、重启、确认设置页
+  仍显示已保存且日志无「凭据存储不可用」。
 
 ## 八、升级说明
 

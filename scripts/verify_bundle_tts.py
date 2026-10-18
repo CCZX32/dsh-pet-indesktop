@@ -72,10 +72,12 @@ MINIMUM_MODULES = (
 # 正确的产物判红（astra 第 13 轮指出的跨平台回归）。要修的是"条件"，不是给另外两个
 # 平台也补一份收集参数。
 #
-# `win32ctypes`（pywin32-ctypes）是 keyring 的 Windows 后端依赖：没有它，钥匙串后端
-# 在冻结包里不可用，凭据只能留在写它的进程内存里——界面说"已保存"、主程序读到空串。
-# `--collect-all keyring` 收不到它（`keyring.backends.Windows` 里的 import 要等后端被
-# 加载才发生），所以必须在 Windows 构建期钉住。
+# `win32ctypes`（pywin32-ctypes）是**本项目选定的** keyring Windows 后端依赖——不是
+# "不显式收就必然不可用"：PyInstaller 自带的 hook 通常收得到它（实测 4.3.3 与 4.3.4 的
+# exe 内嵌 PYZ 里 `win32ctypes.*` 都在），`keyring.backends.Windows` 在 ImportError 时
+# 还会回退到 pywin32 的 `pywintypes`/`win32cred`。钉进门禁的理由是：那条收集是**隐式**
+# 的，与 keyring 版本失配时会静默丢，而症状（凭据只活在写它的进程内存里、界面仍说
+# "已保存"）在用户侧看不见。显式声明让它在构建期就可知。
 WINDOWS_ONLY_MODULES = (
     "win32ctypes.pywin32.win32cred",
 )
@@ -85,7 +87,6 @@ def platform_modules(platform: str | None = None) -> tuple[str, ...]:
     """目标平台必须随包的平台专用模块（纯函数，便于按平台直接断言）。"""
     target = sys.platform if platform is None else platform
     return WINDOWS_ONLY_MODULES if target.startswith("win") else ()
-
 
 
 def required_version() -> str:
