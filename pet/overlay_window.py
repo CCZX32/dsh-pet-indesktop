@@ -586,20 +586,25 @@ class OverlayWindow(QWidget):
         **登记、更新、清除都报脏**——不报脏时旧像素会留到下一次别的原因重绘
         （实机表现："主屏还留着半截身子，点一下才消失"）。
         """
-        old = self.projection_rect(sprite)
-        self._projections[sprite] = (QPointF(offset), float(scale))
+        entry = self._projections.get(sprite)
+        # **上次真正画出的矩形**必须存下来：sprite 已经移动过以后，
+        # 用当前位置反算"旧位置"是错的（旧像素永远擦不掉 = 实机残影）。
+        old = entry[2] if entry is not None else QRect()
+        self._projections[sprite] = (QPointF(offset), float(scale), QRect())
         new = self.projection_rect(sprite)
+        self._projections[sprite] = (QPointF(offset), float(scale), new)
         for rect in (old, new):
             if not rect.isNull():
                 self.update(rect)
 
     def clear_projection(self, sprite) -> bool:
-        """摘掉一只投影并刷新它原来占的像素（返回是否原本有）。"""
-        old = self.projection_rect(sprite)
-        if self._projections.pop(sprite, None) is None:
+        """摘掉一只投影并刷新它**上次真正占的**像素（返回是否原本有）。"""
+        entry = self._projections.pop(sprite, None)
+        if entry is None:
             return False
-        if not old.isNull():
-            self.update(old)
+        last = entry[2]
+        if not last.isNull():
+            self.update(last)
         return True
 
     def projection_offset(self, sprite):
@@ -616,7 +621,7 @@ class OverlayWindow(QWidget):
         entry = self._projections.get(sprite)
         if entry is None:
             return QRect()
-        offset, scale = entry
+        offset, scale = entry[0], entry[1]
         paint = getattr(sprite, "paint_bounds", None)
         rect = paint() if callable(paint) else sprite.rect()
         scaled = QRectF(rect.x() * scale, rect.y() * scale,
@@ -734,7 +739,7 @@ class OverlayWindow(QWidget):
         # 跨屏投影：不属于本窗、但身体有一部分落在本屏的那只，按映射平移重画。
         # 画在本窗自己的 sprite 之上（正在被拖的那只是活动对象，压在别人上面）。
         # 本窗裁剪天然只留落在自己屏里的那一部分——这就是"两边各画一半"的拼接。
-        for sprite, (offset, scale) in list(self._projections.items()):
+        for sprite, (offset, scale, _last) in list(self._projections.items()):
             if not getattr(sprite, "visible", True):
                 continue
             if not region.intersects(self.projection_rect(sprite)):

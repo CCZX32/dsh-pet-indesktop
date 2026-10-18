@@ -232,7 +232,10 @@ class _SpriteChatAnchor:
         overlay = getattr(self._shell, "overlay", None)
         if overlay is None:
             return QRect()
-        return sprite_anchor_rect_global(self._sprite, overlay.geometry().topLeft())
+        # 原点取**这只宠自己的宿主窗**：用主窗原点时，启动就恢复到副屏的那只
+        # 一打开快速聊天，气泡会定位到主屏对应坐标（不用先拖拽就能撞上）。
+        return sprite_anchor_rect_global(
+            self._sprite, self._shell._sprite_origin(self._sprite))
 
     def on_open_chat(self) -> None:
         """气泡内「完整聊天窗」入口（QuickChatBubble._open_full_chat 调用面）。"""
@@ -465,7 +468,10 @@ class _SpritePetHost:
         overlay = getattr(self._shell, "overlay", None)
         if overlay is None:
             return QRect()
-        return sprite_anchor_rect_global(self._sprite, overlay.geometry().topLeft())
+        # 原点取**这只宠自己的宿主窗**：用主窗原点时，启动就恢复到副屏的那只
+        # 一打开快速聊天，气泡会定位到主屏对应坐标（不用先拖拽就能撞上）。
+        return sprite_anchor_rect_global(
+            self._sprite, self._shell._sprite_origin(self._sprite))
 
     def show_bubble(self, text: str, duration_ms: int = 3200, **_kwargs) -> bool:
         if self._bubble_blocked():
@@ -1424,7 +1430,12 @@ class OverlayShell(QObject):
         desktop = self._host_window_rect(screen)
         bounds = QRect(0, 0, desktop.width(), desktop.height())
         overlay = ShellOverlayWindow(screen, driver=self.driver)
-        overlay._desktop_bounds = self._desktop_bounds  # noqa: SLF001 - 同模块协作面
+        # 窗口的几何来源必须是**它自己那块屏**：注入壳的并集时，任何屏信号
+        # （改分辨率/任务栏/刷新率）都会让这张窗 `_desktop_rect()` 重算出整张
+        # 桌面，把"每屏一窗"悄悄扩回横跨混合 DPI 的单窗（实机探针：
+        # (-1920,0,1536,816) → (-1920,0,4480,1392)，#307 的显示错误原样复活）。
+        overlay._desktop_bounds = (  # noqa: SLF001 - 同模块协作面
+            lambda screen=screen: self._host_window_rect(screen))
         overlay._screen_of_sprite = self._screen_of_sprite  # noqa: SLF001
         overlay.setGeometry(desktop)
         host = ScreenHost(screen, overlay, bounds)
@@ -4949,7 +4960,8 @@ class OverlayShell(QObject):
                              target_local.y() - target.pos.y() * scale)
             overlay.set_projection(target, offset, scale)
 
-    def _place_sprite_in_physical_screen(self, sprite, host=None) -> bool:
+    def _place_sprite_in_physical_screen(self, sprite, host=None, *,
+                                         persist: bool = False) -> bool:
         """按**物理**身体中心把这只交到它现在所在那块屏的窗（多窗的归属落地）。
 
         拖拽期间不调用（跨缝靠投影）；松手后的收尾与每拍兜底都走这里，因此不依赖
@@ -4980,7 +4992,18 @@ class OverlayShell(QObject):
             sprite.set_pos(local)
             other.apply_activity(sprite)
             sprite.home_screen = other.screen
-            self._remember_sprite_screen(sprite, other.screen)
+            # ``remove_sprite`` 会删掉该 sprite 的**全部**位置监听，跟随器又缓存着
+            # 旧窗原点：不补这两步，气泡会停在旧位置、以后也不再跟宠走（实机表现
+            # 就是"气泡漂到另一块屏"）。
+            self._bind_position_listener(sprite)
+            follower = self._bubble_followers.get(sprite)
+            setter = getattr(follower, "set_origin", None)
+            if callable(setter):
+                setter(other.overlay.geometry().topLeft())
+            if persist:
+                # 归属只在**用户动作**里改写（拖拽收尾/显式移屏）。每拍兜底跑到
+                # 这里说明是机械变化（拔屏、几何变化），改写会把用户记住的屏吃掉。
+                self._remember_sprite_screen(sprite, other.screen)
             return True
         return False
 
@@ -4988,7 +5011,7 @@ class OverlayShell(QObject):
         """松手后的归属落地（拖拽期间不换窗，见 ``_hand_over_drag``）。"""
         if not self._multi_window():
             return False
-        return self._place_sprite_in_physical_screen(sprite)
+        return self._place_sprite_in_physical_screen(sprite, persist=True)
 
     def _clear_drag_projection(self) -> None:
         """拖拽收尾：把所有窗上的投影摘干净（否则会留下幽灵残影）。"""
@@ -6683,12 +6706,48 @@ class OverlayShell(QObject):
         """屏几何变化入口（真信号与测试直调共用）：几何同步 + DPR 重喂。"""
         self._sync_host_geometry()
 
+    def _dismantle_host(self, dead, target_screen=None) -> None:
+        """拆掉一张宿主窗：成员按比例并到存活宿主，再关窗、摘表、断信号。
+
+        拔屏/模式翻转都走这里。少了它，被拔那块屏上的宠会留在**已失效的宿主**里
+        ——窗口还在但屏没了，宠要么看不见，要么停在 Qt 自动搬去的错位置。
+        """
+        if dead is None or dead not in self._hosts or len(self._hosts) <= 1:
+            return
+        target = None
+        if target_screen is not None:
+            target = next((h for h in self._hosts if h.screen is target_screen
+                           and h is not dead), None)
+        if target is None:
+            target = next((h for h in self._hosts if h is not dead), None)
+        if target is None:
+            return
+        for sprite in list(dead.overlay.sprites):
+            rx, ry = self._body_ratio(sprite, dead.bounds)
+            dead.overlay.remove_sprite(sprite, release_clip=False)
+            target.overlay.add_sprite(sprite)
+            target.apply_activity(sprite)
+            sprite.home_screen = target.screen
+            self._place_body_ratio(sprite, rx, ry, target.bounds)
+        self._disconnect_host_screen(dead)
+        dead.overlay.hide()
+        dead.overlay.close()
+        if self.driver is not None:
+            self.driver.detach(dead.overlay)
+        self._hosts.remove(dead)
+
     def handle_screen_added(self, screen) -> None:
         """屏插入：窗口矩形与活动区重算（不迁宠——位置记忆归各宠的 ``screen_name``）。"""
         logging.info("overlay: screen added (%s)", _screen_name(screen))
         if not any(candidate is screen for candidate in self._screen_list):
             self._screen_list.append(screen)
-        self._connect_host_screen(self._main_host)
+        if (self._multi_window() and screen is not None
+                and not any(h.screen is screen for h in self._hosts)):
+            # 多窗：新插进来的屏也要有自己的窗，否则拖不过去
+            self._create_host(screen)
+            self._show_all_hosts()
+        for each in list(self._hosts):
+            self._connect_host_screen(each)
         self._sync_host_geometry()
         self._refresh_tick_interval()  # 屏集合变了，刷新率取数范围跟着变
 
@@ -6704,9 +6763,13 @@ class OverlayShell(QObject):
             return
         self._end_drag()  # 拖拽中拔屏处置（v1.1 §10）
         self._screen_list = [s for s in self._screen_list if s is not screen]
+        dead = next((h for h in self._hosts if h.screen is screen), None)
+        if dead is not None:
+            self._dismantle_host(dead, self._fallback_screen(screen))
         if host.screen is screen or host.screen not in self._screen_list:
             self._migrate_to_screen(self._fallback_screen(screen))
-        self._connect_host_screen(host)
+        for each in list(self._hosts):
+            self._connect_host_screen(each)
         self._sync_host_geometry()
         self._refresh_tick_interval()  # 拔掉的那块屏不再参与刷新率取数
 
