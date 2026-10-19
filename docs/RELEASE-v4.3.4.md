@@ -189,6 +189,7 @@ Windows 对同时存在的 trace 会话有上限，攒到十几个以后新会�
 | 残留会话清理只排除"本次会话名" | `stop(wait=False)` 后立刻 `start()` 时，旧线程还在查询，会把新会话当残留停掉 | 排除本进程建过的**全部**会话名；查询失败不关闸，下次再试 |
 | 打包门禁无条件要求 Windows-only 依赖 | `win32ctypes` 是 keyring 的 Windows 后端依赖，而 TTS 产物门禁是**三端共用**的：干净的 Linux/macOS 构建不装它，会被自己的门禁判红（退出码 4） | 平台专用模块单列进 `WINDOWS_ONLY_MODULES`，只在该平台目标上要求；补三平台门禁用例（含"Windows 少带它必须判红"的反向用例） |
 | 凭据"后端是否可用"扫类名子串 | 判据是 `"fail" not in name and "null" not in name`，于是名为 `company.failover.Keyring` 这类**合法可写的第三方后端**被判成"没有钥匙串"，能存凭据的环境被判死 | 只认 keyring 自己的两个占位类：`keyring.backends.fail.Keyring` / `keyring.backends.null.Keyring`（全名匹配 + 类身份 `isinstance` 双重判据） |
+| 只读文本只能鼠标选中、Ctrl+C 没反应 | 截图翻译/问答/聊天窗里选出一段文字按 Ctrl+C 无反应，只能右键菜单「复制」 | 两层成因：结果面板带 `WindowDoesNotAcceptFocus`（连「用户点击后激活」也禁掉，键盘事件永远进不来）→ 只保留 `WA_ShowWithoutActivating`（打开仍不抢焦点）、放开点击可激活、文本视图改 `ClickFocus`；8 处只读 QLabel 只设了 `TextSelectableByMouse` → 补 `TextSelectableByKeyboard` + `ClickFocus`（截图问答气泡、聊天窗两种气泡、网络信息弹窗、设置页路径标签、更新说明、作者账号行） |
 
 ## 七、没有修的（如实）
 
