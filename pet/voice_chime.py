@@ -593,22 +593,29 @@ def edge_pitch_arg(pitch) -> str:
     return f"{sign}{value}Hz"
 
 
-def cache_key(text: str, cfg: dict, provider_id: str | None = None) -> str:
+def cache_key(text: str, cfg: dict | None = None, provider_id: str | None = None,
+              values: dict | None = None) -> str:
     """音频缓存文件名键：内容 + 该后端 flavor 的短哈希。
 
     flavor 由 provider 给（只含影响音频内容的参数），因此换后端 / 换音色 / 换风格都会
     换键，不同后端的缓存不会互串；edge 的 flavor 保持历史格式，老缓存升级后仍命中。
+
+    ``values`` 是**实际合成输入**（``TtsAttempt.values``，可能已被 ``preflight`` 校正）：
+    调用方手里已有解析结果时必须传它，而不是让本函数从 ``cfg`` 再取一次——配置里的
+    音色被 preflight 换掉后，两条路会算出两个键，产物身份与声音就对不上了。
     """
     import hashlib
 
+    cfg = cfg or {}
     backend = clean_backend(provider_id or cfg.get("backend", BACKEND_EDGE))
     provider = tts.get(backend)
     if provider is None:
         raw = f"{text}|{backend}"
     else:
-        values = (cfg.get("providers") or {}).get(backend)
         if values is None:
-            # 紧凑调用（传的是原始 config 映射）：让 provider 自己按字段 key 取值
-            values = provider.values(cfg)
+            values = (cfg.get("providers") or {}).get(backend)
+            if values is None:
+                # 紧凑调用（传的是原始 config 映射）：让 provider 自己按字段 key 取值
+                values = provider.values(cfg)
         raw = f"{text}|{provider.flavor(values)}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]

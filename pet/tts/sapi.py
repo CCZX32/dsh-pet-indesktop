@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from .base import TtsField, TtsProvider, TtsUnavailable, register
 
 PROVIDER_ID = "sapi"
@@ -33,6 +35,8 @@ MISSING_MESSAGE = (
 )
 #: SpFileStream.Open 的 SSFM_CREATE（覆写已有文件）
 SSFM_CREATE = 3
+#: 逐线程的 COM 初始化标记（thread-local；线程退出时随之消失，不需要清理）
+_com_ready = threading.local()
 #: 音色列表探测结果只取一次（COM 调用很便宜，但没必要每次问系统）
 _OPTIONS_CACHE: tuple[tuple[str, str], ...] | None = None
 
@@ -49,12 +53,42 @@ def _ensure_com() -> None:
     COM 是线程级的：GUI 线程里 Qt 早就初始化过，后台线程没有。合成跑在
     ``_TTSWorker`` 线程里，缺这一步时 ``CreateObject`` 直接抛
     ``WinError -2147221008 尚未调用 CoInitialize``——报时 / 试听 / 台词语音
-    三条链路在后台合成时全部退化成「本地语音合成失败」。同线程重复调用是引用
-    计数语义，多调一次无害；调用方要么是常驻 GUI 线程，要么是短命 worker。
+    三条链路在后台合成时全部退化成「本地语音合成失败」。
+
+    调用方要么是常驻 GUI 线程，要么是短命 worker；两者都不该把 ``CoInitialize``
+    的引用计数一路加上去，所以这里按线程只做一次（见下方 thread-local 开关）。
     """
     import comtypes
 
+    # 每**线程**只初始化一次：``CoInitialize`` 是引用计数语义，逐次调用会把计数
+    # 一直加上去而没人 ``CoUninitialize``（合成的 worker 线程是短命的，GUI 线程
+    # 是长寿的——前者随线程退出由系统回收，后者会一路涨）。加一个 thread-local
+    # 开关把计数钉在 1，语义仍是"这个线程进过 COM"。
+    flag = getattr(_com_ready, "value", None)
+    if flag is True:
+        return
     comtypes.CoInitialize()
+    _com_ready.value = True
+
+
+def release_thread_com() -> None:
+    """本线程若因本模块进过 COM，就配对 ``CoUninitialize`` 释放。
+
+    只在**我们自己的短命线程**（合成 worker）的收尾里调用：那种线程的生命周期由
+    本进程掌握，配对释放是干净的。常驻 GUI 线程不调——注意口径：配对释放只撤掉
+    **本模块自己加的那一次**计数，不会撤销 Qt 自己持有的另一份初始化；不在 GUI 线程
+    释放的理由是那里没有"线程结束"这个收尾点，提前释放反而可能让同一线程上后续的
+    COM 调用落进已拆除的 apartment。线程从未初始化过时是 no-op。
+    """
+    if getattr(_com_ready, "value", None) is not True:
+        return
+    _com_ready.value = False
+    try:
+        import comtypes
+
+        comtypes.CoUninitialize()
+    except Exception:  # pragma: no cover - 非 Windows / 库缺失
+        pass
 
 
 def _voice_objects():

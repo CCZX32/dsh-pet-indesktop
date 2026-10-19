@@ -538,3 +538,31 @@ def test_light_pet_island_hit_below_raw_dv_floor_still_sounds():
     event = SimpleNamespace(a="pet-1", b="island", j=32.5)
     assert player._hit_floor(event) <= 32.5
     assert player._hit_floor(SimpleNamespace(a="pet-1", b="pet-2", j=32.5)) == 300.0
+
+
+def test_click_gate_picks_from_the_whole_candidate_list(monkeypatch, tmp_path):
+    """点击门在多文件包里**现挑**，不再固定文件名排序第一那个（issue #308）。
+
+    设置页对「自定义文件夹（随机）」的承诺就是随机播放；旧实现取 ``candidates[0]``，
+    整个进程内永远播同一个文件（报告者 9 个 .mp3 的目录只播排序第一）。
+    """
+    files = [tmp_path / f"{index}.mp3" for index in range(3)]
+    monkeypatch.setattr(click_sound, "resolve_click_sound_candidates",
+                        lambda pack, data_dir=None: list(files))
+    picks: list[int] = []
+
+    def choose(paths):
+        picks.append(len(paths))
+        return paths[len(picks) - 1]          # 每次换一个 → 证明真的走了现挑
+
+    monkeypatch.setattr(click_sound, "choose_sound", choose)
+    player, played = _recording_player(
+        monkeypatch, {"click_sound_pack": {"kind": "folder", "path": str(tmp_path)}})
+    for _ in range(3):
+        player._last_play = 0.0
+        player.on_click()
+        _pump()
+
+    assert picks == [3, 3, 3], "点击门必须把**整个**候选列表交给 choose_sound"
+    paths = [str(path) for path, _ in played]
+    assert len(set(paths)) > 1, f"多文件包点击必须换文件，实际：{paths}"

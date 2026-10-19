@@ -9,8 +9,8 @@
 （``SETTINGS_DOMAIN_NAV``，多处测试与截图脚本按索引/名称依赖）；同一个能力域内的
 多个**同级任务**适合页内标签（先例：菜单域的 菜单编排 / 快捷启动 / 外观）。本域四个
 标签就是四个同级任务：**点击与音效**（输入 + 点击反馈）、**自言自语**（周期气泡的
-台词与配图）、**天气**、**抽签**——后两个都是"用户主动拉一次、桌宠给一个结果"的
-互动面，行与控件由各自模块构建（本模块只挂页）。
+节奏，加上两条链路共用的台词与配图）、**天气**、**趣味**（卡片名仍是「抽签」）——后两个都是"用户主动
+拉一次、桌宠给一个结果"的互动面，行与控件由各自模块构建（本模块只挂页）。
 
 **接线契约**（与 ``settings_file_interpret`` 同口径）：
 
@@ -28,8 +28,8 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .settings_widgets import SettingRow, SettingsSection, SettingsTabContainer
 
-TAB_KEYS = ("click", "self_talk", "weather", "divination")
-TAB_LABELS = ("点击与音效", "自言自语", "天气", "趣味")
+TAB_KEYS = ("click", "self_talk", "weather", "divination", "hotkeys")
+TAB_LABELS = ("点击与音效", "自言自语", "天气", "趣味", "快捷键")
 
 
 def _page(dialog, title: str, sections: list[tuple[str, list[SettingRow]]]) -> QWidget:
@@ -99,7 +99,12 @@ def build_click_rows(dialog) -> list[SettingRow]:
 
 
 def build_self_talk_rows(dialog) -> list[SettingRow]:
-    """「自言自语」组的行（周期气泡的台词 / 节奏 / 配图）。"""
+    """「自言自语」组的行（节奏 / 显示时间 / 台词 / 配图）。
+
+    节奏与配图大小只属于周期链路（显隐只跟 ``self_talk``）；显示时间、候选内容、
+    图片目录、配图概率是**两条链路共读**的同一份配置，显隐跟「周期或点击任一开启」
+    （见 ``ModernSettingsDialog._update_self_talk_content_controls``）。
+    """
     return [
         SettingRow(
             "self_talk_bubble_style",
@@ -179,4 +184,12 @@ def build_interaction_domain(dialog) -> QWidget:
     from .settings_divination import build_divination_tab
 
     tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
+    # 第五个同级任务：全局快捷键（"用户怎么唤出它"）。默认全不绑，见 settings_hotkeys。
+    from .settings_hotkeys import build_hotkey_rows
+
+    tabs.addTab(
+        TAB_KEYS[4],
+        TAB_LABELS[4],
+        _page(dialog, TAB_LABELS[4], [("快捷键", build_hotkey_rows(dialog))]),
+    )
     return tabs

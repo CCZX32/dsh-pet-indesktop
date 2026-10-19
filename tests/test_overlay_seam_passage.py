@@ -588,7 +588,9 @@ def test_crossing_leaves_no_extra_window_or_projection_state(tmp_path, monkeypat
         main.set_pos(QPointF(600.0, 400.0))
         overlay, origin, cursor = _drag_to_straddle(shell, main)
         assert shell.hosts() == [shell._main_host]
-        assert not hasattr(overlay, "_projections"), "投影机制已删除"
+        # 投影机制回来了（混合缩放每屏一窗时给相邻窗画另一半），但**单窗模式**
+        # 一张窗就能画整只，不该登记任何投影。
+        assert overlay._projections == {}, "单窗模式不产生跨窗投影"
         assert shell.host_for_screen(b) is shell._main_host, "副屏也在同一张窗里"
 
         cursor = QPointF(origin.x() + 2400.0, cursor.y())

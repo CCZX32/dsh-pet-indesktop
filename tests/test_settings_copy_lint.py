@@ -54,6 +54,9 @@ _DOMAIN_WHITELIST: dict[str, frozenset[str]] = {
 _ROW_WHITELIST: dict[str, frozenset[str]] = {
     # 文件识别域：解释「交给谁」的产品级说法，不是内部代号。
     "file_interpret_enabled": frozenset({"AI"}),
+    # 全局快捷键：行标题必须**与右键菜单项「AI 对话」逐字一致**——用户在菜单上看到
+    # 的就是这个名字，换成「对话」反而对不上号（这是外部契约，不是内部代号）。
+    "hotkey_open_chat": frozenset({"AI"}),
     # 注（2026-10-14）：`voice_chime_custom_times` / `festival_reminder_times` /
     # `voice_chime_voice` / `festival_custom_quotes_west` 四条豁免已随文案重写而失效
     # ——新文案不再出现 HH/MM、API、KJV 这些 token，所以按本文件「白名单不是垃圾桶」

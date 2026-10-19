@@ -24,6 +24,8 @@ from PySide6.QtGui import (
     QColor,
     QClipboard,
     QFontDatabase,
+    QKeySequence,
+    QShortcut,
     QIcon,
     QImageReader,
     QPainter,
@@ -177,6 +179,7 @@ from . import settings_music
 from . import settings_network
 from . import settings_page_guide
 from . import settings_divination
+from . import settings_hotkeys
 from . import settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
@@ -1008,10 +1011,20 @@ class ModernSettingsDialog(QDialog):
         self.sidebar.setCurrentRow(0)
         if self.initial_page:
             self.select_page(self.initial_page)
-        self._search_rows = self.findChildren(SettingRow)
+        # 索引口径：标准设置行 + 「更新」页的作者账号行（后者不是 SettingRow，
+        # 但暴露同名的 label/hint_label，故同一套匹配函数就能覆盖；侧栏命令类
+        # 控件仍不进索引——那是 docs/SETTINGS-CHANGE-GATES.md 里的既有决定）。
+        from .settings_about import AuthorRow
+
+        self._search_rows = self.findChildren(SettingRow) + self.findChildren(AuthorRow)
         self._search_matches: list[SettingRow] = []
         self._search_index = -1
         self.search_edit.textChanged.connect(self._search_settings)
+        # Ctrl+F：设置窗内任意位置把光标送进搜索框（浏览器/编辑器的一致习惯）。
+        # 不抢输入框自己的按键：焦点已经在搜索框时 Qt 不会再触发这条快捷方式。
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._focus_search_box)
 
         self.self_talk_check.toggled.connect(self._update_self_talk_controls)
         self.menu_translucent_check.toggled.connect(self._update_translucency_controls)
@@ -1334,23 +1347,44 @@ class ModernSettingsDialog(QDialog):
         点击侧（``click_self_talk*`` / ``click_talk_bindings``）**不在这里**：它们是
         独立开关的后续项，见 :meth:`_update_click_self_talk_controls`。绑在一起会让
         「只想点击听声」的用户在设置页里连开关都看不到。
+
+        节奏项（最短/最长间隔、配图大小）只属于周期链路，仍只跟本开关；内容项
+        （显示时间/候选内容/图片目录/配图概率）两条链路**共读同一份配置**——点击
+        自言自语落地的 ``window_alerts.show_click_self_talk`` 读的正是这批键——所以
+        它们跟 :meth:`_update_self_talk_content_controls` 走「任一开启」。
         """
-        keys = (
-            "self_talk_duration",
-            "self_talk_min",
-            "self_talk_max",
-            "self_talk_texts",
-            "self_talk_images",
-            "self_talk_image_scale",
-            "self_talk_image_chance",
+        self._set_setting_rows_visible(
+            ("self_talk_min", "self_talk_max", "self_talk_image_scale"),
+            enabled,
+            dependency="self_talk",
         )
-        self._set_setting_rows_visible(keys, enabled)
+        self._update_self_talk_content_controls(enabled)
+
+    def _update_self_talk_content_controls(self, self_talk_enabled: bool) -> None:
+        """内容项显隐：周期气泡与点击自言自语**任一**开启就显示。
+
+        这些键是两条链路共用的内容源（候选文本 / 图片目录 / 配图概率 / 显示时长）。
+        旧模型把显隐整组挂在周期开关上，只开点击的用户必须先打开一个他不用的周期
+        功能才能编辑候选文本——消费侧早已解耦（``show_click_self_talk`` 不看
+        ``self_talk_enabled``），显隐跟着解耦。
+        """
+        self._set_setting_rows_visible(
+            (
+                "self_talk_duration",
+                "self_talk_texts",
+                "self_talk_images",
+                "self_talk_image_chance",
+            ),
+            self_talk_enabled or self.click_self_talk_check.isChecked(),
+            dependency="self_talk_content",
+        )
 
     def _update_click_self_talk_controls(self, enabled: bool) -> None:
         """点击自言自语（``click_self_talk``）的后续项显隐。
 
         预缓存也跟这里：只有点击链路才会把台词**读出来**（周期气泡只显示不朗读），
-        所以点击开关关着时预缓存没有意义。
+        所以点击开关关着时预缓存没有意义。内容项与周期气泡共用，见
+        :meth:`_update_self_talk_content_controls`（任一开启即显示）。
         """
         keys = (
             "click_self_talk_speak",
@@ -1358,6 +1392,7 @@ class ModernSettingsDialog(QDialog):
             "click_talk_bindings",
         )
         self._set_setting_rows_visible(keys, enabled, dependency="click_self_talk")
+        self._update_self_talk_content_controls(self.self_talk_check.isChecked())
 
     def _update_island_controls(self, enabled: bool) -> None:
         settings_pet_controls._update_island_controls(self, enabled)
@@ -2107,7 +2142,20 @@ class ModernSettingsDialog(QDialog):
                 row.style().unpolish(row)
                 row.style().polish(row)
 
-    def _search_settings(self, query: str, *, advance: bool = False) -> None:
+    def _focus_search_box(self) -> None:
+        """把焦点送进侧栏搜索框并全选（Ctrl+F；不改变已输入的内容之外的状态）。"""
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
+
+    def _search_settings(self, query: str, *, advance: int = 0) -> None:
+        """执行搜索；``advance`` 是**步长**（回车/↓ = +1、↑ = -1、0 = 不主动翻页）。
+
+        用步长而不是"要不要前进"的布尔：↑ 需要反方向，取模天然支持回绕
+        （第一条上按 ↑ 落到最后一条），不必为回绕写特判。
+
+        ``advance=0`` 是"不主动翻页"，**不是"重新开始"**：命中集合没变时保持当前
+        索引，只有集合变了（`:2166` 那支）才归零。
+        """
         query = query.strip().lower()
         self._clear_search_matches()
         if not query:
@@ -2126,7 +2174,7 @@ class ModernSettingsDialog(QDialog):
             self._search_matches = matches
             self._search_index = 0
         elif advance:
-            self._search_index = (self._search_index + 1) % len(matches)
+            self._search_index = (self._search_index + advance) % len(matches)
         row = matches[self._search_index]
         row.setProperty("searchMatch", True)
         row.style().unpolish(row)
@@ -2164,9 +2212,21 @@ class ModernSettingsDialog(QDialog):
         return f"需先开启「{source.label.text()}」"
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        if watched is self.search_edit and event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._search_settings(self.search_edit.text(), advance=True)
-            return True
+        if watched is self.search_edit and event.type() == QEvent.Type.KeyPress:
+            # 回车 / ↓ 前进、↑ 后退。只在**裸键**（或小键盘键）时拦：带 Ctrl/Alt/Shift
+            # 的 ↑/↓ 一律透传——输入法候选导航、以及将来可能加的组合键，不该被搜索抢走。
+            # 单行 QLineEdit 里裸 ↑/↓ 本来没有默认行为，拦掉不损失任何既有操作。
+            if event.modifiers() in (Qt.KeyboardModifier.NoModifier,
+                                     Qt.KeyboardModifier.KeypadModifier):
+                step = {
+                    Qt.Key.Key_Return: 1,
+                    Qt.Key.Key_Enter: 1,
+                    Qt.Key.Key_Down: 1,
+                    Qt.Key.Key_Up: -1,
+                }.get(event.key())
+                if step is not None:
+                    self._search_settings(self.search_edit.text(), advance=step)
+                    return True
         return super().eventFilter(watched, event)
 
     def _apply_selected_theme(self, *_args) -> None:
@@ -2440,6 +2500,7 @@ class ModernSettingsDialog(QDialog):
         settings_quiet.save_quiet_settings(self)
         settings_weather.save_weather_settings(self)
         settings_divination.save_divination_settings(self)
+        settings_hotkeys.save_hotkey_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 

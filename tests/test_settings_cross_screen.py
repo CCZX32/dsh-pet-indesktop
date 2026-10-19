@@ -128,12 +128,23 @@ def test_row_is_reachable_by_search(tmp_path, monkeypatch):
         dialog.close()
 
 
-def test_hint_describes_one_window_over_the_desktop():
-    """说明文案必须写新架构（一张合成窗铺满桌面），不能再写"每块屏各开一张窗口"。
+def test_hint_describes_the_window_count_split_by_scaling():
+    """说明文案必须写 v4.3.4 的窗口数分流：混合缩放每屏一窗，全 100% 仍是单窗。
 
-    旧文案描述的是已删除的"每屏一窗"拓扑；用户照着它理解，会以为跨屏就是多开窗口。
+    旧文案（v4.3.3）是「一张合成窗铺满所有显示器组成的桌面」——那是单窗模型：一张窗
+    只能有一个 DPR，混合缩放下必有一侧被按错倍率画（#307），两块屏缩放相同但不是
+    100% 时又会把 Qt 报错的负原点屏坐标当真（#310）。反向也不能写成"永远每屏一张"：
+    多块屏缩放全是 100% 时仍是单窗。
     """
     from pet.settings_pet_controls import CROSS_SCREEN_HINT
 
-    assert "一张合成窗" in CROSS_SCREEN_HINT
-    assert "各开一张窗口" not in CROSS_SCREEN_HINT
+    assert "一张合成窗铺满所有显示器组成的桌面" not in CROSS_SCREEN_HINT
+    assert "每块屏各自有一张合成窗" in CROSS_SCREEN_HINT
+    assert "缩放不是 100%" in CROSS_SCREEN_HINT, (
+        "条件必须写出来，否则会被读成「永远每屏一窗」")
+    assert "全是 100% 时，仍是一张合成窗" in CROSS_SCREEN_HINT, (
+        "全 100% 的多屏还是单窗，这句不能省")
+    assert "默认关闭" in CROSS_SCREEN_HINT and "重启后生效" in CROSS_SCREEN_HINT, (
+        "默认态与生效时机都是用户第一眼要问的两件事")
+    assert CROSS_SCREEN_HINT.endswith(GLOBAL_SCOPE_NOTE), (
+        "末句仍是作用域声明原文（由 GLOBAL_SCOPE_ROWS 削进行内标注）")

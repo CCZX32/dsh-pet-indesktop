@@ -40,7 +40,7 @@ from __future__ import annotations
 import sys
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QCursor, QPainter, QRegion, QScreen
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -151,6 +151,8 @@ class OverlayWindow(QWidget):
         # 产品壳（overlay_shell）建一个进程级驱动器，挂全部屏的 overlay。
         self._driver = driver if driver is not None else TickDriver(self)
         self._driver.attach(self)
+        # 跨屏投影：不属于本窗、但身体有一部分落在本屏的 sprite（每屏一窗时用）
+        self._projections: dict = {}
         # 旧属性面（deprecation）：overlay._timer 即驱动器时钟，供旧调用点
         # （测试同步驱动/间隔断言）沿用；新代码请走 tick_driver。
         self._timer = self._driver.timer
@@ -572,6 +574,62 @@ class OverlayWindow(QWidget):
             self._sprite_removed_listeners.append(cb)
 
     # ---------------------------------------------------------------- 位置监听（Phase 3b）
+    def set_projection(self, sprite, offset, scale: float = 1.0) -> None:
+        """登记/更新一只**属于别的窗**的 sprite 在本窗的只读视图。
+
+        ``offset`` = 这只的左上角落在本窗坐标系里的位置。**必须由物理坐标换算**，
+        不能拿两个窗的逻辑原点相减——混合 DPI 下那样整体位移几百像素（Qt 官方文档
+        的 islands-of-screens：屏的位置不随缩放变，逻辑桌面不是连续平面）。
+        ``scale`` = 源窗 DPR / 本窗 DPR，把它的物理尺寸换算到本窗的逻辑尺寸。
+
+        只读：本窗只借 painter 平移 + 缩放重画它的当前帧，不持有驱动权。
+        **登记、更新、清除都报脏**——不报脏时旧像素会留到下一次别的原因重绘
+        （实机表现："主屏还留着半截身子，点一下才消失"）。
+        """
+        entry = self._projections.get(sprite)
+        # **上次真正画出的矩形**必须存下来：sprite 已经移动过以后，
+        # 用当前位置反算"旧位置"是错的（旧像素永远擦不掉 = 实机残影）。
+        old = entry[2] if entry is not None else QRect()
+        self._projections[sprite] = (QPointF(offset), float(scale), QRect())
+        new = self.projection_rect(sprite)
+        self._projections[sprite] = (QPointF(offset), float(scale), new)
+        for rect in (old, new):
+            if not rect.isNull():
+                self.update(rect)
+
+    def clear_projection(self, sprite) -> bool:
+        """摘掉一只投影并刷新它**上次真正占的**像素（返回是否原本有）。"""
+        entry = self._projections.pop(sprite, None)
+        if entry is None:
+            return False
+        last = entry[2]
+        if not last.isNull():
+            self.update(last)
+        return True
+
+    def projection_offset(self, sprite):
+        """该投影在本窗坐标系的落点（没投影返回 None）。"""
+        entry = self._projections.get(sprite)
+        return None if entry is None else QPointF(entry[0])
+
+    def projection_scale(self, sprite) -> float:
+        entry = self._projections.get(sprite)
+        return 1.0 if entry is None else float(entry[1])
+
+    def projection_rect(self, sprite) -> QRect:
+        """该投影在本窗坐标系里的绘制外接矩形（脏区映射用它）。"""
+        entry = self._projections.get(sprite)
+        if entry is None:
+            return QRect()
+        offset, scale = entry[0], entry[1]
+        paint = getattr(sprite, "paint_bounds", None)
+        rect = paint() if callable(paint) else sprite.rect()
+        scaled = QRectF(rect.x() * scale, rect.y() * scale,
+                        rect.width() * scale, rect.height() * scale)
+        return scaled.translated(offset.x(), offset.y()).toRect()
+
+    # ---------------------------------------------------------------- 位置监听（Phase 3b）
+
     def add_position_listener(self, sprite, cb) -> None:
         """注册 sprite 位置监听：tick 推进后 rect 变化时回调 cb(sprite)。
 
@@ -678,6 +736,25 @@ class OverlayWindow(QWidget):
                 continue  # M14：隐藏 sprite 跳过绘制（脏区域照旧被覆盖擦除）
             if region.intersects(sprite.rect()):
                 sprite.paint(painter)
+        # 跨屏投影：不属于本窗、但身体有一部分落在本屏的那只，按映射平移重画。
+        # 画在本窗自己的 sprite 之上（正在被拖的那只是活动对象，压在别人上面）。
+        # 本窗裁剪天然只留落在自己屏里的那一部分——这就是"两边各画一半"的拼接。
+        for sprite, (offset, scale, _last) in list(self._projections.items()):
+            if not getattr(sprite, "visible", True):
+                continue
+            if not region.intersects(self.projection_rect(sprite)):
+                continue
+            painter.save()
+            try:
+                # 降采样/放大都要平滑：投影跨混合 DPI 时目标窗的 DPR 与源帧的
+                # devicePixelRatio 不同，默认最近邻会出锯齿（用户直接说"很糊"）。
+                painter.setRenderHint(
+                    QPainter.RenderHint.SmoothPixmapTransform, True)
+                painter.translate(offset)
+                painter.scale(scale, scale)
+                sprite.paint(painter)
+            finally:
+                painter.restore()
         self._paint_slingshot(painter)  # 瞄准 UI 层（橡皮带 + 轨迹预览，最上）
         painter.end()
 
@@ -703,6 +780,11 @@ class OverlayWindow(QWidget):
         cb = getattr(self, "_through_changed", None)
         if callable(cb):
             cb(self.mouse_through)
+
+    def _sprite_local(self, local_pos):
+        """事件坐标 → 被拖 sprite 当前宿主窗的局部坐标（单窗时原样返回）。"""
+        convert = getattr(self, "_sprite_space_pos", None)
+        return convert(local_pos) if callable(convert) else local_pos
 
     def sprite_at(self, local_pos: QPoint | QPointF):
         """逐像素联合命中：z-order 顶层往下，绘制外接矩形粗筛 + alpha 细判。
@@ -781,7 +863,7 @@ class OverlayWindow(QWidget):
                 # （旧 window.py:3224-3225 同语义），否则菜单会被误吞一次
                 self._context_menu_suppressed = False
             if self._mouse_grab is not None:
-                self._finish_grab(event.position())
+                self._finish_grab(self._sprite_local(event.position()))
             # 只有左键进拖拽 grab——右键语义是弹菜单（contextMenuEvent），
             # 若进 grab，松手会被当成一次"原地放下"的拖拽（PetWindow 旧语义）
             event.ignore()
@@ -902,9 +984,13 @@ class OverlayWindow(QWidget):
         # 先判升级再喂移动：on_move 在 begin_drag 之前是 no-op（点击候选不挪窝）
         global_pos = event.globalPosition().toPoint()
         self._commit_drag_if_threshold_crossed(global_pos)
+        # 多窗（混合缩放）：拖到另一块屏就把这只交给那块屏的窗，再照常喂移动
+        handover = getattr(self, "_handover_cb", None)
+        if callable(handover) and self._drag_committed:
+            handover(self._mouse_grab, global_pos)
         # grab 期间事件直达被按住的 sprite（光标移出/落到别的 sprite 上不换手）；
-        # 坐标按 sprite 所在坐标系换算（跨屏移交后已不是本窗局部坐标）
-        self._mouse_grab.on_move(event.position())
+        # 坐标按 sprite **当前宿主窗**换算——跨窗移交后它已不在本窗坐标系里
+        self._mouse_grab.on_move(self._sprite_local(event.position()))
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -919,7 +1005,7 @@ class OverlayWindow(QWidget):
             event.accept()
             return
         grab = self._mouse_grab
-        self._finish_grab(event.position())
+        self._finish_grab(self._sprite_local(event.position()))
         if grab is None:
             event.ignore()
             return
@@ -1045,9 +1131,12 @@ class OverlayWindow(QWidget):
         消费成功即刷新脏区 + 抑制随之而来的右键菜单 + 作废子类的
         点击/拖拽判别状态（``ShellOverlayWindow._press_pos``：右键 press
         会覆写它，若不清理，随后的左键松手会被壳层判成一次单击）。
+
+        会话记下 ``owner=self``：多窗共用一个控制器时，只有本窗有这套局部坐标，
+        绘制与 Esc 取消都按它路由（见 ``_paint_slingshot`` 与壳的 eventFilter）。
         """
         if not self.slingshot.maybe_enter_on_right_press(
-                self._mouse_grab, self._grab_cursor_pos(event)):
+                self._mouse_grab, self._grab_cursor_pos(event), owner=self):
             return False
         self._context_menu_suppressed = True
         self._invalidate_press_discriminator()
@@ -1088,8 +1177,14 @@ class OverlayWindow(QWidget):
     def _paint_slingshot(self, painter: QPainter) -> bool:
         """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。
 
-        会话与 sprite 同在一张合成窗、同一套局部坐标，直接画。
+        只由会话的 owner 画：多窗时同一个控制器被所有窗共享，而每张窗只有自己
+        那套局部坐标——别的窗照着画只会得到一条错位的幽灵弹弓。故非 owner 窗在
+        这里直接返回（脏区也不登记，取消后没有残留要擦）。裸控制器的直调用例
+        owner 为 None，照常绘制。
         """
+        owner = self.slingshot.owner
+        if owner is not None and owner is not self:
+            return False
         return self.slingshot.paint(painter)
 
     def _refresh_slingshot_visual(self) -> None:

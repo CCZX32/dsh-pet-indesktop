@@ -208,6 +208,24 @@ foreach ($m in @('django','hypothesis')) {
 # 而语音报时的收费后端（pet/tts/mimo、pet/tts/doubao）照旧收 API Key。少了它，凭据只能
 # 留在写它的进程内存里，主程序永远读不到（见上面 $excludes 那段）。
 $keyringCollect = @('--collect-all', 'keyring')
+# **keyring 的 Windows 后端要 win32ctypes**（pywin32-ctypes 包，import 名 `win32ctypes`）。
+#
+# 注意归因（2026-10-19 核验，纠正先前的说法）：4.3.3 的包**并不缺它**。两项证据要分开看：
+# ① 产物层：`CArchiveReader` 读 4.3.3 部署 exe 的内嵌 PYZ，里面有 27 个 `win32ctypes.*`
+#    模块（PyInstaller 自带 hook-win32ctypes 收的；`_internal` 目录里看不到它只是"纯 Python
+#    模块进 PYZ"的正常表现）。
+# ② 模块层（**不是**冻结进程）：以产物 `_internal` 作 sys.path、`python -S` 隔离系统
+#    site-packages，`import win32ctypes.pywin32.win32cred` 成功——这只说明包内那份源码能被
+#    同版本解释器加载，不能当成"冻结运行时已验证"（keyring 本体会因 jaraco 只在 PYZ 里而
+#    在这条路径下 ImportError）。
+# 所以"缺这个模块"不是那次 401 的根因。
+#
+# 仍然显式收集，理由换成加固：那条收集是**隐式**的，依赖 PyInstaller hook 与 keyring
+# 版本恰好的配合；hook 消失或依赖布局变化就静默丢，症状是钥匙串后端不可用（凭据只活在
+# 写它的进程内存里：界面显示"已保存"、重启后读到空）。显式收集让这件事在构建期可见，
+# 并进 `scripts/verify_bundle_tts.py` 的 **Windows** 兜底清单（缺了退出码 4；Linux/macOS
+# 不装这个依赖，门禁不许要求它）。
+$keyringCollect += @('--collect-all', 'win32ctypes')
 # 随包分发的许可与声明：assets\sounds\duck 下的内置点击音是 MeteorNOX 的 MIT 素材，
 # 许可正文写在仓根 THIRD_PARTY_NOTICES.md 第 1 节——只打 assets\sounds 等于只分发素材、
 # 不分发许可。两份都落在 _internal（onedir 的数据根），安装包整目录拷贝即随分发。

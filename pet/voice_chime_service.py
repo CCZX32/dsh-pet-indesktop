@@ -298,6 +298,18 @@ class _TTSWorker(threading.Thread):
         self._temp_paths = [_temp_cache_path(Path(path)) for path in self._paths]
 
     def run(self) -> None:  # noqa: D102
+        try:
+            self._synthesize_attempts()
+        finally:
+            # 本线程是短命的、生命周期由本进程掌握：SAPI 若在这个线程上初始化过 COM，
+            # 收尾时配对释放（常驻 GUI 线程不释放——那份计数跟着进程活）。
+            try:
+                tts.sapi.release_thread_com()
+            except Exception:  # pragma: no cover - 非 Windows / 库缺失
+                pass
+
+    def _synthesize_attempts(self) -> None:
+        """按尝试链逐个合成（``run`` 的本体；收尾的 COM 释放由 ``run`` 负责）。"""
         errors: list[str] = []
         for index, (attempt, path) in enumerate(zip(self._attempts, self._paths)):
             temp_path = self._temp_paths[index]
@@ -904,8 +916,13 @@ class VoiceChimeService:
         self._bubble(note)
 
     def _cache_path(self, text: str, attempt: tts.TtsAttempt) -> Path:
-        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。"""
-        key = cache_key(text, self._cfg, provider_id=attempt.provider)
+        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。
+
+        键取**这个 attempt 自己**的 provider + values（``_usable_attempts`` 已跑过
+        ``preflight``）：即时合成、预合成、缓存查找三处传的都是同一份 resolved
+        attempt，音色被自动回退后产物仍按实际合成输入命名，不会挂在配置原音色名下。
+        """
+        key = cache_key(text, provider_id=attempt.provider, values=attempt.values)
         return self._cache_dir / f"{key}.{attempt.ext}"
 
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
@@ -1559,6 +1576,11 @@ class VoiceChimeService:
         报时属用户主动关注事件，此时直接经桌宠气泡位（_speech_bubble）展示，
         避免“只听声不见字”。
 
+        气泡**没上屏**是另一回事：``show_bubble`` 返回 False，最常见的原因是审批/
+        问题提醒正占着气泡位（普通气泡让路）。那类弹窗是用户要回答的东西，绝不
+        抢占——改道系统通知并留一条 warning。旧写法只看"调用没抛异常"就 return，
+        于是气泡没出、通知没发、日志也没有，报时文字整条消失。
+
         飞行期是唯一的例外：这是**瞬时**状态（鱼被撞飞几秒），此时连直写也
         禁掉（鱼飞行过程中不弹气泡），也不排队、不改道系统通知——一次性播报
         丢弃即可，落地后正常。判据统一走 ``window_alerts`` 的门禁助手（惰性
@@ -1579,34 +1601,45 @@ class VoiceChimeService:
         if win is not None and win.isVisible():
             if window_alerts.sprite_in_flight(win):
                 return
-            suppressed = window_alerts.bubble_blocked(win)
-            if not suppressed:
-                try:
-                    win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS)
+            if window_alerts.bubble_blocked(win):
+                if self._bubble_in_slot(win, text):
                     return
+            else:
+                try:
+                    if win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS):
+                        return
                 except Exception:
                     logger.exception("气泡展示失败")
-            try:
-                bubble = getattr(win, "_speech_bubble", None)
-                rect = win.visible_content_rect()
-                scale = getattr(win, "scale", 1.0)
-                if bubble is not None and rect is not None:
-                    bubble.show_text(
-                        text,
-                        rect,
-                        self.BUBBLE_DURATION_MS,
-                        pet_scale=scale,
-                        subtitle="",
-                    )
-                    return
-            except Exception:
-                logger.exception("报时气泡降级展示失败")
+                logger.warning("报时气泡未上屏（多半是提醒占着气泡位），改道桌面通知：%s", text)
         notify = getattr(app, "system_notify", None)
         if callable(notify):
             try:
                 notify("语音报时", text)
             except Exception:
                 logger.exception("桌面通知失败")
+
+    def _bubble_in_slot(self, win, text: str) -> bool:
+        """设置页抑制期直写桌宠气泡位（绕过 show_bubble 的抑制门禁）。
+
+        抑制期是"设置页开着、普通气泡一律让路"的长时用户意图，而报时是用户主动
+        关注的事件，故照旧直写；写不进去返回 False，由调用方改道桌面通知。
+        """
+        try:
+            bubble = getattr(win, "_speech_bubble", None)
+            rect = win.visible_content_rect()
+            scale = getattr(win, "scale", 1.0)
+            if bubble is not None and rect is not None:
+                bubble.show_text(
+                    text,
+                    rect,
+                    self.BUBBLE_DURATION_MS,
+                    pet_scale=scale,
+                    subtitle="",
+                )
+                return True
+        except Exception:
+            logger.exception("报时气泡降级展示失败")
+        return False
 
     def _notify_missing_tts(self) -> None:
         msg = missing_dependency_hint()

@@ -388,7 +388,12 @@ def test_primary_screen_change_does_not_move_any_pet(tmp_path, two_screens, monk
         home = shell._screen
         bounds = QRect(shell._bounds)
         monkeypatch.setattr(QGuiApplication, "primaryScreen", staticmethod(lambda: secondary))
-        monkeypatch.setattr(app, "primaryScreen", lambda: secondary)
+        # 注意：**不要**再 patch 实例属性（`monkeypatch.setattr(app, "primaryScreen", ...)`）。
+        # 实例上没有这个方法，monkeypatch 的"撤销"会 `delattr`，而 QApplication 是
+        # **全测试会话共用**的单例——这个删除会让后续模块的 `app.primaryScreen()`
+        # 落到一个已被污染的查找路径上（实测：`test_desktop_pet_features` 里
+        # 气泡位置用例读到副屏 1920，而产品内部读到主屏 0）。产品读的是
+        # `QGuiApplication.primaryScreen()`，只 patch 类就够了。
 
         shell.handle_primary_screen_changed(secondary)
 

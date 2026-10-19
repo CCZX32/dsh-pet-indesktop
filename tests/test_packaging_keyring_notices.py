@@ -262,3 +262,27 @@ def test_windows_build_script_keeps_its_utf8_bom():
     assert PS1.read_bytes().startswith(b"\xef\xbb\xbf"), (
         "build_onedir.ps1 的 UTF-8 BOM 丢了；PowerShell 5.1 会按 ANSI 码页读它"
     )
+
+
+# ==================================================== 四、keyring 的 Windows 后端依赖
+def test_build_scripts_collect_keyring_windows_backend_dependency():
+    """`--collect-all keyring` 收的是 keyring 自己，不带它的 Windows 后端依赖。
+
+    归因纠正（2026-10-19 实测 PYZ）：4.3.3 的包**并不缺** `win32ctypes`——`_internal`
+    目录里没有，但 exe 内嵌 PYZ 里有 27 个 `win32ctypes.*` 模块（PyInstaller 自带的
+    hook 收的），冻结包里可以正常导入。所以"缺这个模块"不是那次 401 的根因。
+    显式收集仍然要留：隐式 hook 一旦与 keyring 版本失配就会静默丢，症状是钥匙串后端
+    不可用（凭据只活在写它的进程内存里）。
+    """
+    repo = Path(__file__).resolve().parents[1]
+    script = (repo / "scripts" / "build_onedir.ps1").read_text(encoding="utf-8")
+    assert "win32ctypes" in script, "构建脚本必须显式收集 win32ctypes"
+    assert "--collect-all', 'win32ctypes'" in script, (
+        "要以 --collect-all 收集（它自己的子模块也要带）")
+
+    verifier = (repo / "scripts" / "verify_bundle_tts.py").read_text(encoding="utf-8")
+    assert "WINDOWS_ONLY_MODULES" in verifier and "win32ctypes.pywin32.win32cred" in verifier, (
+        "构建期兜底清单要钉住它（按目标平台生效）：Windows 包缺了就以退出码 4 中止")
+
+    requires = (repo / "requirements.txt").read_text(encoding="utf-8")
+    assert "pywin32-ctypes" in requires, "运行时依赖要显式声明（不靠 keyring 带）"

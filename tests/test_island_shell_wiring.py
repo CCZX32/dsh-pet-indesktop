@@ -250,7 +250,9 @@ class _IslandOverlayHost:
     碰撞世界也是真实对象——墙成员的注册/注销走真实产品路径。
 
     多屏宿主面（``_main_host`` / ``host_for_screen``）按"只有一块屏"的最小形态补齐：
-    岛墙挂到岛当前所在屏的宿主，本桩里那块屏就是唯一一块。
+    岛墙挂到岛当前所在屏的宿主，本桩里那块屏就是唯一一块。岛换屏必然经
+    ``_rebind_island_host``（桥的 ``on_sync`` 挂点），故它和 ``_island_screen_host``
+    一样必须取真实实现——本桩的 ``host_for_screen`` 恒回同一宿主，重绑是 no-op。
     """
 
     def __init__(self):
@@ -273,6 +275,7 @@ class _IslandOverlayHost:
         self._hosts = [host]
         self.attach_island = OverlayShell.attach_island.__get__(self)
         self._island_screen_host = OverlayShell._island_screen_host.__get__(self)
+        self._rebind_island_host = OverlayShell._rebind_island_host.__get__(self)
 
     @property
     def _main_host(self):

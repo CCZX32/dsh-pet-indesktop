@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -77,9 +78,14 @@ class _Win:
 
     def __init__(self) -> None:
         self.bubbles: list[tuple[str, int | None]] = []
+        # 气泡位被审批提醒占着：普通气泡让路（真宿主此时返回 False）
+        self.occupied = False
 
-    def show_bubble(self, text: str, duration_ms: int | None = None) -> None:
+    def show_bubble(self, text: str, duration_ms: int | None = None) -> bool:
+        if self.occupied:
+            return False
         self.bubbles.append((text, duration_ms))
+        return True
 
     def isVisible(self) -> bool:  # noqa: N802 - 对齐 Qt API
         return True
@@ -259,6 +265,35 @@ def test_service_cfg_matches_contract_shape_at_construction(tmp_path, monkeypatc
 
 
 # ------------------------------------------------------------ 服务：合成/播放路径
+
+
+def test_bubble_taken_by_alert_still_reaches_the_user(tmp_path, monkeypatch, caplog):
+    """审批提醒占着气泡位时，报时文字不得静默丢弃。
+
+    旧行为：``show_bubble`` 在有提醒展示时让路并返回 False，调用侧不看返回值就
+    ``return``——气泡没出、通知没发、连一条日志都没有，用户只听得到声音（或什么都
+    没有）。新契约：没上屏就改道桌面通知并留 warning 说明被占，绝不抢占审批气泡。
+    """
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    app.win.occupied = True
+    # 直写气泡位那条降级路必须不被碰：碰了就是抢占审批气泡
+    clobbered: list[str] = []
+
+    class _AlertBubble:
+        def show_text(self, text, *_args, **_kwargs):
+            clobbered.append(text)
+
+    app.win._speech_bubble = _AlertBubble()
+    app.win.visible_content_rect = lambda: object()
+
+    with caplog.at_level(logging.WARNING, logger="pet.voice_chime_service"):
+        service._bubble("现在是上午九点整。")
+
+    assert app.win.bubbles == [], "宿主让路（前置）"
+    assert clobbered == [], "不得抢占正在展示的审批气泡"
+    assert app.notices == [("语音报时", "现在是上午九点整。")], "没上屏必须送达"
+    assert any("九点" in record.getMessage() for record in caplog.records), "被占要有留痕"
 
 
 def test_missing_edge_tts_degrades_to_bubble_without_synthesis(tmp_path, monkeypatch):
@@ -2122,6 +2157,10 @@ def test_audio_channel_survives_on_self_talk_speak_alone(tmp_path):
     """报时关闭、只剩点击自言自语朗读时，通道同样不能被释放。
 
     与节日语音同理：通道随报时开关一起被释放，点击朗读就会「有气泡没声音」。
+
+    ``self_talk_speak_enabled`` / ``click_show_self_talk`` 是**每宠键**：通道判据读
+    每只宠自己的 slot 视图（``AppShell._self_talk_speak_wanted``），主配置只是 slot0
+    兜底。这条用例曾经把两个键写在主配置上，判据按每宠视图改过之后那条路已不存在。
     """
     from pet.app import AppShell
 
@@ -2129,14 +2168,15 @@ def test_audio_channel_survives_on_self_talk_speak_alone(tmp_path):
     cfg = Config(base=tmp_path)
     cfg.set("voice_chime_enabled", False)
     cfg.set("self_talk_enabled", True)
-    cfg.set("click_show_self_talk", True)
-    cfg.set("self_talk_speak_enabled", True)
     shell = AppShell(_qapp(), cfg, enable_chat=False)
+    pet_view = shell.instance.config          # 这只宠的视图（slot0 档案）
+    pet_view.set("click_show_self_talk", True)
+    pet_view.set("self_talk_speak_enabled", True)
 
     shell._sync_chime_service()
     assert shell.voice_chime_service is not None, "点击朗读需要通道"
 
-    cfg.set("self_talk_speak_enabled", False)
+    pet_view.set("self_talk_speak_enabled", False)
     shell._sync_chime_service()
     assert shell.voice_chime_service is None, "三个消费者都关掉后通道应释放"
 
@@ -2600,9 +2640,15 @@ def test_precache_worker_uses_resolved_voice(tmp_path, monkeypatch):
     # 尝试序列里带的必须是**替换后**的音色（provider 的 preflight 换的），不是配置原值
     assert worker.attempts[0].plan["voice"] == DEFAULT_VOICE, \
         "worker 必须拿替换后的音色，不是配置原值"
-    # 与缓存 key 同源：产物文件名就是按替换后音色算出来的那个 key
-    expected = cache_key(worker.text, service._cfg, provider_id=worker.attempts[0].provider)
+    # 缓存键必须与 worker 手里那份**已解析**的 attempt 同源（provider + values），
+    # 不能回头再从 _cfg 取一次：那样回退产物的文件名挂的是死音色的身份，用户显式
+    # 改成这把回退音色时会再合一遍，原音色恢复后又继续命中回退的声音。
+    expected = cache_key(worker.text, provider_id=worker.attempts[0].provider,
+                         values=worker.attempts[0].values)
     assert worker.out_path.name == f"{expected}.mp3"
+    assert expected != cache_key(worker.text, service._cfg,
+                                 provider_id=worker.attempts[0].provider), \
+        "按配置原音色算出来的键是另一个（正是缺陷 B 的错键）"
 
 
 # ============================================================ 手动通道：合成超时解锁

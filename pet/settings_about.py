@@ -32,15 +32,30 @@ def build_author_section(parent: QWidget | None = None) -> SettingsSection:
     return SettingsSection("作者账号", rows, parent)
 
 
+class AuthorRow(QWidget):
+    """作者账号行（读只读面，写入 Config 无关）。
+
+    刻意**不是** ``SettingRow``：这一行没有配置键、没有「已修改 / 改回默认」，两行
+    文字的主次也与标准行相反。但搜索只读 ``label`` / ``hint_label`` / ``objectName``
+    和祖先组标题（见 ``settings_search._row_text``），所以按同一个形状暴露这两个属性
+    就够被索引到，不必为"可搜"改掉这里的排版。
+    """
+
+    def __init__(self, platform: str, handle: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName(f"authorRow_{platform}")
+        self.label = QLabel(platform, self)
+        self.hint_label = QLabel(handle, self)
+
+
 def _account_row(platform: str, handle: str) -> QWidget:
-    row = QWidget()
+    row = AuthorRow(platform, handle)
     layout = QHBoxLayout(row)
     layout.setContentsMargins(16, 10, 16, 10)
     layout.setSpacing(12)
     text = QVBoxLayout()
     text.setSpacing(3)
-    for value, role in ((platform, "settingHint"), (handle, "settingLabel")):
-        label = QLabel(value, row)
+    for label, role in ((row.label, "settingHint"), (row.hint_label, "settingLabel")):
         label.setObjectName(role)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

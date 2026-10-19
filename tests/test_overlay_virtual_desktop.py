@@ -328,3 +328,35 @@ def test_probe_pose_target_keeps_part_of_the_body_on_screen(tmp_path, monkeypatc
             "露出量过大：留在屏内的部分不足一刻")
     finally:
         hosts_mod._cleanup(shell)
+
+
+def test_dragging_onto_the_secondary_screen_remembers_the_assignment(tmp_path, monkeypatch):
+    """鼠标拖到副屏松手 = 有意换屏，必须补记归属，否则几何自存当成临时承载跳过。
+
+    实机回归：拖过去当场正常，重启却回到主屏——因为 ``_save_child_geometry`` 看到
+    盘上 ``screen_name`` 与实际屏不一致，按「临时承载」整段跳过（一个几何键都不写）。
+    """
+    main, left = _stacked_screens()
+    _install_screens(monkeypatch, main, left)
+    shell = _make_shell(tmp_path, main, {"allow_cross_screen": True})
+    try:
+        sprite = shell.sprite
+        _hittable(sprite)
+        overlay = shell.overlay
+        origin = QPointF(overlay.geometry().topLeft())
+        cursor = QPointF(sprite.rect().center())
+        overlay.mousePressEvent(_press(cursor, origin + cursor))
+        for _ in range(70):                       # 向左跨过缝，落进副屏
+            cursor = QPointF(cursor.x() - 40.0, cursor.y())
+            overlay.mouseMoveEvent(_move(cursor, origin + cursor))
+            _tick(shell)
+        overlay.mouseReleaseEvent(_release(cursor, origin + cursor))
+        _tick(shell)
+
+        assert shell._screen_of_sprite(sprite) is left, "前提：身体已经在副屏"
+        assert shell._stored_screen_name(shell._spawn_config_dir(), 0) == left.name(), (
+            "松手即落盘：盘上的屏幕归属必须是副屏")
+        assert shell._save_child_geometry(sprite, slot=0) is True, (
+            "归属与承载屏一致时几何自存必须真的写盘")
+    finally:
+        hosts_mod._cleanup(shell)
