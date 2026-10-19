@@ -58,7 +58,10 @@ def _account_row(platform: str, handle: str) -> QWidget:
     for label, role in ((row.label, "settingHint"), (row.hint_label, "settingLabel")):
         label.setObjectName(role)
         label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         text.addWidget(label)
     layout.addLayout(text, 1)
     copy = _button(row, "copy", f"复制 {platform} 账号 {handle}")

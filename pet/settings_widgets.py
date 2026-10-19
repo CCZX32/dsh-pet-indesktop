@@ -434,7 +434,10 @@ class ImagePreviewDrawer(QFrame):
         self.path_label = QLabel(self)
         self.path_label.setObjectName("imagePreviewPath")
         self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.path_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.scroll = QScrollArea(self)
         self.scroll.setObjectName("imagePreviewScroll")
         self.scroll.setWidgetResizable(True)

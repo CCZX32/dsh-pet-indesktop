@@ -3,9 +3,10 @@
 
 面板是四条截图链路共同的落点，它的契约有五条，逐条都有对应用例：
 
-1. **可复制**：OCR 文本 / 问答答复靠鼠标点按钮进剪贴板——面板是
-   ``WS_EX_NOACTIVATE``（``WindowDoesNotAcceptFocus``）窗，用户没法用
-   Ctrl+C，复制入口必须是一个鼠标可点的按钮（主按钮是 accent 蓝）；
+1. **可复制**：OCR 文本 / 问答答复靠鼠标点按钮进剪贴板（主按钮是 accent 蓝）；
+   文本视图本身是 ``ClickFocus``，选中一段后 **Ctrl+C 也能复制**——面板不再带
+   ``WindowDoesNotAcceptFocus``（那会把"点击后激活"一起禁掉，于是键盘事件永远进不来，
+   用户只能右键菜单复制，2026-10-19 实机反馈）；
 2. **Esc 可关**：同上，面板拿不到键盘焦点，Esc 只能走应用级过滤器；而过滤器
    **绝不吞事件**（返回 False），所以"关面板"永远不挡主人的其它 Esc 语义；
 3. **贴边**：锚在岛旁，越界夹回当刻可用几何——不许跑到屏幕外；
@@ -170,7 +171,9 @@ def test_secondary_slot_appears_only_for_bilingual_results():
 def test_panel_never_steals_focus_and_esc_closes_it_without_swallowing():
     panel = ScreenResultPanel()
     assert panel.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating) is True
-    assert Qt.WindowType.WindowDoesNotAcceptFocus in panel.windowFlags()
+    # 不抢焦点靠 WA_ShowWithoutActivating（显示不激活）；不再带
+    # WindowDoesNotAcceptFocus——那个标志连"点击后激活"也禁掉，Ctrl+C 就没有落点。
+    assert Qt.WindowType.WindowDoesNotAcceptFocus not in panel.windowFlags()
 
     panel.show_result(ScreenResult(title="截图提取文字", primary="内容"))
     panel.show()

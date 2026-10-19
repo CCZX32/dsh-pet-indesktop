@@ -66,7 +66,10 @@ class _Bubble(QLabel):
         # （AutoText 会把本地路径图片加载出来——那是隐私面，不是样式面）
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setWordWrap(True)
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         bg = "#1677e8" if role == "user" else colors["button"]
         fg = "#ffffff" if role == "user" else colors["text"]
         side = "right" if role == "user" else "left"

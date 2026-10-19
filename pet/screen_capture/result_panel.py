@@ -9,11 +9,13 @@
 
 三个硬约束（都在 ``tests/test_screen_capture_result_panel.py`` 里钉死）：
 
-1. **不抢焦点**：窗口带 ``WindowDoesNotAcceptFocus``（= Windows 的
-   ``WS_EX_NOACTIVATE``）与 ``WA_ShowWithoutActivating``——主人正在别的窗口打字时
-   弹出结果，输入焦点不许被抢走（与灵动岛、桌面通知同口径）。
-2. **鼠标交互照常**：防抢焦点窗仍然收得到鼠标事件（岛上的卡片按钮就是先例），
-   所以"复制"做成**按钮**而不是指望用户 Ctrl+C——这个窗口拿不到键盘焦点。
+1. **显示时不抢焦点**：窗口带 ``WA_ShowWithoutActivating``——主人正在别的窗口打字
+   时弹出结果，输入焦点不许被抢走（与灵动岛、桌面通知同口径）。
+   **不再带** ``WindowDoesNotAcceptFocus``（``WS_EX_NOACTIVATE``）：那个标志连
+   "用户点击后激活"也一并禁掉，于是键盘事件永远进不来——选中一段后 Ctrl+C 复制不了，
+   只能右键菜单（2026-10-19 实机反馈）。现在保留"打开不激活"、放开"点击可激活"。
+2. **鼠标交互照常**：鼠标事件本来就有（岛上的卡片按钮是先例）；文本视图是
+   ``ClickFocus``，选中后 Ctrl+C 能复制，右键菜单与工具栏的「复制」按钮照旧。
 3. **Esc 可关**：同上，面板收不到键盘事件，Esc 只能走应用级事件过滤器；过滤器
    **永不吞事件**（恒返回 ``False``）——主人的 Esc 语义（弹弓取消、关设置页）
    一个都不能被结果面板挡住。
@@ -367,7 +369,6 @@ class ScreenResultPanel(QFrame):
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         # 真圆角靠透明背景 + paintEvent 手画卡片；不透明会把圆角吃成直角
         # （实机"白盒"观感之源），而透明窗上 QSS 又不画自身背景（A/B 实测）。
@@ -561,8 +562,9 @@ class ScreenResultPanel(QFrame):
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         view.setMinimumHeight(min_h)
         view.setMaximumHeight(max_h)
-        # 只读文本视图不许在点击时抢键盘焦点（面板本来也激活不了）
-        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # 点击才聚焦（打开时仍不抢焦点，见 WA_ShowWithoutActivating）：
+        # 不给任何焦点的话 Ctrl+C 永远没有落点，用户只能右键菜单复制。
+        view.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         return view
 
     # ---------------------------------------------------------------- 只读视图

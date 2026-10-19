@@ -135,7 +135,10 @@ class MessageBubble(QFrame):
         self.body = QLabel()
         self.body.setObjectName("bubble-body")
         self.body.setWordWrap(True)
-        self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.body.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.body.setFont(QFont("Microsoft YaHei UI", 10))
         self._set_body_text(content)
         panel.addWidget(self.body)

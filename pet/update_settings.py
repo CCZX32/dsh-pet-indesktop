@@ -104,8 +104,11 @@ class UpdatePage(QWidget):
         self.notes_label.setObjectName("updateNotes")
         self.notes_label.setWordWrap(True)
         self.notes_label.setTextInteractionFlags(
-            self.notes_label.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse
+            self.notes_label.textInteractionFlags()
+            | Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
+        self.notes_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         notes_layout.addWidget(notes_title)
         notes_layout.addWidget(self.notes_label)
         layout.addWidget(notes_card)
