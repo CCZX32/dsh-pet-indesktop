@@ -92,8 +92,9 @@ def _default_render_device_id() -> "str | None":
         ole32 = ctypes.windll.ole32
     except AttributeError:
         return None
+    init_hr = -1  # CoInitializeEx 未跑完（异常）时按"未初始化"处理，不配平
     try:
-        ole32.CoInitializeEx(None, 0)          # COINIT_MULTITHREADED；重复调用安全
+        init_hr = ole32.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED；重复调用安全
         enum = ctypes.c_void_p()
         hr = ole32.CoCreateInstance(ctypes.byref(_CLSID_MMDEVENUM), None, 0x17,
                                     ctypes.byref(_IID_IMMDEVENUM), ctypes.byref(enum))
@@ -123,10 +124,14 @@ def _default_render_device_id() -> "str | None":
     except Exception:            # noqa: BLE001 - 探测失败按"不知道"处理
         return None
     finally:
-        try:
-            ole32.CoUninitialize()
-        except Exception:        # noqa: BLE001
-            pass
+        # 仅本函数真正初始化成功（S_OK/S_FALSE，会给线程 COM 计数 +1）时才配平；
+        # RPC_E_CHANGED_MODE（GUI 线程已是 STA）与其它失败值不增加计数，
+        # 此时 CoUninitialize 会错扣别人的计数（播放热路径每 2s 一次）。
+        if init_hr in (0, 1):  # S_OK / S_FALSE
+            try:
+                ole32.CoUninitialize()
+            except Exception:        # noqa: BLE001
+                pass
 
 
 #: 默认设备对账的最小间隔（play 热路径不每次做 COM 往返）

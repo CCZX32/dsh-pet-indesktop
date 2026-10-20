@@ -969,3 +969,53 @@ def test_pool_device_check_is_rate_limited(tmp_path, monkeypatch):
         assert len(calls) == 1, "限频窗口内只查一次"
     finally:
         pool.close()
+
+
+# ---------------------------------------------------------------------------
+# COM 计数配平：CoInitializeEx 只在真正初始化成功时才配平 CoUninitialize
+# ---------------------------------------------------------------------------
+
+class _FakeOle32:
+    """ole32 最小替身：CoCreateInstance 直接失败，让探测提前返回，
+    测试专注 CoInitializeEx/CoUninitialize 的计数配平。"""
+
+    def __init__(self, init_hr: int) -> None:
+        self.init_hr = init_hr
+        self.uninit_calls = 0
+
+    def CoInitializeEx(self, _reserved, _model):
+        return self.init_hr
+
+    def CoCreateInstance(self, *_args):
+        return -1  # 失败 → _default_render_device_id 提前 return None
+
+    def CoTaskMemFree(self, _ptr):
+        pass
+
+    def CoUninitialize(self):
+        self.uninit_calls += 1
+
+
+@pytest.mark.parametrize(
+    "init_hr, expected_uninit",
+    [
+        (0, 1),                    # S_OK：本函数初始化了 COM，必须配平
+        (1, 1),                    # S_FALSE：已初始化但计数仍 +1，必须配平
+        (-2147024634, 0),          # RPC_E_CHANGED_MODE(0x80010106 有符号)：不增加计数，禁止配平
+        (-1, 0),                   # 其它失败值：不增加计数，禁止配平
+    ],
+)
+def test_default_render_device_id_com_init_balance(monkeypatch, init_hr, expected_uninit):
+    """GUI 线程通常已是 STA：CoInitializeEx(MTA) 返回 RPC_E_CHANGED_MODE 且
+    **不**增加引用计数，此时无条件 CoUninitialize 会错扣别人的 COM 计数
+    （播放热路径每 2s 一次，是无 traceback native 崩溃的隐患）。"""
+    import pet.sound_winmm as sm
+
+    monkeypatch.setattr(sm.sys, "platform", "win32")
+    fake = _FakeOle32(init_hr)
+    monkeypatch.setattr(sm.ctypes, "windll", SimpleNamespace(ole32=fake), raising=False)
+    assert sm._default_render_device_id() is None
+    assert fake.uninit_calls == expected_uninit, (
+        f"CoInitializeEx 返回 {init_hr:#x} 时 CoUninitialize 应被调 {expected_uninit} 次，"
+        f"实调 {fake.uninit_calls} 次"
+    )
