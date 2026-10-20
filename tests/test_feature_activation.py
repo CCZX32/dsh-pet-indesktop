@@ -39,6 +39,10 @@ def test_new_install_gets_baseline_and_persists(tmp_path):
     cfg = _config(tmp_path)
     frozen = fa.decide_and_freeze(cfg)
     assert frozen == frozenset(MIGRATION_BASELINE)  # 期 5 前新装同样继承全集
+    # 判定只进内存草稿（启动链不许有配置副作用），随下一次自然保存落盘
+    assert not cfg.path.is_file()
+    assert cfg.data["feature_activation"] == {"version": 1, "enabled": list(MIGRATION_BASELINE)}
+    assert cfg.save()
     assert _disk_payload(cfg) == {"version": 1, "enabled": list(MIGRATION_BASELINE)}
     # 幂等：二次判定不改写、不重判
     fa.reset_snapshot_for_tests()

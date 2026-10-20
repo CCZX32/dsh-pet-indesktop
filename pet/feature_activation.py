@@ -57,7 +57,11 @@ def decide_and_freeze(config) -> frozenset[str]:
     """启动早期调用一次：完成迁移判定（若需要）并冻结本次运行快照。
 
     - 已判定（盘上有合法值）：直接冻结，未知 ID 进不了快照但保留在盘上；
-    - 未判定（None）：按新装/升级写回初始集合（整值提交，走正常 save 链）；
+    - 未判定（None）：按新装/升级置出初始集合——**只进内存草稿，不主动落盘**：
+      判定是确定性的（同一份磁盘痕迹必然判出同一结果），进程死掉重判无妨；
+      草稿随下一次自然配置保存落盘。启动链上主动 save 会过早触发 slot-0
+      档案引导（`Config.save` 的 pet_profiles  bootstrap），破坏「AppShell
+      构造前零配置副作用」的启动不变量（tests/test_overlay_instance_gate.py）；
     - 损坏（非 dict / 版本不认识 / enabled 不是 list）：保留原数据、打诊断，
       保守冻结全模块——绝不拿默认值覆盖用户数据；
     - 合法空列表是明确选择，原样冻结（绝不回退成全激活）。
@@ -67,14 +71,9 @@ def decide_and_freeze(config) -> frozenset[str]:
     if raw is None:
         upgrade = _is_upgrade_install(config)
         enabled = [] if (not upgrade and PURE_CORE_FOR_NEW_INSTALL) else list(MIGRATION_BASELINE)
-        payload = {"version": CURRENT_VERSION, "enabled": enabled}
-        config.set("feature_activation", payload)
-        if config.save():
-            log.info("功能模块激活：%s安装，初始启用集合已落盘（%d 项）",
-                     "升级" if upgrade else "新装", len(enabled))
-        else:
-            # 写失败不冒充成功：快照照常冻结（本次运行可用），诊断留给日志
-            log.warning("功能模块激活：初始启用集合落盘失败，仅本次运行生效")
+        config.set("feature_activation", {"version": CURRENT_VERSION, "enabled": enabled})
+        log.info("功能模块激活：%s安装，初始启用集合 %d 项（随下次配置保存落盘）",
+                 "升级" if upgrade else "新装", len(enabled))
         _snapshot = frozenset(enabled)
         return _snapshot
     if not isinstance(raw, dict) or raw.get("version") != CURRENT_VERSION \

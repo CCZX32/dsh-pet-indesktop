@@ -301,7 +301,7 @@ WINDOW_PY_LINE_BUDGET = 4671
 # pet/settings_features.py**，本文件净 +14：`_features_page` 初始化与构造接线、
 # `domain_content` 一行、`_write_config` 末尾统一 save 前的 staged 写回委托。
 # 实测 2620。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2620
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2621  # 2026-10-21：#316 朗读行 claim 进 AI 域页 +1
 
 
 def _read(name: str) -> str:
