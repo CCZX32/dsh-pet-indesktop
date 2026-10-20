@@ -915,3 +915,57 @@ def test_play_clip_skips_scaled_cache_for_large_clip(tmp_path, monkeypatch):
     assert len(calls) == 2, "超过上限的素材不得钉进缓存"
     assert api.writes[1][1] == real_scale(big.data, 0.5)
     pool.clear()
+
+
+def test_pool_follows_default_device_change(tmp_path, monkeypatch):
+    """issue #315：默认设备一切换，整池关闭并按需在**新**设备重建句柄。
+
+    旧行为：切了默认输出，已开句柄继续往旧设备播（waveOutOpen 只在打开
+    那一刻解析默认设备）。现在每次播放前限频对一次默认端点 ID。
+    """
+    import pet.sound_winmm as sm
+
+    api = FakeWinmmApi()
+    pool = sm.WinmmSoundPool(api=api)
+    device = {"id": "{DEV-A}"}
+    monkeypatch.setattr(sm, "_default_render_device_id", lambda: device["id"])
+    wav = _pcm16_wav(tmp_path / "a.wav")
+    try:
+        assert pool.play(wav) is True
+        assert pool._device_id == "{DEV-A}"
+        handles_a = list(api.opened)
+        assert handles_a, "首次播放必须开过句柄"
+
+        device["id"] = "{DEV-B}"
+        real_now = sm.time.monotonic()
+        monkeypatch.setattr(sm.time, "monotonic", lambda: real_now + 100.0)  # 越过限频
+        assert pool.play(wav) is True
+        assert pool._device_id == "{DEV-B}"
+        assert api.closed == [h for (h, _c, _r) in handles_a], "旧句柄必须全部关闭"
+        assert len(api.opened) > len(handles_a), "新设备上要按需重开句柄"
+
+        # 查询失败（返回 None）：绝不动池
+        closed_before = list(api.closed)
+        monkeypatch.setattr(sm, "_default_render_device_id", lambda: None)
+        assert pool.play(wav) is True
+        assert api.closed == closed_before, "查询失败不许误清池"
+    finally:
+        pool.close()
+
+
+def test_pool_device_check_is_rate_limited(tmp_path, monkeypatch):
+    """默认设备对账限频：热路径不许每次播放都走 COM 往返。"""
+    import pet.sound_winmm as sm
+
+    api = FakeWinmmApi()
+    pool = sm.WinmmSoundPool(api=api)
+    calls = []
+    monkeypatch.setattr(sm, "_default_render_device_id", lambda: calls.append(1) or "{DEV-A}")
+    wav = _pcm16_wav(tmp_path / "b.wav")
+    try:
+        pool.play(wav)
+        pool.play(wav)
+        pool.play(wav)
+        assert len(calls) == 1, "限频窗口内只查一次"
+    finally:
+        pool.close()
