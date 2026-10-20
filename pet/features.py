@@ -611,6 +611,25 @@ def all_features() -> tuple[FeatureSpec, ...]:
     return tuple(sorted(FEATURES.values(), key=_sort_key))
 
 
+_ACTION_TO_FEATURE: dict[str, str] | None = None
+
+
+def feature_for_action(action_id: str) -> str | None:
+    """右键菜单动作 id → 所属模块 id；不属于任何可停用模块返回 None。
+
+    菜单投影（registry.available_ids）按它做激活过滤：返回 None 的动作
+    （核心动作、MIGRATION 外的）不受模块门控影响。
+    """
+    global _ACTION_TO_FEATURE
+    if _ACTION_TO_FEATURE is None:
+        _ACTION_TO_FEATURE = {
+            action_id: spec.id
+            for spec in FEATURES.values()
+            for action_id in spec.menu_action_ids
+        }
+    return _ACTION_TO_FEATURE.get(action_id)
+
+
 def get(feature_id: str) -> FeatureSpec | None:
     """按 id 取模块；未知 id 返回 `None`（未知是常态：降级/再升级会让它回来）。"""
     return FEATURES.get(feature_id)

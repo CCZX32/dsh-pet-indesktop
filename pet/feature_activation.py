@@ -97,8 +97,20 @@ def decide_and_freeze(config) -> frozenset[str]:
 
 
 def is_active(feature_id: str) -> bool:
-    """本次运行该模块是否激活。快照未冻结（测试/工具/独立设置进程）恒 True。"""
-    return _snapshot is None or feature_id in _snapshot
+    """本次运行该模块是否可用（激活快照 ∧ 硬依赖满足）。
+
+    快照未冻结（测试/工具/独立设置进程）恒 True。只勾了模块但没勾它的
+    硬依赖（如只开 file_interpret 不开 chat）时按不可用计——门控三层
+    （菜单/设置/执行）共用这个判据，不会出现「入口在、点了没反应」。
+    不在清单里的 id（核心能力、空串）不受门控，恒 True。
+    """
+    if feature_id not in FEATURES:
+        return True
+    if _snapshot is None:
+        return True
+    from .features import resolve_dependencies
+
+    return feature_id in resolve_dependencies(_snapshot).active
 
 
 def snapshot() -> frozenset[str] | None:
@@ -137,3 +149,9 @@ def reset_snapshot_for_tests() -> None:
     """测试专用：解除冻结，恢复 is_active 恒 True 的默认态。"""
     global _snapshot
     _snapshot = None
+
+
+def freeze_snapshot_for_tests(enabled) -> None:
+    """测试专用：直接冻结成指定启用集（门控用例的开关）。"""
+    global _snapshot
+    _snapshot = frozenset(enabled)

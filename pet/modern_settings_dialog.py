@@ -2515,8 +2515,14 @@ class ModernSettingsDialog(QDialog):
         settings_network.save_network_settings(self)
         settings_music.save_music_player_settings(self)
         settings_quiet.save_quiet_settings(self)
-        settings_weather.save_weather_settings(self)
-        settings_divination.save_divination_settings(self)
+        # 模块未激活时对应标签页未构造（控件不存在），其 save 必须同步跳过：
+        # 既不是「藏起来继续全表保存」，也不能碰不存在的控件
+        from . import feature_activation as _fa
+
+        if _fa.is_active("weather"):
+            settings_weather.save_weather_settings(self)
+        if _fa.is_active("divination"):
+            settings_divination.save_divination_settings(self)
         settings_hotkeys.save_hotkey_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS

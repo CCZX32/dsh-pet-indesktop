@@ -11,6 +11,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QWidgetAction
 
 from ..config import DEFAULT_MENU_EASTER_EGG
+from .. import features as features_mod
 from ..weather_menu import (
     WEATHER_DISABLED_REASON,
     add_show_weather,
@@ -417,10 +418,18 @@ class MenuActionRegistry:
         return frozenset(self._specs)
 
     def available_ids(self, pet) -> frozenset[str]:
+        # 功能模块投影：未激活模块的动作直接从「可用集」剔除——布局解析会
+        # 顺带丢空子菜单、规整分隔线，且不写回用户的自定义布局（重开即恢复）。
+        # 快照未冻结（测试/工具）时 is_active 恒 True，行为与旧版一致。
+        from .. import feature_activation
+
         return frozenset(
             action_id
             for action_id, spec in self._specs.items()
             if spec.available(pet)
+            and feature_activation.is_active(
+                features_mod.feature_for_action(action_id) or ""
+            )
         )
 
     def enabled_ids(self, pet) -> frozenset[str]:

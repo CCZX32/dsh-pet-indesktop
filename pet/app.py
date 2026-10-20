@@ -3934,6 +3934,11 @@ class AppShell:
         与 ``show_balance`` 同口径：``parent`` 是气泡宿主（旧版拓扑是 PetWindow、
         overlay 拓扑是壳）；服务懒创建、进程级单例（多窗共用）。
         """
+        if not feature_activation_mod.is_active("weather"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留/外部触发），不建服务、不起网络线程。
+            logging.info("天气模块未激活，忽略「查看天气」请求")
+            return
         from .weather_service import WeatherService
 
         if self._weather_service is None:

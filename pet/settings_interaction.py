@@ -172,9 +172,14 @@ def build_interaction_domain(dialog) -> QWidget:
     )
     # 第三个同级任务：天气（"桌宠替你看一眼外部数据"，与「点击显示余额」同族）。
     # 行与控件都由 settings_weather 构建（本模块只挂页，与 file_interpret 同口径）。
-    from .settings_weather import build_weather_tab
+    # 模块未激活：标签整页不构造（其 save 在 _write_config 里同样被跳过，
+    # 配置与数据保持原样，重新激活后原样回来）。
+    from . import feature_activation as _fa
 
-    tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
+    if _fa.is_active("weather"):
+        from .settings_weather import build_weather_tab
+
+        tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
     # 第四个同级任务：每日一签（"用户主动拉一次、桌宠给一个结果"，同天气一族）。
     # **标签名用「趣味」**：她 2026-10-15 的归类要求是「抽签这个功能…归类为趣味」；
     # 卡片/分组名仍是「抽签」。落地形态是**页内标签而不是一级域**——只有一组的
@@ -183,7 +188,8 @@ def build_interaction_domain(dialog) -> QWidget:
     # 一级域要过准入，页内标签不用——她的归类意图由标签名承载。
     from .settings_divination import build_divination_tab
 
-    tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
+    if _fa.is_active("divination"):
+        tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
     # 第五个同级任务：全局快捷键（"用户怎么唤出它"）。默认全不绑，见 settings_hotkeys。
     from .settings_hotkeys import build_hotkey_rows
 
