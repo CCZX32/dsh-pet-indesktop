@@ -8,7 +8,7 @@
 
 本文件钉住五件事：
 
-1. 桌宠域确实用页内标签组织、默认激活标签 1、侧栏 10 个域不变（域是外部契约）；
+1. 桌宠域确实用页内标签组织、默认激活标签 1、侧栏域清单不变（域是外部契约）；
 2. 标签内组序：主视线组在前、高级组垫底；每行的 ``SettingsSection`` 归属唯一；
 3. 每一行都能由标签键路由到，切到所属标签后可见（分页没丢功能）；
 4. 搜索命中另一标签的行时自动切标签 + 展开高级组，命中行**实际可见**
@@ -25,7 +25,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 EXPECTED_SIDEBAR = [
-    "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
+    "常规", "桌宠", "互动", "菜单", "桌面组件", "功能", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
 ]
 #: 标签键给代码（稳定），标签名给用户（可读）；顺序 = 使用顺序。
 EXPECTED_TABS = (("display_music", "显示与音乐"), ("motion_collision", "动作与碰撞"),
@@ -148,7 +148,7 @@ def _section_of(row):
 
 
 def test_pet_domain_uses_in_page_tabs_without_changing_sidebar(dialog):
-    """页内标签组织桌宠域；默认激活标签 1；侧栏 10 个域不变。"""
+    """页内标签组织桌宠域；默认激活标签 1；侧栏域清单不变。"""
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == EXPECTED_SIDEBAR
 
     tabs = _pet_tabs(dialog)

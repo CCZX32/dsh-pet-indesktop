@@ -1385,12 +1385,13 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
+    # 2026-10-21 新增「功能」域（功能模块启用/停用卡片，settings_features）。
+    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "功能", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_pages
     assert dialog.pages.count() == len(expected_pages)
     assert dialog.search_edit.placeholderText() == "搜索设置…"
     assert all(not dialog.sidebar.item(i).icon().isNull() for i in range(dialog.sidebar.count()))
-    assert all(dialog.sidebar.item(i).sizeHint().height() >= 34 for i in range(dialog.sidebar.count()))
+    assert all(dialog.sidebar.item(i).sizeHint().height() >= 31 for i in range(dialog.sidebar.count()))
     assert "QListWidget#settingsSidebar::item:hover" in dialog.styleSheet()
     assert "border-right: 1px solid #e3e5e8" in dialog.styleSheet()
     assert "background: #f7f7f8" in dialog.styleSheet()
@@ -1466,8 +1467,8 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_playback_speed")) == 1
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_self_talk_texts")) == 2
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_scale")) == 1
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == 5
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == 5
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == sidebar_index("AI 与对话")
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == sidebar_index("AI 与对话")
     if settings_mod.sys.platform != "win32":
         assert dialog.auto_hide_fullscreen_check is None
         assert dialog.stream_capture_check is None
@@ -2084,7 +2085,8 @@ def test_modern_settings_search_locates_rows_and_return_does_not_close(tmp_path,
     dialog.search_edit.setFocus()
     dialog.search_edit.setText("API 地址")
     app.processEvents()
-    assert dialog.sidebar.currentRow() == 5  # 稳定的“AI 与对话”能力域
+    assert dialog.sidebar.currentItem().text() == "AI 与对话"  # 稳定的能力域
+    assert dialog.sidebar.currentRow() == 6  # 「功能」域（2026-10-21）在「桌面组件」之后
     api_row = dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")
     assert api_row.property("searchMatch") is True
     QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)

@@ -82,6 +82,7 @@ SETTINGS_DOMAIN_NAV = (
     ("互动", "interaction"),
     ("菜单", "application"),
     ("桌面组件", "island"),
+    ("功能", "template"),
     ("AI 与对话", "chat"),
     ("自动化与联动", "automation"),
     ("语音", "sound"),
@@ -1605,8 +1606,11 @@ CONTENT_READING_MAX_WIDTH = 800
 SIDEBAR_MIN_WIDTH = 200
 
 #: 侧栏导航图标与行高：图标按当前主题渲染一次、切主题时重画（见 :func:`refresh_settings_icons`）。
+#: 行高 31：能力域 10→11（2026-10-21 新增「功能」域）后，34 在默认 800×560 窗口里装不下
+#: 11 行（实测余量 −16px）；31 装得下且余量（17px）与 10 域 × 34 时（19px）相当——
+#: 间距与行距一个都没动，只按新预算校准行高。
 SIDEBAR_ICON_SIZE = 16
-SIDEBAR_ROW_HEIGHT = 34
+SIDEBAR_ROW_HEIGHT = 31
 
 #: 项里的矢量图标请求：``(名字, 尺寸)``。侧栏导航行与快捷启动行都存这一格——列表项不是
 #: 控件，没法走 ``themedIconRequest`` 动态属性，只能记在数据角色上。取 ``UserRole`` 之后的

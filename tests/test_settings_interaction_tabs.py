@@ -6,7 +6,8 @@
 把同域的多个同级任务分成页内标签（见 test_menu_layout 里的菜单域用例）。
 
 本文件钉住四件事：
-1. 互动域确实用页内标签组织，且**侧栏 10 个域不变**（域数量/顺序是外部契约）；
+1. 互动域确实用页内标签组织，且**侧栏域清单不变**（域数量/顺序是外部契约，
+   2026-10-21 新增「功能」域后 11 个）；
 2. 每个设置行都能通过它的标签**到达**（切到对应标签后可见）——"整理后功能仍可用"；
 3. 设置搜索命中非默认标签里的行时，**自动切到那个标签**（否则结果不可见）；
 4. 全局不变量：所有 ``settingRow_*`` 仍落在某个域页里，不出现「待分类（开发期）」。
@@ -19,7 +20,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 EXPECTED_SIDEBAR = [
-    "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
+    "常规", "桌宠", "互动", "菜单", "桌面组件", "功能", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
 ]
 # 标签键/名：键给代码（稳定），名给用户（可读）。顺序 = 使用顺序。
 # 「天气」（issue #209，2026-10-07）与「点击显示余额」同族——都是"桌宠替你看一眼
@@ -84,7 +85,7 @@ def _row(dialog, key: str):
 
 
 def test_interaction_domain_uses_in_page_tabs_without_changing_sidebar(dialog):
-    """页内标签组织互动域，侧栏 10 个域不变（域契约是外部可见的）。"""
+    """页内标签组织互动域，侧栏域清单不变（域契约是外部可见的）。"""
     from pet.settings_widgets import SettingsTabContainer
 
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == EXPECTED_SIDEBAR
@@ -221,7 +222,7 @@ def test_every_setting_row_still_lives_in_a_domain_page(dialog):
 # 判不合格：域撤回、行归位到「互动」页内第四个标签，侧栏间距与行高一个都不动。
 
 def test_divination_rows_hang_off_the_interaction_domain_not_a_new_sidebar_domain(dialog):
-    """侧栏仍是 10 个域，且没有叫「趣味」的一级域——抽签的行在「互动」域里。"""
+    """侧栏没有叫「趣味」的一级域——抽签的行在「互动」域里。"""
     from pet.settings_widgets import SettingsTabContainer
 
     labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
@@ -236,10 +237,12 @@ def test_divination_rows_hang_off_the_interaction_domain_not_a_new_sidebar_domai
 
 
 def test_sidebar_spacing_and_row_height_are_not_squeezed(dialog):
-    """侧栏间距 3 / 导航行距 1 / 行高 ≥34 全部保持原值（不许为新域压间距）。
+    """侧栏间距 3 / 导航行距 1 不许压（压它们 = 拿所有域的呼吸空间换一个域）。
 
-    这三个数是「10 个域在默认 800×560 窗口里全落在视口内」的既有解；靠把它们压到
-    0 来多塞一个域，是拿"所有域的可见性余量"换"多一个域"，代价落在用户身上。
+    行高是另一条预算：2026-10-21 新增「功能」域（10 → 11 域，拍板决策，见
+    docs/SETTINGS-CHANGE-GATES.md）后按「默认 800×560 装下全部域」重新校准为 31——
+    11 × 31 在本机余量 17px，与 10 × 34 时的 19px 相当（间距与行距一个都没动）。
+    再压行高（< 31）或动间距/行距来多塞域，都不许。
     """
     from PySide6.QtWidgets import QFrame
 
@@ -249,7 +252,7 @@ def test_sidebar_spacing_and_row_height_are_not_squeezed(dialog):
     assert pane is not None, "侧栏容器没找到"
     assert pane.layout().spacing() == 3, "侧栏布局间距被压过（原值 3）"
     assert dialog.sidebar.spacing() == 1, "侧栏导航行距被压过（原值 1）"
-    assert SIDEBAR_ROW_HEIGHT == 34
+    assert SIDEBAR_ROW_HEIGHT == 31
     assert dialog.sidebar.sizeHintForRow(0) >= SIDEBAR_ROW_HEIGHT
 
 

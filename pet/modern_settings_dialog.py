@@ -290,6 +290,9 @@ class ModernSettingsDialog(QDialog):
         self.standalone = bool(standalone)
         self.initial_page = str(initial_page or "").strip()
         self.ai_page = None
+        # 「功能」页（settings_features，staged 语义）：_rebuild_domain_navigation 里构造，
+        # _write_config 末尾统一 save 前委托它写 feature_activation。
+        self._features_page = None
         self.setProperty("modernStyle", True)
         self.setProperty("menuStyle", "modern")
         self.setWindowTitle("桌宠设置")
@@ -1858,7 +1861,7 @@ class ModernSettingsDialog(QDialog):
             claim("foobar_title_format") + settings_music.build_music_player_rows(self))
         # 「桌宠」域（2026-10-08 第二刀）：域内是两个**互斥任务**——「它长什么样 /
         # 唱不唱歌」与「它怎么动 / 怎么撞」，页内切成两个标签，首屏只管一个任务。
-        # 侧栏 10 域是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
+        # 侧栏域清单是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
         # _search_settings 的 activate_for_descendant 自动切标签。
         pet = SettingsTabContainer(self)
         pet.addTab(
@@ -2109,6 +2112,13 @@ class ModernSettingsDialog(QDialog):
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
         file_interpret = settings_file_interpret.build_file_interpret_page(self)
 
+        # 「功能」域（2026-10-21 新增）：功能模块的启用/停用卡片，内容本体在
+        # pet/settings_features.py（行数预算原因，本文件只留接线）。staged 语义：
+        # 卡片开关只改内存 pending 集，保存由 _write_config 末尾统一委托。
+        from . import settings_features
+
+        self._features_page = settings_features.build_content(self)
+
         # Preserve any newly added row until it receives an explicit domain decision.
         leftovers = [row for row in all_rows if row not in claimed and (self.ai_page is None or not self.ai_page.isAncestorOf(row))]
         if leftovers:
@@ -2124,6 +2134,7 @@ class ModernSettingsDialog(QDialog):
             "互动": interaction,
             "菜单": menu,
             "桌面组件": desktop_components,
+            "功能": self._features_page,
             "AI 与对话": ai_sections,
             "自动化与联动": automation,
             "语音": voice,
@@ -2550,6 +2561,10 @@ class ModernSettingsDialog(QDialog):
         # 位置自动保存等一切后台写盘不得置位。主配置（slot 0/主肥鱼）保存不置位。
         if self.config.instance_id:
             self.config.set("user_customized", True)
+        # 「功能」页 staged 写回：只在本进程内 staging 的 pending 集与盘上「下次启动」值
+        # 不同才 set（未改动不碰，避免无谓写盘触发主进程 watcher）；不自己 save。
+        if self._features_page is not None:
+            self._features_page.write_to_config(self.config)
         ok = self.config.save()
         if not ok:
             self._write_failure = settings_close_flow.failure_of(self)

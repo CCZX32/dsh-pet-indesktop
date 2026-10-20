@@ -83,6 +83,42 @@ recovery
 
 ## 变更记录
 
+### 2026-10-21 — 新增一级域「功能」（功能模块启用/停用卡片，staged 语义）
+
+本刀**新增 1 个一级能力域与 1 个持久设置的可见入口**（`feature_activation` 键与迁移
+语义在期 1 地基里已就位：`pet/features.py` 清单、`pet/feature_activation.py` 快照/
+待生效分层，本刀不改它们的 API）；不改任何既有键的默认值、归属与保存语义。
+设计稿：`feature-modules` SPEC（§2 架构、§5.2 设置层、§9 已拍决策：侧栏新域
+「功能」放「桌面组件」之后 + 「推荐套件」一键勾选）。
+
+| 项 | 本刀口径 |
+|---|---|
+| 键 | `feature_activation`（`{"version":1,"enabled":[...]}`），**不是新键**：期 1 已进 `Config._initial_data`（默认 `None` = 未判定）、reload 白名单与 `_NULL_ACCEPTING_KEYS`。本刀只是给它第一个 UI 入口 |
+| 归属 | 新增一级域「功能」（侧栏放「桌面组件」之后，图标 `template`）。**准入复核**：代表长期独立用户目标（模块级启用/停用，与任何单功能的参数调优不同层），自带 **5 个稳定分组**（生活/声音/智能/联动/系统，跟随 `features.CATEGORY_ORDER`，≥2 组的机器门 `test_new_top_level_domain_must_own_at_least_two_setting_groups` 过）；放现有域会把 14 张卡片埋进别的任务页，可发现性显著下降 |
+| 页面形态 | 卡片列表（仿 `character_packs_page` 的卡片语言，复用 `settingsCard`/`settingLabel`/`settingHint` 令牌）：功能名、一句话 desc、开关；徽标 联网 / 可能要花钱/凭据 / 会拉起外部程序（取自 `FeatureSpec.needs_*`）。顶部说明条 + 常驻「重启后生效」提示；快捷按钮「推荐套件 / 全部开启 / 全部关闭」（纯 UI 捷径，只改 pending 集）。**卡片不是 SettingRow**（一个键装 14 个模块的集合，不是逐键偏好），与角色包卡片同口径 |
+| default / 迁移 | 无迁移：老用户首次打开 pending 即迁移基线全集（`pending_enabled` 语义），无需迁移提示；合法空集不回退（`[]` 是用户明确选择的纯核心）；未知模块 ID 写回时原样保留（SPEC §4「不执行但保留」） |
+| 保存时机 / commit_policy | `immediate` 但 **staged**：卡片开关只改内存 pending 集；`_write_config` 末尾统一 save 前委托 `FeaturesPage.write_to_config`——pending 与盘上 `pending_enabled` 不同才 `config.set`（未改动不 set，避免无谓写盘触发主进程 watcher），不自己 save、不调 `write_enabled`。取消/关窗不保存即丢弃。**生效时机是重启**（激活快照在启动早期冻结，页面如实写「重启后生效；当前正在运行的功能不受影响」） |
+| 依赖呈现 | 硬依赖如实显示不强制拦：被勾选功能缺依赖时，在**被依赖者**卡下挂一行「××需要它才能用」（`features.resolve_dependencies` 判 blocked）；保存不拦（blocked 模块运行时自然不可用） |
+| 搜索 | 卡片是普通 QWidget，**不进**搜索索引（索引 = `SettingRow` + `AuthorRow`，既有决定）；功能名经各自既有设置行可搜（天气→互动域行、抽签→互动域行等），与「命令类控件不进索引」同一纪律 |
+| 侧栏预算 | 能力域 10 → 11：`SIDEBAR_ROW_HEIGHT` 34 → **31**（实测 800×560 下 11×31 余量 17px，与 10×34 的 19px 相当；间距 3 与行距 1 不动——压它们才是「拿所有域的呼吸空间换一个域」）。行高 pins（`test_settings_interaction_tabs` / `test_desktop_pet_features`）与域清单快照同步更新 |
+| 恢复 | 无需恢复路径：失败面只有写盘失败，走既有设置窗关闭闸门；损坏配置值在用户未改动时一字不动 |
+| 平台 / 变体 | 三端同建（模块清单是静态数据，无平台分支）；no-chat 变体的「本构建不支持」呈现是 SPEC 期 5 范围，本刀不做 |
+
+准出对应：
+
+1. **契约**：键、默认值、归属、披露层级（全部 primary）、保存与生效时机逐条见上表；
+   旧键/旧入口/旧别名无迁移问题（键在期 1 已注册）。
+2. **TDD**：`tests/test_settings_features.py` 12 例（页面装配 14 卡 5 组、staged 不落盘、
+   有改动才 set / 未改动不 set、全部关闭 → 盘上 `enabled=[]` 不回退、依赖提示与不拦保存、
+   未知 ID 保留、快捷按钮、取消丢弃）；侧栏/域契约快照（`test_menu_layout` /
+   `test_desktop_pet_features` / `test_settings_interaction_tabs` /
+   `test_settings_pet_tabs` / `test_settings_sidebar_and_chrome`）随新域同步。
+3. **布局与可访问性**：无新增控件类型、无新增 QSS（复用卡片与 `ToggleSwitch` 令牌）；
+   开关带 `accessibleName`（「启用<功能名>」）；默认窗口 11 域全部可见
+   （`test_default_window_shows_every_domain_without_scrolling` 原判据不变）。
+4. **跨平台**：产品代码无新平台分支；真实 GUI 验收仅本机 Windows，macOS / Linux 未跑（不推断）。
+5. **视觉与文档**：本记录即变更记录。
+
 ### 2026-10-19 — 设置页搜索：↑/↓ 逐条翻命中（无新增设置项）
 
 用户反馈「搜索结果不能用方向键上下翻」。审计：`eventFilter` 原本只吃 `Return`/`Enter`，

@@ -297,7 +297,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-20 上调到 2606：新增「角色与素材」页。**页面本体拆到
 # pet/character_packs_page.py**（按本文件预算注释的规矩：新页面不许在上帝类里堆代码），
 # 这里只加 6 行接线（import + _add_page + 3 行注释）。实测 2606。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2606
+# 2026-10-21 上调到 2620：新增「功能」域（功能模块启用/停用卡片）。**页面本体拆到
+# pet/settings_features.py**，本文件净 +14：`_features_page` 初始化与构造接线、
+# `domain_content` 一行、`_write_config` 末尾统一 save 前的 staged 写回委托。
+# 实测 2620。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2620
 
 
 def _read(name: str) -> str:

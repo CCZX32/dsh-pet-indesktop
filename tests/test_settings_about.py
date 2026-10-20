@@ -56,7 +56,7 @@ def test_author_section_sits_on_the_updates_page(tmp_path, monkeypatch, include_
         dialog.show()
         app.processEvents()
         labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
-        # 作者账号不是侧栏能力域：它并进「更新」页，侧栏仍是 10 个域。
+        # 作者账号不是侧栏能力域：它并进「更新」页，侧栏域清单不含「关于」。
         assert labels[-1] == "更新"
         assert "关于" not in labels
         assert dialog.select_page("更新") is True
