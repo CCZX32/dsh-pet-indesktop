@@ -58,6 +58,10 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 判定
     def _proactive_wanted(self) -> bool:
+        """行为开关 ∧ 模块激活：主动识屏停用后，即使 ``proactive_screen.enabled``
+        还开着也不建对象、不起 8s 心跳与两条 worker 线程。"""
+        if not feature_activation.is_active("proactive"):
+            return False
         raw = self.cfg.get("proactive_screen", {})
         return bool((raw or {}).get("enabled", False))
 
@@ -72,7 +76,13 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 懒创建
     def _ensure_proactive_watcher(self):
-        """首次启用主动识屏时懒创建观察器；已存在则原样返回。"""
+        """首次启用主动识屏时懒创建观察器；已存在则原样返回。
+
+        主动识屏模块停用：**构造前挡**，返回 None。构造即 ``apply_config``，
+        一旦建出来就是一条 8s 心跳 + 可能的 worker 线程——停用不能靠"建完再停"。
+        """
+        if not feature_activation.is_active("proactive"):
+            return None
         if self.proactive_watcher is None:
             from .proactive import ProactiveScreenWatcher
             self.proactive_watcher = ProactiveScreenWatcher(self, self.cfg)
@@ -99,7 +109,15 @@ class WindowFeatureGateMixin:
 
         启用与否不再走 sync：offer() 每次实时读 file_interpret.enabled，
         设置页改动即时生效且无需同步钩子。
+
+        文件解读模块未激活（含硬依赖 chat 缺失）：**不构造控制器、不接管缝**，
+        ``interpret_offer`` 保持 None（拖文件只播吃动画与统计）。模块闸在接线处
+        而不是 offer()：控制器构造即持有 ChatService/SessionStore，停用后连
+        这两个对象都不该出现。
         """
+        if not feature_activation.is_active("file_interpret"):
+            self.install_file_eater().interpret_offer = None
+            return self._file_interpret
         if self._file_interpret is None:
             from .file_interpret import FileInterpretController
             self._file_interpret = FileInterpretController(self)

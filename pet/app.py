@@ -436,6 +436,10 @@ def _read_spawn_offset_env() -> int:
 # 播放器路径预热的错峰延迟：排在动画预热之后，避开多开启动期的 IO 洪峰。
 _MUSIC_PLAYER_WARM_DELAY_MS = 2500
 
+#: 归「手动视觉 vision」模块的全局快捷键动作（注册与回调双守的共用清单）。
+#: ``hotkey_open_chat`` 不在此列：chat 的闸在 enable_chat 单源上。
+_VISION_HOTKEY_ACTIONS = frozenset({"look_screen", "screen_capture"})
+
 
 def _warm_music_player_paths() -> None:
     """后台线程暖音乐播放器路径缓存（幂等，可重复调用）。
@@ -2108,7 +2112,9 @@ class AppShell:
         shared = getattr(self, "_shared", None)
         if shared is None:
             return
-        shared.proactive.apply_config()
+        # 主动识屏模块停用：共享容器里没有 watcher 对象（构造前挡），这里跳过。
+        if shared.proactive is not None:
+            shared.proactive.apply_config()
         shared.agent_link.apply_config()
 
     def open_settings_process(self, instance=None, page: str | None = None) -> bool:
@@ -2598,15 +2604,7 @@ class AppShell:
             selector = getattr(self._overlay_shell, "select_slot", None)
             if self._slot_id is not None and callable(selector):
                 selector(self._slot_id)
-            # 拖文件解读：legacy 由 PetWindow.install_file_interpreter 注入
-            # （window_optional_services.py:96-105）；overlay 无 PetWindow，
-            # 由壳作宿主（cfg/show_bubble/show_alert/resolve_alert 同名面）。
-            try:
-                from .file_interpret import FileInterpretController
-                self._overlay_shell.set_file_interpret_offer(
-                    FileInterpretController(self._overlay_shell).offer)
-            except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
-                logging.exception("overlay: 拖文件解读接线失败")
+            self._wire_overlay_file_interpret()
         else:
             if 0 in self._active_pet_slots:
                 self._create_ui_with_character_fallback(str(self.instance.config.get(
@@ -2694,6 +2692,24 @@ class AppShell:
         except Exception:
             logging.exception("启动时预缓存台词语音失败")
 
+    def _wire_overlay_file_interpret(self) -> None:
+        """overlay 拓扑的拖文件解读接线（legacy 走 ``install_file_interpreter``）。
+
+        legacy 由 ``PetWindow.install_file_interpreter`` 注入；overlay 无 PetWindow，
+        由壳作宿主（``cfg``/``show_bubble``/``show_alert``/``resolve_alert`` 同名面）。
+        文件解读模块停用（含硬依赖 chat 缺失）：**不构造控制器、不接缝**——控制器
+        构造即持有 ``ChatService``/``SessionStore``，真跑起来还会往 ``sessions/``
+        写会话；拖文件只留吃动画与统计。
+        """
+        if not feature_activation_mod.is_active("file_interpret"):
+            return
+        try:
+            from .file_interpret import FileInterpretController
+            self._overlay_shell.set_file_interpret_offer(
+                FileInterpretController(self._overlay_shell).offer)
+        except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
+            logging.exception("overlay: 拖文件解读接线失败")
+
     # ------------------------------------------------------------ 全局快捷键
     def _install_global_hotkeys(self) -> None:
         """装系统级热键服务（幂等；非 Windows 或装不上时只保留引用供诊断）。"""
@@ -2711,20 +2727,32 @@ class AppShell:
         self._apply_global_hotkeys()
 
     def _apply_global_hotkeys(self) -> None:
-        """按当前配置重新注册全部热键（改键/启动/外部配置变更后调用）。"""
+        """按当前配置重新注册全部热键（改键/启动/外部配置变更后调用）。
+
+        手动视觉（看看屏幕 / 截图提问）模块停用：这两个动作**不注册**——``apply``
+        是全量重设，从 bindings 里拿掉即顺带注销旧绑定，留着空转的键只会让用户
+        按下去毫无反应。回调落点另有早退兜底（残留绑定/老菜单直达时不再采集）。
+        """
         service = getattr(self, "_hotkeys", None)
         if service is None or not getattr(service, "installed", False):
             return
         from .hotkeys import ACTIONS
 
+        vision_active = feature_activation_mod.is_active("vision")
+        bindings = {
+            action: self.config.get(key) for action, key in ACTIONS.items()
+            if vision_active or action not in _VISION_HOTKEY_ACTIONS
+        }
+        callbacks = {
+            "open_chat": self._hotkey_open_chat,
+            "look_screen": self._hotkey_look_screen,
+            "screen_capture": self._hotkey_screen_capture,
+        }
+        if not vision_active:
+            callbacks = {a: cb for a, cb in callbacks.items()
+                         if a not in _VISION_HOTKEY_ACTIONS}
         try:
-            failures = service.apply(
-                {action: self.config.get(key) for action, key in ACTIONS.items()},
-                {
-                    "open_chat": self._hotkey_open_chat,
-                    "look_screen": self._hotkey_look_screen,
-                    "screen_capture": self._hotkey_screen_capture,
-                })
+            failures = service.apply(bindings, callbacks)
         except Exception:
             logging.exception("注册全局快捷键失败（右键菜单仍可用）")
             return
@@ -2745,7 +2773,12 @@ class AppShell:
             quick()
 
     def _hotkey_look_screen(self) -> None:
-        """看看屏幕：与右键「看看屏幕」同一条入口（不传 sprite = 主宠）。"""
+        """看看屏幕：与右键「看看屏幕」同一条入口（不传 sprite = 主宠）。
+
+        手动视觉模块停用：早退（热键本身不注册，本条防残留绑定/直连回调兜底）。
+        """
+        if not feature_activation_mod.is_active("vision"):
+            return
         look = getattr(self._hotkey_overlay(), "look_at_screen", None)
         if callable(look):
             look()
@@ -2755,7 +2788,12 @@ class AppShell:
             legacy()
 
     def _hotkey_screen_capture(self) -> None:
-        """截图提问：与右键「截图提问」同一条入口。"""
+        """截图提问：与右键「截图提问」同一条入口。
+
+        手动视觉模块停用：早退（同 ``_hotkey_look_screen``）。
+        """
+        if not feature_activation_mod.is_active("vision"):
+            return
         capture = getattr(self._hotkey_overlay(), "on_screen_capture", None)
         if callable(capture):
             capture()

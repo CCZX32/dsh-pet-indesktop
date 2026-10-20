@@ -3396,7 +3396,11 @@ class OverlayShell(QObject):
         旧版一窗一宠，答复气泡天经地义落在被点那只头顶；overlay 下先记住发起者
         （``_look_sprite``），气泡由 ``_look_bubble`` 分发到**发起者自己的**跟随器
         （B7b 接上逐 sprite 气泡后，子宠发起的识屏不再让主宠代答）。
+
+        手动视觉模块停用：早退（不冒泡、不起 ``overlay-look-screen`` 线程）。
         """
+        if not feature_activation.is_active("vision"):
+            return
         target = self.sprite if sprite is None else sprite
         if target is None or target not in self._all_sprites():
             return
@@ -3482,8 +3486,17 @@ class OverlayShell(QObject):
 
     @property
     def on_screen_capture(self):
-        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。"""
-        return lambda: self._screen_capture().run()
+        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。
+
+        手动视觉模块停用：空操作（不采集、不建编排件、不开覆盖层）——
+        ``_callback_available`` 只看"可调"，闸必须在落点。
+        """
+        def _run() -> None:
+            if not feature_activation.is_active("vision"):
+                return
+            self._screen_capture().run()
+
+        return _run
 
     # ---- 黄金回旋（复用 golden_spin.GoldenSpinController + sprite 宿主）----
     def _golden_spin_capable(self, sprite) -> bool:

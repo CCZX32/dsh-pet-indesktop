@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -1241,3 +1243,531 @@ def test_harness_autostart_follows_system_tools_not_chat(tmp_path, monkeypatch):
     # 全开：自启
     fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
     assert app_mod.AppShell._harness_autostart_wanted(shell) is True
+
+
+# ---------------------------------------------------------------- 期 4b：file_interpret
+def test_file_interpret_domain_absent_when_inactive(tmp_path, monkeypatch):
+    """未激活：控件整批不建 → 「文件识别」域整域不出现（语音域同款空域机制）。"""
+    _freeze_all_but("file_interpret")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        labels = [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+        assert "文件识别" not in labels
+        assert getattr(dlg, "file_interpret_enabled_check", None) is None
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()  # 不碰不存在的域，保存照常
+        assert "file_interpret" not in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_file_interpret_domain_present_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        labels = [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+        assert "文件识别" in labels
+        assert dlg.file_interpret_enabled_check is not None
+        assert _row_mounted(dlg, "file_interpret_enabled")
+        assert _row_mounted(dlg, "file_interpret_progress_interval")
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_file_interpret_config_survives_inactive_save(tmp_path, monkeypatch):
+    """未挂出不代表写回默认值：域整域消失时原配置一个字节都不改。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = _qapp()
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    cfg = Config(tmp_path)
+    cfg.set("file_interpret", {"enabled": False, "progress_interval_seconds": 60.0})
+    assert cfg.save()
+    _freeze_all_but("file_interpret")
+    dlg = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
+    try:
+        assert dlg._write_config()
+        data = dlg.config.get("file_interpret")
+        assert data["enabled"] is False
+        assert data["progress_interval_seconds"] == 60.0
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def _install_file_interpret_fake(monkeypatch):
+    """把 ``FileInterpretController`` 换成记录器（模块内惰性 import，打模块属性）。"""
+    import pet.file_interpret as fi_mod
+
+    created = []
+
+    class _Ctrl:
+        def __init__(self, win):
+            created.append(win)
+
+        def offer(self, _paths):
+            created.append("offer")
+
+    monkeypatch.setattr(fi_mod, "FileInterpretController", _Ctrl)
+    return created
+
+
+def _file_interpret_host():
+    """只借 ``WindowFeatureGateMixin`` 的真装配方法（legacy 窗侧接入面）。"""
+    from PySide6.QtWidgets import QWidget
+
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    class _Host(QWidget, WindowFeatureGateMixin):
+        cfg = _cfg_obj()
+
+    return _Host()
+
+
+def test_file_interpret_wiring_skipped_when_inactive(monkeypatch):
+    """拖拽链入口闸：控制器不构造、投喂接缝保持 None（吃动画与统计照旧）。"""
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    _qapp()
+    created = _install_file_interpret_fake(monkeypatch)
+    _freeze_all_but("file_interpret")
+    host = _file_interpret_host()
+    try:
+        assert WindowFeatureGateMixin.install_file_interpreter(host) is None
+        assert created == []
+        assert host._file_eater is not None  # 吃文件是核心行为，照旧挂载
+        assert host._file_eater.interpret_offer is None
+    finally:
+        host.deleteLater()
+        _qapp().processEvents()
+
+
+def test_file_interpret_wiring_skipped_when_chat_missing(monkeypatch):
+    """硬依赖 chat 未满足（只勾 file_interpret）：同「未激活」口径，不接线。"""
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    _qapp()
+    created = _install_file_interpret_fake(monkeypatch)
+    fa.freeze_snapshot_for_tests(["file_interpret"])
+    host = _file_interpret_host()
+    try:
+        assert WindowFeatureGateMixin.install_file_interpreter(host) is None
+        assert created == []
+        assert host._file_eater.interpret_offer is None
+    finally:
+        host.deleteLater()
+        _qapp().processEvents()
+
+
+def test_file_interpret_wiring_installed_by_default(monkeypatch):
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    _qapp()
+    created = _install_file_interpret_fake(monkeypatch)
+    host = _file_interpret_host()
+    try:
+        WindowFeatureGateMixin.install_file_interpreter(host)
+        assert created == [host]  # 控制器建了一次
+        assert callable(host._file_eater.interpret_offer)
+    finally:
+        host.deleteLater()
+        _qapp().processEvents()
+
+
+def test_overlay_file_interpret_wiring_skipped_when_inactive(monkeypatch):
+    """overlay 拓扑的接缝（壳作宿主）：停用时不构造控制器、不注入 offer。"""
+    created = _install_file_interpret_fake(monkeypatch)
+
+    class _Overlay:
+        def __init__(self):
+            self.offers = []
+
+        def set_file_interpret_offer(self, offer):
+            self.offers.append(offer)
+
+    app_mod, shell = _shell(_overlay_shell=_Overlay())
+    _freeze_all_but("file_interpret")
+    app_mod.AppShell._wire_overlay_file_interpret(shell)
+    assert shell._overlay_shell.offers == []
+    assert created == []
+
+    fa.freeze_snapshot_for_tests(["file_interpret", "chat"])
+    app_mod.AppShell._wire_overlay_file_interpret(shell)
+    assert created == [shell._overlay_shell]
+    assert callable(shell._overlay_shell.offers[0])
+
+
+# ---------------------------------------------------------------- 期 4b：vision
+class _FakeHotkeyService:
+    installed = True
+
+    def __init__(self):
+        self.calls = []
+
+    def apply(self, bindings, callbacks):
+        self.calls.append((dict(bindings), dict(callbacks)))
+        return []
+
+
+def _hotkey_shell(config, service):
+    import pet.app as app_mod
+
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = config
+    shell._hotkeys = service
+    return shell
+
+
+def test_vision_hotkeys_not_registered_when_inactive():
+    """注册侧：两个截图热键既不进绑定表也不进回调表（全量重设顺带注销旧绑定）。"""
+    import pet.app as app_mod
+
+    service = _FakeHotkeyService()
+    shell = _hotkey_shell(_cfg_obj(
+        hotkey_open_chat="ctrl+alt+c",
+        hotkey_look_screen="ctrl+alt+l",
+        hotkey_screen_capture="ctrl+alt+s",
+    ), service)
+
+    _freeze_all_but("vision")
+    app_mod.AppShell._apply_global_hotkeys(shell)
+    bindings, callbacks = service.calls[-1]
+    assert bindings == {"open_chat": "ctrl+alt+c"}  # 视觉两条不在
+    assert set(callbacks) == {"open_chat"}
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    app_mod.AppShell._apply_global_hotkeys(shell)
+    bindings, callbacks = service.calls[-1]
+    assert set(bindings) == {"open_chat", "look_screen", "screen_capture"}
+    assert set(callbacks) == {"open_chat", "look_screen", "screen_capture"}
+
+
+def test_vision_hotkey_callbacks_do_nothing_when_inactive():
+    """回调落点侧：残留绑定/直连回调绕不过模块闸。"""
+    import pet.app as app_mod
+
+    class _Overlay:
+        def __init__(self):
+            self.looked = 0
+            self.captured = 0
+
+        def look_at_screen(self):
+            self.looked += 1
+
+        def on_screen_capture(self):
+            self.captured += 1
+
+    overlay = _Overlay()
+    shell = object.__new__(app_mod.AppShell)
+    shell._overlay_shell = overlay
+    _freeze_all_but("vision")
+    app_mod.AppShell._hotkey_look_screen(shell)
+    app_mod.AppShell._hotkey_screen_capture(shell)
+    assert (overlay.looked, overlay.captured) == (0, 0)
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    app_mod.AppShell._hotkey_look_screen(shell)
+    app_mod.AppShell._hotkey_screen_capture(shell)
+    assert (overlay.looked, overlay.captured) == (1, 1)
+
+
+def test_look_screen_hosts_return_before_any_work_when_inactive():
+    """两个宿主的「看看屏幕」：模块停用后不冒泡、不起线程、不查 sprite。"""
+    from pet.overlay_shell import OverlayShell
+    from pet.window import PetWindow
+
+    bubbles = []
+
+    class _WinStub:
+        _on_look_screen = PetWindow._on_look_screen
+
+        def show_bubble(self, *args, **_kwargs):
+            bubbles.append(args)
+
+    class _ShellStub:
+        look_at_screen = OverlayShell.look_at_screen
+
+        def __init__(self):
+            self.sprite = object()
+
+        def _show_bubble_text_for(self, *args, **_kwargs):
+            bubbles.append(args)
+
+        def _all_sprites(self):
+            raise AssertionError("模块停用后不许遍历 sprite")
+
+    _freeze_all_but("vision")
+    _WinStub()._on_look_screen()
+    _ShellStub().look_at_screen()
+    assert bubbles == []
+
+
+def test_screen_capture_entry_is_noop_when_inactive():
+    """``on_screen_capture`` 两侧都是 property：闸必须在落点（可调性判据不变）。"""
+    from pet.overlay_shell import OverlayShell
+    from pet.window import PetWindow
+
+    calls = []
+
+    class _Runner:
+        def run(self):
+            calls.append("run")
+
+    class _WinStub:
+        on_screen_capture = PetWindow.on_screen_capture
+
+        def _screen_capture(self):
+            calls.append("window")
+            return _Runner()
+
+    class _ShellStub:
+        on_screen_capture = OverlayShell.on_screen_capture
+
+        def _screen_capture(self):
+            calls.append("overlay")
+            return _Runner()
+
+    _freeze_all_but("vision")
+    assert callable(_WinStub().on_screen_capture)
+    _WinStub().on_screen_capture()
+    _ShellStub().on_screen_capture()
+    assert calls == []  # 编排件都没造，更没采集
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    _WinStub().on_screen_capture()
+    _ShellStub().on_screen_capture()
+    assert calls == ["window", "run", "overlay", "run"]
+
+
+def test_vision_group_unmounted_when_inactive(tmp_path, monkeypatch):
+    """AI 域「视觉能力」组：行照常 claim（防待分类）但不挂出；其余 AI 行照旧。"""
+    _freeze_all_but("vision")  # chat 仍激活：AI 域在，只有视觉组收起
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        from pet.modern_settings_dialog import SettingRow
+
+        for key in ("vision_same", "vision_model", "vision_url", "vision_key"):
+            assert dlg.findChild(SettingRow, f"settingRow_{key}") is not None, key
+            assert not _row_mounted(dlg, key), key
+        labels = _domain_page_labels(dlg)
+        assert "视觉能力" not in labels
+        assert "待分类（开发期）" not in labels
+        assert _row_mounted(dlg, "provider_list")  # AI 域其余行不受影响
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_vision_group_mounted_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert _row_mounted(dlg, "vision_same")
+        assert _row_mounted(dlg, "vision_key")
+        assert "视觉能力" in _domain_page_labels(dlg)
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+# ---------------------------------------------------------------- 期 4b：proactive
+def _install_shared_fakes(monkeypatch, events):
+    """共享子系统的三个真组件换成记录器（只钉「构造与否」，不碰真探测）。"""
+    from PySide6.QtCore import QObject
+
+    import pet.multi_window_shared as mws
+
+    class _Proactive:
+        def __init__(self, _proxy, _config, identity_provider=None):
+            events.append("proactive")
+
+        def apply_config(self):
+            events.append("proactive.apply_config")
+
+        def stop_all(self):
+            events.append("proactive.stop_all")
+
+    class _Agent:
+        def __init__(self, _proxy, _config):
+            events.append("agent_link")
+
+        def apply_config(self):
+            events.append("agent_link.apply_config")
+
+        def stop_all(self):
+            events.append("agent_link.stop_all")
+
+    class _Signal:
+        def connect(self, _slot):
+            pass
+
+    class _Fs(QObject):
+        def __init__(self, _shell):
+            super().__init__()
+            self.fullscreen_changed = _Signal()
+            self.cursor_visibility_changed = _Signal()
+
+        def start(self):
+            events.append("fs.start")
+
+        def stop(self):
+            events.append("fs.stop")
+
+    class _Quiet(QObject):
+        def __init__(self, **_kwargs):
+            super().__init__()
+            self.ended = _Signal()
+
+        def stop(self):
+            events.append("quiet.stop")
+
+    monkeypatch.setattr(mws, "SharedProactiveWatcher", _Proactive)
+    monkeypatch.setattr(mws, "SharedAgentLinkManager", _Agent)
+    monkeypatch.setattr(mws, "SharedFullscreenWatcher", _Fs)
+    monkeypatch.setattr(mws.quiet_mode, "QuietTicker", _Quiet)
+
+
+def _shared_shell_stub():
+    """共享容器的宿主面：只有构造期会读的那几处（proxy.cfg / 身份 / 两个信号槽）。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        config=_cfg_obj(),
+        _identity_config=lambda: None,
+        _on_shared_fullscreen=lambda _hit: None,
+        _on_shared_cursor=lambda _visibility: None,
+    )
+
+
+def test_shared_subsystems_skips_proactive_construction_when_inactive(monkeypatch):
+    """构造前挡：停用时不建共享 watcher（它构造即 apply_config → 8s 心跳）。"""
+    _qapp()
+    import pet.multi_window_shared as mws
+
+    events = []
+    _install_shared_fakes(monkeypatch, events)
+    _freeze_all_but("proactive")
+    subs = mws.SharedSubsystems(_shared_shell_stub())
+    assert subs.proactive is None
+    assert events == ["agent_link"]  # 只有联动管理器被构造
+    subs.stop_all()  # 没有 watcher 也不许炸（退出/测试收口路径）
+    assert "proactive.stop_all" not in events
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    alive = mws.SharedSubsystems(_shared_shell_stub())
+    assert alive.proactive is not None
+    assert events[-2:] == ["agent_link", "proactive"]
+
+
+def test_sync_shared_optional_services_skips_missing_proactive():
+    """overlay 分支的同步点：容器里没有 watcher 时跳过，联动管理器照常应用。"""
+    from types import SimpleNamespace
+
+    events = []
+
+    class _Applied:
+        def apply_config(self):
+            events.append("apply")
+
+    app_mod, shell = _shell(_shared=SimpleNamespace(
+        proactive=None, agent_link=_Applied()))
+    _freeze_all_but("proactive")
+    app_mod.AppShell._sync_shared_optional_services(shell)
+    assert events == ["apply"]  # 只有联动管理器的 apply_config
+
+    events.clear()
+    shell._shared = SimpleNamespace(proactive=_Applied(), agent_link=_Applied())
+    app_mod.AppShell._sync_shared_optional_services(shell)
+    assert events == ["apply", "apply"]
+
+
+def test_proactive_wanted_false_and_no_lazy_watcher_when_inactive():
+    """窗侧懒建口同源闸：行为开关开着也不建 watcher、不上报「想要」。"""
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    class _Host:
+        cfg = _cfg_obj(proactive_screen={"enabled": True})
+        proactive_watcher = None
+
+    _freeze_all_but("proactive")
+    host = _Host()
+    assert WindowFeatureGateMixin._proactive_wanted(host) is False
+    assert WindowFeatureGateMixin._ensure_proactive_watcher(host) is None
+    assert host.proactive_watcher is None
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert WindowFeatureGateMixin._proactive_wanted(host) is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="主动识屏设置页只在 Windows 构造")
+def test_proactive_settings_rows_unmounted_when_inactive(tmp_path, monkeypatch):
+    _freeze_all_but("proactive")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        for key in ("proactive_enabled", "proactive_preset", "proactive_whitelist",
+                    "proactive_dry_run"):
+            assert not _row_mounted(dlg, key), key
+        labels = _domain_page_labels(dlg)
+        assert "主动识屏 · 开关与节奏" not in labels
+        assert "待分类（开发期）" not in labels  # 照常 claim，不掉「待分类」
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert "proactive_screen" not in writes  # 未挂出的组不写回
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="主动识屏设置页只在 Windows 构造")
+def test_proactive_settings_rows_mounted_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert _row_mounted(dlg, "proactive_enabled")
+        assert _row_mounted(dlg, "proactive_whitelist")
+        assert "主动识屏 · 开关与节奏" in _domain_page_labels(dlg)
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_vision_config_survives_inactive_save(tmp_path, monkeypatch):
+    """视觉组的配置寄生在 ``chat`` provider 里（AI 页整体写回）。
+
+    未挂出的四行控件仍按构造时的配置值持有，保存的往返写回是**同值覆盖**——
+    这条用例把「没有单独跳过写回」的口径钉成可验证事实，而不是靠注释承诺。
+    """
+    from pet.config import Config
+
+    app = _qapp()
+    import pet.modern_settings_dialog as settings_mod
+
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    cfg = Config(tmp_path)
+    chat = dict(cfg.get("chat") or {})
+    providers = dict(chat.get("providers") or {})
+    active = chat.get("active_provider")
+    provider = dict(providers[active])
+    provider["vision_model"] = "vision-x"
+    provider["vision_same_as_chat"] = False
+    providers[active] = provider
+    chat["providers"] = providers
+    cfg.set("chat", chat)
+    assert cfg.save()
+
+    _freeze_all_but("vision")
+    dlg = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
+    try:
+        assert dlg._write_config()
+        active_config = dlg.config.chat_settings().active_config
+        assert active_config.vision_model == "vision-x"
+        assert active_config.vision_same_as_chat is False
+    finally:
+        dlg.close()
+        app.processEvents()

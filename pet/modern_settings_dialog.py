@@ -1978,6 +1978,8 @@ class ModernSettingsDialog(QDialog):
             balance_rows = claim_prefix("balance_")
             # 照常 claim（防掉「待分类」并保有控件），挂载与否由语音模块决定
             chat_reply_voice_rows = claim("chat_reply_voice_enabled")
+            # 视觉能力组同理：claim 照做，挂载与否由手动视觉模块决定
+            vision_rows = claim("vision_same", "vision_model", "vision_url", "vision_key")
             appearance_rows = claim(
                 "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
             )
@@ -2011,15 +2013,8 @@ class ModernSettingsDialog(QDialog):
                     # 回复朗读依赖语音模块（共用其音频通道）：语音未激活时不挂出
                     *([("助手回复朗读", chat_reply_voice_rows)]
                       if _fa.is_active("voice") else []),
-                    (
-                        "视觉能力",
-                        claim(
-                            "vision_same",
-                            "vision_model",
-                            "vision_url",
-                            "vision_key",
-                        ),
-                    ),
+                    # 视觉能力组依赖手动视觉模块：模块停用时不挂出（行已被上面 claim）
+                    *([("视觉能力", vision_rows)] if _fa.is_active("vision") else []),
                     (
                         "生成参数（高级）",
                         claim(
@@ -2048,6 +2043,10 @@ class ModernSettingsDialog(QDialog):
             ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
                                        "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
         ]
+        if not _fa.is_active("proactive"):
+            # 主动识屏模块停用：四组照常 claim（防掉「待分类」并保有控件），但不挂进
+            # 域页、不写回配置——重新激活后原样回来。
+            proactive_sections = []
         voice_chime_rows = (
             list(self.voice_chime_page.findChildren(SettingRow))
             if self.voice_chime_page is not None else []
@@ -2561,7 +2560,8 @@ class ModernSettingsDialog(QDialog):
         if _fa.is_active("divination"):
             settings_divination.save_divination_settings(self)
         settings_hotkeys.save_hotkey_settings(self)
-        if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
+        if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check") \
+                and _fa.is_active("proactive"):
             from .proactive import PRESET_DEFAULTS
 
             pro_data = dict(self.config.get("proactive_screen", {}) or {})

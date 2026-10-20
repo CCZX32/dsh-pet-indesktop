@@ -3456,7 +3456,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     # ================================================================ 看看屏幕
     def _on_look_screen(self) -> None:
-        """Capture and analyse the screen outside the GUI thread."""
+        """Capture and analyse the screen outside the GUI thread.
+
+        手动视觉模块停用：早退（不冒「让我看看…」气泡、不起 ``pet-look-screen``
+        线程、不采集屏幕）。模块层拒绝冒泡只会给一个点不动的承诺。
+        """
+        if not feature_activation_mod.is_active('vision'):
+            return
         if self._look_busy:
             self.show_bubble("上一张还没看完呢…")
             return
@@ -3532,8 +3538,17 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     @property
     def on_screen_capture(self):
-        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。"""
-        return lambda: self._screen_capture().run()
+        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。
+
+        手动视觉模块停用：空操作——不采集屏幕、不建编排件、不开覆盖层
+        （注册表 ``_callback_available`` 只看"可调"，故闸必须在落点）。
+        """
+        def _run() -> None:
+            if not feature_activation_mod.is_active('vision'):
+                return
+            self._screen_capture().run()
+
+        return _run
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         if self._context_menu_suppressed:
@@ -3967,8 +3982,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.cfg.set('proactive_screen', pro_data)
         self.cfg.save()
         # Phase 1：开启时懒创建观察器；关闭时仅同步已存在实例。
+        # 模块停用时懒创建口返回 None（构造前挡），这里不再碰 apply_config。
         if on:
-            self._ensure_proactive_watcher().apply_config()
+            watcher = self._ensure_proactive_watcher()
+            if watcher is not None:
+                watcher.apply_config()
         elif self.proactive_watcher is not None:
             self.proactive_watcher.apply_config()
         if on:

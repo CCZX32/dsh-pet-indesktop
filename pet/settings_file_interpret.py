@@ -11,6 +11,7 @@ from typing import Any
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from . import feature_activation as _fa
 from .config import _default_file_interpret_data
 from .settings_widgets import BrowserDoubleSpinBox, SettingRow, SettingsSection, ToggleSwitch
 
@@ -28,7 +29,13 @@ def _clamp_interval(value: Any) -> float:
 
 
 def create_file_interpret_controls(dialog) -> None:
-    """在对话框上创建本域控件（幂等；行由 build_file_interpret_rows 装配）。"""
+    """在对话框上创建本域控件（幂等；行由 build_file_interpret_rows 装配）。
+
+    文件解读模块未激活（含硬依赖 chat 缺失）：**控件不创建**——「文件识别」域
+    随之整域不出现，``save_file_interpret_settings`` 据「控件不存在」跳过写回。
+    """
+    if not _fa.is_active("file_interpret"):
+        return
     if getattr(dialog, "file_interpret_enabled_check", None) is not None:
         return
     defaults = _default_file_interpret_data()
@@ -70,8 +77,16 @@ def build_file_interpret_rows(dialog) -> list[SettingRow]:
     ]
 
 
-def build_file_interpret_page(dialog) -> QWidget:
-    """「文件识别」域整页内容（_rebuild_domain_navigation 直接挂到域导航）。"""
+def build_file_interpret_page(dialog) -> QWidget | None:
+    """「文件识别」域整页内容（_rebuild_domain_navigation 直接挂到域导航）。
+
+    返回 ``None`` = 整域不出现（与「语音」域同款空域机制：``domain_content``
+    里给 None，侧栏不缺一项死页）。模块未激活时控件也没建，行无从装配。
+    """
+    if not _fa.is_active("file_interpret"):
+        return None
+    if getattr(dialog, "file_interpret_enabled_check", None) is None:
+        return None
     rows = build_file_interpret_rows(dialog)
     content = QWidget(dialog)
     layout = QVBoxLayout(content)
@@ -83,7 +98,11 @@ def build_file_interpret_page(dialog) -> QWidget:
 
 
 def save_file_interpret_settings(dialog) -> None:
-    """_write_config 委托：把本域控件写回 config（在既有 dict 上合并，保未来键）。"""
+    """_write_config 委托：把本域控件写回 config（在既有 dict 上合并，保未来键）。
+
+    模块未激活时控件整批没创建，这里连同 ``config.save()`` 一起跳过——不写回
+    未挂出的域（写回就是拿默认值盖掉用户原值）。
+    """
     if getattr(dialog, "file_interpret_enabled_check", None) is None:
         return
     data = dialog.config.get("file_interpret") or {}

@@ -31,6 +31,7 @@ from . import quiet_mode
 from . import vision as vision_mod
 from . import window_alerts
 from .agent_link import AgentLinkManager
+from .feature_activation import is_active
 from .overlay_settings_command import is_overlay_topology
 from .proactive import ProactiveScreenWatcher
 
@@ -531,8 +532,16 @@ class SharedSubsystems:
         self.agent_link = SharedAgentLinkManager(self.proxy, shell.config)
         # 共享 watcher 的 cfg 是**进程级**配置（开关/白名单/额度/密钥都是全局面），
         # 只有宠物名要跟随当前身份：角色身份由壳的每宠视图给（见 pet_name）。
-        self.proactive = SharedProactiveWatcher(
-            self.proxy, shell.config, identity_provider=shell._identity_config)
+        #
+        # 主动识屏模块停用：**构造前挡**——``SharedProactiveWatcher`` 构造即
+        # ``apply_config``（8s 心跳 + worker 线程随 enabled/whitelist 起表），
+        # 所以这里不建对象，各窗/壳拿到的 ``proactive_watcher`` 为 None
+        # （窗口侧懒建口 ``_ensure_proactive_watcher`` 另有同源闸）。
+        self.proactive = (
+            SharedProactiveWatcher(
+                self.proxy, shell.config, identity_provider=shell._identity_config)
+            if is_active("proactive") else None
+        )
         self.fs = SharedFullscreenWatcher(shell)
         self.fs.fullscreen_changed.connect(shell._on_shared_fullscreen)
         self.fs.cursor_visibility_changed.connect(shell._on_shared_cursor)
@@ -590,7 +599,8 @@ class SharedSubsystems:
         不掉，解释器退出 GC 才最终化 → 原生访问违规（见 _LIVE_SHARED_SUBSYSTEMS
         注释）。
         """
-        self.proactive.stop_all()
+        if self.proactive is not None:  # 主动识屏模块停用：容器里没有 watcher
+            self.proactive.stop_all()
         self.agent_link.stop_all()
         self.fs.stop()
         self.quiet.stop()
@@ -622,7 +632,12 @@ def _release_qt_lifetimes(subs: "SharedSubsystems") -> None:
         app = QCoreApplication.instance()
         if app is None:
             return
-        for obj in (subs.proactive._bridge, subs.proactive._timer, subs.fs, subs.quiet):
+        # 主动识屏模块停用时容器里没有 watcher（构造前挡），那两个对象一并缺席。
+        proactive_objects = (
+            (subs.proactive._bridge, subs.proactive._timer)
+            if subs.proactive is not None else ()
+        )
+        for obj in (*proactive_objects, subs.fs, subs.quiet):
             try:
                 if obj.parent() is None and obj.thread() is app.thread():
                     obj.setParent(app)
