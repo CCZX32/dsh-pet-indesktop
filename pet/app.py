@@ -1599,6 +1599,11 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（待办提醒）
     def _todo_wanted(self) -> bool:
+        # 模块闸在行为开关之上：todo 模块未激活时连总开关都不看。本方法是
+        # 「要不要有服务对象」的唯一判据（构造、启动同步、设置保存、外部变更
+        # 全部经过它），返回 False 即不建服务、不起 30s tick。
+        if not feature_activation_mod.is_active("todo"):
+            return False
         return bool(self.config.get("todo_reminder_enabled", True))
 
     def _ensure_todo_service(self):
@@ -1628,9 +1633,13 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（语音报时）
     def _festival_speak_wanted(self) -> bool:
-        """节日语音是否开启——它复用报时服务的音频通道，因此会连带影响通道生命周期。"""
+        """节日语音是否开启——它复用报时服务的音频通道，因此会连带影响通道生命周期。
+
+        总开关与模块闸都走 ``_festival_wanted``（模块未激活即"不要声音"），
+        否则模块停用后光凭 speak 键就能把报时服务拉起来。
+        """
         return bool(
-            self.config.get("festival_reminder_enabled", False)
+            self._festival_wanted()
             and self.config.get("festival_reminder_speak", False)
         )
 
@@ -1659,7 +1668,12 @@ class AppShell:
         与节日语音同族：通道随报时开关一起被释放时，抽签语音就变成"有气泡没声音"。
         判定走抽签自己的配置清洗（`normalize_divination_config`，非法值回落默认），
         与抽签服务读的同一处实现，不另立第二份真值。
+
+        模块未激活时同样返回 False：服务对象已被停掉/不建，再让 speak 键把共用
+        音频通道留住就是"模块关了、声音通道还开着"。
         """
+        if not feature_activation_mod.is_active("divination"):
+            return False
         from .divination import normalize_divination_config
 
         cfg = normalize_divination_config(self.config)
@@ -1670,9 +1684,11 @@ class AppShell:
 
         与节日语音同族：通道随报时开关一起被释放时，待办提醒就变成"有气泡没声音"
         （开关能存、点了没声的死开关）。总开关关掉时待办服务自己也不跑，故两者都要。
+        模块未激活同样算"不要"——否则模块停用后光凭一个 speak 键就能把
+        VoiceChimeService（20s tick + edge-tts 线程）拉起来（`_todo_wanted` 已含模块闸）。
         """
         return bool(
-            self.config.get("todo_reminder_enabled", True)
+            self._todo_wanted()
             and self.config.get("todo_reminder_speak", False)
         )
 
@@ -1920,6 +1936,11 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（节日提醒）
     def _festival_wanted(self) -> bool:
+        # 模块闸在行为开关之上：festival 模块未激活时连总开关都不看。
+        # 本方法是「要不要有服务对象」的唯一判据（构造、启动同步、设置保存、
+        # 外部变更全部经过它）；返回 False 既不建服务、也不跑 30s tick 与启动补提醒。
+        if not feature_activation_mod.is_active("festival"):
+            return False
         # 总开关默认关闭：主动打扰型功能，升级后不应突然冒出来。
         return bool(self.config.get("festival_reminder_enabled", False))
 
@@ -4557,6 +4578,12 @@ class AppShell:
 
     def open_todo_panel(self) -> None:
         """打开待办管理面板（非模态单例；条目增删改即时落盘）。"""
+        if not feature_activation_mod.is_active("todo"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留 / 通知点击回跳 / 外部触发）。面板一开就会懒创建
+            # 服务并把 30s tick 跑起来，所以闸必须在懒创建之前。
+            logging.info("待办模块未激活，忽略「待办提醒」请求")
+            return
         from .todo_panel import TodoPanelDialog
 
         # Phase 1：即使总开关关闭，用户主动打开面板也需要服务对象（懒创建）。
@@ -4651,6 +4678,12 @@ class AppShell:
         与语音报时的手动触发同语义——**无视总开关**，服务懒创建；当天没有
         节日/节气时给出明确文案，不做静默无反应。
         """
+        if not feature_activation_mod.is_active("festival"):
+            # 本入口明确**绕过提醒总开关**（试听语义），所以模块闸必须单独在这里：
+            # 否则模块停用后菜单/设置页试听/独立设置进程三条路都能把服务与整套
+            # 文案表（2.95MB）拉起来。
+            logging.info("节日模块未激活，忽略「今日节日」请求")
+            return
         service = self._ensure_festival_service()
         service.remind_now()
 
@@ -4674,10 +4707,15 @@ class AppShell:
         """按开关同步抽签服务：关掉就释放，不留常驻对象。"""
         from .divination import normalize_divination_config
 
-        if normalize_divination_config(self.config)["enabled"]:
+        # 模块闸与行为开关合成一个判据：未激活时不建服务（不装 10 分钟跨天定时器、
+        # 不提交预合成/重试链）；已在跑的走下面的 else 分支显式 shutdown()。
+        if feature_activation_mod.is_active("divination") and normalize_divination_config(
+            self.config
+        )["enabled"]:
             self._ensure_divination_service().apply_config()
         elif getattr(self, "divination_service", None) is not None:
             # 停用要**显式收口**：服务持有跨天定时器，直接丢对象定时器还会留着。
+            # shutdown() 同时把代次 +1，已投递的揭签/预热重试闭包整条作废。
             self.divination_service.shutdown()
             self.divination_service = None
 
@@ -4686,6 +4724,12 @@ class AppShell:
 
         关掉总开关时**不做静默无反应**——明确告诉用户去哪儿打开（天气那条同口径）。
         """
+        if not feature_activation_mod.is_active("divination"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留 / overlay 门面 / 外部触发）。本方法会**懒创建**服务并
+            # apply_config()，闸必须在这之前，否则调一次就把服务与定时器复活了。
+            logging.info("抽签模块未激活，忽略「抽支签」请求")
+            return
         service = self._ensure_divination_service()
         service.apply_config()
         if service.draw_now() is None:

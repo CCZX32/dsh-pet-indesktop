@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""功能模块门控（期 2，第一批 weather/divination 模板）三层回归。
+"""功能模块门控（期 2：weather/divination 模板 + divination/todo/festival 执行层）三层回归。
 
 钉住的语义：
 - 菜单投影：未激活（或硬依赖未满足）的模块动作从 available_ids 剔除；
   布局解析顺带丢空子菜单/规整分隔线，且**不写回**用户自定义布局；
 - 设置层：未激活模块的标签页不构造、其 save 不执行（不写回配置）；
-- 执行层：绕过菜单直达回调时，未激活模块不建服务、不起线程；
+- 执行层：绕过菜单直达回调时，未激活模块不建服务、不起线程。三模块各自的
+  「要不要有服务对象」判据（`_todo_wanted` / `_festival_wanted` / 抽签同步）都把
+  模块闸并在行为开关之上，菜单落点（`open_todo_panel` / `trigger_festival_now` /
+  `trigger_divination_draw`）另有一道早退；已建服务走各自 stop/shutdown 收口；
+  三个 speak 键也不许在模块停用后继续把共用报时通道拉起来；
 - 快照未冻结（旧行为）一切照旧。
 """
 from __future__ import annotations
@@ -225,3 +229,286 @@ def test_show_weather_active_lazy_creates_service(monkeypatch):
     shell._weather_service = None
     app_mod.AppShell.show_weather(shell, parent=None)
     assert created and shell._weather_service is not None
+
+
+# ------------------------------------- 执行层：divination / todo / festival（第二批）
+class _Cfg:
+    """只读配置替身：门控判据只经 ``get`` 读扁平键（与 pet.config.Config 同口径）。"""
+
+    def __init__(self, **values):
+        self._values = values
+
+    def get(self, key, default=None):
+        return self._values.get(key, default)
+
+
+def _shell(**attrs):
+    """不构造真壳：只放被测方法要读的字段（``test_show_weather_*`` 同手法）。"""
+    import pet.app as app_mod
+
+    shell = object.__new__(app_mod.AppShell)
+    for key, value in attrs.items():
+        setattr(shell, key, value)
+    return app_mod, shell
+
+
+def test_divination_sync_inactive_creates_no_service(monkeypatch):
+    """未激活：即使 ``divination_enabled`` 开着也不建服务（不装跨天定时器、不预合成）。"""
+    import pet.divination_service as ds_mod
+
+    created = []
+
+    class _Svc:
+        def __init__(self, _app):
+            created.append("new")
+
+        def apply_config(self):
+            created.append("apply_config")
+
+    monkeypatch.setattr(ds_mod, "DivinationService", _Svc)
+    _freeze_all_but("divination")
+    app_mod, shell = _shell(config=_Cfg(divination_enabled=True), divination_service=None)
+    app_mod.AppShell._sync_divination_service(shell)
+    assert created == []
+    assert shell.divination_service is None
+
+
+def test_divination_sync_inactive_stops_service_with_generation_guard():
+    """已建的服务必须走 ``shutdown()``（停跨天定时器 + 代次作废在飞闭包），不是丢对象。"""
+    events = []
+
+    class _Svc:
+        def shutdown(self):
+            events.append("shutdown")
+
+    _freeze_all_but("divination")
+    app_mod, shell = _shell(
+        config=_Cfg(divination_enabled=True), divination_service=_Svc())
+    app_mod.AppShell._sync_divination_service(shell)
+    assert events == ["shutdown"]
+    assert shell.divination_service is None
+
+
+def test_divination_draw_inactive_returns_before_lazy_create(monkeypatch):
+    """菜单落点兜底：本方法会懒创建服务 + apply_config，闸必须在其之前。"""
+    import pet.divination_service as ds_mod
+
+    created = []
+    bubbles = []
+
+    class _Svc:
+        def __init__(self, _app):
+            created.append("new")
+
+    class _Win:
+        def show_bubble(self, *_args, **_kwargs):
+            bubbles.append("bubble")
+
+    monkeypatch.setattr(ds_mod, "DivinationService", _Svc)
+    _freeze_all_but("divination")
+    app_mod, shell = _shell(
+        config=_Cfg(divination_enabled=True), divination_service=None, win=_Win())
+    app_mod.AppShell.trigger_divination_draw(shell)
+    assert created == []
+    assert shell.divination_service is None
+    # 也不冒「去设置里打开」的提示：那是行为开关层的文案，模块层拒绝时无落点可指。
+    assert bubbles == []
+
+
+def test_divination_draw_active_lazy_creates_service(monkeypatch):
+    import pet.divination_service as ds_mod
+
+    calls = []
+
+    class _Svc:
+        def __init__(self, _app):
+            calls.append("new")
+
+        def apply_config(self):
+            calls.append("apply_config")
+
+        def draw_now(self):
+            calls.append("draw_now")
+            return {"quote": {}, "newly": False}
+
+    monkeypatch.setattr(ds_mod, "DivinationService", _Svc)
+    fa.freeze_snapshot_for_tests(["divination"])
+    app_mod, shell = _shell(config=_Cfg(divination_enabled=True), divination_service=None)
+    app_mod.AppShell.trigger_divination_draw(shell)
+    assert calls.count("new") == 1
+    assert "draw_now" in calls
+    assert isinstance(shell.divination_service, _Svc)
+
+
+def test_todo_sync_inactive_creates_no_service(monkeypatch):
+    import pet.app as app_mod
+
+    created = []
+
+    class _Svc:
+        def __init__(self, _app):
+            created.append("new")
+
+    monkeypatch.setattr(app_mod, "TodoReminderService", _Svc)
+    _freeze_all_but("todo")
+    app_mod, shell = _shell(
+        config=_Cfg(todo_reminder_enabled=True), todo_service=None, todo_panel=None)
+    app_mod.AppShell._sync_todo_service(shell)
+    assert created == []
+    assert shell.todo_service is None
+
+
+def test_todo_sync_inactive_stops_service_and_frees_it():
+    events = []
+
+    class _Svc:
+        def stop(self):
+            events.append("stop")
+
+    _freeze_all_but("todo")
+    app_mod, shell = _shell(
+        config=_Cfg(todo_reminder_enabled=True), todo_service=_Svc(), todo_panel=None)
+    app_mod.AppShell._sync_todo_service(shell)
+    assert events == ["stop"]
+    assert shell.todo_service is None
+
+
+def test_open_todo_panel_inactive_refuses_before_lazy_create(monkeypatch):
+    """面板打开即懒创建服务（「总开关关着也要服务对象」）：模块闸必须在它之前。"""
+    import pet.app as app_mod
+
+    created = []
+
+    class _Svc:
+        def __init__(self, _app):
+            created.append("new")
+
+    monkeypatch.setattr(app_mod, "TodoReminderService", _Svc)
+    _freeze_all_but("todo")
+    app_mod, shell = _shell(config=_Cfg(), todo_service=None, todo_panel=None)
+    app_mod.AppShell.open_todo_panel(shell)
+    assert created == []
+    assert shell.todo_service is None
+    assert shell.todo_panel is None
+
+
+def test_todo_sync_active_lazy_creates_and_starts_service(monkeypatch):
+    import pet.app as app_mod
+
+    events = []
+
+    class _Svc:
+        _timer = None
+
+        def __init__(self, _app):
+            events.append("new")
+
+        def start(self):
+            events.append("start")
+
+        def apply_config(self):
+            events.append("apply_config")
+
+    monkeypatch.setattr(app_mod, "TodoReminderService", _Svc)
+    fa.freeze_snapshot_for_tests(["todo"])
+    app_mod, shell = _shell(
+        config=_Cfg(todo_reminder_enabled=True), todo_service=None, todo_panel=None)
+    app_mod.AppShell._sync_todo_service(shell)
+    assert events == ["new", "start"]
+    assert isinstance(shell.todo_service, _Svc)
+
+
+def _install_festival_fake(monkeypatch, events, *, running=False):
+    """把 ``FestivalReminderService`` 换成记录器（模块内惰性 import，故打模块属性）。"""
+    import pet.festival_service as fs_mod
+
+    class _Svc:
+        def __init__(self, _app):
+            events.append("new")
+
+        def is_running(self):
+            return running
+
+        def start(self):
+            events.append("start")
+
+        def apply_config(self):
+            events.append("apply_config")
+
+        def stop(self):
+            events.append("stop")
+
+        def remind_now(self):
+            events.append("remind_now")
+
+    monkeypatch.setattr(fs_mod, "FestivalReminderService", _Svc)
+    return _Svc
+
+
+def test_festival_sync_inactive_creates_no_service(monkeypatch):
+    """未激活：总开关开着也不建服务——它连带整套节日文案表（实测 2.95MB 堆）。"""
+    events = []
+    _install_festival_fake(monkeypatch, events)
+    _freeze_all_but("festival")
+    app_mod, shell = _shell(
+        config=_Cfg(festival_reminder_enabled=True), festival_service=None)
+    shell._sync_chime_service = lambda: None
+    assert app_mod.AppShell._festival_wanted(shell) is False
+    app_mod.AppShell._sync_festival_service(shell)
+    assert events == []
+    assert shell.festival_service is None
+
+
+def test_festival_sync_inactive_stops_service(monkeypatch):
+    events = []
+    fake_cls = _install_festival_fake(monkeypatch, events)
+    _freeze_all_but("festival")
+    app_mod, shell = _shell(
+        config=_Cfg(festival_reminder_enabled=True), festival_service=fake_cls(None))
+    shell._sync_chime_service = lambda: None
+    app_mod.AppShell._sync_festival_service(shell)
+    assert events == ["new", "stop"]
+    assert shell.festival_service is None
+
+
+def test_trigger_festival_now_inactive_blocks_the_bypass(monkeypatch):
+    """本入口明确**绕过提醒总开关**（试听语义），模块闸必须单独挡在这里。"""
+    events = []
+    _install_festival_fake(monkeypatch, events)
+    _freeze_all_but("festival")
+    app_mod, shell = _shell(
+        config=_Cfg(festival_reminder_enabled=False), festival_service=None)
+    app_mod.AppShell.trigger_festival_now(shell)
+    assert events == []
+    assert shell.festival_service is None
+
+
+def test_trigger_festival_now_active_lazy_creates_service(monkeypatch):
+    events = []
+    _install_festival_fake(monkeypatch, events)
+    fa.freeze_snapshot_for_tests(["festival"])
+    app_mod, shell = _shell(
+        config=_Cfg(festival_reminder_enabled=False), festival_service=None)
+    app_mod.AppShell.trigger_festival_now(shell)
+    assert events == ["new", "remind_now"]
+
+
+def test_inactive_modules_do_not_keep_the_shared_chime_channel_alive():
+    """三个 speak 键都挂在共用报时通道上：模块停用后不许再凭它们把通道拉起来。"""
+    app_mod, shell = _shell(config=_Cfg(
+        festival_reminder_enabled=True,
+        festival_reminder_speak=True,
+        todo_reminder_enabled=True,
+        todo_reminder_speak=True,
+        divination_enabled=True,
+        divination_speak=True,
+    ))
+    _freeze_all_but("festival", "todo", "divination")
+    assert app_mod.AppShell._festival_speak_wanted(shell) is False
+    assert app_mod.AppShell._todo_speak_wanted(shell) is False
+    assert app_mod.AppShell._divination_speak_wanted(shell) is False
+
+    fa.freeze_snapshot_for_tests(["festival", "todo", "divination"])
+    assert app_mod.AppShell._festival_speak_wanted(shell) is True
+    assert app_mod.AppShell._todo_speak_wanted(shell) is True
+    assert app_mod.AppShell._divination_speak_wanted(shell) is True
