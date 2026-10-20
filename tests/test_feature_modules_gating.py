@@ -718,3 +718,474 @@ def test_voice_domain_present_when_only_festival_off(tmp_path, monkeypatch):
     finally:
         dlg.close()
         app.processEvents()
+
+
+# ---------------------------------------------------------------- 期 3b：music 模块
+_MUSIC_ACTIONS = (
+    "music_pause",
+    "music_next",
+    "music_prev",
+    "music_quit",
+    "music_lyric_align",
+    "music_open_netease",
+    "music_open_qqmusic",
+    "music_open_kugou",
+    "music_open_soda",
+)
+
+
+class _MusicPet:
+    """菜单投影用的最小宿主：歌词开关开着，九条音乐动作因此都进入可用集。"""
+
+    class _Cfg:
+        def get(self, key, default=None):
+            if key == "music_lyric_enabled":
+                return True
+            return default
+
+    cfg = _Cfg()
+
+    def __getattr__(self, name):
+        if name.startswith("on_"):
+            return lambda *a, **k: None
+        raise AttributeError(name)
+
+
+def _cfg_obj(**values):
+    """只实现 ``get`` 的配置替身（执行层门控不碰配置写回）。"""
+
+    class _Cfg:
+        def get(self, key, default=None):
+            return values.get(key, default)
+
+    return _Cfg()
+
+
+def _default_template():
+    import json
+    from pathlib import Path
+
+    return json.loads(
+        (Path(__file__).resolve().parent.parent / "pet/menu_templates/modern-default-v1.json")
+        .read_text(encoding="utf-8")
+    )
+
+
+def test_music_menu_action_ids_match_registry_and_template():
+    """features.py 的动作清单 == 注册表里的音乐动作 == 默认模板的叶子。
+
+    菜单投影按 ``feature_for_action`` 反查模块，三者一旦漂移就会出现「模块停了
+    但某条动作还在菜单里」——这条用例就是那份数据的对账（本次核对结果：对得上）。
+    """
+    from pet.context_menus.registry import MENU_ACTIONS
+    from pet.features import feature_for_action
+
+    assert set(FEATURES["music"].menu_action_ids) == set(_MUSIC_ACTIONS)
+    for action_id in _MUSIC_ACTIONS:
+        assert action_id in MENU_ACTIONS.ids, action_id
+        assert feature_for_action(action_id) == "music", action_id
+    music_nodes = [n for n in _default_template()["nodes"] if n.get("id") == "music"]
+    assert music_nodes, "默认布局里的「音乐」子菜单找不到"
+    leaves = {c["id"] for c in music_nodes[0]["children"] if c.get("type") == "action"}
+    assert leaves == set(_MUSIC_ACTIONS)
+
+
+def test_projection_hides_music_menu_when_inactive():
+    from pet.context_menus.registry import MENU_ACTIONS
+
+    pet = _MusicPet()
+    assert set(_MUSIC_ACTIONS) <= MENU_ACTIONS.available_ids(pet)  # 未冻结：全在
+    _freeze_all_but("music")
+    ids = MENU_ACTIONS.available_ids(pet)
+    assert not (set(_MUSIC_ACTIONS) & ids)
+    assert "modern_settings" in ids and "quit" in ids  # 核心动作不受影响
+
+
+def test_default_layout_drops_music_submenu_when_inactive():
+    """布局解析：九条动作被投影剔除后「音乐」子菜单整体消失（不写回布局）。"""
+    from pet.context_menus.registry import MENU_ACTIONS
+    from pet.menu_layout import resolve_menu_layout
+
+    template = _default_template()
+    _freeze_all_but("music")
+    result = resolve_menu_layout(
+        template,
+        registered_actions=MENU_ACTIONS.ids,
+        available_actions=MENU_ACTIONS.available_ids(_MusicPet()),
+    )
+
+    def _ids(nodes):
+        for node in nodes:
+            yield node.get("id")
+            yield from _ids(node.get("children", ()))
+
+    flat = list(_ids(result.nodes))
+    assert "music" not in flat
+    assert not (set(_MUSIC_ACTIONS) & set(flat))
+    assert "modern_settings" in flat
+    # 写回禁令：传进去的布局原样（模板文件本身也不被改）
+    assert any(n.get("id") == "music" for n in template["nodes"])
+
+
+def test_music_sing_polling_not_started_when_inactive():
+    """唱歌轮询（legacy 与 overlay 共用这一面）：模块未激活不起表、退出唱歌态。"""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QWidget
+
+    from pet import window_alerts
+
+    _qapp()
+
+    class _Host(QWidget):
+        _music_sing_enabled = True
+        _music_sing_active = True
+        _music_sing_silent_since = 1.0
+        cfg = _cfg_obj()
+
+        def __init__(self):
+            super().__init__()
+            self._music_sing_timer = QTimer(self)
+            self._music_sing_timer.setInterval(1000)
+
+        def isVisible(self):
+            return True
+
+        def _check_music_sing(self):
+            pass
+
+    host = _Host()
+    _freeze_all_but("music")
+    window_alerts.start_music_sing_polling(host)
+    assert host._music_sing_timer.isActive() is False
+    window_alerts.check_music_sing(host)
+    assert host._music_sing_active is False  # 停用即退出唱歌态
+
+    alive = _Host()
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)  # 未冻结/全激活：照旧
+    window_alerts.start_music_sing_polling(alive)
+    assert alive._music_sing_timer.isActive() is True
+    alive._music_sing_timer.stop()
+
+
+def test_check_music_sing_skips_audio_probe_when_inactive(monkeypatch):
+    """停用后不再每秒调 pycaw COM（也不拉 SMTC 探针线程）。"""
+    from pet import music_detect, window_alerts
+
+    _qapp()
+    calls = []
+    monkeypatch.setattr(music_detect, "is_music_playing",
+                        lambda: calls.append(1) or True)
+
+    class _Host:
+        _music_sing_enabled = True
+        _music_sing_active = False
+        _music_sing_silent_since = None
+        _dragging = False
+        _instrumental_playing = False
+        cfg = _cfg_obj()
+
+        def isVisible(self):
+            return True
+
+        def _is_one_shot_playing(self):
+            return False
+
+        def _switch(self, _name):
+            raise AssertionError("停用后不许切唱歌动画")
+
+    _freeze_all_but("music")
+    window_alerts.check_music_sing(_Host())
+    assert calls == []
+
+
+def test_overlay_music_sing_timer_not_started_when_inactive():
+    """overlay 拓扑：构造期不直接起表（它绕过了 start_music_sing_polling）。"""
+    from PySide6.QtWidgets import QWidget
+
+    from pet.overlay_shell import OverlayShell
+
+    _qapp()
+
+    class _Host(QWidget):
+        def _check_music_sing(self):
+            pass
+
+        def isVisible(self):
+            return True
+
+    def _build(**cfg):
+        host = _Host()
+        host._config = _cfg_obj(**cfg)
+        OverlayShell._init_music_sing(host)
+        return host
+
+    _freeze_all_but("music")
+    off = _build(music_sing_enabled=True)
+    assert off._music_sing_timer.isActive() is False
+    OverlayShell.sync_music_sing(off)  # 保存后的同步也不许起表
+    assert off._music_sing_timer.isActive() is False
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)  # 未冻结/全激活：照旧
+    on = _build(music_sing_enabled=True)
+    assert on._music_sing_timer.isActive() is True
+    on._music_sing_timer.stop()
+
+
+def test_lyric_controller_not_installed_when_inactive(monkeypatch):
+    """两条链（legacy mixin / overlay 壳）都不构造歌词控制器。"""
+    from PySide6.QtWidgets import QWidget
+
+    from pet import music_lyric_controller as mlc_mod
+    from pet.overlay_shell import OverlayShell
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    _qapp()
+    created = []
+
+    class _FakeController:
+        def __init__(self, win):
+            created.append(win)
+
+        def shutdown(self):
+            return None
+
+    monkeypatch.setattr(mlc_mod, "MusicLyricController", _FakeController)
+
+    class _Host(QWidget):
+        _music_lyric = None
+        cfg = _cfg_obj(music_lyric_enabled=True)
+
+    _freeze_all_but("music")
+    assert WindowFeatureGateMixin.install_music_lyric(_Host()) is None
+    assert OverlayShell.install_music_lyric(_Host()) is None
+    assert created == []
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)  # 未冻结/全激活：照旧装配
+    assert WindowFeatureGateMixin.install_music_lyric(_Host()) is not None
+    assert created
+
+
+def test_lyric_controller_shutdown_and_dropped_when_inactive():
+    """模块停用时已建的控制器走既有 shutdown 收口并置 None。"""
+    from PySide6.QtWidgets import QWidget
+
+    from pet.overlay_shell import OverlayShell
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    _qapp()
+
+    class _FakeController:
+        def __init__(self):
+            self.shutdowns = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+    class _MixinHost(QWidget, WindowFeatureGateMixin):
+        def __init__(self):
+            super().__init__()
+            self._music_lyric = _FakeController()
+            self.cfg = _cfg_obj(music_lyric_enabled=True)
+
+    class _OverlayHost(QWidget):
+        # overlay 壳的收口方法只读 ``_music_lyric``，可借其未绑定函数
+        shutdown_music_lyric = OverlayShell.shutdown_music_lyric
+
+        def __init__(self):
+            super().__init__()
+            self._music_lyric = _FakeController()
+            self.cfg = _cfg_obj(music_lyric_enabled=True)
+
+    _freeze_all_but("music")
+    pairs = (
+        (WindowFeatureGateMixin.sync_music_lyric, _MixinHost),
+        (OverlayShell.sync_music_lyric, _OverlayHost),
+    )
+    for sync, host_cls in pairs:
+        host = host_cls()
+        controller = host._music_lyric
+        sync(host)
+        assert controller.shutdowns == 1
+        assert host._music_lyric is None
+
+
+def test_music_player_warm_not_scheduled_when_inactive(monkeypatch):
+    """启动期的播放器路径浅扫（app.py 的延迟预热）不登记。"""
+    import pet.app as app_mod
+
+    scheduled = []
+
+    class _Timer:
+        @staticmethod
+        def singleShot(ms, fn):
+            scheduled.append((ms, fn))
+
+    monkeypatch.setattr(app_mod, "QTimer", _Timer)
+    _freeze_all_but("music")
+    app_mod._schedule_music_player_warm()
+    assert scheduled == []
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    app_mod._schedule_music_player_warm()
+    assert scheduled and scheduled[0][1] is app_mod._warm_music_player_paths
+
+
+def test_music_menu_callbacks_early_return_when_inactive(monkeypatch):
+    """绕过菜单直达回调：不装控制器、不起线程、不读路径缓存。"""
+    from PySide6.QtWidgets import QMenu
+
+    from pet import music_players
+    from pet.context_menus import shared as shared_mod
+
+    _qapp()
+    threads = []
+
+    class _Thread:
+        def __init__(self, target=None, name=None, daemon=None):
+            threads.append(name)
+
+        def start(self):
+            raise AssertionError("模块停用后不许起后台线程")
+
+    class _ThreadingShim:
+        Thread = _Thread
+        Event = shared_mod.threading.Event
+
+    monkeypatch.setattr(shared_mod, "threading", _ThreadingShim)
+    warmed = []
+    monkeypatch.setattr(music_players, "warm_cache_async",
+                        lambda *a, **k: warmed.append(a) or False)
+    monkeypatch.setattr(music_players, "cached_player",
+                        lambda *a, **k: (music_players.CACHED_COLD, ""))
+
+    class _FakeController:
+        def __init__(self):
+            self.aligned = []
+
+        def skip_track(self, _direction):
+            raise AssertionError("模块停用后不许调后台媒体控制")
+
+        def resync_to_line(self, step):
+            self.aligned.append(step)
+            return True
+
+        def music_mode_active(self):
+            return True
+
+        def set_music_mode_enabled(self, _on):
+            raise AssertionError("模块停用后不许改音乐模式")
+
+    class _Pet:
+        cfg = _cfg_obj(music_lyric_enabled=True)
+
+        def __init__(self):
+            self._music_lyric = _FakeController()
+            self.installs = 0
+
+        def install_music_lyric(self):
+            self.installs += 1
+            raise AssertionError("模块停用后不许懒装控制器")
+
+    pet = _Pet()
+    _freeze_all_but("music")
+    shared_mod._launch_player_and_play("netease", pet)
+    shared_mod.set_music_mode(pet, True)
+    assert shared_mod._align_lyric(pet, "next") is False
+    assert shared_mod._skip_track(pet, "next") is False
+    assert pet._music_lyric.aligned == []
+    assert pet.installs == 0
+    ran = []
+    shared_mod._run_music_off_main(lambda: ran.append(1))
+    assert ran == []
+    menu = QMenu()
+    try:
+        assert shared_mod._music_player_builder("netease")(menu, pet) is None
+    finally:
+        menu.deleteLater()
+    assert threads == []  # 一条后台线程都没起
+    assert warmed == []  # 也没起目录浅扫
+
+
+def test_music_player_detect_no_scan_when_inactive():
+    """设置页「自动检测」：停用后不清缓存、不起扫描、不起轮询表。"""
+    from pet import settings_music
+
+    calls = []
+
+    class _Dialog:
+        pass
+
+    _freeze_all_but("music")
+    settings_music.start_detect(
+        _Dialog(),
+        warm=lambda *a, **k: calls.append(("warm", a)),
+        clear=lambda: calls.append(("clear",)),
+    )
+    assert calls == []
+
+
+def _row_mounted(dlg, key: str) -> bool:
+    from pet.modern_settings_dialog import SettingRow
+
+    row = dlg.findChild(SettingRow, f"settingRow_{key}")
+    if row is None:
+        return False
+    pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+    return any(page.isAncestorOf(row) for page in pages)
+
+
+def _domain_page_labels(dlg) -> list[str]:
+    from PySide6.QtWidgets import QLabel
+
+    return [
+        label.text()
+        for index in range(dlg.pages.count())
+        for label in dlg.pages.widget(index).findChildren(QLabel)
+    ]
+
+
+def test_music_settings_groups_unmounted_when_inactive(tmp_path, monkeypatch):
+    """「音乐关联」整组与「播放器路径…（高级）」不挂出，核心组照旧。"""
+    _freeze_all_but("music")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        for key in ("music_sing", "music_lyric", "music_lyric_lead",
+                    "foobar_title_format", "music_player_netease", "music_player_detect"):
+            assert not _row_mounted(dlg, key), key
+        labels = _domain_page_labels(dlg)
+        assert "音乐关联" not in labels
+        assert "待分类（开发期）" not in labels  # 照常 claim，不掉「待分类」
+        # 「显示与音乐」标签仍在（「显示」组属核心，音乐只是页内两组）
+        sidebar = [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+        assert "桌宠" in sidebar
+        assert _row_mounted(dlg, "pet_opacity")
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_music_settings_groups_mounted_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        for key in ("music_sing", "music_lyric", "music_lyric_lead",
+                    "foobar_title_format", "music_player_netease", "music_player_detect"):
+            assert _row_mounted(dlg, key), key
+        assert "音乐关联" in _domain_page_labels(dlg)
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_music_settings_not_written_back_when_inactive(tmp_path, monkeypatch):
+    """未挂出的两组：保存不写回（含播放器路径与两个歌词来源开关）。"""
+    _freeze_all_but("music")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert not [k for k in writes if k.startswith(("music_", "foobar_"))]
+    finally:
+        dlg.close()
+        app.processEvents()

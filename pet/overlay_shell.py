@@ -93,6 +93,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 from . import autostart as autostart_mod
 from . import catalog
 from . import click_sound
+from . import feature_activation
 from . import overlay_settings_command
 from . import overlay_spawn_state
 from . import slot_manager
@@ -3271,6 +3272,9 @@ class OverlayShell(QObject):
         构造期与旧机一致：开关开着就先起表（不可见时判定自身早退）。
         """
         self._music_sing_enabled = bool(self._config.get("music_sing_enabled", False))
+        # 音乐模块未激活：唱歌轮询整条不建（下面就不起表；行为开关的值原样留着）
+        if not feature_activation.is_active("music"):
+            self._music_sing_enabled = False
         self._music_sing_active = False
         # 唱歌续播判据（window.py:2595-2601）：行为层不查音频，只问这一面；缺它
         # 则唱歌 clip 播完走掷骰链——约 60% 概率被切到随机动作，唱歌循环碎裂。
@@ -3326,6 +3330,9 @@ class OverlayShell(QObject):
         """
         self._music_sing_enabled = bool(
             self._config.get("music_sing_enabled", False))
+        # 音乐模块未激活：与开关关同路（停表 + 清唱歌态），不读配置以外的行为
+        if not feature_activation.is_active("music"):
+            self._music_sing_enabled = False
         timer = getattr(self, "_music_sing_timer", None)
         if timer is None:
             return
@@ -3345,7 +3352,12 @@ class OverlayShell(QObject):
         ``music_lyric_enabled`` 都需要一个控制器宿主。控制器只消费
         ``cfg / isVisible / show_bubble / hold_bubble`` 四面，本壳全部具备，
         故逐行对齐 ``window_optional_services.install_music_lyric``。
+
+        音乐模块未激活：返回 None，一个控制器都不构造（1s 轮询、取词线程、
+        常驻 SMTC 采样线程都随之不存在）。调用方全部按 None 降级。
         """
+        if not feature_activation.is_active("music"):
+            return None
         if self._music_lyric is None:
             from .music_lyric_controller import MusicLyricController
 
@@ -3354,6 +3366,11 @@ class OverlayShell(QObject):
 
     def sync_music_lyric(self) -> None:
         """按配置启停歌词显示（不再启用且从未装过 → 不白养定时器）。"""
+        if not feature_activation.is_active("music"):
+            # 音乐模块未激活：已装的控制器走既有 shutdown 收口并置 None
+            self.shutdown_music_lyric()
+            self._music_lyric = None
+            return
         enabled = bool(self._config.get("music_lyric_enabled", False))
         if not enabled and self._music_lyric is None:
             return

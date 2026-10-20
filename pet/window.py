@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
 
 from . import autostart as autostart_mod
 from . import catalog
+from . import feature_activation as feature_activation_mod
 from . import gui_stall_sampler
 from . import perfstats
 from .config import (
@@ -487,7 +488,12 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._self_talk_timer.setSingleShot(True)
         self._self_talk_timer.timeout.connect(self._on_self_talk_timeout)
         # 后台音乐检测：默认关闭，开启后检测到系统正在输出音频就播放唱歌动画
-        self._music_sing_enabled = bool(config.get('music_sing_enabled', False))
+        # 音乐模块未激活：唱歌轮询整条不建（行为开关的值原样留在配置里，
+        # 重新激活后照旧生效）
+        self._music_sing_enabled = (
+            bool(config.get('music_sing_enabled', False))
+            and feature_activation_mod.is_active('music')
+        )
         self._music_sing_active = False
         self._music_sing_timer = QTimer(self)
         # 1s 轮询：兼顾 COM 开销与“识别到音频后尽快触发”的体验。
@@ -3901,7 +3907,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._animation_gap_timer.start(
                 max(1, int(round(self.animation_gap_seconds * 1000)))
             )
-        self._music_sing_enabled = bool(self.cfg.get('music_sing_enabled', False))
+        # 音乐模块未激活：唱歌轮询整条不建（行为开关的值原样留在配置里）
+        self._music_sing_enabled = (
+            bool(self.cfg.get('music_sing_enabled', False))
+            and feature_activation_mod.is_active('music')
+        )
         if self._music_sing_enabled:
             # 隐藏期间保持停止，恢复显示时由 _resume_activity 按开关状态启动
             if self.isVisible():

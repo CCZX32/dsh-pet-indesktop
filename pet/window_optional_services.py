@@ -11,6 +11,7 @@ from typing import Any
 
 import shiboken6
 
+from . import feature_activation
 from .window_effects import (
     begin_rotation,
     end_rotation,
@@ -121,7 +122,13 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 歌词显示
     def install_music_lyric(self):
-        """安装歌词显示控制器（幂等）。"""
+        """安装歌词显示控制器（幂等）。
+
+        音乐模块未激活：返回 None，一个控制器都不构造（1s 轮询、取词线程、
+        常驻 SMTC 采样线程都随之不存在）。调用方全部按 None 降级。
+        """
+        if not feature_activation.is_active("music"):
+            return None
         if self._music_lyric is None:
             from .music_lyric_controller import MusicLyricController
             self._music_lyric = MusicLyricController(self)
@@ -145,6 +152,12 @@ class WindowFeatureGateMixin:
         自行检查可见性并空转。放在这里判断反而会漏掉"配置写入时窗口恰好隐藏"
         的情况，导致功能再也起不来。
         """
+        if not feature_activation.is_active("music"):
+            # 音乐模块未激活：已装的控制器走既有 shutdown 收口并置 None
+            # （不起 1s 轮询、不取词、不拉 SMTC 采样线程）
+            self.shutdown_music_lyric()
+            self._music_lyric = None
+            return
         enabled = bool(self.cfg.get("music_lyric_enabled", False))
         if not enabled and self._music_lyric is None:
             return  # 从未启用过：不为一个关着的功能白养一个定时器

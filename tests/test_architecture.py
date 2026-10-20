@@ -301,7 +301,11 @@ WINDOW_PY_LINE_BUDGET = 4671
 # pet/settings_features.py**，本文件净 +14：`_features_page` 初始化与构造接线、
 # `domain_content` 一行、`_write_config` 末尾统一 save 前的 staged 写回委托。
 # 实测 2620。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2637  # 2026-10-21：期 2 模块门控（天气/抽签/待办/节日设置层）+16
+# 2026-10-21 上调到 2664：期 3 模块门控（voice 语音闸 + music 音乐闸）叠加后实测
+# 2664。**前一笔已达 2653（期 3a voice 提交未同步校准，预算从 2637 起就红了）**，
+# 本次一并校准；差值来自「按激活挂出/跳键」的分支行（每组 3~5 行，无新增页面）。
+# 按文件约定只随实测校准，不为达标压行（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2664
 
 
 def _read(name: str) -> str:

@@ -297,6 +297,13 @@ def start_detect(dialog, *, warm=None, lookup=None, clear=None) -> None:
 
     ``warm`` / ``lookup`` / ``clear`` 是测试注入缝；默认都用后端真身。
     """
+    from . import feature_activation
+
+    if not feature_activation.is_active("music"):
+        # 音乐模块未激活：路径探测链整条不做（不清缓存、不起扫描线程、不起轮询表）。
+        # 行本身也没挂出（设置层），这里是绕过 UI 直接调用的兜底。
+        log.info("音乐模块未激活，忽略播放器路径自动检测")
+        return
     warm = warm or music_players.warm_cache_async
     clear = clear or music_players.clear_cache
     dialog._music_detect_lookup = lookup

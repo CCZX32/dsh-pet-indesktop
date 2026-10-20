@@ -19,6 +19,7 @@ from collections import deque
 from PySide6.QtCore import QTimer
 
 from . import catalog
+from . import feature_activation
 from . import quiet_mode
 from . import window_placement
 
@@ -798,6 +799,10 @@ def on_self_talk_timeout(host) -> None:
 
 def start_music_sing_polling(host) -> None:
     """启动音乐检测并尽量立即检查一次，避免等一个轮询周期才唱歌。"""
+    if not feature_activation.is_active("music"):
+        # 音乐模块未激活：唱歌链整条不建（表不起、COM 不调）。行为开关的值
+        # 原样留在配置里，重新激活后按它照旧工作。
+        return
     if not host._music_sing_enabled:
         return
     host._music_sing_timer.start()
@@ -840,6 +845,12 @@ def check_music_sing(host) -> None:
     绕过桩直接读到真实 SMTC（本机开着浏览器视频时用例就红），也把否决规则拆成
     两处。规则只留在 ``music_detect`` 一处。
     """
+    if not feature_activation.is_active("music"):
+        # 音乐模块未激活：本拍直接收口——不调 music_detect（每秒一次 pycaw COM）、
+        # 不拉常驻 SMTC 探针线程，也不付 pet.window 的导入。行为开关的值原样留着。
+        host._music_sing_active = False
+        host._music_sing_silent_since = None
+        return
     from .window import SING_ANIM
     if not host.isVisible():
         return

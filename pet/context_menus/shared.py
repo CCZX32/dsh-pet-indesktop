@@ -1108,6 +1108,22 @@ def add_harness(menu: QMenu, pet, *, icons: bool = True):
     return submenu
 
 
+def _music_gated() -> bool:
+    """音乐模块未激活 → True（右键音乐动作的**回调**闸）。
+
+    菜单层已按激活快照投影（``registry.available_ids``，九条动作都在
+    ``features.music.menu_action_ids`` 里），这里兜底绕过菜单的直达回调：
+    旧布局残留、用户编排里的陈旧节点、外部调用都不该在模块停用后还能建控制器
+    或起后台线程。``is_active`` 在快照未冻结（测试/工具）时恒真，行为与旧版一致。
+    """
+    from .. import feature_activation
+
+    if feature_activation.is_active("music"):
+        return False
+    log.info("音乐模块未激活，忽略右键音乐动作")
+    return True
+
+
 def _music_controller(pet):
     """取歌词控制器。**不**在这里创建——仅打开菜单不该装一套定时器。
 
@@ -1121,6 +1137,8 @@ def _music_controller(pet):
 
 
 def _skip_track(pet, direction: str) -> bool:
+    if _music_gated():
+        return False
     controller = _music_controller(pet)
     if controller is None:
         return False
@@ -1137,6 +1155,8 @@ def music_mode_active(pet) -> bool:
 
 def set_music_mode(pet, on: bool) -> None:
     """临时进入/退出音乐模式（仅本次运行，不写设置）。"""
+    if _music_gated():
+        return
     controller = _music_controller(pet)
     if controller is None:
         installer = getattr(pet, "install_music_lyric", None)
@@ -1210,6 +1230,9 @@ def _launch_player_and_play(player_key: str, pet) -> None:
     """
     from .. import music_players, now_playing
 
+    if _music_gated():
+        # 模块未激活：连桥与 worker 线程都不建（启动播放器/轮询 SMTC 全不做）
+        return
     label = music_players.player_label(player_key)
     manual = ""
     paths_cfg = pet.cfg.get("music_player_paths", {})
@@ -1264,13 +1287,20 @@ def _run_off_main(callable_) -> None:
     threading.Thread(target=callable_, name="music-menu", daemon=True).start()
 
 
+def _run_music_off_main(callable_) -> None:
+    """音乐菜单回调的线程入口：模块未激活时连后台线程都不起（媒体控制整条不建）。"""
+    if _music_gated():
+        return
+    _run_off_main(callable_)
+
+
 def add_music_pause(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单：暂停 / 播放。"""
     from .. import now_playing
 
     return add_action(
         menu, "让人家歇一会儿嘛（暂停 / 播放）", "pause" if icons else None,
-        lambda: _run_off_main(now_playing.toggle_play_pause), close_on_trigger=True,
+        lambda: _run_music_off_main(now_playing.toggle_play_pause), close_on_trigger=True,
     )
 
 
@@ -1278,7 +1308,7 @@ def add_music_next(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单：切歌。"""
     return add_action(
         menu, "给主人换一首（切歌）", "play" if icons else None,
-        lambda: _run_off_main(lambda: _skip_track(pet, "next")), close_on_trigger=True,
+        lambda: _run_music_off_main(lambda: _skip_track(pet, "next")), close_on_trigger=True,
     )
 
 
@@ -1286,7 +1316,7 @@ def add_music_prev(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单：切到上一首。"""
     return add_action(
         menu, "人家想再听刚才那首（上一首）", "play" if icons else None,
-        lambda: _run_off_main(lambda: _skip_track(pet, "previous")), close_on_trigger=True,
+        lambda: _run_music_off_main(lambda: _skip_track(pet, "previous")), close_on_trigger=True,
     )
 
 
@@ -1305,6 +1335,8 @@ def _align_lyric(pet, kind: str) -> bool:
     **纯内存操作，必须留在 GUI 线程**（其余音乐菜单项走 ``_run_off_main`` 是因为
     它们要调 WinRT）。这里只改 LyricTracker 的本地时钟基准，微秒级。
     """
+    if _music_gated():
+        return False
     controller = _music_controller(pet)
     if controller is None:
         return False
@@ -1389,6 +1421,10 @@ def _music_player_builder(player_key: str):
     def build(menu: QMenu, pet, *, icons: bool = True):
         from .. import music_players
 
+        if _music_gated():
+            # 模块未激活：不建条目、不读路径缓存、不起后台浅扫（菜单层已投影过滤，
+            # 这是绕过菜单直调建造器的兜底）
+            return None
         label = music_players.player_label(player_key)
         manual = ""
         paths_cfg = pet.cfg.get("music_player_paths", {})

@@ -461,7 +461,13 @@ def _schedule_music_player_warm() -> None:
     """UI 就绪后统一预热点的一环：延迟几秒再后台暖播放器路径缓存。
 
     用单次 QTimer 错峰，**不阻塞任何线程**（这里只是登记一个延迟任务）。
+
+    音乐模块未激活：连延迟任务都不登记——播放器路径只服务「打开播放器」与
+    「自动检测」，模块停用后这条浅扫链（启动期两条 daemon 线程 + 全局串行
+    锁）没有任何消费者。
     """
+    if not feature_activation_mod.is_active("music"):
+        return
     QTimer.singleShot(_MUSIC_PLAYER_WARM_DELAY_MS, _warm_music_player_paths)
 
 

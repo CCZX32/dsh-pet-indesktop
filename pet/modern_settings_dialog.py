@@ -1866,6 +1866,10 @@ class ModernSettingsDialog(QDialog):
         # 组序裁定：高频组按使用频率递减（标签 1 内音乐关联第 2），高级组垫底其标签页。
         music_advanced = (
             claim("foobar_title_format") + settings_music.build_music_player_rows(self))
+        # 音乐模块未激活：等价于 todo 组形态——两组的行**照常 claim**（防掉「待分类」
+        # 并保有控件），但不挂进标签页、保存也不写回；重新激活后原样回来。
+        music_rows = claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")
+        music_on = _fa.is_active("music")
         # 「桌宠」域（2026-10-08 第二刀）：域内是两个**互斥任务**——「它长什么样 /
         # 唱不唱歌」与「它怎么动 / 怎么撞」，页内切成两个标签，首屏只管一个任务。
         # 侧栏域清单是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
@@ -1877,8 +1881,10 @@ class ModernSettingsDialog(QDialog):
             page_content(
                 [
                     ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
-                    ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
-                    (settings_music.advanced_group_title(self), music_advanced, True),
+                    # 音乐模块未激活：两组的行已 claim（上面），这里不挂出
+                    *([("音乐关联", music_rows)] if music_on else []),
+                    *([(settings_music.advanced_group_title(self), music_advanced, True)]
+                      if music_on else []),
                 ]
             ),
         )
@@ -2411,16 +2417,18 @@ class ModernSettingsDialog(QDialog):
             self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
             self.config.set("self_talk_voice_precache_enabled",
                             self.self_talk_voice_precache_check.isChecked())
-        self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
-        if getattr(self, "music_lyric_check", None) is not None:
-            self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
+        if _fa.is_active("music"):
+            # 音乐模块未激活：两组行未挂出（见「显示与音乐」装配），其键不写回
+            self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
+            if getattr(self, "music_lyric_check", None) is not None:
+                self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
+            if getattr(self, "music_lyric_lead_spin", None) is not None:
+                self.config.set(
+                    "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
+                )
+            settings_music.save_source_settings(self)
         if getattr(self, "agent_cost_check", None) is not None:
             self.config.set("agent_cost_enabled", self.agent_cost_check.isChecked())
-        if getattr(self, "music_lyric_lead_spin", None) is not None:
-            self.config.set(
-                "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
-            )
-        settings_music.save_source_settings(self)
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())
@@ -2541,7 +2549,10 @@ class ModernSettingsDialog(QDialog):
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
         settings_network.save_network_settings(self)
-        settings_music.save_music_player_settings(self)
+        if _fa.is_active("music"):
+            # 播放器路径组未挂出时不写回（路径变更还会顺带 clear_cache，模块停用后
+            # 这条缓存早没人读）
+            settings_music.save_music_player_settings(self)
         settings_quiet.save_quiet_settings(self)
         # 模块未激活时对应标签页未构造（控件不存在），其 save 必须同步跳过：
         # 既不是「藏起来继续全表保存」，也不能碰不存在的控件
