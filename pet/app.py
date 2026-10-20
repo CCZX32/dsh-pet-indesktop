@@ -521,6 +521,14 @@ class PetInstance:
         #（只读转发——读取走 getter 的 shell.enable_chat 权威源）。
         self._enable_chat = bool(value)
 
+    @property
+    def chat_build_capable(self) -> bool:
+        """构建变体能力（不含模块闸）：转发 shell，兜底回本地构造值。"""
+        shell = getattr(self, "shell", None)
+        if shell is not None:
+            return shell.chat_build_capable
+        return bool(getattr(self, "_enable_chat", True))
+
     # ------------------------------------------------------------ 窗口构建
     def _create_library(self, character_id: str) -> MovieLibrary:
         # 预热策略：默认 balanced（瞬时交互核 pinned 预热首帧，随机动作池
@@ -584,6 +592,8 @@ class PetInstance:
         其余均为本窗操作。批5.2 用 ``_slot_wrap`` 给每窗回调加日志槽位。
         """
         win.on_switch_character = self._slot_wrap(self.switch_character)
+        # 构建变体能力（不含 chat 模块闸）：harness 菜单可用性按它判（registry）
+        win.chat_build_capable = self.chat_build_capable
         win.on_open_chat = self._slot_wrap(self.open_chat) if self.enable_chat else None
         win.on_open_quick_chat = self._slot_wrap(self.open_quick_chat) if self.enable_chat else None
         win.on_open_chat_settings = self._slot_wrap(self.open_chat_settings) if self.enable_chat else None
@@ -1269,7 +1279,13 @@ class AppShell:
                  spawn_offset: int = 0, overlay_gate=None) -> None:
         self.app = app
         self.config = config
-        self._enable_chat = bool(enable_chat)
+        # 构建变体能力单独留一份真值：harness 这类「no-chat 变体不出场、但与
+        # chat 模块无关」的入口按它判（不能用 enable_chat——那里面还有模块闸）。
+        self._chat_build_capable = bool(enable_chat)
+        # enable_chat 双闸：构建变体能力（no-chat 包）∧ 功能模块激活（chat 模块）。
+        # 进程级单源不变——下游全部回调置 None/早退（:587-595/:784/:856 等）
+        # 对两种「不可用」一视同仁，模块关了 AI 对话就是不存在。
+        self._enable_chat = bool(enable_chat) and feature_activation_mod.is_active("chat")
         self._slot_id = slot_id
         # 托盘本体（属性访问器在下方：overlay 拓扑回退到壳持有的托盘）
         self._tray: QSystemTrayIcon | None = None
@@ -1525,6 +1541,11 @@ class AppShell:
     def enable_chat(self) -> bool:
         """进程级单源（E2/REVIEW_batch51）：窗口经 PetInstance.enable_chat 转发。"""
         return self._enable_chat
+
+    @property
+    def chat_build_capable(self) -> bool:
+        """构建变体是否带 AI 聊天（不含功能模块闸）：harness 等按它判出场。"""
+        return self._chat_build_capable
 
     @enable_chat.setter
     def enable_chat(self, value):
@@ -2939,7 +2960,7 @@ class AppShell:
     def _harness_autostart_wanted(self) -> bool:
         """「随桌宠启动 dsh 服务」的功能门：三个条件同时成立才自动拉起。
 
-        1. ``enable_chat``——旧口径；无 Chat 的变体连 Harness 菜单都不显示；
+        1. ``system_tools`` 模块激活（2026-10-21 起替换 enable_chat 的历史误绑）；
         2. 用户显式开了 ``harness_autostart``；
         3. **DSH 联动确实启用**（``agent_link.dsh``，复用 ``_dsh_tracker_wanted``
            这个单一口径）。
@@ -2953,7 +2974,9 @@ class AppShell:
         复用 ``_dsh_tracker_wanted`` 而不是就地再读一遍 config：同一个功能门在两处
         各自实现，早晚会漂移（监视器跟联动走、服务不跟）。
         """
-        if not self.enable_chat:
+        # harness 属系统工具模块（历史误绑 enable_chat：chat 模块一关它跟着消失，
+        # 但 dsh 服务管理与 AI 对话无关）。模块关了绝不自启外部服务。
+        if not feature_activation_mod.is_active("system_tools"):
             return False
         if not bool(self.config.get("harness_autostart", False)):
             return False

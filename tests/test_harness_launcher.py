@@ -217,15 +217,18 @@ def test_launch_harness_no_browser_when_autostart(monkeypatch):
 
 
 def test_harness_autostart_hook_gates(tmp_path, monkeypatch):
-    """AppShell._maybe_autostart_harness：三个门（enable_chat / harness_autostart /
-    agent_link.dsh）任一不成立都不触发；已有实例不重复拉起。
+    """AppShell._maybe_autostart_harness：三个门（system_tools 模块激活 /
+    harness_autostart / agent_link.dsh）任一不成立都不触发；已有实例不重复拉起。
 
     真 Config + 真门方法（``AppShell.__new__`` 绕开重型 __init__）：门本身就是
     被测对象，用替身替掉它等于什么都没测（本批 K1 就是在这里加第三条门）。
+    2026-10-21：第一门从 enable_chat 的历史误绑改为 system_tools 模块激活。
     """
     from pet import app as app_mod
+    from pet import feature_activation as fa
     from pet import harness_launcher as hl
     from pet.config import Config
+    from pet.features import MIGRATION_BASELINE
 
     spawned = []
     monkeypatch.setattr(
@@ -233,24 +236,30 @@ def test_harness_autostart_hook_gates(tmp_path, monkeypatch):
         lambda target=None, daemon=None, name=None: SimpleNamespace(start=lambda: spawned.append(target)),
     )
 
-    def _make(enable_chat, flag, dsh_link):
+    def _make(flag, dsh_link):
         cfg = Config(base=tmp_path)
         cfg.set("harness_autostart", flag)
         agent_cfg = dict(cfg.get("agent_link") or {})
         agent_cfg["dsh"] = dsh_link
         cfg.set("agent_link", agent_cfg)
         shell = app_mod.AppShell.__new__(app_mod.AppShell)  # 绕开重型 __init__
-        shell._enable_chat = enable_chat
         shell.config = cfg
         return shell
 
-    app_mod.AppShell._maybe_autostart_harness(_make(True, False, dsh_link=True))
-    app_mod.AppShell._maybe_autostart_harness(_make(False, True, dsh_link=True))
-    app_mod.AppShell._maybe_autostart_harness(_make(True, True, dsh_link=False))
-    assert spawned == []
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    try:
+        app_mod.AppShell._maybe_autostart_harness(_make(False, dsh_link=True))
+        app_mod.AppShell._maybe_autostart_harness(_make(True, dsh_link=False))
+        # system_tools 模块未激活：flag 与联动都开也不拉
+        fa.freeze_snapshot_for_tests([fid for fid in MIGRATION_BASELINE if fid != "system_tools"])
+        app_mod.AppShell._maybe_autostart_harness(_make(True, dsh_link=True))
+        assert spawned == []
 
-    app_mod.AppShell._maybe_autostart_harness(_make(True, True, dsh_link=True))
-    assert len(spawned) == 1
+        fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+        app_mod.AppShell._maybe_autostart_harness(_make(True, dsh_link=True))
+        assert len(spawned) == 1
+    finally:
+        fa.reset_snapshot_for_tests()
 
     # 「已有实例」的判定已下移到 launch_harness（它同时看 web 端口与桌面端单实例，
     # app 层按 web 端口提前 return 会把桌面端目标一起挡掉）。判据升级为两条：

@@ -1189,3 +1189,55 @@ def test_music_settings_not_written_back_when_inactive(tmp_path, monkeypatch):
     finally:
         dlg.close()
         app.processEvents()
+
+
+# ---------------------------------------------------------------- 期 4a：chat 单源复合 + harness 解耦
+def test_chat_module_off_disables_enable_chat(tmp_path):
+    """AppShell 构造：enable_chat = 构建能力 ∧ chat 模块激活（单源复合）。"""
+    import pet.app as app_mod
+    from pet.config import Config
+
+    app = _qapp()
+    _freeze_all_but("chat")
+    shell = app_mod.AppShell(app, Config(tmp_path), enable_chat=True, slot_id=0)
+    assert shell.enable_chat is False
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    shell2 = app_mod.AppShell(app, Config(tmp_path), enable_chat=True, slot_id=0)
+    assert shell2.enable_chat is True
+    # 构建能力缺失（no-chat）仍然 False（不被模块激活救回）
+    shell3 = app_mod.AppShell(app, Config(tmp_path), enable_chat=False, slot_id=0)
+    assert shell3.enable_chat is False
+
+
+def test_harness_action_available_without_chat_callback():
+    """harness 解耦：chat 运行回调缺席（模块关）时仍可用；构建变体缺失才隐藏。"""
+    from pet.context_menus.registry import MENU_ACTIONS
+
+    class _NoChatPet(_FakePet):
+        on_open_chat = None
+
+    ids = MENU_ACTIONS.available_ids(_NoChatPet())
+    assert "harness" in ids
+    assert "chat" not in ids  # chat 自己的可用性仍跟回调走
+
+    class _NoChatBuildPet(_NoChatPet):
+        chat_build_capable = False  # no-chat 打包变体（既有语义：不出场）
+
+    assert "harness" not in MENU_ACTIONS.available_ids(_NoChatBuildPet())
+
+
+def test_harness_autostart_follows_system_tools_not_chat(tmp_path, monkeypatch):
+    import pet.app as app_mod
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.set("harness_autostart", True)
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+    monkeypatch.setattr(app_mod.AppShell, "_dsh_tracker_wanted", lambda _s: True)
+    # chat 开、system_tools 关：不自启
+    fa.freeze_snapshot_for_tests([fid for fid in MIGRATION_BASELINE if fid != "system_tools"])
+    assert app_mod.AppShell._harness_autostart_wanted(shell) is False
+    # 全开：自启
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert app_mod.AppShell._harness_autostart_wanted(shell) is True

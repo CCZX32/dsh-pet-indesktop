@@ -213,9 +213,22 @@ def test_autostart_gated_off_when_dsh_link_disabled(tmp_path, spawn_probe):
 
 
 def test_autostart_still_gated_by_master_toggles(tmp_path, spawn_probe):
-    """旧口径不退化：enable_chat / harness_autostart 任一关着都不拉（即便联动开着）。"""
-    app_mod.AppShell._maybe_autostart_harness(
-        _gate_shell(tmp_path, enable_chat=False, dsh_link=True))
+    """旧口径不退化：system_tools 模块未激活 / harness_autostart 任一关着都不拉。
+
+    2026-10-21：第一门从 enable_chat 的历史误绑改为 system_tools 模块激活
+    （harness 与 AI 对话无关，模块显隐归功能投影）。冻结快照判负后必须复位，
+    否则线程级拉起会漏进后续用例的 probe（实测）。
+    """
+    from pet import feature_activation as fa
+    from pet.features import MIGRATION_BASELINE
+
+    try:
+        fa.freeze_snapshot_for_tests(
+            [fid for fid in MIGRATION_BASELINE if fid != "system_tools"])
+        app_mod.AppShell._maybe_autostart_harness(
+            _gate_shell(tmp_path, dsh_link=True))
+    finally:
+        fa.reset_snapshot_for_tests()
     app_mod.AppShell._maybe_autostart_harness(
         _gate_shell(tmp_path, autostart=False, dsh_link=True))
     assert spawn_probe == []

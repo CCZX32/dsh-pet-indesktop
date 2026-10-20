@@ -356,7 +356,14 @@ class MenuActionRegistry:
                 disabled_reason="尚未配置快捷启动应用",
             ),
             "balance": MenuActionSpec(add_balance, _callback_available("on_show_balance")),
-            "harness": MenuActionSpec(add_harness, _callback_available("on_open_chat")),
+            # harness 属系统工具模块：可用性按**构建变体能力**判（no-chat 变体
+            # 不出场是既有语义，test_sprite_menu_parity 钉着），不再误绑 chat 的
+            # 运行回调——chat 模块停用时它照常出现，模块显隐归功能投影
+            # （system_tools）负责。
+            "harness": MenuActionSpec(
+                add_harness,
+                lambda pet: bool(getattr(pet, "chat_build_capable", True)),
+            ),
             "deepseek_web": MenuActionSpec(lambda menu, pet: add_deepseek_web(menu)),
             "check_update": MenuActionSpec(_build_check_update, _callback_available("on_check_update")),
             "github_project": MenuActionSpec(_build_github),

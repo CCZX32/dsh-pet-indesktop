@@ -113,7 +113,8 @@ def _run_settings(config=None) -> int:
     except OSError:
         pass
     return _exec_settings(
-        app, config, include_ai=_chat_available(), initial_page=_settings_page(sys.argv)
+        app, config, include_ai=_chat_available() and _feature_activation.is_active("chat"),
+        initial_page=_settings_page(sys.argv)
     )
 
 
