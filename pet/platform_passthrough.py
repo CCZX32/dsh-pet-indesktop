@@ -221,9 +221,13 @@ class QtPerPixelInputController:
             # ``QCocoaWindow::setWindowFlags`` 伴随原生窗口重建并把本 App
             # **激活**，用户的前台窗口被踢成失活。macOS 上以本控制器自记的
             # 落窗状态为准：已是目标态且句柄未变就什么也不做。
-            # 其它平台保留「读回收敛」语义（外部改写属性能被读回纠回来）。
+            # 但属性侧（``WA_TransparentForMouseEvents``）在 macOS 同样可读
+            # （纯 Qt 内存读），外部改写属性仍然走读回收敛——自记状态只替
+            # 读不回的标志侧背书，不替读得回的属性侧背书。
             if _IS_MACOS and not recreated:
-                if self._applied_state is not None and bool(self._applied_state) == enabled:
+                if (self._applied_state is not None
+                        and bool(self._applied_state) == enabled
+                        and bool(win.testAttribute(_TRANSPARENT_ATTR)) == enabled):
                     return False
             attribute_ok = bool(win.testAttribute(_TRANSPARENT_ATTR)) == enabled
             flag_ok = (handle is None

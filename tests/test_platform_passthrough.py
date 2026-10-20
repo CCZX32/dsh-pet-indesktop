@@ -321,6 +321,12 @@ def test_external_flag_write_is_converged_back():
 
     属性与标志是两个独立的判据，任一侧被外部改写都要能在下一 tick 自愈——只钉属性
     侧会漏掉「标志被平台/第三方清掉」这一类（穿透静默失效的另一种形态）。
+
+    平台例外（issue #314）：macOS 的 QCocoaWindow 读不回
+    ``WindowTransparentForInput``（``flags()`` 恒不含该位），标志侧没有读回
+    通道，收敛只能靠控制器自记状态——外部翻标志在 macOS 上**不可检测**（已登记
+    的平台限制，属性侧收敛仍由上一用例钉住）。macOS 下本用例改钉「不重写」
+    语义：自记状态一致时每 tick 不做任何窗口写。
     """
     window = _FakeWindow(transparent=True)
     window.handle = _FakeHandle(0xA1)
@@ -331,9 +337,13 @@ def test_external_flag_write_is_converged_back():
         assert window.testAttribute(ATTR) is True
 
         window.handle.setFlag(FLAG, False)        # 外部改写：标志被翻掉，句柄未变
-        assert controller._apply_through(True) is True
-        assert window.handle.flags() & FLAG, "标志侧外部改写必须被收敛回目标态"
-        assert window.testAttribute(ATTR) is True
+        if sys.platform == "darwin":
+            # 读不回 → 自记状态短路，不重写也不收敛（见 docstring 的平台例外）
+            assert controller._apply_through(True) is False
+        else:
+            assert controller._apply_through(True) is True
+            assert window.handle.flags() & FLAG, "标志侧外部改写必须被收敛回目标态"
+            assert window.testAttribute(ATTR) is True
     finally:
         controller.stop()
 
