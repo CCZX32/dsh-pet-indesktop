@@ -1993,6 +1993,7 @@ class ModernSettingsDialog(QDialog):
                         ),
                     ),
                     ("系统通知", claim("system_notifications_enabled")),
+                    ("助手回复朗读", claim("chat_reply_voice_enabled")),
                     (
                         "视觉能力",
                         claim(
