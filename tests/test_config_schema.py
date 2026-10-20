@@ -83,6 +83,7 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "edge_probe_enabled",
         "experimental_shared_decode",
         "facing",
+        "feature_activation",
         "ffmpeg_recycle_minutes",
         "first_frame_cache_max_mb",
         "game_fps_process",
@@ -229,6 +230,8 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 音频通道，不新增语速/音色/音量键），白名单 154。
 # 2026-10-20 加助手回复朗读 1 键（chat_reply_voice_enabled，默认 False：同样复用
 # 语音报时的音频通道，只念对话不念歌词），白名单 155。
+# 2026-10-21 加功能模块激活 1 键（feature_activation，默认 None=未判定，由
+# pet/feature_activation 一次性迁移写回 {version, enabled}；NULL 接受键），白名单 156。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

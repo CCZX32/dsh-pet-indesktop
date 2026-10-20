@@ -37,6 +37,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 from . import autostart as autostart_mod
 from . import catalog
 from . import click_sound
+from . import feature_activation as feature_activation_mod
 from . import overlay_instance_gate as overlay_gate_mod
 from . import self_talk_voice
 from . import slot_manager as slot_manager_mod
@@ -5054,6 +5055,9 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
         config = Config(instance_id="")
         _mac_set_dock_icon_visible(bool(config.get("show_dock_icon", True)))
         _setup_logging(config)
+        # 功能模块激活：在创建任何可选服务（AppShell 及其服务树）之前完成
+        # 一次性迁移判定并冻结本次运行快照；功能页写盘只影响下次启动。
+        feature_activation_mod.decide_and_freeze(config)
 
         logging.info("dsh-pet-standalone 启动 (slot: %s, instance: %s)", slot_id, instance_id)
         _cleanup_stale_runtime_dirs()
