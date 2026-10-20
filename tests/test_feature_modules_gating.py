@@ -512,3 +512,100 @@ def test_inactive_modules_do_not_keep_the_shared_chime_channel_alive():
     assert app_mod.AppShell._festival_speak_wanted(shell) is True
     assert app_mod.AppShell._todo_speak_wanted(shell) is True
     assert app_mod.AppShell._divination_speak_wanted(shell) is True
+
+
+# ---------------------------------------------------------------- 期 2b：todo/festival 设置层 + 设置进程
+def _build_dialog(tmp_path, monkeypatch):
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = _qapp()
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    dlg = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+    return app, dlg
+
+
+def test_todo_group_unmounted_when_inactive(tmp_path, monkeypatch):
+    _freeze_all_but("todo")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        from pet.modern_settings_dialog import SettingRow
+
+        row = dlg.findChild(SettingRow, "settingRow_todo_reminder_enabled")
+        assert row is not None  # 控件保留（重新激活原样回来）
+        pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+        assert not any(page.isAncestorOf(row) for page in pages)  # 但不挂在任何域页
+        from PySide6.QtWidgets import QLabel
+
+        labels = [lb.text() for lb in dlg.findChildren(QLabel)]
+        assert "待分类（开发期）" not in labels
+        # 不写回
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert not [k for k in writes if k.startswith("todo_reminder")]
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_todo_group_mounted_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        from pet.modern_settings_dialog import SettingRow
+
+        row = dlg.findChild(SettingRow, "settingRow_todo_reminder_enabled")
+        pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+        assert any(page.isAncestorOf(row) for page in pages)
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_festival_page_not_constructed_when_inactive(tmp_path, monkeypatch):
+    _freeze_all_but("festival")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.festival_page is None
+        assert dlg._write_config()  # 不碰不存在的页，保存照常
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_festival_page_constructed_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.festival_page is not None
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_freeze_for_settings_process_reads_global_config(tmp_path):
+    """设置进程：按主 config.json 的待生效集合冻结（slot 实例配置也读主文件）。"""
+    import json
+
+    from pet.config import Config
+
+    main_cfg = Config(tmp_path)
+    assert fa.write_enabled(main_cfg, ["weather", "chat"])
+    # 主实例设置进程
+    fa.freeze_for_settings_process(main_cfg)
+    assert fa.is_active("weather") is True
+    assert fa.is_active("todo") is False
+    # slot 实例设置进程（全局键真值在主文件）
+    fa.reset_snapshot_for_tests()
+    slot_cfg = Config(tmp_path, instance_id="slot-3")
+    fa.freeze_for_settings_process(slot_cfg)
+    assert fa.is_active("weather") is True
+    assert fa.is_active("todo") is False
+    # 未判定的安装：基线（全激活）
+    fa.reset_snapshot_for_tests()
+    raw = json.loads(main_cfg.path.read_text(encoding="utf-8"))
+    raw.pop("feature_activation")
+    main_cfg.path.write_text(json.dumps(raw), encoding="utf-8")
+    fa.freeze_for_settings_process(main_cfg)
+    assert all(fa.is_active(fid) for fid in FEATURES)

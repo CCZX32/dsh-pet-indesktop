@@ -151,6 +151,37 @@ def reset_snapshot_for_tests() -> None:
     _snapshot = None
 
 
+def freeze_for_settings_process(config) -> None:
+    """独立设置进程：按全局 config.json 的「下次启动」集合冻结快照。
+
+    设置 UI 必须反映**待生效**状态（主进程的运行快照是它启动时冻结的，
+    两边本来就不必相同）。本进程不运行功能服务，is_active 只影响设置层
+    投影（哪些标签/组/页出现）与预览入口。
+    传入的可能是 slot 实例配置（feature_activation 是全局键，真值只在
+    主 config.json），所以一律直读主文件；不做迁移判定、不写盘——那是
+    主进程启动时的职责。读不到/判不出就冻结迁移基线（全激活=旧行为）。
+    """
+    import json
+
+    global _snapshot
+    raw = None
+    try:
+        main_path = config.dir / "config.json"
+        if main_path.is_file():
+            data = json.loads(main_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                raw = data.get("feature_activation")
+    except (OSError, ValueError):
+        raw = None
+    enabled = list(MIGRATION_BASELINE)
+    if isinstance(raw, dict) and isinstance(raw.get("enabled"), list):
+        try:
+            enabled, _ = normalize_enabled(raw["enabled"])
+        except ValueError:
+            enabled = list(MIGRATION_BASELINE)
+    _snapshot = frozenset(enabled)
+
+
 def freeze_snapshot_for_tests(enabled) -> None:
     """测试专用：直接冻结成指定启用集（门控用例的开关）。"""
     global _snapshot

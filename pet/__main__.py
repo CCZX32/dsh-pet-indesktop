@@ -103,6 +103,11 @@ def _run_settings(config=None) -> int:
         # 它自己的 config-slot-N.json，与主进程同一份文件；多窗场景由主进程
         # 追加 --instance 显式指明。
         config = Config(instance_id=_settings_instance_id(sys.argv))
+        # 功能模块激活：设置进程按盘上「下次启动」集合冻结快照——设置 UI 反映
+        # 待生效状态；不做迁移判定（那是主进程启动的职责）。
+        from . import feature_activation as _feature_activation
+
+        _feature_activation.freeze_for_settings_process(config)
     try:
         config.dir.mkdir(parents=True, exist_ok=True)
     except OSError:

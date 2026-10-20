@@ -176,6 +176,7 @@ from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
+from . import feature_activation as _fa
 from . import settings_network
 from . import settings_page_guide
 from . import settings_divination
@@ -1000,9 +1001,12 @@ class ModernSettingsDialog(QDialog):
         self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
 
         # 节日提醒设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
-        from .festival_settings import FestivalSettingsPage
+        # 模块未激活：整页不构造（不挂载、不写回；「语音」域只剩语音报时组）
+        self.festival_page = None
+        if _fa.is_active("festival"):
+            from .festival_settings import FestivalSettingsPage
 
-        self.festival_page = FestivalSettingsPage(self.config, self)
+            self.festival_page = FestivalSettingsPage(self.config, self)
 
         # 更新页是命令/状态面板，不写入 Config；它与常规域同级，便于从菜单
         # 和设置窗口进入同一套检查、下载、校验、安装流程。
@@ -2037,8 +2041,9 @@ class ModernSettingsDialog(QDialog):
         # （无父的 SettingRow 一旦 setVisible 就是个顶层窗口，用户会看到无标题小窗闪
         # ——上游 #261 修的就是这个），因此 findChildren 现在取得到它们。不登记就会
         # 掉进「待分类（开发期）」——它们稍后由 build_domain_page 现造卡片收进「语音」域。
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        if self.festival_page is not None:
+            festival_rows = list(self.festival_page.findChildren(SettingRow))
+            claimed.update(festival_rows)
         dialogue_rows = claim_prefix("dialogue_")
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
@@ -2074,9 +2079,12 @@ class ModernSettingsDialog(QDialog):
         # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
         # leftovers），若不显式放回本域就会从设置页里彻底消失。
         # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
+        # 待办模块未激活：行照常被 claim（防掉「待分类」并保有控件），但不挂进
+        # 域页、不写回配置——重新激活后原样回来。
+        todo_rows = claim("todo_reminder_enabled", "todo_reminder_lead_minutes", "todo_reminder_speak")
         automation = page_content(
             [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes", "todo_reminder_speak")),
+                *([("待办提醒", todo_rows)] if _fa.is_active("todo") else []),
                 # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
                 ("免打扰", settings_quiet.build_quiet_rows(self)),
                 *proactive_sections,
@@ -2101,13 +2109,15 @@ class ModernSettingsDialog(QDialog):
         voice_layout.setSpacing(18)
         if voice_chime_rows:
             voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
-        voice_layout.addWidget(self.festival_page.build_domain_page(voice))
+        if self.festival_page is not None:
+            voice_layout.addWidget(self.festival_page.build_domain_page(voice))
         voice_layout.addStretch(1)
         # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
         # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
         self.voice_chime_page.refresh_backend_rows()
-        # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
-        self.festival_page.refresh_backend_rows()
+        if self.festival_page is not None:
+            # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
+            self.festival_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -2465,9 +2475,11 @@ class ModernSettingsDialog(QDialog):
         agent_cfg["sound_cooldown_seconds"] = float(self.agent_sound_cooldown_spin.value())
 
         self.config.set("agent_link", agent_cfg)
-        self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
-        self.config.set("todo_reminder_lead_minutes", int(self.todo_reminder_lead_spin.value()))
-        self.config.set("todo_reminder_speak", self.todo_reminder_speak_check.isChecked())
+        # 模块未激活的组未挂进页面（见 automation 装配），其键不写回
+        if _fa.is_active("todo"):
+            self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
+            self.config.set("todo_reminder_lead_minutes", int(self.todo_reminder_lead_spin.value()))
+            self.config.set("todo_reminder_speak", self.todo_reminder_speak_check.isChecked())
         # 语音报时设置页写回（voice_chime_* 平铺键 + 各后端字段键）
         if self.voice_chime_page is not None:
             self.voice_chime_page.apply_to_config()
@@ -2517,8 +2529,6 @@ class ModernSettingsDialog(QDialog):
         settings_quiet.save_quiet_settings(self)
         # 模块未激活时对应标签页未构造（控件不存在），其 save 必须同步跳过：
         # 既不是「藏起来继续全表保存」，也不能碰不存在的控件
-        from . import feature_activation as _fa
-
         if _fa.is_active("weather"):
             settings_weather.save_weather_settings(self)
         if _fa.is_active("divination"):
