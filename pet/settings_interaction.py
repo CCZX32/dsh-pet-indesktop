@@ -62,23 +62,34 @@ def build_click_rows(dialog) -> list[SettingRow]:
                 dialog.click_balance_check,
             )
         )
+    # 「点击触发自言自语」（文字气泡）是核心交互；「读出来」两行是语音模块的
+    # 增强——语音未激活时不出现（控件保留、配置不丢，重新激活原样回来）。
+    from . import feature_activation as _fa
+
+    rows.append(
+        SettingRow("click_self_talk", "点击触发自言自语", "点击时随机显示一条自言自语内容；打开后可用下方两项把同一句读出来。", dialog.click_self_talk_check),
+    )
+    if _fa.is_active("voice"):
+        rows.extend(
+            [
+                SettingRow(
+                    "click_self_talk_speak",
+                    "点击台词朗读",
+                    "点击触发自言自语时，用语音报时的音色把这句话读出来（与报时共用音频通道，不会叠音）。",
+                    dialog.click_self_talk_speak_check,
+                ),
+                SettingRow(
+                    "click_self_talk_precache",
+                    "台词自动预缓存",
+                    "保存设置后，在后台把点击台词与点击动画绑定台词合成为本机语音文件，"
+                    "点击时秒出、断网也能说（用与语音报时相同的语音后端和音色，可先在"
+                    "语音报时里点一次试听确认能出声；不想占磁盘就保持关闭，新台词仍走在线合成）。",
+                    dialog.self_talk_voice_precache_check,
+                ),
+            ]
+        )
     rows.extend(
         [
-            SettingRow("click_self_talk", "点击触发自言自语", "点击时随机显示一条自言自语内容；打开后可用下方两项把同一句读出来。", dialog.click_self_talk_check),
-            SettingRow(
-                "click_self_talk_speak",
-                "点击台词朗读",
-                "点击触发自言自语时，用语音报时的音色把这句话读出来（与报时共用音频通道，不会叠音）。",
-                dialog.click_self_talk_speak_check,
-            ),
-            SettingRow(
-                "click_self_talk_precache",
-                "台词自动预缓存",
-                "保存设置后，在后台把点击台词与点击动画绑定台词合成为本机语音文件，"
-                "点击时秒出、断网也能说（用与语音报时相同的语音后端和音色，可先在"
-                "语音报时里点一次试听确认能出声；不想占磁盘就保持关闭，新台词仍走在线合成）。",
-                dialog.self_talk_voice_precache_check,
-            ),
             SettingRow("click_talk_bindings", "点击动画台词绑定", "为每个点击动画设置专属自言自语台词。", dialog.click_talk_bindings_btn),
             SettingRow(
                 "golden_spin_click",

@@ -609,3 +609,112 @@ def test_freeze_for_settings_process_reads_global_config(tmp_path):
     main_cfg.path.write_text(json.dumps(raw), encoding="utf-8")
     fa.freeze_for_settings_process(main_cfg)
     assert all(fa.is_active(fid) for fid in FEATURES)
+
+
+# ---------------------------------------------------------------- 期 3a：voice 模块
+def _voice_shell(config):
+    """裸 AppShell（不构造）：方法解析走类，属性只有 config。"""
+    import pet.app as app_mod
+
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = config
+    return shell
+
+
+def test_chime_wanted_off_when_voice_inactive(tmp_path):
+    import pet.app as app_mod
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.set("voice_chime_enabled", True)
+    shell = _voice_shell(cfg)
+    fa.freeze_snapshot_for_tests([fid for fid in MIGRATION_BASELINE if fid != "voice"])
+    assert app_mod.AppShell._chime_wanted(shell) is False
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert app_mod.AppShell._chime_wanted(shell) is True
+
+
+def test_ensure_audio_channel_returns_none_when_voice_inactive(tmp_path):
+    import pet.app as app_mod
+    from pet.config import Config
+
+    _freeze_all_but("voice")
+    shell = _voice_shell(Config(tmp_path))
+    assert app_mod.AppShell.ensure_audio_channel(shell) is None
+
+
+def test_self_talk_speak_wanted_off_when_voice_inactive(tmp_path, monkeypatch):
+    import pet.app as app_mod
+    from pet.config import Config
+
+    class _Cfg:
+        def get(self, key, default=None):
+            return True  # 两键都开（仅本测试的鸭子视图）
+
+    shell = _voice_shell(Config(tmp_path))
+    monkeypatch.setattr(app_mod.AppShell, "_self_talk_voice_configs",
+                        lambda _self: [_Cfg()])
+    _freeze_all_but("voice")
+    assert app_mod.AppShell._self_talk_speak_wanted(shell) is False
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert app_mod.AppShell._self_talk_speak_wanted(shell) is True
+
+
+def test_precache_not_started_when_voice_inactive(tmp_path, monkeypatch):
+    import pet.app as app_mod
+    from pet.config import Config
+    from pet import self_talk_voice
+
+    monkeypatch.setattr(self_talk_voice, "enabled", lambda _cfg: True)
+    started = []
+    monkeypatch.setattr(self_talk_voice, "start_precache",
+                        lambda *a, **k: started.append(1) or True)
+    shell = _voice_shell(Config(tmp_path))
+    _freeze_all_but("voice")
+    assert app_mod.AppShell.precache_self_talk_voice(shell, "test") is False
+    assert started == []
+
+
+def test_voice_settings_pages_absent_when_inactive(tmp_path, monkeypatch):
+    _freeze_all_but("voice", "festival")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.voice_chime_page is None
+        assert dlg.festival_page is None
+        # 语音域整域隐藏
+        labels = [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+        assert "语音" not in labels
+        # 朗读两行不出现，核心行在
+        from pet.modern_settings_dialog import SettingRow
+
+        assert dlg.findChild(SettingRow, "settingRow_click_self_talk") is not None
+        pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+        for key in ("click_self_talk_speak", "click_self_talk_precache", "chat_reply_voice_enabled"):
+            row = dlg.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                assert not any(page.isAncestorOf(row) for page in pages), key
+        # 保存不写回这两键
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert "self_talk_speak_enabled" not in writes
+        assert "self_talk_voice_precache_enabled" not in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_voice_domain_present_when_only_festival_off(tmp_path, monkeypatch):
+    """语音开 + 节日关：语音域在，且只有语音报时组。"""
+    _freeze_all_but("festival")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        labels = [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+        assert "语音" in labels
+        assert dlg.voice_chime_page is not None
+        assert dlg.festival_page is None
+    finally:
+        dlg.close()
+        app.processEvents()

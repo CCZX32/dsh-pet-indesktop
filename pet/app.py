@@ -1652,6 +1652,9 @@ class AppShell:
         ——音频通道根本不建，点击静默无声、连一行日志都没有（v4.3.3 用户实测：
         设置里勾着「点击台词朗读」，`config-slot-0.json` 也有值，就是不朗读）。
         """
+        # 语音模块未激活：朗读是语音提供的增强，文字台词不受影响
+        if not feature_activation_mod.is_active("voice"):
+            return False
         for cfg in self._self_talk_voice_configs():
             try:
                 speaks = bool(cfg.get("self_talk_speak_enabled", False))
@@ -1696,6 +1699,10 @@ class AppShell:
         # 报时自身开启，或节日语音 / 点击自言自语朗读 / 抽签语音 / 待办语音播报 /
         # 助手回复朗读需要这条音频通道（六者共用一套合成与播放，因此"通道是否存在"
         # 取决于其中之一是否需要）。
+        # 语音模块未激活：整条通道不建——其它模块的「念出来」是语音提供的可选
+        # 增强，模块没了增强自然失效（文字照出）。
+        if not feature_activation_mod.is_active("voice"):
+            return False
         return (
             bool(self.config.get("voice_chime_enabled", False))
             or self._festival_speak_wanted()
@@ -1792,6 +1799,9 @@ class AppShell:
         处是为了不必让每个调用方各自补读。运行中的通道由 ``_sync_chime_service`` 在
         保存时刷新，不在这里重读：重读会清掉报时那一组预合成占位。
         """
+        if not feature_activation_mod.is_active("voice"):
+            # 语音模块未激活：通道不存在（调用方全部按 None 降级：只出文字/气泡）
+            return None
         channel = self._ensure_chime_service()
         if channel is not None and not channel.is_running():
             channel.apply_config()
@@ -1876,6 +1886,9 @@ class AppShell:
         """
         if not self_talk_voice.enabled(self.config):
             # 关着时连每宠名单都不读：slot 档案的读取不该为关掉的功能付费。
+            return False
+        if not feature_activation_mod.is_active("voice"):
+            # 语音模块未激活：不发起任何后台合成
             return False
         try:
             started = self_talk_voice.start_precache(

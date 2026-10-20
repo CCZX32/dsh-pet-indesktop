@@ -995,10 +995,13 @@ class ModernSettingsDialog(QDialog):
         # its rows are reparented into the shared card system.
 
         # 语音报时设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
-        from .voice_chime_settings import VoiceChimeSettingsPage
+        # 语音模块未激活：整页不构造（「语音」域随之只剩节日组/整个隐藏）
+        self.voice_chime_page = None
+        if _fa.is_active("voice"):
+            from .voice_chime_settings import VoiceChimeSettingsPage
 
-        self.voice_chime_page = VoiceChimeSettingsPage(self.config, self)
-        self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
+            self.voice_chime_page = VoiceChimeSettingsPage(self.config, self)
+            self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
 
         # 节日提醒设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
         # 模块未激活：整页不构造（不挂载、不写回；「语音」域只剩语音报时组）
@@ -1967,6 +1970,8 @@ class ModernSettingsDialog(QDialog):
         ai_sections = None
         if self.ai_page is not None:
             balance_rows = claim_prefix("balance_")
+            # 照常 claim（防掉「待分类」并保有控件），挂载与否由语音模块决定
+            chat_reply_voice_rows = claim("chat_reply_voice_enabled")
             appearance_rows = claim(
                 "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
             )
@@ -1997,7 +2002,9 @@ class ModernSettingsDialog(QDialog):
                         ),
                     ),
                     ("系统通知", claim("system_notifications_enabled")),
-                    ("助手回复朗读", claim("chat_reply_voice_enabled")),
+                    # 回复朗读依赖语音模块（共用其音频通道）：语音未激活时不挂出
+                    *([("助手回复朗读", chat_reply_voice_rows)]
+                      if _fa.is_active("voice") else []),
                     (
                         "视觉能力",
                         claim(
@@ -2035,7 +2042,10 @@ class ModernSettingsDialog(QDialog):
             ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
                                        "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
         ]
-        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
+        voice_chime_rows = (
+            list(self.voice_chime_page.findChildren(SettingRow))
+            if self.voice_chime_page is not None else []
+        )
         claimed.update(voice_chime_rows)
         # 节日提醒的行**也要在这里登记**：本页的行从构造起就挂在自己的持有容器里
         # （无父的 SettingRow 一旦 setVisible 就是个顶层窗口，用户会看到无标题小窗闪
@@ -2103,21 +2113,25 @@ class ModernSettingsDialog(QDialog):
         # festival_settings 自己建卡交给本域：本域不能按「一组行」收它——页面容器
         # 会散架、四段分组标题会跟着丢（见 docs/SETTINGS-CHANGE-GATES.md 节日提醒
         # 准入记录）。故这里不用 page_content，自己起一层容器。
-        voice = QWidget(self)
-        voice_layout = QVBoxLayout(voice)
-        voice_layout.setContentsMargins(0, 0, 0, 0)
-        voice_layout.setSpacing(18)
-        if voice_chime_rows:
-            voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
-        if self.festival_page is not None:
-            voice_layout.addWidget(self.festival_page.build_domain_page(voice))
-        voice_layout.addStretch(1)
-        # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
-        # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
-        self.voice_chime_page.refresh_backend_rows()
-        if self.festival_page is not None:
-            # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
-            self.festival_page.refresh_backend_rows()
+        # 语音与节日两个模块都未激活：域内容 None（侧栏整域自动隐藏）。
+        voice = None
+        if self.voice_chime_page is not None or self.festival_page is not None:
+            voice = QWidget(self)
+            voice_layout = QVBoxLayout(voice)
+            voice_layout.setContentsMargins(0, 0, 0, 0)
+            voice_layout.setSpacing(18)
+            if voice_chime_rows:
+                voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
+            if self.festival_page is not None:
+                voice_layout.addWidget(self.festival_page.build_domain_page(voice))
+            voice_layout.addStretch(1)
+            # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
+            # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
+            if self.voice_chime_page is not None:
+                self.voice_chime_page.refresh_backend_rows()
+            if self.festival_page is not None:
+                # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
+                self.festival_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -2392,9 +2406,11 @@ class ModernSettingsDialog(QDialog):
         if self.click_balance_check is not None:
             self.config.set("click_show_balance", self.click_balance_check.isChecked())
         self.config.set("click_show_self_talk", self.click_self_talk_check.isChecked())
-        self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
-        self.config.set("self_talk_voice_precache_enabled",
-                        self.self_talk_voice_precache_check.isChecked())
+        if _fa.is_active("voice"):
+            # 「读出来」两键是语音模块的增强：模块未激活时不写回（行未挂出）
+            self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
+            self.config.set("self_talk_voice_precache_enabled",
+                            self.self_talk_voice_precache_check.isChecked())
         self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
         if getattr(self, "music_lyric_check", None) is not None:
             self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
