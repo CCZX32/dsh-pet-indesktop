@@ -686,3 +686,43 @@ def test_matches_windows_controller_decisions():
             assert qt_ctl.should_click_through(point) is expected
         finally:
             qt_ctl.stop()
+
+
+def test_macos_same_state_never_resets_window_flags(monkeypatch):
+    """issue #314：macOS 读不回穿透标志（flag_ok 恒 False）时，以控制器自记
+    落窗状态为准——同目标态的轮询 tick 不许再碰窗口 flags（每碰一次
+    QCocoaWindow::setWindowFlags 都会伴随窗口重建并把 App 激活）。"""
+    from pet import platform_passthrough as pp
+
+    monkeypatch.setattr(pp, "_IS_MACOS", True)
+    widget = _shown_widget()
+    controller = _controller(widget)
+    try:
+        assert controller._apply_through(True) is True    # 首次落窗 True
+        # 模拟 macOS 读回不可信：原生标志位直接清掉，读回自然「不是目标态」
+        widget.windowHandle().setFlag(FLAG, False)
+        assert controller._apply_through(True) is False,             "读回不可信时必须以自记状态为准，同状态不许再写窗口"
+        assert controller._apply_through(True) is False
+        assert controller._apply_through(False) is True   # 状态真变了才写
+        assert controller._apply_through(False) is False
+    finally:
+        controller.stop()
+        widget.close()
+
+
+def test_non_macos_keeps_readback_convergence(monkeypatch):
+    """非 macOS 平台保留「读回收敛」：外部把属性写走后，下一拍纠回来。"""
+    from pet import platform_passthrough as pp
+
+    monkeypatch.setattr(pp, "_IS_MACOS", False)
+    widget = _shown_widget()
+    controller = _controller(widget)
+    try:
+        controller._apply_through(True)
+        widget.setAttribute(ATTR, False)      # 模拟外部改写
+        assert controller._apply_through(True) is True, "读回发现不一致必须收敛"
+        widget.windowHandle().setFlag(FLAG, False)  # 标志也被写走 → 再收敛一次
+        assert controller._apply_through(True) is True
+    finally:
+        controller.stop()
+        widget.close()
