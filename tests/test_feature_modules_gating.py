@@ -1166,10 +1166,16 @@ def test_music_settings_groups_unmounted_when_inactive(tmp_path, monkeypatch):
 
 
 def test_music_settings_groups_mounted_by_default(tmp_path, monkeypatch):
+    import sys
+
     app, dlg = _build_dialog(tmp_path, monkeypatch)
     try:
-        for key in ("music_sing", "music_lyric", "music_lyric_lead",
-                    "foobar_title_format", "music_player_netease", "music_player_detect"):
+        keys = ["music_sing", "music_lyric", "music_lyric_lead",
+                "music_player_netease", "music_player_detect"]
+        if sys.platform == "win32":
+            # foobar2000 行仅 Windows（窗口标题源走 Win32 窗口枚举）
+            keys.append("foobar_title_format")
+        for key in keys:
             assert _row_mounted(dlg, key), key
         assert "音乐关联" in _domain_page_labels(dlg)
     finally:
