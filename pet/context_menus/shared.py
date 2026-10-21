@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QMenu
 
 from .. import autostart as autostart_mod
 from .. import catalog
+from .. import feature_activation
 from ..harness_launcher import launch_harness_gui
 from ..updater import QUARK_PAN_URL as QUARK_PAN_URL, REPO_URL as REPO_URL
 from .icons import fitted_pet_pixmap_icon, pet_avatar_menu_icon, vector_menu_icon
@@ -1544,7 +1545,14 @@ def trigger_memory_trim(pet) -> None:
     过滤与安全红线全在 ``pet/memory_trim.py``（纯逻辑，零 Qt）；这里只做三件事：
     读配置、起 worker、把结果经队列信号送回 GUI 线程弹气泡。**菜单点击路径必须
     立刻返回**——枚举几百个进程 + 逐个 OpenProcess 放在 GUI 线程跑就是卡菜单。
+
+    ``system_tools`` 模块未激活：本函数是「回收内存」的唯一执行落点（注册表投影
+    之外还有 builder 直调与旧布局残留两条路），不读配置、不起 ``memory-trim``
+    线程、不枚举进程。
     """
+    if not feature_activation.is_active("system_tools"):
+        log.info("系统工具模块未激活，忽略「回收内存」请求")
+        return
     from .. import memory_trim
 
     cfg = getattr(pet, "cfg", None)
@@ -1576,9 +1584,14 @@ def add_memory_trim(menu: QMenu, pet, *, icons: bool = True):
 
     自己 / 当前前台 / 自己的子进程 / 系统关键进程一律不碰（见
     ``pet/memory_trim.py`` 的模块 docstring）；这里只负责菜单项与触发。
+
+    ``system_tools`` 模块未激活整条不建——与平台门同址（builder 是注册表投影
+    之外的第二条入口，只挡注册表会被直调路径绕过）。
     """
     from .. import memory_trim
 
+    if not feature_activation.is_active("system_tools"):
+        return None
     if not memory_trim.is_supported():
         return None
     return add_action(

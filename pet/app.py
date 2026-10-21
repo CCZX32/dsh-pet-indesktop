@@ -1427,7 +1427,11 @@ class AppShell:
         # 是 pet/dsh_state.py 的纯函数，读方是 DshMonitor 自己）：
         # thinking/attention 注入与 offline 交互收口在管理器内部完成，这里只
         # 驱动灵动岛的 agent 活跃指示。
-        self._shared.agent_link.dsh_state_changed.connect(self._on_dsh_state_changed)
+        # agent_link 模块未激活时共享容器不构造管理器（``_shared.agent_link``
+        # 为 None）：没有 DshMonitor 就没有状态可订，订阅整条跳过。
+        shared_link = self._shared.agent_link
+        if shared_link is not None:
+            shared_link.dsh_state_changed.connect(self._on_dsh_state_changed)
         _LIVE_SHELLS.add(self)
 
     def _mark_slot0_profile_unusable(self, migration) -> None:
@@ -2019,13 +2023,20 @@ class AppShell:
 
     # ------------------------------------------------------------ DSH 联动门
     def _dsh_tracker_wanted(self) -> bool:
-        """DSH 联动的功能门：``agent_link.dsh``（默认关）。
+        """DSH 联动的功能门：``agent_link`` 模块激活 ∧ ``agent_link.dsh``（默认关）。
 
         联动开启时桥接插件才安装（``DshMonitor.install_bridge``，关联动即卸载）、
         DshMonitor（桥目录唯一读方：信号分派 + dsh_state 收敛器共用一份解析）
         才由 ``AgentLinkManager.apply_config`` 拉起；联动没开时它 3s 探端口、
         1.5s 读桥目录全是空转。本方法是该门的单一口径，harness 自启/收口也复用它。
+
+        模块激活是**外层**条件（2026-10-21 期 4c）：agent_link 模块停用时共享
+        manager 压根不构造，DshMonitor 也就不存在——但这条单一口径还必须自己
+        答 False，否则「模块停用」被下游读成「联动关掉了」，harness 自启/收口
+        会各按各的理解走。
         """
+        if not feature_activation_mod.is_active("agent_link"):
+            return False
         agent_cfg = self.config.get("agent_link", {})
         return bool(agent_cfg.get("dsh", False)) if isinstance(agent_cfg, dict) else False
 
@@ -2109,7 +2120,8 @@ class AppShell:
         if shared is None:
             return
         shared.proactive.apply_config()
-        shared.agent_link.apply_config()
+        if shared.agent_link is not None:  # agent_link 模块未激活：容器不构造管理器
+            shared.agent_link.apply_config()
 
     def open_settings_process(self, instance=None, page: str | None = None) -> bool:
         """拉起独立设置进程；True = 已交给独立进程（不得再开进程内对话框）。
@@ -3345,8 +3357,11 @@ class AppShell:
         shared = self._shared
         if shared is None:
             return
+        link = shared.agent_link
+        if link is None:
+            return  # agent_link 模块未激活：管理器不存在，无联动链可接
         try:
-            shared.proxy.set_link_next_provider(shared.agent_link._next_busy_anim)
+            shared.proxy.set_link_next_provider(link._next_busy_anim)
         except (AttributeError, RuntimeError):
             logging.exception("把窗口接入共享 Agent 联动链失败")
 
@@ -3354,6 +3369,12 @@ class AppShell:
         """按配置创建/隐藏灵动岛；桌宠隐藏后灵动岛仍可常驻。"""
         island_cfg = self.config.get("dynamic_island", {})
         enabled = bool(island_cfg.get("enabled", True)) if isinstance(island_cfg, dict) else False
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 功能模块未激活 = 岛**不创建**（下面的 hide 分支只停定时器，岛对象、
+            # 四路采样槽与 FPS 订阅都还留着，那条路径不算停用）。岛自己的
+            # ``dynamic_island.enabled`` 是行为开关，两处缺省值本来就不一致
+            # （config 默认 True / 设置页默认 False），绝不拿它判模块激活。
+            enabled = False
         if not enabled:
             if getattr(self, "island", None) is not None:
                 self.island.hide()
@@ -3499,10 +3520,16 @@ class AppShell:
         """岛当前是不是**启用且可见**的交互面。
 
         ``_sync_dynamic_island`` 关岛走的是 ``hide()`` + 摘桥，**不销毁对象**——
-        「对象保留 ≠ 交互面可用」。判据读宿主这一侧的运行态（本进程内存里的岛
-        启用真值 + 岛窗自己的显隐），不读磁盘：岛开关可能是运行中改的（托盘菜单 /
-        设置子进程落盘后由 config watcher 收口），磁盘上那份随时可能滞后一拍。
+        「对象保留 ≠ 交互面可用」。判据读宿主这一侧的运行态（模块激活快照 +
+        本进程内存里的岛启用真值 + 岛窗自己的显隐），不读磁盘：岛开关可能是
+        运行中改的（托盘菜单 / 设置子进程落盘后由 config watcher 收口），磁盘上
+        那份随时可能滞后一拍。
         """
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 功能模块未激活：岛对象根本不该存在（见 _sync_dynamic_island），这里
+            # 是同一口径的兜底——判据只读「模块激活 ∧ 岛开关 ∧ 岛窗可见」三件
+            # 事，绝不因为「岛对象非空」就当成交互面可用。
+            return False
         island = getattr(self, "island", None)
         if island is None or not shiboken6.isValid(island):
             return False
@@ -3824,6 +3851,10 @@ class AppShell:
 
     def _apply_balance_timer(self) -> None:
         self._balance_timer.stop()
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额是灵动岛模块的子能力（清单 §余额：自动刷新/峰谷文案/岛信息槽
+            # 同属一模块）：模块停用后本进程一次都不许自己发余额请求。
+            return
         minutes = max(0, int(self.config.get("balance_refresh_minutes", 0) or 0))
         if minutes:
             self._balance_timer.start(minutes * 60000)
@@ -3890,6 +3921,10 @@ class AppShell:
         island = getattr(self, "island", None)
         if island is None or getattr(self, "_quiet_balance_busy", False):
             return
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额属灵动岛模块：模块停用后卡片不可能展开（岛根本不存在），
+            # 这条直达回调也不许绕过模块闸去发网络请求。
+            return
         if not getattr(self, "enable_chat", True):
             island.set_balance_info(self._island_tier_hint(), "此版本无余额查询")
             return
@@ -3940,6 +3975,12 @@ class AppShell:
 
     # ------------------------------------------------------------ 余额
     def show_balance(self, parent=None) -> None:
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额归属灵动岛模块（features.py 的 config_keys）：模块未激活时
+            # 托盘/右键/点击三条入口都不该走到这里，这是绕过菜单投影的兜底——
+            # 不查余额、不起 pet-balance 线程、不碰余额缓存文件。
+            logging.info("灵动岛模块未激活，忽略「DeepSeek 余额」请求")
+            return
         # 宿主判定：必须是能冒泡的 pet 形宿主。overlay 菜单把合成窗
         # （OverlayWindow，无 show_bubble）当 parent 传下来，直接用它会在
         # _show_balance_payload 里 AttributeError；overlay 拓扑下 ``instance.win``
@@ -4894,10 +4935,14 @@ class AppShell:
             self.config.save()
             self._sync_dynamic_island()
 
-        island_action = add_tray_toggle(
-            menu, '灵动岛',
-            bool(self.config.get("dynamic_island", {}).get("enabled", True)),
-            toggle_island)
+        island_action = None
+        if feature_activation_mod.is_active("dynamic_island"):
+            # 灵动岛模块未激活：这条直写配置 + _sync_dynamic_island 的托盘开关整条
+            # 不出现（它是绕过设置页的第二条入口，留着就是「界面藏了、开关还在」）。
+            island_action = add_tray_toggle(
+                menu, '灵动岛',
+                bool(self.config.get("dynamic_island", {}).get("enabled", True)),
+                toggle_island)
 
         if self.enable_chat:
             add_tray_action(menu, 'AI 对话', self.instance.open_chat)
@@ -4931,15 +4976,18 @@ class AppShell:
             # 只改看相、不触发副作用：副作用挂 triggered，程序化 setChecked 不发它。
             mouse_through.setChecked(bool(self.config.get('mouse_through', False)))
             auto.setChecked(autostart_mod.is_enabled())
-            island_action.setChecked(bool(
-                self.config.get("dynamic_island", {}).get("enabled", True)
-            ))
+            if island_action is not None:
+                island_action.setChecked(bool(
+                    self.config.get("dynamic_island", {}).get("enabled", True)
+                ))
 
         menu.aboutToShow.connect(sync_tray_checks)
 
         menu.addSeparator()
         if self.enable_chat:
-            menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
+            if feature_activation_mod.is_active("dynamic_island"):
+                # 余额属灵动岛模块：模块停用时不给一个"点了没反应"的入口
+                menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
             menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
             menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
         else:
