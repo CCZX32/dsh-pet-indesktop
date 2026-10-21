@@ -59,7 +59,7 @@ def _standalone_chime_class():
     global _STANDALONE_CHIME_CLASS
     if _STANDALONE_CHIME_CLASS is not None:
         return _STANDALONE_CHIME_CLASS
-    from .voice_chime_service import VoiceChimeService
+    from .voice.chime_service import VoiceChimeService
 
     class _StandaloneChimeService(VoiceChimeService):
         """独立设置进程音频通道：文本反馈改走进程内瞬时提示。
@@ -107,7 +107,7 @@ class _StandaloneHost:
 
     def festival_service(self):
         if self._festival is None:
-            from .festival_service import FestivalReminderService
+            from .festival.service import FestivalReminderService
 
             self._festival = FestivalReminderService(self)
         return self._festival

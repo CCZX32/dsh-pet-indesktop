@@ -109,7 +109,7 @@ class WindowFeatureGateMixin:
     def install_file_eater(self):
         """挂载“吃垃圾文件”拖放处理器（幂等，只对 PetWindow 实例调用）。"""
         if self._file_eater is None:
-            from .file_eater import FileEaterDropHandler
+            from .file_interpret.eater import FileEaterDropHandler
             self._file_eater = FileEaterDropHandler(self)
         return self._file_eater
 
@@ -158,7 +158,7 @@ class WindowFeatureGateMixin:
         if not feature_activation.is_active("music"):
             return None
         if self._music_lyric is None:
-            from .music_lyric_controller import MusicLyricController
+            from .music.lyric_controller import MusicLyricController
             self._music_lyric = MusicLyricController(self)
         return self._music_lyric
 

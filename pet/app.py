@@ -41,7 +41,7 @@ from . import catalog
 from . import click_sound
 from . import feature_activation as feature_activation_mod
 from . import overlay_instance_gate as overlay_gate_mod
-from . import self_talk_voice
+from .voice import self_talk as self_talk_voice
 from . import slot_manager as slot_manager_mod
 from . import updater
 from . import webm_clip as webm_clip_mod
@@ -56,8 +56,8 @@ from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
 from .session_watcher import install_session_watcher
 from .decode_fanout import DecodeFanoutHub
-from .todo_reminder import TodoReminderService
-from .voice_chime_service import VoiceChimeService
+from .todo.reminder import TodoReminderService
+from .voice.chime_service import VoiceChimeService
 from .persona_phrases import PhrasePicker
 
 
@@ -179,12 +179,12 @@ def _show_balance_payload(win, payload) -> None:
     网络查询、内存缓存、文件缓存三条路径统一走这里，避免缓存命中时
     没有副标题/不播动画导致的行为不一致。
 
-    pet.balance 按需导入（内存瘦身第二刀）：该模块自带整套档位文案/价格提示
+    pet.island.balance 按需导入（内存瘦身第二刀）：该模块自带整套档位文案/价格提示
     表，实测独占 4.75MB Python 堆（tools/import_cost.py），而余额查询在
     默认配置下从不发生（balance_refresh_minutes=0 且用户没点"看余额"）——
     启动就不该为它付这份常驻。函数内 import 只在真正要显示余额时才付。
     """
-    from . import balance as balance_mod
+    from .island import balance as balance_mod
 
     if win is None or not shiboken6.isValid(win):
         return
@@ -459,7 +459,7 @@ def _warm_music_player_paths() -> None:
     首屏。这条口径由 ``tests/test_music_player_cache.py`` 的
     ``test_ui_ready_prewarm_schedules_music_player_cache_warm`` 钉住。
     """
-    from . import music_players
+    from .music import players as music_players
 
     for player_key in ("netease", "qqmusic"):
         music_players.warm_cache_async(player_key)
@@ -2009,13 +2009,13 @@ class AppShell:
     def _ensure_festival_service(self):
         """懒创建节日提醒服务（仅在开启提醒/手动触发时创建）。
 
-        pet.festival_service 连带 festival/festival_calendar/festival_data 与
+        pet.festival.service 连带 festival/calendar/data 与
         五份节日文案表，实测 2.95MB Python 堆（tools/import_cost.py）。总开关
         默认关闭（主动打扰型功能），关闭时整套文案表都不该常驻——import 收到
         构造点，开启/试听时按需付一次。
         """
         if getattr(self, "festival_service", None) is None:
-            from .festival_service import FestivalReminderService
+            from .festival.service import FestivalReminderService
 
             self.festival_service = FestivalReminderService(self)
         return self.festival_service
@@ -2932,7 +2932,7 @@ class AppShell:
         路径的纪律是"静默、快速、不再派生任何进程"（issue #111），只做有界硬停。
         """
         try:
-            from . import island_fps as island_fps_mod
+            from .island import fps as island_fps_mod
         except ImportError:  # pragma: no cover - 纯桌宠变体没有岛模块
             return
         try:
@@ -3280,7 +3280,7 @@ class AppShell:
         那是「全部退出」，测试收口不得触发。
         """
         try:
-            from . import island_fps as _island_fps
+            from .island import fps as _island_fps
 
             _island_fps._clear_exit_latch_for_tests()
         except Exception:  # pragma: no cover - 纯桌宠变体没有岛模块
@@ -3449,7 +3449,7 @@ class AppShell:
             self._sync_island_collision(island_cfg)
             return
         if getattr(self, "island", None) is None:
-            from .dynamic_island import DynamicIsland
+            from .island.dynamic_island import DynamicIsland
 
             self.island = DynamicIsland(self.config)
             # 纯桌宠版（无聊天模块）：hidden_chat 的岛单击路由回退为展开卡片，
@@ -3532,7 +3532,7 @@ class AppShell:
                 body.stop()
             return
         if body is None:
-            from .island_collision import IslandCollisionBody
+            from .island.collision import IslandCollisionBody
 
             body = IslandCollisionBody(
                 self.island, self.config,
@@ -3663,7 +3663,7 @@ class AppShell:
         """弹出锚定灵动岛的对话气泡（activate=False 为不抢焦点的预览弹出）。"""
         if not self._island_chat_available():
             return
-        from .island_chat import IslandChatBubble
+        from .island.chat import IslandChatBubble
 
         chat_config = self._chat_identity_config()
         if getattr(self, "island_chat", None) is None:
@@ -3724,7 +3724,7 @@ class AppShell:
         island = getattr(self, "island", None)
         if island is None or not shiboken6.isValid(island):
             return False
-        from .island_chat import IslandChatBubble
+        from .island.chat import IslandChatBubble
 
         if getattr(self, "island_chat", None) is None:
             self.island_chat = IslandChatBubble(self._chat_identity_config())
@@ -3941,10 +3941,10 @@ class AppShell:
     def _island_tier_hint(self) -> str:
         """灵动岛余额峰谷提示文案（与 _update_island_balance / 静默查询共用）。
 
-        pet.balance 按需导入：本函数只在"岛卡片展开 / 余额查询返回"时才被调用，
+        pet.island.balance 按需导入：本函数只在"岛卡片展开 / 余额查询返回"时才被调用，
         启动路径（_sync_dynamic_island）不碰它（见 _show_balance_payload）。
         """
-        from . import balance as balance_mod
+        from .island import balance as balance_mod
 
         peak_label, idle_label = balance_mod.resolve_tier_labels(
             str(self.config.get("balance_tier_labels_mode", "default") or "default"),
@@ -4101,14 +4101,14 @@ class AppShell:
             # （旧布局残留/外部触发），不建服务、不起网络线程。
             logging.info("天气模块未激活，忽略「查看天气」请求")
             return
-        from .weather_service import WeatherService
+        from .weather.service import WeatherService
 
         if self._weather_service is None:
             self._weather_service = WeatherService(self)
         self._weather_service.show_weather(parent)
 
     def _balance_worker(self, bridge, base_url: str, api_key: str, verify_ssl: bool, provider_key: str = '', *, quiet: bool = False) -> None:
-        from . import balance as balance_mod  # 按需导入（见 _show_balance_payload）
+        from .island import balance as balance_mod  # 按需导入（见 _show_balance_payload）
         try:
             info = balance_mod.fetch_balance(base_url, api_key, verify_ssl=verify_ssl)
             text = balance_mod.format_balance(info)
@@ -4725,7 +4725,7 @@ class AppShell:
             # 服务并把 30s tick 跑起来，所以闸必须在懒创建之前。
             logging.info("待办模块未激活，忽略「待办提醒」请求")
             return
-        from .todo_panel import TodoPanelDialog
+        from .todo.panel import TodoPanelDialog
 
         # Phase 1：即使总开关关闭，用户主动打开面板也需要服务对象（懒创建）。
         self._ensure_todo_service()
@@ -4836,7 +4836,7 @@ class AppShell:
     def _ensure_divination_service(self):
         """懒创建抽签服务（纯逻辑 + 无定时器，创建很轻，但仍按开关懒建）。"""
         if getattr(self, "divination_service", None) is None:
-            from .divination_service import DivinationService
+            from .divination.service import DivinationService
 
             self.divination_service = DivinationService(self)
             # 建好就刷一次配置：`apply_config()` 会顺手把今天的语音预合成提交掉，

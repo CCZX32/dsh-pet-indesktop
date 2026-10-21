@@ -3368,7 +3368,7 @@ class OverlayShell(QObject):
         if not feature_activation.is_active("music"):
             return None
         if self._music_lyric is None:
-            from .music_lyric_controller import MusicLyricController
+            from .music.lyric_controller import MusicLyricController
 
             self._music_lyric = MusicLyricController(self)
         return self._music_lyric
@@ -3918,7 +3918,7 @@ class OverlayShell(QObject):
         host = self._island_screen_host(island)
         driver = getattr(self, "driver", None)
         kinetic = getattr(driver, "note_kinetic", None)
-        from .island_bridge import IslandWindowBridge
+        from .island.bridge import IslandWindowBridge
         self.island_bridge = IslandWindowBridge(
             island, host.collision, host.overlay, sound=self._sound,
             kinetic=kinetic if callable(kinetic) else None,
@@ -6627,7 +6627,7 @@ class OverlayShell(QObject):
         壳上子宠气泡既有分发靠 ``_bubble_for(sprite)``（每只一只跟随器，见
         ``_ensure_sprite_bubble``），这里不再新造通道：落点是子宠就发子宠那只。
         """
-        from .file_eater import FEEDING_BUBBLE_SUBTITLE, feeding_bubble_text
+        from .file_interpret.eater import FEEDING_BUBBLE_SUBTITLE, feeding_bubble_text
         follower = self._bubble_for(sprite)
         if follower is None:
             return

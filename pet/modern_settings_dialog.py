@@ -173,15 +173,15 @@ from .persona_template import (
     PARAMETERS,
 )
 from . import settings_default_marks
-from . import settings_file_interpret
+from .file_interpret import settings as settings_file_interpret
 from . import settings_interaction
-from . import settings_music
+from .music import settings as settings_music
 from . import feature_activation as _fa
 from . import settings_network
 from . import settings_page_guide
-from . import settings_divination
+from .divination import settings as settings_divination
 from . import settings_hotkeys
-from . import settings_weather
+from .weather import settings as settings_weather
 from . import settings_pet_controls
 from . import settings_quiet
 from . import settings_reset_defaults
@@ -1009,7 +1009,7 @@ class ModernSettingsDialog(QDialog):
         # 语音模块未激活：整页不构造（「语音」域随之只剩节日组/整个隐藏）
         self.voice_chime_page = None
         if _fa.is_active("voice"):
-            from .voice_chime_settings import VoiceChimeSettingsPage
+            from .voice.chime_settings import VoiceChimeSettingsPage
 
             self.voice_chime_page = VoiceChimeSettingsPage(self.config, self)
             self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
@@ -1018,7 +1018,7 @@ class ModernSettingsDialog(QDialog):
         # 模块未激活：整页不构造（不挂载、不写回；「语音」域只剩语音报时组）
         self.festival_page = None
         if _fa.is_active("festival"):
-            from .festival_settings import FestivalSettingsPage
+            from .festival.settings import FestivalSettingsPage
 
             self.festival_page = FestivalSettingsPage(self.config, self)
 

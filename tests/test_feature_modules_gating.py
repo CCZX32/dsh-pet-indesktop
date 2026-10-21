@@ -224,7 +224,7 @@ def test_show_weather_active_lazy_creates_service(monkeypatch):
         def show_weather(self, _parent):
             pass
 
-    import pet.weather_service as ws
+    import pet.weather.service as ws
 
     monkeypatch.setattr(ws, "WeatherService", _Svc)
     shell = object.__new__(app_mod.AppShell)
@@ -256,7 +256,7 @@ def _shell(**attrs):
 
 def test_divination_sync_inactive_creates_no_service(monkeypatch):
     """未激活：即使 ``divination_enabled`` 开着也不建服务（不装跨天定时器、不预合成）。"""
-    import pet.divination_service as ds_mod
+    import pet.divination.service as ds_mod
 
     created = []
 
@@ -293,7 +293,7 @@ def test_divination_sync_inactive_stops_service_with_generation_guard():
 
 def test_divination_draw_inactive_returns_before_lazy_create(monkeypatch):
     """菜单落点兜底：本方法会懒创建服务 + apply_config，闸必须在其之前。"""
-    import pet.divination_service as ds_mod
+    import pet.divination.service as ds_mod
 
     created = []
     bubbles = []
@@ -318,7 +318,7 @@ def test_divination_draw_inactive_returns_before_lazy_create(monkeypatch):
 
 
 def test_divination_draw_active_lazy_creates_service(monkeypatch):
-    import pet.divination_service as ds_mod
+    import pet.divination.service as ds_mod
 
     calls = []
 
@@ -422,7 +422,7 @@ def test_todo_sync_active_lazy_creates_and_starts_service(monkeypatch):
 
 def _install_festival_fake(monkeypatch, events, *, running=False):
     """把 ``FestivalReminderService`` 换成记录器（模块内惰性 import，故打模块属性）。"""
-    import pet.festival_service as fs_mod
+    import pet.festival.service as fs_mod
 
     class _Svc:
         def __init__(self, _app):
@@ -665,11 +665,11 @@ def test_self_talk_speak_wanted_off_when_voice_inactive(tmp_path, monkeypatch):
 def test_precache_not_started_when_voice_inactive(tmp_path, monkeypatch):
     import pet.app as app_mod
     from pet.config import Config
-    from pet import self_talk_voice
+    from pet.voice import self_talk
 
-    monkeypatch.setattr(self_talk_voice, "enabled", lambda _cfg: True)
+    monkeypatch.setattr(self_talk, "enabled", lambda _cfg: True)
     started = []
-    monkeypatch.setattr(self_talk_voice, "start_precache",
+    monkeypatch.setattr(self_talk, "start_precache",
                         lambda *a, **k: started.append(1) or True)
     shell = _voice_shell(Config(tmp_path))
     _freeze_all_but("voice")
@@ -871,7 +871,8 @@ def test_music_sing_polling_not_started_when_inactive():
 
 def test_check_music_sing_skips_audio_probe_when_inactive(monkeypatch):
     """停用后不再每秒调 pycaw COM（也不拉 SMTC 探针线程）。"""
-    from pet import music_detect, window_alerts
+    from pet import window_alerts
+    from pet.music import detect as music_detect
 
     _qapp()
     calls = []
@@ -937,7 +938,7 @@ def test_lyric_controller_not_installed_when_inactive(monkeypatch):
     """两条链（legacy mixin / overlay 壳）都不构造歌词控制器。"""
     from PySide6.QtWidgets import QWidget
 
-    from pet import music_lyric_controller as mlc_mod
+    from pet.music import lyric_controller as mlc_mod
     from pet.overlay_shell import OverlayShell
     from pet.window_optional_services import WindowFeatureGateMixin
 
@@ -1035,7 +1036,7 @@ def test_music_menu_callbacks_early_return_when_inactive(monkeypatch):
     """绕过菜单直达回调：不装控制器、不起线程、不读路径缓存。"""
     from PySide6.QtWidgets import QMenu
 
-    from pet import music_players
+    from pet.music import players as music_players
     from pet.context_menus import shared as shared_mod
 
     _qapp()
@@ -1109,7 +1110,7 @@ def test_music_menu_callbacks_early_return_when_inactive(monkeypatch):
 
 def test_music_player_detect_no_scan_when_inactive():
     """设置页「自动检测」：停用后不清缓存、不起扫描、不起轮询表。"""
-    from pet import settings_music
+    from pet.music import settings as settings_music
 
     calls = []
 
@@ -1878,7 +1879,7 @@ def test_island_module_off_never_creates_the_island(tmp_path, monkeypatch):
     attach 只发生在 ``DynamicIsland`` 内部），所以停用必须落在构造之前。
     """
     import pet.app as app_mod
-    import pet.dynamic_island as island_mod
+    import pet.island.dynamic_island as island_mod
     from pet.chat.service import ChatService
     from pet.config import Config
 

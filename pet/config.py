@@ -16,7 +16,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import catalog, island_segments, music_players
+from . import catalog
+from .island import segments as island_segments
+from .music import players as music_players
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -743,7 +745,7 @@ def _clean_island_metrics(value) -> list:
     # 清单扫描失败不能连累配置加载（读目录/解析是外部输入面）：拿不到就只认内置段，
     # 已声明组件的 id 会在下一次（扫描恢复后）重新被接受——宁可这一拍收紧，不炸启动。
     try:
-        from . import island_extension_host
+        from .island import extension_host as island_extension_host
 
         allowed = island_extension_host.allowed_metric_ids()
     except Exception:  # pragma: no cover - 目录不可读等极端环境
@@ -2076,7 +2078,7 @@ class Config:
         self.data["foobar_lyrics_enabled"] = _bool_or_default(
             self.data.get("foobar_lyrics_enabled"), False
         )
-        from .music_title import FOOBAR_FORMAT_MAX_CHARS
+        from .music.title import FOOBAR_FORMAT_MAX_CHARS
 
         raw_format = self.data.get("foobar_title_format")
         self.data["foobar_title_format"] = (
@@ -2091,7 +2093,7 @@ class Config:
         )
         # 歌词提前量的区间与设置页滑块**同源**（music_lyric_controller 的常量），
         # 不再抄一份边界。惰性导入：config.py 顶层不引 Qt。
-        from .music_lyric_controller import (
+        from .music.lyric_controller import (
             LEAD_MAX_SECONDS,
             LEAD_MIN_SECONDS,
             LYRIC_LEAD_SECONDS,

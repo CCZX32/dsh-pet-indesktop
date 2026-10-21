@@ -235,7 +235,7 @@ def drop_stale_chime_quiet_listeners() -> None:
     """
     try:
         from pet import quiet_mode
-        from pet.voice_chime_service import VoiceChimeService
+        from pet.voice.chime_service import VoiceChimeService
     except Exception:
         return
     try:
@@ -276,7 +276,7 @@ def _no_filesystem_player_scan(monkeypatch):
     随套件进度漂移。需要真实扫描语义的用例自行 monkeypatch
     （test_music_player_cache.py 全部用例自带打桩，不受影响）。
     """
-    from pet import music_players
+    from pet.music import players as music_players
 
     monkeypatch.setattr(music_players, "_search", lambda key: None)
     yield

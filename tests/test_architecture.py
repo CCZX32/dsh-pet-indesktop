@@ -324,24 +324,24 @@ def test_pure_logic_modules_do_not_import_qt():
     # network_info.py 是弹窗的数据层（属地解析/连通性/文案），同样零 Qt。
     for name in (
         "collision.py", "physics.py",
-        "festival_calendar.py", "festival_data.py", "festival.py",
-        "festival_quotes_cn.py", "festival_quotes_west.py",
-        "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
-        "festival_quotes_west_song.py", "overlay_settings_command.py",
+        "festival/calendar.py", "festival/data.py", "festival/__init__.py",
+        "festival/quotes_cn.py", "festival/quotes_west.py",
+        "festival/quotes_west_movie.py", "festival/quotes_west_game.py",
+        "festival/quotes_west_song.py", "overlay_settings_command.py",
         # 「回收内存」(#210)：过滤真值表与 ctypes 薄封装必须零 Qt——后台线程里
         # 跑的就是这一层，单测也在无 Qt 的替身上验（ctypes 全 mock）。
         "memory_trim.py",
         "net_monitor.py", "network_info.py",
         # 2026-10-07 加入 music_title：标题清洗/解析是取词链路的前处理，规则要能
         # 脱离 Qt 单独跑真值表（误伤防护的用例都是纯字符串）。
-        "music_title.py",
+        "music/title.py",
         # 2026-10-07 加入 island_segments/sys_monitor（灵动岛段契约 P1）：段注册
         # 契约与 CPU/内存采样核心必须零 Qt——采样跑在后台线程，测宽靠调用方
         # 注入的 QFontMetrics（依赖注入，本模块不 import PySide6）。
         # 2026-10-07 加入 island_layout（P1 Slice D2 下沉）：段数据/落位/收缩流水线
         # 是纯几何，度量对象同样注入——收缩逐级触发/逆序恢复这些规则要能在没有
         # 窗口、没有真实字体、没有屏幕的替身上直接验，就必须零 Qt。
-        "island_segments.py", "sys_monitor.py", "island_layout.py",
+        "island/segments.py", "sys_monitor.py", "island/layout.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"
@@ -575,7 +575,7 @@ def _overlay_new_path_modules() -> tuple[str, ...]:
     不会因为"忘了加名单"漏掉一次回潮。
     """
     patterns = ("overlay_*.py", "sprite_*.py", "tick_*.py")
-    names = {"pet_sprite.py", "island_bridge.py"}
+    names = {"pet_sprite.py", "island/bridge.py"}
     for pattern in patterns:
         names.update(p.name for p in PET_DIR.glob(pattern))
     return tuple(sorted(names))
@@ -606,7 +606,7 @@ def test_window_private_surface_frozen():
     """S2 收口成果：window 私有成员跨模块访问在以下文件中必须保持零命中。"""
     pattern = re.compile(r"(?:win|pet|window)\._[a-z]")
     offenders = []
-    for rel in ("app.py", "agent_link.py"):
+    for rel in ("app.py", "agent_link/__init__.py"):
         for lineno, line in enumerate(_read(rel).splitlines(), 1):
             if pattern.search(line):
                 offenders.append(f"{rel}:{lineno}: {line.strip()}")
