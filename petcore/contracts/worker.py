@@ -14,6 +14,10 @@ ERROR = "error"
 SHUTDOWN = "shutdown"
 CANCEL = "cancel"
 REQUEST_ID = "request_id"
+REQUEST = "request"
+DELTA = "delta"
+RESULT = "result"
+DONE = "done"
 
 
 def encode(message: dict[str, Any]) -> str:

@@ -39,3 +39,5 @@
 | L028 | 2026-10-22 | P0 主分支对齐审查 | 新增主分支功能矩阵、AI 交接计划和审查报告；冻结每宠作用域、WorkerHost、迁移回滚、默认扩展和发布门。 | parity matrix、handoff、audit、scope、worker、migration、rollback |
 | L029 | 2026-10-22 | P1 配置作用域/基础迁移 | 设置窗口绑定当前宠物；全局/每宠键分流；点击台词/自语按宠物运行；standalone 与 slot 基础迁移并备份。 | ScopedConfig、pet scope、settings target、legacy migration、slot、feature lifecycle |
 | L030 | 2026-10-22 | P2 WorkerHost/离线接缝 | 真实子进程 WorkerHost、角色目录导入、Graph 类别映射、5 个官方 feature 默认安装。 | WorkerHost、JSONL、cancel、heartbeat、character importer、Graph、installer tasks |
+| L031 | 2026-10-22 | P3 Core 账户/余额基础 | Core 账户服务、余额缓存/错误分类、钥匙串读取和 `ApiPort.fetch_balance()`。 | AccountService、BalanceResult、cache、keyring、ApiPort、DeepSeek |
+| L032 | 2026-10-22 | P3 每宠会话/worker 请求接缝 | 增加按 slot/角色隔离的会话存储、消息限制和 WorkerSession.request 协议接缝。 | SessionStore、ChatSession、slot、character、request、delta、done |

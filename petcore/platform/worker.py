@@ -123,6 +123,15 @@ class WorkerSession:
     def cancel(self, request_id: str) -> None:
         self.send({"type": protocol.CANCEL, protocol.REQUEST_ID: str(request_id)})
 
+    def request(self, request_id: str, payload: dict[str, Any]) -> None:
+        self.send(
+            {
+                "type": protocol.REQUEST,
+                protocol.REQUEST_ID: str(request_id),
+                "payload": dict(payload),
+            }
+        )
+
     def shutdown(self, timeout: float = 2.0) -> None:
         process = self.process
         if process is None:

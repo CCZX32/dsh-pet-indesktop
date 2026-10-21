@@ -346,6 +346,9 @@ class CoreApiPort:
     def open_settings(self) -> None:
         self.host.open_settings("api")
 
+    def fetch_balance(self, service_id: str, *, force: bool = False):
+        return self.host.account.fetch_balance(service_id, force=force)
+
 
 def build_ports(host, window) -> HostPorts:
     store = getattr(host, "api_store", None)

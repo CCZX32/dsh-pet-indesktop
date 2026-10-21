@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 from .. import paths
 from ..api.credentials import KeyringCredentials
 from ..api.store import ApiStore
+from ..account.service import AccountService
 from ..config import Config
 from ..content.collect import collect_characters as _collect
 from ..log import setup_logging
@@ -109,6 +110,7 @@ class CoreHost:
         self.mod_dirs = mod_dirs
         self.api_store = ApiStore(self.root)
         self.api_credentials = KeyringCredentials()
+        self.account = AccountService(self.api_store, self.api_credentials)
         self.menu_model = MenuModel()
         self.load_result = None
         self._characters: list = []

@@ -264,6 +264,16 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
   `shutdown`，超时后 terminate/kill。
 - WorkerHost 目前是基础设施，业务 feature 仍需在后续阶段声明 worker entrypoint 和结果事件。
 
+## 22. P3 账户基础（2026-10-22）
+
+- `petcore/account/AccountService` 使用 `ApiStore` 的服务规格和 `KeyringCredentials` 的密钥，
+  通过 `petcore.net.http.urlopen` 发起有界余额请求。
+- `CoreApiPort.fetch_balance()` 只返回结构化余额结果或稳定 `AccountError.reason`；mod 不直接
+  import account/net 实现。
+- 余额 UI 必须异步调用该服务，不能在 Qt 菜单回调里同步阻塞网络。
+- `petcore/chat/SessionStore` 的路径包含 slot 与角色 id，消息历史原子写入并限制长度；
+  它不读取凭据，也不把 worker 临时状态写入会话文件。
+
 ## 19. P1–P6 目标架构补充（2026-10-22）
 
 ### 19.1 当前宠物上下文

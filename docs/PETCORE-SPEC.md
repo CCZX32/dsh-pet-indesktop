@@ -404,4 +404,14 @@ petcore/
 - 设置常规页可从角色目录构建并安装 content mod；旧素材目录补齐 VPet Graph 类别的寻址映射。
 - 安装器的 5 个官方离线 feature 默认选中，用户仍可取消；它们继续保持 feature mod 边界。
 
+## 18. P3 账户基础（2026-10-22）
+
+- `petcore/account/AccountService` 属于 Core，通过 `ApiStore`、`KeyringCredentials` 和统一
+  `net` 出口提供余额查询、30 秒内存缓存、多币种选择和稳定错误分类。
+- `HostPorts.api.fetch_balance()` 是 mod 的唯一余额入口；请求响应体和密钥不得进入日志。
+- 余额菜单、自动刷新、档位动画和灵动岛展示要等异步 UI/worker 阶段接入，不能把同步服务
+  直接放进 Qt 菜单回调。
+- `petcore/chat/SessionStore` 按 slot 和角色目录隔离会话，限制消息数量并原子写入；它不保存
+  API Key、服务凭据或 worker 状态。
+
 

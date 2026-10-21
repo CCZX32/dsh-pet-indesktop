@@ -168,3 +168,14 @@
 | 5 个官方 feature 默认安装 | 已对齐（安装任务） | `test_official_feature_tasks_are_default_selected` |
 | 旧 `pet` 媒体后端解耦 | 未做 | `petcore/media/backends.py` 仍为适配层 |
 | AI/识屏/Agent worker 业务 | 未做 | P3/P4 |
+
+## 10. P3 Core 账户基础（2026-10-22）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| Core 余额服务/缓存/错误分类 | 已对齐（基础） | `tests/test_petcore_account.py` |
+| `HostPorts.api.fetch_balance()` | 已对齐（协议） | `tests/test_petcore_api.py`、account tests |
+| 余额菜单、自动刷新、档位动画 | 未做 | 等异步 UI/worker 阶段 |
+| AI/识屏/Agent 业务 | 未做 | P3/P4 后续 |
+
+| 每宠聊天会话存储 | 已对齐（基础） | `tests/test_petcore_sessions.py`；尚未接入聊天 UI |

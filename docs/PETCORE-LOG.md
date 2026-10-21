@@ -1125,3 +1125,42 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 **未完成**
 
 - 业务 worker、旧 `pet` 媒体后端解耦、真实安装升级卸载和声卡/双屏人工验收留给后续阶段。
+---
+
+## L031 · 2026-10-22 · P3 Core 账户/余额基础
+
+**改动**
+
+- 新增 `petcore/account/AccountService` 与 `BalanceResult`：服务协议校验、钥匙串读取、
+  DeepSeek 余额解析、多币种选择、30 秒内存缓存和稳定错误分类。
+- `ApiPort` 增加 `fetch_balance()`，CoreApiPort 转发到账户服务；CoreHost 持有进程级服务。
+- 新增账户/API/net/架构回归测试，响应体和密钥不进入日志。
+
+**验证**
+
+- `pytest test_petcore_account.py test_petcore_api.py test_petcore_net.py test_petcore_architecture.py -q`
+  → `84 passed in 1.89s`。
+- `ruff check petcore tests/test_petcore_account.py` → 通过。
+
+**未完成**
+
+- 余额菜单、自动刷新、档位动画、灵动岛展示和真实远程账户请求留给后续 P3 UI/worker 阶段。
+
+---
+
+## L032 · 2026-10-22 · P3 每宠会话存储接缝
+
+**改动**
+
+- 新增 `petcore/chat/SessionStore` 和 `ChatSession`，按 slot/角色隔离目录，限制消息数量和
+  单条长度，原子写入，拒绝路径逃逸。
+- 扩展 worker 协议的 request/delta/result/done 常量，并为 WorkerSession 增加 request 接缝。
+
+**验证**
+
+- `pytest tests/test_petcore_sessions.py` → `3 passed in 0.83s`。
+- `ruff check pet/ tests/ petcore/` → 通过。
+
+**未完成**
+
+- 会话尚未接入 AI worker 或聊天 UI；业务接入继续属于 P3 后续。
