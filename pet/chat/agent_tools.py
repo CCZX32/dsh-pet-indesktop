@@ -103,7 +103,14 @@ _DEFAULT_ROOT_NAMES = ('Desktop', 'Documents', 'Downloads')
 
 
 class ToolError(RuntimeError):
-    """工具的可预期失败（参数不对 / 白名单外 / 文件读不了）：作为结果文本回给模型。"""
+    """工具的可预期失败（参数不对 / 白名单外 / 文件读不了）：作为结果文本回给模型。
+
+    ``code`` 是结构化原因码（``fs_outside_whitelist`` 等，设计审后续项）：
+    给人看的文案与给程序读的码分开，审计与聚合按码归类。"""
+
+    def __init__(self, message, code: str = ''):
+        super().__init__(message)
+        self.code = str(code or '')
 
 
 @dataclass(frozen=True)
@@ -113,6 +120,7 @@ class ToolOutcome:
     text: str
     ok: bool = True
     status: tuple[str, ...] = ()
+    code: str = ''
 
 
 def wrap_untrusted(text: str) -> str:
@@ -161,16 +169,20 @@ class AgentAuditLog:
     必须在日志里留痕，不静默。
     """
 
-    def __init__(self, path, *, max_bytes: int = AUDIT_MAX_BYTES):
+    def __init__(self, path, *, max_bytes: int = AUDIT_MAX_BYTES, character: str = ''):
         self.path = Path(path)
         self.max_bytes = max(1, int(max_bytes))
+        # 角色标识（设计审后续项）：多角色共存时审计能分清是谁的对话触发的调用
+        self.character = str(character or '')
 
-    def record(self, tool, args_summary, ok, result_chars, duration_ms) -> None:
+    def record(self, tool, args_summary, ok, result_chars, duration_ms, code='') -> None:
         line = json.dumps({
             'ts': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'character': self.character,
             'tool': str(tool),
             'args': args_summary if isinstance(args_summary, dict) else {},
             'ok': bool(ok),
+            'code': str(code or ''),
             'result_chars': int(result_chars),
             'duration_ms': round(float(duration_ms), 3),
         }, ensure_ascii=False)
@@ -229,22 +241,23 @@ class ToolRegistry:
         started = time.perf_counter()
         tool = self._tools.get(str(name or ''))
         if tool is None:
-            outcome = ToolOutcome(f'未知工具：{name}', False)
+            outcome = ToolOutcome(f'未知工具：{name}', False, code='unknown_tool')
         else:
             try:
                 outcome = tool.handler(args_map)
                 if not isinstance(outcome, ToolOutcome):
                     outcome = ToolOutcome(str(outcome))
             except ToolError as exc:
-                outcome = ToolOutcome(str(exc), False)
+                outcome = ToolOutcome(str(exc), False, code=exc.code)
             except Exception as exc:  # noqa: BLE001 - 工具边界：任何异常都不许炸对话
                 log.warning('工具 %s 执行异常：%s', name, type(exc).__name__)
-                outcome = ToolOutcome(f'工具执行失败（{type(exc).__name__}）', False)
+                outcome = ToolOutcome(f'工具执行失败（{type(exc).__name__}）', False, code='tool_exception')
         wrapped = ToolOutcome(wrap_untrusted(outcome.text), bool(outcome.ok),
-                              tuple(outcome.status))
+                              tuple(outcome.status), outcome.code)
         if self._audit is not None:
             self._audit.record(name, summarize_args(args_map), wrapped.ok,
-                               len(wrapped.text), (time.perf_counter() - started) * 1000.0)
+                               len(wrapped.text), (time.perf_counter() - started) * 1000.0,
+                               code=wrapped.code)
         return wrapped
 
 
@@ -339,10 +352,10 @@ def resolve_in_roots(raw, roots) -> Path:
     """
     text = str(raw or '').strip().strip('"\'')
     if not text:
-        raise ToolError('没有给出路径')
+        raise ToolError('没有给出路径', code='fs_no_path')
     roots = tuple(roots or ())
     if not roots:
-        raise ToolError(_outside_message(()))
+        raise ToolError(_outside_message(()), code='fs_outside_whitelist')
     candidate = Path(os.path.expandvars(text)).expanduser()
     if not candidate.is_absolute():
         resolved_candidate = None
@@ -361,11 +374,11 @@ def resolve_in_roots(raw, roots) -> Path:
         candidate = resolved_candidate
     target = _real(candidate)
     if _is_device_name(target):
-        raise ToolError(_outside_message(roots))
+        raise ToolError(_outside_message(roots), code='fs_outside_whitelist')
     for root in roots:
         if _within(target, _real(root)):
             return target
-    raise ToolError(_outside_message(roots))
+    raise ToolError(_outside_message(roots), code='fs_outside_whitelist')
 
 
 # ---------------------------------------------------------------- 本地只读工具
@@ -389,9 +402,9 @@ def _fs_read(args: dict, roots) -> ToolOutcome:
     status = (f'📁 正在读取文件：{target}',)
     try:
         if not target.exists():
-            raise ToolError('文件不存在')
+            raise ToolError('文件不存在', code='fs_not_found')
         if target.is_dir():
-            raise ToolError('这是一个目录，请用 fs_list 查看')
+            raise ToolError('这是一个目录，请用 fs_list 查看', code='fs_is_directory')
         with open(target, 'rb') as handle:
             data = handle.read(FS_READ_MAX_BYTES + 1)
     except ToolError:
@@ -399,12 +412,12 @@ def _fs_read(args: dict, roots) -> ToolOutcome:
     except OSError as exc:
         raise ToolError(f'读取失败（{type(exc).__name__}）') from exc
     if len(data) > FS_READ_MAX_BYTES:
-        raise ToolError(f'文件超过 {FS_READ_MAX_BYTES // 1024} 千字节上限，没有读取')
+        raise ToolError(f'文件超过 {FS_READ_MAX_BYTES // 1024} 千字节上限，没有读取', code='fs_too_large')
     if b'\x00' in data:
-        raise ToolError('这不是文本文件（含二进制内容），没有读取')
+        raise ToolError('这不是文本文件（含二进制内容），没有读取', code='fs_binary')
     text = _decode_text(data)
     if text is None:
-        raise ToolError('无法按文本解码（编码不支持），没有读取')
+        raise ToolError('无法按文本解码（编码不支持），没有读取', code='fs_decode')
     truncated = len(text) > FS_READ_MAX_CHARS
     body = f'文件 {target} 的内容：\n{text[:FS_READ_MAX_CHARS]}'
     if truncated:
@@ -417,9 +430,9 @@ def _fs_list(args: dict, roots) -> ToolOutcome:
     status = (f'📁 正在查看目录：{target}',)
     try:
         if not target.exists():
-            raise ToolError('目录不存在')
+            raise ToolError('目录不存在', code='fs_not_found')
         if not target.is_dir():
-            raise ToolError('这不是目录，请用 fs_read 读文件')
+            raise ToolError('这不是目录，请用 fs_read 读文件', code='fs_not_directory')
         entries = []
         with os.scandir(target) as iterator:
             for entry in iterator:
@@ -485,10 +498,10 @@ def _memory_tools(memory_path) -> list:
         text = str(args.get('text', '') or '').strip()[:MAX_ENTRY_CHARS]
         status = (f'🧠 正在记住：{_clip(text, 40)}',)
         if not text:
-            raise ToolError('没有给出要记住的内容')
+            raise ToolError('没有给出要记住的内容', code='memory_empty_text')
         result = _store().add(text, source='agent')
         if result is None:
-            raise ToolError('记忆没写进去（记忆文件正被占用），稍后再试')
+            raise ToolError('记忆没写进去（记忆文件正被占用），稍后再试', code='memory_lock_conflict')
         _entry, created = result
         return ToolOutcome(f'已记住：{text}' if created else f'这条我本来就记得：{text}', True, status)
 
@@ -498,12 +511,12 @@ def _memory_tools(memory_path) -> list:
         text = str(args.get('text', '') or '').strip()[:MAX_ENTRY_CHARS]
         status = (f'🧠 正在忘记：{_clip(text, 40)}',)
         if not text:
-            raise ToolError('没有给出要忘记的内容')
+            raise ToolError('没有给出要忘记的内容', code='memory_empty_text')
         store = _store()
         if not any(str(entry.get('text', '')) == text for entry in store.load()):
             return ToolOutcome(f'记忆里没有这条：{text}', True, status)
         if not store.apply_ops([{'op': 'FORGET', 'text': text}], source='agent'):
-            raise ToolError('删除没成功（记忆文件正被占用），稍后再试')
+            raise ToolError('删除没成功（记忆文件正被占用），稍后再试', code='memory_lock_conflict')
         return ToolOutcome(f'已忘记：{text}', True, status)
 
     return [
@@ -546,7 +559,7 @@ def _web_tools(config, settings) -> list:
         query = str(args.get('query', '') or '').strip()
         status = (f'🔍 正在搜索：{query}',)
         if not query:
-            raise ToolError('搜索词为空')
+            raise ToolError('搜索词为空', code='web_empty_query')
         try:
             results = ws.search(query, settings, timeout=timeout, verify_ssl=verify)
         except ws.WebSearchError as exc:
@@ -559,7 +572,7 @@ def _web_tools(config, settings) -> list:
         url = str(args.get('url', '') or '').strip()
         status = (f'📄 正在阅读：{url}',)
         if not url:
-            raise ToolError('没有给出网页地址')
+            raise ToolError('没有给出网页地址', code='web_no_url')
         try:
             text = ws.fetch_page_text(url, timeout=timeout, verify_ssl=verify)
         except ws.WebSearchError as exc:
@@ -598,6 +611,7 @@ class AgentRuntime:
     max_rounds: int = DEFAULT_MAX_ROUNDS
     fs_roots: tuple = ()
     memory_path: Any = None
+    character_id: str = ''
     audit: AgentAuditLog | None = None
 
 
@@ -695,5 +709,6 @@ def build_agent_runtime(config, character_id) -> AgentRuntime | None:
         max_rounds=_clamp_rounds(config.get('chat_agent_tool_rounds', DEFAULT_MAX_ROUNDS)),
         fs_roots=roots,
         memory_path=memory,
-        audit=AgentAuditLog(Path(config.dir) / AUDIT_FILE_NAME),
+        character_id=character,
+        audit=AgentAuditLog(Path(config.dir) / AUDIT_FILE_NAME, character=character),
     )

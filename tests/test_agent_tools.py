@@ -538,3 +538,32 @@ def test_bing_host_filter_not_fooled_by_suffix_lookalikes():
     assert "https://bing.com/self" not in hosts  # 自家跳转仍剔
     assert "https://bing.com.evil.com/phish" in hosts or True  # 不属过滤面，但必须不是按 bing.com 误剔逻辑放行的
     assert all("bing.com/self" not in h for h in hosts)
+
+
+def test_audit_records_character_and_error_code(tmp_path):
+    """审计行带角色标识与结构化原因码（设计审/k3 后续项）：成功与失败都落。"""
+    audit = at.AgentAuditLog(tmp_path / "audit.jsonl", character="shenshen")
+    registry = at.ToolRegistry(at._fs_tools((tmp_path,)), audit=audit)
+    registry.run('fs_list', {'path': str(tmp_path)})
+    registry.run('fs_read', {'path': 'C:/Windows/system.ini'})
+    registry.run('no_such_tool', {})
+    lines = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [line['character'] for line in lines] == ['shenshen'] * 3
+    assert lines[0]['ok'] is True and lines[0]['code'] == ''
+    assert lines[1]['ok'] is False and lines[1]['code'] == 'fs_outside_whitelist'
+    assert lines[2]['ok'] is False and lines[2]['code'] == 'unknown_tool'
+
+
+def test_tool_error_codes_on_expected_failures(tmp_path):
+    """可预期失败带原因码：给人看的文案与给程序读的码分离。"""
+    root = tmp_path / "Desktop"
+    root.mkdir()
+    with pytest.raises(at.ToolError) as exc1:
+        at.resolve_in_roots("C:/Windows/system.ini", (root,))
+    assert exc1.value.code == 'fs_outside_whitelist'
+    with pytest.raises(at.ToolError) as exc2:
+        at.resolve_in_roots("", (root,))
+    assert exc2.value.code == 'fs_no_path'
+    with pytest.raises(at.ToolError) as exc3:
+        at.resolve_in_roots("NUL", (root,))
+    assert exc3.value.code == 'fs_outside_whitelist'
