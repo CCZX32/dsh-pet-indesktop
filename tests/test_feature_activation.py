@@ -35,19 +35,20 @@ def _disk_payload(config: Config):
     return json.loads(config.path.read_text(encoding="utf-8")).get("feature_activation")
 
 
-def test_new_install_gets_baseline_and_persists(tmp_path):
+def test_new_install_gets_pure_core_and_persists(tmp_path):
+    """期 5：新装默认纯核心（enabled=[]）；升级才继承全集。"""
     cfg = _config(tmp_path)
     frozen = fa.decide_and_freeze(cfg)
-    assert frozen == frozenset(MIGRATION_BASELINE)  # 期 5 前新装同样继承全集
+    assert frozen == frozenset()  # PURE_CORE_FOR_NEW_INSTALL=True（期 5 落地）
     # 判定只进内存草稿（启动链不许有配置副作用），随下一次自然保存落盘
     assert not cfg.path.is_file()
-    assert cfg.data["feature_activation"] == {"version": 1, "enabled": list(MIGRATION_BASELINE)}
+    assert cfg.data["feature_activation"] == {"version": 1, "enabled": []}
     assert cfg.save()
-    assert _disk_payload(cfg) == {"version": 1, "enabled": list(MIGRATION_BASELINE)}
-    # 幂等：二次判定不改写、不重判
+    assert _disk_payload(cfg) == {"version": 1, "enabled": []}
+    # 幂等：二次判定不重判（合法空列表绝不回退成全激活）
     fa.reset_snapshot_for_tests()
     frozen2 = fa.decide_and_freeze(cfg)
-    assert frozen2 == frozen
+    assert frozen2 == frozenset()
 
 
 def test_upgrade_with_existing_config_gets_baseline(tmp_path):

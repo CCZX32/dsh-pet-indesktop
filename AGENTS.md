@@ -108,14 +108,36 @@ stay gone and are never imported again. Collision math is pure (`pet/collision.p
 + `pet/sprite_collision.py`); the island's stadium clamp lives in
 `sprite_collision.capsule_circles` via `pet/island_bridge.py`.
 
-`pet/multi_window_shared.py` is always on: one process-wide agent_link /
-proactive / fullscreen watcher fanned out to every window or sprite. Under the
-overlay topology the shared fullscreen watcher is not started (the overlay shell
-owns its own `FullscreenCursorWatcher`). The DSH bridge directory has exactly one
-reader: `DshMonitor` (one `DirGlobTailer` + one polling thread; parsed records feed
-both the signal dispatch and the pure 8-state converger in `pet/dsh_state.py`,
-with the DSH port probe folded into the same thread), started by
-`AgentLinkManager.apply_config` only while `agent_link.dsh` is enabled.
+`pet/multi_window_shared.py` is always on, but its members are now conditional:
+the agent_link manager and proactive watcher exist only while their feature
+module is active (see below); the process-wide fullscreen watcher is fan-out to
+every window or sprite (under the overlay topology it is not started — the
+overlay shell owns its own `FullscreenCursorWatcher`). The DSH bridge directory
+has exactly one reader: `DshMonitor` (one `DirGlobTailer` + one polling thread;
+parsed records feed both the signal dispatch and the pure 8-state converger in
+`pet/dsh_state.py`, with the DSH port probe folded into the same thread),
+started by `AgentLinkManager.apply_config` only while `agent_link.dsh` is
+enabled.
+
+**Feature-module activation layer (2026-10-21, `pet/features.py` +
+`pet/feature_activation.py`).** Non-core capabilities (weather, divination,
+todo, festival, voice, music, chat, file_interpret, vision, proactive,
+agent_link, dynamic_island, quick_launch, system_tools) are gated by a global
+`feature_activation` set in `config.json` (`{"version": 1, "enabled": [...]}`;
+`null` = undecided → one-time migration: upgrades inherit everything, fresh
+installs get pure core). The main process freezes a snapshot before any
+optional service is built (`decide_and_freeze` in `pet/app.py`'s main
+startup); the settings process freezes from the on-disk pending set
+(`freeze_for_settings_process`). All three gate layers share one predicate,
+`feature_activation.is_active(fid)` (unfrozen → always true; unknown id →
+true; frozen → hard-dependency-resolved membership): menu projection in
+`context_menus/registry.available_ids` (layout resolution drops empty
+submenus and never writes the filtered tree back), settings pages (inactive
+modules' tabs/groups/pages are not constructed and never written back;
+claimed-but-unmounted to stay out of the 待分类 leftovers), and execution
+seams (services are not constructed — gate before construction, not stop
+after — timers/threads/hotkeys/precaches stay off). Gating tests:
+`tests/test_feature_modules_gating.py`.
 
 ## Change discipline
 

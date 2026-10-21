@@ -27,9 +27,10 @@ log = logging.getLogger(__name__)
 #: 启用集合结构的当前版本（不认识的高版本按损坏处理：保留原数据 + 诊断）。
 CURRENT_VERSION = 1
 
-#: 新装用户是否默认纯核心（enabled=[]）。期 5 才允许翻 True——那是「全部
-#: 模块过完验收矩阵」之后的最后一步，见 SPEC §6。
-PURE_CORE_FOR_NEW_INSTALL = False
+#: 新装用户默认纯核心（enabled=[]）：全部 14 个模块已过「不出现、不启动、
+#: 不写回」门控验收（tests/test_feature_modules_gating.py 84 例），期 5 落地。
+#: 升级安装不受本开关影响——永远继承 MIGRATION_BASELINE。
+PURE_CORE_FOR_NEW_INSTALL = True
 
 #: 本次运行冻结的启用集合；None = 未冻结（is_active 一律 True）。
 _snapshot: frozenset[str] | None = None
