@@ -2219,6 +2219,11 @@ def test_stream_capture_row_absent_and_topology_off_when_inactive(tmp_path, monk
 
 
 def test_stream_capture_row_present_by_default(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "win32":
+        # 控件只在 Windows 创建（settings_pet_controls.py:499 的既有平台分支）
+        return
     from pet.modern_settings_dialog import SettingRow
 
     app, dlg = _build_dialog(tmp_path, monkeypatch)
