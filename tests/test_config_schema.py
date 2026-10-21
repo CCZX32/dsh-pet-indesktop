@@ -48,6 +48,9 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "character_aliases",
         "character_profiles",
         "chat_always_on_top",
+        "chat_agent_fs_roots",
+        "chat_agent_tool_rounds",
+        "chat_agent_tools",
         "chat_background",
         "chat_background_fill",
         "chat_background_opacity",
@@ -241,6 +244,9 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 静默提炼，关 = 只保留手动钉；非 NULL 接受键），白名单 158。
 # 2026-10-21 加提炼频率 1 键（chat_memory_extract_interval，默认 5=每 5 轮提炼
 # 一次；共创者定稿的 token 成本闸），白名单 159。
+# 2026-10-21 加 Personal Agent v0 3 键（chat_agent_tools 总开关默认 True /
+# chat_agent_tool_rounds 工具循环轮数默认 5 / chat_agent_fs_roots 本地只读白名单
+# 追加目录默认空；三者都是 chat 模块内子开关，非 NULL 接受键），白名单 162。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

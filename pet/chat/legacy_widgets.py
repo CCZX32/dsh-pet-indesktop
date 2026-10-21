@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .geometry import best_position_near_pet
 from .markdown_view import markdown_to_html
+from .agent_tools import build_agent_runtime
 from .memory import ChatMemory, injection_text, parse_remember_command
 from .memory_extract import schedule_extraction
 from .models import ChatMessage
@@ -1136,6 +1137,8 @@ class ChatWindow(QDialog):
         self.store.save(self.session)
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
+        # 工具循环运行环境（chat_agent_* 全局键）：与 widgets.py 同款接线
+        config.agent = build_agent_runtime(self.config, self.character_id)
         messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text, memory_text=self._memory_injection())
         # 与 widgets.py 同款：id 必须先落本窗在途状态再 send（`started` 在
         # send() 内同步发出，晚赋值会让 `_started` 的 id 过滤恒命中）。

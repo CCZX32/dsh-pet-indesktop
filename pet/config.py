@@ -1283,6 +1283,12 @@ class Config:
             "chat_memory_enabled": True,  # 对话全局记忆注入总开关（档 A 手动钉；关 = system 不附「关于用户的记忆」段）
             "chat_memory_auto_extract": True,  # 档 B：回复后静默自动提炼记忆（默认开：被动形成；关 = 只手动钉）
             "chat_memory_extract_interval": 5,  # 提炼频率：每 N 轮回复提炼一次（1=每轮；共创者定稿 5）
+            # Personal Agent v0（2026-10-21）：对话里可调工具的总开关 + 工具循环轮数上限 +
+            # 本地只读白名单的**追加**目录（分号分隔；默认桌面/文档/下载恒在，写错的项丢弃）。
+            # 属于 chat 模块内的子开关，不单独成 feature 模块。
+            "chat_agent_tools": True,
+            "chat_agent_tool_rounds": 5,
+            "chat_agent_fs_roots": "",
             # 合成后端：edge（edge-tts，免 Key）/ mimo（小米 MiMo TTS，OpenAI 兼容接口，
             # API Key 存系统钥匙串）/ sapi（Windows 本地语音）/ doubao（豆包 2.0）；
             # 主后端失败时按 fallback 自动回退另一个。
@@ -1570,6 +1576,9 @@ class Config:
             "chat_memory_enabled",
             "chat_memory_auto_extract",
             "chat_memory_extract_interval",
+            "chat_agent_tools",
+            "chat_agent_tool_rounds",
+            "chat_agent_fs_roots",
             "voice_chime_schedule",
             "voice_chime_custom_times",
             "voice_chime_voice",

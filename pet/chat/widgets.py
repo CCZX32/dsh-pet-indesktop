@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from .geometry import best_position_near_pet
 from .markdown_view import markdown_to_html
+from .agent_tools import build_agent_runtime
 from .memory import ChatMemory, injection_text, parse_remember_command
 from .memory_extract import schedule_extraction
 from .models import ChatMessage
@@ -593,14 +594,22 @@ class MessageBubble(QFrame):
 
     def _thinking_summary(self) -> str:
         searched = any(line.startswith(("🔍", "📄")) for line in self._activity_lines)
+        used_tools = any(line.startswith(("📁", "🧠")) for line in self._activity_lines)
         if not self._thinking_done:
-            label = "💭 深度思考中…" if self._reasoning_text else "🌐 联网检索中…"
+            if self._reasoning_text:
+                label = "💭 深度思考中…"
+            elif used_tools:
+                label = "🛠 工具调用中…"
+            else:
+                label = "🌐 联网检索中…"
         elif self._reasoning_text and searched:
             label = "💭 已联网搜索并深度思考"
         elif self._reasoning_text:
             label = "💭 已深度思考"
         elif searched:
             label = "🔍 已联网搜索"
+        elif used_tools:
+            label = "🛠 已调用工具"
         else:
             label = "🌐 联网检索过程"
         arrow = "▾" if self.thinking_toggle.isChecked() else "▸"
@@ -2336,6 +2345,8 @@ class ChatWindow(QDialog):
         self.store.save(self.session)
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
+        # 工具循环运行环境（chat_agent_* 全局键）：总开关关 → None，provider 侧零成本
+        config.agent = build_agent_runtime(self.config, self.character_id)
         messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text, memory_text=self._memory_injection())
         if image_payloads:
             messages[-1]["content"] = [{"type": "text", "text": text}, *image_payloads]

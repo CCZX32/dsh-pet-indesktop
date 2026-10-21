@@ -7,9 +7,16 @@ DeepSeek 等 OpenAI 兼容 API 本身不带联网能力，providers.py 在正式
 引擎：
 - baidu：免 Key，抓取百度网页结果（默认；国内直连可用）
 - duckduckgo：免 Key，抓取 html.duckduckgo.com（国内网络通常需要代理）
-  两个免 Key 引擎互为兜底；频繁请求会被要求人机验证，此时如实报错，不尝试绕过。
+- bing：免 Key，抓取 www.bing.com 网页结果（2026-10-21 起；服务端仍直接吐结果
+  节点，见 `parse_bing_html`）
+  三个免 Key 引擎互为兜底；频繁请求会被要求人机验证，此时如实报错，不尝试绕过。
 - bocha：博查 Web Search API（需 Key，国内可用）
 - tavily：Tavily Search API（需 Key）
+
+**Google 不在这里**：2026-10-21 本机实测 `www.google.com/search` 返回的是纯 JS
+外壳（92 KB 页面里 `<h3>` 0 个、`/url?q=` 0 个、命中 `/httpservice/retry/enablejs`），
+服务端不再下发可解析的结果节点，正则抓取只能抓到脚本；要支持就得内置 JS 引擎/浏览器，
+与"纯 urllib 无第三方依赖"的定位冲突。等 Google 恢复服务端渲染再加，别绕过。
 """
 from __future__ import annotations
 
@@ -26,6 +33,7 @@ from .providers import _make_ssl_context as make_ssl_context, build_browser_head
 ENGINE_LABELS = {
     'baidu': '百度（免 Key）',
     'duckduckgo': 'DuckDuckGo（免 Key）',
+    'bing': 'Bing（免 Key）',
     'bocha': '博查 Bocha（需 API Key）',
     'tavily': 'Tavily（需 API Key）',
 }
@@ -138,6 +146,34 @@ def parse_baidu_html(page: str, limit: int) -> list[SearchResult]:
     return results
 
 
+def parse_bing_html(page: str, limit: int) -> list[SearchResult]:
+    """Bing 网页结果：`<li class="b_algo"><h2><a href=…>标题</a></h2>…<p>摘要</p>`。
+
+    广告在 `b_ad` 块里（不是 `b_algo`），Bing 自跳转链接（`bing.com/aclick`）即使
+    混进 `b_algo` 也剔掉——它们对模型没有信息量。
+    """
+    results: list[SearchResult] = []
+    for chunk in re.split(r'<li class="b_algo"', page)[1:]:
+        m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
+        if not m:
+            continue
+        url = _html.unescape(m.group(1)).strip()
+        if not url.startswith('http') or 'bing.com/aclick' in url:
+            continue
+        host = urllib.parse.urlparse(url).netloc
+        if host.endswith('bing.com') or host.endswith('microsofttranslator.com'):
+            continue
+        title = _clean_text(m.group(2))
+        if not title:
+            continue
+        s = re.search(r'<p[^>]*>(.*?)</p>', chunk, re.S)
+        snippet = _clean_text(s.group(1))[:300] if s else ''
+        results.append(SearchResult(title, url, snippet))
+        if len(results) >= limit:
+            break
+    return results
+
+
 def html_to_text(page: str) -> str:
     """粗粒度正文提取：去脚本/样式/导航，块级标签转换行。"""
     title_m = re.search(r'<title[^>]*>(.*?)</title>', page, re.S | re.I)
@@ -155,7 +191,7 @@ def html_to_text(page: str) -> str:
 
 # 免 Key 引擎靠抓网页，频繁请求会被要求人机验证（不会也不应自动绕过）：
 # 一个失败时自动换另一个兜底，两个都失败才报错。
-_FREE_FALLBACK = {'baidu': 'duckduckgo', 'duckduckgo': 'baidu'}
+_FREE_FALLBACK = {'baidu': 'duckduckgo', 'duckduckgo': 'baidu', 'bing': 'baidu'}
 _CAPTCHA_HINT = '，请稍后再试；需要稳定联网可在 AI 设置里改用博查 / Tavily'
 
 
@@ -182,6 +218,12 @@ def _search_engine(engine, query, limit, settings, timeout, verify_ssl) -> list[
         if 'wappass.baidu.com' in page[:5000] or '百度安全验证' in page[:5000]:
             raise WebSearchError('百度要求人机验证' + _CAPTCHA_HINT)
         return parse_baidu_html(page, limit)
+    if engine == 'bing':
+        page, _ = _http_get('https://www.bing.com/search?q=' + urllib.parse.quote(query) + '&setlang=zh-CN',
+                            timeout=timeout, verify_ssl=verify_ssl)
+        if 'b_captcha' in page or 'bing.com/challenge' in page[:20000]:
+            raise WebSearchError('Bing 要求人机验证' + _CAPTCHA_HINT)
+        return parse_bing_html(page, limit)
     if engine in ('bocha', 'tavily'):
         key = settings.resolve_api_key() if hasattr(settings, 'resolve_api_key') else getattr(settings, 'api_key', '')
         if not key:
