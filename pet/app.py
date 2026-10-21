@@ -5026,8 +5026,10 @@ class AppShell:
             if feature_activation_mod.is_active("dynamic_island"):
                 # 余额属灵动岛模块：模块停用时不给一个"点了没反应"的入口
                 menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
-            menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
-            menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
+            if feature_activation_mod.is_active("system_tools"):
+                # dsh 服务管理属系统工具模块（与 chat 无关，只挂构建能力分支）
+                menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
+                menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
         else:
             # 纯桌宠版本不提供本地 DSH 启动入口，只保留网页版入口
             menu.addAction('打开网页版 DeepSeek', open_deepseek_web)

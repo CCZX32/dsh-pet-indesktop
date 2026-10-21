@@ -633,9 +633,9 @@ class ModernSettingsDialog(QDialog):
                         "隐藏时对话气泡",
                         "桌宠隐藏后岛变成对话入口：单击灵动岛弹出对话气泡，AI 回复到达时也会在岛上弹出预览（不抢焦点，超时自动收回）。",
                         self.island_hidden_chat_check,
-                    )] if _chat_feature_available() else []),
-                    # 纯桌宠版（无 pet.chat 打包变体）不展示该开关：开了也没有
-                    # 气泡可弹——运行时岛侧已由 chat_available 回退展开卡片
+                    )] if _chat_feature_available() and _fa.is_active("chat") else []),
+                    # 纯桌宠版（无 pet.chat 打包变体）或 chat 模块停用时不展示该开关：
+                    # 开了也没有气泡可弹——运行时岛侧已由 chat_available 回退展开卡片
                     SettingRow(
                         "dynamic_island_event_effects",
                         "事件动效",
@@ -2021,7 +2021,10 @@ class ModernSettingsDialog(QDialog):
                         True,
                     ),
                     ("对话窗口", appearance_rows),
-                    ("余额与服务状态", balance_rows),
+                    # 余额是灵动岛模块的子能力：岛未激活时不挂出（行已 claim 防
+                    # 「待分类」），运行时查询链也已被 show_balance 挡住
+                    *([("余额与服务状态", balance_rows)]
+                      if _fa.is_active("dynamic_island") else []),
                 ]
             )
             ai_sections.setObjectName("settingsDomain_ai")
@@ -2406,7 +2409,7 @@ class ModernSettingsDialog(QDialog):
             "x": existing_island.get("x"),
             "y": existing_island.get("y"),
         })
-        if self.click_balance_check is not None:
+        if self.click_balance_check is not None and _fa.is_active("dynamic_island"):
             self.config.set("click_show_balance", self.click_balance_check.isChecked())
         self.config.set("click_show_self_talk", self.click_self_talk_check.isChecked())
         if _fa.is_active("voice"):
@@ -2430,7 +2433,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())
-        if self.balance_refresh_spin is not None:
+        if self.balance_refresh_spin is not None and _fa.is_active("dynamic_island"):
             self.config.set("balance_refresh_minutes", int(self.balance_refresh_spin.value()))
             self.config.set(
                 "balance_tier_labels_mode",

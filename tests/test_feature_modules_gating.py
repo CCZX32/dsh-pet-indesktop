@@ -2141,3 +2141,43 @@ def test_memory_trim_blocked_when_system_tools_inactive(monkeypatch):
         menu_shared._MEMORY_TRIM_BRIDGES.clear()
         menu.deleteLater()
         app.processEvents()
+
+
+# ---------------------------------------------------------------- 期 4 合并收尾：余额行与隐藏对话行
+def test_balance_rows_follow_island_module(tmp_path, monkeypatch):
+    """余额是灵动岛子能力：岛关时 AI 域余额组与互动域点击余额行都不挂出。"""
+    from pet.modern_settings_dialog import SettingRow
+
+    _freeze_all_but("dynamic_island")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+        click_row = dlg.findChild(SettingRow, "settingRow_click_balance")
+        if click_row is not None:
+            assert not any(page.isAncestorOf(click_row) for page in pages)
+        assert dlg.findChild(SettingRow, "settingRow_balance_refresh_minutes") is None or not any(
+            page.isAncestorOf(dlg.findChild(SettingRow, "settingRow_balance_refresh_minutes"))
+            for page in pages)
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert not [k for k in writes if k.startswith("balance_") or k == "click_show_balance"]
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_hidden_chat_row_follows_chat_module(tmp_path, monkeypatch):
+    """岛的「隐藏时对话气泡」行：岛开 chat 关时不出现（chat 恢复即回来）。"""
+    from pet.modern_settings_dialog import SettingRow
+
+    _freeze_all_but("chat")  # 岛开、chat 关
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        row = dlg.findChild(SettingRow, "settingRow_dynamic_island_hidden_chat")
+        assert row is None  # 判据复合 is_active("chat") 后不构造该行
+    finally:
+        dlg.close()
+        app.processEvents()
