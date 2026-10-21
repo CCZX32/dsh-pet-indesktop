@@ -349,6 +349,7 @@
 | [`PETCORE-FUNCTION-MATRIX-2026-10-22.md`](PETCORE-FUNCTION-MATRIX-2026-10-22.md) | 2026-10-22 主分支 v4.3.4 与 petcore 的完整功能矩阵、阶段归属和有意差异。 | 做主分支对齐审查、判断某项是否已交付或分派迁移阶段前必读。 |
 | [`PETCORE-HANDOFF-PLAN-2026-10-22.md`](PETCORE-HANDOFF-PLAN-2026-10-22.md) | P0–P6 的 AI 交接计划：每阶段边界、依赖、验收、用户效果和提交标题。 | 把 petcore 后续阶段交给另一个 AI 或开始一个新阶段前必读。 |
 | [`PR-REPORT-PETCORE-AUDIT-2026-10-22.md`](PR-REPORT-PETCORE-AUDIT-2026-10-22.md) | 2026-10-22 petcore 主分支对齐审查报告，含门禁结果、性能口径和实机限制。 | 引用本次审查结论、复核当前基线或决定 P1 开始条件前必读。 |
+| [`PR-REPORT-PETCORE-P1-SCOPE-2026-10-22.md`](PR-REPORT-PETCORE-P1-SCOPE-2026-10-22.md) | P1 每宠配置作用域、feature 宠物生命周期和 standalone/slot 基础迁移报告。 | 改设置作用域、slot 配置、旧数据迁移或 feature timer 生命周期前必读。 |
 | [`PETCORE-SPEC.md`](PETCORE-SPEC.md) | petcore 的**最终形态规格**：core/mod 边界、用户能力、菜单/设置契约、素材与角色包供应链、交付门、非目标与退出旧架构的判定。 | 判断「这个功能该不该进 core」「最终要做成什么样」「菜单和设置谁负责」前必读。 |
 | [`PETCORE-LOG.md`](PETCORE-LOG.md) | petcore 追加式变更日志：每条 `LNNN` 记录文件、行为、验证与遗留。 | 只在 log-index 命中后打开对应条目；不要把整份日志读进上下文。 |
 | [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |

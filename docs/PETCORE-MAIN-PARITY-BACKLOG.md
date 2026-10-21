@@ -147,3 +147,13 @@
 - **默认安装**：5 个 example mod 仍不能按“示例存在”计为默认功能；后续 P2 要求安装包默认安装。
 
 有意差异：播放速率维持 `0.5–2.0x`；不支持 VPet LPS/PNG；首轮最多 16 只桌宠。
+
+## 8. P1 基础作用域收口（2026-10-22）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 设置窗口绑定当前宠物 | 已对齐 | `test_settings_dialog_binds_to_the_clicked_child_pet` |
+| 每宠/全局配置读写分流 | 已对齐 | `tests/test_petcore_config_scope.py` |
+| 点击台词/自语按宠物分流 | 已对齐 | `test_petcore_click_listeners.py`、`test_petcore_self_talk.py` |
+| 旧 standalone 与 slot 基础迁移 | 已对齐 | `test_legacy_config_and_slot_profiles_migrate_with_backup` |
+| 会话/待办/API 文件迁移 | 未做 | 等待对应业务消费者阶段 |

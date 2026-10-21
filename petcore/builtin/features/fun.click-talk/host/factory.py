@@ -28,7 +28,7 @@ class ClickTalkRuntime:
             self._cancel = interaction.on_click(self.context.owner, self._on_click)
 
     def _on_click(self, _window) -> None:
-        config = getattr(self.context.host, "config", None)
+        config = getattr(_window, "config", None) or getattr(self.context.host, "config", None)
         if config is None or not bool(config.get("click_talk_enabled")):
             return
         texts = [
@@ -45,6 +45,9 @@ class ClickTalkRuntime:
         if not texts:
             return
         presentation = self.context.ports.presentation
+        binder = getattr(presentation, "for_window", None)
+        if callable(binder):
+            presentation = binder(_window)
         if presentation is None:
             return
         try:

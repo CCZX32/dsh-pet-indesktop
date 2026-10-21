@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,27 @@ from .engine.geometry import SCALE_MAX, SCALE_MIN
 from .platform import hotkey_spec
 
 SCHEMA_VERSION = 1
+
+# Settings which belong to the process rather than the pet selected in the
+# settings window.  Unknown keys deliberately stay per-pet so new pet-local
+# feature settings do not silently become global.
+GLOBAL_CONFIG_KEYS = frozenset(
+    {
+        "active_pets",
+        "allow_feature_mods",
+        "click_through",
+        "hotkey_toggle_pet",
+        "last_settings_page",
+        "menu_hidden",
+        "menu_layout",
+        "menu_order",
+        "quick_launch_apps",
+        "spawn_inherit_size",
+        "spawn_scale",
+        "stream_capture_mode",
+        "ui_font_size",
+    }
+)
 
 DEFAULTS: dict[str, Any] = {
     "schema": SCHEMA_VERSION,
@@ -93,6 +115,74 @@ DEFAULTS: dict[str, Any] = {
 }
 
 _LEGACY_IMPORT_KEYS = ("character", "scale", "rx", "ry", "screen_name")
+
+_LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "character": ("character",),
+    "scale": ("scale",),
+    "rx": ("rx",),
+    "ry": ("ry",),
+    "screen_name": ("screen_name",),
+    "body_rx": ("body_rx",),
+    "body_ry": ("body_ry",),
+    "pos_x": ("pos_x",),
+    "pos_y": ("pos_y",),
+    "always_on_top": ("always_on_top", "on_top"),
+    "click_through": ("click_through", "mouse_through"),
+    "playback_speed": ("playback_speed",),
+    "animation_gap_seconds": ("animation_gap_seconds", "animation_gap"),
+    "self_talk_enabled": ("self_talk_enabled",),
+    "self_talk_min": ("self_talk_min", "self_talk_min_interval"),
+    "self_talk_max": ("self_talk_max", "self_talk_max_interval"),
+    "self_talk_duration": ("self_talk_duration", "self_talk_duration_seconds"),
+    "self_talk_texts": ("self_talk_texts",),
+    "self_talk_image_dir": ("self_talk_image_dir",),
+    "self_talk_image_scale": ("self_talk_image_scale",),
+    "self_talk_image_chance": ("self_talk_image_chance",),
+    "bubble_text_scale": ("bubble_text_scale",),
+    "drag_physics_enabled": ("drag_physics_enabled", "drag_physics"),
+    "drop_gravity_enabled": ("drop_gravity_enabled", "drop_gravity"),
+    "lock_position": ("lock_position",),
+    "shift_drag": ("shift_drag",),
+    "click_sound": ("click_sound", "click_sound_enabled"),
+    "click_sound_pack": ("click_sound_pack",),
+    "volume": ("volume", "click_sound_volume"),
+    "collision_enabled": ("collision_enabled",),
+    "collision_sound": ("collision_sound", "collision_sound_enabled"),
+    "golden_spin_on_click": ("golden_spin_on_click",),
+    "golden_spin_direct": ("golden_spin_direct",),
+    "edge_probe_enabled": ("edge_probe_enabled",),
+    "no_move": ("no_move",),
+    "throw_strength": ("throw_strength",),
+    "slingshot_enabled": ("slingshot_enabled",),
+    "file_feeding_enabled": ("file_feeding_enabled",),
+    "quiet_minutes_default": ("quiet_minutes_default",),
+    "quick_launch_apps": ("quick_launch_apps",),
+    "divination_enabled": ("divination_enabled",),
+    "festival_enabled": ("festival_enabled",),
+    "todo_items": ("todo_items",),
+    "voice_chime_enabled": ("voice_chime_enabled",),
+    "music_enabled": ("music_enabled",),
+    "ui_font_size": ("ui_font_size",),
+    "stream_capture_mode": ("stream_capture_mode",),
+    "allow_feature_mods": ("allow_feature_mods",),
+    "active_pets": ("active_pets",),
+    "spawn_inherit_size": ("spawn_inherit_size",),
+    "spawn_scale": ("spawn_scale",),
+    "menu_hidden": ("menu_hidden",),
+    "menu_order": ("menu_order",),
+    "menu_layout": ("menu_layout", "context_menu_layout"),
+}
+
+
+def _map_legacy_data(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map known v4/standalone keys without copying secrets or unknown data."""
+    mapped: dict[str, Any] = {}
+    for new_key, aliases in _LEGACY_KEY_ALIASES.items():
+        for old_key in aliases:
+            if old_key in raw:
+                mapped[new_key] = raw[old_key]
+                break
+    return mapped
 
 
 def _bool(value: Any, default: bool) -> bool:
@@ -212,23 +302,69 @@ class Config:
         if legacy:
             config.data.update(legacy)
             config.save()
+            config._migrate_legacy_slots()
         return config
 
     def _read_legacy(self) -> dict[str, Any]:
-        path = paths.legacy_config_path()
+        for root in paths.legacy_data_roots():
+            path = root / "config.json"
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            imported = _map_legacy_data(raw)
+            if imported:
+                return self._normalize({**DEFAULTS, **imported})
+        return {}
+
+    def _migrate_legacy_slots(self) -> list[str]:
+        """Copy old slot profiles into petcore files without touching the source."""
+        migrated: list[str] = []
+        source_root = None
+        for root in paths.legacy_data_roots():
+            if (root / "config.json").is_file():
+                source_root = root
+                break
+        if source_root is None:
+            return migrated
+        backup_root = self.root / "migration-backup"
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(raw, dict):
-            return {}
-        imported: dict[str, Any] = {}
-        for key in _LEGACY_IMPORT_KEYS:
-            if key in raw and raw[key] is not None:
-                imported[key] = raw[key]
-        if "mouse_through" in raw:
-            imported["click_through"] = bool(raw["mouse_through"])
-        return self._normalize({**DEFAULTS, **imported})
+            backup_root.mkdir(parents=True, exist_ok=True)
+            backup = backup_root / f"{source_root.name}-config.json"
+            if not backup.exists():
+                shutil.copy2(source_root / "config.json", backup)
+        except OSError:
+            # A backup failure must not alter the old source or prevent normal
+            # startup; the migration report is represented by diagnostics.
+            return migrated
+        for candidate in sorted(source_root.glob("config-slot-*.json")) + sorted(
+            source_root.glob("config-pet-*.json")
+        ):
+            stem = candidate.stem
+            suffix = stem.removeprefix("config-slot-").removeprefix("config-pet-")
+            if not suffix.isdigit() or not 0 < int(suffix) < 16:
+                continue
+            target = self.root / f"config-pet-{int(suffix)}.json"
+            if target.exists():
+                continue
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            mapped = _map_legacy_data(raw)
+            if not mapped:
+                continue
+            Config(self.root, mapped, filename=target.name).save()
+            migrated.append(target.name)
+            try:
+                shutil.copy2(candidate, backup_root / f"{source_root.name}-{candidate.name}")
+            except OSError:
+                pass
+        return migrated
 
     def _normalize(self, data: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(DEFAULTS)
@@ -389,3 +525,60 @@ class Config:
 
     def snapshot(self) -> dict[str, Any]:
         return json.loads(json.dumps(self.data))
+
+
+class ScopedConfig:
+    """Route settings reads/writes to a global config or the selected pet.
+
+    The settings UI historically received ``CoreHost`` directly, so pages call
+    ``host.config``.  Keeping this small Config-shaped facade lets existing
+    pages and feature settings gain correct per-pet behavior without giving
+    them a second configuration API.
+    """
+
+    def __init__(self, global_config: Config, pet_config: Config | None = None):
+        self.global_config = global_config
+        self.pet_config = pet_config or global_config
+
+    def _config(self, key: str) -> Config:
+        if self.pet_config is self.global_config or key in GLOBAL_CONFIG_KEYS:
+            return self.global_config
+        return self.pet_config
+
+    @property
+    def root(self) -> Path:
+        return self.pet_config.root
+
+    @property
+    def path(self) -> Path:
+        return self.pet_config.path
+
+    @property
+    def data(self) -> dict[str, Any]:
+        merged = self.global_config.snapshot()
+        if self.pet_config is not self.global_config:
+            merged.update(self.pet_config.snapshot())
+            for key in GLOBAL_CONFIG_KEYS:
+                merged[key] = self.global_config.get(key)
+        return merged
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._config(str(key)).get(str(key), default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._config(str(key)).set(str(key), value)
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.data
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        if self.pet_config is self.global_config:
+            self.global_config.restore(snapshot)
+            return
+        for key, value in snapshot.items():
+            self._config(str(key)).set(str(key), value)
+
+    def save(self) -> None:
+        self.global_config.save()
+        if self.pet_config is not self.global_config:
+            self.pet_config.save()

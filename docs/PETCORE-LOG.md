@@ -1081,3 +1081,26 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 
 - 本阶段只改文档，没有改变运行时行为；真实双屏、安装器 E2E、非 Windows 窗口和完整大素材
   导入继续留给 P1–P6 的实机阶段。
+---
+
+## L029 · 2026-10-22 · P1 每宠配置作用域与基础迁移
+
+**改动**
+
+- `ScopedConfig` 路由全局键与当前宠物键；设置窗口绑定当前窗口并保存到正确配置文件。
+- `CoreHost._apply_live_to()` 不再把主宠的角色、缩放、动画、物理和台词覆盖到所有子宠；
+  `PetManager` 只同步真正全局键。
+- 点击台词、自言自语按具体宠物读取配置；新增宠物生命周期钩子收口 timer。
+- 旧 standalone 配置和 slot 档案迁移到新目录，先写 `migration-backup/`，不修改旧源。
+- 新增配置作用域、设置窗口和迁移回归测试。
+
+**验证**
+
+- petcore：`608 passed`；petcore + 架构/报告/CI 守卫：`907 passed, 5 skipped`。
+- ruff：通过；`python -m petcore --check`：exit 0。
+- 作用域性能：get 0.14 µs/op（n=50,000），set 12.75 µs/op（n=5,000），snapshot 34.08 µs/op（n=500）。
+
+**未完成**
+
+- 会话、待办独立文件和 API/凭据引用需要对应业务消费者，留到 P3/P4；真实双屏和安装器
+  E2E 留到 P5/P6。

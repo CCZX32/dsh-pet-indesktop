@@ -21,24 +21,60 @@ DEFAULT_IMAGE_CHANCE = talk_images.image_chance({})
 class SelfTalkRuntime:
     def __init__(self, context):
         self.context = context
-        self._handle = None
+        self._handles: dict[int, str] = {}
         self._rng = random.Random()
         self.commands = {}
 
     def start(self) -> None:
-        self._schedule()
+        self._schedule_all()
 
-    def _schedule(self) -> None:
-        config = getattr(self.context.host, "config", None)
+    def on_pet_added(self, window) -> None:
+        self._schedule(window)
+
+    def on_pet_removed(self, window) -> None:
+        slot = int(getattr(window, "slot", 0))
+        handle = self._handles.pop(slot, None)
+        if handle is not None:
+            self.context.ports.scheduler.cancel(handle)
+
+    def _pets(self):
+        registry = getattr(self.context.ports, "pets", None)
+        getter = getattr(registry, "pets", None)
+        if callable(getter):
+            return list(getter())
+        return []
+
+    def _schedule_all(self) -> None:
+        pets = self._pets()
+        if not pets:
+            self._schedule(None)
+            return
+        for pet in pets:
+            slot = int(getattr(pet, "slot", 0))
+            if slot not in self._handles:
+                self._schedule(pet)
+
+    def _schedule(self, pet) -> None:
+        config = getattr(pet, "config", None) or getattr(self.context.host, "config", None)
         if config is None or not bool(config.get("self_talk_enabled")):
             return
         low = float(config.get("self_talk_min") or 20)
         high = max(low, float(config.get("self_talk_max") or 60))
         delay_ms = int(self._rng.uniform(low, high) * 1000)
-        self._handle = self.context.ports.scheduler.call_later(delay_ms, self._speak)
+        slot = int(getattr(pet, "slot", 0))
+        self._handles[slot] = self.context.ports.scheduler.call_later(
+            delay_ms, lambda slot=slot: self._speak(slot)
+        )
 
-    def _speak(self) -> None:
-        config = getattr(self.context.host, "config", None)
+    def _speak(self, slot: int | None = None) -> None:
+        pet = None
+        if slot is not None:
+            pet = next(
+                (item for item in self._pets() if int(getattr(item, "slot", -1)) == slot),
+                None,
+            )
+            self._handles.pop(slot, None)
+        config = getattr(pet, "config", None) or getattr(self.context.host, "config", None)
         if config is None or not bool(config.get("self_talk_enabled")):
             return
         try:
@@ -52,6 +88,9 @@ class SelfTalkRuntime:
             presentation = self.context.ports.presentation
             if presentation is None:
                 return
+            binder = getattr(presentation, "for_window", None)
+            if callable(binder) and pet is not None:
+                presentation = binder(getattr(pet, "window", None))
             directory, images = talk_images.configured_images(config)
             chance = talk_images.image_chance(config, DEFAULT_IMAGE_CHANCE)
             choice = talk_images.pick_choice(self._rng, texts, images, chance)
@@ -82,7 +121,7 @@ class SelfTalkRuntime:
         except Exception:
             logger.exception("self-talk failed")
         finally:
-            self._schedule()
+            self._schedule(pet)
 
     def _show_image(
         self,
@@ -109,9 +148,9 @@ class SelfTalkRuntime:
             return False
 
     def stop(self) -> None:
-        if self._handle:
-            self.context.ports.scheduler.cancel(self._handle)
-            self._handle = None
+        for handle in self._handles.values():
+            self.context.ports.scheduler.cancel(handle)
+        self._handles.clear()
 
     def close(self) -> None:
         self.stop()

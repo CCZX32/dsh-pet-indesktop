@@ -133,6 +133,7 @@ class PetHandleImpl:
         self.window = window
         self.slot = window.slot
         self.is_primary = window.is_primary
+        self.config = window.config
 
     def body_rect(self) -> tuple[int, int, int, int]:
         return self.window.body_rect()

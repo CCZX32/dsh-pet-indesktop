@@ -170,6 +170,28 @@ def _host(tmp_path: Path) -> FakeHost:
     return FakeHost(tmp_path)
 
 
+def test_settings_dialog_binds_to_the_clicked_child_pet(app, tmp_path: Path) -> None:
+    host = _host(tmp_path)
+    child_config = Config(
+        tmp_path,
+        {"character": "fallback", "scale": 0.5},
+        filename="config-pet-1.json",
+    )
+    host.window.slot = 1
+    host.window.config = child_config
+
+    dialog = SettingsDialog(host, target_window=host.window)
+    assert dialog.windowTitle() == "设置 · 子宠 1"
+    assert dialog.config.get("scale") == 0.5
+    dialog.config.set("scale", 0.9)
+    dialog.config.set("ui_font_size", 16)
+
+    assert child_config.get("scale") == 0.9
+    assert host.config.get("scale") == 0.72
+    assert host.config.get("ui_font_size") == 16
+    dialog.deleteLater()
+
+
 def _page(dialog: SettingsDialog, title: str) -> QWidget:
     for index in range(dialog.stack.count()):
         page = dialog.stack.widget(index)

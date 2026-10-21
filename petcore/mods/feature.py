@@ -244,6 +244,26 @@ class FeatureManager:
             return None
         return feature.commands.get(command_id)
 
+    def pet_added(self, window) -> None:
+        """Notify runtimes that a new pet profile is now available."""
+        for feature in self.features.values():
+            callback = getattr(feature.runtime, "on_pet_added", None)
+            if callable(callback):
+                try:
+                    callback(window)
+                except Exception:
+                    logger.warning("feature %s pet-added hook failed", feature.owner, exc_info=True)
+
+    def pet_removed(self, window) -> None:
+        """Notify runtimes before a pet profile is closed."""
+        for feature in self.features.values():
+            callback = getattr(feature.runtime, "on_pet_removed", None)
+            if callable(callback):
+                try:
+                    callback(window)
+                except Exception:
+                    logger.warning("feature %s pet-removed hook failed", feature.owner, exc_info=True)
+
     def stop(self) -> None:
         for feature in self.features.values():
             if feature.runtime is not None:

@@ -25,32 +25,19 @@ logger = logging.getLogger("petcore.ui.pets")
 
 MAX_PETS = 16
 SHARED_KEYS = (
-    "character",
-    "scale",
-    "frameseq",
-    "volume",
-    "always_on_top",
     "click_through",
-    "multi_screen",
-    "click_sound",
-    "click_squash_enabled",
-    "click_squash_ms",
-    "drag_physics_enabled",
-    "drop_gravity_enabled",
-    "throw_strength",
-    "slingshot_enabled",
-    "collision_enabled",
-    "collision_sound",
-    "golden_spin_on_click",
-    "golden_spin_direct",
-    "throw_egg_enabled",
-    "file_feeding_enabled",
-    "no_move",
-    "lock_position",
-    "shift_drag",
-    "playback_speed",
-    "animation_gap_seconds",
+    "active_pets",
+    "allow_feature_mods",
+    "hotkey_toggle_pet",
+    "last_settings_page",
+    "menu_hidden",
+    "menu_layout",
+    "menu_order",
+    "quick_launch_apps",
+    "spawn_inherit_size",
+    "spawn_scale",
     "stream_capture_mode",
+    "ui_font_size",
 )
 
 
@@ -83,9 +70,9 @@ class PetManager(QObject):
         if path.exists():
             return Config.load(self.root, filename=path.name)
         seed = {
-            key: self.config.get(key)
-            for key in SHARED_KEYS
-            if self.config.get(key) is not None
+            key: value
+            for key, value in self.config.data.items()
+            if key not in {"active_pets", "positions", "menu_layout", "menu_order", "menu_hidden"}
         }
         if not bool(self.config.get("spawn_inherit_size", True)):
             seed["scale"] = float(self.config.get("spawn_scale") or 0.72)
@@ -130,6 +117,9 @@ class PetManager(QObject):
             attach(window)
         except Exception:
             logger.debug("failed to attach interaction listeners", exc_info=True)
+        notify = getattr(features, "pet_added", None)
+        if callable(notify):
+            notify(window)
 
     def _detach_interaction(self, window: PetWindow) -> None:
         features = getattr(self.host, "features", None)
@@ -141,6 +131,9 @@ class PetManager(QObject):
             detach(window)
         except Exception:
             logger.debug("failed to detach interaction listeners", exc_info=True)
+        notify = getattr(features, "pet_removed", None)
+        if callable(notify):
+            notify(window)
 
     def _place_spawned(self, window: PetWindow, slot: int) -> None:
         window._layout = screen_mod.snapshot_from_qt()
@@ -231,8 +224,6 @@ class PetManager(QObject):
                 continue
             for key in SHARED_KEYS:
                 window.config.set(key, self.config.get(key))
-            window.config.set("spawn_inherit_size", self.config.get("spawn_inherit_size"))
-            window.config.set("spawn_scale", self.config.get("spawn_scale"))
             try:
                 window.config.save()
             except OSError:

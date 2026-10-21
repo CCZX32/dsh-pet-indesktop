@@ -35,7 +35,14 @@ def live_host(app, tmp_path: Path, monkeypatch):
     config.set("collision_sound", False)
     config.set("active_pets", [0, 1])
     Config(
-        tmp_path, {"character": "fallback"}, filename="config-pet-1.json"
+        tmp_path,
+        {
+            "character": "fallback",
+            "click_talk_enabled": True,
+            "click_talk_texts": [CLICK_TEXT],
+            "self_talk_image_chance": 0,
+        },
+        filename="config-pet-1.json",
     ).save()
 
     host = CoreHost(app, config, tmp_path, ())
@@ -64,11 +71,13 @@ def test_restored_child_gets_click_listeners(live_host) -> None:
 def test_click_talk_fires_for_primary_and_child(live_host) -> None:
     host, _manager, primary, child = live_host
 
-    for window in (primary, child):
+    primary.config.set("click_talk_texts", ["主宠台词"])
+    child.config.set("click_talk_texts", ["子宠台词"])
+    for window, expected in ((primary, "主宠台词"), (child, "子宠台词")):
         host._active_window = window
         window.bubble.label.setText("")
         window._notify_click()
-        assert window.bubble.label.text() == CLICK_TEXT
+        assert window.bubble.label.text() == expected
 
 
 def test_attach_window_is_idempotent_and_cancel_removes_the_listener(live_host) -> None:

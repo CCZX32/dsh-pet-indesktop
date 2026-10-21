@@ -217,7 +217,7 @@ class AppearancePage(SettingsPage):
         card.add_row(
             "点击穿透",
             self.click_through_check,
-            "鼠标点击穿过桌宠，不再响应拖动与互动；开启后右键菜单点不到，可从托盘菜单关闭。",
+            "影响所有桌宠：鼠标点击穿过桌宠，不再响应拖动与互动；开启后右键菜单点不到，可从托盘菜单关闭。",
         )
 
         self.stream_capture_check = make_checkbox(self)
@@ -226,7 +226,7 @@ class AppearancePage(SettingsPage):
         card.add_row(
             "直播捕获兼容",
             self.stream_capture_check,
-            "让 OBS / 直播姬能在窗口列表里枚举到桌宠。捕获方式请选 "
+            "影响所有桌宠，让 OBS / 直播姬能在窗口列表里枚举到桌宠。捕获方式请选 "
             "「Windows 10 (1903 及以上)」，BitBlt 会黑屏；多只桌宠的窗口都可单独捕获。",
         )
 
@@ -266,7 +266,7 @@ class AppearancePage(SettingsPage):
         text_card.add_row(
             "界面字号",
             self.ui_font_size_spin,
-            "同步调整设置页与右键菜单字号。",
+            "全局设置：同步调整设置页与所有桌宠的右键菜单字号。",
         )
 
         self.bubble_text_scale_spin = make_spin(self)

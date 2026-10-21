@@ -1351,7 +1351,7 @@ class PetWindow(QWidget):
             self.host.pets.close_secondary()
 
     def open_settings(self, initial_page: str | None = None) -> None:
-        self.host.open_settings(initial_page)
+        self.host.open_settings(initial_page, window=self)
 
     def reload_mods(self) -> None:
         self.host.reload_mods()

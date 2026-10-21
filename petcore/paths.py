@@ -134,6 +134,28 @@ def legacy_config_path() -> Path:
     return base_dir() / LEGACY_APP_NAME / "config.json"
 
 
+def legacy_data_roots() -> tuple[Path, ...]:
+    """Return old standalone data roots, including published variants."""
+    base = base_dir()
+    candidates = [base / LEGACY_APP_NAME]
+    try:
+        candidates.extend(sorted(base.glob(f"{LEGACY_APP_NAME}-*")))
+    except OSError:
+        pass
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return tuple(result)
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path

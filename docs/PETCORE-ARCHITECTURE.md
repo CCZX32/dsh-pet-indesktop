@@ -245,6 +245,17 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 - **打包回归**：`petcore/menu_templates` 必须进 PyInstaller 数据；`load_default()`
   内置兜底常量，`--check` 输出 `menu_template=json|builtin`，避免旧布局缺项无法补齐。
 
+## 20. P1 作用域实现（2026-10-22）
+
+- `petcore.config.ScopedConfig` 是设置页和 Core feature 使用的统一视图：显式全局键路由到
+  主配置，其余键路由到目标宠物的 `Config`。
+- `SettingsDialog(target_window=...)` 绑定当前窗口；`CoreHost._apply_live_to()` 对每只宠物
+  从自己的 profile 读取角色/缩放/物理/动画/台词，对全局键读取主配置。
+- `FeatureManager.pet_added/pet_removed` 是运行时生命周期接缝，自语等按宠物排程的 feature
+  不再只覆盖启动时的主宠。
+- 迁移器当前处理 standalone 主配置和 slot profile；会话、待办和 API 文件等业务数据必须由
+  对应功能阶段实现并清洗敏感字段。
+
 ## 19. P1–P6 目标架构补充（2026-10-22）
 
 ### 19.1 当前宠物上下文

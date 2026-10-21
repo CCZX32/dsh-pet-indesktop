@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import __version__
+from ...config import ScopedConfig
 from ..icons import icon as menu_icon
 from ..placement import place_beside_pet
 from .base import make_button, page_label_texts, reveal_text
@@ -61,6 +62,19 @@ def _page_icon(title: str) -> str:
     return _PAGE_ICONS.get(str(title), "application")
 
 
+class _SettingsHostProxy:
+    """Expose the host API while routing ``config`` to the selected pet."""
+
+    def __init__(self, host, target_window=None):
+        self._host = host
+        self.window = target_window or getattr(host, "window", None)
+        target_config = getattr(self.window, "config", None)
+        self.config = ScopedConfig(host.config, target_config)
+
+    def __getattr__(self, name):
+        return getattr(self._host, name)
+
+
 @dataclass
 class _PageEntry:
     title: str
@@ -70,15 +84,19 @@ class _PageEntry:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, host, parent=None, initial_page: str | None = None):
+    def __init__(
+        self, host, parent=None, initial_page: str | None = None, target_window=None
+    ):
         super().__init__(parent)
-        self.host = host
-        self.config = host.config
+        self.root_host = host
+        self.target_window = target_window or getattr(host, "window", None)
+        self.host = _SettingsHostProxy(host, self.target_window)
+        self.config = self.host.config
         self._pages: list[_PageEntry] = []
         self._disposed = False
         self._placed = False
         self._snapshot = self.config.snapshot()
-        window = getattr(host, "window", None)
+        window = self.target_window
         visible_check = getattr(window, "isVisible", None)
         self._initial_visible = bool(visible_check()) if callable(visible_check) else True
         self._before = {
@@ -92,7 +110,10 @@ class SettingsDialog(QDialog):
         self._live_timer.setInterval(16)
         self._live_timer.timeout.connect(self._apply_live)
         self.setObjectName("settingsDialog")
-        self.setWindowTitle("设置")
+        if window is None or int(getattr(window, "slot", 0)) == 0:
+            self.setWindowTitle("设置 · 主宠")
+        else:
+            self.setWindowTitle(f"设置 · 子宠 {int(window.slot)}")
         self.resize(900, 620)
         self.setMinimumSize(720, 500)
         self.setModal(False)

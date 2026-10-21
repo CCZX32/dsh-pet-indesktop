@@ -42,10 +42,13 @@ def _mod_diagnostics(result) -> list[str]:
 
 
 class _PresentationAdapter:
-    def __init__(self, host):
+    def __init__(self, host, target_window=None):
         self._host = host
+        self._target_window = target_window
 
     def _window(self):
+        if self._target_window is not None:
+            return self._target_window
         active = getattr(self._host, "_active_window", None) or getattr(
             self._host, "window", None
         )
@@ -58,6 +61,10 @@ class _PresentationAdapter:
                 return visible[0]
             return active
         return active
+
+    def for_window(self, window):
+        """Return a presentation port bound to one pet window."""
+        return _PresentationAdapter(self._host, window)
 
     def say(self, text: str, *, duration_ms: int = 4000, force: bool = False) -> None:
         if not force:
@@ -316,29 +323,34 @@ class CoreHost:
 
     def _apply_live_to(self, window) -> None:
         window_config = getattr(window, "config", None)
+        # Global values are read from the process config; pet-local values are
+        # read from the window's own profile.  The old implementation copied
+        # every key from the primary profile, which made a child settings
+        # window silently edit the wrong pet.
+        global_config = self.config
+        pet_config = window_config or self.config
         if window_config is not None:
             for key in SHARED_KEYS:
-                if key in self.config.data:
-                    window_config.set(key, self.config.get(key))
-            window_config.set("edge_probe_enabled", self.config.get("edge_probe_enabled"))
-        character = str(self.config.get("character") or "")
+                if key in global_config.data:
+                    window_config.set(key, global_config.get(key))
+        character = str(pet_config.get("character") or "")
         if character and character != getattr(window, "character_id", ""):
             window.set_character(character, persist=False)
-        scale = float(self.config.get("scale") or 0.72)
+        scale = float(pet_config.get("scale") or 0.72)
         state = getattr(window, "state", None)
         current_scale = float(getattr(state, "scale", scale))
         if abs(scale - current_scale) > 1e-9:
             window.set_scale(scale, persist=False)
-        on_top = bool(self.config.get("always_on_top"))
+        on_top = bool(pet_config.get("always_on_top"))
         if on_top != bool(getattr(window, "always_on_top", on_top)):
             window.set_always_on_top(on_top, persist=False)
-        click_through = bool(self.config.get("click_through"))
+        click_through = bool(global_config.get("click_through"))
         if click_through != bool(getattr(window, "click_through", click_through)):
             window.set_click_through(click_through, persist=False)
-        edge_probe = bool(self.config.get("edge_probe_enabled"))
+        edge_probe = bool(pet_config.get("edge_probe_enabled"))
         if hasattr(window, "set_edge_probe_enabled"):
             window.set_edge_probe_enabled(edge_probe, persist=False)
-        stream = bool(self.config.get("stream_capture_mode"))
+        stream = bool(global_config.get("stream_capture_mode"))
         if stream != bool(getattr(window, "stream_capture_mode", stream)):
             window.set_stream_capture_mode(stream, persist=False)
 
@@ -368,12 +380,21 @@ class CoreHost:
         if self.window is not None:
             self.window.set_visible(not self.window.isVisible())
 
-    def open_settings(self, initial_page: str | None = None) -> None:
+    def open_settings(self, initial_page: str | None = None, *, window=None) -> None:
         from .settings.dialog import SettingsDialog
 
         dialog = self.settings_dialog
+        target = window or self._active_window or self.window
+        if dialog is not None and getattr(dialog, "target_window", None) is not target:
+            # One non-modal dialog remains the single source of truth.  Commit
+            # the old target before rebuilding it for the pet that was clicked.
+            dialog.close()
+            if self.settings_dialog is dialog:
+                self.settings_dialog = None
+            dialog.deleteLater()
+            dialog = None
         if dialog is None:
-            dialog = SettingsDialog(self, initial_page=initial_page)
+            dialog = SettingsDialog(self, initial_page=initial_page, target_window=target)
             dialog.finished.connect(lambda _result, d=dialog: self._settings_closed(d))
             self.settings_dialog = dialog
         elif initial_page:
