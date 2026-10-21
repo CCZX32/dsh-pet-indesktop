@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -133,6 +134,17 @@ class _AiSettingsPage(QWidget):
         self.chat_memory_manage_btn = QPushButton("查看与管理…", self)
         self.chat_memory_manage_btn.setProperty("variant", "ghost")
         self.chat_memory_manage_btn.clicked.connect(self._open_memory_manager)
+        # 工具（Agent，全局，默认开）：对话里可调用的工具——联网搜索与读网页、
+        # 读白名单目录文件、写记忆。隐私敏感（白名单目录内容可随对话发往远端
+        # provider），文案如实写明。
+        self.chat_agent_tools = ToggleSwitch()
+        self.chat_agent_tools.setChecked(bool(config.get("chat_agent_tools", True)))
+        self.chat_agent_tool_rounds = QSpinBox()
+        self.chat_agent_tool_rounds.setRange(1, 8)
+        self.chat_agent_tool_rounds.setValue(int(config.get("chat_agent_tool_rounds", 5) or 5))
+        self.chat_agent_fs_roots = QLineEdit()
+        self.chat_agent_fs_roots.setText(str(config.get("chat_agent_fs_roots", "") or ""))
+        self.chat_agent_fs_roots.setPlaceholderText("追加目录，分号分隔；留空 = 只用默认三个")
         self.system_notify_check = ToggleSwitch()
         # 系统通知键：构造期快照无条件回写会把打开期间外部（老聊天设置即存入口
         # settings_dialog.py:437）对该键的改动静默回滚，所以只在用户实际拨动过
@@ -302,6 +314,27 @@ class _AiSettingsPage(QWidget):
                 "chat_memory_manage", "记忆管理",
                 "按角色保存在本地（最多 100 条 / 4000 字），可查看、单条删除或全部清空。",
                 self.chat_memory_manage_btn,
+            ),
+        ], self))
+        root.addWidget(SettingsSection("工具（Agent）", [
+            SettingRow(
+                "chat_agent_tools", "对话里可用工具",
+                "开启后，它聊天时可以自己决定调用工具：联网搜索与读网页、读取下方白名单"
+                "目录里的文本文件、把你说的事写进记忆。注意：白名单目录的内容与记忆可能"
+                "随对话发往你配置的模型服务；关闭则只做纯聊天。默认开启。",
+                self.chat_agent_tools,
+            ),
+            SettingRow(
+                "chat_agent_tool_rounds", "工具调用轮数上限",
+                "一次提问最多连续调用几轮工具：1 = 最多一轮（最省），5 = 默认；"
+                "查资料 + 读文件组合时轮数多才够用。",
+                self.chat_agent_tool_rounds,
+            ),
+            SettingRow(
+                "chat_agent_fs_roots", "可读目录（白名单）",
+                "它能读的文件只限这些目录：默认桌面、文档、下载三个；这里可追加，"
+                "分号分隔，写错的目录会被忽略。",
+                self.chat_agent_fs_roots,
             ),
         ], self))
         vision_rows = [
@@ -797,6 +830,9 @@ class _AiSettingsPage(QWidget):
         self.config.set("chat_memory_enabled", self.chat_memory_enabled.isChecked())
         self.config.set("chat_memory_auto_extract", self.chat_memory_auto_extract.isChecked())
         self.config.set("chat_memory_extract_interval", int(self.chat_memory_extract_interval.value()))
+        self.config.set("chat_agent_tools", self.chat_agent_tools.isChecked())
+        self.config.set("chat_agent_tool_rounds", int(self.chat_agent_tool_rounds.value()))
+        self.config.set("chat_agent_fs_roots", self.chat_agent_fs_roots.text().strip())
         self.config.set_chat_settings(self.settings)
 
     def _chat_memory(self) -> ChatMemory:
