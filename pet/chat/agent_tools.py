@@ -85,6 +85,19 @@ def _outside_message(roots) -> str:
 
 #: 单段路径名 → 根目录名（小写）的中文别名：模型说「下载」时指的是 Downloads 根。
 _FS_ROOT_ALIASES = {'桌面': 'desktop', '下载': 'downloads', '文档': 'documents'}
+
+#: Windows 设备名（CON/NUL/COM1…）：exists() 判定依环境而异——判存在时
+#: open().read() 会永久阻塞聊天工作线程（k3 审查建议 4），一律按白名单外拒绝。
+_DEVICE_NAMES = frozenset(
+    {'CON', 'PRN', 'AUX', 'NUL'}
+    | {f'COM{i}' for i in range(1, 10)}
+    | {f'LPT{i}' for i in range(1, 10)}
+)
+
+
+def _is_device_name(path) -> bool:
+    stem = str(getattr(path, 'name', path)).split('.')[0].upper()
+    return stem in _DEVICE_NAMES
 #: 平台默认只读目录（QStandardPaths 处理 OneDrive 重定向；Qt 不可用时回落 ~/Desktop 等）。
 _DEFAULT_ROOT_NAMES = ('Desktop', 'Documents', 'Downloads')
 
@@ -347,6 +360,8 @@ def resolve_in_roots(raw, roots) -> Path:
             resolved_candidate = (matches[0] if matches else Path(roots[0])) / candidate
         candidate = resolved_candidate
     target = _real(candidate)
+    if _is_device_name(target):
+        raise ToolError(_outside_message(roots))
     for root in roots:
         if _within(target, _real(root)):
             return target

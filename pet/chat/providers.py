@@ -174,7 +174,6 @@ _CONTEXT_PROMPT=("【{title}】（当前时间：{today}；以下资料是刚刚
 #: 换成通用口径——标题对不上内容会误导模型。
 _TITLE_WEB='联网搜索结果'
 _TITLE_TOOLS='工具返回资料'
-_MAX_RESEARCH_ROUNDS=3
 _MAX_CALLS_PER_ROUND=4
 _MAX_NOTES_CHARS=24000
 

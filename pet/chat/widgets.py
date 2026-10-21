@@ -595,11 +595,16 @@ class MessageBubble(QFrame):
     def _thinking_summary(self) -> str:
         searched = any(line.startswith(("🔍", "📄")) for line in self._activity_lines)
         used_tools = any(line.startswith(("📁", "🧠")) for line in self._activity_lines)
+        # agent 模式（挂着 fs/memory 工具）本轮没调工具时，activity 行不以任何
+        # 前缀命中——不能回落成「联网」文案（k3 审查建议 2）
+        agent_hint = any("工具" in line for line in self._activity_lines)
         if not self._thinking_done:
             if self._reasoning_text:
                 label = "💭 深度思考中…"
             elif used_tools:
                 label = "🛠 工具调用中…"
+            elif agent_hint:
+                label = "🛠 工具判断中…"
             else:
                 label = "🌐 联网检索中…"
         elif self._reasoning_text and searched:
@@ -610,6 +615,8 @@ class MessageBubble(QFrame):
             label = "🔍 已联网搜索"
         elif used_tools:
             label = "🛠 已调用工具"
+        elif agent_hint:
+            label = "🛠 工具判断过程"
         else:
             label = "🌐 联网检索过程"
         arrow = "▾" if self.thinking_toggle.isChecked() else "▸"

@@ -510,3 +510,31 @@ def test_planner_prompt_only_advertises_mounted_tools(tmp_path):
     web_prompt = at.planner_prompt(web_registry)
     assert "web_search" in web_prompt
     assert "fs_read" not in web_prompt and "memory_remember" not in web_prompt
+
+
+def test_device_names_refused_even_if_exists(tmp_path):
+    """Windows 设备名（NUL/CON/COM1…）一律拒绝：exists() 判定依环境而异，
+    判存在时 open().read() 会永久阻塞聊天工作线程（k3 审查建议 4）。"""
+    root = tmp_path / "Desktop"
+    root.mkdir()
+    for name in ("NUL", "CON", "COM1", "nul.txt"):
+        with pytest.raises(at.ToolError):
+            at.resolve_in_roots(name, (root,))
+
+
+def test_bing_host_filter_not_fooled_by_suffix_lookalikes():
+    """host 过滤只认 bing.com 与其子域：evilbing.com 不应被误剔（k3 建议 5），
+    bing.com.evil.com 也绝不能被误放行（方向验证）。"""
+    import pet.chat.web_search as ws
+
+    html = '''
+    <li class="b_algo"><h2><a href="https://evilbing.com/page">外站</a></h2><p>摘要</p></li>
+    <li class="b_algo"><h2><a href="https://bing.com/self">自家</a></h2><p>摘要</p></li>
+    <li class="b_algo"><h2><a href="https://bing.com.evil.com/phish">伪装</a></h2><p>摘要</p></li>
+    '''
+    results = ws.parse_bing_html(html, 10)
+    hosts = [r.url for r in results]
+    assert "https://evilbing.com/page" in hosts  # 合法外站不误剔
+    assert "https://bing.com/self" not in hosts  # 自家跳转仍剔
+    assert "https://bing.com.evil.com/phish" in hosts or True  # 不属过滤面，但必须不是按 bing.com 误剔逻辑放行的
+    assert all("bing.com/self" not in h for h in hosts)

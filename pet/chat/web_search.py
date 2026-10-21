@@ -161,7 +161,8 @@ def parse_bing_html(page: str, limit: int) -> list[SearchResult]:
         if not url.startswith('http') or 'bing.com/aclick' in url:
             continue
         host = urllib.parse.urlparse(url).netloc
-        if host.endswith('bing.com') or host.endswith('microsofttranslator.com'):
+        if host == 'bing.com' or host.endswith('.bing.com') \
+                or host == 'microsofttranslator.com' or host.endswith('.microsofttranslator.com'):
             continue
         title = _clean_text(m.group(2))
         if not title:
