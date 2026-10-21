@@ -2,7 +2,8 @@
 
 > **基线**：`be0eb46`（origin/main，PR #327 Qt 插件路径消毒之后）
 > **分支**：`feat/agent-tools`（worktree `/d/dsh-pet-agent-tools`）
-> **范围**：12 个文件（实现 8、测试 5，其中 4 个新增）
+> **范围**：14 个文件 `+1876/−62`（实现 7、测试 5、文档 2；其中**新增 5 个**文件：
+> `pet/chat/agent_tools.py`、3 个测试文件、本报告）
 > **关联**：`.scratch/personal-agent/SPEC-v0.md`（本 PR 的需求 spec）
 
 ## 一、核心特性
@@ -36,18 +37,28 @@
 
 ## 二、修改文件说明
 
-`git diff --numstat`（相对 `be0eb46`，不含 `.scratch/` 探针脚本）：
+`git diff --numstat be0eb46 HEAD`（不含 `.scratch/` 探针脚本；本报告的 301 行含
+§六.1 回填）：
 
 ```
+1      0      docs/INDEX.md
+301    0      docs/PR-REPORT-PERSONAL-AGENT-V0-2026-10-21.md
+625    0      pet/chat/agent_tools.py
 3      0      pet/chat/legacy_widgets.py
 4      2      pet/chat/models.py
 54     56     pet/chat/providers.py
 44     2      pet/chat/web_search.py
 12     1      pet/chat/widgets.py
 9      0      pet/config.py
+457    0      tests/test_agent_tools.py
+259    0      tests/test_agent_tools_loop.py
 6      1      tests/test_chat_thinking_web_search.py
 6      0      tests/test_config_schema.py
+95     0      tests/test_web_search_bing.py
 ```
+
+（合计 14 文件 `+1876/−62`。上表逐文件的增删与本报告同一次 `git diff` 一致；
+本报告自身的行数会在报告继续补写时增长，源码/测试的行数不会再变。）
 
 ### 实现
 
