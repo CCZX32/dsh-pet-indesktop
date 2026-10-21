@@ -214,6 +214,18 @@ exact breakpoint there; see `docs/agents/handoff.md`.
 找文档先查 `docs/INDEX.md`（全文档入口索引：每条一句话 + 何时必读）；
 新文档入场必须按其中的规则登记并互链。高频专项指针：
 
+- **petcore 分支（core + mod 重构）**：在 `petcore/` 下改任何代码/测试/文档前，
+  先读 [`petcore/AGENTS.md`](petcore/AGENTS.md) 与
+  [`docs/PETCORE-LOG-INDEX.md`](docs/PETCORE-LOG-INDEX.md)。硬要求：每次改动
+  追加 `docs/PETCORE-LOG.md` 的 `LNNN` 条目，并在 log-index 加一行；最终形态看
+  [`docs/PETCORE-SPEC.md`](docs/PETCORE-SPEC.md)。P2 的交互/多宠/打包边界看
+  [`docs/PETCORE-ROADMAP.md`](docs/PETCORE-ROADMAP.md) §11–§12；动画排期看
+  [`docs/PETCORE-ANIMATION-BACKLOG.md`](docs/PETCORE-ANIMATION-BACKLOG.md)。
+  P3 的设置聚合、可导入 mod 样板与移动同步见
+  [`docs/PETCORE-MOD-FORMAT.md`](docs/PETCORE-MOD-FORMAT.md) §8 / `examples/petcore-mods/README.md`。
+  允许在独立 mod/纯逻辑/文档任务上用 AgentSwarm 并行；`PetWindow`/`app.py`/
+  `config.py`/菜单模板/四大文档由主代理串行修改。
+
 - Read `docs/ISSUE-111-WINDOWS-SESSION-END-FFMPEG-2026-09-12.md` when changing
   ffmpeg spawning (`webm_clip` reader/first-frame/meta/exe probes), warm
   scheduling, or anything that runs during Windows shutdown/logoff

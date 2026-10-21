@@ -1,0 +1,317 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from . import __version__, paths
+from .config import Config
+from .log import get_logger, setup_logging
+
+
+def _ensure_streams() -> None:
+    """窗口化打包（PyInstaller --windowed）下 sys.stdout/stderr 是 None。
+
+    CLI 子命令仍要能跑（`petcore mods list`、`--check`），否则第一次 print 就
+    抛 AttributeError；这里接到 devnull，等价于「静默丢弃控制台输出」。
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        except OSError:
+            pass
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="petcore", description="dsh-pet core")
+    parser.add_argument("--version", action="store_true", help="print version and exit")
+    parser.add_argument("--check", action="store_true", help="headless self check")
+    parser.add_argument("--out", type=Path, default=None, help="write --check report to this path")
+    parser.add_argument("--character", default=None)
+    parser.add_argument("--scale", type=float, default=None)
+    parser.add_argument("--mods-dir", action="append", default=[])
+    parser.add_argument("--portable", action="store_true")
+    parser.add_argument("--instance", default=None, help="isolated data root, e.g. pet2")
+    parser.add_argument("--frameseq", choices=("auto", "off", "only"), default=None)
+    parser.add_argument("--screen", default=None)
+    parser.add_argument("--allow-feature-mods", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--root", type=Path, default=None, help="data root (default: user data dir)")
+    parser.add_argument("command", nargs="?", default=None)
+    return parser
+
+
+def _value_options(parser: argparse.ArgumentParser) -> frozenset[str]:
+    options: set[str] = set()
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public enumeration
+        if action.option_strings and action.nargs != 0:
+            options.update(action.option_strings)
+    return frozenset(options)
+
+
+def _subcommand_index(argv: list[str], names: tuple[str, ...]) -> int | None:
+    """Locate a subcommand token that is not the value of a preceding option."""
+    value_options = _value_options(_parser())
+    skip_value = False
+    for index, token in enumerate(argv):
+        if skip_value:
+            skip_value = False
+            continue
+        if token in names:
+            return index
+        if token in value_options:
+            skip_value = True
+    return None
+
+
+def _menu_ids(nodes) -> set[str]:
+    found: set[str] = set()
+    for node in nodes if isinstance(nodes, list) else ():
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "")
+        if node.get("type") in {"action", "submenu"} and node_id:
+            found.add(node_id)
+        found.update(_menu_ids(node.get("children", [])))
+    return found
+
+
+def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | None = None) -> int:
+    from .content.collect import collect_characters
+    from .ui import menu_layout
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    characters, result = collect_characters(
+        root=root,
+        mod_dirs=mod_dirs,
+        frameseq_mode=str(config.get("frameseq") or "auto"),
+        allow_feature_mods=bool(config.get("allow_feature_mods")),
+    )
+    character_report = []
+    for character in characters:
+        backends: dict[str, int] = {}
+        for animation in character.animations:
+            if animation.frameseq_dir is not None:
+                kind = "frameseq"
+            elif animation.path is not None:
+                kind = animation.path.suffix.lower().lstrip(".") or "unknown"
+            else:
+                kind = "none"
+            backends[kind] = backends.get(kind, 0) + 1
+        character_report.append(
+            {
+                "id": character.id,
+                "name": character.name,
+                "owner": character.owner,
+                "animations": len(character.animations),
+                "backends": backends,
+                "body_box": character.body_box,
+                "head_box": character.head_box,
+            }
+        )
+    mod_report = [
+        {
+            "id": mod.id,
+            "kind": mod.kind,
+            "name": mod.manifest.name,
+            "version": mod.manifest.version,
+            "enabled": mod.enabled,
+            "path": str(mod.path),
+        }
+        for mod in result.mods
+    ]
+    # Headless evidence for the packaged menu: `menu_template` is "builtin" when
+    # petcore/menu_templates did not ship with the build.
+    menu_template, menu_template_source = menu_layout.load_default_with_source()
+    menu_ids = _menu_ids(menu_template.get("nodes", []))
+    menu_resolved = menu_layout.resolve(None, registered=menu_ids, available=menu_ids)
+    from .media import talk_images
+
+    configured_dir = talk_images.resolve_image_dir(config.get("self_talk_image_dir"))
+    builtin_dir = talk_images.builtin_image_dir()
+    report = {
+        "version": __version__,
+        "data_root": str(root),
+        "config": config.snapshot(),
+        "active_pets": list(config.get("active_pets") or [0]),
+        "pet_configs": {
+            str(slot): str(paths.pet_config_path(root, slot))
+            for slot in (config.get("active_pets") or [0])
+        },
+        "mod_dirs": [str(path) for path in mod_dirs],
+        "legacy_characters": str(paths.legacy_characters_root()),
+        "mods": mod_report,
+        "characters": character_report,
+        "diagnostics": list(result.diagnostics),
+        "menu_template": menu_template_source,
+        "menu_layout_diagnostics": list(menu_resolved.diagnostics[:20]),
+        "self_talk_images": {
+            "dir": str(configured_dir),
+            "count": len(talk_images.image_files(configured_dir)),
+            "readable": len(talk_images.readable_images(configured_dir)),
+            "builtin_dir": str(builtin_dir),
+            "builtin_count": len(talk_images.image_files(builtin_dir)),
+            "builtin_readable": len(talk_images.readable_images(builtin_dir)),
+        },
+    }
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    print(payload)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(payload + "\n", encoding="utf-8")
+    return 0
+
+
+def _resolve_root(args: argparse.Namespace) -> Path:
+    if getattr(args, "root", None) is not None:
+        return Path(args.root)
+    return paths.data_root(portable=args.portable, instance=args.instance)
+
+
+def main(argv: list[str] | None = None) -> int:
+    _ensure_streams()
+    raw = list(sys.argv[1:] if argv is None else argv)
+
+    mods_index = None
+    if raw[:1] not in (["pack-character"], ["pack-legacy"], ["autostart"], ["provision"]):
+        mods_index = _subcommand_index(raw, ("mods",))
+    if mods_index is not None:
+        from .mods.cli import main as mods_main
+
+        global_args, _extra_args = _parser().parse_known_args(raw[:mods_index])
+        try:
+            root = _resolve_root(global_args)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        tokens: list[str] = []
+        if raw[:mods_index]:
+            tokens.extend(["--root", str(root)])
+        for item in global_args.mods_dir:
+            tokens.extend(["--mods-dir", item])
+        return mods_main(tokens + raw[mods_index + 1 :])
+
+    if raw[:1] == ["pack-character"]:
+        parser = argparse.ArgumentParser(prog="petcore pack-character")
+        parser.add_argument("source", type=Path)
+        parser.add_argument("--out", required=True, type=Path)
+        parser.add_argument("--id", default=None)
+        parser.add_argument("--name", default=None)
+        parser.add_argument("--version", default="1.0.0")
+        parser.add_argument("--copy", action="store_true")
+        pack_args = parser.parse_args(raw[1:])
+        from .content.character_pack import build_character_pack
+
+        ok, message = build_character_pack(
+            pack_args.source,
+            pack_args.out,
+            character_id=pack_args.id,
+            name=pack_args.name,
+            version=pack_args.version,
+            link=not pack_args.copy,
+        )
+        print(message)
+        return 0 if ok else 1
+
+    if raw[:1] == ["pack-legacy"]:
+        parser = argparse.ArgumentParser(prog="petcore pack-legacy")
+        parser.add_argument("character")
+        parser.add_argument("--out", required=True)
+        parser.add_argument("--copy", action="store_true", help="copy files instead of hardlinks")
+        pack_args = parser.parse_args(raw[1:])
+        from .content.pack import pack_legacy
+
+        ok, message = pack_legacy(pack_args.character, Path(pack_args.out), link=not pack_args.copy)
+        print(message)
+        return 0 if ok else 1
+
+    if raw[:1] == ["autostart"]:
+        from .platform import autostart
+
+        action = raw[1] if len(raw) > 1 else "status"
+        if action == "status":
+            print("on" if autostart.is_enabled() else "off")
+            return 0
+        if action == "on":
+            ok = autostart.enable()
+            print("enabled" if ok else "failed")
+            return 0 if ok else 1
+        if action == "off":
+            ok = autostart.disable()
+            print("disabled" if ok else "failed")
+            return 0 if ok else 1
+        print("usage: petcore autostart on|off|status")
+        return 1
+
+    if raw[:1] == ["provision"]:
+        parser = argparse.ArgumentParser(prog="petcore provision")
+        parser.add_argument("character", nargs="?", default="shenshen")
+        parser.add_argument("--budget", type=float, default=60.0)
+        parser.add_argument("--migration-clips", type=int, default=1)
+        prov_args = parser.parse_args(raw[1:])
+        from .content.legacy import load_character
+        from .media.provision import provision_character
+
+        character = load_character(prov_args.character, frameseq_mode="off")
+        if character is None:
+            print(f"unknown or empty character: {prov_args.character}")
+            return 1
+        report = provision_character(
+            character,
+            budget_seconds=prov_args.budget,
+            migration_clips=prov_args.migration_clips,
+        )
+        if report is None:
+            print("provision unavailable (no webm or frameseq pipeline)")
+            return 1
+        for field in (
+            "converted",
+            "skipped",
+            "failed",
+            "retired",
+            "locked",
+            "idle",
+            "deferred_budget",
+            "deferred_backoff",
+            "deferred_disk",
+        ):
+            print(f"{field}: {getattr(report, field, 0)}")
+        return 0
+
+    args, _extra = _parser().parse_known_args(raw)
+    if args.version:
+        print(__version__)
+        return 0
+    try:
+        root = _resolve_root(args)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    setup_logging(paths.logs_dir(root), verbose=args.verbose)
+    logger = get_logger("cli")
+    config = Config.load(root, portable=args.portable)
+    if args.scale is not None:
+        config.set("scale", args.scale)
+    if args.character:
+        config.set("character", args.character)
+    if args.frameseq is not None:
+        config.set("frameseq", args.frameseq)
+    if args.screen:
+        config.set("screen_name", args.screen)
+    if args.allow_feature_mods:
+        config.set("allow_feature_mods", True)
+    extra = tuple(Path(item) for item in args.mods_dir)
+    mod_dirs = paths.mods_dirs(root, extra)
+    if args.check:
+        return _check(root, config, mod_dirs, args.out)
+    logger.info("starting petcore %s", __version__)
+    from .ui.app import run
+
+    return run(config, root=root, mod_dirs=mod_dirs, instance=args.instance)

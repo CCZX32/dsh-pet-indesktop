@@ -142,6 +142,18 @@
 
 ## PR 报告存档
 
+- [petcore 首版 core + mod 宿主（2026-10-20）](PR-REPORT-PETCORE-M0-M6-2026-10-20.md)：新分支 `feat/petcore-vpet-architecture` 的最小 core、mod 加载器、设置宿主与多屏；改 `petcore/` 或评估重构进度时必读。
+- [petcore P1-C 窗口/大小/实时预览（2026-10-20）](PR-REPORT-PETCORE-P1C-2026-10-20.md)：设置/关于非模态、10–300% 大小、设置实时预览与取消回滚、菜单/设置覆盖矩阵、文档体系；改这些行为或复测时必读。
+- [petcore P1-E 贴边按身体框（2026-10-20）](PR-REPORT-PETCORE-EDGE-BODY-2026-10-20.md)：贴边/落位/恢复/比例/跨屏迁移改用 `body_box`，透明画布允许出屏；改位置钳制或排查「靠边留一大截」时必读。
+- [petcore P1-F/P1-B/P1-D 边缘探头·核心体验·角色包（2026-10-20）](PR-REPORT-PETCORE-P1F-P1B-P1D-2026-10-20.md)：45° 探头、快捷键/自启/多实例/打包入口/首跑供给、`pack-character`；改这些模块或排查探头/快捷键/角色包时必读。
+- [petcore P2-A/P2-B1 交互·多宠·关于·打包（2026-10-20）](PR-REPORT-PETCORE-P2-2026-10-20.md)：Q弹/拖拽/弹弓/回旋/投喂/碰撞、单进程多宠、关于并入设置、菜单重排、PyInstaller/Inno 本地构建、内置/示例 mod；改这些行为或复测 P2 时必读。
+- [petcore P3 设置聚合·可导入 mod·移动同步（2026-10-20）](PR-REPORT-PETCORE-P3-2026-10-20.md)：设置页合并到「扩展管理」页内标签、5 个 mod 移到 examples、快捷启动移入工具与帮助、移动朝向/curve 位移同步；改设置宿主、mod 安装或移动逻辑时必读。
+- [petcore P4 交互缺陷修复·安装器选装扩展（2026-10-20）](PR-REPORT-PETCORE-P4-2026-10-20.md)：朝向镜像口径、点击后回旋起表、碰边逐次反馈、探头吸附、多宠防穿模与落座、设置搜索/分页溢出、安装向导勾选扩展与 `.trusted` 授信、无终端窗口；改这些行为或排查「朝向反了/碰撞穿模/扩展装不上」时必读。
+- [petcore P5 气泡·设置·扩展反馈·碰撞圆链（2026-10-20）](PR-REPORT-PETCORE-P5-2026-10-20.md)：气泡改按头部锚点贴近角色、候选台词改多行大框、Enter 保存退出、免打扰页补文案与状态、扩展命令 `say(force=)` 反馈、右键菜单对勾、多宠碰撞改内切三圆链 + 主分支分离规则；改这些行为或排查「气泡太远/点了没反应/没有对勾/碰撞穿模」时必读。
+- [petcore P6 动画节拍·事件动画·core 联网/API（2026-10-20）](PR-REPORT-PETCORE-P6-2026-10-20.md)：待机一圈改为掷骰（修一直 idle）、四项概率可调、播放动画分组、`events/<group>` 与 `play_event()`、`petcore/net` 代理兜底、`petcore/api` + keyring + 设置页「API 与账户」；改播放链、动画概率、事件动画或 core 联网/密钥时必读。
+- [petcore P7 探头/击飞·安装器·扩展管理·彩蛋音效（2026-10-21）](PR-REPORT-PETCORE-P7-2026-10-21.md)：击飞旋转改为碰撞授权、飞行接管态不掷骰/点击忽略、探头只 idle/转向、setup 鲸鱼娘图标与 `{app}\mods` 扩展、扩展页竖向分组导航、`name_zh`、彩蛋图片与点击音效包；改这些行为时必读。
+- [petcore P8 多宠推动·气泡跟随·设置重组·打包回归（2026-10-21）](PR-REPORT-PETCORE-P8-2026-10-21.md)：轻碰推动与探头优先、子宠单独退出、气泡跟随/图片、彩蛋菜单行、互动页 8 分页、Core 内置特性归位、扩展分组可折叠、安装向导目录页与菜单模板打包兜底；排查「推不动/气泡不跟/右键缺项/设置太长/安装路径消失」时必读。
+- [petcore P8.1 字号/彩蛋图片·菜单结构·弹弓与直播兼容（2026-10-21）](PR-REPORT-PETCORE-P8-1-2026-10-21.md)：界面/气泡字号、彩蛋图片大小、自语配图概率、彩蛋置顶与菜单尾部、播放动画缩略图、弹弓右键抑制、点击监听补挂、X 保存、直播捕获兼容；排查「字太小/彩蛋不在顶部/发射后弹菜单/点击台词不生效/直播抓不到」时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。
 
@@ -324,6 +336,23 @@
 | Phase 5 | [`plugin-phase-05-distribution/`](plugin-phase-05-distribution/) | 增加本地、GitHub、CDN 或 Workshop 来源前必读。 |
 | Phase 6 | [`plugin-phase-06-ecosystem/`](plugin-phase-06-ecosystem/) | 开放第三方插件 SDK、签名和社区 catalog 前必读。 |
 | Phase 7 | [`plugin-phase-07-release/`](plugin-phase-07-release/) | 做跨平台正式发布和生态运维前必读。 |
+
+## petcore（新 core + mod 架构）
+
+| 文档 | 一句话内容 | 何时必读 |
+|---|---|---|
+| [`PETCORE-ARCHITECTURE.md`](PETCORE-ARCHITECTURE.md) | `petcore` 的分层、契约、启动路径、数据目录与 VPet 对应关系。 | 改 `petcore/` 任何模块、判断 core 与 mod 边界前必读。 |
+| [`PETCORE-MOD-FORMAT.md`](PETCORE-MOD-FORMAT.md) | `mod.json` 字段、校验、发现/启停、安装与能力模型。 | 新增/修改 mod 包、改加载器或安装流程前必读。 |
+| [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读。 |
+| [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、P1–P8 路线、Core/mod 边界与延后项。 | 规划后续功能迁包或评估重构进度前必读。 |
+| [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md) | petcore ↔ 主分支功能差距台账：已对齐 / 部分 / 未做、默认安装口径、计划批次与验收方式。 | 回答「还差什么」「这个域算不算完成」「示例 mod 能不能算默认功能」前必读；每轮收口更新。 |
+| [`PETCORE-SPEC.md`](PETCORE-SPEC.md) | petcore 的**最终形态规格**：core/mod 边界、用户能力、菜单/设置契约、素材与角色包供应链、交付门、非目标与退出旧架构的判定。 | 判断「这个功能该不该进 core」「最终要做成什么样」「菜单和设置谁负责」前必读。 |
+| [`PETCORE-LOG.md`](PETCORE-LOG.md) | petcore 追加式变更日志：每条 `LNNN` 记录文件、行为、验证与遗留。 | 只在 log-index 命中后打开对应条目；不要把整份日志读进上下文。 |
+| [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |
+| [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md) | 动画/性能 backlog：已完成交互动画、P2-B2/P4 延后项、依赖与验收、明确不做。 | 规划动画批次、回答「这个动画什么时候做」或改播放/解码策略前必读。 |
+| [`../petcore/README.md`](../petcore/README.md) | 开发者上手指南：环境、运行、目录地图、加菜单项/mod/角色包、测试门禁、已知边界。 | 第一次接手 petcore、或需要一条可复制的命令时。 |
+| [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 5 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
+| [`../petcore/AGENTS.md`](../petcore/AGENTS.md) | petcore 的 agent/贡献者约定：每次改动必须写 log + index、架构红线、菜单/设置一致性、非模态与大小上限。 | 在 `petcore/` 下改任何代码或文档之前必读。 |
 
 ## 在线更新与网络发布
 

@@ -1,0 +1,476 @@
+"""「API 与账户」设置页：服务规格落到 ``api.json``，密钥只走系统钥匙串。"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ... import paths
+from ...api.credentials import KeyringCredentials
+from ...api.probe import ProbeResult, probe_text
+from ...api.spec import ApiService
+from ...api.store import ApiStore
+from ...net.errors import describe
+from .base import SettingsPage, make_button, make_checkbox
+
+logger = logging.getLogger("petcore.ui.settings.api")
+
+OWNER = "core.api"
+_BALANCE_CHOICES = (("none", "无"), ("deepseek", "DeepSeek"))
+_ERROR_TEXT = {
+    "api_endpoint_empty": "Base URL 不能为空",
+    "api_endpoint_insecure": "远程地址只允许 https；http 只用于 localhost / 127.0.0.1",
+    "api_endpoint_userinfo": "Base URL 里不能带用户名或密码",
+    "api_endpoint_query": "Base URL 里不能带 ? 或 #",
+    "api_endpoint_port": "端口号无效",
+    "api_endpoint_scheme": "Base URL 必须以 https:// 开头",
+    "api_name_invalid": "名称不能为空，且不超过 128 个字符",
+    "api_chat_path_invalid": "Chat Path 必须以 / 开头",
+    "api_timeout_invalid": "超时必须在 1–300 秒之间",
+    "api_balance_protocol_invalid": "余额协议无效",
+}
+
+
+class _ProbeSignals(QObject):
+    finished = Signal(object)
+
+
+class _ProbeWorker(QRunnable):
+    """在池线程里跑一次探测；结果（含失败）都收口成一次 ``finished``。"""
+
+    def __init__(self, service: ApiService, api_key: str, signals: _ProbeSignals):
+        super().__init__()
+        self._service = service
+        self._api_key = api_key
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            result = probe_text(self._service, self._api_key)
+        except Exception as exc:  # noqa: BLE001 - 异常不许穿出 QRunnable
+            logger.warning("API 探测异常：%s", type(exc).__name__)
+            result = ProbeResult("protocol")
+        try:
+            self.signals.finished.emit(result)
+        except RuntimeError:
+            pass
+
+
+class ApiSettingsPage(SettingsPage):
+    title = "API 与账户"
+
+    def __init__(self, host, parent=None):
+        super().__init__(host, parent)
+        self.root = Path(str(getattr(host, "root", None) or paths.base_dir()))
+        self.store = getattr(host, "api_store", None) or ApiStore(self.root)
+        self.credentials = getattr(host, "api_credentials", None) or KeyringCredentials()
+        self._unsubscribe = self.store.subscribe(self._on_store_changed)
+        self._loaded: ApiService | None = None
+        self._draft_id: str | None = None
+        self._baseline: ApiService | None = None
+        self._probe_running = False
+        self._probe_signals: _ProbeSignals | None = None
+        self._disposed = False
+        self._refreshing = False
+
+        self.add_note(
+            "API Key 只写入系统钥匙串，不写 config.json，也不写 api.json；"
+            "页面只记住「已保存 / 未保存」，不会回显密钥。"
+        )
+        self._keyring_note = self.add_note("")
+
+        card = self.section("服务")
+        panel = QWidget(self)
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        self.services_list = QListWidget(panel)
+        self.services_list.setObjectName("apiServiceList")
+        self.services_list.setAccessibleName("API 服务")
+        self.services_list.setMinimumWidth(190)
+        self.services_list.setMinimumHeight(300)
+        self.services_list.currentRowChanged.connect(self._on_selection_changed)
+        left.addWidget(self.services_list, 1)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.add_button = make_button("新增", panel)
+        self.add_button.clicked.connect(self.add_service)
+        self.remove_button = make_button("删除", panel)
+        self.remove_button.clicked.connect(self.remove_service)
+        buttons.addWidget(self.add_button)
+        buttons.addWidget(self.remove_button)
+        buttons.addStretch(1)
+        left.addLayout(buttons)
+        layout.addLayout(left)
+
+        right = QVBoxLayout()
+        right.setSpacing(12)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(9)
+
+        self.name_edit = self._line("例如 DeepSeek")
+        self.base_url_edit = self._line("https://api.example.com")
+        self.chat_path_edit = self._line("/v1/chat/completions")
+        self.model_edit = self._line("例如 deepseek-chat")
+        self.vision_edit = self._line("可留空；视觉模型名")
+        self.key_edit = self._line("留空表示不修改", password=True)
+        self.verify_ssl_check = make_checkbox(panel)
+        self.timeout_spin = QSpinBox(panel)
+        self.timeout_spin.setRange(1, 300)
+        self.timeout_spin.setSuffix(" 秒")
+        self.timeout_spin.setMinimumWidth(110)
+        self.balance_combo = QComboBox(panel)
+        for value, label in _BALANCE_CHOICES:
+            self.balance_combo.addItem(label, value)
+
+        self._form_row(form, "名称", self.name_edit)
+        self._form_row(form, "Base URL", self.base_url_edit, "远程地址只允许 https；本机可用 http://localhost。")
+        self._form_row(form, "Chat Path", self.chat_path_edit, "拼在 Base URL 后面，形如 /v1/chat/completions。")
+        self._form_row(form, "模型", self.model_edit, "聊天与探测使用的模型名。")
+        self._form_row(form, "视觉模型", self.vision_edit, "识屏等能力使用；留空表示该服务不支持。")
+        self._form_row(form, "校验 SSL", self.verify_ssl_check, "关闭前请确认对端可信；只影响该服务。")
+        self._form_row(form, "超时", self.timeout_spin, "单次请求的上限，1–300 秒。")
+        self._form_row(form, "余额协议", self.balance_combo, "决定余额查询走哪套接口；未知服务选「无」。")
+        self._form_row(form, "API Key", self.key_edit, "保存后再次打开不会回显；留空表示沿用已保存的密钥。")
+        right.addLayout(form)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self.status_label = QLabel("", panel)
+        self.status_label.setObjectName("settingHint")
+        self.status_label.setWordWrap(True)
+        status_row.addWidget(self.status_label, 1)
+        self.test_button = make_button("测试连接", panel)
+        self.test_button.clicked.connect(self.test_connection)
+        self.save_button = make_button("保存服务", panel, primary=True)
+        self.save_button.clicked.connect(self.save_service)
+        status_row.addWidget(self.test_button)
+        status_row.addWidget(self.save_button)
+        right.addLayout(status_row)
+        right.addStretch(1)
+        layout.addLayout(right, 1)
+        card.add_widget(panel)
+
+        self._refresh_list()
+        self._refresh_keyring_note()
+
+    def _line(self, placeholder: str, *, password: bool = False) -> QLineEdit:
+        field = QLineEdit(self)
+        field.setObjectName("apiField")
+        field.setPlaceholderText(placeholder)
+        field.setMinimumWidth(300)
+        if password:
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setAccessibleName("API Key")
+        return field
+
+    def _form_row(self, form: QFormLayout, label: str, control: QWidget, hint: str = "") -> None:
+        title = QLabel(label, self)
+        title.setObjectName("settingLabel")
+        title.setBuddy(control)
+        control.setAccessibleName(label)
+        if not hint:
+            form.addRow(title, control)
+            return
+        control.setAccessibleDescription(hint)
+        wrapper = QWidget(self)
+        column = QVBoxLayout(wrapper)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(control)
+        note = QLabel(hint, wrapper)
+        note.setObjectName("settingHint")
+        note.setWordWrap(True)
+        column.addWidget(note)
+        form.addRow(title, wrapper)
+
+    def _refresh_keyring_note(self) -> None:
+        if self.credentials.available():
+            self._keyring_note.setText("系统钥匙串可用：保存后密钥由操作系统保管。")
+        else:
+            self._keyring_note.setText(
+                "系统钥匙串不可用：密钥只保存在本进程内存，重启即丢。"
+            )
+
+    def _refresh_list(self, select: str | None = None) -> None:
+        services = self.store.services()
+        target = select or self._current_id() or None
+        self.services_list.blockSignals(True)
+        self.services_list.clear()
+        for service in services:
+            item = QListWidgetItem(service.name or service.service_id, self.services_list)
+            item.setData(Qt.ItemDataRole.UserRole, service.service_id)
+            item.setToolTip(f"{service.service_id} · {service.base_url}")
+        row = -1
+        if services:
+            row = 0
+            if target:
+                for index, service in enumerate(services):
+                    if service.service_id == target:
+                        row = index
+                        break
+            self.services_list.setCurrentRow(row)
+        self.services_list.blockSignals(False)
+        if row >= 0:
+            self._show(services[row])
+        else:
+            self._start_draft(silent=True)
+        self._sync_buttons()
+
+    def _current_id(self) -> str:
+        if self._draft_id:
+            return self._draft_id
+        return self._loaded.service_id if self._loaded is not None else ""
+
+    def _selected_id(self) -> str | None:
+        item = self.services_list.currentItem()
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        return str(data) if data is not None else None
+
+    def _on_selection_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        service_id = self._selected_id()
+        if service_id is None:
+            return
+        service = self.store.get(service_id)
+        if service is None:
+            return
+        self._show(service)
+        self.status_label.clear()
+        self._sync_buttons()
+
+    def _show(self, service: ApiService) -> None:
+        self._loaded = service
+        self._draft_id = None
+        self._populate(service)
+
+    def _populate(self, service: ApiService) -> None:
+        self.name_edit.setText(service.name)
+        self.base_url_edit.setText(service.base_url)
+        self.chat_path_edit.setText(service.chat_path)
+        self.model_edit.setText(service.model)
+        self.vision_edit.setText(service.vision_model)
+        self.verify_ssl_check.setChecked(bool(service.verify_ssl))
+        self.timeout_spin.setValue(int(service.timeout))
+        self.balance_combo.setCurrentIndex(
+            max(0, self.balance_combo.findData(service.balance_protocol))
+        )
+        self.key_edit.clear()
+        self._baseline = self._form_service()
+
+    def _start_draft(self, *, silent: bool = False) -> None:
+        draft = ApiService(service_id=self._next_service_id(), name="", base_url="")
+        self._loaded = None
+        self._draft_id = draft.service_id
+        self._populate(draft)
+        self.services_list.blockSignals(True)
+        self.services_list.setCurrentRow(-1)
+        self.services_list.blockSignals(False)
+        if not silent:
+            self.status_label.setText("新服务：填好名称与 Base URL 后点「保存服务」。")
+        self._sync_buttons()
+
+    def _next_service_id(self) -> str:
+        taken = {service.service_id for service in self.store.services()}
+        index = 1
+        while f"api{index}" in taken:
+            index += 1
+        return f"api{index}"
+
+    def _form_service(self) -> ApiService:
+        return ApiService(
+            service_id=self._current_id(),
+            name=self.name_edit.text(),
+            base_url=self.base_url_edit.text(),
+            chat_path=self.chat_path_edit.text() or "/v1/chat/completions",
+            model=self.model_edit.text(),
+            vision_model=self.vision_edit.text(),
+            verify_ssl=self.verify_ssl_check.isChecked(),
+            timeout=int(self.timeout_spin.value()),
+            balance_protocol=str(self.balance_combo.currentData() or "none"),
+        )
+
+    def _sync_buttons(self) -> None:
+        self.remove_button.setEnabled(self._selected_id() is not None)
+        self.test_button.setEnabled(not self._probe_running)
+
+    def _on_store_changed(self) -> None:
+        if self._disposed or self._refreshing:
+            return
+        self._refreshing = True
+        try:
+            self._refresh_list()
+        finally:
+            self._refreshing = False
+
+    def add_service(self, *_args) -> None:
+        self._start_draft()
+
+    def remove_service(self, *_args) -> None:
+        service_id = self._selected_id()
+        if service_id is None:
+            self.status_label.setText("先在左侧选择要删除的服务。")
+            return
+        service = self.store.get(service_id)
+        name = service.name if service is not None else service_id
+        answer = QMessageBox.question(
+            self,
+            "删除服务",
+            f"确定删除「{name}」吗？对应的 API Key 也会从钥匙串删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = self.store.remove(service_id)
+        except OSError as exc:
+            self.status_label.setText(f"删除失败：{type(exc).__name__}")
+            return
+        if not removed:
+            self.status_label.setText("服务已不存在。")
+            return
+        self.credentials.delete(OWNER, service_id)
+        self._loaded = None
+        self._draft_id = None
+        self._refresh_list()
+        self.status_label.setText(f"已删除「{name}」")
+
+    def save_service(self, *_args) -> bool:
+        try:
+            normalized = self._form_service().validate()
+        except ValueError as exc:
+            self.status_label.setText(f"无法保存：{_error_text(exc)}")
+            return False
+        key = self.key_edit.text().strip()
+        try:
+            saved = self.store.upsert(normalized)
+        except OSError as exc:
+            self.status_label.setText(f"无法写入 api.json：{type(exc).__name__}")
+            return False
+        if key:
+            self.credentials.set(OWNER, saved.service_id, key)
+        self._loaded = saved
+        self._draft_id = None
+        self._refresh_list(saved.service_id)
+        self._refresh_keyring_note()
+        message = f"已保存「{saved.name}」"
+        if key and not self.credentials.available():
+            message += "；密钥只在本进程内存，重启即丢"
+        self.status_label.setText(message)
+        return True
+
+    def test_connection(self, *_args) -> None:
+        if self._probe_running:
+            return
+        try:
+            service = self._form_service().validate()
+        except ValueError as exc:
+            self.status_label.setText(f"无法测试：{_error_text(exc)}")
+            return
+        if not service.model:
+            self.status_label.setText("无法测试：请先填写模型名。")
+            return
+        key = self.key_edit.text().strip()
+        if not key:
+            key = self.credentials.get(OWNER, service.service_id) or ""
+        if not key:
+            self.status_label.setText("无法测试：请先填写 API Key。")
+            return
+        self._probe_running = True
+        self._sync_buttons()
+        self.status_label.setText("正在测试连接…")
+        signals = _ProbeSignals()
+        signals.finished.connect(self._on_probe_done)
+        self._probe_signals = signals
+        QThreadPool.globalInstance().start(_ProbeWorker(service, key, signals))
+
+    def _on_probe_done(self, result) -> None:
+        if self._disposed:
+            return
+        self._probe_running = False
+        self._probe_signals = None
+        self._sync_buttons()
+        if not isinstance(result, ProbeResult):
+            self.status_label.setText("连接失败：内部错误")
+            return
+        if result.ok:
+            text = "连接成功"
+        else:
+            text = f"连接失败：{describe(result.reason)}"
+        if result.http_status:
+            text += f"（HTTP {result.http_status}）"
+        if result.retry_after:
+            text += f"，{int(result.retry_after)} 秒后再试"
+        self.status_label.setText(text)
+
+    def dirty(self) -> bool:
+        if bool(self.key_edit.text().strip()):
+            return True
+        return self._baseline is None or self._form_service() != self._baseline
+
+    def confirm_save(self) -> bool:
+        if not self.dirty():
+            return True
+        return bool(self.save_service())
+
+    def discard_changes(self) -> None:
+        self._loaded = None
+        self._draft_id = None
+        self._refresh_list()
+        self.status_label.clear()
+
+    def dispose(self) -> None:
+        self._disposed = True
+        unsubscribe = self._unsubscribe
+        self._unsubscribe = None
+        if unsubscribe is not None:
+            unsubscribe()
+
+    def keywords(self) -> list[str]:
+        return [
+            "API",
+            "密钥",
+            "钥匙串",
+            "模型",
+            "视觉模型",
+            "Base URL",
+            "Chat Path",
+            "连接测试",
+            "余额",
+            "DeepSeek",
+            "api",
+            "key",
+            "keyring",
+            "token",
+            "model",
+            "endpoint",
+        ]
+
+
+def _error_text(exc: ValueError) -> str:
+    return _ERROR_TEXT.get(str(exc), "请检查填写内容")

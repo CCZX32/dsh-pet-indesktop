@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "media.music",
+  "name": "Media keys",
+  "name_zh": "音乐媒体键",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": ["sound.play"]
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "reminder.todo",
+  "name": "Todo reminder",
+  "name_zh": "待办提醒",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": ["speech.present"]
+}

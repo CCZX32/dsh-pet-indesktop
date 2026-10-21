@@ -1,0 +1,463 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QStackedWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ... import __version__
+from ..icons import icon as menu_icon
+from ..placement import place_beside_pet
+from .base import make_button, page_label_texts, reveal_text
+from .page_about import AboutPage
+from .page_api import ApiSettingsPage
+from .page_extensions import ExtensionsPage
+from .page_interaction import InteractionPage
+from .page_pets import PetsPage
+from .pages_core import AppearancePage, GeneralPage, MenuPage
+from .style import is_dark, stylesheet
+
+logger = logging.getLogger("petcore.ui.settings")
+
+_PAGE_ICONS = {
+    "常规": "settings",
+    "外观与交互": "size",
+    "互动与物理": "pointer",
+    "多宠": "spawn",
+    "菜单": "application",
+    "扩展管理": "application",
+    "API 与账户": "network",
+    "关于与诊断": "info",
+}
+
+_PAGE_KEYS = {
+    "常规": "general",
+    "外观与交互": "appearance",
+    "互动与物理": "interaction",
+    "多宠": "pets",
+    "菜单": "menu",
+    "扩展管理": "mods",
+    "API 与账户": "api",
+    "关于与诊断": "about",
+}
+
+
+def _page_icon(title: str) -> str:
+    return _PAGE_ICONS.get(str(title), "application")
+
+
+@dataclass
+class _PageEntry:
+    title: str
+    page: QWidget
+    keywords: tuple[str, ...]
+    key: str = ""
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, host, parent=None, initial_page: str | None = None):
+        super().__init__(parent)
+        self.host = host
+        self.config = host.config
+        self._pages: list[_PageEntry] = []
+        self._disposed = False
+        self._placed = False
+        self._snapshot = self.config.snapshot()
+        window = getattr(host, "window", None)
+        visible_check = getattr(window, "isVisible", None)
+        self._initial_visible = bool(visible_check()) if callable(visible_check) else True
+        self._before = {
+            "character": str(self.config.get("character") or ""),
+            "scale": float(self.config.get("scale") or 0.72),
+            "always_on_top": bool(self.config.get("always_on_top")),
+            "click_through": bool(self.config.get("click_through")),
+        }
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(16)
+        self._live_timer.timeout.connect(self._apply_live)
+        self.setObjectName("settingsDialog")
+        self.setWindowTitle("设置")
+        self.resize(900, 620)
+        self.setMinimumSize(720, 500)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        palette = self.palette()
+        accent = QColor("#0a84ff")
+        palette.setColor(QPalette.ColorRole.Highlight, accent)
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        accent_role = getattr(QPalette.ColorRole, "Accent", None)
+        if accent_role is not None:
+            palette.setColor(accent_role, accent)
+        self.setPalette(palette)
+        self._build_ui()
+        self._load_pages()
+        self._connect_live_preview()
+        self._apply_filter("")
+        if initial_page:
+            self.select_page(initial_page)
+        else:
+            self.nav.setFocus()
+
+    def refresh_style(self) -> None:
+        """按当前界面字号重设样式表；字号/主题未变时是空操作。"""
+        key = (is_dark(), int(self.config.get("ui_font_size") or 13))
+        if key == getattr(self, "_style_key", None):
+            return
+        self._style_key = key
+        self.setStyleSheet(stylesheet(key[0], key[1]))
+
+    def _build_ui(self) -> None:
+        self.refresh_style()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        sidebar = QWidget(self)
+        sidebar.setObjectName("sidebarPanel")
+        sidebar.setFixedWidth(200)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(12, 16, 12, 12)
+        sidebar_layout.setSpacing(10)
+
+        self.search = QLineEdit(sidebar)
+        self.search.setObjectName("settingsSearch")
+        self.search.setPlaceholderText("搜索设置")
+        self.search.setAccessibleName("搜索设置")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_filter)
+        sidebar_layout.addWidget(self.search)
+
+        self.nav = QListWidget(sidebar)
+        self.nav.setObjectName("settingsNav")
+        self.nav.setAccessibleName("设置页面")
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.nav.currentRowChanged.connect(self._select_row)
+        sidebar_layout.addWidget(self.nav, 1)
+
+        self.search_status = QLabel("", sidebar)
+        self.search_status.setObjectName("searchStatus")
+        self.search_status.setWordWrap(True)
+        sidebar_layout.addWidget(self.search_status)
+
+        body.addWidget(sidebar)
+
+        content = QWidget(self)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        self.stack = QStackedWidget(content)
+        self.stack.setObjectName("settingsPages")
+        content_layout.addWidget(self.stack, 1)
+
+        footer = QWidget(content)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(30, 8, 28, 16)
+        footer_layout.setSpacing(8)
+        self.version_label = QLabel(f"petcore v{__version__}", footer)
+        self.version_label.setObjectName("versionFooter")
+        footer_layout.addWidget(self.version_label)
+        footer_layout.addStretch(1)
+        self.cancel_button = make_button("取消", footer)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = make_button("保存", footer, primary=True)
+        self.save_button.setDefault(True)
+        self.save_button.clicked.connect(self.accept)
+        footer_layout.addWidget(self.cancel_button)
+        footer_layout.addWidget(self.save_button)
+        content_layout.addWidget(footer)
+
+        body.addWidget(content, 1)
+        root.addLayout(body)
+
+    def _load_pages(self) -> None:
+        pages: list[tuple[str, QWidget, tuple[str, ...], str]] = []
+        for page in (
+            GeneralPage(self.host),
+            AppearancePage(self.host),
+            InteractionPage(self.host),
+            PetsPage(self.host),
+            MenuPage(self.host),
+            ExtensionsPage(self.host),
+            ApiSettingsPage(self.host),
+            AboutPage(self.host),
+        ):
+            title = str(getattr(page, "title", "") or "")
+            pages.append((title, page, self._page_keywords(page), _PAGE_KEYS.get(title, "")))
+
+        for title, page, keywords, key in pages:
+            item = QListWidgetItem(title, self.nav)
+            item.setData(Qt.ItemDataRole.UserRole, len(self._pages))
+            item.setSizeHint(QSize(0, 34))
+            item.setIcon(menu_icon(_page_icon(title)))
+            self.stack.addWidget(page)
+            self._pages.append(_PageEntry(title, page, keywords, key))
+
+    def _page_keywords(self, page: QWidget) -> tuple[str, ...]:
+        values: list[str] = []
+        getter = getattr(page, "keywords", None)
+        if callable(getter):
+            try:
+                values.extend(str(item) for item in (getter() or ()))
+            except Exception:
+                values = []
+        # 行级文案（选项标题 + 说明）也进搜索口径：只搜页面标题等于搜不到功能。
+        values.extend(page_label_texts(page))
+        return tuple(dict.fromkeys(value for value in values if value))
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        first_visible = -1
+        visible = 0
+        for index, entry in enumerate(self._pages):
+            item = self.nav.item(index)
+            haystack = " ".join((entry.title, *entry.keywords)).lower()
+            matched = not needle or needle in haystack
+            item.setHidden(not matched)
+            if matched:
+                visible += 1
+                if first_visible < 0:
+                    first_visible = index
+        if not needle:
+            self.search_status.setText("")
+        elif visible:
+            self.search_status.setText(f"匹配 {visible} 个页面")
+        else:
+            self.search_status.setText("没有匹配的设置页")
+        if visible == 0:
+            self.nav.setCurrentRow(-1)
+            return
+        current = self.nav.currentRow()
+        if not 0 <= current < len(self._pages) or self.nav.item(current).isHidden():
+            current = first_visible
+            self.nav.setCurrentRow(current)
+        if needle and 0 <= current < len(self._pages):
+            reveal_text(self._pages[current].page, needle)
+
+    def _select_row(self, row: int) -> None:
+        if 0 <= row < len(self._pages):
+            self.stack.setCurrentWidget(self._pages[row].page)
+
+    def select_page(self, key: str) -> None:
+        needle = str(key or "").strip().lower()
+        if not needle:
+            return
+        if needle.startswith("extension:"):
+            for index, entry in enumerate(self._pages):
+                selector = getattr(entry.page, "select_tab", None)
+                if callable(selector):
+                    self.nav.setCurrentRow(index)
+                    selector(needle)
+                    return
+        for index, entry in enumerate(self._pages):
+            names = (entry.key, entry.title, *entry.keywords)
+            if any(needle == str(name).lower() for name in names):
+                self.nav.setCurrentRow(index)
+                return
+        for index, entry in enumerate(self._pages):
+            if needle in entry.key.lower() or needle in entry.title.lower():
+                self.nav.setCurrentRow(index)
+                return
+
+    def _connect_live_preview(self) -> None:
+        for entry in self._pages:
+            signal = getattr(entry.page, "changed", None)
+            if signal is None:
+                continue
+            try:
+                signal.connect(self._request_live_apply)
+            except Exception:
+                logger.warning("settings page %s has no usable changed signal", entry.title)
+
+    def _request_live_apply(self, *_args) -> None:
+        if self._disposed:
+            return
+        if not self._live_timer.isActive():
+            self._live_timer.start()
+
+    def _remember_before(self) -> None:
+        self._before = {
+            "character": str(self.config.get("character") or ""),
+            "scale": float(self.config.get("scale") or 0.72),
+            "always_on_top": bool(self.config.get("always_on_top")),
+            "click_through": bool(self.config.get("click_through")),
+        }
+
+    def _apply_live(self) -> None:
+        self._live_timer.stop()
+        if self._disposed:
+            return
+        applier = getattr(self.host, "apply_live_settings", None)
+        if callable(applier):
+            try:
+                applier()
+            except Exception:
+                logger.exception("live settings apply failed")
+        else:
+            self._apply_window_changes()
+        self._remember_before()
+
+    def _save_pages(self) -> bool:
+        ok = True
+        for entry in self._pages:
+            page = entry.page
+            dirty = getattr(page, "dirty", None)
+            draft = getattr(page, "draft", None)
+            confirm = getattr(page, "confirm_save", None)
+            try:
+                if callable(dirty) and not dirty():
+                    continue
+                if callable(draft):
+                    draft()
+                if callable(confirm) and confirm() is False:
+                    ok = False
+                    QMessageBox.warning(
+                        self,
+                        "保存设置",
+                        f"「{entry.title}」没有保存：请按页面提示修正后再试。",
+                    )
+            except Exception:
+                logger.exception("settings page %s failed to save", entry.title)
+                QMessageBox.warning(self, "保存设置", f"「{entry.title}」保存失败，其他设置仍会保存。")
+        return ok
+
+    def _apply_window_changes(self) -> None:
+        window = getattr(self.host, "window", None)
+        if window is None:
+            return
+
+        def invoke(name: str, *args) -> None:
+            callback = getattr(window, name, None)
+            if not callable(callback):
+                return
+            try:
+                callback(*args)
+            except Exception:
+                logger.exception("failed to call window.%s", name)
+
+        character = str(self.config.get("character") or "")
+        scale = float(self.config.get("scale") or 0.72)
+        always_on_top = bool(self.config.get("always_on_top"))
+        click_through = bool(self.config.get("click_through"))
+        if character and character != self._before["character"]:
+            invoke("set_character", character)
+        if abs(scale - self._before["scale"]) > 1e-9:
+            invoke("set_scale", scale)
+        if always_on_top != self._before["always_on_top"]:
+            invoke("toggle_always_on_top")
+        if click_through != self._before["click_through"]:
+            invoke("toggle_click_through")
+
+    def _commit(self) -> bool:
+        """保存并实时应用：保存页 → 同步子宠 → 落盘 → 实时应用。失败返回 False。"""
+        self._live_timer.stop()
+        if not self._save_pages():
+            return False
+        pets = getattr(self.host, "pets", None)
+        if pets is not None:
+            try:
+                pets.sync_shared_settings()
+            except Exception:
+                logger.warning("failed to sync shared settings to pets", exc_info=True)
+        try:
+            self.config.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "保存设置", f"无法保存配置：{exc}")
+            return False
+        self._apply_live()
+        return True
+
+    def accept(self) -> None:
+        if not self._commit():
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        self._live_timer.stop()
+        self.config.restore(self._snapshot)
+        for entry in self._pages:
+            discarding = getattr(entry.page, "discard_changes", None)
+            if not callable(discarding):
+                continue
+            try:
+                discarding()
+            except Exception:
+                logger.warning("settings page %s failed to discard", entry.title, exc_info=True)
+        window = getattr(self.host, "window", None)
+        setter = getattr(window, "set_visible", None)
+        if callable(setter):
+            try:
+                setter(self._initial_visible)
+            except Exception:
+                logger.warning("failed to restore pet visibility", exc_info=True)
+        else:
+            visible_check = getattr(window, "isVisible", None)
+            if callable(visible_check) and bool(visible_check()) != self._initial_visible:
+                window.toggle_hidden()
+        self._live_timer.stop()
+        self._apply_live()
+        super().reject()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._placed:
+            return
+        self._placed = True
+        place_beside_pet(self, getattr(self.host, "window", None))
+
+    def keyPressEvent(self, event) -> None:
+        """Enter = 保存并退出；只有多行文本框才允许 Enter 换行。"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            focus = self.focusWidget()
+            if not isinstance(focus, (QPlainTextEdit, QTextEdit)):
+                self.accept()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        """X 关闭也保存：只有提交失败才留在页面上，绝不静默丢弃改动。"""
+        if not self._commit():
+            event.ignore()
+            return
+        event.accept()
+        # ``done`` 负责 dispose 释放内嵌页并让 host 清掉窗口引用（关闭不是 reject）。
+        self.done(QDialog.DialogCode.Accepted)
+
+    def done(self, result: int) -> None:
+        super().done(result)
+        self._dispose_pages()
+
+    def _dispose_pages(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        for entry in self._pages:
+            dispose = getattr(entry.page, "dispose", None)
+            if not callable(dispose):
+                continue
+            try:
+                dispose()
+            except Exception:
+                logger.warning("settings page %s failed to dispose", entry.title, exc_info=True)

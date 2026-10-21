@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "core.feature-demo",
+  "kind": "feature",
+  "name": "Feature seam demo",
+  "name_zh": "功能接缝示例",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": ["speech.present", "animation.request"]
+}

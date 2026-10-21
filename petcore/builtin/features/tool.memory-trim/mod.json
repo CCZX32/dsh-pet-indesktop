@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "tool.memory-trim",
+  "name": "Memory trim",
+  "name_zh": "回收内存",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": ["process.spawn"]
+}

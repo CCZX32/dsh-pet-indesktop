@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from petcore.content.character_pack import build_character_pack, validate_character_source
+from petcore.content.collect import collect_characters
+
+
+def _source(root: Path) -> Path:
+    source = root / "source"
+    videos = source / "videos"
+    videos.mkdir(parents=True)
+    (videos / "idle.webm").write_bytes(b"")
+    (source / "manifest.json").write_text(
+        json.dumps(
+            {
+                "name": "Test Pet",
+                "body_box": [212, 60, 428, 330],
+                "head_box": [185, 60, 436, 195],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_build_character_pack_and_collect(tmp_path):
+    source = _source(tmp_path)
+    out = tmp_path / "mods" / "character.test"
+    ok, message = build_character_pack(source, out, link=False)
+    assert ok, message
+    manifest = json.loads((out / "mod.json").read_text(encoding="utf-8"))
+    assert manifest["id"] == "character.test"
+    assert manifest["kind"] == "content"
+    assert manifest["character"]["media"] == "videos"
+    assert manifest["character"]["body_box"] == [212, 60, 428, 330]
+    assert (out / "videos" / "idle.webm").is_file()
+
+    characters, _result = collect_characters(
+        root=tmp_path / "data", mod_dirs=(tmp_path / "mods",), frameseq_mode="off"
+    )
+    assert any(character.id == "test" for character in characters)
+
+
+def test_validate_rejects_missing_media_and_bad_boxes(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert validate_character_source(empty)
+
+    source = _source(tmp_path)
+    (source / "videos" / "idle.webm").unlink()
+    assert validate_character_source(source)
+
+    source = _source(tmp_path / "bad")
+    (source / "manifest.json").write_text(
+        json.dumps({"body_box": [0, 0, 0, 10]}), encoding="utf-8"
+    )
+    assert "invalid body_box" in validate_character_source(source)[0]
+
+
+def test_build_rejects_invalid_id_and_non_empty_target(tmp_path):
+    source = _source(tmp_path)
+    ok, message = build_character_pack(source, tmp_path / "out", character_id="bad id")
+    assert ok is False
+    assert "invalid character id" in message
+
+    target = tmp_path / "used"
+    target.mkdir()
+    (target / "x").write_text("x", encoding="utf-8")
+    ok, message = build_character_pack(source, target)
+    assert ok is False
+    assert "not empty" in message

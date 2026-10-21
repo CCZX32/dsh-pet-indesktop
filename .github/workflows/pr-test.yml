@@ -117,7 +117,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ruff
-        run: ruff check pet/ tests/
+        run: ruff check pet/ tests/ petcore/
 
       # 桥接插件零依赖门禁（2026-09 事故回归防线）：bridge 经 pnpm link: 链进
       # 用户 profile，link 不装依赖、链接目标常是打包版 _internal 副本（无

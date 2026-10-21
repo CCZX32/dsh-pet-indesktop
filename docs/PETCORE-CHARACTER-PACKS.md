@@ -1,0 +1,91 @@
+# petcore 角色资源包
+
+> 基线：`feat/petcore-vpet-architecture`，2026-10-20。
+
+## 1. 包布局
+
+```
+mods/character.shenshen/
+  mod.json
+  videos/
+    manifest.json          可选：name / body_box / head_box
+    move_strides.json      可选：每段移动动画的地面位移
+    text_clips.json        可选：{"no_mirror": [动画名]}
+    idle/    *.webm|*.gif
+    turn/
+    move/
+    click/
+    drag/
+    random/
+  frameseq/                可选：预生成的 WebP 帧序列
+    <folder>/<stem>.g<源sha12>/{meta.json, f_0001.webp...}
+```
+
+旧素材目录 `assets/characters/<id>/videos/` 与上述 `videos/` 同构，由 core 以只读 provider 接入，无需复制。
+
+## 2. 动画分类
+
+| 目录 | GraphType | AnimatType | locate | loop |
+|---|---|---|---|---|
+| `idle/` | `Idel` | `B_Loop` | ground | 是 |
+| `idle_turn/` | `Idel` | `B_Loop` | ground | 是 |
+| `turn/` | `Move` | `B_Loop` | in_place | 否 |
+| `move/` | `Move` | `B_Loop` | ground | 否 |
+| `click/` | `Touch_Body` | `Single` | ground | 否 |
+| `drag/` | `Raised_Static` | `Single` | ground | 否 |
+| `random/` 与未知目录 | `Default` | `Single` | ground | 否 |
+
+同目录多个文件即多变体，`find_for` 在变体间随机选择；同名动画按 `(graph, animat, mode)` 索引，不按文件路径。
+
+## 3. manifest.json
+
+```json
+{
+  "name": "Shenshen",
+  "body_box": [212, 60, 428, 330],
+  "head_box": [185, 60, 436, 195]
+}
+```
+
+- 画布固定 640×360，脚底 y=330，绘制下移 30px。
+- `body_box`/`head_box` 必须在画布范围内且 `x1<x2`、`y1<y2`；非法值忽略。
+- 缺 `head_box` 时按 `body_box` 顶部 45% 推导。
+- **`body_box` 是运行期定位锚点，不只是素材元数据**：贴边、右下角落位、位置恢复/比例、屏幕热插拔都用 `body_box × scale` 的身体框；未声明时才回退整窗。做包时必须按 alpha≥128 量身体框，否则桌宠会按透明边留出错误间距。
+- `head_box` 留给边缘探头（P1-E）：45° 探头用头框决定「只露头/脸」的切面；没有头框时按身体框顶部 45% 推导。
+- 身体框用于拖拽/边缘锚点与命中参考；首版命中仍按帧 alpha。
+
+## 4. move_strides.json
+
+```json
+{"run": 240, "walk": {"stride": 120, "curve": [0, 0.5, 1]}}
+```
+
+整数或 `{"stride": 正整数}` 生效；缺省 120px。首版只读取 `stride`，`curve` 保留给后续。
+
+## 5. text_clips.json
+
+```json
+{"no_mirror": ["typing", "reading"]}
+```
+
+列出的动画在向左朝向时不水平镜像。
+
+## 6. WebP 帧序列
+
+- 目录名 `<stem>.g<源 webm sha256 前 12 位>` 即源身份；`meta.json` 记录 `fps`、`frames`、`source_sha256`、`encoder`。
+- 采纳条件：目录戳可读、meta 戳一致、meta 帧数等于磁盘帧数、`encoder == unblend-white-v5`（当前档）。
+- 任一条件不成立 → 该段回退 WebM，绝不播放旧档或无身份产物。
+- 首版只消费帧序列；WebM→WebP 转换与世代退役/GC 仍在旧应用或 `tools/convert_frameseq.py`，P1 再移植。
+
+## 7. 制作新角色包
+
+1. 按第 1 节建立 `videos/` 与分类目录；
+2. 写 `manifest.json`（至少 body_box）；
+3. 可选 `move_strides.json` / `text_clips.json`；
+4. 写 `mod.json`（`kind: "content"`，`character.media: "videos"`）；
+5. `python -m petcore mods validate <目录>`；
+6. `python -m petcore mods install <目录或.zip>`；
+7. `python -m petcore --check` 确认每段 clip 采用的后端；
+8. `python -m petcore --character <id>` 实机确认。
+
+旧内置角色可用 `python -m petcore pack-legacy shenshen --out mods/character.shenshen`（默认硬链接，避免复制 53MB）生成标准包。

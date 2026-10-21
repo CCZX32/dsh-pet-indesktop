@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "fun.divination",
+  "name": "Daily fortune",
+  "name_zh": "抽签",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": ["speech.present"]
+}

@@ -714,6 +714,8 @@ DeepSeek 余额显示（气泡/小部件思路）参考了 [MeteorNOX/DeepSeek-B
 - [`docs/INDEX.md`](docs/INDEX.md)：**全文档入口索引**，每份文档一句话 + 何时必读；找文档先查它，新文档必须在此登记并互链。
 - [`docs/DEV-HANDOVER.md`](docs/DEV-HANDOVER.md)：本地运行、改配置、加功能、跑测试、重新打包的流程，外加 §10 的 `pet/` 模块一览、Harness 启动器机制、性能与内存治理口径、坑位清单（自带基线日期，其中的行数/用例数按当时实测算，改动后以实际为准）。
 - [`CONTEXT.md`](CONTEXT.md)：领域术语表（Shared UX Contract / Settings System / Menu Action Model 等）。
+- [`petcore/README.md`](petcore/README.md)：新 core + mod 架构的开发者上手（环境、运行、目录地图、加菜单项/mod/角色包、测试门禁）。在 `petcore/` 下改代码前还要读 [`petcore/AGENTS.md`](petcore/AGENTS.md) 与 [`docs/PETCORE-LOG-INDEX.md`](docs/PETCORE-LOG-INDEX.md)。
+- [`docs/PETCORE-MAIN-PARITY-BACKLOG.md`](docs/PETCORE-MAIN-PARITY-BACKLOG.md)：petcore 与主分支的功能差距台账（已对齐/部分/未做 + 计划批次），判断“还差什么”先看它。
 
 改对应代码前的必读文档（完整触发表见 `AGENTS.md` 的 "Context pointers"）：
 

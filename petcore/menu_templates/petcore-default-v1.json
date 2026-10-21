@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "layout_id": "petcore-default-v1",
+  "nodes": [
+    {"type": "action", "id": "easter_egg", "visible": true, "section": "tools"},
+    {"type": "action", "id": "character", "visible": true, "section": "profile"},
+    {"type": "action", "id": "animations_hub", "visible": true, "section": "playback"},
+    {"type": "action", "id": "playback_speed", "visible": false, "section": "playback"},
+    {"type": "action", "id": "size", "visible": false, "section": "playback"},
+    {"type": "separator", "id": "default.separator-playback", "visible": true},
+    {
+      "type": "submenu",
+      "id": "pet_controls",
+      "label": "桌宠控制",
+      "visible": true,
+      "section": "pet",
+      "children": [
+        {"type": "action", "id": "drag_physics", "visible": true},
+        {"type": "action", "id": "no_move", "visible": true},
+        {"type": "action", "id": "on_top", "visible": true},
+        {"type": "action", "id": "edge_probe", "visible": true},
+        {"type": "action", "id": "autostart", "visible": true},
+        {"type": "action", "id": "return_corner", "visible": true},
+        {"type": "action", "id": "hide_pet", "visible": true},
+        {"type": "action", "id": "spawn_pet", "visible": true},
+        {"type": "action", "id": "clear_spawned_pets", "visible": true},
+        {"type": "action", "id": "golden_spin", "visible": true},
+        {"type": "separator", "id": "default.separator-pet-tools", "visible": true},
+        {"type": "action", "id": "move_to_primary", "visible": true},
+        {"type": "action", "id": "reload_mods", "visible": true},
+        {"type": "action", "id": "open_data", "visible": true}
+      ]
+    },
+    {"type": "separator", "id": "default.separator-pet", "visible": true},
+    {
+      "type": "submenu",
+      "id": "tools_help",
+      "label": "工具与帮助",
+      "visible": true,
+      "section": "tools",
+      "children": [
+        {"type": "action", "id": "tool.quick-launch:open_menu", "visible": true},
+        {"type": "action", "id": "api_settings", "visible": true},
+        {"type": "action", "id": "tool.links:deepseek_web", "visible": true},
+        {"type": "action", "id": "tool.links:github_project", "visible": true},
+        {"type": "action", "id": "tool.links:quark_download", "visible": true},
+        {"type": "action", "id": "tool.network-info:show", "visible": true},
+        {"type": "action", "id": "tool.memory-trim:trim", "visible": true}
+      ]
+    },
+    {"type": "action", "id": "tool.quiet-mode:quiet_30", "visible": true, "section": "tools"},
+    {
+      "type": "submenu",
+      "id": "extensions_hub",
+      "label": "扩展",
+      "visible": true,
+      "section": "extensions",
+      "children": []
+    },
+    {"type": "separator", "id": "default.separator-extensions", "visible": true},
+    {"type": "action", "id": "modern_settings", "visible": true, "section": "system"},
+    {"type": "separator", "id": "default.separator-system", "visible": true},
+    {"type": "action", "id": "quit", "visible": true, "section": "system"}
+  ]
+}

@@ -1,0 +1,3 @@
+dsh-pet core installer trust marker.
+The presence of this file (installed as ".trusted") tells petcore that the
+adjacent feature mod was authorised by the Windows installer.
