@@ -1771,3 +1771,373 @@ def test_vision_config_survives_inactive_save(tmp_path, monkeypatch):
     finally:
         dlg.close()
         app.processEvents()
+
+
+# ------------------------------- 期 4c：dynamic_island / agent_link / 工具模块
+class _SignalStub:
+    """岛替身的「信号」：既能被 connect，也能被当函数调用。"""
+
+    def connect(self, *_a, **_k):
+        return None
+
+    def __call__(self, *_a, **_k):
+        return None
+
+
+class _IslandStub:
+    """``DynamicIsland`` 替身：其余方法一律吞掉（信号属性给出 ``_SignalStub``）。"""
+
+    _SIGNALS = frozenset({
+        "clicked", "toggle_pet_requested", "open_chat_requested",
+        "open_settings_requested", "chat_requested", "card_expanded",
+    })
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        if name in self._SIGNALS:
+            return _SignalStub()
+
+        def _call(*_a, **_k):
+            self.calls.append(name)
+
+        return _call
+
+
+class _RecordingIsland:
+    """只记录方法名的岛替身（``_quiet_balance_refresh`` 的落点是 set_balance_info）。"""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        def _call(*_a, **_k):
+            self.calls.append(name)
+
+        return _call
+
+
+def _write_keys(dlg, monkeypatch) -> list[str]:
+    """把 ``dlg.config.set`` 换成记录器：返回的列表在 ``_write_config`` 后即写回键集。"""
+    keys: list[str] = []
+    orig_set = dlg.config.set
+
+    def _set(key, value):
+        keys.append(key)
+        return orig_set(key, value)
+
+    monkeypatch.setattr(dlg.config, "set", _set)
+    return keys
+
+
+def _domain_tab_labels(dlg, domain_label: str) -> list[str]:
+    from pet.settings_widgets import SettingsTabContainer
+
+    page = next(
+        dlg.pages.widget(i)
+        for i in range(dlg.pages.count())
+        if dlg.sidebar.item(i).text() == domain_label
+    )
+    tabs = page.findChild(SettingsTabContainer)
+    return list(tabs.labels())
+
+
+def _domain_labels(dlg, domain_label: str) -> list[str]:
+    """某个域页内的全部 QLabel 文本（只看该域；功能域卡片里会出现模块名）。"""
+    from PySide6.QtWidgets import QLabel
+
+    page = next(
+        dlg.pages.widget(i)
+        for i in range(dlg.pages.count())
+        if dlg.sidebar.item(i).text() == domain_label
+    )
+    return [label.text() for label in page.findChildren(QLabel)]
+
+
+def _widget_mounted(dlg, widget) -> bool:
+    pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
+    return any(page.isAncestorOf(widget) for page in pages)
+
+
+def _sidebar_labels(dlg) -> list[str]:
+    return [dlg.sidebar.item(i).text() for i in range(dlg.sidebar.count())]
+
+
+def test_island_module_off_never_creates_the_island(tmp_path, monkeypatch):
+    """执行层：岛开关开着、模块关着 → 岛**不创建**（不是建好再 hide）。
+
+    「建好再 hide()」那条路径保留岛对象、四路采样槽与 FPS 订阅（``FpsHub``
+    attach 只发生在 ``DynamicIsland`` 内部），所以停用必须落在构造之前。
+    """
+    import pet.app as app_mod
+    import pet.dynamic_island as island_mod
+    from pet.chat.service import ChatService
+    from pet.config import Config
+
+    monkeypatch.setattr(island_mod, "DynamicIsland", _IslandStub)
+    monkeypatch.setattr(app_mod.AppShell, "_sync_island_collision", lambda _s, _cfg: None)
+    # 全局聊天完成订阅是进程级表：测试里别把裸壳挂进去
+    monkeypatch.setattr(ChatService, "register_global_finished",
+                        classmethod(lambda _cls, _cb: None))
+    cfg = Config(tmp_path)
+    cfg.set("dynamic_island", {"enabled": True})
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+    shell.island = None
+    shell.island_collision = None
+    shell._instances = []
+
+    _freeze_all_but("dynamic_island")
+    app_mod.AppShell._sync_dynamic_island(shell)
+    assert shell.island is None
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    app_mod.AppShell._sync_dynamic_island(shell)
+    assert isinstance(shell.island, _IslandStub)  # 模块激活时照旧创建（不是"永远不造"）
+
+
+def test_island_interactive_follows_the_module_gate(tmp_path):
+    """``_island_interactive`` 是岛可用的单一口径：模块未激活恒 False。"""
+    from PySide6.QtWidgets import QWidget
+
+    import pet.app as app_mod
+    from pet.config import Config
+
+    app = _qapp()
+    cfg = Config(tmp_path)
+    cfg.set("dynamic_island", {"enabled": True})
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+    island = QWidget()
+    shell.island = island
+    try:
+        island.show()
+        _freeze_all_but("dynamic_island")
+        assert app_mod.AppShell._island_interactive(shell) is False
+        fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+        assert app_mod.AppShell._island_interactive(shell) is True
+    finally:
+        island.close()
+        island.deleteLater()
+        app.processEvents()
+
+
+def test_balance_refresh_timer_off_when_island_inactive(tmp_path):
+    from PySide6.QtCore import QTimer
+
+    import pet.app as app_mod
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.set("balance_refresh_minutes", 5)
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+    shell._balance_timer = QTimer()
+    try:
+        _freeze_all_but("dynamic_island")
+        app_mod.AppShell._apply_balance_timer(shell)
+        assert shell._balance_timer.isActive() is False
+        fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+        app_mod.AppShell._apply_balance_timer(shell)
+        assert shell._balance_timer.isActive() is True
+    finally:
+        shell._balance_timer.stop()
+
+
+def test_island_balance_entry_points_blocked_when_inactive(tmp_path):
+    """两条绕过菜单的直达回调：模块未激活时在读配置/起线程之前返回。
+
+    ``show_balance`` 漏拦会当场读 ``self.win``（裸壳没有该属性）；静默刷新漏拦
+    会先读 ``chat_settings()`` 再走到 ``island.set_balance_info`` 与
+    ``pet-balance-quiet`` 线程。
+    """
+    import pet.app as app_mod
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+    island = _RecordingIsland()
+    shell.island = island
+    _freeze_all_but("dynamic_island")
+    app_mod.AppShell.show_balance(shell)
+    app_mod.AppShell._quiet_balance_refresh(shell)
+    assert island.calls == []
+    assert getattr(shell, "_quiet_balance_busy", False) is False
+
+
+def test_agent_link_module_off_stops_dsh_tracker_and_harness_autostart(tmp_path):
+    """``_dsh_tracker_wanted`` 是 DSH 的单一口径：模块停用后连带 harness 不自启。"""
+    import pet.app as app_mod
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.set("agent_link", {"dsh": True})
+    cfg.set("harness_autostart", True)
+    shell = object.__new__(app_mod.AppShell)
+    shell.config = cfg
+
+    _freeze_all_but("agent_link")
+    assert app_mod.AppShell._dsh_tracker_wanted(shell) is False
+    # system_tools 与 harness_autostart 都开着，但 dsh 联动不存在 → 不自启
+    assert app_mod.AppShell._harness_autostart_wanted(shell) is False
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert app_mod.AppShell._dsh_tracker_wanted(shell) is True
+    assert app_mod.AppShell._harness_autostart_wanted(shell) is True
+
+
+def test_shared_subsystems_skips_agent_link_construction_when_inactive(tmp_path):
+    """构造前挡：模块停用时共享容器**不构造** agent_link 管理器。
+
+    ``SharedAgentLinkManager.__init__`` 末尾就是 ``apply_config()``（起监视器
+    线程 / DshMonitor），所以闸必须在构造处；None 是既有语义（单窗路径历史上
+    就有"没有管理器"这一态），全部消费点按 None 降级。
+    """
+    import pet.app as app_mod
+    from pet.config import Config
+
+    app = _qapp()
+    _freeze_all_but("agent_link")
+    shell = app_mod.AppShell(app, Config(tmp_path), enable_chat=True, slot_id=0)
+    assert shell._shared is not None
+    assert shell._shared.agent_link is None
+    assert shell._shared.proactive is not None  # proactive 那一半不受本模块影响
+
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    shell2 = app_mod.AppShell(app, Config(tmp_path), enable_chat=True, slot_id=0)
+    assert shell2._shared.agent_link is not None
+
+
+def test_island_settings_domain_absent_when_inactive(tmp_path, monkeypatch):
+    """设置层：桌面组件域整域消失（岛行 + 指标行都不挂出），其键不写回。"""
+    _freeze_all_but("dynamic_island")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert "桌面组件" not in _sidebar_labels(dlg)
+        for key in ("dynamic_island_enabled", "dynamic_island_info", "island_network",
+                    "island_fps", "network_probe_interval", "game_fps_target_mode"):
+            assert not _row_mounted(dlg, key), key
+        assert "待分类（开发期）" not in _domain_page_labels(dlg)
+
+        writes = _write_keys(dlg, monkeypatch)
+        assert dlg._write_config()
+        assert not [k for k in writes
+                    if k.startswith(("dynamic_island", "island_", "network_probe",
+                                     "game_fps"))]
+        # 菜单域那一行不受岛门控（归属见 settings_network 模块 docstring），照常写回
+        assert "network_info_menu_enabled" in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_island_settings_domain_present_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert "桌面组件" in _sidebar_labels(dlg)
+        for key in ("dynamic_island_enabled", "island_network", "island_fps"):
+            assert _row_mounted(dlg, key), key
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_agent_link_box_unmounted_when_inactive(tmp_path, monkeypatch):
+    """设置层：「Agent 联动」折叠框与「消费统计」组不挂出，其键不写回。"""
+    _freeze_all_but("agent_link")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        for key in ("agent_sound_enabled", "agent_sound_start", "agent_sound_volume",
+                    "agent_cost"):
+            assert not _row_mounted(dlg, key), key
+        labels = _domain_labels(dlg, "自动化与联动")
+        assert "消费统计" not in labels
+        assert not _widget_mounted(dlg, dlg.agent_link_box)  # 折叠框不挂出（控件保留）
+        assert "待分类（开发期）" not in labels  # 照常 claim，不掉「待分类」
+
+        writes = _write_keys(dlg, monkeypatch)
+        assert dlg._write_config()
+        assert "agent_link" not in writes
+        assert not [k for k in writes if k.startswith(("agent_sound", "agent_cost"))]
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_agent_link_box_mounted_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        for key in ("agent_sound_enabled", "agent_cost"):
+            assert _row_mounted(dlg, key), key
+        labels = _domain_labels(dlg, "自动化与联动")
+        assert "消费统计" in labels
+        assert _widget_mounted(dlg, dlg.agent_link_box)
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_quick_launch_tab_unmounted_when_inactive(tmp_path, monkeypatch):
+    """设置层：「菜单 → 快捷启动」标签与编辑器不挂出，quick_launch_apps 不写回。"""
+    _freeze_all_but("quick_launch")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        tabs = _domain_tab_labels(dlg, "菜单")
+        assert "快捷启动" not in tabs
+        assert "菜单编排" in tabs  # 同域核心标签照旧
+        assert not _row_mounted(dlg, "quick_launch_apps")
+        assert "待分类（开发期）" not in _domain_page_labels(dlg)
+
+        writes = _write_keys(dlg, monkeypatch)
+        assert dlg._write_config()
+        assert "quick_launch_apps" not in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_quick_launch_tab_present_by_default(tmp_path, monkeypatch):
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert "快捷启动" in _domain_tab_labels(dlg, "菜单")
+        assert _row_mounted(dlg, "quick_launch_apps")
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_memory_trim_blocked_when_system_tools_inactive(monkeypatch):
+    """执行层：菜单投影之外的两条直达路（builder 直调 / 回调直调）都不起回收线程。"""
+    from PySide6.QtWidgets import QMenu
+
+    import pet.memory_trim as memory_trim_mod
+    from pet.context_menus import shared as menu_shared
+
+    app = _qapp()
+    started: list = []
+    monkeypatch.setattr(memory_trim_mod, "run_in_background",
+                        lambda *_a, **_k: started.append(1))
+    monkeypatch.setattr(memory_trim_mod, "is_supported", lambda: True)
+
+    class _Pet:
+        cfg = _Cfg(mem_min_size_mb=50.0, mem_skip_foreground=True)
+
+    _freeze_all_but("system_tools")
+    menu = QMenu()
+    try:
+        assert menu_shared.add_memory_trim(menu, _Pet()) is None
+        menu_shared.trigger_memory_trim(_Pet())
+        assert started == []
+
+        fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+        assert menu_shared.add_memory_trim(menu, _Pet()) is not None
+        menu_shared.trigger_memory_trim(_Pet())
+        assert started == [1]
+    finally:
+        # 被替身的 worker 不会回发 _worker_done，手动摘掉本轮留下的桥
+        menu_shared._MEMORY_TRIM_BRIDGES.clear()
+        menu.deleteLater()
+        app.processEvents()

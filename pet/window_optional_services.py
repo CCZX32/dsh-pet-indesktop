@@ -66,6 +66,10 @@ class WindowFeatureGateMixin:
         return bool((raw or {}).get("enabled", False))
 
     def _agent_link_wanted(self) -> bool:
+        if not feature_activation.is_active("agent_link"):
+            # 模块未激活：legacy 懒创建路径一个管理器都不许建（构造即
+            # apply_config → 起监视器线程）；共享容器那条路径同理不构造。
+            return False
         raw = self.cfg.get("agent_link", {})
         if not isinstance(raw, dict):
             return False
@@ -89,7 +93,13 @@ class WindowFeatureGateMixin:
         return self.proactive_watcher
 
     def _ensure_agent_link_manager(self):
-        """首次启用 Agent 联动时懒创建管理器；已存在则原样返回。"""
+        """首次启用 Agent 联动时懒创建管理器；已存在则原样返回。
+
+        模块未激活：返回 None，一个管理器都不构造（``AgentLinkManager.__init__``
+        末尾就是 ``apply_config``，构造即起监视器线程）。调用方全部按 None 降级。
+        """
+        if not feature_activation.is_active("agent_link"):
+            return None
         if self.agent_link_manager is None:
             from .agent_link import AgentLinkManager
             self.agent_link_manager = AgentLinkManager(self, self.cfg)

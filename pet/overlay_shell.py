@@ -2457,8 +2457,11 @@ class OverlayShell(QObject):
         shared = getattr(getattr(self._instance, "shell", None), "_shared", None)
         if shared is None:
             return
+        link = getattr(shared, "agent_link", None)
+        if link is None:
+            return  # agent_link 模块未激活：容器里没有管理器，无联动链可接
         try:
-            shared.proxy.set_link_next_provider(shared.agent_link._next_busy_anim)
+            shared.proxy.set_link_next_provider(link._next_busy_anim)
         except Exception:
             logging.debug("overlay: 接入共享联动链失败", exc_info=True)
 

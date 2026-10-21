@@ -1923,15 +1923,9 @@ class ModernSettingsDialog(QDialog):
                 ]
             ),
         )
-        menu.addTab(
-            "launcher",
-            "快捷启动",
-            page_content(
-                [
-                    ("已配置应用", claim("quick_launch_apps")),
-                ]
-            ),
-        )
+        quick_launch_rows = claim("quick_launch_apps")  # 模块未激活也走这里：claim 防「待分类」
+        if _fa.is_active("quick_launch"):
+            menu.addTab("launcher", "快捷启动", page_content([("已配置应用", quick_launch_rows)]))
         menu.addTab(
             "appearance",
             "外观",
@@ -1962,14 +1956,15 @@ class ModernSettingsDialog(QDialog):
         interval_rows = [row for row in island_rows
                          if row.objectName() == "settingRow_network_probe_interval"]
         island_rows = [row for row in island_rows if row not in interval_rows]
+        # 灵动岛模块未激活：整域只有岛内容 → 域本身消失（同语音域空域机制）。
         desktop_components = page_content(
             [
                 ("桌面胶囊（灵动岛）", island_rows),
                 ("网络延迟检测（高级）", interval_rows, True),
             ]
-        )
-        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是一条误导标题）。
-        for section in desktop_components.findChildren(SettingsSection):
+        ) if _fa.is_active("dynamic_island") else None
+        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是误导标题）。
+        for section in (desktop_components.findChildren(SettingsSection) if desktop_components else ()):
             if section.rows and all(row.isHidden() for row in section.rows):
                 section.setVisible(False)
 
@@ -2097,14 +2092,15 @@ class ModernSettingsDialog(QDialog):
         # 待办模块未激活：行照常被 claim（防掉「待分类」并保有控件），但不挂进
         # 域页、不写回配置——重新激活后原样回来。
         todo_rows = claim("todo_reminder_enabled", "todo_reminder_lead_minutes", "todo_reminder_speak")
+        # Agent 联动模块未激活：折叠框与「消费统计」两处同样只 claim 不挂出。
         automation = page_content(
             [
                 *([("待办提醒", todo_rows)] if _fa.is_active("todo") else []),
                 # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
                 ("免打扰", settings_quiet.build_quiet_rows(self)),
                 *proactive_sections,
-                ("消费统计", agent_cost_rows),
-                agent_box,
+                *([("消费统计", agent_cost_rows)] if _fa.is_active("agent_link") else []),
+                *([agent_box] if _fa.is_active("agent_link") else []),
                 ("文案风格与模板", ungated_dialogue_rows),
                 phrases_box,
             ]
@@ -2316,6 +2312,10 @@ class ModernSettingsDialog(QDialog):
         self._saved_via_button = True
         self.accept()
 
+    def _set_feature_key(self, feature_id: str, key: str, value) -> None:
+        if _fa.is_active(feature_id):  # 未激活模块的组未挂出：其键不写回（控件保留）
+            self.config.set(key, value)
+
     def _write_config(self) -> bool:
         """把当前控件值写入 config 并落盘（按钮与直接关闭共用）。
 
@@ -2383,31 +2383,29 @@ class ModernSettingsDialog(QDialog):
         existing_island = self.config.get("dynamic_island", {})
         if not isinstance(existing_island, dict):
             existing_island = {}
-        self.config.set(
-            "dynamic_island",
-            {
-                "enabled": self.island_enabled_check.isChecked(),
-                "show_icon": self.island_icon_check.isChecked(),
-                "show_name": self.island_name_check.isChecked(),
-                "show_info": self.island_info_check.isChecked(),
-                "info_mode": str(self.island_info_mode_select.currentData() or "time"),
-                "custom_text": self.island_custom_text_edit.text().strip(),
-                "show_status": self.island_status_check.isChecked(),
-                "style": str(self.island_style_select.currentData() or "dark"),
-                "opacity": float(self.island_opacity_spin.value()),
-                "accent": str(self.island_accent_select.currentData() or "blue"),
-                "icon": str(self.island_icon_select.currentData() or "auto"),
-                "click_action": str(self.island_click_action_select.currentData() or "expand"),
-                "hidden_chat": self.island_hidden_chat_check.isChecked(),
-                "event_effects": self.island_event_effects_check.isChecked(),
-                "edge_dock": self.island_edge_dock_check.isChecked(),
-                "collision_enabled": self.island_collision_check.isChecked(),
-                # 拖拽落点写入的停靠边与位置：设置页不回写，原样保留。
-                "dock_edge": existing_island.get("dock_edge", "none"),
-                "x": existing_island.get("x"),
-                "y": existing_island.get("y"),
-            },
-        )
+        # 灵动岛模块未激活：岛行未挂出，其键不写回（见「桌面组件」域装配）。
+        self._set_feature_key("dynamic_island", "dynamic_island", {
+            "enabled": self.island_enabled_check.isChecked(),
+            "show_icon": self.island_icon_check.isChecked(),
+            "show_name": self.island_name_check.isChecked(),
+            "show_info": self.island_info_check.isChecked(),
+            "info_mode": str(self.island_info_mode_select.currentData() or "time"),
+            "custom_text": self.island_custom_text_edit.text().strip(),
+            "show_status": self.island_status_check.isChecked(),
+            "style": str(self.island_style_select.currentData() or "dark"),
+            "opacity": float(self.island_opacity_spin.value()),
+            "accent": str(self.island_accent_select.currentData() or "blue"),
+            "icon": str(self.island_icon_select.currentData() or "auto"),
+            "click_action": str(self.island_click_action_select.currentData() or "expand"),
+            "hidden_chat": self.island_hidden_chat_check.isChecked(),
+            "event_effects": self.island_event_effects_check.isChecked(),
+            "edge_dock": self.island_edge_dock_check.isChecked(),
+            "collision_enabled": self.island_collision_check.isChecked(),
+            # 拖拽落点写入的停靠边与位置：设置页不回写，原样保留。
+            "dock_edge": existing_island.get("dock_edge", "none"),
+            "x": existing_island.get("x"),
+            "y": existing_island.get("y"),
+        })
         if self.click_balance_check is not None:
             self.config.set("click_show_balance", self.click_balance_check.isChecked())
         self.config.set("click_show_self_talk", self.click_self_talk_check.isChecked())
@@ -2426,7 +2424,8 @@ class ModernSettingsDialog(QDialog):
                     "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
                 )
             settings_music.save_source_settings(self)
-        if getattr(self, "agent_cost_check", None) is not None:
+        # 消费统计归 Agent 联动模块：未激活时该行未挂出（控件随旧页销毁），键不写回
+        if _fa.is_active("agent_link") and getattr(self, "agent_cost_check", None) is not None:
             self.config.set("agent_cost_enabled", self.agent_cost_check.isChecked())
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
@@ -2484,9 +2483,8 @@ class ModernSettingsDialog(QDialog):
             self.config.set("dialogue_phrases", new_global)
         # 记住上次编辑层：下次打开设置直接回到该 Agent 专属层（未知值回落全局）
         self.config.set("dialogue_last_scope", str(getattr(self, "_dialogue_scope", "") or ""))
+        # Agent 联动音效写回（模块未激活时折叠框未挂出 → 整个字典不写回，见下）
         agent_cfg = dict(self.config.get("agent_link", {}))
-
-        # Agent 联动音效写回
         agent_cfg["sound_enabled"] = self.agent_sound_check.isChecked()
         agent_cfg["sound_start_enabled"] = self.agent_sound_start_check.isChecked()
         agent_cfg["sound_start_path"] = self.agent_sound_start_picker.text().strip() or "builtin:agent-start"
@@ -2497,7 +2495,7 @@ class ModernSettingsDialog(QDialog):
         agent_cfg["sound_volume"] = float(self.agent_sound_volume_spin.value()) / 100.0
         agent_cfg["sound_cooldown_seconds"] = float(self.agent_sound_cooldown_spin.value())
 
-        self.config.set("agent_link", agent_cfg)
+        self._set_feature_key("agent_link", "agent_link", agent_cfg)
         # 模块未激活的组未挂进页面（见 automation 装配），其键不写回
         if _fa.is_active("todo"):
             self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
@@ -2543,7 +2541,8 @@ class ModernSettingsDialog(QDialog):
                 "image_dir": store_fun_asset(self.egg_image_dir_picker.text(), oijingjing_image_path().parent),
             },
         )
-        self.config.set("quick_launch_apps", self.quick_launch_editor.apps())
+        # 快捷启动模块未激活：「快捷启动」标签未挂出，编辑器值不写回
+        self._set_feature_key("quick_launch", "quick_launch_apps", self.quick_launch_editor.apps())
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)

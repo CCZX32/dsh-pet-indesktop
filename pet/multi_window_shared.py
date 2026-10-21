@@ -26,6 +26,7 @@ import weakref
 
 from PySide6.QtCore import QObject, Signal
 
+from . import feature_activation
 from . import platform_win
 from . import quiet_mode
 from . import vision as vision_mod
@@ -529,7 +530,14 @@ class SharedSubsystems:
 
     def __init__(self, shell) -> None:
         self.proxy = MultiWindowProxy(shell)
-        self.agent_link = SharedAgentLinkManager(self.proxy, shell.config)
+        # 构造前挡：``SharedAgentLinkManager`` 的 ``__init__`` 末尾就是
+        # ``apply_config()``（构造即启停监视器），所以模块停用必须在这里**不构造**
+        # ——不是构造完再 ``stop_all()``。None 是既有语义（单窗路径历史上就有
+        # 「没有 manager」这一态），全部消费点按 None 降级。
+        self.agent_link = (
+            SharedAgentLinkManager(self.proxy, shell.config)
+            if feature_activation.is_active("agent_link") else None
+        )
         # 共享 watcher 的 cfg 是**进程级**配置（开关/白名单/额度/密钥都是全局面），
         # 只有宠物名要跟随当前身份：角色身份由壳的每宠视图给（见 pet_name）。
         #
@@ -601,7 +609,8 @@ class SharedSubsystems:
         """
         if self.proactive is not None:  # 主动识屏模块停用：容器里没有 watcher
             self.proactive.stop_all()
-        self.agent_link.stop_all()
+        if self.agent_link is not None:  # Agent 联动模块停用：容器里没有管理器
+            self.agent_link.stop_all()
         self.fs.stop()
         self.quiet.stop()
         _release_qt_lifetimes(self)
