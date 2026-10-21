@@ -2032,7 +2032,16 @@ class ModernSettingsDialog(QDialog):
                     # include_ai=False 时 ai_page 不存在、这里整段不构造）。
                     ("记忆", claim("chat_memory_enabled", "chat_memory_auto_extract", "chat_memory_extract_interval", "chat_memory_manage")),
                     # 「工具（Agent）」组：随 chat 模块挂出（与「记忆」同一条门控）
-                    ("工具（Agent）", claim("chat_agent_tools", "chat_agent_tool_rounds", "chat_agent_fs_roots")),
+                    (
+                        "工具（Agent）",
+                        claim(
+                            "chat_agent_tools",
+                            "chat_agent_tool_rounds",
+                            "chat_agent_fs_roots",
+                            "chat_agent_write_enabled",
+                            "chat_agent_write_root",
+                        ),
+                    ),
                     # 余额是灵动岛模块的子能力：岛未激活时不挂出（行已 claim 防
                     # 「待分类」），运行时查询链也已被 show_balance 挡住
                     *([("余额与服务状态", balance_rows)]

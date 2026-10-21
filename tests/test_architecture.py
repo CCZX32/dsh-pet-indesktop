@@ -305,7 +305,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2664。**前一笔已达 2653（期 3a voice 提交未同步校准，预算从 2637 起就红了）**，
 # 本次一并校准；差值来自「按激活挂出/跳键」的分支行（每组 3~5 行，无新增页面）。
 # 按文件约定只随实测校准，不为达标压行（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2678  # 2026-10-21/22：直播捕获/跨屏 +7 与 AI 域「记忆」组 +3 合并校准；+2：AI 域「工具（Agent）」组 claim 一行（feat/agent-tools）
+# 2026-10-21 上调到 2687：AI 域「工具（Agent）」组 claim 增加写工具 2 键
+# （chat_agent_write_enabled / chat_agent_write_root），单行拆成 10 行，净 +9。
+# 只随实测校准，不为达标压行（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2687  # 2026-10-21：写工具 claim 两键展开 +9（feat/agent-write）
 
 
 def _read(name: str) -> str:

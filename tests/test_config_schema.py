@@ -51,6 +51,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "chat_agent_fs_roots",
         "chat_agent_tool_rounds",
         "chat_agent_tools",
+        "chat_agent_write_enabled",
+        "chat_agent_write_root",
         "chat_background",
         "chat_background_fill",
         "chat_background_opacity",
@@ -247,6 +249,9 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 2026-10-21 加 Personal Agent v0 3 键（chat_agent_tools 总开关默认 True /
 # chat_agent_tool_rounds 工具循环轮数默认 5 / chat_agent_fs_roots 本地只读白名单
 # 追加目录默认空；三者都是 chat 模块内子开关，非 NULL 接受键），白名单 162。
+# 2026-10-21 加 Personal Agent v0.5 2 键（chat_agent_write_enabled 写能力默认 False /
+# chat_agent_write_root 唯一工作区根默认 桌面/肥鱼工作区；同样是非 NULL 接受键），
+# 白名单 164。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

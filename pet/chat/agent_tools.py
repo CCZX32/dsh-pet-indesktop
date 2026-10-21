@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Personal Agent v0：注册表驱动的工具循环 + 三组内置工具。
+"""Personal Agent v0.5：注册表驱动的工具循环 + 内置工具。
 
-设计稿：`.scratch/personal-agent/SPEC-v0.md`。v0 只做「能聊，且在对话里调工具」，
-不做写文件 / 执行命令 / 定时任务（那是 v2「受控执行」的内容）。
+设计稿：`.scratch/personal-agent/SPEC-v0.md` 与 `SPEC-v05-write.md`。
 
-三组工具：
+v0 只做「能聊，且在对话里调工具」；v0.5 增加**默认关闭**的受控写能力：
 
 - **网络**（复用 `pet/chat/web_search.py`）：`web_search` + `web_fetch`；
 - **本地只读**：`fs_read` / `fs_list`，白名单根目录（默认桌面/文档/下载，可追加），
   单文件 ≤200 KB，二进制/超限/白名单外一律拒绝；
+- **工作区写入**（v0.5，默认关）：`fs_write` / `fs_edit` / `fs_undo`，唯一工作区根、
+  原子写 + 备份 + 撤销（逻辑在 `pet/chat/agent_write.py`）；
 - **记忆**（复用 `pet/chat/memory.py` 的 ChatMemory 与它的三层锁）：`memory_remember`
   / `memory_forget`，走既有写入合并，不另开存储通道。
 
@@ -24,8 +25,8 @@
 4. **循环上限**：轮数由 `max_rounds()` 给出，硬上限 `MAX_ROUNDS_LIMIT`。
 
 工具注册表按开关装配（`build_registry`）：联网搜索开启才挂 web 工具，`agent`
-运行环境存在才挂 fs / 记忆工具；两者都没有时返回 None，对话路径与没有工具时
-逐调用一致。
+运行环境存在才挂 fs / 记忆工具；写工具还要 `chat_agent_write_enabled=True`
+（v0.5，默认关）。两者都没有时返回 None，对话路径与没有工具时逐调用一致。
 """
 
 from __future__ import annotations
@@ -65,13 +66,14 @@ AUDIT_FILE_NAME = 'chat-agent-audit.jsonl'
 AUDIT_MAX_BYTES = 2 * 1024 * 1024
 AUDIT_ARG_CHARS = 120
 #: 参数里属于用户隐私正文的键：审计只留长度，不留原文。
-_SENSITIVE_ARG_KEYS = frozenset({'text'})
+_SENSITIVE_ARG_KEYS = frozenset({'text', 'content', 'new_text'})
 
 #: 白名单外的统一拒绝口径（不透露该路径存在与否）。
 _OUTSIDE_MESSAGE = '这个位置不在允许访问的目录里（只读桌面、文档、下载等白名单目录）'
 
 _WEB_TOOL_NAMES = frozenset({'web_search', 'web_fetch'})
 _FS_TOOL_NAMES = frozenset({'fs_read', 'fs_list'})
+_WRITE_TOOL_NAMES = frozenset({'fs_write', 'fs_edit', 'fs_undo'})
 _MEMORY_TOOL_NAMES = frozenset({'memory_remember', 'memory_forget'})
 
 
@@ -613,6 +615,8 @@ class AgentRuntime:
     memory_path: Any = None
     character_id: str = ''
     audit: AgentAuditLog | None = None
+    #: v0.5：唯一工作区根。None = 写能力默认关（不注册写工具）；非 None 才装配。
+    write_root: Path | None = None
 
 
 def _clamp_rounds(value) -> int:
@@ -632,11 +636,16 @@ def max_rounds(config) -> int:
 
 
 def agent_registry(runtime, *, audit: AgentAuditLog | None = None) -> ToolRegistry:
-    """只含本地只读与记忆工具的注册表（fs 无根目录 / 记忆无路径时对应工具不挂）。"""
+    """本地只读 / 工作区写入 / 记忆工具的注册表（各自无根或路径时不挂）。"""
     tools: list = []
     roots = tuple(getattr(runtime, 'fs_roots', ()) or ())
     if roots:
         tools.extend(_fs_tools(roots))
+    write_root = getattr(runtime, 'write_root', None)
+    if write_root is not None:
+        from .agent_write import write_tools
+
+        tools.extend(write_tools(write_root))
     memory_path = getattr(runtime, 'memory_path', None)
     if memory_path is not None:
         tools.extend(_memory_tools(memory_path))
@@ -661,6 +670,10 @@ def planner_prompt(registry: ToolRegistry) -> str:
     if names & _FS_TOOL_NAMES:
         lines.append("- 用户点名的本地文件、说「我的桌面上/下载里那个文件」这类 → "
                      "先 fs_list 看目录，再 fs_read 读正文；")
+    if names & _WRITE_TOOL_NAMES:
+        lines.append("- 用户明确要你新建/改写/撤销肥鱼工作区里的文本文件 → "
+                     "fs_write / fs_edit / fs_undo；只能写工作区目录，写之前不用问，"
+                     "但要在回复里告诉用户你写了什么；")
     if names & _MEMORY_TOOL_NAMES:
         lines.append("- 用户说「记住……」或要求你以后别再提某件事 → memory_remember / memory_forget；")
     groups = "\n".join(lines)
@@ -695,6 +708,21 @@ def build_agent_runtime(config, character_id) -> AgentRuntime | None:
     if not bool(config.get('chat_agent_tools', True)):
         return None
     roots = fs_roots_from_config(config.get('chat_agent_fs_roots', ''))
+    write_root = None
+    write_flag = config.get('chat_agent_write_enabled', False)
+    if isinstance(write_flag, str):
+        write_enabled = write_flag.strip().lower() in {'1', 'true', 'yes', 'on'}
+    else:
+        write_enabled = bool(write_flag)
+    if write_enabled:
+        from ..config import default_agent_write_root
+
+        from .agent_write import resolve_workspace_root
+
+        write_root = resolve_workspace_root(
+            config.get('chat_agent_write_root', ''),
+            default=Path(default_agent_write_root()),
+        )
     memory = None
     character = str(character_id or '')
     if character:
@@ -711,4 +739,5 @@ def build_agent_runtime(config, character_id) -> AgentRuntime | None:
         memory_path=memory,
         character_id=character,
         audit=AgentAuditLog(Path(config.dir) / AUDIT_FILE_NAME, character=character),
+        write_root=write_root,
     )

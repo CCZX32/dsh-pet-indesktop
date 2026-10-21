@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import errno
+import functools
 import json
 import logging
 import math
@@ -17,6 +18,34 @@ from pathlib import Path
 from typing import Any
 
 from . import catalog, island_segments, music_players
+
+
+def default_agent_write_root() -> str:
+    """Personal Agent v0.5 的唯一写工作区默认根：桌面/肥鱼工作区。
+
+    只计算路径、不建目录（首次写入时才创建）。这里**不能 import Qt**：
+    ``pet/pet_profiles.py`` 之类的纯逻辑入口会取 Config 默认值，必须能在
+    无 Qt/无 keyring 的进程里导入。OneDrive 重定向用环境变量兜底，取不到
+    已存在的 Desktop 时回落 ``~/Desktop``。结果按进程缓存。
+    """
+    return _default_agent_write_root_cached()
+
+
+@functools.lru_cache(maxsize=1)
+def _default_agent_write_root_cached() -> str:
+    desktops = []
+    for key in ("OneDrive", "OneDriveCommercial"):
+        root = os.environ.get(key)
+        if root:
+            desktops.append(Path(root) / "Desktop")
+    desktops.append(Path.home() / "Desktop")
+    for desktop in desktops:
+        try:
+            if desktop.is_dir():
+                return str(desktop / "肥鱼工作区")
+        except OSError:
+            continue
+    return str(desktops[-1] / "肥鱼工作区")
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -1289,6 +1318,10 @@ class Config:
             "chat_agent_tools": True,
             "chat_agent_tool_rounds": 5,
             "chat_agent_fs_roots": "",
+            # Personal Agent v0.5（2026-10-21）：受控写/编辑默认关（显式授权），
+            # 工作区根唯一且与只读白名单分离；默认 桌面/肥鱼工作区。
+            "chat_agent_write_enabled": False,
+            "chat_agent_write_root": default_agent_write_root(),
             # 合成后端：edge（edge-tts，免 Key）/ mimo（小米 MiMo TTS，OpenAI 兼容接口，
             # API Key 存系统钥匙串）/ sapi（Windows 本地语音）/ doubao（豆包 2.0）；
             # 主后端失败时按 fallback 自动回退另一个。
@@ -1579,6 +1612,8 @@ class Config:
             "chat_agent_tools",
             "chat_agent_tool_rounds",
             "chat_agent_fs_roots",
+            "chat_agent_write_enabled",
+            "chat_agent_write_root",
             "voice_chime_schedule",
             "voice_chime_custom_times",
             "voice_chime_voice",
@@ -2030,6 +2065,16 @@ class Config:
         self.data["todo_reminder_enabled"] = _bool_or_default(self.data.get("todo_reminder_enabled"), True)
         self.data["todo_reminder_lead_minutes"] = int(_float_or_default(self.data.get("todo_reminder_lead_minutes"), 5.0, 0.0, 60.0))
         self.data["todo_reminder_speak"] = _bool_or_default(self.data.get("todo_reminder_speak"), False)
+        # Personal Agent v0.5：写开关走同族布尔归一（防手写 "false" 被误开）；
+        # 工作区根只收非空字符串，脏值/空串回落默认根。系统目录的拒绝与回落
+        # 在装配时由 agent_write.resolve_workspace_root 做（config 不 import chat）。
+        self.data["chat_agent_write_enabled"] = _bool_or_default(
+            self.data.get("chat_agent_write_enabled"), False)
+        raw_write_root = self.data.get("chat_agent_write_root")
+        if isinstance(raw_write_root, str) and raw_write_root.strip():
+            self.data["chat_agent_write_root"] = raw_write_root.strip()[:500]
+        else:
+            self.data["chat_agent_write_root"] = default_agent_write_root()
         # 免打扰（issue #208）：默认时长归一到一个合法档位（手改成 7 分钟不该让
         # 菜单里一个勾选项都对不上）；布尔键同族同规，防手改字符串布尔误开。
         self.data["quiet_minutes_default"] = normalize_quiet_minutes(
@@ -2279,6 +2324,8 @@ class Config:
             "island_network_enabled",
             "network_probe_interval_seconds",
             "network_info_menu_enabled",
+            "chat_agent_write_enabled",
+            "chat_agent_write_root",
         }:
             self._normalize_pet_settings()
             # 本次显式赋的键是**整值替换**，不是"用户删了里面的子键"：把它的规范化

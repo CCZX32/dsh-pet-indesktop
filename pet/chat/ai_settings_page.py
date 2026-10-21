@@ -145,6 +145,13 @@ class _AiSettingsPage(QWidget):
         self.chat_agent_fs_roots = QLineEdit()
         self.chat_agent_fs_roots.setText(str(config.get("chat_agent_fs_roots", "") or ""))
         self.chat_agent_fs_roots.setPlaceholderText("追加目录，分号分隔；留空 = 只用默认三个")
+        # v0.5 受控写：默认关；工作区根唯一，与上面的只读白名单严格分离。
+        self.chat_agent_write_enabled = ToggleSwitch()
+        self.chat_agent_write_enabled.setChecked(
+            bool(config.get("chat_agent_write_enabled", False)))
+        self.chat_agent_write_root = QLineEdit()
+        self.chat_agent_write_root.setText(str(config.get("chat_agent_write_root", "") or ""))
+        self.chat_agent_write_root.setPlaceholderText("默认：桌面/肥鱼工作区")
         self.system_notify_check = ToggleSwitch()
         # 系统通知键：构造期快照无条件回写会把打开期间外部（老聊天设置即存入口
         # settings_dialog.py:437）对该键的改动静默回滚，所以只在用户实际拨动过
@@ -335,6 +342,19 @@ class _AiSettingsPage(QWidget):
                 "它能读的文件只限这些目录：默认桌面、文档、下载三个；这里可追加，"
                 "分号分隔，写错的目录会被忽略。",
                 self.chat_agent_fs_roots,
+            ),
+            SettingRow(
+                "chat_agent_write_enabled", "允许写文件（仅工作区）",
+                "开启后，它可以在工作区里新建或改写文本文件，并支持备份与撤销。"
+                "写入仅限肥鱼工作区目录，工作区外的路径一律拒绝；写之前不用问，"
+                "但会在回复里告诉你写了什么。默认关闭。",
+                self.chat_agent_write_enabled,
+            ),
+            SettingRow(
+                "chat_agent_write_root", "写入工作区目录",
+                "唯一允许写入的目录。默认桌面/肥鱼工作区，不存在会在首次写入时创建；"
+                "改到系统目录会被拒绝并回落到默认目录。只读白名单不隐含写权限。",
+                self.chat_agent_write_root,
             ),
         ], self))
         vision_rows = [
@@ -833,6 +853,8 @@ class _AiSettingsPage(QWidget):
         self.config.set("chat_agent_tools", self.chat_agent_tools.isChecked())
         self.config.set("chat_agent_tool_rounds", int(self.chat_agent_tool_rounds.value()))
         self.config.set("chat_agent_fs_roots", self.chat_agent_fs_roots.text().strip())
+        self.config.set("chat_agent_write_enabled", self.chat_agent_write_enabled.isChecked())
+        self.config.set("chat_agent_write_root", self.chat_agent_write_root.text().strip())
         self.config.set_chat_settings(self.settings)
 
     def _chat_memory(self) -> ChatMemory:
