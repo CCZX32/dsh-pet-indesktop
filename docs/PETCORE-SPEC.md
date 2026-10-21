@@ -396,4 +396,12 @@ petcore/
 - 旧 standalone 配置与 slot 档案会在目标不存在时迁移，旧源只读，新目录保存 `migration-backup/`。
   会话、待办和 API 文件迁移等待对应消费者阶段。
 
+## 17. P2 已落地的 WorkerHost 与离线接缝（2026-10-22）
+
+- `petcore/platform/worker.py` 提供统一 `WorkerHost/WorkerSession`：真实子进程、JSONL 握手、
+  配置推送、取消、错误、退出回收、owner 替换和可选心跳超时。
+- CoreHost 持有单一 WorkerHost；退出流程会先收口 worker。业务 worker 仍需在 P3/P4 由 mod 接入。
+- 设置常规页可从角色目录构建并安装 content mod；旧素材目录补齐 VPet Graph 类别的寻址映射。
+- 安装器的 5 个官方离线 feature 默认选中，用户仍可取消；它们继续保持 feature mod 边界。
+
 

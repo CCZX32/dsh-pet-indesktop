@@ -49,6 +49,21 @@ def test_bundled_mods_install_under_the_app_directory() -> None:
         assert f"{{app}}\\mods\\{mod_id}" in text
 
 
+def test_official_feature_tasks_are_default_selected() -> None:
+    lines = _iss_text().splitlines()
+    task_lines = {
+        mod_id: next(line for line in lines if f'Name: "mod_{suffix}"' in line)
+        for mod_id, suffix in (
+            ("fun.divination", "divination"),
+            ("fun.festival", "festival"),
+            ("reminder.todo", "todo"),
+            ("voice.chime", "chime"),
+            ("media.music", "music"),
+        )
+    }
+    assert all("Flags: unchecked" not in line for line in task_lines.values())
+
+
 def test_install_mods_dir_is_only_used_when_frozen(tmp_path: Path, monkeypatch) -> None:
     assert paths.install_mods_dir() is None
     monkeypatch.setattr(sys, "frozen", True, raising=False)

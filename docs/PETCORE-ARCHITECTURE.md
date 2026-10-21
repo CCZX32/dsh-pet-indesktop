@@ -256,6 +256,14 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 - 迁移器当前处理 standalone 主配置和 slot profile；会话、待办和 API 文件等业务数据必须由
   对应功能阶段实现并清洗敏感字段。
 
+## 21. P2 WorkerHost 实现（2026-10-22）
+
+- `platform.worker.WorkerHost` 是进程级宿主，`HostPorts.worker` 只暴露最小 `start()` 入口；
+  `WorkerSession` 负责协议和 pipe 生命周期。
+- Worker stdout/stderr 各有独立 reader，stdout 解码错误只回调诊断，不会杀死 Core；关闭先发
+  `shutdown`，超时后 terminate/kill。
+- WorkerHost 目前是基础设施，业务 feature 仍需在后续阶段声明 worker entrypoint 和结果事件。
+
 ## 19. P1–P6 目标架构补充（2026-10-22）
 
 ### 19.1 当前宠物上下文

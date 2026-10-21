@@ -29,7 +29,7 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 
 ### Windows 安装包
 
-正式安装包（`dist/dsh-pet-core-setup.exe`）把这 5 个包做成了安装向导里的可勾选项，
+正式安装包（`dist/dsh-pet-core-setup.exe`）默认勾选并安装这 5 个包，用户仍可在安装向导里取消，
 装到 `%APPDATA%\dsh-pet-core\mods\<id>`，并附一个 `.trusted` 标记文件——那是
 「安装器逐包授权」的证据，带着它就不需要再勾「允许功能扩展」。不勾选就完全不会
 写盘；卸载时随目录一起删除。

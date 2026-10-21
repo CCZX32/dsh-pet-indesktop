@@ -20,6 +20,14 @@ _FOLDER_MAP: dict[str, tuple[GraphType, AnimatType, str, bool]] = {
     "move": (GraphType.MOVE, AnimatType.B_LOOP, "ground", False),
     "click": (GraphType.TOUCH_BODY, AnimatType.SINGLE, "ground", False),
     "drag": (GraphType.RAISED_STATIC, AnimatType.SINGLE, "ground", False),
+    "raised_static": (GraphType.RAISED_STATIC, AnimatType.SINGLE, "ground", False),
+    "raised_dynamic": (GraphType.RAISED_DYNAMIC, AnimatType.B_LOOP, "ground", False),
+    "touch_head": (GraphType.TOUCH_HEAD, AnimatType.SINGLE, "ground", False),
+    "say": (GraphType.SAY, AnimatType.SINGLE, "ground", False),
+    "sleep": (GraphType.SLEEP, AnimatType.B_LOOP, "ground", True),
+    "startup": (GraphType.STARTUP, AnimatType.SINGLE, "ground", False),
+    "start_up": (GraphType.STARTUP, AnimatType.SINGLE, "ground", False),
+    "work": (GraphType.WORK, AnimatType.B_LOOP, "ground", True),
     # events/<group>/<name>.webm：语义事件动画（如 events/balance/余额-*.webm），
     # 不进随机动作池，只能由 play_event() 显式触发。
     "events": (GraphType.EVENT, AnimatType.SINGLE, "ground", False),

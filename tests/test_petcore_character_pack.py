@@ -5,6 +5,9 @@ from pathlib import Path
 
 from petcore.content.character_pack import build_character_pack, validate_character_source
 from petcore.content.collect import collect_characters
+from petcore.content.importer import install_character_source
+from petcore.content.legacy import build_animations
+from petcore.engine.enums import GraphType
 
 
 def _source(root: Path) -> Path:
@@ -71,3 +74,32 @@ def test_build_rejects_invalid_id_and_non_empty_target(tmp_path):
     ok, message = build_character_pack(source, target)
     assert ok is False
     assert "not empty" in message
+
+
+def test_settings_importer_installs_character_mod(tmp_path):
+    source = _source(tmp_path)
+    data_root = tmp_path / "data"
+    ok, message, character_id = install_character_source(source, data_root)
+
+    assert ok, message
+    assert character_id == "character.source"
+    assert (data_root / "mods" / "character.source" / "mod.json").is_file()
+    assert not (data_root / ".character-import").exists()
+
+
+def test_legacy_animation_folders_cover_vpet_graph_categories(tmp_path):
+    videos = tmp_path / "videos"
+    for folder in ("touch_head", "say", "sleep", "startup", "work", "raised_dynamic"):
+        path = videos / folder
+        path.mkdir(parents=True)
+        (path / "sample.webm").write_bytes(b"")
+
+    animations = build_animations(videos, tmp_path / "frameseq", "off")
+    graphs = {animation.graph for animation in animations}
+
+    assert GraphType.TOUCH_HEAD in graphs
+    assert GraphType.SAY in graphs
+    assert GraphType.SLEEP in graphs
+    assert GraphType.STARTUP in graphs
+    assert GraphType.WORK in graphs
+    assert GraphType.RAISED_DYNAMIC in graphs

@@ -17,6 +17,7 @@ from ..log import setup_logging
 from ..platform import hotkey_spec
 from ..platform.hotkeys import GlobalHotkeyService
 from ..platform.session import SessionWatcher
+from ..platform.worker import WorkerHost
 from ..mods.feature import FeatureManager
 from .menu import install_core_menu
 from .menu_layout import (
@@ -121,6 +122,7 @@ class CoreHost:
         self.menu_diagnostics: list[str] = []
         self.features: FeatureManager | None = None
         self.quiet = None
+        self.worker_host = WorkerHost()
         from .ports import QuietMode
 
         self.quiet = QuietMode()
@@ -568,6 +570,7 @@ class CoreHost:
 
     def quit_app(self) -> None:
         self.close_dialogs()
+        self.worker_host.shutdown_all()
         if self.features is not None:
             self.features.stop()
             self.features = None
@@ -647,6 +650,7 @@ def run(config: Config, *, root: Path, mod_dirs, instance: str | None = None) ->
             host.hotkeys.uninstall()
         host.close_dialogs()
         manager.shutdown()
+        host.worker_host.shutdown_all()
         if host.features is not None:
             host.features.stop()
         if host.tray is not None:

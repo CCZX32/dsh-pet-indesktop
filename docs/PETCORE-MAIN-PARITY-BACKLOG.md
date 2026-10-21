@@ -157,3 +157,14 @@
 | 点击台词/自语按宠物分流 | 已对齐 | `test_petcore_click_listeners.py`、`test_petcore_self_talk.py` |
 | 旧 standalone 与 slot 基础迁移 | 已对齐 | `test_legacy_config_and_slot_profiles_migrate_with_backup` |
 | 会话/待办/API 文件迁移 | 未做 | 等待对应业务消费者阶段 |
+
+## 9. P2 Worker/离线接缝（2026-10-22）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 统一 WorkerHost | 已对齐（基础） | `tests/test_petcore_worker.py` 真实子进程测试 |
+| 角色目录 GUI 导入 | 已对齐（基础） | `tests/test_petcore_character_pack.py` |
+| VPet Graph 类别寻址 | 已对齐（映射） | `build_animations()` 文件夹映射测试 |
+| 5 个官方 feature 默认安装 | 已对齐（安装任务） | `test_official_feature_tasks_are_default_selected` |
+| 旧 `pet` 媒体后端解耦 | 未做 | `petcore/media/backends.py` 仍为适配层 |
+| AI/识屏/Agent worker 业务 | 未做 | P3/P4 |

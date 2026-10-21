@@ -361,4 +361,5 @@ def build_ports(host, window) -> HostPorts:
         quiet=getattr(host, "quiet", None),
         credentials=credentials,
         api=api,
+        worker=getattr(host, "worker_host", None),
     )

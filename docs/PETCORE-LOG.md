@@ -1104,3 +1104,24 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 
 - 会话、待办独立文件和 API/凭据引用需要对应业务消费者，留到 P3/P4；真实双屏和安装器
   E2E 留到 P5/P6。
+---
+
+## L030 · 2026-10-22 · P2 WorkerHost/离线扩展/角色导入
+
+**改动**
+
+- 新增 `petcore/platform/worker.py`，提供真实子进程 WorkerHost/WorkerSession、JSONL READY、
+  配置推送、取消、错误回调、owner 替换、心跳超时和有界关闭。
+- `CoreHost` 持有 WorkerHost，`HostPorts.worker` 注入；退出时统一收口 worker。
+- 设置常规页增加角色目录导入；旧素材 Graph 映射补齐 Touch_Head/Say/Sleep/StartUP/Work/Raised。
+- 安装器 5 个官方离线 feature 默认选中，README 与安装器测试同步。
+
+**验证**
+
+- Worker/角色/安装器/架构：`21 passed in 1.54s`。
+- petcore + 架构/报告/CI：`915 passed, 5 skipped in 27.15s`。
+- ruff：通过。
+
+**未完成**
+
+- 业务 worker、旧 `pet` 媒体后端解耦、真实安装升级卸载和声卡/双屏人工验收留给后续阶段。

@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QWidget,
+)
 
 from ...engine.geometry import DEFAULT_SCALE, SCALE_MAX, SCALE_MIN, SCALE_STEPS
 from ...platform import autostart, hotkey_spec, screens
@@ -63,6 +72,18 @@ class GeneralPage(SettingsPage):
         open_button.clicked.connect(self._open_data_dir)
         data_card.add_row("数据目录", open_button, "打开保存配置、日志和扩展的目录。")
 
+        import_button = make_button("导入角色目录", self)
+        import_button.clicked.connect(self._import_character)
+        self.import_status = QLabel("支持包含 videos/ 和 manifest.json 的角色目录。", self)
+        self.import_status.setObjectName("settingHint")
+        self.import_status.setWordWrap(True)
+        data_card.add_row(
+            "角色资源包",
+            import_button,
+            "选择角色目录后生成并安装 content mod；导入成功后可在角色下拉框切换。",
+        )
+        data_card.add_widget(self.import_status)
+
         app_card = self.section("应用")
         quit_button = make_button("退出桌宠", self)
         quit_button.clicked.connect(self._quit_app)
@@ -87,6 +108,36 @@ class GeneralPage(SettingsPage):
         opener = getattr(self.host, "open_data_dir", None)
         if callable(opener):
             opener()
+
+    def _import_character(self) -> None:
+        source = QFileDialog.getExistingDirectory(
+            self, "选择角色资源目录", str(getattr(self.host, "root", ""))
+        )
+        if not source:
+            return
+        try:
+            from ...content.importer import install_character_source
+
+            ok, message, character_id = install_character_source(
+                Path(source), self.host.root
+            )
+        except Exception as exc:
+            ok, message, character_id = False, f"导入失败：{type(exc).__name__}: {exc}", None
+        if not ok or not character_id:
+            self.import_status.setText(str(message))
+            QMessageBox.warning(self, "导入角色", str(message))
+            return
+        reloader = getattr(self.host, "reload_mods", None)
+        if callable(reloader):
+            reloader()
+        index = self.character_combo.findData(character_id)
+        if index < 0:
+            for spec in self.host.characters():
+                self.character_combo.addItem(str(spec.name), str(spec.id))
+            index = self.character_combo.findData(character_id)
+        if index >= 0:
+            self.character_combo.setCurrentIndex(index)
+        self.import_status.setText(f"已导入：{character_id}")
 
     def _quit_app(self) -> None:
         answer = QMessageBox.question(

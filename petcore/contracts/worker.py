@@ -12,6 +12,8 @@ EVENT = "event"
 HEARTBEAT = "heartbeat"
 ERROR = "error"
 SHUTDOWN = "shutdown"
+CANCEL = "cancel"
+REQUEST_ID = "request_id"
 
 
 def encode(message: dict[str, Any]) -> str:

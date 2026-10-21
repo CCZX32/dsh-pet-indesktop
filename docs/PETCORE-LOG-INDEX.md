@@ -38,3 +38,4 @@
 | L027 | 2026-10-21 | P8.4 穿透归位/高清 | 点击穿透移出右键菜单改由托盘统一开关（p9 迁移）；彩蛋/气泡/头像按屏幕 DPR 解码，修 1.5 倍屏发虚。 | migrate_p9_menu、tray click-through、media/images、DPR、load_pixmap、logical_size |
 | L028 | 2026-10-22 | P0 主分支对齐审查 | 新增主分支功能矩阵、AI 交接计划和审查报告；冻结每宠作用域、WorkerHost、迁移回滚、默认扩展和发布门。 | parity matrix、handoff、audit、scope、worker、migration、rollback |
 | L029 | 2026-10-22 | P1 配置作用域/基础迁移 | 设置窗口绑定当前宠物；全局/每宠键分流；点击台词/自语按宠物运行；standalone 与 slot 基础迁移并备份。 | ScopedConfig、pet scope、settings target、legacy migration、slot、feature lifecycle |
+| L030 | 2026-10-22 | P2 WorkerHost/离线接缝 | 真实子进程 WorkerHost、角色目录导入、Graph 类别映射、5 个官方 feature 默认安装。 | WorkerHost、JSONL、cancel、heartbeat、character importer、Graph、installer tasks |
