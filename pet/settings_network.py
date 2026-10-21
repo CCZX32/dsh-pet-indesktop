@@ -28,6 +28,7 @@ import threading
 from PySide6.QtCore import QSize, QTimer
 from PySide6.QtWidgets import QLineEdit, QPushButton
 
+from . import feature_activation
 from . import fps_permission, island_extension_host, island_segments, net_monitor
 from .config import (
     GAME_FPS_PROCESS_MAX_CHARS,
@@ -660,8 +661,17 @@ def save_network_settings(dialog) -> None:
     天气 → ``config.save()``）断在写入之前，这次保存一个键都不落盘；
     ② 把它当"用户没勾"淘汰，会静默删掉用户的偏好。所以"表单没覆盖的 id"一律
     按磁盘现状保留（用户没编辑过它，就不该被这次保存改写），顺序也留在原位。
+
+    灵动岛模块未激活时（期 4c）：岛侧行（指标 5 段 + 第三方组件行、探测间隔、
+    帧率两键）未挂出，这些键一律不写回——控件还在（重新激活原样回来），但
+    "没显示的行不该被这次保存改写"。菜单域的 ``network_info_menu`` 行不受岛
+    门控（它挂在「菜单 → 菜单编排」域），照常写回。
     """
     if getattr(dialog, "island_network_check", None) is None:
+        return
+    dialog.config.set("network_info_menu_enabled",
+                      bool(dialog.network_info_menu_check.isChecked()))
+    if not feature_activation.is_active("dynamic_island"):
         return
     covered = _form_metric_ids(dialog)
     checked = {metric_id for metric_id in covered
@@ -671,6 +681,4 @@ def save_network_settings(dialog) -> None:
     dialog.config.set("island_metrics",
                       kept + [m for m in covered if m in checked and m not in kept])
     dialog.config.set("network_probe_interval_seconds", _spin_value(dialog))
-    dialog.config.set("network_info_menu_enabled",
-                      bool(dialog.network_info_menu_check.isChecked()))
     _save_game_fps_settings(dialog)

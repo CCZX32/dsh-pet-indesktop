@@ -155,6 +155,7 @@ class _StubInstance(cap.CapInstance):
     def __init__(self, config, *, chat=True) -> None:
         super().__init__(config)
         self.enable_chat = bool(chat)
+        self.chat_build_capable = bool(chat)  # 与 _wire_window/PetInstance 的接线同款
         self.shell = _StubAppShell()
         self.calls: list[tuple] = []
 
@@ -204,6 +205,7 @@ def _reference_window(config, *, chat=True):
     for key, pool in POOLS.items():
         setattr(win, key, list(pool))
     win.on_open_chat = (lambda: None) if chat else None
+    win.chat_build_capable = bool(chat)
     win.on_open_chat_settings = (lambda: None) if chat else None
     win.on_show_balance = (lambda parent=None: None) if chat else None
     win.on_show_weather = lambda parent=None: None

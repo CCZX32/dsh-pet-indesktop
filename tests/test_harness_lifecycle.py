@@ -468,12 +468,11 @@ def test_harness_submenu_wires_three_lifecycle_actions(tmp_path, monkeypatch):
 
 
 def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
-    """纯桌宠（无 on_open_chat）版本连 DeepSeek Harness 子菜单都不显示。
+    """no-chat 打包变体（chat_build_capable=False）连 DeepSeek Harness 子菜单都不显示。
 
-    门禁有两层，缺一层就有版本漏出 Harness 入口：
-    ① 注册表 ``harness`` 的可用性 = ``on_open_chat`` 回调存在（菜单树直接过滤掉）；
-    ② 共享建造器 ``add_harness`` 自身也带同一道门（任何直调它的入口都安全）。
-    这里两层都验：替身只提供门禁判定需要的属性。
+    门禁：注册表 ``harness`` 的可用性 = 构建变体能力 ``chat_build_capable``
+    （2026-10-21 起替代 on_open_chat 回调的历史误绑——chat 功能模块停用时
+    harness 照常出现，只跟着 no-chat 变体走；模块显隐归功能投影 system_tools）。
     """
     from PySide6.QtWidgets import QApplication, QMenu
 
@@ -481,8 +480,9 @@ def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
 
     app = QApplication.instance() or QApplication([])
 
-    class _LitePet:          # 纯桌宠：没有 on_open_chat
+    class _LitePet:          # no-chat 打包变体：构建能力缺席
         cfg: dict = {}
+        chat_build_capable = False
 
     class _FullPet:
         cfg: dict = {}

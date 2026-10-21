@@ -11,6 +11,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMenu, QWidgetAction
 
 from ..config import DEFAULT_MENU_EASTER_EGG
+from .. import features as features_mod
 from ..weather_menu import (
     WEATHER_DISABLED_REASON,
     add_show_weather,
@@ -355,7 +356,14 @@ class MenuActionRegistry:
                 disabled_reason="尚未配置快捷启动应用",
             ),
             "balance": MenuActionSpec(add_balance, _callback_available("on_show_balance")),
-            "harness": MenuActionSpec(add_harness, _callback_available("on_open_chat")),
+            # harness 属系统工具模块：可用性按**构建变体能力**判（no-chat 变体
+            # 不出场是既有语义，test_sprite_menu_parity 钉着），不再误绑 chat 的
+            # 运行回调——chat 模块停用时它照常出现，模块显隐归功能投影
+            # （system_tools）负责。
+            "harness": MenuActionSpec(
+                add_harness,
+                lambda pet: bool(getattr(pet, "chat_build_capable", True)),
+            ),
             "deepseek_web": MenuActionSpec(lambda menu, pet: add_deepseek_web(menu)),
             "check_update": MenuActionSpec(_build_check_update, _callback_available("on_check_update")),
             "github_project": MenuActionSpec(_build_github),
@@ -417,10 +425,18 @@ class MenuActionRegistry:
         return frozenset(self._specs)
 
     def available_ids(self, pet) -> frozenset[str]:
+        # 功能模块投影：未激活模块的动作直接从「可用集」剔除——布局解析会
+        # 顺带丢空子菜单、规整分隔线，且不写回用户的自定义布局（重开即恢复）。
+        # 快照未冻结（测试/工具）时 is_active 恒 True，行为与旧版一致。
+        from .. import feature_activation
+
         return frozenset(
             action_id
             for action_id, spec in self._specs.items()
             if spec.available(pet)
+            and feature_activation.is_active(
+                features_mod.feature_for_action(action_id) or ""
+            )
         )
 
     def enabled_ids(self, pet) -> frozenset[str]:

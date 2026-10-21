@@ -13,7 +13,7 @@
    非撑满子控件**算，默认字体下恒为 200（逐像素不变），放大字体下跟着长；**构造之后
    字体才变大也要跟上**（系统放大字体 / 无障碍放大 / 截图脚本的 ``--font-scale`` 都是
    这条路，所以不能只在构造时算一次）。
-2. **导航可达**：默认窗口 800×560 下 10 个能力域必须全部落在视口里（默认尺寸就把
+2. **导航可达**：默认窗口 800×560 下 11 个能力域必须全部落在视口里（默认尺寸就把
    「更新」截掉一半＝用户看不到还有这一页）；720×500 下允许滚动，但每一行都要能选中
    并切到对应页。
 3. **窗口图标**：``setWindowTitle`` 之后挂正式桌宠图标（``load_application_icon``），
@@ -178,20 +178,22 @@ def test_sidebar_width_tracks_a_font_change_after_construction(tmp_path, monkeyp
 
 # ------------------------------------------------------------------ 2. 导航可达
 def test_default_window_shows_every_domain_without_scrolling(tmp_path, monkeypatch):
-    """默认窗口 800×560：10 个能力域全部落在侧栏视口里（不必滚动才发现「更新」）。
+    """默认窗口 800×560：11 个能力域全部落在侧栏视口里（不必滚动才发现「更新」）。
 
     判据是 ``scrollBar.maximum() == 0``：内容只要比视口高 1px，Qt 就把它抬到 1（实测
     556 → 555 的分界），没有"差一点也算过"的余地。余量只来自侧栏纵向间距——导航行高是
-    显式 ``setSizeHint(34)``（与字体无关），其余子控件的高度由 13px 字号与 QSS
+    显式 ``setSizeHint``（与字体无关），其余子控件的高度由 13px 字号与 QSS
     ``min-height`` 决定。CI 280 上 6px 间距留的 4px 余量被 Ubuntu runner 的字体/风格吃光，
     第 10 行落到视口外（ubuntu-latest 红、windows/macOS 绿）；间距因此收到 3px，
-    本机余量 4 → 19px。别的平台再把这份余量吃掉，说明"默认尺寸真的装不下"，
+    本机余量 4 → 19px。2026-10-21 能力域 10 → 11（新增「功能」域）：行高按同一判据
+    从 34 校准到 31（实测 11 × 31 余量 17px，与之前相当），间距与行距不动。
+    别的平台再把这份余量吃掉，说明"默认尺寸真的装不下"，
     修法是继续收间距或按字体度量重算预算，不是放宽这条断言。
     """
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         sidebar = dialog.sidebar
-        assert sidebar.count() >= 10, "能力域少了一个（本用例会假绿）"
+        assert sidebar.count() >= 11, "能力域少了一个（本用例会假绿）"
         assert sidebar.verticalScrollBar().maximum() == 0, (
             "默认尺寸下侧栏仍需滚动：最后一个能力域被截在视口外")
         viewport = sidebar.viewport().height()
@@ -208,7 +210,7 @@ def test_every_domain_is_reachable_at_both_window_sizes(tmp_path, monkeypatch,
                                                         width, height):
     """两个尺寸下每个能力域都能滚进视口并选中切页（键盘/滚轮可达的机器判据）。
 
-    720×500 下侧栏装不下 10 行，需要滚动——这里量的是"滚得到、选得中、切得过去"：
+    720×500 下侧栏装不下 11 行，需要滚动——这里量的是"滚得到、选得中、切得过去"：
     只断言 ``setCurrentRow`` 会漏掉"选中了但在视口外"这种不可达。
     """
     dialog = _dialog(tmp_path, monkeypatch, width=width, height=height)

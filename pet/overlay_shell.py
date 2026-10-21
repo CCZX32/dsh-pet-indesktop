@@ -93,6 +93,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 from . import autostart as autostart_mod
 from . import catalog
 from . import click_sound
+from . import feature_activation
 from . import overlay_settings_command
 from . import overlay_spawn_state
 from . import slot_manager
@@ -1091,7 +1092,13 @@ class OverlayShell(QObject):
         # 开关的语义（与 stream_capture_mode 同口径）。关闭时：窗仍铺满整个虚拟
         # 桌面，但活动区只剩启动时选定的那块屏（见 ``_activity_rects`` /
         # ``_restore_screen`` / ``move_sprite_to_screen``）。
-        self._cross_screen_allowed = bool(self._config.get("allow_cross_screen", False))
+        # 跨屏模块未激活（功能页）与配置关闭同义：活动区只剩家屏。
+        from . import feature_activation as _fa
+
+        self._cross_screen_allowed = (
+            bool(self._config.get("allow_cross_screen", False))
+            and _fa.is_active("cross_screen")
+        )
         self._sprite_factory = sprite_factory or (
             lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
         self._started = False
@@ -2456,8 +2463,11 @@ class OverlayShell(QObject):
         shared = getattr(getattr(self._instance, "shell", None), "_shared", None)
         if shared is None:
             return
+        link = getattr(shared, "agent_link", None)
+        if link is None:
+            return  # agent_link 模块未激活：容器里没有管理器，无联动链可接
         try:
-            shared.proxy.set_link_next_provider(shared.agent_link._next_busy_anim)
+            shared.proxy.set_link_next_provider(link._next_busy_anim)
         except Exception:
             logging.debug("overlay: 接入共享联动链失败", exc_info=True)
 
@@ -3271,6 +3281,9 @@ class OverlayShell(QObject):
         构造期与旧机一致：开关开着就先起表（不可见时判定自身早退）。
         """
         self._music_sing_enabled = bool(self._config.get("music_sing_enabled", False))
+        # 音乐模块未激活：唱歌轮询整条不建（下面就不起表；行为开关的值原样留着）
+        if not feature_activation.is_active("music"):
+            self._music_sing_enabled = False
         self._music_sing_active = False
         # 唱歌续播判据（window.py:2595-2601）：行为层不查音频，只问这一面；缺它
         # 则唱歌 clip 播完走掷骰链——约 60% 概率被切到随机动作，唱歌循环碎裂。
@@ -3326,6 +3339,9 @@ class OverlayShell(QObject):
         """
         self._music_sing_enabled = bool(
             self._config.get("music_sing_enabled", False))
+        # 音乐模块未激活：与开关关同路（停表 + 清唱歌态），不读配置以外的行为
+        if not feature_activation.is_active("music"):
+            self._music_sing_enabled = False
         timer = getattr(self, "_music_sing_timer", None)
         if timer is None:
             return
@@ -3345,7 +3361,12 @@ class OverlayShell(QObject):
         ``music_lyric_enabled`` 都需要一个控制器宿主。控制器只消费
         ``cfg / isVisible / show_bubble / hold_bubble`` 四面，本壳全部具备，
         故逐行对齐 ``window_optional_services.install_music_lyric``。
+
+        音乐模块未激活：返回 None，一个控制器都不构造（1s 轮询、取词线程、
+        常驻 SMTC 采样线程都随之不存在）。调用方全部按 None 降级。
         """
+        if not feature_activation.is_active("music"):
+            return None
         if self._music_lyric is None:
             from .music_lyric_controller import MusicLyricController
 
@@ -3354,6 +3375,11 @@ class OverlayShell(QObject):
 
     def sync_music_lyric(self) -> None:
         """按配置启停歌词显示（不再启用且从未装过 → 不白养定时器）。"""
+        if not feature_activation.is_active("music"):
+            # 音乐模块未激活：已装的控制器走既有 shutdown 收口并置 None
+            self.shutdown_music_lyric()
+            self._music_lyric = None
+            return
         enabled = bool(self._config.get("music_lyric_enabled", False))
         if not enabled and self._music_lyric is None:
             return
@@ -3379,7 +3405,11 @@ class OverlayShell(QObject):
         旧版一窗一宠，答复气泡天经地义落在被点那只头顶；overlay 下先记住发起者
         （``_look_sprite``），气泡由 ``_look_bubble`` 分发到**发起者自己的**跟随器
         （B7b 接上逐 sprite 气泡后，子宠发起的识屏不再让主宠代答）。
+
+        手动视觉模块停用：早退（不冒泡、不起 ``overlay-look-screen`` 线程）。
         """
+        if not feature_activation.is_active("vision"):
+            return
         target = self.sprite if sprite is None else sprite
         if target is None or target not in self._all_sprites():
             return
@@ -3465,8 +3495,17 @@ class OverlayShell(QObject):
 
     @property
     def on_screen_capture(self):
-        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。"""
-        return lambda: self._screen_capture().run()
+        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。
+
+        手动视觉模块停用：空操作（不采集、不建编排件、不开覆盖层）——
+        ``_callback_available`` 只看"可调"，闸必须在落点。
+        """
+        def _run() -> None:
+            if not feature_activation.is_active("vision"):
+                return
+            self._screen_capture().run()
+
+        return _run
 
     # ---- 黄金回旋（复用 golden_spin.GoldenSpinController + sprite 宿主）----
     def _golden_spin_capable(self, sprite) -> bool:

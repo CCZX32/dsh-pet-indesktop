@@ -959,7 +959,10 @@ def atomic_replace_with_retry(temp, target, attempts: int = 5) -> None:
 #: ``window_placement.screen_available(host, None)`` 回落当前屏。不采纳则运行期内存里
 #: 一直留着**重置前**的位置：之后任何一次 ``restore_position``（换屏/副屏上线）都会
 #: 把桌宠送回旧位置，与刚写下的默认值自相矛盾。
-_NULL_ACCEPTING_KEYS = frozenset({"context_menu_layout", "rx", "ry", "screen_name"})
+_NULL_ACCEPTING_KEYS = frozenset({"context_menu_layout", "rx", "ry", "screen_name",
+                                  # feature_activation 显式 null = 撤成「未判定」，
+                                  # 下次启动重新走一次性迁移判定
+                                  "feature_activation"})
 
 
 _MISSING = object()
@@ -1091,6 +1094,11 @@ class Config:
         """
         return {
             "version": 4,
+            # 功能模块激活集合（SPEC：.scratch/feature-modules/SPEC.md）：
+            # None = 未判定（一次性迁移判定的信号，由 pet/feature_activation.
+            # decide_and_freeze 在启动早期写回）；判定后为
+            # {"version": 1, "enabled": [...]}。合法空列表 = 用户明确选择纯核心。
+            "feature_activation": None,
             "rx": None,
             "ry": None,
             "screen_name": None,
@@ -1622,6 +1630,7 @@ class Config:
             "hotkey_open_chat",
             "hotkey_look_screen",
             "hotkey_screen_capture",
+            "feature_activation",
         ):
             if key not in raw:
                 continue

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 from . import autostart as autostart_mod
 from . import catalog
 from . import click_sound
+from . import feature_activation as feature_activation_mod
 from . import overlay_instance_gate as overlay_gate_mod
 from . import self_talk_voice
 from . import slot_manager as slot_manager_mod
@@ -435,6 +436,10 @@ def _read_spawn_offset_env() -> int:
 # 播放器路径预热的错峰延迟：排在动画预热之后，避开多开启动期的 IO 洪峰。
 _MUSIC_PLAYER_WARM_DELAY_MS = 2500
 
+#: 归「手动视觉 vision」模块的全局快捷键动作（注册与回调双守的共用清单）。
+#: ``hotkey_open_chat`` 不在此列：chat 的闸在 enable_chat 单源上。
+_VISION_HOTKEY_ACTIONS = frozenset({"look_screen", "screen_capture"})
+
 
 def _warm_music_player_paths() -> None:
     """后台线程暖音乐播放器路径缓存（幂等，可重复调用）。
@@ -460,7 +465,13 @@ def _schedule_music_player_warm() -> None:
     """UI 就绪后统一预热点的一环：延迟几秒再后台暖播放器路径缓存。
 
     用单次 QTimer 错峰，**不阻塞任何线程**（这里只是登记一个延迟任务）。
+
+    音乐模块未激活：连延迟任务都不登记——播放器路径只服务「打开播放器」与
+    「自动检测」，模块停用后这条浅扫链（启动期两条 daemon 线程 + 全局串行
+    锁）没有任何消费者。
     """
+    if not feature_activation_mod.is_active("music"):
+        return
     QTimer.singleShot(_MUSIC_PLAYER_WARM_DELAY_MS, _warm_music_player_paths)
 
 
@@ -513,6 +524,14 @@ class PetInstance:
         # P2-4：setter 仅缓存构造值作无 shell 兜底，**从不改写进程级 shell**
         #（只读转发——读取走 getter 的 shell.enable_chat 权威源）。
         self._enable_chat = bool(value)
+
+    @property
+    def chat_build_capable(self) -> bool:
+        """构建变体能力（不含模块闸）：转发 shell，兜底回本地构造值。"""
+        shell = getattr(self, "shell", None)
+        if shell is not None:
+            return shell.chat_build_capable
+        return bool(getattr(self, "_enable_chat", True))
 
     # ------------------------------------------------------------ 窗口构建
     def _create_library(self, character_id: str) -> MovieLibrary:
@@ -577,6 +596,8 @@ class PetInstance:
         其余均为本窗操作。批5.2 用 ``_slot_wrap`` 给每窗回调加日志槽位。
         """
         win.on_switch_character = self._slot_wrap(self.switch_character)
+        # 构建变体能力（不含 chat 模块闸）：harness 菜单可用性按它判（registry）
+        win.chat_build_capable = self.chat_build_capable
         win.on_open_chat = self._slot_wrap(self.open_chat) if self.enable_chat else None
         win.on_open_quick_chat = self._slot_wrap(self.open_quick_chat) if self.enable_chat else None
         win.on_open_chat_settings = self._slot_wrap(self.open_chat_settings) if self.enable_chat else None
@@ -1262,7 +1283,13 @@ class AppShell:
                  spawn_offset: int = 0, overlay_gate=None) -> None:
         self.app = app
         self.config = config
-        self._enable_chat = bool(enable_chat)
+        # 构建变体能力单独留一份真值：harness 这类「no-chat 变体不出场、但与
+        # chat 模块无关」的入口按它判（不能用 enable_chat——那里面还有模块闸）。
+        self._chat_build_capable = bool(enable_chat)
+        # enable_chat 双闸：构建变体能力（no-chat 包）∧ 功能模块激活（chat 模块）。
+        # 进程级单源不变——下游全部回调置 None/早退（:587-595/:784/:856 等）
+        # 对两种「不可用」一视同仁，模块关了 AI 对话就是不存在。
+        self._enable_chat = bool(enable_chat) and feature_activation_mod.is_active("chat")
         self._slot_id = slot_id
         # 托盘本体（属性访问器在下方：overlay 拓扑回退到壳持有的托盘）
         self._tray: QSystemTrayIcon | None = None
@@ -1404,7 +1431,11 @@ class AppShell:
         # 是 pet/dsh_state.py 的纯函数，读方是 DshMonitor 自己）：
         # thinking/attention 注入与 offline 交互收口在管理器内部完成，这里只
         # 驱动灵动岛的 agent 活跃指示。
-        self._shared.agent_link.dsh_state_changed.connect(self._on_dsh_state_changed)
+        # agent_link 模块未激活时共享容器不构造管理器（``_shared.agent_link``
+        # 为 None）：没有 DshMonitor 就没有状态可订，订阅整条跳过。
+        shared_link = self._shared.agent_link
+        if shared_link is not None:
+            shared_link.dsh_state_changed.connect(self._on_dsh_state_changed)
         _LIVE_SHELLS.add(self)
 
     def _mark_slot0_profile_unusable(self, migration) -> None:
@@ -1519,6 +1550,11 @@ class AppShell:
         """进程级单源（E2/REVIEW_batch51）：窗口经 PetInstance.enable_chat 转发。"""
         return self._enable_chat
 
+    @property
+    def chat_build_capable(self) -> bool:
+        """构建变体是否带 AI 聊天（不含功能模块闸）：harness 等按它判出场。"""
+        return self._chat_build_capable
+
     @enable_chat.setter
     def enable_chat(self, value):
         self._enable_chat = bool(value)
@@ -1598,6 +1634,11 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（待办提醒）
     def _todo_wanted(self) -> bool:
+        # 模块闸在行为开关之上：todo 模块未激活时连总开关都不看。本方法是
+        # 「要不要有服务对象」的唯一判据（构造、启动同步、设置保存、外部变更
+        # 全部经过它），返回 False 即不建服务、不起 30s tick。
+        if not feature_activation_mod.is_active("todo"):
+            return False
         return bool(self.config.get("todo_reminder_enabled", True))
 
     def _ensure_todo_service(self):
@@ -1627,9 +1668,13 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（语音报时）
     def _festival_speak_wanted(self) -> bool:
-        """节日语音是否开启——它复用报时服务的音频通道，因此会连带影响通道生命周期。"""
+        """节日语音是否开启——它复用报时服务的音频通道，因此会连带影响通道生命周期。
+
+        总开关与模块闸都走 ``_festival_wanted``（模块未激活即"不要声音"），
+        否则模块停用后光凭 speak 键就能把报时服务拉起来。
+        """
         return bool(
-            self.config.get("festival_reminder_enabled", False)
+            self._festival_wanted()
             and self.config.get("festival_reminder_speak", False)
         )
 
@@ -1642,6 +1687,9 @@ class AppShell:
         ——音频通道根本不建，点击静默无声、连一行日志都没有（v4.3.3 用户实测：
         设置里勾着「点击台词朗读」，`config-slot-0.json` 也有值，就是不朗读）。
         """
+        # 语音模块未激活：朗读是语音提供的增强，文字台词不受影响
+        if not feature_activation_mod.is_active("voice"):
+            return False
         for cfg in self._self_talk_voice_configs():
             try:
                 speaks = bool(cfg.get("self_talk_speak_enabled", False))
@@ -1658,7 +1706,12 @@ class AppShell:
         与节日语音同族：通道随报时开关一起被释放时，抽签语音就变成"有气泡没声音"。
         判定走抽签自己的配置清洗（`normalize_divination_config`，非法值回落默认），
         与抽签服务读的同一处实现，不另立第二份真值。
+
+        模块未激活时同样返回 False：服务对象已被停掉/不建，再让 speak 键把共用
+        音频通道留住就是"模块关了、声音通道还开着"。
         """
+        if not feature_activation_mod.is_active("divination"):
+            return False
         from .divination import normalize_divination_config
 
         cfg = normalize_divination_config(self.config)
@@ -1669,9 +1722,11 @@ class AppShell:
 
         与节日语音同族：通道随报时开关一起被释放时，待办提醒就变成"有气泡没声音"
         （开关能存、点了没声的死开关）。总开关关掉时待办服务自己也不跑，故两者都要。
+        模块未激活同样算"不要"——否则模块停用后光凭一个 speak 键就能把
+        VoiceChimeService（20s tick + edge-tts 线程）拉起来（`_todo_wanted` 已含模块闸）。
         """
         return bool(
-            self.config.get("todo_reminder_enabled", True)
+            self._todo_wanted()
             and self.config.get("todo_reminder_speak", False)
         )
 
@@ -1679,6 +1734,10 @@ class AppShell:
         # 报时自身开启，或节日语音 / 点击自言自语朗读 / 抽签语音 / 待办语音播报 /
         # 助手回复朗读需要这条音频通道（六者共用一套合成与播放，因此"通道是否存在"
         # 取决于其中之一是否需要）。
+        # 语音模块未激活：整条通道不建——其它模块的「念出来」是语音提供的可选
+        # 增强，模块没了增强自然失效（文字照出）。
+        if not feature_activation_mod.is_active("voice"):
+            return False
         return (
             bool(self.config.get("voice_chime_enabled", False))
             or self._festival_speak_wanted()
@@ -1775,6 +1834,9 @@ class AppShell:
         处是为了不必让每个调用方各自补读。运行中的通道由 ``_sync_chime_service`` 在
         保存时刷新，不在这里重读：重读会清掉报时那一组预合成占位。
         """
+        if not feature_activation_mod.is_active("voice"):
+            # 语音模块未激活：通道不存在（调用方全部按 None 降级：只出文字/气泡）
+            return None
         channel = self._ensure_chime_service()
         if channel is not None and not channel.is_running():
             channel.apply_config()
@@ -1860,6 +1922,9 @@ class AppShell:
         if not self_talk_voice.enabled(self.config):
             # 关着时连每宠名单都不读：slot 档案的读取不该为关掉的功能付费。
             return False
+        if not feature_activation_mod.is_active("voice"):
+            # 语音模块未激活：不发起任何后台合成
+            return False
         try:
             started = self_talk_voice.start_precache(
                 self.config, configs=self._self_talk_voice_configs())
@@ -1919,6 +1984,11 @@ class AppShell:
 
     # ------------------------------------------------------------ 功能门控（节日提醒）
     def _festival_wanted(self) -> bool:
+        # 模块闸在行为开关之上：festival 模块未激活时连总开关都不看。
+        # 本方法是「要不要有服务对象」的唯一判据（构造、启动同步、设置保存、
+        # 外部变更全部经过它）；返回 False 既不建服务、也不跑 30s tick 与启动补提醒。
+        if not feature_activation_mod.is_active("festival"):
+            return False
         # 总开关默认关闭：主动打扰型功能，升级后不应突然冒出来。
         return bool(self.config.get("festival_reminder_enabled", False))
 
@@ -1957,13 +2027,20 @@ class AppShell:
 
     # ------------------------------------------------------------ DSH 联动门
     def _dsh_tracker_wanted(self) -> bool:
-        """DSH 联动的功能门：``agent_link.dsh``（默认关）。
+        """DSH 联动的功能门：``agent_link`` 模块激活 ∧ ``agent_link.dsh``（默认关）。
 
         联动开启时桥接插件才安装（``DshMonitor.install_bridge``，关联动即卸载）、
         DshMonitor（桥目录唯一读方：信号分派 + dsh_state 收敛器共用一份解析）
         才由 ``AgentLinkManager.apply_config`` 拉起；联动没开时它 3s 探端口、
         1.5s 读桥目录全是空转。本方法是该门的单一口径，harness 自启/收口也复用它。
+
+        模块激活是**外层**条件（2026-10-21 期 4c）：agent_link 模块停用时共享
+        manager 压根不构造，DshMonitor 也就不存在——但这条单一口径还必须自己
+        答 False，否则「模块停用」被下游读成「联动关掉了」，harness 自启/收口
+        会各按各的理解走。
         """
+        if not feature_activation_mod.is_active("agent_link"):
+            return False
         agent_cfg = self.config.get("agent_link", {})
         return bool(agent_cfg.get("dsh", False)) if isinstance(agent_cfg, dict) else False
 
@@ -2046,8 +2123,11 @@ class AppShell:
         shared = getattr(self, "_shared", None)
         if shared is None:
             return
-        shared.proactive.apply_config()
-        shared.agent_link.apply_config()
+        # 主动识屏/Agent 联动模块停用：共享容器里没有对应对象（构造前挡），跳过。
+        if shared.proactive is not None:
+            shared.proactive.apply_config()
+        if shared.agent_link is not None:
+            shared.agent_link.apply_config()
 
     def open_settings_process(self, instance=None, page: str | None = None) -> bool:
         """拉起独立设置进程；True = 已交给独立进程（不得再开进程内对话框）。
@@ -2536,15 +2616,7 @@ class AppShell:
             selector = getattr(self._overlay_shell, "select_slot", None)
             if self._slot_id is not None and callable(selector):
                 selector(self._slot_id)
-            # 拖文件解读：legacy 由 PetWindow.install_file_interpreter 注入
-            # （window_optional_services.py:96-105）；overlay 无 PetWindow，
-            # 由壳作宿主（cfg/show_bubble/show_alert/resolve_alert 同名面）。
-            try:
-                from .file_interpret import FileInterpretController
-                self._overlay_shell.set_file_interpret_offer(
-                    FileInterpretController(self._overlay_shell).offer)
-            except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
-                logging.exception("overlay: 拖文件解读接线失败")
+            self._wire_overlay_file_interpret()
         else:
             if 0 in self._active_pet_slots:
                 self._create_ui_with_character_fallback(str(self.instance.config.get(
@@ -2632,6 +2704,24 @@ class AppShell:
         except Exception:
             logging.exception("启动时预缓存台词语音失败")
 
+    def _wire_overlay_file_interpret(self) -> None:
+        """overlay 拓扑的拖文件解读接线（legacy 走 ``install_file_interpreter``）。
+
+        legacy 由 ``PetWindow.install_file_interpreter`` 注入；overlay 无 PetWindow，
+        由壳作宿主（``cfg``/``show_bubble``/``show_alert``/``resolve_alert`` 同名面）。
+        文件解读模块停用（含硬依赖 chat 缺失）：**不构造控制器、不接缝**——控制器
+        构造即持有 ``ChatService``/``SessionStore``，真跑起来还会往 ``sessions/``
+        写会话；拖文件只留吃动画与统计。
+        """
+        if not feature_activation_mod.is_active("file_interpret"):
+            return
+        try:
+            from .file_interpret import FileInterpretController
+            self._overlay_shell.set_file_interpret_offer(
+                FileInterpretController(self._overlay_shell).offer)
+        except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
+            logging.exception("overlay: 拖文件解读接线失败")
+
     # ------------------------------------------------------------ 全局快捷键
     def _install_global_hotkeys(self) -> None:
         """装系统级热键服务（幂等；非 Windows 或装不上时只保留引用供诊断）。"""
@@ -2649,20 +2739,32 @@ class AppShell:
         self._apply_global_hotkeys()
 
     def _apply_global_hotkeys(self) -> None:
-        """按当前配置重新注册全部热键（改键/启动/外部配置变更后调用）。"""
+        """按当前配置重新注册全部热键（改键/启动/外部配置变更后调用）。
+
+        手动视觉（看看屏幕 / 截图提问）模块停用：这两个动作**不注册**——``apply``
+        是全量重设，从 bindings 里拿掉即顺带注销旧绑定，留着空转的键只会让用户
+        按下去毫无反应。回调落点另有早退兜底（残留绑定/老菜单直达时不再采集）。
+        """
         service = getattr(self, "_hotkeys", None)
         if service is None or not getattr(service, "installed", False):
             return
         from .hotkeys import ACTIONS
 
+        vision_active = feature_activation_mod.is_active("vision")
+        bindings = {
+            action: self.config.get(key) for action, key in ACTIONS.items()
+            if vision_active or action not in _VISION_HOTKEY_ACTIONS
+        }
+        callbacks = {
+            "open_chat": self._hotkey_open_chat,
+            "look_screen": self._hotkey_look_screen,
+            "screen_capture": self._hotkey_screen_capture,
+        }
+        if not vision_active:
+            callbacks = {a: cb for a, cb in callbacks.items()
+                         if a not in _VISION_HOTKEY_ACTIONS}
         try:
-            failures = service.apply(
-                {action: self.config.get(key) for action, key in ACTIONS.items()},
-                {
-                    "open_chat": self._hotkey_open_chat,
-                    "look_screen": self._hotkey_look_screen,
-                    "screen_capture": self._hotkey_screen_capture,
-                })
+            failures = service.apply(bindings, callbacks)
         except Exception:
             logging.exception("注册全局快捷键失败（右键菜单仍可用）")
             return
@@ -2683,7 +2785,12 @@ class AppShell:
             quick()
 
     def _hotkey_look_screen(self) -> None:
-        """看看屏幕：与右键「看看屏幕」同一条入口（不传 sprite = 主宠）。"""
+        """看看屏幕：与右键「看看屏幕」同一条入口（不传 sprite = 主宠）。
+
+        手动视觉模块停用：早退（热键本身不注册，本条防残留绑定/直连回调兜底）。
+        """
+        if not feature_activation_mod.is_active("vision"):
+            return
         look = getattr(self._hotkey_overlay(), "look_at_screen", None)
         if callable(look):
             look()
@@ -2693,7 +2800,12 @@ class AppShell:
             legacy()
 
     def _hotkey_screen_capture(self) -> None:
-        """截图提问：与右键「截图提问」同一条入口。"""
+        """截图提问：与右键「截图提问」同一条入口。
+
+        手动视觉模块停用：早退（同 ``_hotkey_look_screen``）。
+        """
+        if not feature_activation_mod.is_active("vision"):
+            return
         capture = getattr(self._hotkey_overlay(), "on_screen_capture", None)
         if callable(capture):
             capture()
@@ -2898,7 +3010,7 @@ class AppShell:
     def _harness_autostart_wanted(self) -> bool:
         """「随桌宠启动 dsh 服务」的功能门：三个条件同时成立才自动拉起。
 
-        1. ``enable_chat``——旧口径；无 Chat 的变体连 Harness 菜单都不显示；
+        1. ``system_tools`` 模块激活（2026-10-21 起替换 enable_chat 的历史误绑）；
         2. 用户显式开了 ``harness_autostart``；
         3. **DSH 联动确实启用**（``agent_link.dsh``，复用 ``_dsh_tracker_wanted``
            这个单一口径）。
@@ -2912,7 +3024,9 @@ class AppShell:
         复用 ``_dsh_tracker_wanted`` 而不是就地再读一遍 config：同一个功能门在两处
         各自实现，早晚会漂移（监视器跟联动走、服务不跟）。
         """
-        if not self.enable_chat:
+        # harness 属系统工具模块（历史误绑 enable_chat：chat 模块一关它跟着消失，
+        # 但 dsh 服务管理与 AI 对话无关）。模块关了绝不自启外部服务。
+        if not feature_activation_mod.is_active("system_tools"):
             return False
         if not bool(self.config.get("harness_autostart", False)):
             return False
@@ -3281,8 +3395,11 @@ class AppShell:
         shared = self._shared
         if shared is None:
             return
+        link = shared.agent_link
+        if link is None:
+            return  # agent_link 模块未激活：管理器不存在，无联动链可接
         try:
-            shared.proxy.set_link_next_provider(shared.agent_link._next_busy_anim)
+            shared.proxy.set_link_next_provider(link._next_busy_anim)
         except (AttributeError, RuntimeError):
             logging.exception("把窗口接入共享 Agent 联动链失败")
 
@@ -3290,6 +3407,12 @@ class AppShell:
         """按配置创建/隐藏灵动岛；桌宠隐藏后灵动岛仍可常驻。"""
         island_cfg = self.config.get("dynamic_island", {})
         enabled = bool(island_cfg.get("enabled", True)) if isinstance(island_cfg, dict) else False
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 功能模块未激活 = 岛**不创建**（下面的 hide 分支只停定时器，岛对象、
+            # 四路采样槽与 FPS 订阅都还留着，那条路径不算停用）。岛自己的
+            # ``dynamic_island.enabled`` 是行为开关，两处缺省值本来就不一致
+            # （config 默认 True / 设置页默认 False），绝不拿它判模块激活。
+            enabled = False
         if not enabled:
             if getattr(self, "island", None) is not None:
                 self.island.hide()
@@ -3435,10 +3558,16 @@ class AppShell:
         """岛当前是不是**启用且可见**的交互面。
 
         ``_sync_dynamic_island`` 关岛走的是 ``hide()`` + 摘桥，**不销毁对象**——
-        「对象保留 ≠ 交互面可用」。判据读宿主这一侧的运行态（本进程内存里的岛
-        启用真值 + 岛窗自己的显隐），不读磁盘：岛开关可能是运行中改的（托盘菜单 /
-        设置子进程落盘后由 config watcher 收口），磁盘上那份随时可能滞后一拍。
+        「对象保留 ≠ 交互面可用」。判据读宿主这一侧的运行态（模块激活快照 +
+        本进程内存里的岛启用真值 + 岛窗自己的显隐），不读磁盘：岛开关可能是
+        运行中改的（托盘菜单 / 设置子进程落盘后由 config watcher 收口），磁盘上
+        那份随时可能滞后一拍。
         """
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 功能模块未激活：岛对象根本不该存在（见 _sync_dynamic_island），这里
+            # 是同一口径的兜底——判据只读「模块激活 ∧ 岛开关 ∧ 岛窗可见」三件
+            # 事，绝不因为「岛对象非空」就当成交互面可用。
+            return False
         island = getattr(self, "island", None)
         if island is None or not shiboken6.isValid(island):
             return False
@@ -3760,6 +3889,10 @@ class AppShell:
 
     def _apply_balance_timer(self) -> None:
         self._balance_timer.stop()
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额是灵动岛模块的子能力（清单 §余额：自动刷新/峰谷文案/岛信息槽
+            # 同属一模块）：模块停用后本进程一次都不许自己发余额请求。
+            return
         minutes = max(0, int(self.config.get("balance_refresh_minutes", 0) or 0))
         if minutes:
             self._balance_timer.start(minutes * 60000)
@@ -3826,6 +3959,10 @@ class AppShell:
         island = getattr(self, "island", None)
         if island is None or getattr(self, "_quiet_balance_busy", False):
             return
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额属灵动岛模块：模块停用后卡片不可能展开（岛根本不存在），
+            # 这条直达回调也不许绕过模块闸去发网络请求。
+            return
         if not getattr(self, "enable_chat", True):
             island.set_balance_info(self._island_tier_hint(), "此版本无余额查询")
             return
@@ -3876,6 +4013,12 @@ class AppShell:
 
     # ------------------------------------------------------------ 余额
     def show_balance(self, parent=None) -> None:
+        if not feature_activation_mod.is_active("dynamic_island"):
+            # 余额归属灵动岛模块（features.py 的 config_keys）：模块未激活时
+            # 托盘/右键/点击三条入口都不该走到这里，这是绕过菜单投影的兜底——
+            # 不查余额、不起 pet-balance 线程、不碰余额缓存文件。
+            logging.info("灵动岛模块未激活，忽略「DeepSeek 余额」请求")
+            return
         # 宿主判定：必须是能冒泡的 pet 形宿主。overlay 菜单把合成窗
         # （OverlayWindow，无 show_bubble）当 parent 传下来，直接用它会在
         # _show_balance_payload 里 AttributeError；overlay 拓扑下 ``instance.win``
@@ -3933,6 +4076,11 @@ class AppShell:
         与 ``show_balance`` 同口径：``parent`` 是气泡宿主（旧版拓扑是 PetWindow、
         overlay 拓扑是壳）；服务懒创建、进程级单例（多窗共用）。
         """
+        if not feature_activation_mod.is_active("weather"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留/外部触发），不建服务、不起网络线程。
+            logging.info("天气模块未激活，忽略「查看天气」请求")
+            return
         from .weather_service import WeatherService
 
         if self._weather_service is None:
@@ -4551,6 +4699,12 @@ class AppShell:
 
     def open_todo_panel(self) -> None:
         """打开待办管理面板（非模态单例；条目增删改即时落盘）。"""
+        if not feature_activation_mod.is_active("todo"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留 / 通知点击回跳 / 外部触发）。面板一开就会懒创建
+            # 服务并把 30s tick 跑起来，所以闸必须在懒创建之前。
+            logging.info("待办模块未激活，忽略「待办提醒」请求")
+            return
         from .todo_panel import TodoPanelDialog
 
         # Phase 1：即使总开关关闭，用户主动打开面板也需要服务对象（懒创建）。
@@ -4645,6 +4799,12 @@ class AppShell:
         与语音报时的手动触发同语义——**无视总开关**，服务懒创建；当天没有
         节日/节气时给出明确文案，不做静默无反应。
         """
+        if not feature_activation_mod.is_active("festival"):
+            # 本入口明确**绕过提醒总开关**（试听语义），所以模块闸必须单独在这里：
+            # 否则模块停用后菜单/设置页试听/独立设置进程三条路都能把服务与整套
+            # 文案表（2.95MB）拉起来。
+            logging.info("节日模块未激活，忽略「今日节日」请求")
+            return
         service = self._ensure_festival_service()
         service.remind_now()
 
@@ -4668,10 +4828,15 @@ class AppShell:
         """按开关同步抽签服务：关掉就释放，不留常驻对象。"""
         from .divination import normalize_divination_config
 
-        if normalize_divination_config(self.config)["enabled"]:
+        # 模块闸与行为开关合成一个判据：未激活时不建服务（不装 10 分钟跨天定时器、
+        # 不提交预合成/重试链）；已在跑的走下面的 else 分支显式 shutdown()。
+        if feature_activation_mod.is_active("divination") and normalize_divination_config(
+            self.config
+        )["enabled"]:
             self._ensure_divination_service().apply_config()
         elif getattr(self, "divination_service", None) is not None:
             # 停用要**显式收口**：服务持有跨天定时器，直接丢对象定时器还会留着。
+            # shutdown() 同时把代次 +1，已投递的揭签/预热重试闭包整条作废。
             self.divination_service.shutdown()
             self.divination_service = None
 
@@ -4680,6 +4845,12 @@ class AppShell:
 
         关掉总开关时**不做静默无反应**——明确告诉用户去哪儿打开（天气那条同口径）。
         """
+        if not feature_activation_mod.is_active("divination"):
+            # 模块未激活：菜单层已投影过滤，这里是绕过菜单直达回调的兜底
+            # （旧布局残留 / overlay 门面 / 外部触发）。本方法会**懒创建**服务并
+            # apply_config()，闸必须在这之前，否则调一次就把服务与定时器复活了。
+            logging.info("抽签模块未激活，忽略「抽支签」请求")
+            return
         service = self._ensure_divination_service()
         service.apply_config()
         if service.draw_now() is None:
@@ -4802,10 +4973,14 @@ class AppShell:
             self.config.save()
             self._sync_dynamic_island()
 
-        island_action = add_tray_toggle(
-            menu, '灵动岛',
-            bool(self.config.get("dynamic_island", {}).get("enabled", True)),
-            toggle_island)
+        island_action = None
+        if feature_activation_mod.is_active("dynamic_island"):
+            # 灵动岛模块未激活：这条直写配置 + _sync_dynamic_island 的托盘开关整条
+            # 不出现（它是绕过设置页的第二条入口，留着就是「界面藏了、开关还在」）。
+            island_action = add_tray_toggle(
+                menu, '灵动岛',
+                bool(self.config.get("dynamic_island", {}).get("enabled", True)),
+                toggle_island)
 
         if self.enable_chat:
             add_tray_action(menu, 'AI 对话', self.instance.open_chat)
@@ -4839,17 +5014,22 @@ class AppShell:
             # 只改看相、不触发副作用：副作用挂 triggered，程序化 setChecked 不发它。
             mouse_through.setChecked(bool(self.config.get('mouse_through', False)))
             auto.setChecked(autostart_mod.is_enabled())
-            island_action.setChecked(bool(
-                self.config.get("dynamic_island", {}).get("enabled", True)
-            ))
+            if island_action is not None:
+                island_action.setChecked(bool(
+                    self.config.get("dynamic_island", {}).get("enabled", True)
+                ))
 
         menu.aboutToShow.connect(sync_tray_checks)
 
         menu.addSeparator()
         if self.enable_chat:
-            menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
-            menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
-            menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
+            if feature_activation_mod.is_active("dynamic_island"):
+                # 余额属灵动岛模块：模块停用时不给一个"点了没反应"的入口
+                menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
+            if feature_activation_mod.is_active("system_tools"):
+                # dsh 服务管理属系统工具模块（与 chat 无关，只挂构建能力分支）
+                menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
+                menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
         else:
             # 纯桌宠版本不提供本地 DSH 启动入口，只保留网页版入口
             menu.addAction('打开网页版 DeepSeek', open_deepseek_web)
@@ -5054,6 +5234,9 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
         config = Config(instance_id="")
         _mac_set_dock_icon_visible(bool(config.get("show_dock_icon", True)))
         _setup_logging(config)
+        # 功能模块激活：在创建任何可选服务（AppShell 及其服务树）之前完成
+        # 一次性迁移判定并冻结本次运行快照；功能页写盘只影响下次启动。
+        feature_activation_mod.decide_and_freeze(config)
 
         logging.info("dsh-pet-standalone 启动 (slot: %s, instance: %s)", slot_id, instance_id)
         _cleanup_stale_runtime_dirs()

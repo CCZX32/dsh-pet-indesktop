@@ -106,7 +106,10 @@ def test_null_accepting_keys_are_minimal_and_exist(tmp_path):
     把旧位置写回磁盘，重置被静默抵消。
     """
     assert config_mod._NULL_ACCEPTING_KEYS == frozenset(
-        {"context_menu_layout", "rx", "ry", "screen_name"}
+        {"context_menu_layout", "rx", "ry", "screen_name",
+         # 2026-10-21 功能模块激活：显式 null = 撤成「未判定」，下次启动重新走
+         # 一次性迁移判定（pet/feature_activation.decide_and_freeze）
+         "feature_activation"}
     )
     assert config_mod._NULL_ACCEPTING_KEYS <= set(Config(tmp_path).data)
 

@@ -5,7 +5,7 @@
 反复触顶），本域的行定义与页装配搬到这里，收益是双向的——既让互动域长得像
 「菜单」域那样可分页（主人反馈「单页面太多东西了」），又把 60+ 行从该文件搬出。
 
-**为什么用页内标签而不是再拆一个侧栏域**：侧栏 10 个域是外部契约
+**为什么用页内标签而不是再拆一个侧栏域**：侧栏域清单是外部契约
 （``SETTINGS_DOMAIN_NAV``，多处测试与截图脚本按索引/名称依赖）；同一个能力域内的
 多个**同级任务**适合页内标签（先例：菜单域的 菜单编排 / 快捷启动 / 外观）。本域四个
 标签就是四个同级任务：**点击与音效**（输入 + 点击反馈）、**自言自语**（周期气泡的
@@ -52,7 +52,12 @@ def build_click_rows(dialog) -> list[SettingRow]:
         SettingRow("click_sound_volume", "音效音量", "调整点击音效播放音量。", dialog.click_sound_volume_spin),
         SettingRow("click_sound_preview", "试听音效", "测试当前选择的点击音效。", dialog.click_sound_preview_btn),
     ]
-    if getattr(dialog, "click_balance_check", None) is not None:
+    # 「点击显示余额」是灵动岛模块的子能力（余额查询链）：岛未激活时不出现
+    # （控件保留、配置不丢；运行时入口已被 show_balance 挡住）。
+    from . import feature_activation as _fa
+
+    if (getattr(dialog, "click_balance_check", None) is not None
+            and _fa.is_active("dynamic_island")):
         # 余额能力可用时才出现（与控件创建口径一致），位置保持在「试听音效」之后。
         rows.append(
             SettingRow(
@@ -62,23 +67,32 @@ def build_click_rows(dialog) -> list[SettingRow]:
                 dialog.click_balance_check,
             )
         )
+    # 「点击触发自言自语」（文字气泡）是核心交互；「读出来」两行是语音模块的
+    # 增强——语音未激活时不出现（控件保留、配置不丢，重新激活原样回来）。
+    rows.append(
+        SettingRow("click_self_talk", "点击触发自言自语", "点击时随机显示一条自言自语内容；打开后可用下方两项把同一句读出来。", dialog.click_self_talk_check),
+    )
+    if _fa.is_active("voice"):
+        rows.extend(
+            [
+                SettingRow(
+                    "click_self_talk_speak",
+                    "点击台词朗读",
+                    "点击触发自言自语时，用语音报时的音色把这句话读出来（与报时共用音频通道，不会叠音）。",
+                    dialog.click_self_talk_speak_check,
+                ),
+                SettingRow(
+                    "click_self_talk_precache",
+                    "台词自动预缓存",
+                    "保存设置后，在后台把点击台词与点击动画绑定台词合成为本机语音文件，"
+                    "点击时秒出、断网也能说（用与语音报时相同的语音后端和音色，可先在"
+                    "语音报时里点一次试听确认能出声；不想占磁盘就保持关闭，新台词仍走在线合成）。",
+                    dialog.self_talk_voice_precache_check,
+                ),
+            ]
+        )
     rows.extend(
         [
-            SettingRow("click_self_talk", "点击触发自言自语", "点击时随机显示一条自言自语内容；打开后可用下方两项把同一句读出来。", dialog.click_self_talk_check),
-            SettingRow(
-                "click_self_talk_speak",
-                "点击台词朗读",
-                "点击触发自言自语时，用语音报时的音色把这句话读出来（与报时共用音频通道，不会叠音）。",
-                dialog.click_self_talk_speak_check,
-            ),
-            SettingRow(
-                "click_self_talk_precache",
-                "台词自动预缓存",
-                "保存设置后，在后台把点击台词与点击动画绑定台词合成为本机语音文件，"
-                "点击时秒出、断网也能说（用与语音报时相同的语音后端和音色，可先在"
-                "语音报时里点一次试听确认能出声；不想占磁盘就保持关闭，新台词仍走在线合成）。",
-                dialog.self_talk_voice_precache_check,
-            ),
             SettingRow("click_talk_bindings", "点击动画台词绑定", "为每个点击动画设置专属自言自语台词。", dialog.click_talk_bindings_btn),
             SettingRow(
                 "golden_spin_click",
@@ -172,9 +186,14 @@ def build_interaction_domain(dialog) -> QWidget:
     )
     # 第三个同级任务：天气（"桌宠替你看一眼外部数据"，与「点击显示余额」同族）。
     # 行与控件都由 settings_weather 构建（本模块只挂页，与 file_interpret 同口径）。
-    from .settings_weather import build_weather_tab
+    # 模块未激活：标签整页不构造（其 save 在 _write_config 里同样被跳过，
+    # 配置与数据保持原样，重新激活后原样回来）。
+    from . import feature_activation as _fa
 
-    tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
+    if _fa.is_active("weather"):
+        from .settings_weather import build_weather_tab
+
+        tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
     # 第四个同级任务：每日一签（"用户主动拉一次、桌宠给一个结果"，同天气一族）。
     # **标签名用「趣味」**：她 2026-10-15 的归类要求是「抽签这个功能…归类为趣味」；
     # 卡片/分组名仍是「抽签」。落地形态是**页内标签而不是一级域**——只有一组的
@@ -183,7 +202,8 @@ def build_interaction_domain(dialog) -> QWidget:
     # 一级域要过准入，页内标签不用——她的归类意图由标签名承载。
     from .settings_divination import build_divination_tab
 
-    tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
+    if _fa.is_active("divination"):
+        tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
     # 第五个同级任务：全局快捷键（"用户怎么唤出它"）。默认全不绑，见 settings_hotkeys。
     from .settings_hotkeys import build_hotkey_rows
 

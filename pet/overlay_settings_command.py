@@ -205,6 +205,12 @@ def _read_stream_capture_mode(path: Path) -> bool:
     if not isinstance(data, dict):
         logger.warning("拓扑门：配置不是对象，捕获模式按未开启处理: %s", path)
         return False
+    # 直播捕获模块未激活（功能页）：拓扑判定按未开启处理——开着捕获开关但
+    # 停了模块的用户回落 overlay（模块停用是更外层的意图）。
+    from . import feature_activation
+
+    if not feature_activation.is_active("stream_capture"):
+        return False
     return bool(_bool_or_default(data.get(STREAM_CAPTURE_KEY), False))
 
 

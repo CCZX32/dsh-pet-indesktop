@@ -176,6 +176,7 @@ from . import settings_default_marks
 from . import settings_file_interpret
 from . import settings_interaction
 from . import settings_music
+from . import feature_activation as _fa
 from . import settings_network
 from . import settings_page_guide
 from . import settings_divination
@@ -290,6 +291,9 @@ class ModernSettingsDialog(QDialog):
         self.standalone = bool(standalone)
         self.initial_page = str(initial_page or "").strip()
         self.ai_page = None
+        # 「功能」页（settings_features，staged 语义）：_rebuild_domain_navigation 里构造，
+        # _write_config 末尾统一 save 前委托它写 feature_activation。
+        self._features_page = None
         self.setProperty("modernStyle", True)
         self.setProperty("menuStyle", "modern")
         self.setWindowTitle("桌宠设置")
@@ -549,19 +553,24 @@ class ModernSettingsDialog(QDialog):
                         "Windows 光标隐藏后，桌宠自动穿透点击；光标出现立即恢复。适用于游戏，也可能影响自动隐藏光标的视频播放器。",
                         self.cursor_hidden_passthrough_check,
                     ),
-                    SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check),
+                    # 直播捕获模块未激活：行不出现（拓扑判定按未开启，见
+                    # overlay_settings_command；既有捕获用户经迁移基线继承不受影响）
+                    *([SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check)]
+                      if _fa.is_active("stream_capture") else []),
                 ]
             )
         # 「允许桌宠跨屏」不分平台（三端都有多显示器），排在窗口旗标类之后：前面几条
         # 讲"窗口怎么摆"，它讲"桌宠能不能到别的显示器去"（行序见常规域装配的 claim 表）。
-        window_rows.append(
-            SettingRow(
-                "cross_screen",
-                "允许桌宠跨屏",
-                settings_pet_controls.CROSS_SCREEN_HINT,
-                self.cross_screen_check,
+        # 跨屏模块未激活：行不出现（配置不丢，跨屏判定按未开启，见 overlay_shell）。
+        if _fa.is_active("cross_screen"):
+            window_rows.append(
+                SettingRow(
+                    "cross_screen",
+                    "允许桌宠跨屏",
+                    settings_pet_controls.CROSS_SCREEN_HINT,
+                    self.cross_screen_check,
+                )
             )
-        )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
         # 拓扑收口：「单进程多开」实验开关已从设置页移除，4.4b 起配置键
         # `experimental_single_process_spawn` 本身也随多进程多宠退役层删除
@@ -629,9 +638,9 @@ class ModernSettingsDialog(QDialog):
                         "隐藏时对话气泡",
                         "桌宠隐藏后岛变成对话入口：单击灵动岛弹出对话气泡，AI 回复到达时也会在岛上弹出预览（不抢焦点，超时自动收回）。",
                         self.island_hidden_chat_check,
-                    )] if _chat_feature_available() else []),
-                    # 纯桌宠版（无 pet.chat 打包变体）不展示该开关：开了也没有
-                    # 气泡可弹——运行时岛侧已由 chat_available 回退展开卡片
+                    )] if _chat_feature_available() and _fa.is_active("chat") else []),
+                    # 纯桌宠版（无 pet.chat 打包变体）或 chat 模块停用时不展示该开关：
+                    # 开了也没有气泡可弹——运行时岛侧已由 chat_available 回退展开卡片
                     SettingRow(
                         "dynamic_island_event_effects",
                         "事件动效",
@@ -991,15 +1000,21 @@ class ModernSettingsDialog(QDialog):
         # its rows are reparented into the shared card system.
 
         # 语音报时设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
-        from .voice_chime_settings import VoiceChimeSettingsPage
+        # 语音模块未激活：整页不构造（「语音」域随之只剩节日组/整个隐藏）
+        self.voice_chime_page = None
+        if _fa.is_active("voice"):
+            from .voice_chime_settings import VoiceChimeSettingsPage
 
-        self.voice_chime_page = VoiceChimeSettingsPage(self.config, self)
-        self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
+            self.voice_chime_page = VoiceChimeSettingsPage(self.config, self)
+            self.voice_chime_page.preview_requested.connect(self._on_voice_chime_preview)
 
         # 节日提醒设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
-        from .festival_settings import FestivalSettingsPage
+        # 模块未激活：整页不构造（不挂载、不写回；「语音」域只剩语音报时组）
+        self.festival_page = None
+        if _fa.is_active("festival"):
+            from .festival_settings import FestivalSettingsPage
 
-        self.festival_page = FestivalSettingsPage(self.config, self)
+            self.festival_page = FestivalSettingsPage(self.config, self)
 
         # 更新页是命令/状态面板，不写入 Config；它与常规域同级，便于从菜单
         # 和设置窗口进入同一套检查、下载、校验、安装流程。
@@ -1835,7 +1850,9 @@ class ModernSettingsDialog(QDialog):
                 # 「直播捕获兼容」单独进一层折叠：行说明有四段（重启级切换、OBS 捕获方式、
                 # 平台限制、作用域），平铺在首屏就是逼用户读完。组描述只写一句"这一项做什么"，
                 # 重启/平台限制/作用域全部留在行内（展开即见全文），搜索照旧可达。
-                ("直播捕获（高级）", claim("stream_capture"), True),
+                # 直播捕获模块未激活：整组折叠不出现（行未构造时 claim 为空，不挂空组）。
+                *([("直播捕获（高级）", claim("stream_capture"), True)]
+                  if _fa.is_active("stream_capture") else []),
                 # 首屏只回答"第一天会问的问题"：凡答案涉及 harness/dsh 的（自启服务、
                 # 自启目标）都是第 N 天才用的，进折叠——不是藏功能，是按"第几天用到"分层。
                 ("启动项（高级）", claim("harness_autostart", "harness_launch_target"), True),
@@ -1856,9 +1873,13 @@ class ModernSettingsDialog(QDialog):
         # 组序裁定：高频组按使用频率递减（标签 1 内音乐关联第 2），高级组垫底其标签页。
         music_advanced = (
             claim("foobar_title_format") + settings_music.build_music_player_rows(self))
+        # 音乐模块未激活：等价于 todo 组形态——两组的行**照常 claim**（防掉「待分类」
+        # 并保有控件），但不挂进标签页、保存也不写回；重新激活后原样回来。
+        music_rows = claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")
+        music_on = _fa.is_active("music")
         # 「桌宠」域（2026-10-08 第二刀）：域内是两个**互斥任务**——「它长什么样 /
         # 唱不唱歌」与「它怎么动 / 怎么撞」，页内切成两个标签，首屏只管一个任务。
-        # 侧栏 10 域是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
+        # 侧栏域清单是外部契约（深链/搜索跳域语义不变）；搜索命中另一标签的行时由
         # _search_settings 的 activate_for_descendant 自动切标签。
         pet = SettingsTabContainer(self)
         pet.addTab(
@@ -1867,8 +1888,10 @@ class ModernSettingsDialog(QDialog):
             page_content(
                 [
                     ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
-                    ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media", "foobar_lyrics")),
-                    (settings_music.advanced_group_title(self), music_advanced, True),
+                    # 音乐模块未激活：两组的行已 claim（上面），这里不挂出
+                    *([("音乐关联", music_rows)] if music_on else []),
+                    *([(settings_music.advanced_group_title(self), music_advanced, True)]
+                      if music_on else []),
                 ]
             ),
         )
@@ -1907,15 +1930,9 @@ class ModernSettingsDialog(QDialog):
                 ]
             ),
         )
-        menu.addTab(
-            "launcher",
-            "快捷启动",
-            page_content(
-                [
-                    ("已配置应用", claim("quick_launch_apps")),
-                ]
-            ),
-        )
+        quick_launch_rows = claim("quick_launch_apps")  # 模块未激活也走这里：claim 防「待分类」
+        if _fa.is_active("quick_launch"):
+            menu.addTab("launcher", "快捷启动", page_content([("已配置应用", quick_launch_rows)]))
         menu.addTab(
             "appearance",
             "外观",
@@ -1946,20 +1963,25 @@ class ModernSettingsDialog(QDialog):
         interval_rows = [row for row in island_rows
                          if row.objectName() == "settingRow_network_probe_interval"]
         island_rows = [row for row in island_rows if row not in interval_rows]
+        # 灵动岛模块未激活：整域只有岛内容 → 域本身消失（同语音域空域机制）。
         desktop_components = page_content(
             [
                 ("桌面胶囊（灵动岛）", island_rows),
                 ("网络延迟检测（高级）", interval_rows, True),
             ]
-        )
-        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是一条误导标题）。
-        for section in desktop_components.findChildren(SettingsSection):
+        ) if _fa.is_active("dynamic_island") else None
+        # 全行被前置开关藏起来的组不留在页面上（高级组尤其：空了就是误导标题）。
+        for section in (desktop_components.findChildren(SettingsSection) if desktop_components else ()):
             if section.rows and all(row.isHidden() for row in section.rows):
                 section.setVisible(False)
 
         ai_sections = None
         if self.ai_page is not None:
             balance_rows = claim_prefix("balance_")
+            # 照常 claim（防掉「待分类」并保有控件），挂载与否由语音模块决定
+            chat_reply_voice_rows = claim("chat_reply_voice_enabled")
+            # 视觉能力组同理：claim 照做，挂载与否由手动视觉模块决定
+            vision_rows = claim("vision_same", "vision_model", "vision_url", "vision_key")
             appearance_rows = claim(
                 "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
             )
@@ -1990,16 +2012,11 @@ class ModernSettingsDialog(QDialog):
                         ),
                     ),
                     ("系统通知", claim("system_notifications_enabled")),
-                    ("助手回复朗读", claim("chat_reply_voice_enabled")),
-                    (
-                        "视觉能力",
-                        claim(
-                            "vision_same",
-                            "vision_model",
-                            "vision_url",
-                            "vision_key",
-                        ),
-                    ),
+                    # 回复朗读依赖语音模块（共用其音频通道）：语音未激活时不挂出
+                    *([("助手回复朗读", chat_reply_voice_rows)]
+                      if _fa.is_active("voice") else []),
+                    # 视觉能力组依赖手动视觉模块：模块停用时不挂出（行已被上面 claim）
+                    *([("视觉能力", vision_rows)] if _fa.is_active("vision") else []),
                     (
                         "生成参数（高级）",
                         claim(
@@ -2011,7 +2028,10 @@ class ModernSettingsDialog(QDialog):
                         True,
                     ),
                     ("对话窗口", appearance_rows),
-                    ("余额与服务状态", balance_rows),
+                    # 余额是灵动岛模块的子能力：岛未激活时不挂出（行已 claim 防
+                    # 「待分类」），运行时查询链也已被 show_balance 挡住
+                    *([("余额与服务状态", balance_rows)]
+                      if _fa.is_active("dynamic_island") else []),
                 ]
             )
             ai_sections.setObjectName("settingsDomain_ai")
@@ -2028,14 +2048,22 @@ class ModernSettingsDialog(QDialog):
             ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
                                        "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
         ]
-        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
+        if not _fa.is_active("proactive"):
+            # 主动识屏模块停用：四组照常 claim（防掉「待分类」并保有控件），但不挂进
+            # 域页、不写回配置——重新激活后原样回来。
+            proactive_sections = []
+        voice_chime_rows = (
+            list(self.voice_chime_page.findChildren(SettingRow))
+            if self.voice_chime_page is not None else []
+        )
         claimed.update(voice_chime_rows)
         # 节日提醒的行**也要在这里登记**：本页的行从构造起就挂在自己的持有容器里
         # （无父的 SettingRow 一旦 setVisible 就是个顶层窗口，用户会看到无标题小窗闪
         # ——上游 #261 修的就是这个），因此 findChildren 现在取得到它们。不登记就会
         # 掉进「待分类（开发期）」——它们稍后由 build_domain_page 现造卡片收进「语音」域。
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        if self.festival_page is not None:
+            festival_rows = list(self.festival_page.findChildren(SettingRow))
+            claimed.update(festival_rows)
         dialogue_rows = claim_prefix("dialogue_")
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
@@ -2071,14 +2099,18 @@ class ModernSettingsDialog(QDialog):
         # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
         # leftovers），若不显式放回本域就会从设置页里彻底消失。
         # 顶层顺序就是下表顺序（没有倒插）；折叠框是已构造好的 QWidget，直接作为表元素进布局。
+        # 待办模块未激活：行照常被 claim（防掉「待分类」并保有控件），但不挂进
+        # 域页、不写回配置——重新激活后原样回来。
+        todo_rows = claim("todo_reminder_enabled", "todo_reminder_lead_minutes", "todo_reminder_speak")
+        # Agent 联动模块未激活：折叠框与「消费统计」两处同样只 claim 不挂出。
         automation = page_content(
             [
-                ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes", "todo_reminder_speak")),
+                *([("待办提醒", todo_rows)] if _fa.is_active("todo") else []),
                 # 「免打扰」两行在本模块构建（settings_quiet，行数预算原因）。
                 ("免打扰", settings_quiet.build_quiet_rows(self)),
                 *proactive_sections,
-                ("消费统计", agent_cost_rows),
-                agent_box,
+                *([("消费统计", agent_cost_rows)] if _fa.is_active("agent_link") else []),
+                *([agent_box] if _fa.is_active("agent_link") else []),
                 ("文案风格与模板", ungated_dialogue_rows),
                 phrases_box,
             ]
@@ -2092,23 +2124,36 @@ class ModernSettingsDialog(QDialog):
         # festival_settings 自己建卡交给本域：本域不能按「一组行」收它——页面容器
         # 会散架、四段分组标题会跟着丢（见 docs/SETTINGS-CHANGE-GATES.md 节日提醒
         # 准入记录）。故这里不用 page_content，自己起一层容器。
-        voice = QWidget(self)
-        voice_layout = QVBoxLayout(voice)
-        voice_layout.setContentsMargins(0, 0, 0, 0)
-        voice_layout.setSpacing(18)
-        if voice_chime_rows:
-            voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
-        voice_layout.addWidget(self.festival_page.build_domain_page(voice))
-        voice_layout.addStretch(1)
-        # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
-        # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
-        self.voice_chime_page.refresh_backend_rows()
-        # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
-        self.festival_page.refresh_backend_rows()
+        # 语音与节日两个模块都未激活：域内容 None（侧栏整域自动隐藏）。
+        voice = None
+        if self.voice_chime_page is not None or self.festival_page is not None:
+            voice = QWidget(self)
+            voice_layout = QVBoxLayout(voice)
+            voice_layout.setContentsMargins(0, 0, 0, 0)
+            voice_layout.setSpacing(18)
+            if voice_chime_rows:
+                voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
+            if self.festival_page is not None:
+                voice_layout.addWidget(self.festival_page.build_domain_page(voice))
+            voice_layout.addStretch(1)
+            # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
+            # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
+            if self.voice_chime_page is not None:
+                self.voice_chime_page.refresh_backend_rows()
+            if self.festival_page is not None:
+                # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
+                self.festival_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
         file_interpret = settings_file_interpret.build_file_interpret_page(self)
+
+        # 「功能」域（2026-10-21 新增）：功能模块的启用/停用卡片，内容本体在
+        # pet/settings_features.py（行数预算原因，本文件只留接线）。staged 语义：
+        # 卡片开关只改内存 pending 集，保存由 _write_config 末尾统一委托。
+        from . import settings_features
+
+        self._features_page = settings_features.build_content(self)
 
         # Preserve any newly added row until it receives an explicit domain decision.
         leftovers = [row for row in all_rows if row not in claimed and (self.ai_page is None or not self.ai_page.isAncestorOf(row))]
@@ -2125,6 +2170,7 @@ class ModernSettingsDialog(QDialog):
             "互动": interaction,
             "菜单": menu,
             "桌面组件": desktop_components,
+            "功能": self._features_page,
             "AI 与对话": ai_sections,
             "自动化与联动": automation,
             "语音": voice,
@@ -2276,6 +2322,10 @@ class ModernSettingsDialog(QDialog):
         self._saved_via_button = True
         self.accept()
 
+    def _set_feature_key(self, feature_id: str, key: str, value) -> None:
+        if _fa.is_active(feature_id):  # 未激活模块的组未挂出：其键不写回（控件保留）
+            self.config.set(key, value)
+
     def _write_config(self) -> bool:
         """把当前控件值写入 config 并落盘（按钮与直接关闭共用）。
 
@@ -2343,51 +2393,54 @@ class ModernSettingsDialog(QDialog):
         existing_island = self.config.get("dynamic_island", {})
         if not isinstance(existing_island, dict):
             existing_island = {}
-        self.config.set(
-            "dynamic_island",
-            {
-                "enabled": self.island_enabled_check.isChecked(),
-                "show_icon": self.island_icon_check.isChecked(),
-                "show_name": self.island_name_check.isChecked(),
-                "show_info": self.island_info_check.isChecked(),
-                "info_mode": str(self.island_info_mode_select.currentData() or "time"),
-                "custom_text": self.island_custom_text_edit.text().strip(),
-                "show_status": self.island_status_check.isChecked(),
-                "style": str(self.island_style_select.currentData() or "dark"),
-                "opacity": float(self.island_opacity_spin.value()),
-                "accent": str(self.island_accent_select.currentData() or "blue"),
-                "icon": str(self.island_icon_select.currentData() or "auto"),
-                "click_action": str(self.island_click_action_select.currentData() or "expand"),
-                "hidden_chat": self.island_hidden_chat_check.isChecked(),
-                "event_effects": self.island_event_effects_check.isChecked(),
-                "edge_dock": self.island_edge_dock_check.isChecked(),
-                "collision_enabled": self.island_collision_check.isChecked(),
-                # 拖拽落点写入的停靠边与位置：设置页不回写，原样保留。
-                "dock_edge": existing_island.get("dock_edge", "none"),
-                "x": existing_island.get("x"),
-                "y": existing_island.get("y"),
-            },
-        )
-        if self.click_balance_check is not None:
+        # 灵动岛模块未激活：岛行未挂出，其键不写回（见「桌面组件」域装配）。
+        self._set_feature_key("dynamic_island", "dynamic_island", {
+            "enabled": self.island_enabled_check.isChecked(),
+            "show_icon": self.island_icon_check.isChecked(),
+            "show_name": self.island_name_check.isChecked(),
+            "show_info": self.island_info_check.isChecked(),
+            "info_mode": str(self.island_info_mode_select.currentData() or "time"),
+            "custom_text": self.island_custom_text_edit.text().strip(),
+            "show_status": self.island_status_check.isChecked(),
+            "style": str(self.island_style_select.currentData() or "dark"),
+            "opacity": float(self.island_opacity_spin.value()),
+            "accent": str(self.island_accent_select.currentData() or "blue"),
+            "icon": str(self.island_icon_select.currentData() or "auto"),
+            "click_action": str(self.island_click_action_select.currentData() or "expand"),
+            "hidden_chat": self.island_hidden_chat_check.isChecked(),
+            "event_effects": self.island_event_effects_check.isChecked(),
+            "edge_dock": self.island_edge_dock_check.isChecked(),
+            "collision_enabled": self.island_collision_check.isChecked(),
+            # 拖拽落点写入的停靠边与位置：设置页不回写，原样保留。
+            "dock_edge": existing_island.get("dock_edge", "none"),
+            "x": existing_island.get("x"),
+            "y": existing_island.get("y"),
+        })
+        if self.click_balance_check is not None and _fa.is_active("dynamic_island"):
             self.config.set("click_show_balance", self.click_balance_check.isChecked())
         self.config.set("click_show_self_talk", self.click_self_talk_check.isChecked())
-        self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
-        self.config.set("self_talk_voice_precache_enabled",
-                        self.self_talk_voice_precache_check.isChecked())
-        self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
-        if getattr(self, "music_lyric_check", None) is not None:
-            self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
-        if getattr(self, "agent_cost_check", None) is not None:
+        if _fa.is_active("voice"):
+            # 「读出来」两键是语音模块的增强：模块未激活时不写回（行未挂出）
+            self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
+            self.config.set("self_talk_voice_precache_enabled",
+                            self.self_talk_voice_precache_check.isChecked())
+        if _fa.is_active("music"):
+            # 音乐模块未激活：两组行未挂出（见「显示与音乐」装配），其键不写回
+            self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
+            if getattr(self, "music_lyric_check", None) is not None:
+                self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
+            if getattr(self, "music_lyric_lead_spin", None) is not None:
+                self.config.set(
+                    "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
+                )
+            settings_music.save_source_settings(self)
+        # 消费统计归 Agent 联动模块：未激活时该行未挂出（控件随旧页销毁），键不写回
+        if _fa.is_active("agent_link") and getattr(self, "agent_cost_check", None) is not None:
             self.config.set("agent_cost_enabled", self.agent_cost_check.isChecked())
-        if getattr(self, "music_lyric_lead_spin", None) is not None:
-            self.config.set(
-                "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
-            )
-        settings_music.save_source_settings(self)
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())
-        if self.balance_refresh_spin is not None:
+        if self.balance_refresh_spin is not None and _fa.is_active("dynamic_island"):
             self.config.set("balance_refresh_minutes", int(self.balance_refresh_spin.value()))
             self.config.set(
                 "balance_tier_labels_mode",
@@ -2398,13 +2451,13 @@ class ModernSettingsDialog(QDialog):
             self.config.set("balance_tier_color_enabled", self.balance_tier_color_check.isChecked())
         if self.auto_hide_fullscreen_check is not None:
             self.config.set("auto_hide_fullscreen", self.auto_hide_fullscreen_check.isChecked())
-        if getattr(self, "cross_screen_check", None) is not None:
+        if getattr(self, "cross_screen_check", None) is not None and _fa.is_active("cross_screen"):
             self.config.set("allow_cross_screen", self.cross_screen_check.isChecked())
         # 「单进程多开」键不落盘控件值：开关已隐藏（拓扑收口 Phase A），
         # 配置字典里加载的原值随 config.save() 原样回写（兼容保留）。
         if self.cursor_hidden_passthrough_check is not None:
             self.config.set("cursor_hidden_passthrough", self.cursor_hidden_passthrough_check.isChecked())
-        if self.stream_capture_check is not None:
+        if self.stream_capture_check is not None and _fa.is_active("stream_capture"):
             self.config.set("stream_capture_mode", self.stream_capture_check.isChecked())
         self.config.set("playback_speed", float(self.speed_select.currentData()))
         self.config.set("animation_gap_seconds", self.gap_spin.value())
@@ -2440,9 +2493,8 @@ class ModernSettingsDialog(QDialog):
             self.config.set("dialogue_phrases", new_global)
         # 记住上次编辑层：下次打开设置直接回到该 Agent 专属层（未知值回落全局）
         self.config.set("dialogue_last_scope", str(getattr(self, "_dialogue_scope", "") or ""))
+        # Agent 联动音效写回（模块未激活时折叠框未挂出 → 整个字典不写回，见下）
         agent_cfg = dict(self.config.get("agent_link", {}))
-
-        # Agent 联动音效写回
         agent_cfg["sound_enabled"] = self.agent_sound_check.isChecked()
         agent_cfg["sound_start_enabled"] = self.agent_sound_start_check.isChecked()
         agent_cfg["sound_start_path"] = self.agent_sound_start_picker.text().strip() or "builtin:agent-start"
@@ -2453,10 +2505,12 @@ class ModernSettingsDialog(QDialog):
         agent_cfg["sound_volume"] = float(self.agent_sound_volume_spin.value()) / 100.0
         agent_cfg["sound_cooldown_seconds"] = float(self.agent_sound_cooldown_spin.value())
 
-        self.config.set("agent_link", agent_cfg)
-        self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
-        self.config.set("todo_reminder_lead_minutes", int(self.todo_reminder_lead_spin.value()))
-        self.config.set("todo_reminder_speak", self.todo_reminder_speak_check.isChecked())
+        self._set_feature_key("agent_link", "agent_link", agent_cfg)
+        # 模块未激活的组未挂进页面（见 automation 装配），其键不写回
+        if _fa.is_active("todo"):
+            self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
+            self.config.set("todo_reminder_lead_minutes", int(self.todo_reminder_lead_spin.value()))
+            self.config.set("todo_reminder_speak", self.todo_reminder_speak_check.isChecked())
         # 语音报时设置页写回（voice_chime_* 平铺键 + 各后端字段键）
         if self.voice_chime_page is not None:
             self.voice_chime_page.apply_to_config()
@@ -2497,17 +2551,26 @@ class ModernSettingsDialog(QDialog):
                 "image_dir": store_fun_asset(self.egg_image_dir_picker.text(), oijingjing_image_path().parent),
             },
         )
-        self.config.set("quick_launch_apps", self.quick_launch_editor.apps())
+        # 快捷启动模块未激活：「快捷启动」标签未挂出，编辑器值不写回
+        self._set_feature_key("quick_launch", "quick_launch_apps", self.quick_launch_editor.apps())
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
         settings_network.save_network_settings(self)
-        settings_music.save_music_player_settings(self)
+        if _fa.is_active("music"):
+            # 播放器路径组未挂出时不写回（路径变更还会顺带 clear_cache，模块停用后
+            # 这条缓存早没人读）
+            settings_music.save_music_player_settings(self)
         settings_quiet.save_quiet_settings(self)
-        settings_weather.save_weather_settings(self)
-        settings_divination.save_divination_settings(self)
+        # 模块未激活时对应标签页未构造（控件不存在），其 save 必须同步跳过：
+        # 既不是「藏起来继续全表保存」，也不能碰不存在的控件
+        if _fa.is_active("weather"):
+            settings_weather.save_weather_settings(self)
+        if _fa.is_active("divination"):
+            settings_divination.save_divination_settings(self)
         settings_hotkeys.save_hotkey_settings(self)
-        if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
+        if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check") \
+                and _fa.is_active("proactive"):
             from .proactive import PRESET_DEFAULTS
 
             pro_data = dict(self.config.get("proactive_screen", {}) or {})
@@ -2551,6 +2614,10 @@ class ModernSettingsDialog(QDialog):
         # 位置自动保存等一切后台写盘不得置位。主配置（slot 0/主肥鱼）保存不置位。
         if self.config.instance_id:
             self.config.set("user_customized", True)
+        # 「功能」页 staged 写回：只在本进程内 staging 的 pending 集与盘上「下次启动」值
+        # 不同才 set（未改动不碰，避免无谓写盘触发主进程 watcher）；不自己 save。
+        if self._features_page is not None:
+            self._features_page.write_to_config(self.config)
         ok = self.config.save()
         if not ok:
             self._write_failure = settings_close_flow.failure_of(self)

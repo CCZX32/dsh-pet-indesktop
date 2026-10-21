@@ -11,6 +11,7 @@ from typing import Any
 
 import shiboken6
 
+from . import feature_activation
 from .window_effects import (
     begin_rotation,
     end_rotation,
@@ -57,10 +58,18 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 判定
     def _proactive_wanted(self) -> bool:
+        """行为开关 ∧ 模块激活：主动识屏停用后，即使 ``proactive_screen.enabled``
+        还开着也不建对象、不起 8s 心跳与两条 worker 线程。"""
+        if not feature_activation.is_active("proactive"):
+            return False
         raw = self.cfg.get("proactive_screen", {})
         return bool((raw or {}).get("enabled", False))
 
     def _agent_link_wanted(self) -> bool:
+        if not feature_activation.is_active("agent_link"):
+            # 模块未激活：legacy 懒创建路径一个管理器都不许建（构造即
+            # apply_config → 起监视器线程）；共享容器那条路径同理不构造。
+            return False
         raw = self.cfg.get("agent_link", {})
         if not isinstance(raw, dict):
             return False
@@ -71,14 +80,26 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 懒创建
     def _ensure_proactive_watcher(self):
-        """首次启用主动识屏时懒创建观察器；已存在则原样返回。"""
+        """首次启用主动识屏时懒创建观察器；已存在则原样返回。
+
+        主动识屏模块停用：**构造前挡**，返回 None。构造即 ``apply_config``，
+        一旦建出来就是一条 8s 心跳 + 可能的 worker 线程——停用不能靠"建完再停"。
+        """
+        if not feature_activation.is_active("proactive"):
+            return None
         if self.proactive_watcher is None:
             from .proactive import ProactiveScreenWatcher
             self.proactive_watcher = ProactiveScreenWatcher(self, self.cfg)
         return self.proactive_watcher
 
     def _ensure_agent_link_manager(self):
-        """首次启用 Agent 联动时懒创建管理器；已存在则原样返回。"""
+        """首次启用 Agent 联动时懒创建管理器；已存在则原样返回。
+
+        模块未激活：返回 None，一个管理器都不构造（``AgentLinkManager.__init__``
+        末尾就是 ``apply_config``，构造即起监视器线程）。调用方全部按 None 降级。
+        """
+        if not feature_activation.is_active("agent_link"):
+            return None
         if self.agent_link_manager is None:
             from .agent_link import AgentLinkManager
             self.agent_link_manager = AgentLinkManager(self, self.cfg)
@@ -98,7 +119,15 @@ class WindowFeatureGateMixin:
 
         启用与否不再走 sync：offer() 每次实时读 file_interpret.enabled，
         设置页改动即时生效且无需同步钩子。
+
+        文件解读模块未激活（含硬依赖 chat 缺失）：**不构造控制器、不接管缝**，
+        ``interpret_offer`` 保持 None（拖文件只播吃动画与统计）。模块闸在接线处
+        而不是 offer()：控制器构造即持有 ChatService/SessionStore，停用后连
+        这两个对象都不该出现。
         """
+        if not feature_activation.is_active("file_interpret"):
+            self.install_file_eater().interpret_offer = None
+            return self._file_interpret
         if self._file_interpret is None:
             from .file_interpret import FileInterpretController
             self._file_interpret = FileInterpretController(self)
@@ -121,7 +150,13 @@ class WindowFeatureGateMixin:
 
     # ------------------------------------------------------------ 歌词显示
     def install_music_lyric(self):
-        """安装歌词显示控制器（幂等）。"""
+        """安装歌词显示控制器（幂等）。
+
+        音乐模块未激活：返回 None，一个控制器都不构造（1s 轮询、取词线程、
+        常驻 SMTC 采样线程都随之不存在）。调用方全部按 None 降级。
+        """
+        if not feature_activation.is_active("music"):
+            return None
         if self._music_lyric is None:
             from .music_lyric_controller import MusicLyricController
             self._music_lyric = MusicLyricController(self)
@@ -145,6 +180,12 @@ class WindowFeatureGateMixin:
         自行检查可见性并空转。放在这里判断反而会漏掉"配置写入时窗口恰好隐藏"
         的情况，导致功能再也起不来。
         """
+        if not feature_activation.is_active("music"):
+            # 音乐模块未激活：已装的控制器走既有 shutdown 收口并置 None
+            # （不起 1s 轮询、不取词、不拉 SMTC 采样线程）
+            self.shutdown_music_lyric()
+            self._music_lyric = None
+            return
         enabled = bool(self.cfg.get("music_lyric_enabled", False))
         if not enabled and self._music_lyric is None:
             return  # 从未启用过：不为一个关着的功能白养一个定时器

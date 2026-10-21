@@ -311,6 +311,11 @@ class SpriteMenuFacade:
         return bool(getattr(self._instance, "enable_chat", True))
 
     @property
+    def chat_build_capable(self) -> bool:
+        """构建变体能力（不含 chat 模块闸）：harness 等按它判出场。"""
+        return bool(getattr(self._instance, "chat_build_capable", True))
+
+    @property
     def on_open_chat(self):
         """「AI 对话」：legacy 由 app 注入 ``PetInstance.open_chat``（纯桌宠版
         注入 None → 条目整条不显示）；这里同一门（``enable_chat``）。"""

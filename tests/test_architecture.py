@@ -297,7 +297,15 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-20 上调到 2606：新增「角色与素材」页。**页面本体拆到
 # pet/character_packs_page.py**（按本文件预算注释的规矩：新页面不许在上帝类里堆代码），
 # 这里只加 6 行接线（import + _add_page + 3 行注释）。实测 2606。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2606
+# 2026-10-21 上调到 2620：新增「功能」域（功能模块启用/停用卡片）。**页面本体拆到
+# pet/settings_features.py**，本文件净 +14：`_features_page` 初始化与构造接线、
+# `domain_content` 一行、`_write_config` 末尾统一 save 前的 staged 写回委托。
+# 实测 2620。
+# 2026-10-21 上调到 2664：期 3 模块门控（voice 语音闸 + music 音乐闸）叠加后实测
+# 2664。**前一笔已达 2653（期 3a voice 提交未同步校准，预算从 2637 起就红了）**，
+# 本次一并校准；差值来自「按激活挂出/跳键」的分支行（每组 3~5 行，无新增页面）。
+# 按文件约定只随实测校准，不为达标压行（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2673  # 2026-10-21：直播捕获/跨屏模块设置层 +7
 
 
 def _read(name: str) -> str:
