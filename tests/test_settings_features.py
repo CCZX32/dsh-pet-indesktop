@@ -6,7 +6,7 @@ seam 是真实的 ``ModernSettingsDialog`` + 真实 ``Config``（tmp_path 落盘
 
 覆盖（对应 docs/SETTINGS-CHANGE-GATES.md 准出）：
 
-- 页面装配：14 张功能卡、按 features 分组的 5 个分组、侧栏「功能」在「桌面组件」之后；
+- 页面装配：16 张功能卡、按 features 分组的 5 个分组、侧栏「功能」在「桌面组件」之后；
 - staged 语义：开关只改内存 pending 集，**不落盘**；
 - ``write_to_config``：有改动才 ``config.set``、未改动不碰配置（不触发无谓写盘）；
 - 「全部关闭」→ 保存后盘上 ``enabled=[]``（合法空集，不回退成全激活）；
@@ -68,7 +68,7 @@ def dialog(tmp_path, monkeypatch):
 def test_page_builds_all_feature_cards_grouped_by_category(dialog):
     page = _page(dialog)
     specs = all_features()
-    assert len(specs) == 14, "清单变了（本用例按 14 模块钉住，变了请同步）"
+    assert len(specs) == 16, "清单变了（本用例按 16 模块钉住，变了请同步）"
     for spec in specs:
         card = page.findChild(settings_mod.QFrame, f"featureCard_{spec.id}")
         assert card is not None, f"缺卡片：{spec.id}"

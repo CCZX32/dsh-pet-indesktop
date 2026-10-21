@@ -2187,3 +2187,110 @@ def test_hidden_chat_row_follows_chat_module(tmp_path, monkeypatch):
     finally:
         dlg.close()
         app.processEvents()
+
+
+# ---------------------------------------------------------------- 直播捕获 / 多屏跨屏
+def test_stream_capture_row_absent_and_topology_off_when_inactive(tmp_path, monkeypatch):
+    """直播捕获模块关：设置行不出现、不写回；拓扑判定按未开启（配置开着也回落 overlay）。"""
+    import json
+
+    from pet.modern_settings_dialog import SettingRow
+    from pet.overlay_settings_command import _read_stream_capture_mode
+
+    _freeze_all_but("stream_capture")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.findChild(SettingRow, "settingRow_stream_capture") is None
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert "stream_capture_mode" not in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+    # 拓扑：配置开着捕获、模块停用 → 按未开启（overlay）
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps({"stream_capture_mode": True}), encoding="utf-8")
+    assert _read_stream_capture_mode(cfg_path) is False
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert _read_stream_capture_mode(cfg_path) is True
+
+
+def test_stream_capture_row_present_by_default(tmp_path, monkeypatch):
+    from pet.modern_settings_dialog import SettingRow
+
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.findChild(SettingRow, "settingRow_stream_capture") is not None
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_cross_screen_row_absent_and_save_skipped_when_inactive(tmp_path, monkeypatch):
+    from pet.modern_settings_dialog import SettingRow
+
+    _freeze_all_but("cross_screen")
+    app, dlg = _build_dialog(tmp_path, monkeypatch)
+    try:
+        assert dlg.findChild(SettingRow, "settingRow_cross_screen") is None
+        writes = []
+        orig_set = dlg.config.set
+        monkeypatch.setattr(dlg.config, "set",
+                            lambda k, v: (writes.append(k), orig_set(k, v))[1])
+        assert dlg._write_config()
+        assert "allow_cross_screen" not in writes
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_cross_screen_allowed_follows_module(tmp_path):
+    """overlay 活动区：配置开跨屏 + 模块停用 = 不许跨屏（与配置关闭同义）。"""
+    import pet.overlay_shell as ovs
+    from pet.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.set("allow_cross_screen", True)
+
+    def _mk():
+        shell = ovs.OverlayShell.__new__(ovs.OverlayShell)
+        shell._config = cfg
+        # 只跑 __init__ 里跨屏快照那两行（真 __init__ 太重，语义一致地复刻判据）
+        from pet import feature_activation as _fa2
+
+        shell._cross_screen_allowed = (
+            bool(shell._config.get("allow_cross_screen", False))
+            and _fa2.is_active("cross_screen")
+        )
+        return shell
+
+    _freeze_all_but("cross_screen")
+    assert _mk()._cross_screen_allowed is False
+    fa.freeze_snapshot_for_tests(MIGRATION_BASELINE)
+    assert _mk()._cross_screen_allowed is True
+
+
+# ---------------------------------------------------------------- 归属守卫（可维护性合同）
+def test_every_action_and_key_has_single_owner():
+    """菜单动作与配置键的归属必须唯一——同一入口归两个模块是门控漂移的开始。"""
+    from pet.context_menus.registry import MENU_ACTIONS
+    from pet.features import FEATURES
+
+    action_owners: dict[str, str] = {}
+    for spec in FEATURES.values():
+        for action_id in spec.menu_action_ids:
+            assert action_id not in action_owners, (
+                f"动作 {action_id} 同时归 {action_owners.get(action_id)} 与 {spec.id}")
+            action_owners[action_id] = spec.id
+    # 清单里登记的菜单动作必须在注册表真实存在（抄错名字 = 门控静默失效）
+    for action_id in action_owners:
+        assert action_id in MENU_ACTIONS.ids, f"清单登记了注册表不存在的动作: {action_id}"
+    key_owners: dict[str, str] = {}
+    for spec in FEATURES.values():
+        for key in spec.config_keys:
+            assert key not in key_owners, (
+                f"配置键 {key} 同时归 {key_owners.get(key)} 与 {spec.id}")
+            key_owners[key] = spec.id

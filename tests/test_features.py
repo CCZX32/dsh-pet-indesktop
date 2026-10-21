@@ -40,6 +40,8 @@ EXPECTED_IDS = {
     "dynamic_island",
     "quick_launch",
     "system_tools",
+    "stream_capture",
+    "cross_screen",
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -137,7 +139,7 @@ class TestInventory:
             1: {"weather", "divination", "todo", "festival"},
             2: {"voice", "music"},
             3: {"chat", "file_interpret", "vision", "proactive", "agent_link", "dynamic_island"},
-            4: {"quick_launch", "system_tools"},
+            4: {"quick_launch", "system_tools", "stream_capture", "cross_screen"},
         }
         for batch, ids in declared.items():
             assert {fid for fid, spec in FEATURES.items() if spec.batch == batch} == ids

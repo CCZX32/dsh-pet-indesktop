@@ -103,7 +103,7 @@ class FeatureSpec:
 #:
 #: 把它登记成白名单而不是编一个假的动作 id：编出来的 id 在注册表里查不到，
 #: 门控会静默失效（菜单编辑器里也点不到），比空着更危险。
-MENU_LESS_FEATURES: frozenset[str] = frozenset({"file_interpret"})
+MENU_LESS_FEATURES = frozenset({"file_interpret", "stream_capture", "cross_screen"})
 
 
 # ---------------------------------------------------------------- 模块清单
@@ -547,6 +547,43 @@ FEATURES: dict[str, FeatureSpec] = {
         batch=BATCH_TOOLS,
         entry_names=("「快捷启动」子菜单",),
     ),
+    # 直播捕获 stream_capture —— 重启级渲染拓扑开关（legacy 单窗供 OBS 捕获）。
+    #   不是服务，关闭无后台成本；模块化藏的是设置行与切换入口（设置页 clutter 治理）。
+    #   现有捕获模式用户经迁移基线继承本模块，行为不变；停用后拓扑判定按未开启处理。
+    "stream_capture": FeatureSpec(
+        id="stream_capture",
+        name="直播捕获",
+        desc="让 OBS 等直播软件能单独捕获桌宠窗口（兼容模式，重启后生效）。",
+        category=CATEGORY_SYSTEM,
+        search_aliases=("直播", "捕获", "OBS", "推流", "capture", "stream"),
+        requires=(),
+        optional_deps=(),
+        menu_action_ids=(),
+        config_keys=("stream_capture_mode",),
+        needs_network=False,
+        needs_paid=False,
+        needs_external_process=False,
+        batch=BATCH_TOOLS,
+        entry_names=("常规页「直播捕获（高级）」与捕获兼容模式",),
+    ),
+    # 多屏跨屏 cross_screen —— 多显示器活动区开关（默认关、重启级、进程快照）。
+    #   同样无后台成本；藏的是设置行。既有跨屏用户经迁移基线继承，行为不变。
+    "cross_screen": FeatureSpec(
+        id="cross_screen",
+        name="多屏跨屏",
+        desc="允许桌宠被拖到其他显示器、在多个屏幕之间活动（重启后生效）。",
+        category=CATEGORY_SYSTEM,
+        search_aliases=("跨屏", "多屏", "副屏", "显示器", "多显示器", "cross screen"),
+        requires=(),
+        optional_deps=(),
+        menu_action_ids=(),
+        config_keys=("allow_cross_screen",),
+        needs_network=False,
+        needs_paid=False,
+        needs_external_process=False,
+        batch=BATCH_TOOLS,
+        entry_names=("常规页「允许桌宠跨屏」",),
+    ),
     # 系统工具 system_tools —— ENTRY-INVENTORY §系统工具（D1 回收内存 + D2 Harness）
     #   菜单：registry.py:346（memory_trim，非 Windows 整条不出现）、
     #         358（harness）。⚠️ harness 的可用性今天绑在 on_open_chat 上
@@ -569,8 +606,7 @@ FEATURES: dict[str, FeatureSpec] = {
             "mem_min_size_mb",
             "harness_autostart",
             "harness_launch_target",
-            "pnpm_bin",
-        ),
+        ),  # pnpm_bin 唯一归 agent_link（归属守卫：一键一主）
         needs_network=False,
         needs_paid=False,
         needs_external_process=True,  # 拉起 dsh 子进程（harness_launcher.py:503-556）
@@ -601,6 +637,11 @@ MIGRATION_BASELINE: tuple[str, ...] = (
     "agent_link",
     "dynamic_island",
     "quick_launch",
+    # 直播捕获/跨屏是**既有**设置项不是新功能：升级用户必须继承（开着捕获
+    # 模式/跨屏的老用户被静默关掉就是事故）；「新增模块默认关」只适用于
+    # 老版本里不存在的能力。
+    "stream_capture",
+    "cross_screen",
     "system_tools",
 )
 

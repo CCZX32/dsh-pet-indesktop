@@ -553,19 +553,24 @@ class ModernSettingsDialog(QDialog):
                         "Windows 光标隐藏后，桌宠自动穿透点击；光标出现立即恢复。适用于游戏，也可能影响自动隐藏光标的视频播放器。",
                         self.cursor_hidden_passthrough_check,
                     ),
-                    SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check),
+                    # 直播捕获模块未激活：行不出现（拓扑判定按未开启，见
+                    # overlay_settings_command；既有捕获用户经迁移基线继承不受影响）
+                    *([SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check)]
+                      if _fa.is_active("stream_capture") else []),
                 ]
             )
         # 「允许桌宠跨屏」不分平台（三端都有多显示器），排在窗口旗标类之后：前面几条
         # 讲"窗口怎么摆"，它讲"桌宠能不能到别的显示器去"（行序见常规域装配的 claim 表）。
-        window_rows.append(
-            SettingRow(
-                "cross_screen",
-                "允许桌宠跨屏",
-                settings_pet_controls.CROSS_SCREEN_HINT,
-                self.cross_screen_check,
+        # 跨屏模块未激活：行不出现（配置不丢，跨屏判定按未开启，见 overlay_shell）。
+        if _fa.is_active("cross_screen"):
+            window_rows.append(
+                SettingRow(
+                    "cross_screen",
+                    "允许桌宠跨屏",
+                    settings_pet_controls.CROSS_SCREEN_HINT,
+                    self.cross_screen_check,
+                )
             )
-        )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
         # 拓扑收口：「单进程多开」实验开关已从设置页移除，4.4b 起配置键
         # `experimental_single_process_spawn` 本身也随多进程多宠退役层删除
@@ -1845,7 +1850,9 @@ class ModernSettingsDialog(QDialog):
                 # 「直播捕获兼容」单独进一层折叠：行说明有四段（重启级切换、OBS 捕获方式、
                 # 平台限制、作用域），平铺在首屏就是逼用户读完。组描述只写一句"这一项做什么"，
                 # 重启/平台限制/作用域全部留在行内（展开即见全文），搜索照旧可达。
-                ("直播捕获（高级）", claim("stream_capture"), True),
+                # 直播捕获模块未激活：整组折叠不出现（行未构造时 claim 为空，不挂空组）。
+                *([("直播捕获（高级）", claim("stream_capture"), True)]
+                  if _fa.is_active("stream_capture") else []),
                 # 首屏只回答"第一天会问的问题"：凡答案涉及 harness/dsh 的（自启服务、
                 # 自启目标）都是第 N 天才用的，进折叠——不是藏功能，是按"第几天用到"分层。
                 ("启动项（高级）", claim("harness_autostart", "harness_launch_target"), True),
@@ -2444,13 +2451,13 @@ class ModernSettingsDialog(QDialog):
             self.config.set("balance_tier_color_enabled", self.balance_tier_color_check.isChecked())
         if self.auto_hide_fullscreen_check is not None:
             self.config.set("auto_hide_fullscreen", self.auto_hide_fullscreen_check.isChecked())
-        if getattr(self, "cross_screen_check", None) is not None:
+        if getattr(self, "cross_screen_check", None) is not None and _fa.is_active("cross_screen"):
             self.config.set("allow_cross_screen", self.cross_screen_check.isChecked())
         # 「单进程多开」键不落盘控件值：开关已隐藏（拓扑收口 Phase A），
         # 配置字典里加载的原值随 config.save() 原样回写（兼容保留）。
         if self.cursor_hidden_passthrough_check is not None:
             self.config.set("cursor_hidden_passthrough", self.cursor_hidden_passthrough_check.isChecked())
-        if self.stream_capture_check is not None:
+        if self.stream_capture_check is not None and _fa.is_active("stream_capture"):
             self.config.set("stream_capture_mode", self.stream_capture_check.isChecked())
         self.config.set("playback_speed", float(self.speed_select.currentData()))
         self.config.set("animation_gap_seconds", self.gap_spin.value())

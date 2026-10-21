@@ -1092,7 +1092,13 @@ class OverlayShell(QObject):
         # 开关的语义（与 stream_capture_mode 同口径）。关闭时：窗仍铺满整个虚拟
         # 桌面，但活动区只剩启动时选定的那块屏（见 ``_activity_rects`` /
         # ``_restore_screen`` / ``move_sprite_to_screen``）。
-        self._cross_screen_allowed = bool(self._config.get("allow_cross_screen", False))
+        # 跨屏模块未激活（功能页）与配置关闭同义：活动区只剩家屏。
+        from . import feature_activation as _fa
+
+        self._cross_screen_allowed = (
+            bool(self._config.get("allow_cross_screen", False))
+            and _fa.is_active("cross_screen")
+        )
         self._sprite_factory = sprite_factory or (
             lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
         self._started = False
