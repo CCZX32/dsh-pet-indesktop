@@ -54,6 +54,11 @@ def _exec_settings(app, config, *, include_ai: bool = True, initial_page: str = 
     dialog = ModernSettingsDialog(config, parent=None, **dialog_kwargs)
     dialog.finished.connect(lambda _result: app.quit())
     dialog.show()
+    # Accessory 设置进程（macOS 无 Dock 图标、不进 Cmd-Tab）被盖住后没有任何
+    # 找回手段——show 后主动置前（三平台安全；进程内路径 app.py 本就有这两句，
+    # PR #333 审查 M1）
+    dialog.raise_()
+    dialog.activateWindow()
     try:
         return app.exec()
     finally:
@@ -96,6 +101,10 @@ def _run_settings(config=None) -> int:
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
+    from .platform_mac import _mac_set_dock_icon_visible
+
+    # The main pet owns the Dock item; its settings helper remains a GUI accessory.
+    _mac_set_dock_icon_visible(False)
     # 设置进程只有设置窗一个窗口：关窗即退出，OS 立刻回收全部内存
     #（进程内设置页首开留下的字体/样式/模块高水位没有卸载 API，只能靠进程退出）。
     app.setQuitOnLastWindowClosed(True)

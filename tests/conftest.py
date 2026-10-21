@@ -37,6 +37,14 @@ except Exception:  # 消毒失败不挡测试
     pass
 
 
+@pytest.fixture
+def non_macos_overlay_topology(monkeypatch):
+    """同 DPR 单窗算法族显式选择非 macOS，平台分支由 macOS 专项覆盖。"""
+    import pet.overlay_shell as overlay_mod
+
+    monkeypatch.setattr(overlay_mod, "_IS_MACOS", False, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _mute_qt_audio(monkeypatch):
     try:

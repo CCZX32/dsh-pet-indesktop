@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,30 +42,35 @@ def test_find_launch_command_resolves_web(monkeypatch):
 
     monkeypatch.setattr(hl, "_supports_no_open", lambda base: True)
     command = hl._find_launch_command()
-    assert command == ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"]
+    assert command == ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"]
 
     monkeypatch.setattr(hl, "_supports_no_open", lambda base: False)
     command = hl._find_launch_command()
-    assert command == ["dsh", "web", "--host", "127.0.0.1", "--port", "38080"]
+    assert command == ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT)]
     assert "--no-open" not in command
 
 
-def test_find_launch_command_fallback_without_dsh(monkeypatch):
-    """PATH 上只有 node（无 dsh 命令）时，回退到 node + npm 全局包或 npx。"""
+@pytest.mark.parametrize("package_installed", [True, False])
+def test_find_launch_command_fallback_without_dsh(tmp_path, monkeypatch, package_installed):
+    """无 dsh 命令时，按包是否存在选择 node + bin.js 或 npx。"""
     from pet import harness_launcher as hl
 
-    node = shutil.which("node")
-    if not node:
-        return  # 本机没有 node，跳过该场景
+    root = tmp_path / "node_modules"
+    bin_js = root / "@deepseek-ai" / "dsh" / "lib" / "bin.js"
+    if package_installed:
+        bin_js.parent.mkdir(parents=True)
+        bin_js.write_text("// fixture", encoding="utf-8")
+    node = str(tmp_path / "node.exe")
+    # 可执行文件与包目录只取本用例输入，避免桌面增强 PATH 找到本机 DSH。
+    monkeypatch.setattr(hl, "_which", {"node": node, "npx": "npx"}.get)
+    monkeypatch.setattr(hl, "static_node_modules_roots", lambda: [])
+    monkeypatch.setattr(hl, "global_node_modules_roots", lambda: [root])
     monkeypatch.setattr(hl, "_supports_no_open", lambda base: False)
-    monkeypatch.setenv("PATH", str(Path(node).parent))
-    command = hl._find_launch_command()
-    assert command is not None and "web" in command
-    allowed = ("node", "node.exe", "npx", "npx.cmd")
-    if os.name == "nt":
-        # Windows 上 npm 全局 dsh 是 .cmd shim，启动器用 cmd.exe 包装执行
-        allowed = allowed + ("cmd.exe",)
-    assert os.path.basename(command[0]).lower() in allowed
+
+    expected = [node, str(bin_js)] if package_installed else ["npx", "--yes", "@deepseek-ai/dsh"]
+    assert hl._find_launch_command() == [
+        *expected, "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT),
+    ]
 
 
 def test_supports_no_open_probes_help(monkeypatch, tmp_path):
@@ -201,7 +205,7 @@ def test_launch_harness_no_browser_when_autostart(monkeypatch):
     monkeypatch.setattr(hl, "_spawn", lambda command: None)
     monkeypatch.setattr(
         hl, "_find_launch_command",
-        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"],
     )
     threads = []
 
@@ -301,7 +305,7 @@ def test_launch_harness_browser_ownership(monkeypatch):
     # 不带 --no-open：dsh 自己开浏览器，桌宠不重复打开
     monkeypatch.setattr(
         hl, "_find_launch_command",
-        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080"],
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT)],
     )
     status, url = hl.launch_harness(target="web")
     assert status == "started"
@@ -311,7 +315,7 @@ def test_launch_harness_browser_ownership(monkeypatch):
     # 带 --no-open：桌宠等待就绪后打开浏览器
     monkeypatch.setattr(
         hl, "_find_launch_command",
-        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"],
     )
     status, url = hl.launch_harness(target="web")
     assert status == "started"
@@ -421,7 +425,7 @@ def test_target_web_keeps_existing_web_command(monkeypatch):
 
     status, url = hl.launch_harness(target="web", open_browser=False)
     assert status == "started"
-    assert spawned == [["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"]]
+    assert spawned == [["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"]]
     assert url == "http://127.0.0.1:38080"
 
 
@@ -491,7 +495,7 @@ def test_auto_launch_is_headless_service(monkeypatch):
     )
     monkeypatch.setattr(
         hl, "_find_launch_command",
-        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"],
     )
 
     status, url = hl.launch_harness(target="auto")
@@ -521,7 +525,7 @@ def test_service_target_stays_headless_even_with_open_browser_true(monkeypatch):
     )
     monkeypatch.setattr(
         hl, "_find_launch_command",
-        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", "38080", "--no-open"],
+        lambda port=None: ["dsh", "web", "--host", "127.0.0.1", "--port", str(hl.DEFAULT_PORT), "--no-open"],
     )
 
     status, url = hl.launch_harness(target="service", open_browser=True)
