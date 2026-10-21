@@ -721,3 +721,38 @@ def test_landing_warm_skips_clip_without_warm_api():
 
     assert sprite.interaction_state == INTERACTION_THROWN   # 飞行不受影响
     assert clip._ffr_landing_pinned is True                 # pin 与预热独立
+
+
+# ---------------------------------------------------------------- 跨屏抛掷（issue #319）
+def test_thrown_crosses_screens_in_multi_rect_domain():
+    """跨屏活动区（常态多矩形域）：抛掷边界按身体带取并集——并列双屏的
+    右墙在副屏右缘，飞行直接穿缝（overlay 拓扑恢复 legacy #186 的能力）。"""
+    screens = [QRectF(0, 0, 1920, 1040), QRectF(1920, 0, 1920, 1040)]
+    controller = ThrowPhysicsController(QRectF(0, 0, 3840, 1040))
+    sprite = _make_sprite((1500.0, 100.0))
+    sprite.set_clamp_rects(screens)
+    sprite.interaction_state = INTERACTION_THROWN
+    sprite.set_velocity(QPointF(5000, -800))  # 高速向右
+
+    for _ in range(10):
+        controller.tick([sprite], 0.016)
+
+    assert sprite.pos.x() > 1920 - 320  # 穿过主屏右缘（320 = sprite 外接宽）
+    assert sprite.velocity.x() > 0.0    # 没有在主屏右墙反弹回头
+
+
+def test_thrown_still_blocked_by_staggered_hole():
+    """错位拼接：身体带不与副屏相交时右墙仍在主屏右缘（band 语义挡空洞，
+    与 legacy 十年口径一致）。"""
+    # 副屏整体下移 520px：y=100 的身体带只与主屏相交 → 横向带 = [主屏]
+    screens = [QRectF(0, 0, 1920, 1040), QRectF(1920, 520, 1920, 1040)]
+    controller = ThrowPhysicsController(QRectF(0, 0, 3840, 1560))
+    sprite = _make_sprite((1500.0, 100.0))
+    sprite.set_clamp_rects(screens)
+    sprite.interaction_state = INTERACTION_THROWN
+    sprite.set_velocity(QPointF(5000, -800))
+
+    for _ in range(10):
+        controller.tick([sprite], 0.016)
+
+    assert sprite.velocity.x() < 0.0  # 在主屏右墙反弹（缝在这个高度是空洞）

@@ -78,6 +78,12 @@ class OverlayWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.Tool
                             | Qt.WindowType.WindowStaysOnTopHint
+                            # The overlay is a visual/input surface, never the
+                            # keyboard owner.  Without these two hints, a
+                            # show()/native-window rebuild can activate the
+                            # accessory app on macOS while another app is in
+                            # the middle of IME composition.
+                            | Qt.WindowType.WindowDoesNotAcceptFocus
                             | _mac_no_window_shadow_flag())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)

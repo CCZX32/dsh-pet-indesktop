@@ -22,6 +22,16 @@ from PySide6.QtCore import QPointF, QRect, QRectF
 
 from . import physics as physics_mod
 from .pet_sprite import INTERACTION_NORMAL, INTERACTION_THROWN
+from .window_placement import DesktopArea, band_bounds
+
+
+def _united(rects) -> QRect:
+    """多个 QRectF 的包围矩形（QRect）。"""
+    united = None
+    for r in rects:
+        qr = QRect(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+        united = qr if united is None else united.united(qr)
+    return united if united is not None else QRect()
 
 
 class ThrowPhysicsController:
@@ -69,17 +79,30 @@ class ThrowPhysicsController:
             self._advance_thrown(sprite, float(dt))
 
     def _effective_bounds(self, sprite) -> QRectF:
-        """这次积分该用的边界：跨屏过渡中的 sprite 用它**自己域里离它最近的那块屏**。
+        """这次积分该用的边界：多矩形跨屏域按**身体带并集**（legacy band 语义）。
 
-        跨屏过渡时 sprite 的合法域是多块屏的并集（``_clamp_rects``），控制器手里这
-        份单屏 bounds 会把飞行中的这只按回本屏边上（跨屏后的第二次 snap）。改用
-        sprite 自己那块屏做反弹/落地边界：既不再把它拽回本屏，也不新增"抛掷能跨屏"
-        的能力（它仍只在当前所在的那块屏里弹与落）。常规 sprite 逐位走原路径。
+        跨屏时 sprite 的合法域是多块屏的并集（``_clamp_rects``）。旧实现取
+        「离身体最近的那一块屏」做反弹边界：墙挡着身体、身体中心过不去、
+        墙就永远不收——并列双屏下抛掷被永久锁在本屏（issue #319）。
+        改回 legacy ``window_placement.band_bounds`` 的语义：与身体 x 带
+        相交的屏决定左右、与 y 带相交的屏决定上下——并列双屏右墙在副屏
+        右缘（飞行穿缝），错位拼接仍挡「不属于任何显示器」的空洞。
+        单矩形域（单屏/未开跨屏）band 结果恒等于该矩形，行为逐位不变。
         """
-        if getattr(sprite, "_clamp_rects", None):
-            rect = sprite._clamp_domain()
-            if rect is not None:
-                return QRectF(rect)
+        clamp_rects = getattr(sprite, "_clamp_rects", None)
+        if clamp_rects:
+            body_local = sprite._body_local_rect()
+            body = QRect(
+                int(sprite.pos.x() + body_local.x()),
+                int(sprite.pos.y() + body_local.y()),
+                body_local.width(), body_local.height(),
+            )
+            area = DesktopArea(
+                bounds=_united(clamp_rects),
+                screens=tuple(QRect(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+                              for r in clamp_rects),
+            )
+            return QRectF(band_bounds(area, body))
         return QRectF(self._bounds)
 
     def _sprite_bounds(self, sprite) -> tuple[float, float, float, float]:
