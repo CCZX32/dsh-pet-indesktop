@@ -280,21 +280,86 @@ class ChatMemory:
                     "hits": 1,
                 }
                 entries.insert(0, entry)
-                self._enforce_limits(entries, protected=entry)
+                self._enforce_limits(entries, protected=(entry,))
                 self._write(entries)
                 return entry, True
             finally:
                 qlock.unlock()
 
-    def _enforce_limits(self, entries: list[dict[str, Any]], *, protected: dict) -> None:
+    def apply_ops(self, ops: list[dict[str, Any]], source: str = "auto") -> bool:
+        """合并一批记忆操作（档 B 自动提炼；读→改→写整体跨进程互斥，一次落盘）。
+
+        逐条按序应用：
+        - ADD：按文本归一去重（与 add() 同源）——命中 hits+1 + updated_at 刷新
+          （source 保持原值：手动钉过的条目被自动提炼再提到，仍是 manual）；
+        - UPDATE：命中 = 同 ADD 命中（重申）；未命中按 ADD；
+        - FORGET：按文本命中删除；未命中忽略。
+
+        返回本次有没有真的落盘（空操作 / 读失败 / 拿不到跨进程锁 = False，
+        后两种情况盘上一个字节都没动）。
+        """
+        normalized = []
+        for item in ops or []:
+            if not isinstance(item, dict):
+                continue
+            op = str(item.get("op", "")).strip().upper()
+            text = str(item.get("text", "")).strip()[:MAX_ENTRY_CHARS]
+            if op in ("ADD", "UPDATE", "FORGET") and text:
+                normalized.append((op, text))
+        if not normalized:
+            return False
+        with self._lock:
+            qlock = QLockFile(str(self._lock_file))
+            if not self._try_file_lock(qlock):
+                return False
+            try:
+                entries = self._read_entries_strict()
+                if entries is None:
+                    log.warning("对话记忆读取失败，本次不合并提炼操作: %s", self.path)
+                    return False
+                now = self._clock().isoformat()
+                added: list[dict[str, Any]] = []
+                for op, text in normalized:
+                    found = next((e for e in entries if str(e.get("text", "")) == text), None)
+                    if op == "FORGET":
+                        if found is not None:
+                            entries.remove(found)
+                            if found in added:
+                                added.remove(found)
+                        continue
+                    # ADD / UPDATE 未命中按 ADD；UPDATE 命中 = 重申
+                    if found is not None:
+                        found["updated_at"] = now
+                        found["hits"] = int(found.get("hits", 0) or 0) + 1
+                        entries.remove(found)
+                        entries.insert(0, found)
+                        continue
+                    entry = {
+                        "id": uuid.uuid4().hex,
+                        "text": text,
+                        "source": str(source or "auto"),
+                        "created_at": now,
+                        "updated_at": now,
+                        "hits": 1,
+                    }
+                    entries.insert(0, entry)
+                    added.append(entry)
+                self._enforce_limits(entries, protected=tuple(added))
+                return self._write(entries)
+            finally:
+                qlock.unlock()
+
+    def _enforce_limits(self, entries: list[dict[str, Any]], *, protected: tuple = ()) -> None:
         """条目数 / 总字符超限：按 hits 少 + 最老淘汰；刚加入的条目受保护
         （单条已截到 MAX_ENTRY_CHARS，必然能在预算内存活，循环必然终止）。"""
+        protected_ids = {id(e) for e in protected}
+
         def over() -> bool:
             return (len(entries) > self.max_entries
                     or sum(len(str(e.get("text", ""))) for e in entries) > self.max_total_chars)
 
         while over():
-            candidates = [e for e in entries if e is not protected]
+            candidates = [e for e in entries if id(e) not in protected_ids]
             if not candidates:
                 break
             victim = min(

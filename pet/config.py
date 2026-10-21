@@ -1281,6 +1281,7 @@ class Config:
             "voice_chime_custom_quotes_en": "",  # 自定义英文台词/歌词（一行一条，留空回退内置库）
             "chat_reply_voice_enabled": False,  # 助手回复朗读（默认关：主动打扰型；复用报时服务的音频通道）
             "chat_memory_enabled": True,  # 对话全局记忆注入总开关（档 A 手动钉；关 = system 不附「关于用户的记忆」段）
+            "chat_memory_auto_extract": True,  # 档 B：回复后静默自动提炼记忆（默认开：被动形成；关 = 只手动钉）
             # 合成后端：edge（edge-tts，免 Key）/ mimo（小米 MiMo TTS，OpenAI 兼容接口，
             # API Key 存系统钥匙串）/ sapi（Windows 本地语音）/ doubao（豆包 2.0）；
             # 主后端失败时按 fallback 自动回退另一个。
@@ -1566,6 +1567,7 @@ class Config:
             "voice_chime_enabled",
             "chat_reply_voice_enabled",
             "chat_memory_enabled",
+            "chat_memory_auto_extract",
             "voice_chime_schedule",
             "voice_chime_custom_times",
             "voice_chime_voice",

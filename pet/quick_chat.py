@@ -27,6 +27,7 @@ from .speech_bubble_text import truncate_bubble_text
 
 from .chat.models import ChatMessage
 from .chat.markdown_view import markdown_to_html
+from .chat.memory_extract import schedule_extraction
 from .chat.prompt import PromptBuilder
 from .chat.service import ChatService
 from .chat.session_store import SessionStore
@@ -80,6 +81,7 @@ class QuickChatBubble(QFrame):
         self.store = SessionStore(config.dir, "" if str(getattr(config, "instance_id", "")) == "slot-0" else str(getattr(config, "instance_id", "")))
         self.session = self._get_session()
         self.service = ChatService(parent=self)
+        self.service.memory_extract_hook = self._schedule_memory_extract
         self._active_request_id: str | None = None
         self._reply_full = ""       # AI 回答全文（会话历史/聊天窗用，不截断）
         self._reply_text = ""       # 气泡内展示文本（超上限截断 + 提示看聊天窗）
@@ -425,6 +427,14 @@ class QuickChatBubble(QFrame):
             return
         self._set_reply_text(self._reply_full + str(text))
         self._render_reply()
+
+    def _schedule_memory_extract(self, user_text: str, reply_text: str, provider, provider_config) -> None:
+        """档 B：回复完成后的静默记忆提炼（护栏/后台线程都在 memory_extract 内）。"""
+        schedule_extraction(
+            config=self.config,
+            memory_path=self.store.root / self.character_id / "memory.json",
+            user_text=user_text, reply_text=reply_text,
+            provider=provider, provider_config=provider_config)
 
     def _finished(self, request_id: str, text: str) -> None:
         if request_id != self._active_request_id:

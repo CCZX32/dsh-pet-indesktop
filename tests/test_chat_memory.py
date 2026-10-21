@@ -446,14 +446,18 @@ def test_settings_toggle_writes_back(tmp_path, monkeypatch):
     config, page = _settings_page(tmp_path, monkeypatch)
     try:
         assert page.chat_memory_enabled.isChecked() is True  # 默认开
+        assert page.chat_memory_auto_extract.isChecked() is True  # 档 B 默认开（被动形成）
         page.chat_memory_enabled.setChecked(False)
+        page.chat_memory_auto_extract.setChecked(False)
         page.save()
         assert config.get("chat_memory_enabled") is False
+        assert config.get("chat_memory_auto_extract") is False
         # 重新打开读回关闭态
         from pet.chat.ai_settings_page import _AiSettingsPage
 
         page2 = _AiSettingsPage(config)
         assert page2.chat_memory_enabled.isChecked() is False
+        assert page2.chat_memory_auto_extract.isChecked() is False
         page2.deleteLater()
     finally:
         page.deleteLater()
@@ -486,7 +490,7 @@ def test_settings_memory_rows_claimed_in_ai_domain(tmp_path, monkeypatch):
     dlg = ModernSettingsDialog(Config(tmp_path), include_ai=True)
     try:
         pages = [dlg.pages.widget(i) for i in range(dlg.pages.count())]
-        for key in ("chat_memory_enabled", "chat_memory_manage"):
+        for key in ("chat_memory_enabled", "chat_memory_auto_extract", "chat_memory_manage"):
             row = dlg.findChild(SettingRow, f"settingRow_{key}")
             assert row is not None, key
             assert any(page.isAncestorOf(row) for page in pages), key

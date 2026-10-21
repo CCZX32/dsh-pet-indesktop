@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from .geometry import best_position_near_pet
 from .markdown_view import markdown_to_html
 from .memory import ChatMemory, injection_text, parse_remember_command
+from .memory_extract import schedule_extraction
 from .models import ChatMessage
 from .pet_link import PetChatLink
 from .prompt import PromptBuilder, load_character_manifest
@@ -314,6 +315,7 @@ class ChatWindow(QDialog):
         self.store = SessionStore(config.dir, getattr(config, "instance_id", ""))
         self.session = self._get_session()
         self.service = ChatService(parent=self)
+        self.service.memory_extract_hook = self._schedule_memory_extract
         self.pet_link = PetChatLink(pet_window)
         self._bubble: MessageBubble | None = None
         self._bubbles: list[MessageBubble] = []
@@ -1061,6 +1063,14 @@ class ChatWindow(QDialog):
     def _chat_memory(self) -> ChatMemory:
         """当前角色的对话全局记忆（与会话文件同目录；按需构造——实例很轻，锁按路径共享）。"""
         return ChatMemory(self.store.root / self.character_id / "memory.json")
+
+    def _schedule_memory_extract(self, user_text: str, reply_text: str, provider, provider_config) -> None:
+        """档 B：回复完成后的静默记忆提炼（护栏/后台线程都在 memory_extract 内）。"""
+        schedule_extraction(
+            config=self.config,
+            memory_path=self.store.root / self.character_id / "memory.json",
+            user_text=user_text, reply_text=reply_text,
+            provider=provider, provider_config=provider_config)
 
     def _memory_injection(self) -> str:
         """system 末尾的「关于用户的记忆」段；chat_memory_enabled 关 / 无记忆 → 空串。"""

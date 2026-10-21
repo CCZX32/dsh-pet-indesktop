@@ -1,10 +1,12 @@
 from __future__ import annotations
-import threading, uuid
+import logging, threading, uuid
 from typing import Any
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication
 from .models import ProviderConfig
 from .providers import OpenAICompatibleProvider, StreamEvent
+
+log = logging.getLogger(__name__)
 class _Worker(QThread):
     delta_received=Signal(str); completed=Signal(str); failed=Signal(str); stopped_by_user=Signal()
     # 非正文事件：(kind, text)，kind 为 'reasoning'（思考过程）或 'status'（联网进度）
@@ -60,6 +62,10 @@ class ChatService(QObject):
 
     def __init__(self,provider=None,parent=None):
         super().__init__(parent); self.provider=provider or OpenAICompatibleProvider(); self._request_id=None; self._cancel=None; self._worker=None; self._workers=set()
+        # 档 B 记忆提炼（pet/chat/memory_extract）：前端在构造后挂 hook
+        # （(user_text, reply_text, provider, provider_config) -> None），
+        # finished 路径在发完信号后同步调一次——hook 内部只做护栏检查并起后台线程。
+        self.memory_extract_hook=None; self._extract_user_text=None; self._extract_config=None
         # 退出时先取消并短等在飞 worker，避免 QThread 运行中被销毁导致崩溃
         app = QApplication.instance()
         if app is not None:
@@ -84,6 +90,11 @@ class ChatService(QObject):
     def busy(self): return self._worker is not None and self._worker.isRunning()
     def send(self,messages:list[dict[str,Any]],config:ProviderConfig,request_id=None):
         self.stop(); rid=request_id or uuid.uuid4().hex; cancel=threading.Event(); worker=_Worker(self.provider,messages,config,cancel); self._request_id=rid; self._cancel=cancel; self._worker=worker
+        # 档 B 提炼上下文：本轮最后一条纯文本用户消息（图片等多模态形态不提炼）
+        self._extract_user_text=None; self._extract_config=config
+        for m in reversed(messages):
+            if isinstance(m,dict) and m.get('role')=='user' and isinstance(m.get('content'),str):
+                self._extract_user_text=m['content']; break
         self._workers.add(worker)
         # 全部显式 QueuedConnection：worker 线程 emit 的信号若直连 lambda
         # 会在 worker 线程执行 _delta/_cleanup 等，与 GUI 线程的 busy()/
@@ -116,6 +127,13 @@ class ChatService(QObject):
             for cb in list(type(self)._global_finished_listeners):
                 try: cb(text)
                 except Exception: pass
+            self._maybe_extract_memory(text)
+    def _maybe_extract_memory(self,reply_text):
+        # 档 B：回复完成后安排静默记忆提炼；hook 异常绝不抛到对话路径
+        hook=self.memory_extract_hook; user_text=self._extract_user_text; config=self._extract_config
+        if hook is None or not user_text or config is None: return
+        try: hook(user_text,reply_text,self.provider,config)
+        except Exception: log.exception("记忆提炼 hook 异常（已静默）")
     def _error(self,rid,text):
         if self._current(rid): self.error.emit(rid,text)
     def _stopped(self,rid):

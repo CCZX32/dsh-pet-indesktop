@@ -123,6 +123,9 @@ class _AiSettingsPage(QWidget):
         # 对话全局记忆（档 A 手动钉，全局，默认开）：注入总开关 + 记忆管理入口。
         self.chat_memory_enabled = ToggleSwitch()
         self.chat_memory_enabled.setChecked(bool(config.get("chat_memory_enabled", True)))
+        # 档 B 自动提炼（默认开：被动形成；文案如实写明会多用模型调用）。
+        self.chat_memory_auto_extract = ToggleSwitch()
+        self.chat_memory_auto_extract.setChecked(bool(config.get("chat_memory_auto_extract", True)))
         self.chat_memory_manage_btn = QPushButton("查看与管理…", self)
         self.chat_memory_manage_btn.setProperty("variant", "ghost")
         self.chat_memory_manage_btn.clicked.connect(self._open_memory_manager)
@@ -278,6 +281,12 @@ class _AiSettingsPage(QWidget):
                 "开启后，每次对话都会带上你钉下的记忆（在对话里说「记住：……」，或点"
                 "消息气泡上的图钉添加）；关闭只是不再带入，已存的记忆保留。默认开启。",
                 self.chat_memory_enabled,
+            ),
+            SettingRow(
+                "chat_memory_auto_extract", "自动整理记忆",
+                "回复后自动整理记忆（会多用一点模型调用）：每轮对话后在后台静默提炼"
+                "值得长期记住的事，不打断对话、失败不打扰；关闭后只保留手动钉的记忆。默认开启。",
+                self.chat_memory_auto_extract,
             ),
             SettingRow(
                 "chat_memory_manage", "记忆管理",
@@ -776,6 +785,7 @@ class _AiSettingsPage(QWidget):
             self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set("chat_reply_voice_enabled", self.chat_reply_voice.isChecked())
         self.config.set("chat_memory_enabled", self.chat_memory_enabled.isChecked())
+        self.config.set("chat_memory_auto_extract", self.chat_memory_auto_extract.isChecked())
         self.config.set_chat_settings(self.settings)
 
     def _chat_memory(self) -> ChatMemory:
@@ -855,6 +865,13 @@ class ChatMemoryDialog(QDialog):
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(8)
+            # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
+            source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
+            source_badge.setObjectName("chat-memory-source")
+            source_badge.setStyleSheet(
+                "color: rgba(128,128,128,0.9); font-size: 11px;"
+                "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
+            layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
             text = QLabel(str(entry.get("text", "")), row)
             text.setWordWrap(True)
             text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
