@@ -558,6 +558,10 @@ class SessionStore:
         result = {}
         if folder.is_dir():
             for path in folder.glob('*.json'):
+                if path.name == 'memory.json':
+                    # 对话全局记忆（pet/chat/memory.py）与会话文件同目录但不是会话：
+                    # 放进来会被 load() 当损坏会话改名（.corrupt-<ts>），记忆文件就没了。
+                    continue
                 result[path.stem] = path
         for path, payload in pending.items():
             if payload is None:

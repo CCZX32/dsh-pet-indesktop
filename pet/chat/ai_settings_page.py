@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -31,6 +35,7 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
+from .memory import ChatMemory, memory_path
 from .themes import CHAT_UI_STYLE_LABELS, CHAT_UI_VIEW_ASPECT, theme_names
 from .utils import _safe_emit
 
@@ -116,6 +121,18 @@ class _AiSettingsPage(QWidget):
         # 助手回复朗读（全局，默认关）：复用语音报时那条音频通道，只念对话不念歌词。
         self.chat_reply_voice = ToggleSwitch()
         self.chat_reply_voice.setChecked(bool(config.get("chat_reply_voice_enabled", False)))
+        # 对话全局记忆（档 A 手动钉，全局，默认开）：注入总开关 + 记忆管理入口。
+        self.chat_memory_enabled = ToggleSwitch()
+        self.chat_memory_enabled.setChecked(bool(config.get("chat_memory_enabled", True)))
+        # 档 B 自动提炼（默认开：被动形成；文案如实写明会多用模型调用）。
+        self.chat_memory_auto_extract = ToggleSwitch()
+        self.chat_memory_auto_extract.setChecked(bool(config.get("chat_memory_auto_extract", True)))
+        self.chat_memory_extract_interval = QSpinBox()
+        self.chat_memory_extract_interval.setRange(1, 20)
+        self.chat_memory_extract_interval.setValue(int(config.get("chat_memory_extract_interval", 5) or 5))
+        self.chat_memory_manage_btn = QPushButton("查看与管理…", self)
+        self.chat_memory_manage_btn.setProperty("variant", "ghost")
+        self.chat_memory_manage_btn.clicked.connect(self._open_memory_manager)
         self.system_notify_check = ToggleSwitch()
         # 系统通知键：构造期快照无条件回写会把打开期间外部（老聊天设置即存入口
         # settings_dialog.py:437）对该键的改动静默回滚，所以只在用户实际拨动过
@@ -260,6 +277,31 @@ class _AiSettingsPage(QWidget):
                 "AI 回复到达后按句念出来（含识图提问的回答）。与语音报时共用同一条"
                 "音频通道，因此不会叠音；只念对话内容，不念歌词与代码。默认关闭。",
                 self.chat_reply_voice,
+            ),
+        ], self))
+        root.addWidget(SettingsSection("记忆", [
+            SettingRow(
+                "chat_memory_enabled", "记住用户的事",
+                "开启后，每次对话都会带上你钉下的记忆（在对话里说「记住：……」，或点"
+                "消息气泡上的图钉添加）；关闭只是不再带入，已存的记忆保留。默认开启。",
+                self.chat_memory_enabled,
+            ),
+            SettingRow(
+                "chat_memory_auto_extract", "自动整理记忆",
+                "回复后自动整理记忆（会多用一点模型调用）：每轮对话后在后台静默提炼"
+                "值得长期记住的事，不打断对话、失败不打扰；关闭后只保留手动钉的记忆。默认开启。",
+                self.chat_memory_auto_extract,
+            ),
+            SettingRow(
+                "chat_memory_extract_interval", "提炼频率",
+                "每几轮回复整理一次记忆：1 = 每轮都整理，5 = 每 5 轮整理一次（默认，"
+                "模型调用更少）；几轮里的内容会合在一起提炼，不影响记忆效果。",
+                self.chat_memory_extract_interval,
+            ),
+            SettingRow(
+                "chat_memory_manage", "记忆管理",
+                "按角色保存在本地（最多 100 条 / 4000 字），可查看、单条删除或全部清空。",
+                self.chat_memory_manage_btn,
             ),
         ], self))
         vision_rows = [
@@ -752,4 +794,131 @@ class _AiSettingsPage(QWidget):
         if self._system_notify_dirty:
             self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set("chat_reply_voice_enabled", self.chat_reply_voice.isChecked())
+        self.config.set("chat_memory_enabled", self.chat_memory_enabled.isChecked())
+        self.config.set("chat_memory_auto_extract", self.chat_memory_auto_extract.isChecked())
+        self.config.set("chat_memory_extract_interval", int(self.chat_memory_extract_interval.value()))
         self.config.set_chat_settings(self.settings)
+
+    def _chat_memory(self) -> ChatMemory:
+        """当前角色的对话全局记忆（与聊天窗同一份文件；设置页常是独立进程，
+        跨进程互斥在 ChatMemory 的 QLockFile 层）。"""
+        character = str(self.config.get("character") or "")
+        return ChatMemory(memory_path(self.config.dir, getattr(self.config, "instance_id", ""), character))
+
+    def _open_memory_manager(self):
+        dialog = ChatMemoryDialog(self._chat_memory(), self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.show()
+        return dialog
+
+
+class ChatMemoryDialog(QDialog):
+    """「记忆管理」对话框：查看 / 单条删除 / 全部清空（清空走确认）。
+
+    每次操作后从 ChatMemory 重读重排：本对话框（可能在独立设置进程）与主进程
+    聊天窗的「记住：……」/「钉为记忆」写同一个 memory.json，展示以盘上为准。
+    """
+
+    def __init__(self, memory: ChatMemory, parent=None):
+        super().__init__(parent)
+        self.memory = memory
+        self._rows: list[QWidget] = []
+        self.setObjectName("chat-memory-dialog")
+        self.setWindowTitle("记忆管理")
+        self.setMinimumWidth(460)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setMinimumHeight(180)
+        self.scroll.setMaximumHeight(380)
+        self.host = QWidget()
+        self.host_layout = QVBoxLayout(self.host)
+        self.host_layout.setContentsMargins(0, 0, 0, 0)
+        self.host_layout.setSpacing(6)
+        self.scroll.setWidget(self.host)
+        root.addWidget(self.scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        self.count_label = QLabel(self)
+        self.count_label.setObjectName("chat-memory-count")
+        footer.addWidget(self.count_label)
+        footer.addStretch(1)
+        self.clear_btn = QPushButton("全部清空…", self)
+        self.clear_btn.setProperty("variant", "ghost")
+        self.clear_btn.clicked.connect(self._clear_all)
+        footer.addWidget(self.clear_btn)
+        close_btn = QPushButton("关闭", self)
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        root.addLayout(footer)
+        self._reload()
+
+    def _row_count(self) -> int:
+        return len(self._rows)
+
+    def _reload(self) -> None:
+        for row in self._rows:
+            self.host_layout.removeWidget(row)
+            row.deleteLater()
+        self._rows = []
+        entries = self.memory.load()
+        if not entries:
+            empty = QLabel("还没有记忆。在对话里说「记住：……」，或点消息气泡上的图钉添加。", self.host)
+            empty.setWordWrap(True)
+            self.host_layout.addWidget(empty)
+            self._rows.append(empty)
+        for entry in entries:
+            row = QWidget(self.host)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+            # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
+            source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
+            source_badge.setObjectName("chat-memory-source")
+            source_badge.setStyleSheet(
+                "color: rgba(128,128,128,0.9); font-size: 11px;"
+                "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
+            layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
+            text = QLabel(str(entry.get("text", "")), row)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            layout.addWidget(text, 1)
+            delete_btn = QPushButton("删除", row)
+            delete_btn.setProperty("variant", "ghost")
+            entry_id = str(entry.get("id", ""))
+            delete_btn.clicked.connect(lambda _checked=False, eid=entry_id: self._delete_entry(eid))
+            layout.addWidget(delete_btn)
+            self.host_layout.addWidget(row)
+            self._rows.append(row)
+        self.host_layout.addStretch(1)
+        real = len(entries)
+        self.count_label.setText(f"共 {real} 条（上限 100 条 / 4000 字）" if real else "")
+        self.clear_btn.setEnabled(real > 0)
+
+    def _delete_entry(self, entry_id: str) -> None:
+        if not self.memory.remove(entry_id):
+            QMessageBox.warning(self, "删除失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()
+
+    def _clear_all(self) -> None:
+        entries = self.memory.load()
+        if not entries:
+            return
+        answer = QMessageBox.question(
+            self,
+            "清空全部记忆",
+            f"确定删除全部 {len(entries)} 条记忆吗？此操作不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # clear() 返回本次是否真的清空：拿不到跨进程锁（主进程正在写）= 这次没清，
+        # 必须如实提示，不能无条件报"已清空"（同 proactive_memory 设置页口径）。
+        if not self.memory.clear():
+            QMessageBox.warning(self, "记忆清空失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()

@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
 
 from .geometry import best_position_near_pet
 from .markdown_view import markdown_to_html
+from .memory import ChatMemory, injection_text, parse_remember_command
+from .memory_extract import schedule_extraction
 from .models import ChatMessage
 from .pet_link import PetChatLink
 from .prompt import PromptBuilder, load_character_manifest
@@ -375,6 +377,7 @@ class ChatTitleBar(QFrame):
 
 class MessageBubble(QFrame):
     retry_requested = Signal()
+    pin_requested = Signal()  # 「钉为记忆」：把气泡原文写进对话全局记忆（pet/chat/memory）
 
     def __init__(self, role: str, content: str = "", character_id: str = "", parent=None):
         super().__init__(parent)
@@ -484,6 +487,9 @@ class MessageBubble(QFrame):
         tools = QHBoxLayout(self.tools)
         tools.setContentsMargins(0, 0, 0, 0)
         tools.setSpacing(2)
+        self.pin_button = _chat_tool_button(self.tools, "message-pin-button", "pin", "钉为记忆")
+        self.pin_button.clicked.connect(self.pin_requested)
+        tools.addWidget(self.pin_button)
         self.copy_button = _chat_tool_button(self.tools, "message-copy-button", "copy", "复制")
         self.copy_button.clicked.connect(
             lambda: QApplication.clipboard().setText(self._raw_text)
@@ -1099,6 +1105,7 @@ class ChatWindow(QDialog):
         self.store = SessionStore(config.dir, getattr(config, "instance_id", ""))
         self.session = self._get_session()
         self.service = ChatService(parent=self)
+        self.service.memory_extract_hook = self._schedule_memory_extract
         self.pet_link = PetChatLink(pet_window)
         self._bubble: MessageBubble | None = None
         self._bubbles: list[MessageBubble] = []
@@ -1792,6 +1799,7 @@ class ChatWindow(QDialog):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         bubble = MessageBubble(role, text, self.character_id)
+        bubble.pin_requested.connect(lambda bubble=bubble: self._pin_bubble(bubble))
         if reasoning or activity:
             bubble.restore_thinking(reasoning, activity)
         if role == "user":
@@ -1843,6 +1851,7 @@ class ChatWindow(QDialog):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         bubble = MessageBubble(role, text, self.character_id)
+        bubble.pin_requested.connect(lambda bubble=bubble: self._pin_bubble(bubble))
         if role == "user":
             row.addStretch(1)
             row.addWidget(bubble)
@@ -2203,6 +2212,14 @@ class ChatWindow(QDialog):
         text = self.input.toPlainText().strip()
         if not text and not self.composer.attachment_paths:
             return
+        remember = parse_remember_command(text)
+        if remember is not None:
+            # 「记住：……」指令（中英文冒号都认）：不发给模型，写全局记忆并给一条
+            # 确认气泡（零网络）；指令与确认都入会话记录，落盘后随历史参与后续对话。
+            self.input.clear()
+            self.composer.clear_attachments()
+            self._handle_remember_command(text, remember)
+            return
         attachment_names = [path.name for path in self.composer.attachment_paths]
         attachment_context = self.composer.attachment_prompt()
         image_payloads = self.composer.image_payloads()
@@ -2230,6 +2247,63 @@ class ChatWindow(QDialog):
         self._add("user", display_text)
         self._last_user_text = request_text
         self._begin_generation(request_text, image_payloads=image_payloads)
+
+    def _chat_memory(self) -> ChatMemory:
+        """当前角色的对话全局记忆（与会话文件同目录；按需构造——实例很轻，锁按路径共享）。"""
+        return ChatMemory(self.store.root / self.character_id / "memory.json")
+
+    def _schedule_memory_extract(self, user_text: str, reply_text: str, provider, provider_config) -> None:
+        """档 B：回复完成后的静默记忆提炼（护栏/后台线程都在 memory_extract 内）。"""
+        schedule_extraction(
+            config=self.config,
+            memory_path=self.store.root / self.character_id / "memory.json",
+            user_text=user_text, reply_text=reply_text,
+            provider=provider, provider_config=provider_config)
+
+    def _memory_injection(self) -> str:
+        """system 末尾的「关于用户的记忆」段；chat_memory_enabled 关 / 无记忆 → 空串。"""
+        return injection_text(
+            bool(self.config.get("chat_memory_enabled", True)),
+            self.config.dir, getattr(self.config, "instance_id", ""), self.character_id)
+
+    def _handle_remember_command(self, display_text: str, command: str) -> None:
+        """「记住：……」指令落记忆 + 确认气泡；存储/读回失败如实告知，不静默。"""
+        if command:
+            result = self._chat_memory().add(command)
+            if result is None:
+                reply = "这条我没存下来（记忆文件正被占用），稍后再试一次？"
+            else:
+                _entry, created = result
+                reply = f"好，我记住了：{command}" if created else f"这条我本来就记得：{command}"
+        else:
+            reply = "要记点什么？在「记住：」后面写上内容，比如「记住：我不吃辣」。"
+        # 与 send_message 同款的原子「读-追加-提交」（吸收外部写入时整页重载）
+        synced, absorbed = self.store.append_messages(
+            self.session, [ChatMessage("user", display_text), ChatMessage("assistant", reply)]
+        )
+        if synced is None:
+            self.session.messages.append(ChatMessage("user", display_text))
+            self.session.messages.append(ChatMessage("assistant", reply))
+        else:
+            self.session = synced
+            if absorbed:
+                self._load()
+                self._refresh_sessions()
+        self._add("user", display_text)
+        self._add("assistant", reply)
+
+    def _pin_bubble(self, bubble: MessageBubble) -> None:
+        """气泡工具条「钉为记忆」：原文写入当前角色的全局记忆（source=manual），
+        反馈走输入区提示条（与附件超限提示同一通道），不弹窗打断。"""
+        text = (bubble.content or "").strip()
+        if not text:
+            return
+        result = self._chat_memory().add(text, source="manual")
+        if result is None:
+            self.composer._flash_notice("这条没钉上（记忆文件正被占用），稍后再试")
+        else:
+            _entry, created = result
+            self.composer._flash_notice("已钉为记忆" if created else "这条已在记忆里")
 
     def retry_last(self) -> None:
         if self.service.busy:
@@ -2262,7 +2336,7 @@ class ChatWindow(QDialog):
         self.store.save(self.session)
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
-        messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text)
+        messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text, memory_text=self._memory_injection())
         if image_payloads:
             messages[-1]["content"] = [{"type": "text", "text": text}, *image_payloads]
         self._last_user_payload = messages[-1].get("content") if image_payloads else None
