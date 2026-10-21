@@ -246,16 +246,27 @@ AUDIT_LINES= 6
 | 门 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `python -m ruff check pet tests` | `All checks passed!` |
-| 新增单测（红→绿） | `pytest -q tests/test_agent_tools.py tests/test_agent_tools_loop.py tests/test_web_search_bing.py` | 实现前：收集期 `ImportError`（`cannot import name 'agent_tools'`）+ 断言红；实现后 **50 passed, 1 skipped**（518 项明细见 §二 测试表） |
+| 新增单测（红→绿） | `pytest -q tests/test_agent_tools.py tests/test_agent_tools_loop.py tests/test_web_search_bing.py` | 实现前：收集期 `ImportError`（`cannot import name 'agent_tools'`）+ 断言红；实现后 **50 passed, 1 skipped**（共 51 项，明细见 §二 测试表） |
 | 配置键 schema | `pytest -q tests/test_config_schema.py` | 更新快照前 2 failed（`Extra items: chat_agent_*`）→ 更新后 **68 passed** |
 | 受影响族 | `pytest -q tests/ -k "chat or memory or web_search or agent"` | **1132 passed, 5 skipped, 7747 deselected**（172.76s） |
-| 受影响时序族 3 连跑 | `pytest -q tests/test_chat_service.py tests/test_chat_safe_emit.py tests/test_chat_thinking_web_search.py` ×3 | 见 §六.1 |
+| 受影响时序族 3 连跑 | `pytest -q tests/test_chat_service.py tests/test_chat_safe_emit.py tests/test_chat_thinking_web_search.py tests/test_agent_tools_loop.py` ×3 | 见 §六.1 |
 | 全量 | `pytest -q tests/` | 见 §六.1 |
 | 交付纪律 | `pytest -q tests/test_pr_report_discipline.py` | 见 §六.1 |
 
 ### 六.1 收官记录
 
 （本节在提交前由实跑结果回填，逐条对应上面的门。）
+
+- **受影响时序族 3 连跑**（`tests/test_chat_service.py tests/test_chat_safe_emit.py
+  tests/test_chat_thinking_web_search.py tests/test_agent_tools_loop.py`）：
+  `38 passed` / `38 passed` / `38 passed`（35.93s / 16.25s / 13.15s，本机顺序跑）。
+- **全量门禁**：`QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q`
+  → **8868 passed, 16 skipped, 3124 warnings in 1819.68s (0:30:19)**，**0 failed**。
+  本分支**没有**引入红，也没有需要跟 `main` 对比的既有红。
+- **交付纪律**：`pytest -q tests/test_pr_report_discipline.py` → `217 passed`
+  （本报告 + `docs/INDEX.md` 登记均在此断言范围内）。
+- 全量门禁**启动时**源码与测试文件已定版；运行期间与之后只写本报告与
+  `docs/INDEX.md`（文档），**没有再改任何源码或测试**。
 
 ## 七、已知限制与后续
 
