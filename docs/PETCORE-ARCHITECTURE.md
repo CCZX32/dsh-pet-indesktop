@@ -244,3 +244,24 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
   两种内容，彩蛋默认进气泡（`easter_egg_display=bubble|window`）。
 - **打包回归**：`petcore/menu_templates` 必须进 PyInstaller 数据；`load_default()`
   内置兜底常量，`--check` 输出 `menu_template=json|builtin`，避免旧布局缺项无法补齐。
+
+## 19. P1–P6 目标架构补充（2026-10-22）
+
+### 19.1 当前宠物上下文
+
+`CoreHost` 保留进程级服务，但每个窗口必须有一个明确的 `PetContext`。设置对话框、
+PresentationPort、InteractionPort 和 feature runtime 不得通过隐式的 `host.config`
+猜测目标宠物。全局配置只能由标记为 global 的页面和端口写入；每宠配置必须由当前
+`PetContext` 的 `Config` 保存。
+
+### 19.2 WorkerHost
+
+业务 worker 不直接创建 Qt 对象，也不直接访问配置文件。Core 的 WorkerHost 负责子进程、
+JSONL 握手/心跳/事件/错误、取消、超时、崩溃重启、代次拒收和退出收口，完成后通过
+`HostPorts.worker` 向 mod 暴露最小能力。
+
+### 19.3 迁移与发布
+
+从旧 `pet` 入口切换前，迁移器必须处理全局配置、slot 配置、会话、待办、API 规格和
+凭据引用；原文件先备份，失败保持原文件不变。发布入口切换必须可回滚，旧 `pet/` 在
+迁移完成前只作为兼容层，不承载新功能。

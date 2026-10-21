@@ -1056,3 +1056,28 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 **后续**
 
 - 需要时监听 `QWindow.screenChanged`，在跨屏后按新 DPR 重新装载当前图片。
+## L028 · 2026-10-22 · P0 主分支对齐审查与迁移契约冻结
+
+**改动**
+
+- 新增 `docs/PETCORE-FUNCTION-MATRIX-2026-10-22.md`，逐项对照主分支 v4.3.4 的用户功能域，
+  标记已对齐、部分、未做、有意差异和目标阶段。
+- 新增 `docs/PETCORE-HANDOFF-PLAN-2026-10-22.md`，把 P0–P6 拆成可交接阶段，固定依赖、
+  禁止事项、验收和本地提交标题。
+- 新增本审查报告，记录当前 petcore/架构/报告/CI 门禁结果和真实环境限制。
+- 更新 SPEC、ROADMAP、MAIN-PARITY-BACKLOG、ARCHITECTURE，冻结每宠配置作用域、WorkerHost、
+  迁移/回滚、Core/mod 边界、默认扩展和发布切换门。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest <test_petcore 文件列表> -q`
+  → `603 passed`。
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest <petcore + guards> -q`
+  → `900 passed, 5 skipped`。
+- `.venv/Scripts/ruff check pet/ tests/ petcore/` → `All checks passed`。
+- `.venv/Scripts/python -m petcore --check` → exit 0。
+
+**未验证**
+
+- 本阶段只改文档，没有改变运行时行为；真实双屏、安装器 E2E、非 Windows 窗口和完整大素材
+  导入继续留给 P1–P6 的实机阶段。

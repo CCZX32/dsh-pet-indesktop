@@ -346,6 +346,9 @@
 | [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读。 |
 | [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、P1–P8 路线、Core/mod 边界与延后项。 | 规划后续功能迁包或评估重构进度前必读。 |
 | [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md) | petcore ↔ 主分支功能差距台账：已对齐 / 部分 / 未做、默认安装口径、计划批次与验收方式。 | 回答「还差什么」「这个域算不算完成」「示例 mod 能不能算默认功能」前必读；每轮收口更新。 |
+| [`PETCORE-FUNCTION-MATRIX-2026-10-22.md`](PETCORE-FUNCTION-MATRIX-2026-10-22.md) | 2026-10-22 主分支 v4.3.4 与 petcore 的完整功能矩阵、阶段归属和有意差异。 | 做主分支对齐审查、判断某项是否已交付或分派迁移阶段前必读。 |
+| [`PETCORE-HANDOFF-PLAN-2026-10-22.md`](PETCORE-HANDOFF-PLAN-2026-10-22.md) | P0–P6 的 AI 交接计划：每阶段边界、依赖、验收、用户效果和提交标题。 | 把 petcore 后续阶段交给另一个 AI 或开始一个新阶段前必读。 |
+| [`PR-REPORT-PETCORE-AUDIT-2026-10-22.md`](PR-REPORT-PETCORE-AUDIT-2026-10-22.md) | 2026-10-22 petcore 主分支对齐审查报告，含门禁结果、性能口径和实机限制。 | 引用本次审查结论、复核当前基线或决定 P1 开始条件前必读。 |
 | [`PETCORE-SPEC.md`](PETCORE-SPEC.md) | petcore 的**最终形态规格**：core/mod 边界、用户能力、菜单/设置契约、素材与角色包供应链、交付门、非目标与退出旧架构的判定。 | 判断「这个功能该不该进 core」「最终要做成什么样」「菜单和设置谁负责」前必读。 |
 | [`PETCORE-LOG.md`](PETCORE-LOG.md) | petcore 追加式变更日志：每条 `LNNN` 记录文件、行为、验证与遗留。 | 只在 log-index 命中后打开对应条目；不要把整份日志读进上下文。 |
 | [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |
