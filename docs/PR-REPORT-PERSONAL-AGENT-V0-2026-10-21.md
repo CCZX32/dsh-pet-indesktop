@@ -310,3 +310,21 @@ AUDIT_LINES= 6
   「孤儿键」由 `test_config_schema` 的白名单 ⊆ 默认值键守卫拦住），无残留副作用；
   审计文件 `<config_dir>/chat-agent-audit.jsonl` 与既有记忆文件不含新格式，旧版本
   只是不再写/读它们。
+
+## 附：主线实机探针与三轮修复（2026-10-21 补）
+
+子代理断连后主线接管，用本机真实 provider 配置（webm-chat 配置目录，deepseek-flash）
+跑了三类工具的真对话探针，**发现三个子代理没验出来的问题并修复**：
+
+| 探针发现 | 根因 | 修复 |
+|---|---|---|
+| 「下载文件夹里有哪些文件」→ fs_list 连错 2 次（`下载`/`Downloads` 短名按首根 Desktop 解析必失败），第 3 次错列 Desktop | `resolve_in_roots` 相对路径只按首根解析；工具描述没带根列表，模型不知道绝对路径 | 相对路径按顺序试每个根（存在者胜出）+ 根目录名/中文别名（下载/桌面/文档）直达 + 工具描述嵌入真实根列表 + 拒绝文案带根列表供模型自我纠正 |
+| 用户配置关联网搜索，模型仍调 `web_search` 撞「未知工具」空耗一轮 | planner 提示词静态宣传全部工具，与注册表实际挂载脱节 | `planner_prompt(registry)` 按实际挂载动态组装，明确「只有这些，别的工具不存在」 |
+| （验证项）审计 JSONL 字段/轮转/不可信标记 | — | 核查无误（早前误读 `args_summary` 键名是探针脚本自身的键名错误，审计字段为 `args`） |
+
+**修复后复跑同一探针**：fs 首发命中绝对路径（1.96ms，回答正确列出 Downloads 内容）；
+memory_remember 成功；联网关闭时模型答「无需工具，直接回答」——三类行为全部符合预期。
+新增回归测试 4 条（`test_resolve_in_roots_tries_each_root_for_relative_names` /
+`test_outside_message_lists_available_roots` / `test_fs_tool_descriptions_embed_actual_roots` /
+`test_planner_prompt_only_advertises_mounted_tools`），agent 测试族 76 passed + ruff 全绿。
+全量门禁（修复前代码）8870 passed / 0 failed；本轮改动为 chat 工具族局部，聚焦族已复跑。

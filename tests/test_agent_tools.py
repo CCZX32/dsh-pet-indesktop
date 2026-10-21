@@ -455,3 +455,58 @@ def test_build_agent_runtime_without_character_keeps_fs_only(tmp_path):
     assert runtime is not None
     assert runtime.memory_path is None
     assert runtime.fs_roots
+
+
+def test_resolve_in_roots_tries_each_root_for_relative_names(tmp_path):
+    """相对短名（「下载」「Downloads」）按顺序试每个白名单根，存在者胜出——
+    实机探针 2026-10-21：按首根解析时这类模型常用叫法必失败。"""
+    desktop = tmp_path / "Desktop"
+    downloads = tmp_path / "Downloads"
+    desktop.mkdir()
+    downloads.mkdir()
+    (downloads / "报表.xlsx").write_text("x", encoding="utf-8")
+    roots = (desktop, downloads)
+    assert at.resolve_in_roots("报表.xlsx", roots) == downloads / "报表.xlsx"
+    assert at.resolve_in_roots("Downloads", roots) == downloads
+    assert at.resolve_in_roots("下载", roots) == downloads  # 中文别名
+    assert at.resolve_in_roots("桌面", roots) == desktop
+    # 都不存在：回落首根走统一校验（仍在白名单内）
+    assert at.resolve_in_roots("不存在的文件.txt", roots) == desktop / "不存在的文件.txt"
+
+
+def test_outside_message_lists_available_roots(tmp_path):
+    """拒绝文案带可用根列表：工具输出回给模型，要支持它下一轮自我纠正。"""
+    root = tmp_path / "Desktop"
+    root.mkdir()
+    with pytest.raises(at.ToolError) as excinfo:
+        at.resolve_in_roots("C:/Windows/system.ini", (root,))
+    assert str(root) in str(excinfo.value)
+
+
+def test_fs_tool_descriptions_embed_actual_roots(tmp_path):
+    """fs 工具描述（发给模型的 schema）必须带真实根列表——模型不知道绝对
+    路径就只能瞎猜（实机探针 2026-10-21）。"""
+    root = tmp_path / "Downloads"
+    root.mkdir()
+    tools = at._fs_tools((root,))
+    for spec in tools:
+        assert str(root) in spec.description
+
+
+def test_planner_prompt_only_advertises_mounted_tools(tmp_path):
+    """planner 提示词按注册表实际挂载生成：没挂 web 工具就不许出现
+    web_search/web_fetch 字样（实机探针 2026-10-21：静态文案宣传未挂载
+    工具，模型照文案调用撞「未知工具」空耗一轮）。"""
+    root = tmp_path / "Desktop"
+    root.mkdir()
+    registry = at.ToolRegistry(at._fs_tools((root,)) + at._memory_tools(tmp_path / "mem.json"))
+    prompt = at.planner_prompt(registry)
+    assert "web_search" not in prompt and "web_fetch" not in prompt
+    assert "fs_list" in prompt and "memory_remember" in prompt
+    # 只有网络工具时也不许宣传 fs/memory
+    web_registry = at.ToolRegistry(at._web_tools(
+        type("C", (), {"verify_ssl": True})(),
+        type("S", (), {"fetch_pages": True, "max_results": 5})()))
+    web_prompt = at.planner_prompt(web_registry)
+    assert "web_search" in web_prompt
+    assert "fs_read" not in web_prompt and "memory_remember" not in web_prompt
