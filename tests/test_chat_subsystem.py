@@ -1047,7 +1047,7 @@ def test_modern_new_conversation_button_is_compact_and_elevated(tmp_path: Path):
     app.processEvents()
 
 
-def test_modern_message_surface_and_toolbar_are_separate_and_copy_only():
+def test_modern_message_surface_and_toolbar_are_separate_and_pin_and_copy():
     from PySide6.QtWidgets import QToolButton
     from pet.chat.widgets import MessageBubble
 
@@ -1055,11 +1055,14 @@ def test_modern_message_surface_and_toolbar_are_separate_and_copy_only():
     assistant = MessageBubble("assistant", "hi", character_id="shenshen")
     assert user.findChild(object, "message-surface") is not None
     assert assistant.findChild(object, "message-surface") is not None
+    # 工具条与正文 surface 分离：钉为记忆（pin）+ 复制（copy）两个动作，顺序即视觉顺序
     assert [button.objectName() for button in user.tools.findChildren(QToolButton)] == [
-        "message-copy-button"
+        "message-pin-button",
+        "message-copy-button",
     ]
     assert [button.objectName() for button in assistant.tools.findChildren(QToolButton)] == [
-        "message-copy-button"
+        "message-pin-button",
+        "message-copy-button",
     ]
 
 

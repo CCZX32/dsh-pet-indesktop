@@ -55,12 +55,16 @@ class PromptBuilder:
             prompt=load_character_prompt(self.characters_root,character_id)
             if prompt.strip(): return prompt.strip()
         return settings.default_system_prompt.strip()
-    def build_messages(self,settings,character_id,history,user_text,role_prompt=None,now=None):
+    def build_messages(self,settings,character_id,history,user_text,role_prompt=None,now=None,memory_text=None):
         """时间感知：历史用户消息前加发送时间标记，system 末尾附当前时间与距上条消息的间隔。
-        时间取自已落盘的 ChatMessage.created_at，只在发给模型时附加，不改动会话文件。"""
+        时间取自已落盘的 ChatMessage.created_at，只在发给模型时附加，不改动会话文件。
+        memory_text（「关于用户的记忆」段，pet/chat/memory.render_injection 渲染）追加在
+        system 最末、与 time_context 同级；None/空 = 不注入，输出与无记忆逐字节一致。"""
         now=(now or datetime.now().astimezone()).astimezone()
         system=self.effective_system_prompt(settings,character_id,role_prompt)
         system=(system+'\n\n'+time_context(history,now)).strip()
+        memory_text=str(memory_text or '').strip()
+        if memory_text: system=(system+'\n\n'+memory_text).strip()
         trimmed=self.trim_history(history,settings.history_message_limit,settings.history_char_limit)
         return [{'role':'system','content':system},*({'role':m.role,'content':stamp_message(m)} for m in trimmed),{'role':'user','content':user_text.strip()}]
     @staticmethod
