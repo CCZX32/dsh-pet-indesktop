@@ -70,6 +70,20 @@ def _mute_winmm_audio(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_feature_activation_snapshot():
+    """功能模块激活快照是进程级全局：走 main() 的用例会真冻结（全新目录 =
+    新装纯核心 []），不回收会污染同进程后续全部用例（设置页模块行整批缺席，
+    期 5 全量曾因此 88 红）。每个用例前后都恢复到「未冻结 = 全激活」默认态；
+    门控用例在测试体内自行 freeze_snapshot_for_tests。
+    """
+    from pet import feature_activation as fa
+
+    fa.reset_snapshot_for_tests()
+    yield
+    fa.reset_snapshot_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _no_modal_message_boxes(monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
