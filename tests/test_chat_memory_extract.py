@@ -60,6 +60,9 @@ def _config(tmp_path, **overrides):
     from pet.config import Config
 
     config = Config(tmp_path)
+    # 调度类用例测的是每轮语义：默认把频率闸放到 1（产品默认 5 由
+    # test_extract_every_five_turns_by_default 与 test_interval_invalid_* 专测）
+    overrides.setdefault("chat_memory_extract_interval", 1)
     for key, value in overrides.items():
         config.set(key, value)
     return config
@@ -318,7 +321,9 @@ def _modern_window(tmp_path, pet=None, notifier=None):
     from pet.chat.widgets import ChatWindow
 
     _qapp()
-    return ChatWindow(Config(tmp_path), "shenshen", pet_window=pet, notifier=notifier)
+    cfg = Config(tmp_path)
+    cfg.set("chat_memory_extract_interval", 1)
+    return ChatWindow(cfg, "shenshen", pet_window=pet, notifier=notifier)
 
 
 def _reply_landed(window) -> bool:
@@ -398,3 +403,61 @@ def test_extraction_is_silent_no_bubble_no_notify(tmp_path):
     assert enabled_pet == baseline_pet  # 宠物侧调用序列与基线逐一致
     assert enabled_notices == baseline_notices
     assert not [c for c in enabled_pet if c[0] == "show_bubble"]
+
+
+# ---------------------------------------------------------------- 提炼频率（每 N 轮）
+def _schedule_turns(config, path, *, user="我不吃辣，晚上吃什么好", reply="试试清汤锅"):
+    from pet.chat.memory_extract import schedule_extraction
+
+    return schedule_extraction(
+        config=config, memory_path=path, user_text=user, reply_text=reply,
+        provider=None, provider_config=None)
+
+
+
+@pytest.fixture(autouse=True)
+def _reset_turn_counters():
+    from pet.chat import memory_extract as me
+
+    with me._last_run_lock:
+        me._turn_count.clear()
+        me._last_run.clear()
+    yield
+    with me._last_run_lock:
+        me._turn_count.clear()
+        me._last_run.clear()
+
+
+def test_extract_every_five_turns_by_default(tmp_path, monkeypatch):
+    from pet.chat import memory_extract as me
+
+    monkeypatch.setattr(me.time, "sleep", lambda *_: None)
+    fired = []
+    monkeypatch.setattr(me.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda self: fired.append(1)})())
+    cfg = _config(tmp_path, chat_memory_extract_interval=5)
+    path = tmp_path / "memory.json"
+    # 默认 5：前 4 轮不安排，第 5 轮安排；第 6-9 不安排，第 10 再安排
+    for i in range(1, 11):
+        me._last_run.clear()  # 清掉 30s 限频只看轮次闸
+        got = _schedule_turns(cfg, path)
+        assert got is (i % 5 == 0), f"第 {i} 轮"
+    assert len(fired) == 2
+
+
+def test_extract_every_turn_when_interval_is_one(tmp_path, monkeypatch):
+    from pet.chat import memory_extract as me
+
+    monkeypatch.setattr(me.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda self: None})())
+    cfg = _config(tmp_path, chat_memory_extract_interval=1)
+    me._last_run.clear()
+    assert _schedule_turns(cfg, tmp_path / "memory.json") is True
+
+
+def test_interval_invalid_falls_back_to_default(tmp_path):
+    from pet.chat.memory_extract import _extract_every_turns
+
+    assert _extract_every_turns(_config(tmp_path / "c", chat_memory_extract_interval="abc")) == 5
+    assert _extract_every_turns(_config(tmp_path / "a", chat_memory_extract_interval=0)) == 1
+    assert _extract_every_turns(_config(tmp_path / "b", chat_memory_extract_interval=99)) == 20

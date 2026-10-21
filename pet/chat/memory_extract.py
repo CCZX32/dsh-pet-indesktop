@@ -57,7 +57,20 @@ _EFFECTIVE_RE = re.compile(r"\w", re.UNICODE)
 
 #: 限频状态：记忆文件路径 → 上次提炼的 monotonic 时间（进程内，不入盘）。
 _last_run: dict[str, float] = {}
+_turn_count: dict[str, int] = {}
 _last_run_lock = threading.Lock()
+
+#: 「每 N 轮回复提炼一次」的默认 N（共创者定稿 5：成本≈1/5，记忆延迟无感）
+DEFAULT_EXTRACT_EVERY_TURNS = 5
+
+
+def _extract_every_turns(config) -> int:
+    """提炼频率（每 N 轮一次）：非法值回落默认，夹到 [1, 20]。"""
+    try:
+        n = int(config.get("chat_memory_extract_interval", DEFAULT_EXTRACT_EVERY_TURNS))
+    except (TypeError, ValueError):
+        return DEFAULT_EXTRACT_EVERY_TURNS
+    return max(1, min(20, n))
 
 _EXTRACT_SYSTEM = (
     "你是记忆整理助手。从「用户和桌宠的一轮对话」中挑出值得长期记住的关于用户的事实"
@@ -148,6 +161,12 @@ def schedule_extraction(
         key = str(path)
         now = time.monotonic()
         with _last_run_lock:
+            # 轮次闸：每 N 轮回复才提炼一次（默认 5）——成本约为每轮提炼的 1/N，
+            # 几轮内的内容会合在一起提，记忆形成延迟无感
+            count = _turn_count.get(key, 0) + 1
+            _turn_count[key] = count
+            if count % _extract_every_turns(config) != 0:
+                return False
             if now - _last_run.get(key, -1e18) < EXTRACT_INTERVAL_SECONDS:
                 return False
             _last_run[key] = now

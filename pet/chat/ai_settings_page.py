@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -126,6 +127,9 @@ class _AiSettingsPage(QWidget):
         # 档 B 自动提炼（默认开：被动形成；文案如实写明会多用模型调用）。
         self.chat_memory_auto_extract = ToggleSwitch()
         self.chat_memory_auto_extract.setChecked(bool(config.get("chat_memory_auto_extract", True)))
+        self.chat_memory_extract_interval = QSpinBox()
+        self.chat_memory_extract_interval.setRange(1, 20)
+        self.chat_memory_extract_interval.setValue(int(config.get("chat_memory_extract_interval", 5) or 5))
         self.chat_memory_manage_btn = QPushButton("查看与管理…", self)
         self.chat_memory_manage_btn.setProperty("variant", "ghost")
         self.chat_memory_manage_btn.clicked.connect(self._open_memory_manager)
@@ -287,6 +291,12 @@ class _AiSettingsPage(QWidget):
                 "回复后自动整理记忆（会多用一点模型调用）：每轮对话后在后台静默提炼"
                 "值得长期记住的事，不打断对话、失败不打扰；关闭后只保留手动钉的记忆。默认开启。",
                 self.chat_memory_auto_extract,
+            ),
+            SettingRow(
+                "chat_memory_extract_interval", "提炼频率",
+                "每几轮回复整理一次记忆：1 = 每轮都整理，5 = 每 5 轮整理一次（默认，"
+                "模型调用更少）；几轮里的内容会合在一起提炼，不影响记忆效果。",
+                self.chat_memory_extract_interval,
             ),
             SettingRow(
                 "chat_memory_manage", "记忆管理",
@@ -786,6 +796,7 @@ class _AiSettingsPage(QWidget):
         self.config.set("chat_reply_voice_enabled", self.chat_reply_voice.isChecked())
         self.config.set("chat_memory_enabled", self.chat_memory_enabled.isChecked())
         self.config.set("chat_memory_auto_extract", self.chat_memory_auto_extract.isChecked())
+        self.config.set("chat_memory_extract_interval", int(self.chat_memory_extract_interval.value()))
         self.config.set_chat_settings(self.settings)
 
     def _chat_memory(self) -> ChatMemory:
