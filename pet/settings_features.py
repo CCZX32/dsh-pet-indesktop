@@ -39,6 +39,8 @@ RECOMMENDED_SUITE: tuple[str, ...] = (
 #: 顶部说明条（如实写：本页改动重启才生效，本次运行不受影响）。
 INFO_LINE = "勾选的功能重启桌宠后生效；没勾的功能不会出现菜单和设置，后台也不会运行。"
 RESTART_NOTE = "重启后生效：本页的改动只写进配置，重启桌宠后才生效；当前正在运行的功能不受影响。"
+CORE_NOTE = ("始终开启的核心能力（不可关闭）：动画播放与素材角色、拖拽/点击/碰撞/弹弓互动、"
+             "自言自语（文字气泡）、多桌宠、直播捕获、全局快捷键、菜单自定义、设置与更新。")
 
 
 def _badge_text(spec) -> str:
@@ -86,6 +88,12 @@ class FeatureCard(QFrame):
         self.hint_label.setObjectName("settingHint")
         self.hint_label.setWordWrap(True)
         main.addWidget(self.hint_label)
+        if spec.entry_names:
+            # 「对应：」行——关掉这张卡后具体哪些东西会消失（用户词汇，不列动作 id）
+            entries = QLabel("对应：" + "、".join(spec.entry_names), self)
+            entries.setObjectName("settingHint")
+            entries.setWordWrap(True)
+            main.addWidget(entries)
         self.dep_hint = QLabel("", self)
         self.dep_hint.setObjectName("settingHint")
         self.dep_hint.setWordWrap(True)
@@ -161,6 +169,12 @@ class FeaturesPage(QWidget):
         ordered += [c for c in by_category if c not in CATEGORY_ORDER]
         for category in ordered:
             layout.addWidget(SettingsSection(category, by_category[category], self))
+
+        # 核心能力说明区：让用户知道「不拆的是哪些」（不可关闭，仅供说明）
+        core = QLabel(CORE_NOTE, self)
+        core.setObjectName("settingHint")
+        core.setWordWrap(True)
+        layout.addWidget(core)
 
         layout.addStretch(1)
         self._refresh_dep_hints()

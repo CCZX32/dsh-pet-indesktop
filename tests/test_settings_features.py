@@ -246,3 +246,20 @@ def test_discard_on_close_without_save_keeps_disk(dialog):
     app.processEvents()
     assert set(page.pending()) == {s.id for s in all_features()} - {"music", "chat"}
     assert _read_disk(dialog.config) == before, "未走保存链就落盘（取消丢弃语义被破坏）"
+
+
+def test_card_shows_entry_names_and_core_note(tmp_path, monkeypatch):
+    """「对应：」行告诉用户关掉卡片会消失什么；底部说明区列出不可关的核心能力。"""
+    from PySide6.QtWidgets import QLabel
+
+    dlg = _dialog(tmp_path, monkeypatch)
+    try:
+        page = _page(dlg)
+        weather_card = page._cards["weather"]
+        texts = [lb.text() for lb in weather_card.findChildren(QLabel)]
+        assert any(t.startswith("对应：") and "查看天气" in t for t in texts)
+        page_texts = [lb.text() for lb in page.findChildren(QLabel)]
+        assert any("始终开启的核心能力" in t and "动画播放" in t for t in page_texts)
+    finally:
+        dlg.close()
+        app.processEvents()

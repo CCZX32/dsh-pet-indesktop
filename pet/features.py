@@ -89,6 +89,9 @@ class FeatureSpec:
     needs_paid: bool
     needs_external_process: bool
     batch: int
+    #: 用户能在右键菜单/设置里认出来的入口名（功能页卡片「对应：」行）——
+    #: 告诉用户关掉这张卡后具体哪些东西会消失。没有显性入口的模块为空。
+    entry_names: tuple[str, ...] = ()
 
 
 #: 没有右键菜单动作的模块（`menu_action_ids` 刻意为空，不是抄漏）。
@@ -132,6 +135,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=False,
         batch=BATCH_FIRST,
+        entry_names=("「查看天气」「天气城市」",),
     ),
     # 抽签 divination —— ENTRY-INVENTORY §抽签
     #   菜单：registry.py:389-391（divination_draw）
@@ -157,6 +161,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=False,
         batch=BATCH_FIRST,
+        entry_names=("「抽支签」",),
     ),
     # 待办 todo —— ENTRY-INVENTORY §待办
     #   菜单：registry.py:374-376（todo_panel）
@@ -179,6 +184,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=False,
         batch=BATCH_FIRST,
+        entry_names=("「待办提醒」面板与到点通知",),
     ),
     # 节日 festival —— ENTRY-INVENTORY §节日
     #   菜单：registry.py:383-388（festival_now / festival_toggle，默认布局 visible:false）
@@ -213,6 +219,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=False,
         batch=BATCH_FIRST,
+        entry_names=("「节日提醒」设置组与提醒气泡",),
     ),
     # ============================================================ 第二批：声音
     # 语音 voice —— ENTRY-INVENTORY §语音报时 + §点击朗读 + §TTS 注册表
@@ -262,6 +269,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # 豆包本地变调拉 ffmpeg（pet/tts/doubao.py:199-216）
         batch=BATCH_SECOND,
+        entry_names=("「语音报时」「点击台词朗读」「助手回复朗读」",),
     ),
     # 音乐 music —— ENTRY-INVENTORY §音乐
     #   菜单：registry.py:327-343（9 个注册动作）。`music`「音乐」子菜单容器只是
@@ -302,6 +310,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # 拉起外部播放器（shared.py:1237-1242）
         batch=BATCH_SECOND,
+        entry_names=("「音乐」子菜单（唱歌/歌词/播放器）",),
     ),
     # ============================================================ 第三批：智能
     # AI 对话 chat —— ENTRY-INVENTORY §AI 对话
@@ -338,6 +347,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=True,  # 主路径必须自备模型服务凭据
         needs_external_process=False,
         batch=BATCH_THIRD,
+        entry_names=("「AI 对话」聊天窗口与快捷聊天",),
     ),
     # 文件解读 file_interpret —— ENTRY-INVENTORY §文件解读
     #   菜单：**无**（唯一入口是拖文件，见 MENU_LESS_FEATURES）
@@ -361,6 +371,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=True,  # 复用 chat 的 provider
         needs_external_process=False,
         batch=BATCH_THIRD,
+        entry_names=("拖文件到桌宠身上解读",),
     ),
     # 手动视觉 vision（看看屏幕 / 截图提问）—— ENTRY-INVENTORY §看看屏幕
     #   菜单：registry.py:304（look_screen）、307-309（screen_capture）
@@ -393,6 +404,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=True,  # 复用 chat 的 provider（视觉模型按 provider 配置）
         needs_external_process=True,  # OCR 子进程 python -m pet.screen_capture.ocr_worker
         batch=BATCH_THIRD,
+        entry_names=("「看看屏幕」「截图提问」及对应全局快捷键",),
     ),
     # 主动识屏 proactive —— ENTRY-INVENTORY §主动识屏
     #   菜单：registry.py:364-367（proactive_screen）
@@ -426,6 +438,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=True,  # 视觉请求走 chat provider
         needs_external_process=False,
         batch=BATCH_THIRD,
+        entry_names=("「主动识屏」与停留建议气泡",),
     ),
     # ============================================================ 第三批：联动
     # Agent 联动 agent_link —— ENTRY-INVENTORY §agent_link
@@ -467,6 +480,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # 装桥走 pnpm 子进程（agent_link.py:2622-2711）
         batch=BATCH_THIRD,
+        entry_names=("「Agent 联动」与状态气泡、「消费统计」",),
     ),
     # 灵动岛 dynamic_island（含 FPS、余额两个子能力）—— ENTRY-INVENTORY §dynamic_island
     #   菜单：registry.py:357（balance）、406-411（network_info）。岛本身是进程级窗口，
@@ -511,6 +525,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # PresentMon 子进程 + 帧率授权 PowerShell
         batch=BATCH_THIRD,
+        entry_names=("桌面胶囊（灵动岛）、「DeepSeek 余额」「网络信息」",),
     ),
     # ============================================================ 第四批：工具
     # 快捷启动 quick_launch —— ENTRY-INVENTORY §快捷启动
@@ -530,6 +545,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # os.startfile / QProcess.startDetached
         batch=BATCH_TOOLS,
+        entry_names=("「快捷启动」子菜单",),
     ),
     # 系统工具 system_tools —— ENTRY-INVENTORY §系统工具（D1 回收内存 + D2 Harness）
     #   菜单：registry.py:346（memory_trim，非 Windows 整条不出现）、
@@ -559,6 +575,7 @@ FEATURES: dict[str, FeatureSpec] = {
         needs_paid=False,
         needs_external_process=True,  # 拉起 dsh 子进程（harness_launcher.py:503-556）
         batch=BATCH_TOOLS,
+        entry_names=("「回收内存」「DeepSeek Harness」",),
     ),
 }
 
