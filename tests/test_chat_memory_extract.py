@@ -113,6 +113,55 @@ def test_parse_ops_caps_count_and_text_length():
     assert len(long_op[0]["text"]) == _OP_TEXT_CHARS
 
 
+def test_parse_ops_new_layer_and_keywords_format():
+    ops = parse_ops(
+        '[{"op":"ADD","text":"别再把配置删了","layer":"lesson",'
+        '"keywords":["配置","删除"]}]'
+    )
+    assert ops == [
+        {
+            "op": "ADD",
+            "text": "别再把配置删了",
+            "layer": "lesson",
+            "keywords": ["配置", "删除"],
+        }
+    ]
+
+
+def test_parse_ops_invalid_layer_and_empty_keywords_are_dropped():
+    ops = parse_ops('[{"op":"ADD","text":"普通事实","layer":"bogus","keywords":[]}]')
+    assert ops == [{"op": "ADD", "text": "普通事实"}]
+
+
+def test_apply_ops_persists_layer_and_keywords(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "别再把配置删了", "layer": "lesson",
+          "keywords": ["配置", "删除"]}],
+        source="auto",
+    ) is True
+    entry = mem.load()[0]
+    assert entry["layer"] == "lesson"
+    assert entry["keywords"] == ["配置", "删除"]
+
+
+def test_apply_ops_old_format_falls_back_to_fact_and_bigrams(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    mem.apply_ops([{"op": "ADD", "text": "周三有课"}], source="auto")
+    entry = mem.load()[0]
+    assert entry["layer"] == "fact"
+    assert entry["keywords"]
+
+
+def test_apply_ops_auto_mention_keeps_existing_layer(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    mem.add("我不吃辣", layer="user")
+    mem.apply_ops([{"op": "ADD", "text": "我不吃辣"}], source="auto")
+    entry = mem.load()[0]
+    assert entry["layer"] == "user"
+    assert entry["source"] == "manual"
+
+
 # ---------------------------------------------------------------- 合并（ChatMemory.apply_ops）
 def test_apply_ops_add_marks_auto_source(tmp_path):
     mem = ChatMemory(tmp_path / "memory.json")
