@@ -65,6 +65,12 @@ class FakeChat:
     def token(self, owner, delta, *, pet_slot=None):
         self.calls.append(("token", delta))
 
+    def reasoning(self, owner, delta, *, pet_slot=None):
+        self.calls.append(("reasoning", delta))
+
+    def status(self, owner, text, *, pet_slot=None):
+        self.calls.append(("status", text))
+
     def done(self, owner, text="", *, pet_slot=None):
         self.calls.append(("done", text))
         self.done_event.set()
@@ -89,6 +95,7 @@ class FakeApi:
     def __init__(self, service: bool = True) -> None:
         self.service = service
         self.requests: list[dict] = []
+        self.search_keys: dict[str, str] = {}
 
     def services(self):
         if not self.service:
@@ -108,6 +115,11 @@ class FakeApi:
         temperature=None,
         timeout=60.0,
         on_delta=None,
+        on_reasoning=None,
+        on_status=None,
+        thinking="auto",
+        reasoning_effort="",
+        web_search=None,
         cancel=None,
     ):
         self.requests.append(
@@ -116,8 +128,15 @@ class FakeApi:
                 "messages": messages,
                 "model": model,
                 "temperature": temperature,
+                "thinking": thinking,
+                "reasoning_effort": reasoning_effort,
+                "web_search": web_search,
             }
         )
+        if on_status is not None:
+            on_status("正在判断是否需要联网…")
+        if on_reasoning is not None:
+            on_reasoning("想一想")
         if on_delta is not None:
             on_delta("答")
             on_delta("案")
@@ -125,6 +144,15 @@ class FakeApi:
 
     def open_settings(self):
         self.requests.append({"open_settings": True})
+
+    def web_search_key_status(self):
+        return {engine: True for engine in self.search_keys}
+
+    def set_web_search_key(self, engine, value):
+        self.search_keys[str(engine)] = str(value)
+
+    def credentials_available(self):
+        return True
 
 
 class FakeScreen:
@@ -511,5 +539,122 @@ def test_settings_page_exposes_chat_appearance_and_previews(qt_app, tmp_path: Pa
         page.accent_edit.setText("不是颜色")
         page._on_accent_finished()
         assert host.config.get("chat_accent") == "#ff8800"
+    finally:
+        page.close()
+
+
+def test_thinking_and_web_search_config_reach_the_port(runtime) -> None:
+    config = runtime.context.host.config
+    config.set("ai_thinking", "enabled")
+    config.set("ai_reasoning_effort", "max")
+    config.set("ai_web_search", True)
+    config.set("ai_web_engine", "bocha")
+    config.set("ai_web_results", 3)
+    config.set("ai_web_fetch", False)
+
+    runtime._on_submit("联网查一下", 2)
+    chat = runtime.context.ports.chat
+    assert chat.done_event.wait(5)
+
+    request = runtime.context.ports.api.requests[0]
+    assert request["thinking"] == "enabled"
+    assert request["reasoning_effort"] == "max"
+    options = request["web_search"]
+    assert options is not None
+    assert (options.engine, options.max_results, options.fetch_pages) == (
+        "bocha",
+        3,
+        False,
+    )
+
+
+def test_reasoning_and_status_reach_the_chat_port(runtime) -> None:
+    runtime.context.host.config.set("ai_thinking", "enabled")
+    runtime._on_submit("想一想", 2)
+    chat = runtime.context.ports.chat
+    assert chat.done_event.wait(5)
+
+    assert ("reasoning", "想一想") in chat.calls
+    assert ("status", "正在判断是否需要联网…") in chat.calls
+
+
+def test_settings_page_saves_search_key_to_keyring_port(qt_app, tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+    api = FakeApi()
+    host = SimpleNamespace(
+        config=Config(tmp_path),
+        features=SimpleNamespace(ports=SimpleNamespace(api=api)),
+    )
+    page = definition.settings_factory(host)
+    try:
+        page.web_check.setChecked(True)
+        page.engine_combo.setCurrentIndex(page.engine_combo.findData("bocha"))
+        assert page._web_key_row.isVisibleTo(page) is True
+
+        page.web_key_edit.setText("sk-search")
+        page._save_web_key()
+
+        assert api.search_keys == {"bocha": "sk-search"}
+        assert page.web_key_edit.text() == ""
+        assert page.web_key_state.text() == "已保存"
+        assert host.config.get("ai_web_search") is True
+        assert host.config.get("ai_web_engine") == "bocha"
+    finally:
+        page.close()
+
+
+def test_settings_page_maps_thinking_and_web_toggles(qt_app, tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+    host = SimpleNamespace(
+        config=Config(tmp_path),
+        features=SimpleNamespace(ports=SimpleNamespace(api=FakeApi())),
+    )
+    page = definition.settings_factory(host)
+    try:
+        assert page._effort_row.isVisibleTo(page) is False
+
+        page.thinking_combo.setCurrentIndex(page.thinking_combo.findData("enabled"))
+        page.effort_combo.setCurrentIndex(page.effort_combo.findData("max"))
+        page.web_check.setChecked(True)
+        page.engine_combo.setCurrentIndex(page.engine_combo.findData("tavily"))
+        page.web_results_spin.setValue(8)
+        page.web_fetch_check.setChecked(False)
+
+        assert host.config.get("ai_thinking") == "enabled"
+        assert host.config.get("ai_reasoning_effort") == "max"
+        assert host.config.get("ai_web_search") is True
+        assert host.config.get("ai_web_engine") == "tavily"
+        assert host.config.get("ai_web_results") == 8
+        assert host.config.get("ai_web_fetch") is False
+        assert page._effort_row.isVisibleTo(page) is True
+
+        page.thinking_combo.setCurrentIndex(page.thinking_combo.findData("disabled"))
+        assert page._effort_row.isVisibleTo(page) is False
+
+        page.web_check.setChecked(False)
+        assert page._engine_row.isVisibleTo(page) is False
+        assert page._web_key_row.isVisibleTo(page) is False
+    finally:
+        page.close()
+
+
+def test_settings_page_marks_in_memory_search_keys(qt_app, tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+    api = FakeApi()
+    api.credentials_available = lambda: False
+    host = SimpleNamespace(
+        config=Config(tmp_path),
+        features=SimpleNamespace(ports=SimpleNamespace(api=api)),
+    )
+    page = definition.settings_factory(host)
+    try:
+        page.web_check.setChecked(True)
+        page.engine_combo.setCurrentIndex(page.engine_combo.findData("tavily"))
+        page.web_key_edit.setText("sk-memory")
+        page._save_web_key()
+        assert "重启即丢" in page.web_key_state.text()
     finally:
         page.close()

@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QObject, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -524,6 +524,19 @@ def test_overlay_paints_no_dim_before_and_dim_after_selection(app) -> None:
         painted = overlay.grab().toImage()
         assert painted.pixelColor(20, 75).red() == 0x80  # 选区内像素原样
         assert painted.pixelColor(190, 5).red() < 0x80   # 选区外压暗
+    finally:
+        overlay.close()
+
+
+def test_overlay_accepts_a_qpixmap_frame_instead_of_painting_gray(app) -> None:
+    """真实抓屏在 Qt6 返回 QPixmap；覆盖层必须照常画出底图（否则就是灰屏）。"""
+    frame = QPixmap.fromImage(_image(200, 120, color=0xFF336699))
+    overlay = SelectionOverlay(frame, FakeScreen(200, 120))
+    overlay.resize(200, 120)
+    try:
+        painted = overlay.grab().toImage()
+        color = painted.pixelColor(190, 5)
+        assert (color.red(), color.green(), color.blue()) == (0x33, 0x66, 0x99)
     finally:
         overlay.close()
 

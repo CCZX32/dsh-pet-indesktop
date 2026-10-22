@@ -44,6 +44,8 @@ class ChatController(QObject):
     """
 
     token_received = Signal(str, str, int)
+    reasoning_received = Signal(str, str, int)
+    status_received = Signal(str, str, int)
     done_received = Signal(str, str, int)
     error_received = Signal(str, str, str, int)
     record_received = Signal(str, str, str, int)
@@ -56,6 +58,8 @@ class ChatController(QObject):
         self._submit_registry: dict[str, Callable[[str, int], None]] = {}
         self._stop_registry: dict[str, Callable[[int], None]] = {}
         self.token_received.connect(self._apply_token)
+        self.reasoning_received.connect(self._apply_reasoning)
+        self.status_received.connect(self._apply_status)
         self.done_received.connect(self._apply_done)
         self.error_received.connect(self._apply_error)
         self.record_received.connect(self._apply_record)
@@ -106,6 +110,14 @@ class ChatController(QObject):
 
     def token(self, owner: str, delta: str, *, pet_slot: int | None = None) -> None:
         self.token_received.emit(str(owner), str(delta or ""), self._slot(pet_slot))
+
+    def reasoning(self, owner: str, delta: str, *, pet_slot: int | None = None) -> None:
+        """深度思考增量：只进已存在的窗口，不主动唤出对话窗。"""
+        self.reasoning_received.emit(str(owner), str(delta or ""), self._slot(pet_slot))
+
+    def status(self, owner: str, text: str, *, pet_slot: int | None = None) -> None:
+        """联网检索进度行：只进已存在的窗口。"""
+        self.status_received.emit(str(owner), str(text or ""), self._slot(pet_slot))
 
     def done(self, owner: str, text: str = "", *, pet_slot: int | None = None) -> None:
         self.done_received.emit(str(owner), str(text or ""), self._slot(pet_slot))
@@ -368,11 +380,34 @@ class ChatController(QObject):
             state.active = True
         window.append_token(delta)
 
+    def _begin_stream_if_needed(self, state: _ChatState) -> None:
+        if state.active or state.window is None:
+            return
+        state.window.begin_stream()
+        state.session.append("assistant", "")
+        state.active = True
+
+    def _apply_reasoning(self, owner: str, delta: str, slot: int) -> None:
+        state = self._ensure(owner, slot, with_window=False)
+        if state.window is None or not delta:
+            return
+        self._begin_stream_if_needed(state)
+        state.window.append_reasoning(delta)
+
+    def _apply_status(self, owner: str, text: str, slot: int) -> None:
+        state = self._ensure(owner, slot, with_window=False)
+        if state.window is None or not text:
+            return
+        self._begin_stream_if_needed(state)
+        state.window.add_activity(text)
+
     def _apply_done(self, owner: str, text: str, slot: int) -> None:
         state = self._ensure(owner, slot)
         window = state.window
+        thinking = ("", [])
         if window is not None:
             window.finish_stream(text)
+            thinking = window.last_thinking()
         final = str(text or "")
         if not final:
             if window is not None:
@@ -382,12 +417,24 @@ class ChatController(QObject):
                 final = str(state.session.messages[-1].get("content") or "")
         # 用窗口的最终内容覆盖会话里那条空的 assistant 记录。
         if state.session.messages and state.session.messages[-1].get("role") == "assistant":
-            state.session.messages[-1]["content"] = final[:24_000]
+            record = state.session.messages[-1]
+            record["content"] = final[:24_000]
+            self._remember_thinking(record, thinking)
         elif final:
             state.session.append("assistant", final)
+            self._remember_thinking(state.session.messages[-1], thinking)
         state.active = False
         self._save(state)
         self._refresh_history(state)
+
+    @staticmethod
+    def _remember_thinking(record: dict, thinking: tuple[str, list[str]]) -> None:
+        """思维链/检索进度随 assistant 记录落盘；没有就保持旧会话格式。"""
+        reasoning, activity = thinking
+        if reasoning:
+            record["reasoning"] = str(reasoning)[:24_000]
+        if activity:
+            record["activity"] = [str(line)[:500] for line in activity][-40:]
 
     def _apply_error(self, owner: str, reason: str, message: str, slot: int) -> None:
         state = self._ensure(owner, slot)

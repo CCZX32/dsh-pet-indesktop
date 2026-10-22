@@ -85,6 +85,7 @@ class ChatWindow(QDialog):
         self._stream_text = ""
         self._streaming = False
         self._stream_bubble: MessageBubble | None = None
+        self._last_thinking: tuple[str, list[str]] = ("", [])
         self._bubbles: list[MessageBubble] = []
         self._pending_attachments: list[dict] = []
         self._last_error = ""
@@ -746,9 +747,16 @@ class ChatWindow(QDialog):
         self._stream_text = ""
         self._streaming = False
         self._stream_bubble = None
+        self._last_thinking = ("", [])
         self._clear_message_rows()
         for item in self._messages:
-            self._add_bubble(str(item.get("role") or "user"), str(item.get("content") or ""))
+            bubble = self._add_bubble(
+                str(item.get("role") or "user"), str(item.get("content") or "")
+            )
+            reasoning = str(item.get("reasoning") or "")
+            activity = item.get("activity") or []
+            if reasoning or activity:
+                bubble.restore_thinking(reasoning, list(activity))
         self._set_empty_state(not self._messages)
         self._set_busy(False)
         self._bottom()
@@ -781,6 +789,33 @@ class ChatWindow(QDialog):
         if not self._flush_timer.isActive():
             self._flush_timer.start()
 
+    def append_reasoning(self, delta: str) -> None:
+        """思维链增量：只进助手气泡的折叠面板，不拼进正文。"""
+        delta = str(delta or "")
+        if not delta:
+            return
+        if self._stream_bubble is None:
+            self.begin_stream()
+        if self._stream_bubble is not None:
+            self._stream_bubble.append_reasoning(delta)
+        self._bottom()
+
+    def add_activity(self, text: str) -> None:
+        """联网检索等进度行：进助手气泡的活动面板。"""
+        text = str(text or "").strip()
+        if not text:
+            return
+        if self._stream_bubble is None:
+            self.begin_stream()
+        if self._stream_bubble is not None:
+            self._stream_bubble.add_activity(text)
+        self._bottom(always=True)
+
+    def last_thinking(self) -> tuple[str, list[str]]:
+        """最近一次流式回复的 (思维链, 检索进度) 副本（落会话用）。"""
+        reasoning, activity = self._last_thinking
+        return reasoning, list(activity)
+
     def _flush_stream(self) -> None:
         if self._stream_bubble is None:
             return
@@ -805,6 +840,7 @@ class ChatWindow(QDialog):
         bubble = self._stream_bubble
         self._stream_bubble = None
         if bubble is not None:
+            self._last_thinking = bubble.thinking_record
             bubble.finish_thinking()
             bubble.set_content(final)
             bubble.set_state(MessageBubble.STATE_NORMAL)
@@ -833,6 +869,7 @@ class ChatWindow(QDialog):
         self._messages = []
         self._stream_text = ""
         self._stream_bubble = None
+        self._last_thinking = ("", [])
         self._pending_attachments = []
         self._clear_message_rows()
         self._set_empty_state(True)

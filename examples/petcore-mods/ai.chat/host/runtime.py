@@ -17,6 +17,8 @@ import base64
 import threading
 import time
 
+from petcore.contracts.api import WebSearchOptions
+
 from .constants import LOOK_SCREEN_COOLDOWN_S, MAX_HISTORY, OWNER
 from .prompts import (
     ask_messages,
@@ -106,6 +108,31 @@ class AiChatRuntime:
 
     def _auto_open_after_look(self) -> bool:
         return bool(self._config_value("ai_look_screen_auto_open", False))
+
+    def _thinking(self) -> str:
+        mode = str(self._config_value("ai_thinking", "auto") or "auto")
+        return mode if mode in {"auto", "enabled", "disabled"} else "auto"
+
+    def _reasoning_effort(self) -> str:
+        level = str(self._config_value("ai_reasoning_effort", "high") or "high")
+        return level if level in {"low", "high", "max"} else "high"
+
+    def _web_search(self):
+        """联网开关关闭时返回 None：core 连一次额外请求都不会发。"""
+        if not bool(self._config_value("ai_web_search", False)):
+            return None
+        engine = str(self._config_value("ai_web_engine", "baidu") or "baidu")
+        if engine not in {"baidu", "duckduckgo", "bocha", "tavily"}:
+            engine = "baidu"
+        try:
+            limit = int(self._config_value("ai_web_results", 5) or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        return WebSearchOptions(
+            engine=engine,
+            max_results=max(1, min(10, limit)),
+            fetch_pages=bool(self._config_value("ai_web_fetch", True)),
+        )
 
     # ---------------------------------------------------------------- 线程/宠物
     def _later(self, callback, delay_ms: int = 0) -> None:
@@ -277,6 +304,8 @@ class AiChatRuntime:
             messages,
             model=str(self._config_value("ai_model", "") or ""),
             temperature=self._temperature(),
+            thinking=self._thinking(),
+            reasoning_effort=self._reasoning_effort(),
         )
         if getattr(result, "cancelled", False):
             return ""
@@ -308,6 +337,12 @@ class AiChatRuntime:
                 partial.append(value)
                 chat.token(OWNER, value, pet_slot=slot)
 
+            def reasoning(value: str) -> None:
+                chat.reasoning(OWNER, value, pet_slot=slot)
+
+            def status(line: str) -> None:
+                chat.status(OWNER, line, pet_slot=slot)
+
             try:
                 result = api.stream_chat(
                     service_id,
@@ -315,6 +350,11 @@ class AiChatRuntime:
                     model=model,
                     temperature=temperature,
                     on_delta=delta,
+                    on_reasoning=reasoning,
+                    on_status=status,
+                    thinking=self._thinking(),
+                    reasoning_effort=self._reasoning_effort(),
+                    web_search=self._web_search(),
                     cancel=cancel,
                 )
             except Exception as exc:  # noqa: BLE001 - 网络/传输错误只认 reason
@@ -354,6 +394,8 @@ class AiChatRuntime:
                     messages,
                     model=model,
                     temperature=temperature,
+                    thinking=self._thinking(),
+                    reasoning_effort=self._reasoning_effort(),
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = str(getattr(exc, "reason", "") or exc)

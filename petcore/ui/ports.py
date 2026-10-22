@@ -354,6 +354,7 @@ class CoreApiPort:
     """API 能力的 core 门面：mod 只看见元数据与一次解析结果，拿不到存储实现。"""
 
     OWNER = "core.api"
+    WEB_SEARCH_OWNER = "core.websearch"
 
     def __init__(self, host, store, credentials) -> None:
         self.host = host
@@ -384,6 +385,32 @@ class CoreApiPort:
     def fetch_balance(self, service_id: str, *, force: bool = False):
         return self.host.account.fetch_balance(service_id, force=force)
 
+    # ---------------------------------------------------------------- 联网检索密钥
+
+    def web_search_key_status(self) -> dict[str, bool]:
+        """哪些引擎已经在钥匙串里存了 Key（设置页只显示状态，不回显值）。"""
+        from ..net.websearch import KEYED_ENGINES
+
+        return {
+            engine: bool(self.credentials.get(self.WEB_SEARCH_OWNER, engine))
+            for engine in sorted(KEYED_ENGINES)
+        }
+
+    def set_web_search_key(self, engine: str, value: str) -> None:
+        from ..net.websearch import KEYED_ENGINES
+
+        engine = str(engine or "").strip()
+        if engine not in KEYED_ENGINES:
+            return
+        self.credentials.set(self.WEB_SEARCH_OWNER, engine, str(value or ""))
+
+    def credentials_available(self) -> bool:
+        """钥匙串不可用时界面要说明「只在本进程内存，重启即丢」。"""
+        return bool(self.credentials.available())
+
+    def _web_search_key(self, engine: str) -> str:
+        return self.credentials.get(self.WEB_SEARCH_OWNER, str(engine or "")) or ""
+
     def stream_chat(
         self,
         service_id: str,
@@ -393,11 +420,20 @@ class CoreApiPort:
         temperature: float | None = None,
         timeout: float = 60.0,
         on_delta=None,
+        on_reasoning=None,
+        on_status=None,
+        thinking: str = "auto",
+        reasoning_effort: str = "",
+        web_search=None,
         cancel=None,
     ):
-        """Core 唯一的对话出口：mod 只给消息，HTTP/SSE 与密钥都在这里。"""
+        """Core 唯一的对话出口：mod 只给消息与开关，HTTP/SSE 与密钥都在这里。"""
         from ..api.chat import stream_chat
 
+        search_key = ""
+        if web_search is not None:
+            engine = str(getattr(web_search, "engine", "") or "")
+            search_key = self._web_search_key(engine)
         return stream_chat(
             self.resolve(service_id),
             messages,
@@ -405,6 +441,12 @@ class CoreApiPort:
             temperature=temperature,
             timeout=timeout,
             on_delta=on_delta,
+            on_reasoning=on_reasoning,
+            on_status=on_status,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            web_search=web_search,
+            search_key=search_key,
             cancel=cancel,
         )
 

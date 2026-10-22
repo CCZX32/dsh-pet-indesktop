@@ -38,6 +38,15 @@ class ApiRequest:
         return self.metadata.model
 
 
+@dataclass(frozen=True, slots=True)
+class WebSearchOptions:
+    """联网检索的纯配置（不含密钥；密钥只在 core 的钥匙串里）。"""
+
+    engine: str = "baidu"
+    max_results: int = 5
+    fetch_pages: bool = True
+
+
 class ApiPort(Protocol):
     def services(self) -> tuple[ApiMetadata, ...]: ...
     def metadata(self, service_id: str) -> ApiMetadata: ...
@@ -45,6 +54,9 @@ class ApiPort(Protocol):
     def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]: ...
     def open_settings(self) -> None: ...
     def fetch_balance(self, service_id: str, *, force: bool = False) -> Any: ...
+    def web_search_key_status(self) -> dict[str, bool]: ...
+    def set_web_search_key(self, engine: str, value: str) -> None: ...
+    def credentials_available(self) -> bool: ...
     def stream_chat(
         self,
         service_id: str,
@@ -54,5 +66,10 @@ class ApiPort(Protocol):
         temperature: float | None = None,
         timeout: float = 60.0,
         on_delta: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+        thinking: str = "auto",
+        reasoning_effort: str = "",
+        web_search: WebSearchOptions | None = None,
         cancel: Any | None = None,
     ) -> Any: ...

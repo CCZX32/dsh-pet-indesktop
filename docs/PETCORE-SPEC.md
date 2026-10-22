@@ -478,3 +478,34 @@ petcore/
   「鲸鱼娘彩蛋」，不复用后者的图片目录/概率配置。
 - **失败可见**：没有 API 服务、缺少扩展、视觉开关关闭、框选取消分别给出不同反馈；
   取消框选是静默返回，不算错误。
+
+## 20. P7 深度思考与联网搜索（2026-10-22）
+
+这一节冻结「思考/联网仍属 Core 传输能力、业务编排在 mod」的边界。
+
+- **思考参数在 Core**：`petcore/api/chat.py::build_payload()` 负责
+  `thinking={"type": enabled|disabled}` 与 `reasoning_effort`；`auto` 模式不发送
+  任何思考字段（严格校验的服务会 400），显式开/关才下发。`stream_chat()` 把
+  `reasoning_content` / `reasoning` 通过 `on_reasoning` 单独回调，**不拼进正文**；
+  只出思维链且 `finish_reason == "length"` 时抛 `ChatTruncated`，提示调大输出上限。
+- **联网检索在 Core**：`petcore/net/websearch.py` 是唯一搜索引擎实现
+  （百度/DuckDuckGo 免 Key，博查/Tavily 需 Key；免 Key 两个互为兜底，遇人机验证
+  如实报错、不绕过）。`stream_chat(web_search=)` 先跑独立一轮非思考 planner
+  （`web_search` / `fetch_url` 工具，≤3 轮 × ≤4 次），把资料按主分支口径注入
+  system，再走正式流式回答；任何检索失败只降级成状态行，不阻断回答。
+- **搜索 Key 只进钥匙串**：owner `core.websearch`、key 为引擎 id；
+  `ApiPort.set_web_search_key()` / `web_search_key_status()` 是唯一读写入口，
+  `config.json` 与 `api.json` 都不出现 Key。
+- **思考/联网是全局设置**：`ai_thinking`（auto/enabled/disabled）、
+  `ai_reasoning_effort`（low/high/max）、`ai_web_search`、`ai_web_engine`
+  （baidu/duckduckgo/bocha/tavily）、`ai_web_results`（1–10）、`ai_web_fetch`；
+  设置入口在「扩展管理 → 加装扩展 → AI 对话」。与现有 `ai_model` / `ai_temperature`
+  一致，不按 API 服务分别保存（主分支是 per-provider，这是已知差异）。
+- **面板在 Core 窗口**：`ChatPort.reasoning()/status()` → `ChatController` 排队信号 →
+  `ChatWindow.append_reasoning()/add_activity()` → `MessageBubble` 的折叠面板；
+  窗口没开就丢弃，绝不主动唤窗。`reasoning`/`activity` 随 assistant 记录落盘，
+  重新打开会话时回显（旧会话没有字段照常加载）。
+- **截图冻结帧契约**：`grab_screen_image()` 必须返回 `QImage` 且
+  `devicePixelRatio == 1.0`（裸设备像素）。Qt6 的 `QScreen.grabWindow` 返回
+  `QPixmap`，直接交给 `QPainter.drawImage` 会抛 TypeError，覆盖层整层画不出来
+  （用户看到的是一整屏灰色）；裁切/编码仍能工作，所以「框出来的图正常」。

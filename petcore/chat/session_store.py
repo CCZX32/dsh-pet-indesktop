@@ -19,7 +19,7 @@ MAX_TITLE_CHARS = 120
 class ChatSession:
     session_id: str
     title: str
-    messages: list[dict[str, str]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
     updated_at: float = 0.0
 
     def append(self, role: str, content: str) -> None:
@@ -52,14 +52,23 @@ class ChatSession:
         session_id = str(raw.get("session_id") or fallback_id).strip()
         if not session_id:
             raise ValueError("session id is empty")
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         for item in raw.get("messages", []) if isinstance(raw.get("messages"), list) else []:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "user").strip().lower()
             content = str(item.get("content") or "")[:MAX_MESSAGE_CHARS]
             if role in {"system", "user", "assistant", "tool"} and content:
-                messages.append({"role": role, "content": content})
+                record: dict[str, Any] = {"role": role, "content": content}
+                reasoning = str(item.get("reasoning") or "")[:MAX_MESSAGE_CHARS]
+                if reasoning:
+                    record["reasoning"] = reasoning
+                activity = item.get("activity")
+                if isinstance(activity, list) and activity:
+                    record["activity"] = [
+                        str(line)[:500] for line in activity[-40:]
+                    ]
+                messages.append(record)
         return cls(
             session_id=session_id,
             title=str(raw.get("title") or "新会话")[:MAX_TITLE_CHARS],

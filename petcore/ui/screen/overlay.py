@@ -60,6 +60,14 @@ _DRAG_SLOP = 3     # 已选区内按下后，移动超过它才算「重新框�
 _HINT = "拖拽框选要问的区域 · Enter 确认 · Esc 取消"
 
 
+def _as_image(frame):
+    """冻结帧只接受 QImage：QPixmap 会让 ``drawImage`` 抛 TypeError（整层灰屏）。"""
+    if frame is None or isinstance(frame, QImage):
+        return frame
+    convert = getattr(frame, "toImage", None)
+    return convert() if callable(convert) else frame
+
+
 class _ActionBar(QFrame):
     """选区操作条：松手后浮在选区下方的 pill（子控件，事件不落到覆盖层）。"""
 
@@ -117,7 +125,7 @@ class SelectionOverlay(QWidget):
         self, frame: QImage | None = None, screen=None, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self._frame = frame
+        self._frame = _as_image(frame)
         self._screen = screen if screen is not None else QGuiApplication.primaryScreen()
         self._anchor: QPoint | None = None
         self._selection: SelectionRect | None = None

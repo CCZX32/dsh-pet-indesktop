@@ -1547,3 +1547,67 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 - `cancel()` 改为 queued：已到点的定时器可能在 stop 处理前再触发一次；GUI 调用方
   （自言自语、报时）不受影响。
 - 截图问答历史明确不落盘；这不是待办，而是隐私与语义约束。
+
+## L041 · 2026-10-22 · 截图蒙层灰屏修复 + 深度思考/联网搜索
+
+**范围**：修「截图提问整屏发灰」的生产环境 bug，并把主分支的深度思考与联网搜索
+按「传输在 core、编排在 mod」的口径接进 petcore。
+
+**改动**
+
+- `petcore/platform/screenshot.py`（+17/−4）：`grab_screen_image()` 接受 Qt6
+  真实返回的 `QPixmap`，`toImage()` 后 `setDevicePixelRatio(1.0)`。根因：覆盖层
+  `QPainter.drawImage(QRect, QPixmap)` 抛 TypeError，`paintEvent` 首行就中断，
+  整层不画 → 默认灰底；裁切/编码走 `QPixmap.copy/save` 恰好可用，所以框出来的图正常。
+- `petcore/ui/screen/overlay.py`（+9/−1）：构造函数 `_as_image()` 兜底非 QImage。
+- `petcore/config.py`（+29）：`ai_thinking`/`ai_reasoning_effort`/`ai_web_search`/
+  `ai_web_engine`/`ai_web_results`/`ai_web_fetch` 六个全局键 + 归一化。
+- `petcore/contracts/api.py`（+17）：`WebSearchOptions`；`ApiPort` 增
+  `on_reasoning/on_status/thinking/reasoning_effort/web_search` 与搜索 Key 读写。
+- `petcore/contracts/chat.py`（+8）：`ChatPort.reasoning()/status()`。
+- `petcore/api/chat.py`（+417/−10）：`thinking_payload()`；`_extract_delta()` 兼容
+  `reasoning_content`/`reasoning`；`ChatResult.reasoning`；只出思维链且
+  `finish_reason=length` 抛 `ChatTruncated`；`research()` / `inject_search_context()` /
+  `_run_tool()` / `_post_json()`；`stream_chat(web_search=)` 先检索后回答。
+- `petcore/net/websearch.py`（+407，新）：百度/DuckDuckGo（免 Key，互为兜底）、
+  博查/Tavily（需 Key）、`fetch_page_text()`、`format_results()`、稳定错误分类；
+  复用 `net.http.urlopen` 的代理兜底。
+- `petcore/ui/ports.py`（+43/−1）：`CoreApiPort` 透传参数并从钥匙串取搜索 Key
+  （owner `core.websearch`）；`web_search_key_status()` / `set_web_search_key()`。
+- `petcore/ui/chat/controller.py`（+48/−1）：`reasoning_received`/`status_received`
+  排队信号；窗口不存在时丢弃；done 时把 `reasoning`/`activity` 写入 assistant 记录。
+- `petcore/ui/chat/window.py`（+38/−1）：`append_reasoning()`/`add_activity()`/
+  `last_thinking()`；`load_messages()` 回显思考面板。
+- `petcore/chat/session_store.py`（+12/−3）：`from_dict()` 保留可选
+  `reasoning`/`activity`（旧会话无字段照常加载）。
+- `examples/petcore-mods/ai.chat/host/runtime.py`（+42）：读 6 个配置键，把
+  `thinking`/`reasoning_effort`/`on_reasoning`/`on_status`/`web_search` 传给端口。
+- `examples/petcore-mods/ai.chat/host/settings_page.py`（+225）：「深度思考」
+  （模式 + 强度，强度仅在开启时显示）与「联网搜索」（开关/引擎/Key/条数/读正文）；
+  Key 走端口进钥匙串，取消时控件复位，搜索关键词补齐。
+- 测试：`test_petcore_screenshot.py`（+38/−2）、`test_petcore_screen_ask.py`
+  （+14/−1）、`test_petcore_api_chat.py`（+212/−2）、`test_petcore_websearch.py`
+  （+150，新）、`test_petcore_chat_ui.py`（+48）、`test_petcore_ai_mod.py`（+145）。
+- 文档：`PETCORE-SPEC.md` §20、`PETCORE-MAIN-PARITY-BACKLOG.md` AI/截图两行、
+  `petcore/AGENTS.md` 四条红线、`PR-REPORT-PETCORE-P7-THINKING-SEARCH-2026-10-22.md`。
+
+**验证**
+
+- 全量门禁：`pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q`
+  → **1114 passed in 71.69s**。
+- `ruff check pet/ tests/ petcore/ examples/petcore-mods/ai.chat` → 全绿。
+- `python -m petcore --check --out .scratch/p7-check.json` → exit 0，
+  `version 0.1.0`、`diagnostics []`、`self_talk_images` 24/24 可读。
+- 真实桌面抓屏（非 offscreen）：`screen TM140VDXP02 1280×800 dpr1.5` →
+  `QImage dpr1.0 1920×1200`；覆盖层 `paint ok, sample #1d1f26`（桌面深色，非灰底）。
+- 真实联网：百度免 Key 搜索 0.83s / 3 条；DuckDuckGo 40.80s 后由百度兜底。
+- 性能：抓屏中位 49.1ms（n=5）、覆盖层绘制 4.22ms（n=20）、
+  `_extract_delta` 1.0µs（n=20000）、`build_payload` 0.6µs（n=5000）。
+
+**未验证 / 边界**
+
+- 真实 DeepSeek 思考模型与博查/Tavily 检索未跑（无 Key，未消耗用户额度）。
+- 真实桌面拖选只验证了抓帧与绘制，拖拽交互由 offscreen 事件测试覆盖。
+- HDR 屏冻结帧仍走 Qt `grabWindow`，未移植 DXGI FP16（可能发灰）。
+- 思考/联网设置是全局键（同 `ai_model`/`ai_temperature`），不是主分支的 per-provider。

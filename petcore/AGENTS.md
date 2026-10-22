@@ -205,6 +205,16 @@
   已存在的窗口，**不得因后台结果主动唤出窗口**。
 - **流式传输只在 core**：SSE/代理兜底/取消/错误分类都在 `petcore/api/chat.py`；
   扩展与 `petcore/chat/` 不得 import `petcore.net`/`petcore.api`（架构守卫）。
+- **思考/联网传输只在 core**：`thinking` / `reasoning_effort` 的 payload、思维链
+  `reasoning_content` 解析（只走 `on_reasoning`，不拼正文）、联网检索轮与
+  `fetch_url` 都在 `petcore/api/chat.py`；搜索引擎实现只在 `petcore/net/websearch.py`。
+  mod 只能传 `WebSearchOptions` 与回调；搜索 Key 只进钥匙串
+  （owner `core.websearch`），`config.json`/`api.json` 不许出现。
+- **截图冻结帧必须是 QImage**：`grab_screen_image()` 接收 Qt6 的 `QPixmap` 时要
+  `toImage()` 并 `setDevicePixelRatio(1.0)`；覆盖层构造函数再做一次兜底。
+  `QPainter.drawImage(QRect, QPixmap)` 会抛 TypeError，整层画不出来 = 全屏灰。
+- **思考/检索进度只进已开窗口**：`ChatPort.reasoning()/status()` 不得创建或唤出
+  对话窗；`reasoning`/`activity` 随 assistant 记录落盘并在重开会话时回显。
 - **截图不落盘**：`ScreenPort.capture()` / `capture_region()` 返回内存 PNG；转 data URL
   由调用方用标准库完成，core 不写临时文件、日志不记录图片内容。
 - **看看屏幕**：答复先落发起宠气泡，再 `ChatPort.record()` 静默入历史；默认不打开

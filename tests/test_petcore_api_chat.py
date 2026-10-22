@@ -8,15 +8,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from petcore.api.chat import ChatCancelled, build_payload, stream_chat
-from petcore.contracts.api import ApiMetadata, ApiRequest
+from petcore.api.chat import ChatCancelled, ChatTruncated, build_payload, stream_chat
+from petcore.contracts.api import ApiMetadata, ApiRequest, WebSearchOptions
 from petcore.net import errors
+from petcore.net import websearch
 
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     mode = "sse"
     seen: list[dict] = []
+    tool_calls = 0
 
     def log_message(self, *_args):  # noqa: A003 - 静音
         return
@@ -28,6 +30,9 @@ class _Handler(BaseHTTPRequestHandler):
         type(self).seen.append(
             {"body": body, "auth": self.headers.get("Authorization", "")}
         )
+        if body.get("tools"):
+            self._planner()
+            return
         if type(self).mode == "auth":
             self.send_response(401)
             self.send_header("Content-Length", "0")
@@ -50,6 +55,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if type(self).mode == "reasoning":
+            self._sse([])
+            return
+        if type(self).mode == "truncated":
+            self._sse([], finish="length")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -60,6 +71,62 @@ class _Handler(BaseHTTPRequestHandler):
             line = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
             self._write_chunk(line)
         done = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        self._write_chunk(f"data: {json.dumps(done)}\n\n".encode())
+        self._write_chunk(b"data: [DONE]\n\n")
+        self._write_chunk(b"")
+
+    def _planner(self) -> None:
+        """联网检索轮：第一次给一个 web_search 工具调用，之后直接说无需搜索。"""
+        if type(self).tool_calls == 0:
+            type(self).tool_calls += 1
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": json.dumps({"query": "deepseek"}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        else:
+            payload = {"choices": [{"message": {"content": "无需搜索"}}]}
+        data = json.dumps(payload, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _sse(self, chunks, finish: str = "stop") -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for chunk in chunks:
+            payload = {"choices": [{"delta": {"content": chunk}}]}
+            self._write_chunk(
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
+        thought = {"choices": [{"delta": {"reasoning_content": "先想一下。"}}]}
+        self._write_chunk(
+            f"data: {json.dumps(thought, ensure_ascii=False)}\n\n".encode("utf-8")
+        )
+        if finish == "stop":
+            payload = {"choices": [{"delta": {"content": "答案"}}]}
+            self._write_chunk(
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
+        done = {"choices": [{"delta": {}, "finish_reason": finish}]}
         self._write_chunk(f"data: {json.dumps(done)}\n\n".encode())
         self._write_chunk(b"data: [DONE]\n\n")
         self._write_chunk(b"")
@@ -81,6 +148,7 @@ class _Server(ThreadingHTTPServer):
 def server():
     _Handler.mode = "sse"
     _Handler.seen = []
+    _Handler.tool_calls = 0
     httpd = _Server(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -167,3 +235,145 @@ def test_build_payload_respects_model_and_temperature() -> None:
 
 def test_chat_cancelled_is_not_a_network_error() -> None:
     assert issubclass(ChatCancelled, RuntimeError)
+
+
+# ---------------------------------------------------------------- 深度思考
+
+
+def test_thinking_payload_only_sends_for_explicit_modes(server) -> None:
+    request = _request(server)
+    auto = build_payload(request, [{"role": "user", "content": "hi"}])
+    assert "thinking" not in auto
+
+    enabled = build_payload(
+        request, [], thinking="enabled", reasoning_effort="max"
+    )
+    assert enabled["thinking"] == {"type": "enabled"}
+    assert enabled["reasoning_effort"] == "max"
+
+    disabled = build_payload(request, [], thinking="disabled")
+    assert disabled["thinking"] == {"type": "disabled"}
+
+
+def test_reasoning_deltas_stay_out_of_the_answer(server) -> None:
+    _Handler.mode = "reasoning"
+    thoughts: list[str] = []
+    result = stream_chat(
+        _request(server),
+        [{"role": "user", "content": "为什么"}],
+        thinking="enabled",
+        on_reasoning=thoughts.append,
+        timeout=5,
+    )
+    assert thoughts == ["先想一下。"]
+    assert result.reasoning == "先想一下。"
+    assert result.text == "答案"
+    assert _Handler.seen[0]["body"]["thinking"] == {"type": "enabled"}
+
+
+def test_thinking_only_with_length_reports_truncation(server) -> None:
+    _Handler.mode = "truncated"
+    with pytest.raises(ChatTruncated):
+        stream_chat(
+            _request(server),
+            [{"role": "user", "content": "长问题"}],
+            thinking="enabled",
+            timeout=5,
+        )
+
+
+# ---------------------------------------------------------------- 联网搜索
+
+
+def _dialogue() -> list[dict]:
+    return [
+        {"role": "system", "content": "你是一只桌宠"},
+        {"role": "user", "content": "DeepSeek 现在多少钱"},
+    ]
+
+
+def test_web_search_injects_notes_and_reports_progress(server, monkeypatch) -> None:
+    monkeypatch.setattr(
+        websearch,
+        "search",
+        lambda *_args, **_kwargs: [
+            websearch.SearchResult("官方定价", "https://example.test/p", "每百万 token")
+        ],
+    )
+    statuses: list[str] = []
+    result = stream_chat(
+        _request(server),
+        _dialogue(),
+        web_search=WebSearchOptions(engine="bocha", max_results=2, fetch_pages=False),
+        search_key="search-key",
+        on_status=statuses.append,
+        timeout=5,
+    )
+
+    assert result.text == "你好！"
+    assert any("正在搜索" in line for line in statuses)
+    assert any("已获取联网资料" in line for line in statuses)
+
+    planner = _Handler.seen[0]["body"]
+    assert planner["stream"] is False
+    assert planner["tool_choice"] == "auto"
+    assert [tool["function"]["name"] for tool in planner["tools"]] == ["web_search"]
+
+    answer = _Handler.seen[-1]["body"]
+    assert answer.get("tools") is None
+    assert answer["messages"][0]["role"] == "system"
+    assert "联网搜索结果" in answer["messages"][0]["content"]
+    assert "官方定价" in answer["messages"][0]["content"]
+    assert "你是一只桌宠" in answer["messages"][0]["content"]
+
+
+def test_web_search_off_makes_no_extra_request(server, monkeypatch) -> None:
+    searched: list[int] = []
+    monkeypatch.setattr(
+        websearch, "search", lambda *_a, **_k: searched.append(1) or []
+    )
+    stream_chat(_request(server), _dialogue(), timeout=5)
+
+    assert len(_Handler.seen) == 1
+    assert searched == []
+    assert _Handler.seen[0]["body"].get("tools") is None
+
+
+def test_search_failure_degrades_to_a_status_line(server, monkeypatch) -> None:
+    def boom(*_args, **_kwargs):
+        raise websearch.SearchError("未配置 API Key", reason=errors.AUTH)
+
+    monkeypatch.setattr(websearch, "search", boom)
+    statuses: list[str] = []
+    result = stream_chat(
+        _request(server),
+        _dialogue(),
+        web_search=WebSearchOptions(engine="bocha"),
+        search_key="",
+        on_status=statuses.append,
+        timeout=5,
+    )
+
+    assert result.text == "你好！"
+    assert any("失败" in line for line in statuses)
+
+
+def test_cancel_during_research_skips_the_answer(server, monkeypatch) -> None:
+    cancel = threading.Event()
+
+    def stop(*_args, **_kwargs):
+        cancel.set()
+        return []
+
+    monkeypatch.setattr(websearch, "search", stop)
+    result = stream_chat(
+        _request(server),
+        _dialogue(),
+        web_search=WebSearchOptions(engine="baidu"),
+        cancel=cancel,
+        timeout=5,
+    )
+
+    assert result.cancelled is True
+    assert result.text == ""
+    assert all(item["body"].get("tools") for item in _Handler.seen)

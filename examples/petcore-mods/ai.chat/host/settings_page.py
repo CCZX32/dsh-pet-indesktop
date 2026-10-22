@@ -16,9 +16,11 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QWidget,
 )
 
@@ -39,6 +41,12 @@ class AiChatPage(SettingsPage):
         "ai_vision_enabled",
         "ai_temperature",
         "ai_look_screen_auto_open",
+        "ai_thinking",
+        "ai_reasoning_effort",
+        "ai_web_search",
+        "ai_web_engine",
+        "ai_web_results",
+        "ai_web_fetch",
         "chat_background",
         "chat_accent",
         "chat_follow_pet",
@@ -107,6 +115,108 @@ class AiChatPage(SettingsPage):
             "默认只把结果同步进对话记录并用气泡回答；勾选后才主动唤出对话窗口。",
         )
 
+        card4 = self.section("深度思考")
+        self.thinking_combo = QComboBox(self)
+        self.thinking_combo.addItem("跟随模型默认", "auto")
+        self.thinking_combo.addItem("开启深度思考", "enabled")
+        self.thinking_combo.addItem("关闭深度思考", "disabled")
+        index = self.thinking_combo.findData(str(self._initial.get("ai_thinking") or "auto"))
+        self.thinking_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.thinking_combo.currentIndexChanged.connect(self._update_thinking_web_visibility)
+        self.thinking_combo.currentIndexChanged.connect(self._on_changed)
+        card4.add_row(
+            "深度思考",
+            self.thinking_combo,
+            "开启后助手气泡会显示可折叠的思维链；跟随默认只对 DeepSeek 官方地址下发参数。",
+        )
+
+        self.effort_combo = QComboBox(self)
+        self.effort_combo.addItem("低（更快）", "low")
+        self.effort_combo.addItem("高（默认）", "high")
+        self.effort_combo.addItem("最高（更慢）", "max")
+        index = self.effort_combo.findData(
+            str(self._initial.get("ai_reasoning_effort") or "high")
+        )
+        self.effort_combo.setCurrentIndex(index if index >= 0 else 1)
+        self.effort_combo.currentIndexChanged.connect(self._on_changed)
+        self._effort_row = card4.add_row(
+            "思考强度",
+            self.effort_combo,
+            "只在「开启深度思考」时发送；强度越高越慢、越耗 Token。",
+        )
+
+        card5 = self.section("联网搜索")
+        self.web_check = make_checkbox(self)
+        self.web_check.setChecked(bool(self._initial.get("ai_web_search", False)))
+        self.web_check.toggled.connect(self._update_thinking_web_visibility)
+        self.web_check.toggled.connect(self._on_changed)
+        card5.add_row(
+            "允许联网搜索",
+            self.web_check,
+            "回答前先让模型判断要不要联网，需要时检索资料再作答。",
+        )
+
+        self.engine_combo = QComboBox(self)
+        for engine, label in (
+            ("baidu", "百度（免 Key）"),
+            ("duckduckgo", "DuckDuckGo（免 Key，通常需代理）"),
+            ("bocha", "博查 Bocha（需 API Key）"),
+            ("tavily", "Tavily（需 API Key）"),
+        ):
+            self.engine_combo.addItem(label, engine)
+        index = self.engine_combo.findData(
+            str(self._initial.get("ai_web_engine") or "baidu")
+        )
+        self.engine_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        self._engine_row = card5.add_row(
+            "搜索引擎",
+            self.engine_combo,
+            "免 Key 的两个引擎互为兜底；遇到人机验证会如实提示，不会绕过。",
+        )
+
+        key_row = QWidget(self)
+        key_layout = QHBoxLayout(key_row)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(6)
+        self.web_key_edit = QLineEdit(key_row)
+        self.web_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.web_key_edit.editingFinished.connect(self._save_web_key)
+        key_layout.addWidget(self.web_key_edit, 1)
+        self.web_key_state = QLabel("", key_row)
+        self.web_key_state.setObjectName("settingHint")
+        key_layout.addWidget(self.web_key_state)
+        self._web_key_row = card5.add_row(
+            "搜索 API Key",
+            key_row,
+            "只存系统钥匙串；输入新值会覆盖旧值，留空不修改。",
+        )
+
+        self.web_results_spin = QSpinBox(self)
+        self.web_results_spin.setRange(1, 10)
+        self.web_results_spin.setSuffix(" 条")
+        try:
+            self.web_results_spin.setValue(int(self._initial.get("ai_web_results") or 5))
+        except (TypeError, ValueError):
+            self.web_results_spin.setValue(5)
+        self.web_results_spin.valueChanged.connect(self._on_changed)
+        self._web_results_row = card5.add_row(
+            "每次搜索结果数",
+            self.web_results_spin,
+            "单次搜索交给模型的结果条数。",
+        )
+
+        self.web_fetch_check = make_checkbox(self)
+        self.web_fetch_check.setChecked(bool(self._initial.get("ai_web_fetch", True)))
+        self.web_fetch_check.toggled.connect(self._on_changed)
+        self._web_fetch_row = card5.add_row(
+            "允许阅读网页正文",
+            self.web_fetch_check,
+            "搜索摘要不够时允许模型打开网页读取正文；更准，但更慢。",
+        )
+        self._refresh_web_key_state()
+        self._update_thinking_web_visibility()
+
         card3 = self.section("对话窗外观")
         self.background_combo = QComboBox(self)
         self._rebuild_background_options()
@@ -169,6 +279,67 @@ class AiChatPage(SettingsPage):
             "对话内容按桌宠 + 角色分别保存在本机 sessions/ 目录；密钥只在系统钥匙串。"
             "截图提问是独立的框选窗口，图片只在内存中流转，问答历史随当次采集结束。"
         )
+
+    # ---------------------------------------------------------------- 思考/联网控件
+    def _keyed_engine(self) -> bool:
+        return str(self.engine_combo.currentData() or "baidu") in {"bocha", "tavily"}
+
+    def _refresh_web_key_state(self) -> None:
+        engine = str(self.engine_combo.currentData() or "baidu")
+        saved = False
+        api = self.api()
+        status = getattr(api, "web_search_key_status", None) if api is not None else None
+        if callable(status):
+            try:
+                saved = bool((status() or {}).get(engine))
+            except Exception:
+                saved = False
+        if self._keyed_engine():
+            self.web_key_edit.setPlaceholderText(
+                "已保存，留空不修改" if saved else "输入 API Key"
+            )
+            self.web_key_state.setText("已保存" if saved else "未配置")
+        else:
+            self.web_key_edit.setPlaceholderText("免 Key 引擎不需要")
+            self.web_key_state.setText("")
+
+    def _on_engine_changed(self, *_args) -> None:
+        self._refresh_web_key_state()
+        self._update_thinking_web_visibility()
+        self._on_changed()
+
+    def _save_web_key(self) -> None:
+        text = self.web_key_edit.text().strip()
+        if not text or not self._keyed_engine():
+            return
+        api = self.api()
+        setter = getattr(api, "set_web_search_key", None) if api is not None else None
+        if not callable(setter):
+            return
+        engine = str(self.engine_combo.currentData() or "baidu")
+        try:
+            setter(engine, text)
+        except Exception:
+            return
+        self.web_key_edit.clear()
+        self._refresh_web_key_state()
+        available = getattr(api, "credentials_available", None)
+        if callable(available):
+            try:
+                if not available():
+                    self.web_key_state.setText("仅本进程（重启即丢）")
+            except Exception:
+                pass
+        self.changed.emit()
+
+    def _update_thinking_web_visibility(self, *_args) -> None:
+        thinking_on = str(self.thinking_combo.currentData() or "auto") == "enabled"
+        self._effort_row.setVisible(thinking_on)
+        web_on = bool(self.web_check.isChecked())
+        self._engine_row.setVisible(web_on)
+        self._web_results_row.setVisible(web_on)
+        self._web_fetch_row.setVisible(web_on)
+        self._web_key_row.setVisible(web_on and self._keyed_engine())
 
     # ---------------------------------------------------------------- 外观控件
     def _rebuild_background_options(self) -> None:
@@ -261,6 +432,14 @@ class AiChatPage(SettingsPage):
         config.set("ai_vision_enabled", bool(self.vision_check.isChecked()))
         config.set("ai_temperature", float(self.temperature_spin.value()))
         config.set("ai_look_screen_auto_open", bool(self.auto_open_check.isChecked()))
+        config.set("ai_thinking", str(self.thinking_combo.currentData() or "auto"))
+        config.set(
+            "ai_reasoning_effort", str(self.effort_combo.currentData() or "high")
+        )
+        config.set("ai_web_search", bool(self.web_check.isChecked()))
+        config.set("ai_web_engine", str(self.engine_combo.currentData() or "baidu"))
+        config.set("ai_web_results", int(self.web_results_spin.value()))
+        config.set("ai_web_fetch", bool(self.web_fetch_check.isChecked()))
         config.set("chat_background", self._background_value)
         config.set("chat_accent", self._accent_value())
         config.set("chat_follow_pet", bool(self.follow_check.isChecked()))
@@ -286,8 +465,41 @@ class AiChatPage(SettingsPage):
         self._initial = self._snapshot()
         self._background_value = str(self._initial.get("chat_background") or "")
         self._rebuild_background_options()
+        self._sync_thinking_web()
         self.apply_preview()
         self.changed.emit()
+
+    def _sync_thinking_web(self) -> None:
+        """取消后把新控件拉回已恢复的配置（config 已由对话框整体还原）。"""
+        config = self.config()
+        widgets = (
+            (self.thinking_combo, "ai_thinking", "auto"),
+            (self.effort_combo, "ai_reasoning_effort", "high"),
+            (self.engine_combo, "ai_web_engine", "baidu"),
+        )
+        for combo, key, fallback in widgets:
+            value = str(config.get(key) or fallback)
+            index = combo.findData(value)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+        try:
+            results = int(config.get("ai_web_results") or 5)
+        except (TypeError, ValueError):
+            results = 5
+        for check, key, fallback in (
+            (self.web_check, "ai_web_search", False),
+            (self.web_fetch_check, "ai_web_fetch", True),
+        ):
+            check.blockSignals(True)
+            check.setChecked(bool(config.get(key, fallback)))
+            check.blockSignals(False)
+        self.web_results_spin.blockSignals(True)
+        self.web_results_spin.setValue(results)
+        self.web_results_spin.blockSignals(False)
+        self.web_key_edit.clear()
+        self._refresh_web_key_state()
+        self._update_thinking_web_visibility()
 
     def keywords(self) -> list[str]:
         return [
@@ -303,6 +515,19 @@ class AiChatPage(SettingsPage):
             "看看屏幕",
             "截图提问",
             "自动打开",
+            "深度思考",
+            "思考",
+            "推理",
+            "思维链",
+            "思考强度",
+            "联网",
+            "搜索",
+            "搜索引擎",
+            "百度",
+            "博查",
+            "Tavily",
+            "API Key",
+            "网页正文",
             "背景",
             "主题",
             "强调色",

@@ -10,7 +10,7 @@ import base64
 import logging
 
 from PySide6.QtCore import QBuffer, QIODevice
-from PySide6.QtGui import QGuiApplication, QImage, QScreen
+from PySide6.QtGui import QGuiApplication, QImage, QPixmap, QScreen
 
 from ..contracts.screen import ScreenCapture
 
@@ -59,19 +59,32 @@ _encode_png = encode_png
 
 
 def grab_screen_image(screen: QScreen | None = None, window=None) -> tuple[QImage, QScreen]:
-    """抓整屏并返回 ``(QImage, QScreen)``；框选覆盖层复用它冻结画面。"""
+    """抓整屏并返回 ``(QImage, QScreen)``；框选覆盖层复用它冻结画面。
+
+    ``QScreen.grabWindow`` 在 Qt6 返回 **QPixmap**（真机实测），这里统一拆成
+    ``QImage`` 并复位 ``devicePixelRatio`` 为 1：冻结帧是「裸设备像素」，DPR 只在
+    裁切时按屏幕换算。留着 QPixmap 会让覆盖层的 ``QPainter.drawImage`` 抛
+    TypeError——整层画不出来，看起来就是一整屏灰色。
+    """
     target = screen or _target_screen(window)
     if target is None:
         raise ScreenshotError("no_screen", "没有可用的显示器")
     try:
-        image = target.grabWindow(0)
+        grabbed = target.grabWindow(0)
     except Exception as exc:  # noqa: BLE001 - 平台插件失败统一成稳定 reason
         logger.debug("grabWindow failed", exc_info=True)
         raise ScreenshotError(
             "capture_failed", f"无法读取屏幕内容：{type(exc).__name__}"
         ) from exc
-    if image is None or image.isNull():
+    if isinstance(grabbed, QPixmap):
+        image = grabbed.toImage()
+    elif isinstance(grabbed, QImage):
+        image = grabbed
+    else:
+        image = QImage()
+    if image.isNull():
         raise ScreenshotError("capture_failed", "无法读取屏幕内容")
+    image.setDevicePixelRatio(1.0)
     return image, target
 
 

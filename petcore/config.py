@@ -32,6 +32,12 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "ai_vision_enabled",
         "ai_temperature",
         "ai_look_screen_auto_open",
+        "ai_thinking",
+        "ai_reasoning_effort",
+        "ai_web_search",
+        "ai_web_engine",
+        "ai_web_results",
+        "ai_web_fetch",
         "chat_always_on_top",
         "chat_follow_pet",
         "chat_background",
@@ -88,6 +94,12 @@ DEFAULTS: dict[str, Any] = {
     "ai_vision_enabled": True,
     "ai_temperature": 0.7,
     "ai_look_screen_auto_open": False,
+    "ai_thinking": "auto",
+    "ai_reasoning_effort": "high",
+    "ai_web_search": False,
+    "ai_web_engine": "baidu",
+    "ai_web_results": 5,
+    "ai_web_fetch": True,
     "chat_always_on_top": False,
     "chat_follow_pet": False,
     "chat_background": "",
@@ -531,6 +543,23 @@ class Config:
         normalized["ai_look_screen_auto_open"] = _bool(
             normalized.get("ai_look_screen_auto_open"), False
         )
+        thinking = str(normalized.get("ai_thinking") or "auto")
+        normalized["ai_thinking"] = (
+            thinking if thinking in {"auto", "enabled", "disabled"} else "auto"
+        )
+        effort = str(normalized.get("ai_reasoning_effort") or "high")
+        normalized["ai_reasoning_effort"] = (
+            effort if effort in {"low", "high", "max"} else "high"
+        )
+        normalized["ai_web_search"] = _bool(normalized.get("ai_web_search"), False)
+        engine = str(normalized.get("ai_web_engine") or "baidu")
+        normalized["ai_web_engine"] = (
+            engine if engine in {"baidu", "duckduckgo", "bocha", "tavily"} else "baidu"
+        )
+        normalized["ai_web_results"] = int(
+            _number(normalized.get("ai_web_results"), 5, 1, 10)
+        )
+        normalized["ai_web_fetch"] = _bool(normalized.get("ai_web_fetch"), True)
         normalized["chat_always_on_top"] = _bool(
             normalized.get("chat_always_on_top"), False
         )

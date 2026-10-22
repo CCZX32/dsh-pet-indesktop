@@ -94,6 +94,54 @@ def _available() -> QRect:
     return screen.availableGeometry()
 
 
+def test_reasoning_and_status_feed_the_thinking_panel(controller) -> None:
+    window = _open(controller)
+
+    controller.status("ai.chat", "🔍 正在搜索：deepseek 定价")
+    controller.reasoning("ai.chat", "先确认一下最新价格。")
+    controller.token("ai.chat", "答案")
+    controller.done("ai.chat", "答案")
+
+    bubble = window.bubbles()[-1]
+    assert bubble.has_thinking is True
+    reasoning, activity = bubble.thinking_record
+    assert reasoning == "先确认一下最新价格。"
+    assert activity == ["🔍 正在搜索：deepseek 定价"]
+    assert "先确认" not in bubble.body.text()
+
+
+def test_thinking_is_persisted_and_restored_from_disk(controller) -> None:
+    window = _open(controller)
+    controller.reasoning("ai.chat", "先想一下。")
+    controller.status("ai.chat", "🌐 联网检索过程")
+    controller.token("ai.chat", "答案")
+    controller.done("ai.chat", "答案")
+
+    state = controller.states()[("ai.chat", 0)]
+    stored = state.session.messages[-1]
+    assert stored["reasoning"] == "先想一下。"
+    assert stored["activity"] == ["🌐 联网检索过程"]
+
+    reloaded = state.store.load(state.session.session_id)
+    assert reloaded is not None
+    assert reloaded.messages[-1]["reasoning"] == "先想一下。"
+    assert reloaded.messages[-1]["activity"] == ["🌐 联网检索过程"]
+
+    window.load_messages(reloaded.messages)
+    bubble = window.bubbles()[-1]
+    assert bubble.has_thinking is True
+    assert bubble.thinking_record[0] == "先想一下。"
+
+
+def test_reasoning_never_opens_a_chat_window(controller) -> None:
+    controller.reasoning("ai.chat", "只更新已存在的窗口")
+    controller.status("ai.chat", "联网检索")
+
+    assert controller.window_for("ai.chat") is None
+    state = controller.states().get(("ai.chat", 0))
+    assert state is not None and state.session.messages == []
+
+
 def test_open_and_stream_render_markdown(controller) -> None:
     assert controller.open("ai.chat", pet_slot=0, title="测试对话") is True
     window = controller.window_for("ai.chat")
