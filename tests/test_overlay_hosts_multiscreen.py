@@ -802,6 +802,191 @@ def test_main_pet_restored_to_its_saved_screen_re_sites_the_home_screen(
         _cleanup(shell)
 
 
+# ---------------------------------------------------------------- 归属屏晚到
+def _awaiting_shell(tmp_path, monkeypatch, *screens):
+    """档案里归属 B、建壳时枚举里只有 A：复现"拔着副屏开机 / 驱动还没枚举完"。
+
+    档案准备与 ``test_restore_puts_each_pet_back_on_its_own_screen`` 完全一致，只
+    少一块 B——这正是重启后回不到副屏的现场：启动恢复解析不到归属屏就落家那块。
+    """
+    from pet import pet_profiles
+
+    _install_screens(monkeypatch, *screens)
+    config = cap.CapConfig(tmp_path, {"allow_cross_screen": True})
+    pet_profiles.write_profile_settings(tmp_path, 0, {"scale": 0.5})
+    pet_profiles.write_profile_settings(tmp_path, 1, {"scale": 0.5})
+    pet_profiles.save_active_set(tmp_path, [0, 1], on_broken="backup-overwrite")
+    pet_profiles.write_profile_geometry(
+        tmp_path, 1, {"rx": 0.25, "ry": 0.75, "screen_name": "B"})
+    # 子宠在建壳期就复活了（活跃清单在构造里读），故库工厂必须在**构造之前**换掉：
+    # 构造后再换只影响之后新建的宠，建壳期建出来的那只会拿到没有素材池的假库。
+    monkeypatch.setattr(OverlayShell, "_create_main_library",
+                        lambda self: fac.RichLibrary())
+    return OverlayShell(
+        app, cap.CapInstance(config), screen=screens[0],
+        sprite_factory=lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
+
+
+def test_missing_assigned_screen_restores_when_it_arrives(tmp_path, monkeypatch):
+    """归属屏晚到：先落家那块屏，它一上线就搬回档案里的位置并落盘一次。
+
+    原先启动恢复解析不到归属屏就**永远**留在主屏（overlay 路径没有 legacy 的
+    ``window_placement.arm_screen_restore_retry`` 那种等屏重试），副屏插回来后
+    宠也不会自己回去——用户看到的就是"重启后回不到副屏"。
+    """
+    a, b = _two_screens()
+    shell = _awaiting_shell(tmp_path, monkeypatch, a)
+    try:
+        child = shell._spawned[0]
+        assert _screen_of(shell, child) is a, "归属屏不在线时先落家那块屏"
+        assert getattr(child, "_awaiting_screen", None) == "B", (
+            "解析不到的归属屏要挂在 sprite 上等它上线")
+
+        _install_screens(monkeypatch, a, b)
+        shell.handle_screen_added(b)
+
+        assert _screen_of(shell, child) is b, "归属屏插回来就要搬回去"
+        rect = _activity_rect(shell, b)
+        body = child.body_rect()
+        assert body.x() + body.width() / 2.0 == pytest.approx(
+            rect.left() + 0.25 * rect.width(), abs=2.0), "按档案 rx 落位"
+        assert body.y() + body.height() / 2.0 == pytest.approx(
+            rect.top() + 0.75 * rect.height(), abs=2.0), "按档案 ry 落位"
+        assert not getattr(child, "_awaiting_screen", None), "落位后清掉待恢复标记"
+
+        from pet import pet_profiles
+        stored = dict(pet_profiles.read_slot_snapshot(tmp_path, 1).profile.data)
+        assert stored["screen_name"] == "B"
+        assert (stored["rx"], stored["ry"]) == pytest.approx((0.25, 0.75), abs=0.01), (
+            "搬回去这一拍要把归属与比例一起落盘")
+    finally:
+        _cleanup(shell)
+
+
+def test_dragging_while_waiting_keeps_the_saved_assignment(tmp_path, monkeypatch):
+    """等屏期间在主屏挪一下，不许把归属改写成主屏。
+
+    归属屏已进屏集合、这只还没落位的中间态（补窗失败/几何未收尾时就是它）里，
+    拖拽收尾会把这次机械位移当成"有意换屏"——归属被永久改写成主屏，屏插回来也
+    回不去了。待恢复标记在，就不许吃归属。
+    """
+    a, b = _two_screens()
+    shell = _awaiting_shell(tmp_path, monkeypatch, a)
+    try:
+        child = shell._spawned[0]
+        # 中间态：屏集合已含 B（``handle_screen_added`` 的第一步就是这件事），
+        # 这只的落位还没收尾（宿主建不起来/活动区没跟上时就会停在这一步）。
+        shell._screen_list.append(b)
+        overlay = shell.host_for_sprite(child).overlay
+        origin = QPointF(overlay.geometry().topLeft())
+        _hittable(child)
+        child.set_pos(QPointF(300, 500))
+        before = QPointF(child.pos)
+        hit = QPointF(child.rect().center())
+        overlay.mousePressEvent(_press(hit, origin + hit))
+        cursor = origin + hit
+        for _ in range(6):
+            cursor = QPointF(cursor.x() + 20, cursor.y())
+            overlay.mouseMoveEvent(_move(cursor - origin, cursor))
+            _tick(shell)
+        overlay.mouseReleaseEvent(_release(cursor, cursor))
+        assert QPointF(child.pos) != before, "前提：这一下真的拖动了"
+        assert _screen_of(shell, child) is a, "前提：拖动没跨屏"
+
+        from pet import pet_profiles
+        stored = dict(pet_profiles.read_slot_snapshot(tmp_path, 1).profile.data)
+        assert stored["screen_name"] == "B", "等屏期间的拖动不得改写屏归属"
+        assert (stored["rx"], stored["ry"]) == pytest.approx((0.25, 0.75), abs=0.01), (
+            "也不得把主屏上的比例写进档案")
+        assert getattr(child, "_awaiting_screen", None) == "B", "仍在等那块屏"
+    finally:
+        _cleanup(shell)
+
+
+def test_rejected_geometry_write_says_why(tmp_path, monkeypatch, caplog):
+    """拒写几何要能在日志里查到 slot / 承载屏 / 归属屏（原先只有 debug，默认看不见）。"""
+    a, b = _two_screens()
+    shell = _awaiting_shell(tmp_path, monkeypatch, a)
+    try:
+        child = shell._spawned[0]
+        slot = shell._spawned_slots[child]
+        with caplog.at_level(logging.INFO):
+            assert shell._save_child_geometry(child, slot=slot) is False
+        records = [r for r in caplog.records
+                   if r.levelno == logging.INFO and "几何自存" in r.getMessage()]
+        assert records, "拒写必须留一条 info 日志"
+        message = records[-1].getMessage()
+        assert f"slot-{slot}" in message, "日志要带 slot"
+        assert "A" in message and "B" in message, "日志要带承载屏与归属屏"
+    finally:
+        _cleanup(shell)
+
+
+def test_main_pet_goes_back_when_its_screen_reappears(tmp_path, monkeypatch):
+    """主宠同一套：归属屏晚到时先落家，它上线后搬回去，家也跟着搬（同恢复口径）。"""
+    from pet import pet_profiles
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a)
+    config = cap.CapConfig(tmp_path, {"allow_cross_screen": True})
+    pet_profiles.write_profile_settings(tmp_path, 0, {"scale": 0.5})
+    pet_profiles.write_profile_geometry(
+        tmp_path, 0, {"rx": 0.5, "ry": 0.5, "screen_name": "B"})
+    shell = OverlayShell(
+        app, cap.CapInstance(config), screen=a,
+        sprite_factory=lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
+    shell._create_main_library = fac.RichLibrary
+    try:
+        main = shell.sprite
+        assert _screen_of(shell, main) is a, "归属屏不在线时先落家那块屏"
+        assert getattr(main, "_awaiting_screen", None) == "B"
+
+        _install_screens(monkeypatch, a, b)
+        shell.handle_screen_added(b)
+
+        assert _screen_of(shell, main) is b
+        assert shell._screen is b, "家跟着主宠的归属走（关闭跨屏/拔屏兜底仍回得去）"
+        rect = _activity_rect(shell, b)
+        body = main.body_rect()
+        assert body.x() + body.width() / 2.0 == pytest.approx(
+            rect.left() + 0.5 * rect.width(), abs=2.0)
+        assert body.y() + body.height() / 2.0 == pytest.approx(
+            rect.top() + 0.5 * rect.height(), abs=2.0)
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 关机落盘
+def test_session_end_persists_positions(tmp_path, monkeypatch):
+    """关机/注销也是最后一次落盘机会：不写的话关机前摆好的位置退回上一次保存。"""
+    from pet import pet_profiles
+
+    a, b = _two_screens()
+    _install_screens(monkeypatch, a, b)
+    shell = _make_shell(tmp_path, a)
+    try:
+        shell.spawn_pet()
+        child = shell._spawned[0]
+        slot = shell._spawned_slots[child]
+        main = shell.sprite
+        # 拖动收尾之外的两处位置（模拟"关机前刚摆好、还没触发任何落盘"）
+        main.set_pos(QPointF(1200, 700))
+        child.set_pos(QPointF(700, 640))
+        expected_main = _ratio_in(shell, main, a)
+        expected_child = _ratio_in(shell, child, a)
+
+        shell._on_session_end()
+
+        main_now = dict(pet_profiles.read_slot_snapshot(tmp_path, 0).profile.data)
+        child_now = dict(pet_profiles.read_slot_snapshot(tmp_path, slot).profile.data)
+        assert (main_now["rx"], main_now["ry"]) == pytest.approx(
+            expected_main, abs=0.01), "关机必须落盘主宠位置"
+        assert (child_now["rx"], child_now["ry"]) == pytest.approx(
+            expected_child, abs=0.01), "关机必须落盘子宠位置"
+    finally:
+        _cleanup(shell)
+
+
 # ---------------------------------------------------------------- 逐屏外围
 def test_bubble_anchor_uses_the_window_origin(tmp_path, monkeypatch):
     """气泡锚点 = 身体框 + **窗口**原点（单窗一套坐标，副屏那只同样对）。"""
