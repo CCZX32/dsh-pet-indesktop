@@ -575,7 +575,11 @@ class TickDriver(QObject):
             return
         if metrics is not None:
             gap_ms = metrics.note_tick_start()
-            if gap_ms is not None:
+            # 只给满速档记账：降载档的间隔是刻意等待不是卡顿——T2 的 250ms /
+            # 电池 T1 的 42ms 会把 p99 顶成假高（max 恒定 235~265 = 250 ×
+            # CoarseTimer ±5%，issue #339）。T3 心跳在上方已整拍早退。
+            # ``_applied_full_speed`` 反映的是**本拍间隔**当初的排程口径。
+            if gap_ms is not None and self._applied_full_speed:
                 metrics.note_interval(gap_ms)
         if dt is None:
             if self._tick_count:

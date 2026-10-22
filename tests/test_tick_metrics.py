@@ -17,6 +17,8 @@ import logging
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -178,3 +180,31 @@ def test_metrics_switch_off_silences_everything(monkeypatch, caplog):
         driver._apply_tier(TIER_IDLE_STILL, reason="quiet")
 
     assert caplog.text == ""
+
+
+def test_throttled_tier_intervals_are_not_counted_as_lag(monkeypatch, caplog):
+    """降载档的 tick 间隔不进卡顿分位（issue #339：T2 的 250ms 档位间隔 +
+    CoarseTimer ±5% 把 p99 顶成假高，max 恒定 235~265）。修复后：T2 拍不记账，
+    降档过渡拍（间隔走的是旧档间隔）不记账，满速拍照记。"""
+    from PySide6.QtGui import QGuiApplication
+
+    fast = FakeScreen(170.0)
+    monkeypatch.setattr(QGuiApplication, "screens", staticmethod(lambda: [fast]))
+    clock = FakeClock()
+    driver = TickDriver(clock=clock)
+    driver.attach(FakeOverlay(screen=fast))
+
+    with caplog.at_level(logging.INFO, logger="pet.tick_driver"):
+        driver.on_tick(dt=0.006)              # 基线
+        clock.advance(0.006)
+        driver.on_tick(dt=0.006)              # 满速 6ms 样本 → 记账
+        driver._applied_full_speed = False    # 模拟排程进了降载档（T2 250ms）
+        clock.advance(0.250)
+        driver.on_tick()                      # 250ms 间隔 → 不记账
+        driver._applied_full_speed = True     # 回升满速
+        clock.advance(0.006)
+        driver.on_tick(dt=0.006)              # 满速 6ms → 记账
+
+    # 直接读环形缓冲：只该有两个满速样本（6ms × 2），250ms 降载拍不在其中
+    samples = sorted(driver._metrics._buf[: driver._metrics._filled])
+    assert samples == [pytest.approx(6.0), pytest.approx(6.0)], samples
