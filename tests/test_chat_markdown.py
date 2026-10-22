@@ -46,6 +46,28 @@ def test_shorter_closing_fence_inside_code_block_does_not_close_it():
     assert "font-style:italic" in html[html.rindex("</pre>"):]
 
 
+def test_indented_code_block_is_not_rewritten():
+    """发版终审（中）：缩进代码块是保护区——URL 不包 <>，括号不上色，可见文字不变。"""
+    from PySide6.QtGui import QTextDocument
+
+    _app()
+    src = "照下面改：\n\n    https://example.com/a_(b)\n    www.example.com\n    f(123) 是调用\n"
+    html = markdown_to_html(src)
+    doc = QTextDocument()
+    doc.setHtml(html)
+    plain = doc.toPlainText()
+    assert "https://example.com/a_(b)" in plain
+    assert "<https://example.com/a_(b)>" not in plain
+    assert "www.example.com" in plain
+    assert "<https://www.example.com>" not in plain
+    assert 'href=' not in html  # 代码块里的 URL 不成链
+    assert "font-style:italic" not in html  # f(123) 不当动作段
+    # 块外的 URL 与动作段不受影响（对照组）
+    outside = markdown_to_html("看 https://example.com/x_(y) 然后（挥手）")
+    assert 'href="https://example.com/x_(y)"' in outside
+    assert "font-style:italic" in outside
+
+
 def test_table_right_after_text_line_still_renders_as_table():
     _app()
     html = markdown_to_html("对比如下：\n| 项目 | 数值 |\n|---|---|\n| 内存 | 220MB |")

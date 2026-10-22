@@ -132,9 +132,60 @@ def _inline_code_ranges(text: str) -> list[tuple[int, int]]:
     return [(match.start(), match.end()) for match in _INLINE_CODE.finditer(text)]
 
 
+_INDENT = re.compile(r'^(?: {4}|\t)')
+
+
+def _indented_code_ranges(text: str, fenced: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """缩进代码块（四空格/Tab）的字符区间；``fenced`` 是已识别的围栏区间。
+
+    成块条件沿 CommonMark 的核心判据：块的上一行是空行或文首（段落正文的缩进
+    续行不算代码）；块内允许空行，块尾取最后一个缩进行（尾随空行不进区间）。
+    与围栏区间相交的候选整段放弃（保守：围栏口径优先）。
+    """
+    lines = text.splitlines(keepends=True)
+    positions: list[int] = []
+    position = 0
+    for line in lines:
+        positions.append(position)
+        position += len(line)
+
+    def _in_fenced(start: int, end: int) -> bool:
+        return any(s < end and start < e for s, e in fenced)
+
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        if not _INDENT.match(lines[index]):
+            index += 1
+            continue
+        prev_blank = index == 0 or not lines[index - 1].strip()
+        start = positions[index]
+        if not prev_blank or _in_fenced(start, positions[index] + len(lines[index])):
+            index += 1
+            continue
+        cursor = index
+        last_content = index
+        while cursor < total:
+            current = lines[cursor]
+            if _INDENT.match(current):
+                last_content = cursor
+                cursor += 1
+            elif not current.strip():
+                cursor += 1  # 可能是块内空行，先看后面还有没有缩进行
+            else:
+                break
+        end = positions[last_content] + len(lines[last_content])
+        if not _in_fenced(start, end):
+            ranges.append((start, end))
+        index = max(cursor, index + 1)
+    return ranges
+
+
 def _code_ranges(text: str) -> list[tuple[int, int]]:
-    """围栏代码块与行内代码的字符区间（动作段不碰这些地方）。"""
-    return _fenced_ranges(text) + _inline_code_ranges(text)
+    """围栏代码块、缩进代码块与行内代码的字符区间（动作段/URL 不碰这些地方）。"""
+    fenced = _fenced_ranges(text)
+    return fenced + _indented_code_ranges(text, fenced) + _inline_code_ranges(text)
 
 
 def _link_ranges(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
@@ -358,8 +409,9 @@ def _action_ranges(text: str) -> list[tuple[int, int]]:
     # F3：交叉嵌套（`(a （b) c）`）会让两种括号的区间相交，而 tokenize 要求
     # 区间有序且两两不相交。按 (start, -end) 排序后单遍扫描，先出现且更长者胜。
     candidates.sort(key=lambda span: (span[0], -span[1]))
-    protected = (_fenced_ranges(text) + _link_target_ranges(text)
-                 + _url_ranges(text))
+    fenced = _fenced_ranges(text)
+    protected = (fenced + _indented_code_ranges(text, fenced)
+                 + _link_target_ranges(text) + _url_ranges(text))
     blocked = _intersect_flags(candidates, protected)
     partial = _partial_inline_flags(candidates, _inline_code_ranges(text))
     spans: list[tuple[int, int]] = []

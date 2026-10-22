@@ -325,6 +325,29 @@ def test_auto_apply_ops_can_still_forget_archived_topic(tmp_path):
     assert mem.load() == []
 
 
+def test_auto_reaffirm_never_demotes_manual_user_layer(tmp_path):
+    """发版终审（高）：自动重申带 layer=fact 也不得把手动 user 偏好降级。
+
+    降级后该偏好不再恒定注入——render_user_snapshot 立即变空。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    entry, created = mem.add("我不吃辣", layer="user")
+    assert created is True
+
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "我不吃辣", "layer": "fact"}], source="auto") is True
+
+    loaded = next(e for e in mem.load() if e["id"] == entry["id"])
+    assert loaded["layer"] == "user"
+    assert loaded["hits"] == 2
+    from pet.chat.memory_recall import render_user_snapshot
+    assert "我不吃辣" in render_user_snapshot(mem.load())
+    # 手动通道仍然可以改层（语义不变）。
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "我不吃辣", "layer": "fact"}], source="manual") is True
+    assert next(e for e in mem.load() if e["id"] == entry["id"])["layer"] == "fact"
+
+
 # ---------------------------------------------------------------- v2f N1/N3
 def test_auto_reaffirm_never_renews_topic_activity(tmp_path):
     """v2f N1：第 13/26/39 天自动重申只 +hits，第 15 天仍归档、recall 不命中。"""

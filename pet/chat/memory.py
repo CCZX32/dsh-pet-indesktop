@@ -764,8 +764,8 @@ class ChatMemory:
 
         v2a：ops 可带 ``layer``（fact/lesson/topic，缺省 fact）与 ``keywords``
         （≤6，缺省现场 bigram 兜底）。老格式无这两个字段，按 fact + 现场提取兼容；
-        自动提炼重申已有条目时，ops 没显式给 layer 就不覆盖原层（避免把 user
-        偏好降级成 fact）。
+        自动提炼重申已有条目时不覆盖原层（发版终审起对自动来源恒成立，避免把
+        user 偏好降级成 fact）。
 
         v2c：``source != "manual"`` 时，已归档或隐式超期的条目只 +hits，不改层、
         不刷 updated_at/last_hit_at、不改关键词（FORGET 仍可删除）；手动重申
@@ -777,6 +777,9 @@ class ChatMemory:
         v2f N3：自动来源要新建条目时，先与已归档条目算关键词 Jaccard；达到
         ``ARCHIVE_DUP_RATIO`` 视为换说法绕过归档，丢弃这次新增（手动来源不受限）。
         v2f L4：整批没有任何实际变更（如 FORGET 未命中）时不写盘并返回 False。
+
+        发版终审：自动来源对已有条目**永不改层**（ops 显式带 layer 也不生效）——
+        提炼按内容分类，会把手动钉的 user 偏好降级成 fact 而丢失恒定注入。
 
         返回本次有没有真的落盘（空操作 / 读失败 / 拿不到跨进程锁 = False，
         后两种情况盘上一个字节都没动）。
@@ -835,12 +838,13 @@ class ChatMemory:
                         if manual:
                             found["updated_at"] = now
                         # v2b：手动来源（手动钉）可以改层并解除归档；自动来源
-                        # 只保留「非归档条目」的现有重申语义。
+                        # 永不改已有条目的层（发版终审：提炼提示词按内容分类，
+                        # 带 layer 的自动重申会把手动钉的 user 偏好降级成 fact，
+                        # 此后不再恒定注入）。
                         restored = manual and explicit_layer is not None
-                        if explicit_layer is not None:
+                        if explicit_layer is not None and manual:
                             found["layer"] = explicit_layer
-                            if manual:
-                                found.pop("archived", None)
+                            found.pop("archived", None)
                         else:
                             found["layer"] = layer_of(found)
                         found["keywords"] = (
