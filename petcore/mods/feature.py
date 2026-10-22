@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,13 @@ class FeatureLoadResult:
     diagnostics: list[str] = field(default_factory=list)
 
 
-def _import_entrypoint(pack: Path, entrypoint: str, owner: str):
+def import_entrypoint(pack: Path, entrypoint: str, owner: str):
+    """导入 mod 入口并返回工厂函数。
+
+    ``__init__.py`` 入口按包加载（带 ``submodule_search_locations``），并先注册到
+    ``sys.modules``，这样入口里的 ``from .runtime import ...`` 才能解析；普通
+    ``.py`` 入口仍是单文件导入。
+    """
     module_part, _, function_name = entrypoint.rpartition(":")
     if not module_part or not function_name:
         raise ValueError(f"invalid entrypoint: {entrypoint}")
@@ -91,15 +98,40 @@ def _import_entrypoint(pack: Path, entrypoint: str, owner: str):
     module_name = "petcore_feature_" + "".join(
         character if character.isalnum() else "_" for character in owner
     )
-    spec = importlib.util.spec_from_file_location(module_name, target)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot import {target}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    if target.name == "__init__.py":
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            target,
+            submodule_search_locations=[str(target.parent)],
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot import {target}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            for name in [
+                name
+                for name in sys.modules
+                if name == module_name or name.startswith(module_name + ".")
+            ]:
+                sys.modules.pop(name, None)
+            raise
+    else:
+        spec = importlib.util.spec_from_file_location(module_name, target)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot import {target}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
     factory = getattr(module, function_name, None)
     if not callable(factory):
         raise AttributeError(f"entrypoint {entrypoint} is not callable")
     return factory
+
+
+#: 兼容旧调用点；新代码用 :func:`import_entrypoint`。
+_import_entrypoint = import_entrypoint
 
 
 class FeatureManager:
@@ -118,7 +150,7 @@ class FeatureManager:
     ) -> list[str]:
         diagnostics: list[str] = []
         try:
-            factory = _import_entrypoint(pack, entrypoint, owner)
+            factory = import_entrypoint(pack, entrypoint, owner)
             context = FeatureContextImpl(owner, self.ports, config, host=self.host)
             definition = factory(context)
             if not isinstance(definition, FeatureDefinition):

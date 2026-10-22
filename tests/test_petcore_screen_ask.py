@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -352,8 +353,9 @@ def test_controller_without_handler_reports_a_visible_error(app) -> None:
         window.close()
 
 
-def test_close_hides_the_window_but_keeps_history(app) -> None:
-    controller = ScreenAskController(None)
+def test_close_hides_the_window_but_keeps_history(app, tmp_path: Path) -> None:
+    # 截图问答历史只在内存：即使给了数据根，也不允许写任何问答文件。
+    controller = ScreenAskController(None, tmp_path)
     controller.on_ask("ai.chat", lambda question, png, history, slot: "答")
     controller.open("ai.chat", _capture(), pet_slot=0)
     window = controller.window_for("ai.chat")
@@ -370,6 +372,7 @@ def test_close_hides_the_window_but_keeps_history(app) -> None:
         # 新采集 = 新会话：历史与消息列表都从零开始。
         assert controller.history("ai.chat") == []
         assert window.messages() == []
+        assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
     finally:
         window.close()
 

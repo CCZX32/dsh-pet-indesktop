@@ -371,6 +371,13 @@ class CoreHost:
         for window in targets:
             self._apply_live_to(window)
         self._apply_live_fonts()
+        chat = getattr(self, "chat", None)
+        apply_appearance = getattr(chat, "apply_appearance", None)
+        if callable(apply_appearance):
+            try:
+                apply_appearance()
+            except Exception:
+                logger.exception("failed to refresh chat appearance")
 
     def _apply_live_fonts(self) -> None:
         """界面字号实时生效：菜单下次构建生效，打开中的设置页立即重排。"""

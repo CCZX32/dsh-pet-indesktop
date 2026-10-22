@@ -42,6 +42,7 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 <id>/
   mod.json            schema=1 / kind=feature / execution=host-only / entrypoint
   host/factory.py     create_host(context) -> FeatureDefinition
+  # 或包入口：host/__init__.py:create_host（loader 支持相对 import）
 ```
 
 规范见 [`../../docs/PETCORE-MOD-FORMAT.md`](../../docs/PETCORE-MOD-FORMAT.md)。
@@ -53,11 +54,14 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 - `presentation`：`say` / `play_animation` / `notify`
 - `scheduler`：`call_later` / `call_every` / `cancel`
 - `storage`：`data_dir(owner)` / `config_dir(owner)`
+- `config`：只读配置 `get(key, default)`；运行时代码不要直接持有 `host.config`
 - `interaction`：`on_click` / `on_drop` / `on_tick`
 - `pets`：只读宠物句柄
 - `quiet`：进程级免打扰
 
-`context.host` 提供共享 `config` 与只读宿主信息；跨域能力仍应走端口/事件，不直接 import `pet.*`。
+运行时代码不要 import PySide6；需要回 GUI 线程用 `ports.scheduler.call_later()`。
+只有设置页（Core 托管的受信 UI）可以用 QtWidgets 并直接使用 `context.host.config`
+（ScopedConfig）。跨域能力仍应走端口/事件，不直接 import `pet.*`。
 
 ## 约定
 

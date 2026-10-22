@@ -17,6 +17,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, Signal
 
 from ...chat.session_store import ChatSession, SessionStore
+from .styles import safe_accent
 from .window import ChatWindow
 
 logger = logging.getLogger("petcore.ui.chat")
@@ -157,6 +158,61 @@ class ChatController(QObject):
         state = self._states.get((str(owner), self._slot(pet_slot)))
         return bool(state is not None and state.window is not None and state.window.isVisible())
 
+    def apply_appearance(
+        self,
+        *,
+        background=None,
+        accent=None,
+        always_on_top=None,
+        follow=None,
+        owner=None,
+    ) -> None:
+        """把外观实时推到已存在的聊天窗；``None`` 表示读当前配置。
+
+        只改窗口外观，不创建窗口、不唤起窗口（``record`` 的静默语义不变）。
+        值没变的窗口不动，避免每次保存设置都重建 QSS / 重放置顶。
+        """
+        target_background = (
+            str(self._config_get("chat_background", "") or "")
+            if background is None
+            else str(background or "").strip()
+        )
+        target_accent = safe_accent(
+            self._config_get("chat_accent", "") if accent is None else accent
+        )
+        target_on_top = (
+            bool(self._config_get("chat_always_on_top", False))
+            if always_on_top is None
+            else bool(always_on_top)
+        )
+        target_follow = (
+            bool(self._config_get("chat_follow_pet", False))
+            if follow is None
+            else bool(follow)
+        )
+        wanted_owner = None if owner is None else str(owner)
+        for (key_owner, _slot), state in self._states.items():
+            if wanted_owner is not None and key_owner != wanted_owner:
+                continue
+            window = state.window
+            if window is None:
+                continue
+            try:
+                # 桌宠窗口可能被收回后重建：跟随前先换绑到当前那只。
+                pet_window = self._pet_window(state.slot)
+                if pet_window is not None:
+                    window.set_pet_window(pet_window)
+                if window.background_value() != target_background:
+                    window.set_background(target_background)
+                if str(window.accent_color).lower() != target_accent.lower():
+                    window.set_accent(target_accent)
+                if window.is_always_on_top() != target_on_top:
+                    window.set_always_on_top(target_on_top)
+                if window.follows_pet() != target_follow:
+                    window.set_follow_pet(target_follow)
+            except RuntimeError:
+                logger.debug("chat window is already gone", exc_info=True)
+
     def on_submit(
         self, owner: str, callback: Callable[[str, int], None]
     ) -> Callable[[], None]:
@@ -190,6 +246,31 @@ class ChatController(QObject):
         except Exception:
             return default
         return default if value is None else value
+
+    def _pet_window(self, slot: int):
+        """该 slot 的桌宠窗口；不可用/已销毁时返回 None。"""
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            slot = 0
+        pets = getattr(self.host, "pets", None)
+        window = None
+        if pets is not None:
+            try:
+                window = pets.window_for_slot(slot)
+            except Exception:
+                window = None
+        if window is None and slot == 0:
+            window = getattr(self.host, "window", None)
+        if window is None:
+            return None
+        probe = getattr(window, "isVisible", None)
+        if callable(probe):
+            try:
+                probe()
+            except RuntimeError:
+                return None
+        return window
 
     def _character_for(self, slot: int) -> str:
         pets = getattr(self.host, "pets", None)
@@ -232,6 +313,8 @@ class ChatController(QObject):
             background=str(self._config_get("chat_background", "") or ""),
             always_on_top=bool(self._config_get("chat_always_on_top", False)),
             provider=str(self._config_get("ai_model", "") or ""),
+            pet_window=self._pet_window(state.slot),
+            follow_pet=bool(self._config_get("chat_follow_pet", False)),
         )
         window.submitted.connect(lambda text, s=key: self._on_submit(s, text))
         window.stop_requested.connect(lambda s=key: self._on_stop(s))

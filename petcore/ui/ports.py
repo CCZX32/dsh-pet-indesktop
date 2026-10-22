@@ -1,12 +1,13 @@
-"""Host 端口的 Qt 实现：定时器、存储、宠物注册表、交互事件与免打扰。"""
+"""Host 端口的 Qt 实现：定时器、只读配置、存储、宠物注册表、交互事件与免打扰。"""
 
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from .. import paths
 from ..contracts.api import ApiMetadata, ApiRequest
@@ -15,52 +16,86 @@ from ..contracts.host import HostPorts
 logger = logging.getLogger("petcore.ui.ports")
 
 
-class QtScheduler:
+class _SchedulerBridge(QObject):
+    """定时器的 GUI 线程代理：信号排队，QTimer 只在归属线程创建/销毁。"""
+
+    schedule = Signal(str, int, object, bool)
+    stop = Signal(str)
+
     def __init__(self) -> None:
+        super().__init__()
         self._timers: dict[str, QTimer] = {}
-        self._counter = 0
+        self.schedule.connect(self._start, Qt.ConnectionType.QueuedConnection)
+        self.stop.connect(self._stop, Qt.ConnectionType.QueuedConnection)
 
-    def _new_handle(self) -> str:
-        self._counter += 1
-        return f"timer-{self._counter}"
-
-    def call_later(self, delay_ms: int, callback) -> str:
-        handle = self._new_handle()
+    def _start(self, handle: str, interval_ms: int, callback, repeating: bool) -> None:
+        # 定时器不挂到 bridge 名下：bridge 被 GC 时若还留着一个 deleteLater
+        # 的子定时器，Qt 会留下悬空的延迟删除事件（进程崩溃）。生命周期由
+        # ``_timers`` 字典持有。
         timer = QTimer()
-        timer.setSingleShot(True)
-        timer.setInterval(max(0, int(delay_ms)))
-        timer.timeout.connect(lambda: self._fire(handle, callback))
+        timer.setSingleShot(not repeating)
+        timer.setInterval(max(1 if repeating else 0, int(interval_ms)))
+        timer.timeout.connect(lambda: self._fire(handle, callback, repeating))
         self._timers[handle] = timer
         timer.start()
-        return handle
 
-    def call_every(self, interval_ms: int, callback) -> str:
-        handle = self._new_handle()
-        timer = QTimer()
-        timer.setInterval(max(1, int(interval_ms)))
-        timer.timeout.connect(callback)
-        self._timers[handle] = timer
-        timer.start()
-        return handle
-
-    def _fire(self, handle: str, callback) -> None:
-        timer = self._timers.pop(handle, None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
+    def _fire(self, handle: str, callback, repeating: bool) -> None:
+        if not repeating:
+            timer = self._timers.pop(handle, None)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
         try:
             callback()
         except Exception:
             logger.exception("scheduled callback failed")
 
-    def cancel(self, handle: str) -> None:
+    def _stop(self, handle: str) -> None:
         timer = self._timers.pop(handle, None)
         if timer is not None:
             timer.stop()
             timer.deleteLater()
 
+
+class QtScheduler:
+    """可从任意线程调用的调度器：定时器与回调都在 GUI 线程执行。"""
+
+    def __init__(self) -> None:
+        self._counter = itertools.count(1)
+        self._bridge = _SchedulerBridge()
+
+    def _new_handle(self) -> str:
+        return f"timer-{next(self._counter)}"
+
+    def call_later(self, delay_ms: int, callback) -> str:
+        handle = self._new_handle()
+        self._bridge.schedule.emit(handle, max(0, int(delay_ms)), callback, False)
+        return handle
+
+    def call_every(self, interval_ms: int, callback) -> str:
+        handle = self._new_handle()
+        self._bridge.schedule.emit(handle, max(1, int(interval_ms)), callback, True)
+        return handle
+
+    def cancel(self, handle: str) -> None:
+        self._bridge.stop.emit(handle)
+
     def cancel_owner(self, owner: str) -> None:
         del owner
+
+
+class QtConfigPort:
+    """只读配置端口：读取失败或缺值一律回默认，mod 不会因配置异常中断。"""
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    def get(self, key: str, default=None):
+        try:
+            value = self._config.get(key, default)
+        except Exception:
+            return default
+        return default if value is None else value
 
 
 class AudioAdapter:
@@ -442,12 +477,14 @@ class QtScreenPort:
 def build_ports(host, window) -> HostPorts:
     store = getattr(host, "api_store", None)
     credentials = getattr(host, "api_credentials", None)
+    config = getattr(host, "config", None)
     api = CoreApiPort(host, store, credentials) if store is not None and credentials is not None else None
     return HostPorts(
         presentation=host.presentation_port(),
         scheduler=QtScheduler(),
         audio=AudioAdapter(window),
         storage=StorageAdapter(host.root),
+        config=QtConfigPort(config) if config is not None else None,
         pets=PetRegistry(host),
         interaction=InteractionAdapter(host),
         quiet=getattr(host, "quiet", None),

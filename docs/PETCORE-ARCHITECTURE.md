@@ -60,7 +60,7 @@ python -m petcore
 ## 4. 关键契约
 
 - `contracts/content.py`：`AnimationSpec`、`CharacterSpec`、`Clip`、`ContentProvider`
-- `contracts/host.py`：`PresentationPort`、`SchedulerPort`、`AudioPort`、`CredentialsPort`、`StoragePort`、`CommandPort`、`MenuPort`、`SettingsPort`、`WindowsPort`、`InputPort`、`SystemPort`、`WorkerPort`、`CapabilityPort`
+- `contracts/host.py`：`PresentationPort`、`SchedulerPort`（任意线程可调，回调回 GUI 线程）、`AudioPort`、`CredentialsPort`、`ConfigPort`（只读）、`StoragePort`、`CommandPort`、`MenuPort`、`WindowsPort`、`InputPort`、`SystemPort`、`WorkerPort`、`CapabilityPort`。设置页是 Core 托管的受信 UI，直接拿 `ScopedConfig`，不再有未实现的 `SettingsPort`。
 - `contracts/feature.py`：`FeatureDefinition`、`FeatureContext`、`Runtime`
 - `contracts/contributions.py`：`Contribution`、`SettingsPageSpec`
 - `contracts/capabilities.py`：能力声明与 `CapabilityDenied`

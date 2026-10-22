@@ -212,8 +212,21 @@
 - **截图提问端口**：框选、窗口、多轮消息在 core（`ScreenAskPort`），模型调用由 mod
   在 `on_ask(question, png, history, slot)` 回调里完成；回调跑后台线程，只碰纯数据。
   截图问答标题固定 DS 鲸鱼；等待时 10% 抽鲸蛙，每次请求只抽一次，独立于菜单彩蛋。
+  **历史每次采集独立**：`open()` 清空上一轮，只存内存、不落盘（图片受隐私约束，
+  纯文本脱离图片没有追问语义）。
+- **mod 运行时代码无 Qt**：`host/runtime.py` 这类运行时代码不得 import PySide6；
+  需要回 GUI 线程一律 `ports.scheduler.call_later()`。只有设置页（`settings_page.py`
+  这类受信 UI）可以用 QtWidgets。包入口用 `host/__init__.py:create_host` 时，
+  loader 会按包加载并支持相对 import。
+- **配置读取分两层**：运行时只经 `HostPorts.config`（只读 `ConfigPort`）；
+  设置页作为 Core 托管的受信 UI，允许直接使用 `host.config`（ScopedConfig）。
+  不许把 `config` 对象塞进业务运行时长期持有。
 - **命令按宠派发**：`run_feature_command(..., slot=)` 对声明 `slot` 参数的扩展命令
   必须传入发起者；子宠菜单的 AI/截图不得落到主宠窗口。
+- **聊天窗外观**：`chat_background` / `chat_accent` / `chat_follow_pet` /
+  `chat_always_on_top` 四个键必须有设置入口；改完经
+  `ChatController.apply_appearance()` 实时作用到已打开窗口。`chat_follow_pet`
+  用 `PetWindow.pet_moved` + 40ms 合并定位，不许 60Hz 反复重排。
 - **四条热键独立**：显示隐藏 / AI 对话 / 看看屏幕 / 截图提问各有独立 Win32 id 与
   配置键；注册失败必须气泡 + 设置行可见，扩展缺失时提示「AI 扩展未安装」。
 - **气泡同层**：`always_on_top` 变化必须同步 `bubble.set_host_on_top()`，彩蛋弹窗用

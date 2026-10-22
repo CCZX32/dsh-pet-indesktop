@@ -59,6 +59,12 @@ class QuietPort(Protocol):
 
 
 class SchedulerPort(Protocol):
+    """定时器端口。
+
+    可从任意线程调用（包括 mod 的 worker 线程）；回调一律在 GUI 线程执行，
+    因此回调里可以安全地碰 Qt 控件。
+    """
+
     def call_later(self, delay_ms: int, callback: Callable[[], None]) -> str: ...
     def call_every(self, interval_ms: int, callback: Callable[[], None]) -> str: ...
     def cancel(self, handle: str) -> None: ...
@@ -81,6 +87,12 @@ class StoragePort(Protocol):
     def config_dir(self, owner: str) -> Path: ...
 
 
+class ConfigPort(Protocol):
+    """只读配置端口：读 core 的全局配置，写操作一律留在 core。"""
+
+    def get(self, key: str, default: Any = None) -> Any: ...
+
+
 class CommandPort(Protocol):
     def register(
         self, owner: str, command_id: str, label: str, callback: Callable[[], None]
@@ -89,10 +101,6 @@ class CommandPort(Protocol):
 
 class MenuPort(Protocol):
     def register(self, owner: str, contribution: Any) -> Callable[[], None]: ...
-
-
-class SettingsPort(Protocol):
-    def register_page(self, owner: str, page: Any) -> Callable[[], None]: ...
 
 
 class WindowsPort(Protocol):
@@ -124,9 +132,9 @@ class HostPorts:
     audio: AudioPort | None = None
     credentials: CredentialsPort | None = None
     storage: StoragePort | None = None
+    config: ConfigPort | None = None
     commands: CommandPort | None = None
     menu: MenuPort | None = None
-    settings: SettingsPort | None = None
     windows: WindowsPort | None = None
     input: InputPort | None = None
     system: SystemPort | None = None

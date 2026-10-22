@@ -325,4 +325,8 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 | 截图提问 | 完成：`ScreenPort.capture_region()` 框选（Core 覆盖层）+ `ScreenAskPort` 截图问答窗（Core UI）；mod 通过 `on_ask(question, png, history, slot) -> str` 在后台线程返回整段答复 |
 | 独立彩蛋 | 完成：截图问答窗标题固定 DS 鲸鱼，等待答复时 10% 抽鲸蛙；每次请求只抽一次，独立于菜单彩蛋 |
 | 按宠派发 | 完成：`run_feature_command` 把发起 slot 传给声明 `slot` 参数的扩展命令；子宠菜单打开自己的对话/截图 |
+| mod 结构 | 完成：`ai.chat` 拆成 `constants/prompts/runtime/settings_page` 与包入口 `host/__init__.py`；loader 支持包相对 import；运行时无 Qt |
+| 端口收口 | 完成：线程安全 `SchedulerPort`、只读 `ConfigPort`；移除未实现的 `SettingsPort`；设置页明确为受信 UI |
+| 外观/跟随 | 完成：背景（默认/内置主题/本地图）、强调色、跟随桌宠、置顶四个设置入口 + `apply_appearance()` 实时预览 |
+| 截图历史 | 明确：每次采集独立、只存内存、不落盘；`open()` 清空上一轮 |
 | 未做 | OCR、翻译、复制动作条、主动识屏、每日预算、思考/联网过程面板（P4） |

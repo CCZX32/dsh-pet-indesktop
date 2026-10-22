@@ -452,15 +452,27 @@ petcore/
 
 - **对话窗口是 Core**：`petcore/ui/chat/` 直接移植主分支的现代双栏对话窗（侧栏会话、
   标题栏、Markdown 气泡、附件、浮动输入框、置顶/最小化/关闭）。mod 只能经
-  `HostPorts.chat` 提交、流式回传、停止；不得 import PySide6 自己造窗口。
+  `HostPorts.chat` 提交、流式回传、停止；不得自建聊天窗口或直接操作气泡。
+- **运行时代码无 Qt**：`ai.chat` 的 `host/runtime.py` 不 import PySide6，需要回
+  GUI 线程一律经 `HostPorts.scheduler.call_later()`；只有 Core 托管的设置页
+  （`host/settings_page.py`）可以用 QtWidgets。
+- **配置读取分两层**：运行时只经 `HostPorts.config`（只读 `ConfigPort`）读配置；
+  设置页作为受信 UI，允许直接使用 Core 给的 `ScopedConfig`。不再保留未实现的
+  `SettingsPort` 假契约。
 - **主对话与截图提问是两个窗口**：主对话用 `ChatPort`，截图提问用
   `ScreenAskPort`；两者都按 `(owner, pet_slot)` 隔离，互不串流。
+- **对话窗外观**：`chat_background`（默认白/内置主题/本地图片）、`chat_accent`、
+  `chat_follow_pet`、`chat_always_on_top` 均有设置入口；改动经
+  `ChatController.apply_appearance()` 实时作用到已打开的窗口。跟随使用
+  `PetWindow.pet_moved` + 40ms 合并定位，优先右侧、放不下切左侧、最后钳在可用区。
 - **看看屏幕**：Core 只提供整屏 `ScreenCapture`（含前台应用描述）；mod 负责
   prompt 与请求。答复必须先落到发起宠的气泡，再通过 `ChatPort.record()` **静默**
   写入该宠的会话记录；不得主动唤出对话窗口，除非 `ai_look_screen_auto_open=true`。
 - **截图提问**：框选覆盖层、图片预览、多轮消息、加载态与 10% 鲸蛙加载彩蛋都在
   Core；mod 只通过 `ScreenAskPort.on_ask(question, png, history, slot) -> str`
   同步返回整段答复（Core 在后台线程调用它）。图片只在内存中流转，不落盘、不进日志。
+  多轮历史**每次采集独立**：`open()` 清空上一轮，只存内存；不写磁盘（图片不能落盘，
+  纯文本脱离当次图片没有追问语义）。
 - **彩蛋口径**：截图提问窗口标题栏固定 DS 鲸鱼；等待答复时按
   `random.random() < 0.1` 抽一次鲸蛙，整次请求保持不轮播。这个彩蛋独立于桌宠菜单的
   「鲸鱼娘彩蛋」，不复用后者的图片目录/概率配置。

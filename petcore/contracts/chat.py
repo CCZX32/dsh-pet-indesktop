@@ -1,8 +1,12 @@
 """聊天窗口的公开契约。
 
 mod 只能通过 ``HostPorts.chat`` 驱动 core 的聊天窗口：窗口、Markdown 渲染、会话
-落盘和取消都在 core，mod 不 import PySide6。``owner`` 是 mod id，窗口按
-``(owner, pet_slot)`` 隔离，互不串流。
+落盘和取消都在 core。``owner`` 是 mod id，窗口按 ``(owner, pet_slot)`` 隔离，
+互不串流。
+
+运行时代码不得 import PySide6；需要回 GUI 线程用 ``HostPorts.scheduler``。
+只有设置页（Core 托管的受信 UI）可以用 QtWidgets，但同样不得自建聊天窗口或
+直接操作气泡。
 """
 
 from __future__ import annotations

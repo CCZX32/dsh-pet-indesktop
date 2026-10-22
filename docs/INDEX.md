@@ -156,6 +156,7 @@
 - [petcore P8.1 字号/彩蛋图片·菜单结构·弹弓与直播兼容（2026-10-21）](PR-REPORT-PETCORE-P8-1-2026-10-21.md)：界面/气泡字号、彩蛋图片大小、自语配图概率、彩蛋置顶与菜单尾部、播放动画缩略图、弹弓右键抑制、点击监听补挂、X 保存、直播捕获兼容；排查「字太小/彩蛋不在顶部/发射后弹菜单/点击台词不生效/直播抓不到」时必读。
 - [petcore P3 收口：AI 对话·截图提问·热键（2026-10-22）](PR-REPORT-PETCORE-P3-AI-2026-10-22.md)：Core 流式 SSE、ChatPort/ChatWindow、内存截图端口、四条全局热键与 ai.chat 参考扩展；改对话/截屏/热键，或排查「点 AI 没反应 / 热键无效 / 截图落盘」时必读。
 - [petcore P3 收口：对话窗/看看屏幕/截图提问效果对齐（2026-10-22）](PR-REPORT-PETCORE-P3-AI-UI-2026-10-22.md)：主分支现代双栏对话窗移植、看看屏幕气泡+静默入历史、框选截图问答窗与 10% 鲸蛙彩蛋、ScreenAskPort 与按宠命令派发；改 AI 窗口/识屏/截图或排查「对话窗又变简版 / 看屏幕强开窗口 / 子宠对话开成主宠」时必读。
+- [petcore AI 边界收口：mod 拆分/调度/配置/外观（2026-10-22）](PR-REPORT-PETCORE-AI-BOUNDARIES-2026-10-22.md)：`ai.chat` 拆成包入口 + prompts/runtime/settings、线程安全 Scheduler、只读 ConfigPort、聊天窗背景/强调色/跟随/置顶设置、截图历史明确不落盘；改 AI mod 结构、线程调度、配置访问或聊天窗外观时必读。
 - [petcore 插件市场 v1（2026-10-22）](PR-REPORT-PETCORE-MARKET-2026-10-22.md)：静态索引 + GitHub Release artifact + SHA-256 + 安装/更新/回滚、扩展管理左导航「插件市场」、`petcore market` CLI、npm 结论；改市场链路或评估分发方案时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。

@@ -40,7 +40,7 @@ feature 包额外字段：
 {
   "kind": "feature",
   "execution": "host-only",
-  "entrypoint": "host/factory.py:create_host",
+  "entrypoint": "host/__init__.py:create_host",
   "capabilities": ["sound.play"],
   "requires": ["character.shenshen"]
 }
@@ -60,7 +60,7 @@ feature 包额外字段：
 | `core_requires` | 否 | 逗号分隔的 `>=`/`<=`/`>`/`<`/`==` 约束 |
 | `author` | 否 | 文本 |
 | `execution` | feature 必需 | `host-only` 或 `worker` |
-| `entrypoint` | feature 必需 | 包内相对路径 `path.py:function` |
+| `entrypoint` | feature 必需 | 包内相对路径 `path.py:function`；也支持包入口 `host/__init__.py:create_host`（loader 以包方式加载，允许相对 import） |
 | `capabilities` | 否 | 必须属于 `contracts/capabilities.py` 的清单 |
 | `character` | content 可选 | 角色块，见 `PETCORE-CHARACTER-PACKS.md` |
 | `sounds`/`themes`/`phrases`/`seasonal` | 否 | `{id: 相对路径}` 的内容贡献 |
@@ -222,9 +222,16 @@ P3 新增两条 mod 可见端口，AI 执行放在 mod，传输与窗口留在 C
 mod.json           kind=feature, execution=host-only,
                    capabilities=[network.request, screenshot.capture,
                                  speech.present, settings.read, settings.write]
-host/factory.py    三条命令 open / look_screen / screen_capture；
-                   注册 chat.on_submit / on_stop；prompt 组装 + 路由 + 视觉内联
+host/__init__.py   create_host：只做 FeatureDefinition 组装
+host/constants.py  OWNER / 历史上限 / 看看屏幕冷却
+host/prompts.py    默认人格、识屏/截图话术、消息组装纯函数
+host/runtime.py    三条命令 open / look_screen / screen_capture；
+                   注册 chat.on_submit / on_stop / screen_ask.on_ask；
+                   只经 ports.config 读配置、ports.scheduler 回 GUI 线程（无 Qt）
+host/settings_page.py  设置页（受信 UI，允许 QtWidgets）
 ```
+
+`runtime.py` 不得 import PySide6；设置页是唯一允许 Qt 的运行位置。
 
 安装：`petcore mods install examples/petcore-mods/ai.chat`（或安装向导勾选，默认不勾）。
 没有安装时，右键菜单与三条热键会气泡提示「AI 扩展未安装」，不会静默无响应。

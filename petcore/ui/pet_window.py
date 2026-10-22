@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtWidgets import QWidget
 
 from .. import paths
@@ -77,6 +77,10 @@ class ScreenState:
 
 
 class PetWindow(QWidget):
+    #: 桌宠移动后发出（拖动、抛掷、漫游、碰撞分离都会走 ``moveEvent``）；
+    #: 聊天窗用它做「跟随桌宠」的合并定位。
+    pet_moved = Signal()
+
     def __init__(self, config: Config, root: Path, host, *, slot: int = 0):
         super().__init__(None)
         self.config = config
@@ -1219,6 +1223,7 @@ class PetWindow(QWidget):
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
         self._schedule_bubble_follow()
+        self.pet_moved.emit()
 
     def _schedule_bubble_follow(self) -> None:
         """同一帧内多次 move 只排一次重排（拖拽/抛掷每 16ms 都在动）。"""

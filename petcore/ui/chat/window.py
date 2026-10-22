@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -44,6 +44,9 @@ COMPACT_WIDTH = 880
 SIDEBAR_WIDTH = 238
 SHELL_MARGIN = 7
 SHELL_RADIUS = 20.0
+#: 跟随桌宠时与身体框的间距；40ms 的单次合并定时器避免 60Hz 移动时反复重排。
+FOLLOW_GAP = 14
+FOLLOW_COALESCE_MS = 40
 
 
 class ChatWindow(QDialog):
@@ -65,6 +68,8 @@ class ChatWindow(QDialog):
         always_on_top: bool = False,
         provider: str = "",
         parent: QWidget | None = None,
+        pet_window: QWidget | None = None,
+        follow_pet: bool = False,
     ) -> None:
         super().__init__(parent)
         self.character_id = str(character_id or "default")
@@ -93,6 +98,13 @@ class ChatWindow(QDialog):
         self._resize_edges: set[str] = set()
         self._resize_global_start: QPoint | None = None
         self._resize_start_geometry: QRect | None = None
+        self._pet_window = pet_window
+        self._follow_pet = bool(follow_pet)
+        self._pet_follow_wired = False
+        self._follow_timer = QTimer(self)
+        self._follow_timer.setSingleShot(True)
+        self._follow_timer.setInterval(FOLLOW_COALESCE_MS)
+        self._follow_timer.timeout.connect(self._on_follow_tick)
 
         self.setObjectName("chat-window")
         self.setWindowTitle(title)
@@ -125,6 +137,115 @@ class ChatWindow(QDialog):
         self._resolve_background()
         self._style()
         self._update_responsive_layout()
+        self._wire_pet_follow()
+
+    # ---------------------------------------------------------------- 跟随桌宠
+    def follows_pet(self) -> bool:
+        return bool(self._follow_pet)
+
+    def set_pet_window(self, pet_window: QWidget | None) -> None:
+        """换绑跟随对象；重复调用幂等，对象已销毁时安静跳过。"""
+        if pet_window is self._pet_window:
+            self._wire_pet_follow()
+            return
+        self._unwire_pet_follow()
+        self._pet_window = pet_window
+        self._wire_pet_follow()
+        if self._follow_pet and self.isVisible():
+            self.position_near_pet()
+
+    def set_follow_pet(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._follow_pet = enabled
+        if enabled:
+            self._wire_pet_follow()
+            if self.isVisible():
+                self.position_near_pet()
+            return
+        self._follow_timer.stop()
+        self._unwire_pet_follow()
+
+    def position_near_pet(self) -> None:
+        """贴到桌宠身体框旁边：右侧优先，溢出换左侧，再不行上下落位并钳制在屏内。"""
+        pet = self._pet_window
+        if pet is None:
+            return
+        try:
+            if not pet.isVisible():
+                return
+            rect = pet.body_rect()
+        except RuntimeError:
+            return
+        if not rect:
+            return
+        body = QRect(*rect)
+        center = body.center()
+        screen = QGuiApplication.screenAt(center) or self.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        width, height = self.width(), self.height()
+        right = area.x() + area.width()
+        bottom = area.y() + area.height()
+        top_y = body.y() + (body.height() - height) // 2
+        right_x = body.x() + body.width() + FOLLOW_GAP
+        left_x = body.x() - FOLLOW_GAP - width
+        if right_x + width <= right:
+            x, y = right_x, top_y
+        elif left_x >= area.x():
+            x, y = left_x, top_y
+        else:
+            x = body.x() + (body.width() - width) // 2
+            below_y = body.y() + body.height() + FOLLOW_GAP
+            above_y = body.y() - FOLLOW_GAP - height
+            if below_y + height <= bottom:
+                y = below_y
+            elif above_y >= area.y():
+                y = above_y
+            else:
+                y = top_y
+        # 最终位置必须整窗落在可用区内：先偏好落位，再钳制。
+        x = max(area.x(), min(x, right - width))
+        y = max(area.y(), min(y, bottom - height))
+        self.move(x, y)
+
+    def _wire_pet_follow(self) -> None:
+        if self._pet_follow_wired or not self._follow_pet:
+            return
+        pet = self._pet_window
+        if pet is None:
+            return
+        try:
+            pet.pet_moved.connect(self._queue_follow)
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        self._pet_follow_wired = True
+
+    def _unwire_pet_follow(self) -> None:
+        if not self._pet_follow_wired:
+            return
+        self._pet_follow_wired = False
+        pet = self._pet_window
+        if pet is None:
+            return
+        try:
+            pet.pet_moved.disconnect(self._queue_follow)
+        except (AttributeError, RuntimeError, TypeError):
+            return
+
+    def _queue_follow(self) -> None:
+        """桌宠移动信号：只排一次 40ms 合并刷新，60Hz 移动不会拖着窗口抖。"""
+        if not self._follow_pet or not self.isVisible():
+            return
+        if not self._follow_timer.isActive():
+            self._follow_timer.start()
+
+    def _on_follow_tick(self) -> None:
+        if not self._follow_pet or not self.isVisible():
+            return
+        self.position_near_pet()
 
     # ---------------------------------------------------------------- 公开属性
     def messages(self) -> list[dict[str, str]]:
@@ -168,6 +289,8 @@ class ChatWindow(QDialog):
 
     def set_accent(self, accent: str) -> None:
         self._base_accent = safe_accent(accent)
+        # ``_style()`` 读的是 ``accent_color``：只改 ``_base_accent`` 会让实时换色静默失效。
+        self.accent_color = self._base_accent
         self._style()
 
     def set_background(self, background: str) -> None:
@@ -1004,6 +1127,9 @@ class ChatWindow(QDialog):
         return super().eventFilter(obj, event)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # 显示前先落位：跟随开启时窗口直接在桌宠旁边出现，不在旧位置闪一下。
+        if self._follow_pet and not event.spontaneous():
+            self.position_near_pet()
         super().showEvent(event)
         # 窗口是复用的（关闭=隐藏）：每次打开都回到最新一条回复，
         # 而不是停在上次关闭时的位置。
@@ -1013,6 +1139,7 @@ class ChatWindow(QDialog):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         """关闭=隐藏并复用窗口：收尾流式状态，保留会话供下次打开。"""
         self._flush_timer.stop()
+        self._follow_timer.stop()
         self.closed.emit()
         self.hide()
         event.ignore()

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QKeyEvent
+from PySide6.QtCore import QEvent, QRect, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from petcore.chat.session_store import ChatSession
 from petcore.config import Config
 from petcore.ui.chat import ChatController, themes
+from petcore.ui.chat.window import ChatWindow, FOLLOW_GAP
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +54,44 @@ def _open(controller, *, slot: int = 0):
     window = controller.window_for("ai.chat", slot)
     assert window is not None and window.isVisible()
     return window
+
+
+class FakePetWindow(QWidget):
+    """最小的桌宠替身：只有跟随定位需要的 ``body_rect``/``pet_moved``。"""
+
+    pet_moved = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._body = QRect(0, 0, 120, 120)
+
+    def set_body_rect(self, rect: QRect) -> None:
+        self._body = QRect(rect)
+
+    def body_rect(self) -> tuple[int, int, int, int]:
+        return self._body.x(), self._body.y(), self._body.width(), self._body.height()
+
+    def move_body(self, x: int, y: int) -> None:
+        self.set_body_rect(QRect(x, y, self._body.width(), self._body.height()))
+        self.pet_moved.emit()
+
+
+def _wait_until(predicate, timeout_ms: int = 2000) -> bool:
+    """事件循环里等条件成立（宽预算，不靠固定 sleep 猜时序）。"""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        QThread.msleep(5)
+    QApplication.processEvents()
+    return bool(predicate())
+
+
+def _available() -> QRect:
+    screen = QGuiApplication.primaryScreen()
+    assert screen is not None
+    return screen.availableGeometry()
 
 
 def test_open_and_stream_render_markdown(controller) -> None:
@@ -309,3 +350,138 @@ def test_theme_registry_and_asset_resolution(app) -> None:
     pixmap = themes.resolve_background_pixmap("builtin:whale")
     assert pixmap is not None and not pixmap.isNull()
     assert themes.background_focus_rect(None, {}, "builtin:whale") == themes.DEFAULT_FOCUS
+
+
+def test_chat_window_follows_the_pet_until_disabled(app) -> None:
+    area = _available()
+    pet = FakePetWindow()
+    pet.set_body_rect(QRect(area.x() + 10, area.y() + 40, 80, 80))
+    pet.show()
+    window = ChatWindow(font_size=13)
+    try:
+        window.resize(560, 480)
+        window.set_pet_window(pet)
+        window.set_follow_pet(True)
+        window.show()
+        QApplication.processEvents()
+
+        body_x, body_y, body_w, _body_h = pet.body_rect()
+        assert window.x() == body_x + body_w + FOLLOW_GAP
+        assert area.contains(window.geometry())
+
+        pet.move_body(body_x + 40, body_y + 10)
+        assert window._follow_timer.isActive() is True, "移动信号只排 40ms 合并刷新"
+        assert _wait_until(
+            lambda: window.x() == pet.body_rect()[0] + pet.body_rect()[2] + FOLLOW_GAP
+        ), "40ms 合并刷新后聊天窗应跟上桌宠"
+        assert area.contains(window.geometry())
+
+        resting = window.geometry()
+        window.set_follow_pet(False)
+        pet.move_body(area.x() + 120, area.y() + 200)
+        assert window._follow_timer.isActive() is False
+        _wait_until(lambda: False, timeout_ms=120)
+        assert window.geometry() == resting
+    finally:
+        window.deleteLater()
+        pet.deleteLater()
+
+
+def test_follow_stays_inside_available_geometry_near_the_edge(app) -> None:
+    area = _available()
+    pet = FakePetWindow()
+    pet.set_body_rect(QRect(area.x() + area.width() - 60, area.y() + 20, 50, 60))
+    pet.show()
+    window = ChatWindow(font_size=13)
+    try:
+        window.resize(560, 480)
+        window.set_follow_pet(True)
+        window.set_pet_window(pet)
+        window.show()
+        QApplication.processEvents()
+
+        geometry = window.geometry()
+        assert area.contains(geometry)
+        assert geometry.x() < pet.body_rect()[0], "右侧放不下时要换到桌宠左边"
+    finally:
+        window.deleteLater()
+        pet.deleteLater()
+
+
+def test_follow_falls_below_when_neither_side_fits(app) -> None:
+    area = _available()
+    pet = FakePetWindow()
+    pet.set_body_rect(QRect(area.x() + 20, area.y() + 10, area.width() - 40, 90))
+    pet.show()
+    window = ChatWindow(font_size=13)
+    try:
+        window.resize(560, 480)
+        window.set_pet_window(pet)
+        window.set_follow_pet(True)
+        window.show()
+        QApplication.processEvents()
+
+        _, body_y, _, body_h = pet.body_rect()
+        assert window.y() == body_y + body_h + FOLLOW_GAP
+        assert area.contains(window.geometry())
+    finally:
+        window.deleteLater()
+        pet.deleteLater()
+
+
+def test_controller_wires_follow_from_config(controller) -> None:
+    controller.host.config.set("chat_follow_pet", True)
+    window = _open(controller)
+    assert window.follows_pet() is True
+
+
+def test_apply_appearance_updates_existing_windows(controller) -> None:
+    window = _open(controller)
+    assert window.follows_pet() is False
+    assert window.background_value() == ""
+
+    controller.apply_appearance(
+        background="builtin:whale",
+        accent="#ff8800",
+        always_on_top=True,
+        follow=True,
+    )
+
+    assert window.background_value() == "builtin:whale"
+    assert window.accent_color.lower() == "#ff8800"
+    assert window.is_always_on_top() is True
+    assert window.follows_pet() is True
+
+    controller.host.config.set("chat_accent", "#123456")
+    controller.host.config.set("chat_background", "")
+    controller.host.config.set("chat_always_on_top", False)
+    controller.host.config.set("chat_follow_pet", False)
+    controller.apply_appearance()
+
+    assert window.background_value() == ""
+    assert window.accent_color.lower() == "#123456"
+    assert window.is_always_on_top() is False
+    assert window.follows_pet() is False
+
+
+def test_apply_appearance_never_opens_a_window(controller) -> None:
+    controller.apply_appearance(background="builtin:whale", follow=True)
+    assert controller.states() == {}
+
+
+def test_apply_appearance_rebinds_a_recreated_pet_window(controller) -> None:
+    pet = FakePetWindow()
+    pet.show()
+    controller.host.pets = SimpleNamespace(window_for_slot=lambda _slot: pet)
+    window = _open(controller)
+    assert window._pet_window is pet
+
+    replacement = FakePetWindow()
+    replacement.show()
+    controller.host.pets = SimpleNamespace(window_for_slot=lambda _slot: replacement)
+    try:
+        controller.apply_appearance()
+        assert window._pet_window is replacement, "桌宠收回重建后跟随要换绑到新窗口"
+    finally:
+        pet.deleteLater()
+        replacement.deleteLater()

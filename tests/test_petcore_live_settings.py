@@ -81,11 +81,33 @@ def test_pet_window_live_scale_does_not_touch_disk(app, tmp_path):
         window.shutdown()
 
 
+def test_pet_window_emits_pet_moved(app, tmp_path):
+    config = Config(tmp_path)
+    window = PetWindow(config, tmp_path, SimpleNamespace())
+    seen: list[bool] = []
+    window.pet_moved.connect(lambda: seen.append(True))
+    try:
+        window.show()
+        QApplication.processEvents()
+        window.move(window.x() + 24, window.y() + 16)
+        assert seen, "聊天窗跟随依赖 PetWindow.pet_moved"
+    finally:
+        window.shutdown()
+
+
 def _host_for_live_applies(tmp_path):
     host = CoreHost.__new__(CoreHost)
     host.config = Config(tmp_path)
     host.window = RecordingWindow()
     return host
+
+
+class RecordingChat:
+    def __init__(self):
+        self.calls = 0
+
+    def apply_appearance(self):
+        self.calls += 1
 
 
 def test_apply_live_settings_only_touches_changed_values(tmp_path):
@@ -117,4 +139,14 @@ def test_apply_live_settings_is_safe_without_window(tmp_path):
     host = CoreHost.__new__(CoreHost)
     host.config = Config(tmp_path)
     host.window = None
+    CoreHost.apply_live_settings(host)
+
+
+def test_apply_live_settings_refreshes_existing_chat_windows(tmp_path):
+    host = _host_for_live_applies(tmp_path)
+    host.chat = RecordingChat()
+    CoreHost.apply_live_settings(host)
+    assert host.chat.calls == 1
+
+    host.chat = None
     CoreHost.apply_live_settings(host)

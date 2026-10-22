@@ -16,14 +16,20 @@ from PySide6.QtWidgets import QApplication
 
 from petcore.config import Config
 from petcore.contracts.screen import ScreenCapture
+from petcore.mods.feature import import_entrypoint
 from petcore.mods.manifest import load_manifest
 
 MOD_DIR = Path(__file__).resolve().parents[1] / "examples" / "petcore-mods" / "ai.chat"
 
 
-def _load_factory():
-    path = MOD_DIR / "host" / "factory.py"
-    spec = importlib.util.spec_from_file_location("ai_chat_factory", path)
+def _create_host(context):
+    factory = import_entrypoint(MOD_DIR, "host/__init__.py:create_host", "ai.chat")
+    return factory(context)
+
+
+def _load_module(name: str):
+    path = MOD_DIR / "host" / name
+    spec = importlib.util.spec_from_file_location(f"ai_chat_{path.stem}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -183,6 +189,29 @@ class FakePresentation:
         self.said.append(str(text))
 
 
+class FakeConfig:
+    """HostPorts.config 的测试实现（只读）。"""
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+
+    def get(self, key, default=None):
+        value = self._config.get(key, default)
+        return default if value is None else value
+
+
+class FakeScheduler:
+    """立即执行版 scheduler；生产实现会排队到 GUI 线程。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call_later(self, delay_ms, callback):
+        self.calls += 1
+        callback()
+        return f"timer-{self.calls}"
+
+
 def _context(tmp_path: Path, *, service: bool = True):
     host = SimpleNamespace(
         config=Config(tmp_path),
@@ -196,6 +225,8 @@ def _context(tmp_path: Path, *, service: bool = True):
         screen_ask=FakeScreenAsk(),
         pets=FakePets(),
         presentation=FakePresentation(),
+        config=FakeConfig(host.config),
+        scheduler=FakeScheduler(),
     )
     return SimpleNamespace(host=host, ports=ports)
 
@@ -218,9 +249,8 @@ def _wait_until(app, predicate, timeout: float = 5.0) -> bool:
 
 @pytest.fixture()
 def runtime(tmp_path: Path):
-    module = _load_factory()
     context = _context(tmp_path)
-    definition = module.create_host(context)
+    definition = _create_host(context)
     instance = definition.runtime_factory(context)
     instance.start()
     yield instance
@@ -239,8 +269,7 @@ def test_manifest_is_a_host_only_feature_with_capabilities() -> None:
 
 
 def test_definition_exposes_three_commands_and_a_settings_page(tmp_path: Path) -> None:
-    module = _load_factory()
-    definition = module.create_host(_context(tmp_path))
+    definition = _create_host(_context(tmp_path))
     assert definition.owner == "ai.chat"
     assert [item.kind for item in definition.contributions] == ["settings_page"]
     instance = definition.runtime_factory(_context(tmp_path))
@@ -320,10 +349,9 @@ def test_look_screen_replies_in_bubble_and_records_without_opening(
 
 
 def test_look_screen_auto_open_toggle_opens_the_chat(qt_app, tmp_path: Path) -> None:
-    module = _load_factory()
     context = _context(tmp_path)
     context.host.config.set("ai_look_screen_auto_open", True)
-    instance = module.create_host(context).runtime_factory(context)
+    instance = _create_host(context).runtime_factory(context)
     instance.start()
     instance.look_screen(2)
     chat = context.ports.chat
@@ -368,9 +396,8 @@ def test_submit_does_not_duplicate_the_current_user_turn(runtime) -> None:
 
 
 def test_missing_service_reports_instead_of_silently_failing(tmp_path: Path) -> None:
-    module = _load_factory()
     context = _context(tmp_path, service=False)
-    instance = module.create_host(context).runtime_factory(context)
+    instance = _create_host(context).runtime_factory(context)
     instance._on_submit("你好", 0)
     chat = context.ports.chat
     assert chat.done_event.wait(5), "无服务时必须给出明确错误"
@@ -395,3 +422,94 @@ def test_ai_keys_survive_config_reload(tmp_path: Path) -> None:
     assert reloaded.get("ai_vision_enabled") is False
     assert reloaded.get("ai_temperature") == 1.3
     assert reloaded.get("ai_look_screen_auto_open") is True
+
+
+def test_manifest_uses_a_package_entrypoint() -> None:
+    manifest, problems = load_manifest(MOD_DIR)
+    assert problems == []
+    assert manifest is not None
+    assert manifest.entrypoint == "host/__init__.py:create_host"
+
+
+def test_runtime_module_is_qt_and_network_free() -> None:
+    runtime_text = (MOD_DIR / "host" / "runtime.py").read_text(encoding="utf-8")
+    for needle in ("PySide6", "petcore.net", "petcore.api", "host.config"):
+        assert needle not in runtime_text, f"runtime.py 不应出现 {needle}"
+    settings_text = (MOD_DIR / "host" / "settings_page.py").read_text(encoding="utf-8")
+    assert "PySide6" in settings_text, "设置页是受信 UI，允许使用 Qt"
+
+
+def test_prompt_builders_keep_history_shapes() -> None:
+    prompts = _load_module("prompts.py")
+    chat = prompts.chat_messages(
+        "sys",
+        [
+            {"role": "user", "content": "上一句"},
+            {"role": "assistant", "content": "上一答"},
+            {"role": "user", "content": "现在这句"},
+        ],
+        "现在这句",
+        ["data:image/png;base64,AAAA"],
+    )
+    assert chat[0] == {"role": "system", "content": "sys"}
+    assert chat[1] == {"role": "user", "content": "上一句"}
+    assert chat[2] == {"role": "assistant", "content": "上一答"}
+    assert chat[3]["content"][0] == {"type": "text", "text": "现在这句"}
+    assert chat[3]["content"][1]["image_url"]["url"].endswith("AAAA")
+
+    ask = prompts.ask_messages(
+        "sys", [{"role": "user", "content": "第一问"}], "第二问", "data:image/png;base64,BBBB"
+    )
+    assert ask[1]["content"][0]["text"] == "第一问"
+    assert ask[1]["content"][1]["image_url"]["url"].endswith("BBBB")
+    assert ask[2] == {"role": "user", "content": "第二问"}
+
+
+def test_settings_page_exposes_chat_appearance_and_previews(qt_app, tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+
+    class AppearanceChat:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def apply_appearance(self, **kwargs):
+            self.calls.append(dict(kwargs))
+
+    host = SimpleNamespace(
+        config=Config(tmp_path),
+        features=SimpleNamespace(ports=SimpleNamespace(api=FakeApi())),
+        chat=AppearanceChat(),
+    )
+    page = definition.settings_factory(host)
+    try:
+        values = [
+            page.background_combo.itemData(index)
+            for index in range(page.background_combo.count())
+        ]
+        assert "builtin:whale" in values
+        assert "__custom__" in values
+
+        index = page.background_combo.findData("builtin:whale")
+        page.background_combo.setCurrentIndex(index)
+        assert host.config.get("chat_background") == "builtin:whale"
+
+        page.accent_edit.setText("#FF8800")
+        page._on_accent_finished()
+        assert host.config.get("chat_accent") == "#ff8800"
+
+        page.follow_check.setChecked(True)
+        page.on_top_check.setChecked(True)
+        assert host.config.get("chat_follow_pet") is True
+        assert host.config.get("chat_always_on_top") is True
+        assert host.chat.calls, "设置改动必须实时预览到对话窗"
+        assert host.chat.calls[-1]["background"] == "builtin:whale"
+        assert host.chat.calls[-1]["accent"] == "#ff8800"
+        assert host.chat.calls[-1]["follow"] is True
+        assert host.chat.calls[-1]["always_on_top"] is True
+
+        page.accent_edit.setText("不是颜色")
+        page._on_accent_finished()
+        assert host.config.get("chat_accent") == "#ff8800"
+    finally:
+        page.close()

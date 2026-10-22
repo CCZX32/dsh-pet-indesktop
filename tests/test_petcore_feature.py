@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from petcore.contracts.host import HostPorts
@@ -52,3 +53,56 @@ def test_bad_entrypoint_is_a_diagnostic(tmp_path: Path) -> None:
     diagnostics = manager.load(pack=pack, owner="bad", entrypoint="factory.py:create_host")
     assert diagnostics
     assert "bad" not in manager.features
+
+
+def test_package_entrypoint_resolves_relative_imports(tmp_path: Path) -> None:
+    pack = tmp_path / "pack"
+    host = pack / "host"
+    host.mkdir(parents=True)
+    (host / "runtime.py").write_text("VALUE = 7\n", encoding="utf-8")
+    (host / "__init__.py").write_text(
+        "from petcore.contracts.feature import FeatureDefinition\n"
+        "from .runtime import VALUE\n"
+        "\n"
+        "\n"
+        "def create_host(context):\n"
+        "    return FeatureDefinition(owner=context.owner, metadata={'value': VALUE})\n",
+        encoding="utf-8",
+    )
+    manager = FeatureManager(HostPorts())
+    diagnostics = manager.load(
+        pack=pack, owner="pkg-mod", entrypoint="host/__init__.py:create_host"
+    )
+    assert diagnostics == []
+    assert "pkg-mod" in manager.features
+    assert manager.features["pkg-mod"].definition.metadata["value"] == 7
+
+
+def test_failing_package_entrypoint_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
+    pack = tmp_path / "pack"
+    host = pack / "host"
+    host.mkdir(parents=True)
+    (host / "runtime.py").write_text("VALUE = 7\n", encoding="utf-8")
+    (host / "__init__.py").write_text(
+        "from .runtime import VALUE\n"
+        "\n"
+        "raise RuntimeError('boom')\n"
+        "\n"
+        "\n"
+        "def create_host(context):\n"
+        "    del context, VALUE\n",
+        encoding="utf-8",
+    )
+    manager = FeatureManager(HostPorts())
+    diagnostics = manager.load(
+        pack=pack, owner="bad-pkg", entrypoint="host/__init__.py:create_host"
+    )
+    assert diagnostics
+    assert "RuntimeError" in diagnostics[0]
+    assert "bad-pkg" not in manager.features
+    module_name = "petcore_feature_bad_pkg"
+    assert not [
+        name
+        for name in sys.modules
+        if name == module_name or name.startswith(module_name + ".")
+    ]

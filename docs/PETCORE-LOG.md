@@ -1474,3 +1474,76 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
   OCR/翻译/复制动作条、主动识屏与每日预算；已记入 parity backlog。
 - `chat_follow_pet` 已持久化但窗口暂不跟随桌宠移动；`chat_background` 只支持
   `builtin:<theme>` 或绝对路径，不含主分支的裁切/透明度/填充键。
+
+## L040 · 2026-10-22 · AI 边界收口：mod 拆分 / 线程调度 / 配置端口 / 外观跟随
+
+**范围**：把 L039 留下的 6 个边界缺口全部落成代码或明确契约。
+行为目标不变，重点是「运行时无 Qt、配置访问分层、聊天窗外观可配且实时生效」。
+
+**改动**
+
+- `petcore/mods/feature.py`（+39/−7）：`import_entrypoint()` 公开；包入口
+  `host/__init__.py:create_host` 以 `submodule_search_locations` 加载并注册
+  `sys.modules`，支持相对 import；异常时清理模块；普通 `.py` 入口行为不变。
+- `petcore/contracts/host.py`（+13/−5）：新增只读 `ConfigPort` 与
+  `HostPorts.config`；删除未实现的 `SettingsPort` / `HostPorts.settings`；
+  `SchedulerPort` 明确「任意线程可调、回调在 GUI 线程」。
+- `petcore/ui/ports.py`（+66/−29）：`_SchedulerBridge` 用 queued signal 统一在
+  GUI 线程创建/销毁 `QTimer`；`QtScheduler` 的 `call_later/call_every/cancel`
+  可从 worker 线程调用；新增 `QtConfigPort`；`build_ports` 接 `config`。
+  定时器不挂 Qt parent（避免 bridge 析构时悬空 DeferredDelete 导致进程 abort）。
+- `examples/petcore-mods/ai.chat/host/`：删除 689 行的 `factory.py`，拆成
+  `__init__.py`（create_host）、`constants.py`、`prompts.py`（消息组装纯函数）、
+  `runtime.py`（430 行，无 PySide6 / 无 `petcore.net` / 无 `petcore.api`）、
+  `settings_page.py`（313 行，受信 UI）。`mod.json` 入口改为包入口，版本 1.1.0→1.2.0。
+- `runtime.py`：配置只经 `ports.config`；worker 回 GUI 只经
+  `ports.scheduler.call_later()`；看看屏幕/对话/截图问答逻辑不变。
+- `settings_page.py`：新增「对话窗外观」分区——背景（默认/9 个内置主题/自定义图片）、
+  强调色（hex 校验 + 颜色选择 + 恢复默认）、跟随桌宠、对话窗置顶；改动即时调用
+  `host.chat.apply_appearance()`。
+- `petcore/ui/pet_window.py`（+6/−1）：新增 `pet_moved` 信号，`moveEvent` 末尾 emit。
+- `petcore/ui/chat/window.py`（+128/−1）：新增 `pet_window/follow_pet` 构造参数、
+  `set_pet_window()` / `set_follow_pet()` / `position_near_pet()`；40ms 合并定位，
+  右侧优先、放不下切左侧、再放下方，最后钳在可用区；`showEvent` 首次定位。
+  顺带修复 `set_accent()` 只改 `_base_accent` 而 `_style()` 读 `accent_color`
+  导致实时换色无效的问题。
+- `petcore/ui/chat/controller.py`（+83）：`apply_appearance()` 把背景/强调色/置顶/
+  跟随实时推到已打开窗口（不建窗、不唤窗）；创建窗口时接当前宠与 follow 配置。
+- `petcore/ui/app.py`（+7）：`apply_live_settings()` 末尾刷新聊天窗外观。
+- `petcore/ui/screen/controller.py`（+4）：明确截图问答历史「每次采集独立、只存内存、
+  不落盘」。
+- `tests/`：`test_petcore_ai_mod.py` 改包入口 + prompt/静态守卫/设置页外观；
+  `test_petcore_scheduler.py` 新增 6 条；`test_petcore_chat_ui.py` 增 follow/外观；
+  `test_petcore_feature.py` 增包入口；`test_petcore_live_settings.py` 增 chat 刷新；
+  `test_petcore_screen_ask.py` 锁定不写盘。
+- 文档：`PETCORE-SPEC.md` §19、`PETCORE-ROADMAP.md` §22、`PETCORE-ARCHITECTURE.md`
+  契约清单、`PETCORE-MOD-FORMAT.md` 包入口与参考实现、`PETCORE-MAIN-PARITY-BACKLOG.md`
+  AI 行、`examples/petcore-mods/README.md` 端口/包入口说明、`petcore/AGENTS.md` 五条红线。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py
+  tests/test_architecture.py tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q`
+  → **1083 passed in 52.62s**。
+- `.venv/Scripts/ruff check pet/ tests/ petcore/ examples/petcore-mods/ai.chat`
+  → 全绿。
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m petcore --check` → exit 0。
+- 端到端 mod 加载：`petcore --root .scratch/ai-boundary mods install
+  examples/petcore-mods/ai.chat` → `installed ai.chat 1.2.0`；`--check` 列出
+  `ai.chat 1.2.0 enabled=true`，`diagnostics=[]`。
+- 性能探针（offscreen）：`call_later(0)` 端到端中位 **0.027ms** / p95 0.061ms
+  （n=50）；`ConfigPort.get` <0.001ms（n=200）；首次打开对话窗 24.7ms；
+  `apply_appearance()` 无变化时 0.003ms（n=50）；`position_near_pet()` <0.001ms
+  （n=100）。
+- 视觉：offscreen 渲染对话窗与截图问答窗仍正常；设置页外观控件为普通
+  combo/line edit/checkbox。
+
+**未验证 / 边界**
+
+- 真实桌面拖选、真实双屏/混合 DPI 下的 follow 定位未实机跑（offscreen 仅验证几何
+  与事件）。
+- `chat_background` 仍只支持 `builtin:<theme>` 或绝对路径，不含主分支的取景裁切、
+  透明度和 cover/contain 独立开关。
+- `cancel()` 改为 queued：已到点的定时器可能在 stop 处理前再触发一次；GUI 调用方
+  （自言自语、报时）不受影响。
+- 截图问答历史明确不落盘；这不是待办，而是隐私与语义约束。
