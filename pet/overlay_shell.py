@@ -2273,6 +2273,8 @@ class OverlayShell(QObject):
         if token is None:
             logging.warning("overlay: slot-%s 没有已应用快照的 token，拒绝几何自存", slot)
             return False
+        pet_screen = self._screen_of_sprite(sprite)
+        host_name = _screen_name(pet_screen)
         if self._topology_txn or self._topology_needs_reconcile():
             # **形态没达成 / 事务进行中**：两种时刻都不能落盘。
             # - 降级态（补窗失败）：窗口按单窗铺、屏按目标算，比例用哪套都可能是错
@@ -2280,16 +2282,14 @@ class OverlayShell(QObject):
             # - **事务进行中**：宿主已补齐、几何还没应用那一段，`_active_multi()` 已经
             #   是多窗、精灵坐标还是旧单窗的，量出来同样越界。
             # 落盘一个越界比例会在补窗成功或重启时把宠推到屏边，比"这次没存"糟得多。
-            logging.debug("overlay: slot-%s 屏拓扑尚未对齐（事务中=%s），本次几何自存跳过",
-                          slot, self._topology_txn)
+            logging.info("overlay: slot-%s 几何自存跳过：屏拓扑尚未对齐（承载 %s，事务中=%s）",
+                         slot, host_name, self._topology_txn)
             return False
-        pet_screen = self._screen_of_sprite(sprite)
-        host_name = _screen_name(pet_screen)
         pending = getattr(sprite, "_pending_screen_assignment", None)
         assignment = pending or self._stored_screen_name(config_dir, slot)
         if assignment is not None and assignment != host_name:
-            logging.debug("overlay: slot-%s 临时承载在 %s（归属 %s），本次几何自存跳过",
-                          slot, host_name, assignment)
+            logging.info("overlay: slot-%s 几何自存跳过：临时承载在 %s（归属 %s），"
+                         "只记位置不改归属", slot, host_name, assignment)
             return False
         geometry = (self._sprite_geometry(sprite, self._screen_rect(pet_screen))
                     if geometry is None else geometry)
@@ -5309,8 +5309,11 @@ class OverlayShell(QObject):
         online = {_screen_name(screen) for screen in self._screens()}
         # 只有「原归属那块屏还活着」时，这次拖拽才算**有意换屏**。拔屏后的临时承载
         # （以及关闭跨屏）下拖动都是机械位置变化——改写归属会让那块屏插回来后回不到
-        # 原位置，所以那条路径只记位置、不动归属。
-        if stored is None or stored in online:
+        # 原位置，所以那条路径只记位置、不动归属。等归属屏上线的宠同样不算有意换屏：
+        # 它正欠一次恢复，此刻在主屏上挪一下只是挪位置（否则"等屏期间一拖，归属就
+        # 永久变成主屏"，屏插回来也回不去）。
+        if ((stored is None or stored in online)
+                and not getattr(sprite, "_awaiting_screen", None)):
             self._remember_sprite_screen(sprite, target)
         if slot is not None:
             # 顺手落一次盘：一次拖拽只是用户动作级的一次原子写（实测中位 3.4 ms），
@@ -5449,8 +5452,11 @@ class OverlayShell(QObject):
 
     def save_position(self) -> None:
         """身体中心相对可用区比例持久化（window_placement.save_position 语义）。"""
-        if self.sprite is not None:
-            self._save_child_geometry(self.sprite, slot=0)
+        if self.sprite is None:
+            return
+        if not self._save_child_geometry(self.sprite, slot=0):
+            # 退出/关机路径上的未落盘要留醒目的记录（拒写原因另有一条 info 日志）
+            logging.warning("overlay: slot-0 主宠几何未落盘，重启后位置可能回退到上次保存")
 
     # ---------------------------------------------------------------- 4.2b 多 sprite 生灭
     def _spawn_config_dir(self):
@@ -5670,6 +5676,14 @@ class OverlayShell(QObject):
         try:
             sprite = self._sprite_factory(lib, QPointF(0, 0), scale)
             sprite.home_screen = pet_screen
+            awaiting = self._awaiting_screen_name(state)
+            if awaiting:
+                # 归属屏此刻不在枚举里（拔着副屏开机 / 驱动没枚举完）：这次只能落
+                # 家那块屏，把屏名挂在这只身上当"欠一次恢复"的记号——屏上线时由
+                # ``_settle_awaiting_screens`` 搬回去（legacy 靠 5 s 轮询等屏）。
+                sprite._awaiting_screen = awaiting
+                logging.info("overlay: slot-%s 归属屏 %s 暂不在线，先落 %s，等它上线后落位",
+                             slot, awaiting, _screen_name(pet_screen))
             sprite.set_bounds(QRect(target_host.bounds))
             target_host.apply_activity(sprite)
             sprite.set_pos(self._spawn_sprite_pos(sprite, state, pet_screen))
@@ -5818,6 +5832,22 @@ class OverlayShell(QObject):
                 first = screen
         return first
 
+    def _awaiting_screen_name(self, state: dict) -> str | None:
+        """档案里的屏归属**此刻解析不到**时返回那个屏名（None = 不用等）。
+
+        "等"是 overlay 路径对 legacy ``window_placement.arm_screen_restore_retry``
+        的等价物：那块屏晚一点上线（拔着副屏开机、扩展坞/驱动还没枚举完）时，这只
+        先落家那块屏，等 ``screenAdded`` 再搬回档案里的位置（见
+        :meth:`_settle_awaiting_screens`）。关闭跨屏时不记——那时"落家那块屏"是
+        常态，不是欠一次恢复。
+        """
+        if not self._cross_screen_allowed:
+            return None
+        name = str(state.get("screen_name") or "")
+        if not name or self._screen_by_name(name) is not None:
+            return None
+        return name
+
     def _restore_screen(self, slot, state):
         """这只宠该落在哪块屏（复活/生成的唯一判据）。
 
@@ -5829,6 +5859,10 @@ class OverlayShell(QObject):
         - **记忆不在线 / 没有记忆** → 留在已有归属上，不搬：一段不在线的记忆不该
           把已经在屏上的宠挪走（legacy ``window_placement.restore_position`` 同款
           取舍）。子宠跟随**主宠**那块屏（新宠的旧行为：自主宠向右错开）。
+
+        解析不到归属屏时这里**只**照旧返回家那块屏——"欠一次恢复"的记号由建这只
+        的地方（``_spawn_slot``）挂在 sprite 上（本方法跑在 sprite 存在之前），
+        由 ``_settle_awaiting_screens`` 在屏上线时收尾。
         """
         home = self._screen
         if not self._cross_screen_allowed:
@@ -5886,6 +5920,48 @@ class OverlayShell(QObject):
                 self._spawn_slot(slot)
             except Exception:
                 logging.exception("overlay: 恢复失败，保留活跃身份 slot=%s", slot)
+
+    def _settle_awaiting_screens(self) -> None:
+        """屏插入后补做恢复：归属屏上线的那几只搬回档案里的位置并落盘一次。
+
+        启动恢复时归属屏解析不到（拔着副屏开机、扩展坞/驱动还没枚举完）只能先落
+        家那块屏。不给这一拍，用户重启后宠就永久留在主屏上——overlay 路径原先没有
+        legacy ``window_placement.arm_screen_restore_retry`` 那种等屏重试。仍解析
+        不到、或此刻还搬不过去的，继续挂着等下一次 ``screenAdded``。
+        """
+        config_dir = self._spawn_config_dir()
+        for sprite in self._all_sprites():
+            name = getattr(sprite, "_awaiting_screen", None)
+            if not name:
+                continue
+            screen = self._screen_by_name(
+                name, prefer=self._screen_under_sprite(sprite))
+            if screen is None:
+                continue
+            slot = self._spawned_slots.get(sprite)
+            if slot is None and sprite is self.sprite:
+                slot = 0
+            self.move_sprite_to_screen(sprite, screen)
+            if self._screen_of_sprite(sprite) is not screen:
+                # 搬不过去（补窗失败 / 活动区还没跟上）：记号留着等下一拍
+                logging.info("overlay: slot-%s 归属屏 %s 已上线但还搬不过去，继续等",
+                             slot, name)
+                continue
+            if sprite is self.sprite and not self._active_multi():
+                # 主宠的屏归属即"家"（口径同 ``_restore_screen``）：家跟着它走，
+                # 关闭跨屏或拔屏兜底时仍落回它本该在的那块屏。
+                self._migrate_to_screen(screen)
+            state = (overlay_spawn_state.read_slot_geometry(config_dir, slot)
+                     if config_dir and slot is not None else {})
+            rx, ry = state.get("rx"), state.get("ry")
+            if rx is not None and ry is not None:
+                sprite.set_pos(self._pos_from_ratios(
+                    float(rx), float(ry), sprite=sprite,
+                    bounds=self._screen_rect(screen)))
+            del sprite._awaiting_screen
+            logging.info("overlay: slot-%s 归属屏 %s 已上线，按档案比例落位", slot, name)
+            if slot is not None:
+                self._save_child_geometry(sprite, slot=slot)
 
     def _remove_spawned_sprite(self, sprite) -> None:
         """退出一只子肥鱼：几何先落盘（配置保留）→ remove_sprite（clip 释放
@@ -5954,8 +6030,12 @@ class OverlayShell(QObject):
             geometry = (self._sprite_geometry(
                 sprite, self._screen_rect(self._screen_of_sprite(sprite)))
                 if host is not None else None)
-            if slot and geometry:
-                self._save_child_geometry(sprite, slot=slot, geometry=geometry)
+            if not slot or not geometry:
+                continue
+            if not self._save_child_geometry(sprite, slot=slot, geometry=geometry):
+                # 退出/关机路径上的未落盘要留醒目的记录（拒写原因另有一条 info 日志）
+                logging.warning("overlay: slot-%s 子宠几何未落盘，重启后位置可能回退",
+                                slot)
 
     def exit_pet(self, sprite=None) -> bool:
         """退出单只（菜单「退出这只」的 overlay 落点）。
@@ -7387,7 +7467,11 @@ class OverlayShell(QObject):
         self._hosts.remove(dead)
 
     def handle_screen_added(self, screen) -> None:
-        """屏插入：窗口矩形与活动区重算（不迁宠——位置记忆归各宠的 ``screen_name``）。"""
+        """屏插入：窗口矩形与活动区重算，并补做归属屏晚到的恢复。
+
+        "不迁宠"只对**用户已经摆好**的宠成立（位置记忆归各宠的 ``screen_name``）；
+        启动时归属屏不在线、被记了待恢复记号的那几只，正是要在这里搬回档案位置。
+        """
         logging.info("overlay: screen added (%s)", _screen_name(screen))
         if not any(candidate is screen for candidate in self._screen_list):
             self._screen_list.append(screen)
@@ -7401,6 +7485,7 @@ class OverlayShell(QObject):
             self._connect_host_screen(each)
         self._sync_host_geometry()
         self._refresh_tick_interval()  # 屏集合变了，刷新率取数范围跟着变
+        self._settle_awaiting_screens()
 
     def handle_screen_removed(self, screen) -> None:
         """屏拔出：收尾在途拖拽 → 家那块屏没了就换家 → 重算窗口与活动区。
@@ -7706,7 +7791,12 @@ class OverlayShell(QObject):
         """会话结束（关机/注销）：停止本路径全部 ffmpeg reader。
 
         spawn 闸门由 SessionWatcher 自身置位（先闸门后回调，顺序不可颠倒）；
-        这里只做 watcher 不管的部分：停全部 clip + 停 tick。幂等。"""
+        这里只做 watcher 不管的部分：停全部 clip + 落盘位置 + 停 tick。幂等。
+
+        位置落盘放在停 tick 之前：关机是本进程最后一次能写档案的机会，缺这两步
+        用户关机前摆好的位置就退回上一次保存（拖动/生成时的那一次）。步骤按
+        ``_run_exit_step`` 逐条隔离，任一失败不拖垮后面的停 reader。
+        """
         if self._session_end_done:
             return
         self._session_end_done = True
@@ -7718,4 +7808,7 @@ class OverlayShell(QObject):
                     stop_all()
                 except Exception:
                     logging.exception("overlay: 会话结束停止素材库 clip 失败")
+        # 4.2a/4.2b 的关机等价物（同 _on_about_to_quit 的两步）
+        self._run_exit_step('关机持久化窗口位置', self.save_position)
+        self._run_exit_step('关机持久化子宠位置', self.save_spawned_positions)
         self._stop_all_hosts()
