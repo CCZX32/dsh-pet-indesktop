@@ -401,6 +401,8 @@ class QuickChatBubble(QFrame):
         self.hint_label.setText("思考中…")
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
+        # 气泡快速对话刻意不注入记忆：一次性问答，注入只会拖慢首字；它仍然
+        # 通过 service.memory_extract_hook 参与后台提炼（见 _schedule_memory_extract）。
         messages = self.prompt_builder.build_messages(
             self.settings, self.character_id, self.session.messages[:-1], text,
             # 每宠键：config 可能是 slot 路由视图，必须从 get 逐键读（chat_settings()

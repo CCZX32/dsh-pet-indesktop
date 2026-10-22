@@ -129,9 +129,14 @@ _REPLACE_ATTEMPTS = 5
 
 #: 命中记录落盘去抖：同一 topic 两次写盘至少隔 60s（内存缓存立即可见）。
 HIT_WRITE_DEBOUNCE_SECONDS = 60.0
-#: 命中写盘失败后的短退避：失败批次留在 _pending 等下一轮，但不许忙转
-#: （锁超时 / 磁盘错误时立即重试会烧满 CPU）。
+#: 命中写盘失败后的退避：1s→2s→4s…上限 30s（锁超时 / 磁盘错误时立即重试会
+#: 烧满 CPU）；连续失败达到 MAX_HIT_WRITE_ATTEMPTS 次后放弃本批并只记一条 warning。
 _FAIL_RETRY_SECONDS = 1.0
+_FAIL_RETRY_MAX_SECONDS = 30.0
+MAX_HIT_WRITE_ATTEMPTS = 5
+#: v2f N3：自动来源要新建条目时，与已归档条目的关键词 Jaccard 达到该比例，
+#: 视为同义改写（换说法绕过归档），丢弃这次新增。
+ARCHIVE_DUP_RATIO = 0.6
 #: 归档巡检最小间隔：无 topic 命中的轮次只做内存判断，不每轮读盘。
 ARCHIVE_SWEEP_SECONDS = 60.0
 #: 进程内 last_hit_at 缓存上限（按条目 id，超限丢最老的写入记录）。
@@ -217,6 +222,28 @@ def _clean_keyword_list(value: Any) -> list[str]:
         if len(cleaned) >= MAX_KEYWORDS:
             break
     return cleaned
+
+
+def _keyword_jaccard(left: str, right: str) -> float:
+    """两条文本的关键词 Jaccard（与 ``extract_keywords`` 同一口径）。"""
+    left_keywords = set(extract_keywords(left))
+    right_keywords = set(extract_keywords(right))
+    if not left_keywords or not right_keywords:
+        return 0.0
+    return len(left_keywords & right_keywords) / len(left_keywords | right_keywords)
+
+
+def _duplicates_archived(
+    text: str,
+    entries: list[dict[str, Any]],
+    moment: datetime,
+) -> bool:
+    """自动来源新增前检查：是否与某条已归档记忆是同义改写（v2f N3）。"""
+    return any(
+        is_archived(entry, moment)
+        and _keyword_jaccard(text, str(entry.get("text", ""))) >= ARCHIVE_DUP_RATIO
+        for entry in entries
+    )
 
 
 def _normalized_entry(
@@ -306,6 +333,12 @@ def memory_payload(
     )
 
 
+def _fail_retry_delay(failures: int) -> float:
+    """连续失败次数 → 退避秒数（1s→2s→4s…，上限 30s）。"""
+    exponent = max(1, int(failures)) - 1
+    return min(_FAIL_RETRY_SECONDS * (2 ** exponent), _FAIL_RETRY_MAX_SECONDS)
+
+
 class _HitWriteQueue:
     """按记忆文件路径共享的命中写盘队列：GUI 线程只入队，daemon 线程单飞落盘。
 
@@ -325,6 +358,7 @@ class _HitWriteQueue:
         self._sweep_moment: datetime | None = None
         self._force = False
         self._thread: threading.Thread | None = None
+        self._failures = 0
         self._clock: Callable[[], datetime] = lambda: datetime.now().astimezone()
 
     # ------------------------------------------------------------ 入队 / 查询
@@ -394,8 +428,10 @@ class _HitWriteQueue:
             succeeded = None
             try:
                 succeeded = self._write_batch(*work)
-            except Exception:  # noqa: BLE001 - 命中记录失败只写日志
-                log.exception("对话记忆命中记录写盘失败（已静默）: %s", self.path)
+            except Exception:  # noqa: BLE001 - 命中记录失败只记日志
+                # v2f L1：失败不在这里打完整 traceback；退避重试，连续失败到
+                # MAX_HIT_WRITE_ATTEMPTS 次后由下面统一记一条 warning 并放弃本批。
+                succeeded = None
             with self._cond:
                 now = time.monotonic()
                 if succeeded is True:
@@ -406,16 +442,25 @@ class _HitWriteQueue:
                     # 巡检已处理（含"无变化"）：同样进入 60s 低频窗口。
                     if work[1] is not None:
                         self._last_sweep = now
+                    self._failures = 0
                 else:
-                    # 失败不置 _last_write（否则该命中 60s 内不再重试），
-                    # 把本批放回 _pending 等下一轮；短退避避免失败时忙转。
+                    # 失败不置 _last_write（否则该命中 60s 内不再重试）；
                     # ``False``（条目已不存在/巡检无变化）是"无需写盘"，不是失败。
-                    for entry_id, moment in work[0].items():
-                        self._pending.setdefault(entry_id, moment)
-                    if work[1] is not None and (
-                            self._sweep_moment is None or work[1] > self._sweep_moment):
-                        self._sweep_moment = work[1]
-                    self._cond.wait(timeout=_FAIL_RETRY_SECONDS)
+                    self._failures += 1
+                    if self._failures >= MAX_HIT_WRITE_ATTEMPTS:
+                        log.warning(
+                            "对话记忆命中记录连续 %d 次写盘失败，放弃本批: %s",
+                            self._failures, self.path)
+                        self._failures = 0
+                    else:
+                        for entry_id, moment in work[0].items():
+                            self._pending.setdefault(entry_id, moment)
+                        if work[1] is not None and (
+                                self._sweep_moment is None
+                                or work[1] > self._sweep_moment):
+                            self._sweep_moment = work[1]
+                        self._cond.wait(
+                            timeout=_fail_retry_delay(self._failures))
                 self._cond.notify_all()
 
     def _collect_locked(self) -> tuple[dict[str, datetime], datetime | None] | None:
@@ -683,6 +728,9 @@ class ChatMemory:
                             entry.pop("archived", None)
                         entries.remove(entry)
                         entries.insert(0, entry)
+                        # v2f L5：去重刷新也要走限额，否则盘上超预算的老条目
+                        # 会一直停在超限状态（旧实现直接 return 跳过了淘汰）。
+                        self._enforce_limits(entries, protected=(entry,))
                         self._write(entries)
                         return entry, False
                 entry_layer = explicit_layer or DEFAULT_LAYER
@@ -723,6 +771,13 @@ class ChatMemory:
         不刷 updated_at/last_hit_at、不改关键词（FORGET 仍可删除）；手动重申
         保留「改层 + 恢复」语义。自动通道一律走本方法，不得改走 ``add()``。
 
+        v2f N1：自动来源对**所有**条目都不写 ``last_hit_at`` / ``updated_at``，
+        只 +hits——否则后台提炼每 13 天重申一次就让 topic 永不到期；活跃时间
+        只由真实召回（``note_recalled``）与手动钉刷新。
+        v2f N3：自动来源要新建条目时，先与已归档条目算关键词 Jaccard；达到
+        ``ARCHIVE_DUP_RATIO`` 视为换说法绕过归档，丢弃这次新增（手动来源不受限）。
+        v2f L4：整批没有任何实际变更（如 FORGET 未命中）时不写盘并返回 False。
+
         返回本次有没有真的落盘（空操作 / 读失败 / 拿不到跨进程锁 = False，
         后两种情况盘上一个字节都没动）。
         """
@@ -754,6 +809,7 @@ class ChatMemory:
                 now = moment.isoformat()
                 added: list[dict[str, Any]] = []
                 manual = str(source or "").strip().lower() == "manual"
+                changed = False
                 for op, text, explicit_layer, keywords in normalized:
                     found = next((e for e in entries if str(e.get("text", "")) == text), None)
                     if op == "FORGET":
@@ -761,6 +817,7 @@ class ChatMemory:
                             entries.remove(found)
                             if found in added:
                                 added.remove(found)
+                            changed = True
                         continue
                     # ADD / UPDATE 未命中按 ADD；UPDATE 命中 = 重申
                     if found is not None:
@@ -770,9 +827,13 @@ class ChatMemory:
                         # 显式归档与 is_archived 的隐式口径必须同源（M3）。
                         if not manual and is_archived(found, moment):
                             found["hits"] = int(found.get("hits", 0) or 0) + 1
+                            changed = True
                             continue
-                        found["updated_at"] = now
                         found["hits"] = int(found.get("hits", 0) or 0) + 1
+                        # v2f N1：只有手动钉能刷新活跃/更新时间；自动重申只累计
+                        # hits（否则提炼的周期性复述会让 topic 的 14 天归档永不触发）。
+                        if manual:
+                            found["updated_at"] = now
                         # v2b：手动来源（手动钉）可以改层并解除归档；自动来源
                         # 只保留「非归档条目」的现有重申语义。
                         restored = manual and explicit_layer is not None
@@ -787,11 +848,15 @@ class ChatMemory:
                             or _clean_keyword_list(found.get("keywords"))
                             or extract_keywords(text)
                         )
-                        if layer_of(found) == "topic" and (
+                        if manual and layer_of(found) == "topic" and (
                                 restored or not is_archived(found, moment)):
                             found["last_hit_at"] = now
                         entries.remove(found)
                         entries.insert(0, found)
+                        changed = True
+                        continue
+                    # v2f N3：自动新增前先查已归档条目的同义改写；命中则丢弃。
+                    if not manual and _duplicates_archived(text, entries, moment):
                         continue
                     entry_layer = explicit_layer or DEFAULT_LAYER
                     entry = {
@@ -808,6 +873,10 @@ class ChatMemory:
                         entry["last_hit_at"] = now
                     entries.insert(0, entry)
                     added.append(entry)
+                    changed = True
+                # v2f L4：空操作（FORGET 未命中 / 全部被归档去重丢弃）不写盘。
+                if not changed:
+                    return False
                 self._enforce_limits(entries, protected=tuple(added))
                 return self._write(entries)
             finally:
@@ -917,9 +986,14 @@ class ChatMemory:
                 for entry in entries:
                     entry_id = str(entry.get("id"))
                     moment = hits.get(entry_id)
-                    if moment is not None and layer_of(entry) == "topic":
+                    if moment is None:
+                        continue
+                    # v2f L6：命中不只刷新 last_hit_at，还要累加 hits——淘汰与
+                    # 注入排序都看 hits，旧实现让真实命中永远停在 1。
+                    entry["hits"] = int(entry.get("hits", 0) or 0) + 1
+                    if layer_of(entry) == "topic":
                         entry["last_hit_at"] = moment.isoformat()
-                        changed = True
+                    changed = True
                 if sweep_moment is not None:
                     changed = archive_stale_topics(entries, sweep_moment) or changed
                 if not changed:

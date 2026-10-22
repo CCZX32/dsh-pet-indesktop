@@ -30,11 +30,14 @@ from pet.chat.memory import (
 from pet.chat.memory_recall import (
     HALF_LIFE_DAYS,
     MAX_KEYWORDS,
-    MIN_SCORE,
     RECALL_TOP_K,
+    RELATIVE_MIN_RATIO,
     TOPIC_ARCHIVE_DAYS,
+    _SEEN,
+    _entry_key,
     _now,
     archive_stale_topics,
+    augment_for_turn,
     extract_keywords,
     is_archived,
     rank_entries,
@@ -208,8 +211,8 @@ def test_importance_manual_and_lesson_are_weighted():
     auto = _entry("自动", keywords=["alpha"], source="auto")
     manual = _entry("手动", keywords=["alpha"], source="manual")
     lesson = _entry("教训", layer="lesson", keywords=["alpha"], source="auto")
-    # MIN_SCORE=0.15：alpha 在小语料里 df=3/3，idf 会被压到 0.15 以下；
-    # 加无关条目把 idf 抬回可判定区间，再比较 importance。
+    # 小语料里 alpha 的 idf 会变低，但相对门槛只看三者相对最高分；
+    # 加无关条目让 idf 回到可判定区间，再比较 importance。
     noise = [
         _entry(f"噪声-{index}", keywords=[f"noise{index}"])
         for index in range(20)
@@ -297,13 +300,64 @@ def test_version_entry_not_hit_by_bare_number_but_hit_by_full_version():
     assert [e["text"] for e in result.entries] == ["版本 4.4.0 修了几个崩溃"]
 
 
-def test_single_char_and_common_idf_below_min_score_are_gated():
-    """M4：命中词至少一个长度 ≥2，且命中 idf 和 ≥ MIN_SCORE。"""
+def test_single_char_is_gated_but_shared_common_word_is_relative():
+    """v2f N2：单字仍挡；共享常见词不再被绝对 idf 门槛整体挡掉。"""
     assert rank_entries(
         [_entry("单字", keywords=["点"])], "点", now=NOW) == []
     common = [_entry(f"常见-{index}", keywords=["发版"]) for index in range(30)]
-    assert rank_entries(common, "发版", now=NOW) == []
-    assert MIN_SCORE == 0.15
+    # 30 条同主题：旧 MIN_SCORE 会因 idf 被 df/N 压到 0.15 以下而返回 []；
+    # 相对门槛下它们分数相同，应全部可检索（top-3 由 recall 截取）。
+    assert len(rank_entries(common, "发版", now=NOW)) == 30
+    assert len(recall(common, "发版", now=NOW).entries) == RECALL_TOP_K
+    assert RELATIVE_MIN_RATIO == 0.25
+
+
+def test_zero_score_entry_is_never_injected():
+    """v2f N2：衰减下溢成 0 分的条目（score <= 0）永不进入注入段。"""
+    ancient = _entry(
+        "论文", keywords=["论文"], updated_at=NOW - timedelta(days=20000))
+    assert rank_entries([ancient], "论文", now=NOW) == []
+    assert recall([ancient], "论文", now=NOW).entries == ()
+
+
+def test_relative_threshold_prunes_entries_below_quarter_of_best():
+    """v2f N2：相对门槛只保留 best_score * RELATIVE_MIN_RATIO 以上的条目。"""
+    strong = _entry("strong", keywords=["alpha", "beta", "gamma"])
+    weak = _entry("weak", keywords=["alpha"])
+    ranked = rank_entries(
+        [strong, weak],
+        "alpha beta gamma",
+        now=NOW,
+        idf={"alpha": 0.01, "beta": 1.0, "gamma": 1.0},
+        avgdl=2.0,
+    )
+    assert [entry["text"] for _score, entry in ranked] == ["strong", "weak"]
+    result = recall(
+        [strong, weak],
+        "alpha beta gamma",
+        now=NOW,
+    )
+    # recall 内用 idf 按全库重算（alpha 在 2 条里都出现，比例仍远低于 0.25），
+    # 因此弱条目被剔除，只剩强条目。
+    assert [entry["text"] for entry in result.entries] == ["strong"]
+
+
+def test_shared_topic_word_keeps_the_whole_topic_recallable():
+    """v2f N2 盲审探针：6 条全是论文主题、只共享「论文」时两种提问都能命中。"""
+    entries = [
+        _entry("论文的数据集已经整理完"),
+        _entry("论文的图表还没画"),
+        _entry("论文的实验跑完了"),
+        _entry("论文的摘要写了三版"),
+        _entry("论文的参考文献要补"),
+        _entry("论文的导师意见还没回"),
+    ]
+    relevant = {entry["text"] for entry in entries}
+    for query in ("论文进度怎么样了", "论文还要改吗"):
+        result = recall(entries, query, now=NOW)
+        assert len(result.entries) == RECALL_TOP_K, query
+        assert {entry["text"] for entry in result.entries} <= relevant, query
+        assert result.text
 
 
 _CHITCHAT_MEMORIES = [
@@ -364,10 +418,11 @@ _CHITCHAT_LINES = [
 
 
 def test_chitchat_false_injection_rate_stays_at_baseline():
-    """M4 盲审构造：20 条真实风格记忆 × 30 句无关闲聊，注入轮数 ≤ 3/30。
+    """v2c M4 基线：20 条真实风格记忆 × 30 句无关闲聊，注入轮数 ≤ 3/30。
 
-    盲审脚本实测放宽关键词后 7/30；本机用同规模语料重建（含多个版本号与
-    带数字的闲聊）时旧实现 5/30、修复后 1/30（只剩「版本」这一处真实词命中）。
+    v2f N2 删掉绝对 idf 门槛后，本机同规模语料实测仍为 1/30（只有「先做 2 个
+    版本试试」与「版本 4.4.0」共享真实词「版本」）；相对门槛不改变命中与否，
+    只裁剪同轮弱条目。
     """
     memories = [_entry(text) for text in _CHITCHAT_MEMORIES]
     injected = [
@@ -419,6 +474,44 @@ def test_recall_top_three_and_first_two_ignore_seen():
     # 前 2 条豁免已见；第 3 条（e2）跳过，顺延到 e3
     assert [e["text"] for e in second.entries] == ["e0", "e1", "e3"]
     assert "e2" not in {e["text"] for e in second.entries}
+
+
+def test_missing_id_entries_get_distinct_seen_keys():
+    """v2f L3：老条目缺 id 时用正文哈希去重，第 3 个名额不会被空串永久关闭。"""
+    entries = []
+    for index in range(4):
+        entry = _entry(
+            f"e{index}",
+            keywords=[f"kw{index}"],
+            updated_at=NOW - timedelta(days=index),
+        )
+        entry.pop("id")
+        entries.append(entry)
+    assert len({_entry_key(entry) for entry in entries}) == 4
+    query = "kw0 kw1 kw2 kw3"
+    first = recall(entries, query, now=NOW)
+    assert [entry["text"] for entry in first.entries] == ["e0", "e1", "e2"]
+    assert "" not in first.seen
+    assert len(first.seen) == 3
+    second = recall(entries, query, now=NOW, seen=first.seen)
+    assert [entry["text"] for entry in second.entries] == ["e0", "e1", "e3"]
+
+
+def test_first_turn_clears_all_seen_buckets_for_session():
+    """v2f L2：无历史的轮次清掉该 session_key 前缀下的所有已见桶。"""
+    session = "memory-recall-test-session"
+    other = "memory-recall-test-other"
+    saved = dict(_SEEN)
+    try:
+        _SEEN[(session, "m1")] = frozenset({"a"})
+        _SEEN[(session, "m2")] = frozenset({"b"})
+        _SEEN[(other, "m1")] = frozenset({"c"})
+        assert augment_for_turn([], session, [], "你好") == ""
+        assert [key for key in _SEEN if key[0] == session] == []
+        assert (other, "m1") in _SEEN
+    finally:
+        _SEEN.clear()
+        _SEEN.update(saved)
 
 
 def test_recall_empty_hit_does_not_render_placeholder():
