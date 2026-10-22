@@ -44,6 +44,10 @@ DEFAULT_QUIET_MINUTES = 30
 DEFAULT_QUIET_ALSO_ON_FULLSCREEN = True
 # 免打扰暂存队列上限：溢出丢最旧（规格硬要求）。
 QUIET_QUEUE_LIMIT = 20
+# 场景卡字段上限（spec：场景描述 ≤500 字符、在场人物 ≤600 字符）。
+# 配置清洗与设置页编辑窗共用这一份，避免两处各写一个数字。
+ROLEPLAY_SCENE_MAX_CHARS = 500
+ROLEPLAY_CAST_MAX_CHARS = 600
 
 
 def normalize_quiet_minutes(value) -> int:
@@ -574,6 +578,17 @@ def _bool_or_default(value, default):
     return bool(default)
 
 
+def _clean_roleplay_text(value, maximum: int) -> str:
+    """场景卡文本：只收字符串、去首尾空白、按字段上限截断。
+
+    多行内容（在场人物每行一个）的**内部换行原样保留**——只裁掉整体首尾，
+    不在行级做任何归一，否则「原样透传」就无从谈起。
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:maximum]
+
+
 def _clean_music_player_paths(value) -> dict:
     """手动指定的播放器可执行文件路径 {播放器键: 路径}。
 
@@ -1044,6 +1059,11 @@ def _normalize_pet_profile_values(data: dict) -> None:
     data["click_sound_enabled"] = bool(data.get("click_sound_enabled", True))
     data["click_sound_pack"] = _clean_click_sound_pack(data.get("click_sound_pack"))
     data["click_sound_volume"] = _float_or_default(data.get("click_sound_volume"), 0.70, 0.0, 1.0)
+    data["roleplay_enabled"] = _bool_or_default(data.get("roleplay_enabled"), False)
+    data["roleplay_scene"] = _clean_roleplay_text(
+        data.get("roleplay_scene"), ROLEPLAY_SCENE_MAX_CHARS)
+    data["roleplay_cast"] = _clean_roleplay_text(
+        data.get("roleplay_cast"), ROLEPLAY_CAST_MAX_CHARS)
     data["throw_strength"] = physics_mod.normalize_throw_strength(str(data.get("throw_strength") or "standard"))
     data["drop_gravity"] = _bool_or_default(data.get("drop_gravity"), False)
     collision = _clean_collision_data(data)
@@ -1130,6 +1150,10 @@ class Config:
             "dialogue_mode": "legacy",
             "dialogue_phrases": dict(DEFAULT_DIALOGUE_PHRASES),
             "dialogue_last_scope": "",  # 台词编辑上次打开的层（""=全局；设置页专属文案入口记忆）
+            # 场景扮演（每宠键：角色级场景卡；默认关 = 行为与旧版逐位一致）
+            "roleplay_enabled": False,
+            "roleplay_scene": "",
+            "roleplay_cast": "",
             "mouse_through": False,
             "cursor_hidden_passthrough": True,
             "drag_physics": False,
@@ -1505,6 +1529,9 @@ class Config:
             "dialogue_mode",
             "dialogue_phrases",
             "dialogue_last_scope",
+            "roleplay_enabled",
+            "roleplay_scene",
+            "roleplay_cast",
             "context_menu_layout",
             "lock_position",
             "shift_drag",

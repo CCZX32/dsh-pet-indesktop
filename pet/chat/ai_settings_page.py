@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import ROLEPLAY_CAST_MAX_CHARS, ROLEPLAY_SCENE_MAX_CHARS
 from ..settings_widgets import (
     ModernSelect,
     _line_edit,
@@ -152,6 +154,14 @@ class _AiSettingsPage(QWidget):
         self.vision_model = _line_edit(provider.vision_model)
         self.vision_url = _line_edit(provider.vision_base_url)
         self.vision_key = _line_edit(password=True)
+        # 场景扮演（每宠键）：人设决定「它是谁」，场景卡决定「在哪演」，两组互独立。
+        # 真值走 config.get/set 的每宠路由，不塞进 chat 全局段。
+        self.roleplay_enabled = ToggleSwitch()
+        self.roleplay_enabled.setChecked(bool(config.get("roleplay_enabled", False)))
+        self._roleplay_scene = str(config.get("roleplay_scene") or "")
+        self._roleplay_cast = str(config.get("roleplay_cast") or "")
+        self.roleplay_scene_btn = QPushButton("场景卡…", self)
+        self.roleplay_scene_btn.clicked.connect(self._edit_roleplay_scene)
 
         self._background_themes = list(theme_names())
         self._background_values = {
@@ -236,6 +246,19 @@ class _AiSettingsPage(QWidget):
             SettingRow("api_key", "API Key", "凭据优先保存到系统钥匙串。", self.key),
             SettingRow("system_prompt", "System Prompt", "定义桌宠对话时的身份、语气和行为。", self.prompt, stacked=True),
             SettingRow("connection_test", "连接测试", self.test_result.text(), self.test_button),
+        ], self))
+        root.addWidget(SettingsSection("场景扮演", [
+            SettingRow(
+                "roleplay_enabled", "场景扮演",
+                "开启后 AI 回复按「动作 + 台词」演，并可附带一张场景卡约定在哪演、现场有谁。"
+                "人设决定它是谁，场景卡决定在哪演，两组互不影响。",
+                self.roleplay_enabled,
+            ),
+            SettingRow(
+                "roleplay_scene", "场景卡",
+                "留空则只开启扮演格式，不约束设定。",
+                self.roleplay_scene_btn,
+            ),
         ], self))
         thinking_web_rows = [
             SettingRow(
@@ -746,6 +769,14 @@ class _AiSettingsPage(QWidget):
         self.test_result.setStyleSheet("color: #16843b;" if ok else "color: #c9362b;")
         self._test_thread = None
 
+    def _edit_roleplay_scene(self) -> None:
+        """打开场景卡编辑窗；结果先留在本页，随宿主的 save() 一起按每宠键落盘。"""
+        dialog = RoleplaySceneDialog(self._roleplay_scene, self._roleplay_cast, self)
+        accepted = dialog.exec()
+        if accepted == QDialog.DialogCode.Accepted:
+            self._roleplay_scene, self._roleplay_cast = dialog.values()
+        dialog.deleteLater()
+
     def save(self) -> None:
         # 保存前基于磁盘最新配置重取快照：另一个设置窗口（AI 设置/桌宠设置 AI 页）
         # 可能在本窗口打开期间改过 Provider 结构；先保留本窗口的 provider 草稿/
@@ -767,6 +798,10 @@ class _AiSettingsPage(QWidget):
         for pid in list(self.settings.providers):
             self._apply_draft_to_provider(pid)
         self.settings.default_system_prompt = self.prompt.toPlainText().strip()
+        # 场景扮演三键是每宠键：SlotRoutedConfig 会把它们写进这只宠的 slot 档案。
+        self.config.set("roleplay_enabled", self.roleplay_enabled.isChecked())
+        self.config.set("roleplay_scene", self._roleplay_scene)
+        self.config.set("roleplay_cast", self._roleplay_cast)
         self._apply_web_search_settings()
         self.config.set("chat_ui_style", self.chat_ui_style.currentData())
         self._capture_background_value()
@@ -816,6 +851,65 @@ class _AiSettingsPage(QWidget):
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.show()
         return dialog
+
+
+class RoleplaySceneDialog(QDialog):
+    """场景卡编辑窗：场景描述多行 + 在场人物多行（每行一个「名字：描述」）。"""
+
+    SCENE_PLACEHOLDER = "示例：雨夜的便利店，灯管忽明忽暗，货架上只剩最后一盒草莓牛奶。"
+    CAST_PLACEHOLDER = "示例：店员阿澈：总在擦同一个杯子，说话前先叹口气。"
+
+    def __init__(self, scene: str = "", cast: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("roleplay-scene-dialog")
+        self.setWindowTitle("场景卡")
+        self.setMinimumWidth(520)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(10)
+
+        intro = QLabel(
+            "场景卡决定「在哪演」，人设决定「它是谁」，两组互不影响。"
+            "留空则只开启扮演格式，不约束设定。",
+            self,
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        scene_label = QLabel(f"场景描述（时间 / 地点 / 氛围，≤{ROLEPLAY_SCENE_MAX_CHARS} 字）", self)
+        root.addWidget(scene_label)
+        self.scene_edit = QPlainTextEdit(self)
+        self.scene_edit.setPlaceholderText(self.SCENE_PLACEHOLDER)
+        self.scene_edit.setPlainText(str(scene or ""))
+        self.scene_edit.setMinimumHeight(100)
+        root.addWidget(self.scene_edit)
+
+        cast_label = QLabel(
+            f"在场人物（每行一个「名字：一句辨识度描述」，≤{ROLEPLAY_CAST_MAX_CHARS} 字）",
+            self,
+        )
+        root.addWidget(cast_label)
+        self.cast_edit = QPlainTextEdit(self)
+        self.cast_edit.setPlaceholderText(self.CAST_PLACEHOLDER)
+        self.cast_edit.setPlainText(str(cast or ""))
+        self.cast_edit.setMinimumHeight(120)
+        root.addWidget(self.cast_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def values(self) -> tuple[str, str]:
+        """返回按 spec 上限截断后的 (场景描述, 在场人物)；多行内部换行原样保留。"""
+        scene = self.scene_edit.toPlainText().strip()[:ROLEPLAY_SCENE_MAX_CHARS]
+        cast = self.cast_edit.toPlainText().strip()[:ROLEPLAY_CAST_MAX_CHARS]
+        return scene, cast
 
 
 class ChatMemoryDialog(QDialog):

@@ -2014,6 +2014,7 @@ class ModernSettingsDialog(QDialog):
                             "connection_test",
                         ),
                     ),
+                    ("场景扮演", claim("roleplay_enabled", "roleplay_scene")),
                     (
                         "深度思考与联网",
                         claim(

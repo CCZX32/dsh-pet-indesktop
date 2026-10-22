@@ -305,7 +305,9 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2664。**前一笔已达 2653（期 3a voice 提交未同步校准，预算从 2637 起就红了）**，
 # 本次一并校准；差值来自「按激活挂出/跳键」的分支行（每组 3~5 行，无新增页面）。
 # 按文件约定只随实测校准，不为达标压行（拆分仍是待办）。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2721  # 2026-10-21：k3 终审 F2 BACKLOG 注释（deleteLater C++ 连坐）+5
+# 2026-10-22 上调到 2722：AI 域新增「场景扮演」组的一行 claim（roleplay_enabled /
+# roleplay_scene），行本体在 _AiSettingsPage。实测 2722。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2722  # 2026-10-22：场景扮演组 claim 一行
 
 
 def _read(name: str) -> str:

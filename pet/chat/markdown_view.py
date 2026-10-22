@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import html as html_mod
 import re
 
 from PySide6.QtGui import QTextDocument
@@ -24,6 +25,12 @@ _MONO_STYLED = "font-family:'Consolas','Courier New',monospace; background-color
 # 聊天气泡里标题缩一档，避免 h1 比正文大太多
 _HEADING_SIZE = re.compile(r'font-size:(xx-large|x-large);')
 _HEADING_MAP = {'xx-large': 'x-large', 'x-large': 'large'}
+# 场景扮演的动作段：全角（）或半角 () 整段包裹；允许多行（跨行连续动作段）。
+_ACTION_SEGMENT = re.compile(r'（[^（）]+）|\([^()]+\)')
+_INLINE_CODE = re.compile(r'`[^`\n]*`')
+# 斜体 + 弱色：半透明灰在浅色/深色气泡里都比正文弱一档（跟随主题的对比关系，
+# 不写死某一种主题的底色）。整段（含括号）一起渲染。
+_ACTION_STYLE = 'font-style:italic; color:rgba(128,128,128,0.88);'
 
 
 def _features():
@@ -33,6 +40,66 @@ def _features():
 
 def _is_table_header(lines, i) -> bool:
     return 0 <= i < len(lines) - 1 and '|' in lines[i] and bool(_TABLE_DELIM.match(lines[i + 1]))
+
+
+def _code_ranges(text: str) -> list[tuple[int, int]]:
+    """围栏代码块与行内代码的字符区间（动作段不碰这些地方）。"""
+    ranges: list[tuple[int, int]] = []
+    position = 0
+    fence_start = None
+    for line in text.splitlines(keepends=True):
+        if _FENCE.match(line):
+            if fence_start is None:
+                fence_start = position
+            else:
+                ranges.append((fence_start, position + len(line)))
+                fence_start = None
+        position += len(line)
+    if fence_start is not None:
+        ranges.append((fence_start, len(text)))
+    ranges.extend((match.start(), match.end()) for match in _INLINE_CODE.finditer(text))
+    return ranges
+
+
+def _action_ranges(text: str) -> list[tuple[int, int]]:
+    code = _code_ranges(text)
+    return [
+        (match.start(), match.end())
+        for match in _ACTION_SEGMENT.finditer(text)
+        if not any(start <= match.start() < end for start, end in code)
+    ]
+
+
+def _tokenize_actions(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """把动作段换成占位 token，交给 Markdown 解析后再还原成带样式的富文本。
+
+    不能直接把 ``<span>`` 塞进 Markdown：``MarkdownNoHTML`` 会把它当字面文本。
+    先换 token 还让跨行动作段作为一个整体（不会在段落切分时被拆散）。
+    """
+    spans = _action_ranges(text)
+    if not spans:
+        return text, []
+    prefix = '\u2063AR'
+    while prefix in text:  # 用户正文恰好含 token 前缀时继续加长，绝不误还原
+        prefix += '\u2063'
+    chunks: list[str] = []
+    replacements: list[tuple[str, str]] = []
+    last = 0
+    for index, (start, end) in enumerate(spans):
+        token = f'{prefix}{index}\u2063'
+        chunks.append(text[last:start])
+        chunks.append(token)
+        replacements.append((token, text[start:end]))
+        last = end
+    chunks.append(text[last:])
+    return ''.join(chunks), replacements
+
+
+def _restore_actions(html: str, replacements: list[tuple[str, str]]) -> str:
+    for token, action in replacements:
+        rendered = html_mod.escape(action, quote=False).replace('\n', '<br />')
+        html = html.replace(token, f'<span style="{_ACTION_STYLE}">{rendered}</span>')
+    return html
 
 
 def preserve_line_breaks(text: str) -> str:
@@ -63,8 +130,9 @@ def preserve_line_breaks(text: str) -> str:
 
 
 def markdown_to_html(text: str, *, link_color: str = '#3994ff') -> str:
+    source, actions = _tokenize_actions(str(text))
     doc = QTextDocument()
-    doc.setMarkdown(preserve_line_breaks(text), _features())
+    doc.setMarkdown(preserve_line_breaks(source), _features())
     html = doc.toHtml()
     head, sep, body = html.partition('<body')
     body = _BODY_STYLE.sub('<body>', sep + body, count=1)
@@ -73,4 +141,4 @@ def markdown_to_html(text: str, *, link_color: str = '#3994ff') -> str:
     html = head + _FONT_DECL.sub(_MONO_STYLED, body)
     html = _HEADING_SIZE.sub(lambda m: f'font-size:{_HEADING_MAP[m.group(1)]};', html)
     html = _LINK_COLOR.sub(lambda m: f'{m.group(1)}<span style=" color:{link_color};">', html)
-    return html
+    return _restore_actions(html, actions)
