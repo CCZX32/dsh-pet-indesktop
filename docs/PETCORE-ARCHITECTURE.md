@@ -294,3 +294,79 @@ JSONL 握手/心跳/事件/错误、取消、超时、崩溃重启、代次拒�
 从旧 `pet` 入口切换前，迁移器必须处理全局配置、slot 配置、会话、待办、API 规格和
 凭据引用；原文件先备份，失败保持原文件不变。发布入口切换必须可回滚，旧 `pet/` 在
 迁移完成前只作为兼容层，不承载新功能。
+
+## 23. AI 对话模块分布与 core 占用（2026-10-22）
+
+> 口径：**业务在 mod，窗口/会话/传输在 core**。这一节回答两个问题：AI 功能现在
+> 分布在哪、core 为它背了哪些代码和运行成本。
+
+### 23.1 代码分布
+
+**core（通用能力，不 import 任何 mod）**
+
+| 位置 | 行数 | 职责 |
+|---|---:|---|
+| `contracts/api.py`、`contracts/chat.py`、`contracts/screen.py`、`contracts/host.py` | 458（含非 AI 契约） | `ApiPort` / `ChatPort` / `QuickChatPort` / `ScreenAskPort` / `ResourcesPort` 等纯契约 |
+| `api/chat.py` | ~600 | SSE 流式、thinking 参数、联网检索轮、错误分类 |
+| `api/{store,spec,credentials,probe}.py` | ~580 | API 服务规格与 `api.json`、keyring、连通性探测（通用） |
+| `net/{http,errors,websearch}.py` | 825 | 代理兜底、失败分类、四引擎搜索与读页 |
+| `chat/session_store.py` | 161 | 每宠/角色会话文件 |
+| `ui/chat/` | 3769 | 双栏对话窗、紧凑快速气泡、消息泡、Markdown、主题、两个控制器 |
+| `ui/screen/` | 1813 | 框选覆盖层、动作条、截图问答/结果窗、动作调度、品牌图标（截图能力共用） |
+| `ui/ports.py` | — | `CoreApiPort`、`QtScreenPort`、`ResourcesAdapter`、端口装配 |
+| `ui/bubble.py`、`ui/pet_window.py`、`ui/app.py` | — | 气泡点击入口、`QuickChatController`、`open_quick_chat()` |
+| `config.py` | — | 16 个 `ai_*` / `chat_*` 全局键（作用域 + 类型归一化） |
+
+**mod（业务）**
+
+| 位置 | 行数 | 职责 |
+|---|---:|---|
+| `examples/petcore-mods/ai.chat/host/runtime.py` | 623 | 消息组装、对话/看看屏幕/截图问答/动作回退/快速对话编排 |
+| `.../prompts.py` | 191 | 人格、识屏、OCR、翻译提示词与目标语言判定 |
+| `.../settings_page.py` | 538 | AI 对话设置页（模型、思考、联网、外观） |
+| `.../__init__.py`、`constants.py` | 41 | 入口与常量 |
+| `examples/petcore-mods/tool.ocr/host/` | 291 | 本地 OCR 引擎（rapidocr + 随包模型）、优先处理者注册 |
+
+### 23.2 core 里**没有**什么
+
+- 没有人格/系统提示词、OCR 提示词、翻译提示词——全在 `ai.chat/host/prompts.py`。
+- 没有模型路由、历史裁剪、温度/思考强度选择——mod 组装消息并传参。
+- 没有 OCR 引擎与模型——在 `tool.ocr`。
+- 没有搜索 API Key——只在系统钥匙串（owner `core.websearch`）。
+- 唯一的用户向残留文案是 `api/chat.py` 的 `ChatTruncated`（「思考用完了输出上限」）；
+  动作条标题、「看看这块区域」属于 core UI 文案，不是业务策略。
+
+### 23.3 实测占用
+
+环境：Windows 11、Python 3.12、PySide6、`QT_QPA_PLATFORM=offscreen`，单次采样。
+
+| 路径 | 增量 | 触发时机 |
+|---|---:|---|
+| `import petcore.ui.chat` | **+7.1 MB / 63.5 ms** | 启动时 `CoreHost` 创建 `ChatController`/`QuickChatController` |
+| `import petcore.api.chat`（含 `net.websearch`） | **+6.4 MB / 77.9 ms** | 首次真正发起对话（`CoreApiPort.stream_chat` 内惰性 import） |
+| `QuickChatBubble` 实例 | **+1.8 MB / 2.5 ms** | 点桌宠气泡后创建，之后复用 |
+| `ChatWindow` 实例 | **+4.9 MB / 15.9 ms** | 打开完整对话窗 |
+| `ScreenAskWindow` 实例 | **+2.6 MB / 10.8 ms** | 截图问答 / 提取文字 / 翻译结果窗 |
+| `tool.ocr` 引擎 | 首次识别 **+145 MB RSS**，之后常驻 | 第一次点「提取文字」；不点不加载 |
+
+- **常驻线程/进程**：0。流式请求与 OCR 都是按次后台线程；OCR 在桌宠进程内运行
+  （主分支是每次一个子进程，这里是有意的差异，见 P8 报告）。
+- **磁盘**：只有每宠/角色的会话 JSON；截图与 OCR 图像只在内存，不落盘。
+- **网络**：只有用户显式对话/联网/翻译时发生；启动不联网。
+
+### 23.4 已知耦合（可接受，但改功能前要知道）
+
+1. 16 个 `ai_*` / `chat_*` 键写在 `petcore/config.py` 的白名单与归一化里；
+   新增一个 AI 设置需要同时改 core 配置（作用域与类型校验），改完不用改 core 其他代码。
+2. `chat_background/accent/follow/always_on_top` 是 core 窗口外观，放在 core 合理。
+3. 截图动作条与结果窗属于 core 截图能力，AI 只是它的消费者；`tool.ocr` 卸载后
+   动作条按能力置灰。
+4. 如果要求 core **零用户文案**，下一步可以把 `ChatTruncated` 改成稳定 `reason`，
+   由 mod 映射成中文提示（目前只有这一处）。
+
+### 23.5 结论
+
+core 为 AI 背的是「窗口 + 会话 + 传输 + 搜索协议 + 端口」这批通用能力，启动成本
+约 **7 MB / 64 ms**（对话窗包导入），真正的传输层在首次对话时才加载；
+业务提示词、模型策略、OCR 引擎都在 mod。当前没有业务逻辑渗进 core，
+唯一的轻度耦合是配置键白名单与一条截断文案。

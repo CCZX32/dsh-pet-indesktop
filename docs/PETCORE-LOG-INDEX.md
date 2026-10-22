@@ -56,3 +56,4 @@
 | L041 | 2026-10-22 | 截图灰屏 + 思考/联网 | 冻结帧强制 QImage/DPR=1（QPixmap 导致 drawImage 崩溃=灰屏）；thinking/reasoning_effort、思维链面板与回显；联网 planner（web_search/fetch_url）、四引擎、搜索 Key 只进钥匙串。 | grab_screen_image、QPixmap、reasoning_content、research、websearch、thinking、ChatPort.status |
 | L042 | 2026-10-22 | 截图四动作 + 快速对话 | 动作条补齐提取文字/翻译/问问肥鱼/复制图像；OCR 归 `tool.ocr`（本地 rapidocr 优先、AI 兜底）；`on_action` 按 priority 回退；点桌宠气泡开快速对话并与完整窗共用会话。 | RegionPick、on_action、priority、tool.ocr、rapidocr、QuickChatPort、bubble.clicked |
 | L043 | 2026-10-22 | 动作条对比度 | 显式深色按钮文字/禁用灰，修深色主题下浅条白字看不清；像素级回归 + 重建安装。 | QSS、ButtonText、对比度、screen-selection-bar |
+| L044 | 2026-10-22 | AI 模块分布盘点 | core/mod 代码表、core 里没有的业务、启动/传输/窗口/OCR 实测占用与四项已知耦合；纯文档批次。 | AI 模块、core 占用、7.1MB、145MB、ChatTruncated、ARCHITECTURE 23 |

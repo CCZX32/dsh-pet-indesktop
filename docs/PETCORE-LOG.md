@@ -1702,3 +1702,29 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 **未验证 / 边界**
 
 - 仅覆盖浅色操作条 + 深色系统主题这一组合；如果以后做深色操作条，需要重新配文字色。
+
+## L044 · 2026-10-22 · AI 对话模块分布与 core 占用盘点
+
+**范围**：回答「AI 对话代码分布 / 对 core 有没有占用」，并把这批事实写进架构文档。
+
+**改动**
+
+- `docs/PETCORE-ARCHITECTURE.md`（+113）：新增 §23——core/mod 代码表（行数）、
+  core 里明确没有的业务、实测内存/导入成本（启动 +7.1MB/63.5ms、传输层首次
+  对话 +6.4MB/77.9ms、快速气泡 +1.8MB、对话窗 +4.9MB、OCR 引擎 +145MB）、
+  四项已知耦合与结论。
+- `docs/PETCORE-SPEC.md`（+15）：新增 §22 摘要并指向 §23。
+- 无代码改动（纯文档批次）。
+
+**验证**
+
+- 行数：`wc -l` / `git diff --numstat` 口径。
+- 占用：`QT_QPA_PLATFORM=offscreen` 单次采样（psutil RSS + `perf_counter`），
+  数值与 P8 报告的 OCR 145MB 一致。
+- `grep` 确认 core 无 `ocr_messages`/提示词实现，唯一用户向文案是
+  `api/chat.py` 的 `ChatTruncated`。
+
+**未验证 / 边界**
+
+- 内存是单次采样，不是多次中位数；真实桌面与混合 DPI 下数值会有差异。
+- 若以后把 `ChatController` 改成首次使用时惰性创建，启动的 7.1MB/63.5ms 还能再降。

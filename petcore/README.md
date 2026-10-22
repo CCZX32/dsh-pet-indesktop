@@ -83,6 +83,17 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 `
 入口是 `petcore/cli.py`；`petcore/ui/app.py` 的 `CoreHost` 负责把配置、内容、
 菜单、设置、托盘和 feature 串起来。
 
+### AI 对话模块在哪
+
+- **core**：`contracts/*` 的端口、`api/chat.py`（SSE/思考参数/联网检索）、
+  `net/websearch.py`、`chat/session_store.py`、`ui/chat/`（双栏窗 + 快速气泡）、
+  `ui/screen/`（截图动作条 + 结果窗）、`ui/ports.py` 的装配。
+- **mod**：`examples/petcore-mods/ai.chat`（人格/提示词/消息组装/翻译/快速对话编排）、
+  `examples/petcore-mods/tool.ocr`（本地 OCR 引擎与随包模型）。
+- 启动成本实测约 **7.1 MB / 63.5 ms**（对话窗包导入），传输层首次对话才加载；
+  OCR 引擎首次识别 +145 MB 常驻。完整代码表、占用与已知耦合见
+  [`../docs/PETCORE-ARCHITECTURE.md` §23](../docs/PETCORE-ARCHITECTURE.md#23-ai-对话模块分布与-core-占用2026-10-22)。
+
 ## 4. 加一个 Core 菜单项
 
 1. 在 `petcore/ui/menu_actions.py` 的 `core_items()` 注册 `MenuItem`。
@@ -198,6 +209,7 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest \
 - 设置页不再每个 mod 占一个侧边栏页：`ExtensionsPage` 用**左侧竖向导航**聚合「扩展管理」和所有 mod 设置页，按「基础扩展 / 加装扩展」分组；侧边栏 8 页（P6 新增 core 页「API 与账户」）。
 - mod 展示名优先 `mod.json` 的 `name_zh`，缺失回退 `name`；安装器随附的包落 `{app}/mods`（`.trusted`），用户导入仍落数据目录 `mods/`。
 - 动画节拍：待机一圈结束才掷骰；`anim_weight_idle/turn/act/move` 可调（默认 30/10/40/20），`events/<group>/` 只能经 `play_event()` 触发。
+- `tool.ocr` 的 rapidocr 引擎常驻桌宠进程（首次识别约 +145 MB RSS），与主分支「一次识别一个子进程」不同；不点「提取文字」不会加载引擎。
 - 联网与 API：只有 `net/`、`api/`、`account/` 可以 import 网络库；API Key 只进系统钥匙串（`KeyringCredentials`），`api.json` 只存服务规格。
 - 移动同步：窗口位置由 clip 帧号 + `move_strides.json` 的 `curve` 驱动；移动开始先按方向设置 `state.facing`，再渲染首帧。不要退回固定 33ms 线性步进。
 

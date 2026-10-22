@@ -530,3 +530,17 @@ petcore/
   assistant，`去聊天窗` 看到同一段对话。
 - **依赖现实**：冻结包无法让 mod 自己安装 Python 包，`rapidocr` / `onnxruntime` /
   `cv2` 随 exe 打包；没有安装 `tool.ocr` 时这些代码不会被调用，动作条按能力置灰。
+
+## 22. AI 对话模块的最终分布（2026-10-22）
+
+- **core 只背通用能力**：`contracts/*` 的端口、`api/chat.py` 的流式/搜索传输、
+  `net/websearch.py` 的搜索引擎、`chat/session_store.py` 的会话、`ui/chat/` 的
+  双栏窗与快速气泡、`ui/screen/` 的截图动作条与结果窗、`ui/ports.py` 的端口装配。
+- **业务全在 mod**：`ai.chat` 负责人格/提示词/消息组装/翻译/快速对话编排；
+  `tool.ocr` 负责本地 OCR 引擎与模型。core 不 import 它们。
+- **允许的耦合**：`ai_*`/`chat_*` 设置键在 core 配置白名单里（作用域与类型校验）；
+  `ChatTruncated` 是 core 里唯一残留的用户向文案。
+- **启动成本**（实测）：对话窗包导入约 7.1 MB / 63.5 ms；传输层首次对话才加载
+  （6.4 MB / 77.9 ms）；OCR 引擎首次识别 +145 MB 常驻。
+- 详细代码表、占用与结论见
+  [`PETCORE-ARCHITECTURE.md` §23](PETCORE-ARCHITECTURE.md#23-ai-对话模块分布与-core-占用2026-10-22)。
