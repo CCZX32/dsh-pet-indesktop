@@ -603,7 +603,8 @@ def test_scene_dialog_counters_follow_input_and_turn_red(qapp):
             f"{ROLEPLAY_SCENE_MAX_CHARS + 1}/{ROLEPLAY_SCENE_MAX_CHARS}")
         assert "#c9362b" in dialog.scene_counter.styleSheet()
         assert dialog.truncation_hint.isVisible()
-        assert "截断" in dialog.truncation_hint.text()
+        assert "超出上限" in dialog.truncation_hint.text()
+        assert not dialog.save_button.isEnabled()
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -637,17 +638,21 @@ def test_scene_dialog_truncates_scene_with_ellipsis_and_cast_on_line_boundary(qa
         qapp.processEvents()
 
 
-def test_scene_dialog_keeps_first_save_on_truncation_notice(qapp):
-    """R7：发生截断时第一次「保存」停在提示上，用户看见后才允许接受。"""
+def test_scene_dialog_blocks_save_while_over_limit(qapp):
+    """R7：超限时保存按钮禁用（不许静默截断），删到范围内才能保存。"""
     from pet.chat.ai_settings_page import RoleplaySceneDialog
+    from pet.config import ROLEPLAY_SCENE_MAX_CHARS
 
     dialog = RoleplaySceneDialog("", "")
     dialog.show()
     try:
         dialog.scene_edit.setPlainText("场" * 600)
-        dialog.save_button.click()
+        assert not dialog.save_button.isEnabled()
+        dialog.save_button.click()          # 禁用状态下点不动
         assert dialog.isVisible()
-        assert dialog.truncation_hint.isVisible()
+        assert "超出上限" in dialog.truncation_hint.text()
+        dialog.scene_edit.setPlainText("场" * (ROLEPLAY_SCENE_MAX_CHARS - 1))
+        assert dialog.save_button.isEnabled()
         dialog.save_button.click()
         assert not dialog.isVisible()
     finally:

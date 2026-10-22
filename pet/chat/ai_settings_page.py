@@ -920,8 +920,7 @@ class RoleplaySceneDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-        self._truncated = False       # 本次 values() 是否发生了截断
-        self._truncation_noticed = False  # 截断提示是否已经给用户看过
+        self._truncated = False       # 本次 values() 是否发生了截断（防御分支用）
         self.scene_edit.textChanged.connect(self._on_edited)
         self.cast_edit.textChanged.connect(self._on_edited)
         self._update_counters()
@@ -958,15 +957,17 @@ class RoleplaySceneDialog(QDialog):
             self.scene_counter, len(self.scene_edit.toPlainText()), ROLEPLAY_SCENE_MAX_CHARS)
         cast_over = self._set_counter(
             self.cast_counter, len(self.cast_edit.toPlainText()), ROLEPLAY_CAST_MAX_CHARS)
-        if scene_over or cast_over:
-            self.truncation_hint.setText("内容超出上限，保存时会截断；确认后再次点击「保存」继续。")
+        over = scene_over or cast_over
+        if over:
+            # 超限就不让保存：用户看得见红计数与这句话，自己删到范围内。
+            # 不做「保存时静默截断」——那是把用户写的内容无声丢掉。
+            self.truncation_hint.setText("超出上限，请删减到上限以内再保存（不会自动截断）")
             self.truncation_hint.show()
         else:
             self.truncation_hint.hide()
+        self.save_button.setEnabled(not over)
 
     def _on_edited(self) -> None:
-        # 用户改过内容后重新计数；上一轮的「已提示」失效，下一次保存要再提示。
-        self._truncation_noticed = False
         self._update_counters()
 
     def _show_truncation(self, scene_cut: bool, cast_cut: bool) -> None:
@@ -976,27 +977,26 @@ class RoleplaySceneDialog(QDialog):
         if cast_cut:
             parts.append(
                 f"在场人物超出 {ROLEPLAY_CAST_MAX_CHARS} 字，已按整行截断（没有切断某一行）。")
-        parts.append("确认后再次点击「保存」继续。")
         self.truncation_hint.setText(" ".join(parts))
         self.truncation_hint.show()
 
     def _on_save_clicked(self) -> None:
-        """保存：先算截断并把提示摆到用户眼前；第一次截断不直接关窗。
+        """保存。内容超限时保存按钮是禁用的（见 ``_update_counters``），点不动。
 
-        发生截断时留在对话框里让提示可见，用户第二次点保存才接受——不出现
-        「内容被静默丢弃」。
+        下面这条 ``_truncated`` 分支只是防御：万一外部代码绕开按钮直接 accept，
+        也不会把截断后的内容当成用户原样内容静默存下去。
         """
         self.values()
-        if self._truncated and not self._truncation_noticed:
-            self._truncation_noticed = True
+        if self._truncated:
             return
         self.accept()
 
     def values(self) -> tuple[str, str]:
-        """返回按上限截断后的 (场景描述, 在场人物)；多行内部换行原样保留。
+        """返回 (场景描述, 在场人物)，多行内部换行原样保留。
 
-        场景按字符截断并补 ``…``；人物按整行截断。发生任何截断都会把提示摆在
-        对话框里（并让第一次「保存」停在提示上）。
+        正常路径（用户在对话框里操作）不会走到截断：超限时保存按钮禁用，用户必须先删。
+        这里的截断只是**防御性兜底**（外部代码直接调 values 时），场景按字符截断并补
+        ``…``、人物按整行截断，一旦发生就把提示摆出来。
         """
         scene_raw = self.scene_edit.toPlainText().strip()
         cast_raw = self.cast_edit.toPlainText().strip()
