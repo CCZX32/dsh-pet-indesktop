@@ -158,13 +158,17 @@ python -m petcore mods doctor
 - 其余 `fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music` 是**可导入样板**，位于 `examples/petcore-mods/`；用 `petcore mods install <目录>` 安装到用户数据目录，并开启 `allow_feature_mods`。安装后由 `FeatureManager` 从用户 mods 目录加载，菜单贡献默认进入「扩展」子菜单。Windows 安装向导勾选安装时落 `{app}\mods\<id>`，归「加装扩展」。
 - 设置页不再各自占侧边栏：第三方 mod 的 `settings_page` 进入「扩展管理」页内导航；Core 内置特性用 `Contribution.data["host_page"]` 声明归属（`interaction` / `menu` / `about`），由对应 Core 页内嵌，见 §9。
 - `HostPorts` 新增：
-  - `pets`：只读宠物句柄（body_rect / velocity / move_by / show / hide / say / play_animation）；
-  - `interaction`：`on_click`、`on_drop`、`on_tick`、`cancel_owner`；
+  - `pets`：只读宠物句柄（body_rect / velocity / move_by / show / hide / say / play_animation / play_event）；
+  - `presentation`：`say` / `show_image` / `play_animation` / `play_event` / `notify`；
+  - `interaction`：`on_click`、`on_drop`、`on_tick`、`cancel_owner`；`on_drop` 回调收到的是
+    **已投喂的文件路径列表**（Core 先做投喂动画与统计，再通知监听者；`file_feeding_enabled`
+    关闭时不会有 drop 事件）；
+  - `http`：普通取数端口（见 §11）；
   - `quiet`：进程级免打扰。
 - `FeatureContext.host` 暴露宿主对象，mod 可读取共享配置；跨域仍走端口/事件，不直接 import `pet.*`。
 - 每个有菜单贡献的内置 mod 必须提供 `settings_page`；`tests/test_petcore_builtin_mods.py` 守住。
 - 内置包当前清单：`fun.self-talk`、`fun.click-talk`、`tool.quick-launch`、`tool.quiet-mode`、`tool.links`、`tool.memory-trim`、`tool.network-info`。
-- 示例可导入包：`examples/petcore-mods/{fun.divination,fun.festival,reminder.todo,voice.chime,media.music}`；`examples/petcore-mods/README.md` 是安装与端口样板说明。
+- 示例可导入包：`examples/petcore-mods/{fun.divination,fun.festival,reminder.todo,voice.chime,media.music,tool.weather,tool.file-reader}`；`examples/petcore-mods/README.md` 是安装与端口样板说明。
 
 
 ## 9. Core 内置特性与 `host_page`（P8）
@@ -235,3 +239,54 @@ host/settings_page.py  设置页（受信 UI，允许 QtWidgets）
 
 安装：`petcore mods install examples/petcore-mods/ai.chat`（或安装向导勾选，默认不勾）。
 没有安装时，右键菜单与三条热键会气泡提示「AI 扩展未安装」，不会静默无响应。
+
+## 11. P4 端口：通用取数 `HttpPort`（2026-10-22）
+
+天气、歌词这类「普通 HTTP GET」原先没有入口：mod 只能拿 `ApiPort`（LLM 专用），
+而网络库按架构守卫禁止出现在 mod 里。P4 增加 `HostPorts.http`：
+
+| 端口 | 方法 | 说明 |
+|---|---|---|
+| `HttpPort` | `request(HttpRequest) -> HttpResponse` | 唯一取数入口；失败抛 `HttpError(reason)` |
+| `HttpPort` | `get_json(url, *, timeout, headers, params, prefer_direct)` | 便利方法；解码失败统一 `protocol` |
+
+`HttpRequest` 关键字段：
+
+- `prefer_direct`：`False` 先走系统代理，`True` 先直连（国内站点口径）。
+- `retry_statuses`：允许换路由的服务器明确答复，默认 `(500, 502, 504)`；404/429/503
+  与带 `Retry-After` 的响应**不换路由**。
+- `params`：查询串键值对，百分号编码由 Core 做（mod 不需要 `urllib.parse`）。
+- `max_bytes`：响应体硬上限，默认 4 MB；超出部分截断，由调用方按协议判无效。
+
+错误只暴露 `HttpError.reason`（`auth/rate_limit/network/timeout/protocol`）、
+`status`、`retry_after`；异常链与响应体不外泄（响应体可能回显密钥）。
+
+**硬规则**：
+
+1. 两条路由共享同一个 `timeout` 预算，最多各试一次；显式路由请求**不改写**进程级
+   「固定直连」结论（天气是国内直连、海外代理，一次失败不能污染其它域）。
+2. mod 不得 import `petcore.net`/`petcore.api`/`petcore.account`；`urllib` 等网络库
+   仍然只允许出现在这三个包（`tests/test_petcore_architecture.py`）。
+3. 新增取数功能时先想清楚路由：国内源 `prefer_direct=True`，海外源用默认值。
+
+### 参考实现：`examples/petcore-mods/tool.weather`
+
+```text
+mod.json               capabilities=[network.request, speech.present]
+host/logic.py          城市名/地区码/两源解析/WMO 码表/失败文案（纯逻辑）
+host/client.py         两源取数：CN 直连 → open-meteo 代理，6s/请求 + 15s 总预算
+host/runtime.py        命令 show：后台线程 → 气泡；运行时无 Qt
+host/settings_page.py  启用、城市列表、当前城市、立即查看
+```
+
+### 参考实现：`examples/petcore-mods/tool.file-reader`
+
+```text
+mod.json               capabilities=[files.read, network.request, speech.present]
+host/reader.py         后缀白名单、20000 文件/2s 扫描预算、200000 字符有界读取
+host/runtime.py        interaction.on_drop → 后台 stream_chat → 气泡 + ChatPort.record
+host/settings_page.py  启用、进度间隔（5–120s）、是否写入聊天记录
+```
+
+`files.read` 是 P4 新增的能力声明（读取用户拖入的任意文本文件）；它同样只是声明，
+不是沙箱。文件解读**只读**：不修改、不移动、不删除被拖入的文件，路径不写日志正文。

@@ -158,6 +158,9 @@ def _draw(name: str, painter: QPainter) -> None:
         painter.drawLine(QPointF(17, 13), QPointF(10, 22))
         painter.drawLine(QPointF(19, 13), QPointF(26, 22))
         painter.drawLine(QPointF(13, 26), QPointF(23, 26))
+    elif name == "weather":
+        painter.drawEllipse(QRectF(6, 7, 13, 13))
+        painter.drawRoundedRect(QRectF(11, 16, 19, 12), 6, 6)
     else:
         painter.drawEllipse(QRectF(14, 14, 8, 8))
 

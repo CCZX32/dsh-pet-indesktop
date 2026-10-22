@@ -130,12 +130,13 @@ feature mod 的入口只能是 `host-only`（worker 还未实现）。开发期�
    `tests/test_petcore_builtin_mods.py` 会红。
 
 可用端口见 `petcore/ui/ports.py`：`presentation`、`scheduler`、`audio`、
-`storage`、`pets`、`interaction`、`quiet`；`context.host` 提供共享配置。
+`storage`、`pets`、`interaction`、`quiet`、`http`（P4-a 通用取数）；
+`context.host` 提供共享配置。
 内置清单（7 个）：`fun.self-talk`、`fun.click-talk`、`tool.quick-launch`、
 `tool.quiet-mode`、`tool.links`、`tool.memory-trim`、`tool.network-info`。
 
-可导入样板（5 个）在 `examples/petcore-mods/`：`fun.divination`、`fun.festival`、
-`reminder.todo`、`voice.chime`、`media.music`。用
+可导入样板（7 个）在 `examples/petcore-mods/`：`fun.divination`、`fun.festival`、
+`reminder.todo`、`voice.chime`、`media.music`、`tool.weather`、`tool.file-reader`。用
 `petcore mods install examples/petcore-mods/<id>` 安装，并在设置 →「扩展管理」
 开启「允许功能扩展」；安装后菜单默认进「扩展」，设置页进入「扩展管理」→「加装扩展」。
 详细说明见 [`examples/petcore-mods/README.md`](../examples/petcore-mods/README.md)。

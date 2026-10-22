@@ -163,6 +163,8 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 
 - `petcore/builtin/features/<id>/mod.json` + `host/factory.py`；`FeatureManager.load_builtin_features()` 扫描并加载，受信任、不受 `allow_feature_mods` 限制。
 - `petcore/ui/ports.py`：`QtScheduler`、`AudioAdapter`、`StorageAdapter`、`PetRegistry`、`InteractionAdapter`、`QuietMode`；`HostPorts` 新增 `pets`/`interaction`/`quiet`。
+- P4-a 新增 `HostPorts.http`（`CoreHttpPort`）：唯一普通取数出口；路由策略、错误分类与
+  体积上限都在 `petcore/net/http.py::fetch_url`，mod 只给 URL/参数/路由偏好。
 - `FeatureContext.host` 暴露宿主（只读使用），使 mod 能读取共享配置；mod 仍不应直接 import `pet.*`。
 - 菜单贡献统一 `<owner>:<contribution>`；每个有菜单的 mod 必须有设置页。
 
@@ -180,7 +182,7 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 
 ## 16. 可导入样例与移动同步
 
-- 内置只保留 7 个强交互 mod；`fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music` 移到 `examples/petcore-mods/`，可用 `petcore mods install` 安装。
+- 内置只保留 7 个强交互 mod；`fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music`、`tool.weather`、`tool.file-reader` 移到 `examples/petcore-mods/`，可用 `petcore mods install` 安装。
 - `CharacterSpec.move_curves` 保存 `move_strides.json` 的 `curve`；`content/legacy.py` 与 `content/modcontent.py` 解析并清洗（0..1、≥2 项）。
 - `engine/motion.py` 新增 `body_reach`、`choose_move_direction`、`quantize_move`、`move_position_at_frame`；位置由 clip 帧号 + curve 推进，静态帧不位移。
 - `PetWindow._begin_move` 先按方向设置 `state.facing`，再渲染首帧；`_on_frame` 调用 `_advance_move_from_frame`；`_on_finished` 提交终点/循环重播。固定 33ms 线性步进已删除。
@@ -192,8 +194,8 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
   逐包授权」。`loader.load_mods()` 的判定是「在用户 mods 目录 + (`allow_feature_mods`
   或 `.trusted`)」；`ui/app.py::attach_window()` 只认 `mod.enabled`，不再自己复读全局
   开关，否则随安装包投放的扩展永远激活不了。
-- **安装器**：`packaging/petcore.iss` 的 5 个扩展是 `[Tasks]`；源文件来自
-  `examples/petcore-mods/`，目标 `{userappdata}\dsh-pet-core\mods\<id>`，另投放
+- **安装器**：`packaging/petcore.iss` 的 9 个随附扩展是 `[Tasks]`（全部 `Flags: unchecked`）；源文件来自
+  `examples/petcore-mods/`，目标 `{app}\mods\<id>`（安装目录，卸载随应用删除），另投放
   `packaging/trust_marker.txt`（重命名为 `.trusted`）。不勾选不写盘。
 - **朝向**：素材原生朝左，`_mirrored()` 只在 `facing == "right"` 时镜像；
   `PetState.facing` 默认 `left`。

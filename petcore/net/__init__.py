@@ -17,7 +17,7 @@ from .errors import (
     classify_http_status,
     describe,
 )
-from .http import force_direct, reset_transport, urlopen
+from .http import build_request, fetch_url, force_direct, reset_transport, urlopen
 
 __all__ = [
     "AuthError",
@@ -26,9 +26,11 @@ __all__ = [
     "NetworkTimeout",
     "NetworkUnreachable",
     "RateLimitError",
+    "build_request",
     "classify_exception",
     "classify_http_status",
     "describe",
+    "fetch_url",
     "force_direct",
     "reset_transport",
     "urlopen",

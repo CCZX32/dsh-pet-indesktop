@@ -50,6 +50,8 @@ Name: "mod_chime"; Description: "整点报时（voice.chime）"; GroupDescriptio
 Name: "mod_music"; Description: "音乐信息（media.music）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_aichat"; Description: "AI 对话（ai.chat，需自备 API）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_ocr"; Description: "本地 OCR（tool.ocr，离线提取文字）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
+Name: "mod_weather"; Description: "天气（tool.weather，需联网）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
+Name: "mod_filereader"; Description: "文件解读（tool.file-reader，需 API）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 
 [Files]
 Source: "..\dist\dsh-pet-core\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -70,6 +72,10 @@ Source: "..\examples\petcore-mods\ai.chat\*"; DestDir: "{app}\mods\ai.chat"; Fla
 Source: "trust_marker.txt"; DestDir: "{app}\mods\ai.chat"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_aichat
 Source: "..\examples\petcore-mods\tool.ocr\*"; DestDir: "{app}\mods\tool.ocr"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_ocr
 Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.ocr"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_ocr
+Source: "..\examples\petcore-mods\tool.weather\*"; DestDir: "{app}\mods\tool.weather"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_weather
+Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.weather"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_weather
+Source: "..\examples\petcore-mods\tool.file-reader\*"; DestDir: "{app}\mods\tool.file-reader"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_filereader
+Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.file-reader"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_filereader
 
 [Icons]
 Name: "{autoprograms}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"

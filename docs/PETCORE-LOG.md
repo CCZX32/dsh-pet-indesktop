@@ -1728,3 +1728,74 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 
 - 内存是单次采样，不是多次中位数；真实桌面与混合 DPI 下数值会有差异。
 - 若以后把 `ChatController` 改成首次使用时惰性创建，启动的 7.1MB/63.5ms 还能再降。
+
+## L045 · 2026-10-22 · P4-a 通用取数端口 + 天气 + 文件解读
+
+**范围**：`PETCORE-HANDOFF-PLAN` §P4 的第一段。Core 只加一条 `HttpPort` 与四个
+`weather_*`/`file_reader_*` 配置键；两个业务域都以 `examples/petcore-mods/` 的
+host-only feature 落地，默认不装。
+
+**改动**（`git diff --numstat` 口径）
+
+- `petcore/contracts/http.py`（新，110）：`HttpRequest/HttpResponse/HttpError`、
+  `HttpPort`。`params` 由 core 编码；`prefer_direct` / `retry_statuses` / `max_bytes`。
+- `petcore/net/http.py`（+135）：`build_request`、`fetch_url`——单请求显式路由、
+  两次尝试共享 deadline、只在传输失败或 500/502/504 换路由、按块读取带体积上限，
+  **不改写**进程级「固定直连」结论；`net/__init__.py` 导出两者。
+- `petcore/ui/ports.py`（+70）：`CoreHttpPort`（`request/get_json`），
+  `build_ports` 装配 `HostPorts.http`；`contracts/host.py` 增字段；
+  `ui/app.py` 保存 `self.ports` 供设置页取用。
+- `petcore/config.py`（+40）：`weather_enabled/weather_city/weather_city_list/
+  weather_city_codes`、`file_reader_enabled/file_reader_progress_seconds/
+  file_reader_record`，全部全局键 + 归一化。
+- `petcore/contracts/capabilities.py`（+1）：新增 `files.read`（读取用户拖入的文本文件）。
+- `petcore/ui/icons.py`（+3）：菜单/设置页的 `weather` 图标。
+- `examples/petcore-mods/tool.weather/`（新，971）：`logic.py`（城市名/地区码/两源解析/
+  WMO 与 Beaufort 码表/失败文案）、`client.py`（CN 直连 → open-meteo 代理，6s/请求、
+  15s 总预算）、`runtime.py`（后台线程 + 气泡）、`settings_page.py`（启用/城市列表/
+  当前城市/立即查看）、`host/__init__.py`、`mod.json`。
+- `examples/petcore-mods/tool.file-reader/`（新，502）：`reader.py`（后缀白名单、
+  20000 文件/2s 扫描预算、200000 字符有界读取）、`runtime.py`（`interaction.on_drop`
+  → 后台 `api.stream_chat` → 气泡 + `ChatPort.record`）、`settings_page.py`。
+- `tests/test_petcore_http_port.py`（新，312）、`tests/test_petcore_weather_mod.py`
+  （新，338）、`tests/test_petcore_file_reader_mod.py`（新，314）。
+- `tests/test_petcore_example_mods.py`（+2）、`tests/test_petcore_installer.py`（+5/-1）：
+  新包进可加载清单与安装器任务断言。
+- `packaging/petcore.iss`（+6）：`mod_weather` / `mod_filereader`，`Flags: unchecked`，
+  `{app}\mods\<id>` + `.trusted`。
+- 文档：`PETCORE-SPEC.md` §23、`PETCORE-ROADMAP.md` §23、`PETCORE-MOD-FORMAT.md` §11、
+  `PETCORE-ARCHITECTURE.md` §14/§16/§17、`PETCORE-MAIN-PARITY-BACKLOG.md` §3.2/§2/§11、
+  `examples/petcore-mods/README.md`、`petcore/AGENTS.md` 四条红线。
+
+**行为变化与理由**
+
+- 天气：国内源直连（本机实测代理慢 7~11 倍，主分支 `docs/NETWORK-PROXY-AND-VPN-2026-09-22.md`
+  的结论）、海外源跟随系统代理；失败点名两源，不静默。城市名存储不剥后缀
+  （剥离不幂等），只在查询期做变体匹配。
+- 文件解读：只读文本类文件，绝不改/移/删；扫描与字符都有硬预算；结果默认进会话，
+  可关；菜单提供「解读刚才拖入的文件」，对应主分支没有菜单入口的缺口。
+- `files.read` 是新增能力声明；能力仍只是声明 + 用户授权，不是沙箱。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py -q`
+  → **881 passed**。本段新增测试 **50 条**（`test_petcore_http_port.py` 17、
+  `test_petcore_weather_mod.py` 18、`test_petcore_file_reader_mod.py` 15）。
+- `.venv/Scripts/ruff check petcore/... examples/petcore-mods/tool.* tests/test_petcore_*`
+  → All checks passed。
+- 真实取数（本机，`CoreHttpPort`）：鹿城 0.26s、北京 0.24s、open-meteo 上海 4.51s、
+  不存在城市 1.86s 且两源原因都出现。
+- `python -m pytest tests/test_petcore_example_mods.py tests/test_petcore_installer.py
+  tests/test_petcore_architecture.py tests/test_petcore_settings_coverage.py -q` → 通过。
+
+**未验证 / 边界**
+
+- 天气「明天」与逐城市子菜单未做：主分支右键也只有「显示天气」，逐城市需要 mod 动态
+  子菜单端口，留 P4-c 菜单模板批次一起评估。
+- 冻结包已重建并静默安装到 `E:\dsh-pet-core`（setup 257,488,664 字节、签名有效）；
+  `--check`（安装版 exe + 临时 `--root`）显示两个新 mod `enabled=True`、`diagnostics []`，
+  安装后进程存活（PID 23652，RSS 98.9 MB）。真实桌面上的「点菜单查天气 / 拖文件解读」
+  需要在用户使用时观察日志，自动化只覆盖到离屏与端口层。
+- 文件解读依赖 Core 的 `file_feeding_enabled`（关闭时不会收到 drop 事件），已在
+  MOD-FORMAT §8 写明。
+- 两个 mod 的设置页只做了离屏测试，真实窗口在 900×620 / 125% DPI 下未实机对照。

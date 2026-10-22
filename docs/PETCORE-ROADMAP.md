@@ -330,3 +330,17 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 | 外观/跟随 | 完成：背景（默认/内置主题/本地图）、强调色、跟随桌宠、置顶四个设置入口 + `apply_appearance()` 实时预览 |
 | 截图历史 | 明确：每次采集独立、只存内存、不落盘；`open()` 清空上一轮 |
 | 未做 | OCR、翻译、复制动作条、主动识屏、每日预算、思考/联网过程面板（P4） |
+
+## 23. P4-a：取数端口 / 天气 / 文件解读（2026-10-22）
+
+| 项 | 状态 |
+|---|---|
+| `HttpPort` | 完成：`contracts/http.py` + `net/http.py::fetch_url` + `CoreHttpPort`；按请求路由、共享 deadline、4MB 上限、五类错误 |
+| `tool.weather` | 完成：双源双出口、城市列表/地区码、失败真值表、设置页「立即查看」；真实取数 0.24–0.26s（CN）与 4.51s（open-meteo 两跳） |
+| `tool.file-reader` | 完成：`on_drop`、20000 文件/2s 扫描预算、200000 字符有界读取、心跳气泡、摘录入会话；只读不删 |
+| 安装器 | 完成：`mod_weather` / `mod_filereader` 两条 unchecked 任务，装到 `{app}\mods\<id>` |
+| 文档 | 完成：SPEC §23、MOD-FORMAT §11、ARCHITECTURE §14/§16/§17、backlog、log `L045` |
+| 未做 | 天气「明天」与逐城市子菜单（主分支也没有）、主动识屏（P4-c）、歌词取词（P4-b） |
+
+**计划变更**：原计划天气命令含 `tomorrow`，实际只做 `show`——主分支右键也只有「显示天气」，
+逐城市子菜单需要 mod 动态 populate 端口，留到 P4-c 菜单模板批次一起评估。

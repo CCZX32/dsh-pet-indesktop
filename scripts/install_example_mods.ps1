@@ -1,4 +1,4 @@
-# 安装 examples/petcore-mods 下的 5 个示例 feature mod
+# 安装 examples/petcore-mods 下的示例 feature mod
 # 用法：pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install_example_mods.ps1
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -14,7 +14,9 @@ $ids = @(
     "fun.festival",
     "reminder.todo",
     "voice.chime",
-    "media.music"
+    "media.music",
+    "tool.weather",
+    "tool.file-reader"
 )
 
 foreach ($id in $ids) {

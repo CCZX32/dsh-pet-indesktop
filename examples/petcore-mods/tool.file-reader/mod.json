@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "tool.file-reader",
+  "name": "File reader",
+  "name_zh": "文件解读",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/__init__.py:create_host",
+  "capabilities": ["files.read", "network.request", "speech.present"]
+}

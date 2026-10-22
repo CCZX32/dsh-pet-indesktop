@@ -46,12 +46,14 @@ def test_bundled_mods_install_under_the_app_directory() -> None:
         "voice.chime",
         "media.music",
         "ai.chat",
+        "tool.weather",
+        "tool.file-reader",
     ):
         assert f"{{app}}\\mods\\{mod_id}" in text
 
 
 def test_official_feature_tasks_are_opt_in() -> None:
-    """5 个官方扩展默认不勾选：不勾选就完全不写盘（用户口径）。"""
+    """随附扩展默认不勾选：不勾选就完全不写盘（用户口径）。"""
     lines = _iss_text().splitlines()
     task_lines = {
         mod_id: next(line for line in lines if f'Name: "mod_{suffix}"' in line)
@@ -63,6 +65,8 @@ def test_official_feature_tasks_are_opt_in() -> None:
             ("media.music", "music"),
             ("ai.chat", "aichat"),
             ("tool.ocr", "ocr"),
+            ("tool.weather", "weather"),
+            ("tool.file-reader", "filereader"),
         )
     }
     assert all("Flags: unchecked" in line for line in task_lines.values())

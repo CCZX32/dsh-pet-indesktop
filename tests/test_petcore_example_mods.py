@@ -16,6 +16,8 @@ IDS = (
     "voice.chime",
     "media.music",
     "tool.ocr",
+    "tool.weather",
+    "tool.file-reader",
 )
 
 

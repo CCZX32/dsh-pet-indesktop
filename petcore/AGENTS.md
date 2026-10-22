@@ -113,6 +113,17 @@
 - **API 配置/密钥**：`api.json` 只存服务规格，密钥只进 `KeyringCredentials`；
   设置页只在显式保存时落盘，keyring 不可用时退内存并在界面说明。mod 通过
   `HostPorts.api`（`ApiPort`）拿 `ApiMetadata/ApiRequest`，不许 import `petcore.api`。
+- **普通取数只经 `HttpPort`**：天气、歌词这类 GET 一律走 `HostPorts.http`；查询串用
+  `HttpRequest.params`（编码在 core），mod 不许 import `urllib`。`prefer_direct` 是
+  **单请求**语义：显式路由请求不得改写 `net/http.py` 的进程级「固定直连」结论，
+  换路由只允许发生在传输失败或 `retry_statuses`（默认 500/502/504），404/429/503 与
+  带 `Retry-After` 的响应不换。新增取数域先定路由：国内源直连、海外源走代理。
+- **天气口径**：中国天气网 `prefer_direct=True`、open-meteo 默认路由；单请求 6 秒、
+  整次 15 秒预算，预算耗尽不再发请求；两源都失败必须点名每个源的原因，不许静默。
+- **文件解读只读**：`tool.file-reader` 只读被拖入的文本文件，**不许修改/移动/删除**；
+  路径不写日志正文；扫描 20000 文件/2 秒、单次 200000 字符，超出要如实提示。
+- **能力声明**：新增能力必须先登记 `contracts/capabilities.py`（P4-a 加了 `files.read`）；
+  能力只是声明与用户授权，不是沙箱。
 - **朝向口径**：角色素材原生朝左，`facing == "right"` 才水平镜像（同主分支）。
   `PetState.facing` 默认 `left`；反了就是「位移方向和面朝向相反」。
 - **碰边反馈**：抛掷/弹射按「离地→接触」的接触沿触发 `_on_motion_bounce()`，每次

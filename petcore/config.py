@@ -51,6 +51,13 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "spawn_scale",
         "stream_capture_mode",
         "ui_font_size",
+        "weather_enabled",
+        "weather_city",
+        "weather_city_list",
+        "weather_city_codes",
+        "file_reader_enabled",
+        "file_reader_progress_seconds",
+        "file_reader_record",
     }
 )
 
@@ -144,6 +151,13 @@ DEFAULTS: dict[str, Any] = {
     "memory_trim_enabled": True,
     "divination_enabled": True,
     "festival_enabled": True,
+    "weather_enabled": True,
+    "weather_city": "",
+    "weather_city_list": [],
+    "weather_city_codes": {},
+    "file_reader_enabled": True,
+    "file_reader_progress_seconds": 15,
+    "file_reader_record": True,
     "todo_items": [],
     "voice_chime_enabled": False,
     "music_enabled": True,
@@ -515,6 +529,32 @@ class Config:
         normalized["memory_trim_enabled"] = _bool(normalized.get("memory_trim_enabled"), True)
         normalized["divination_enabled"] = _bool(normalized.get("divination_enabled"), True)
         normalized["festival_enabled"] = _bool(normalized.get("festival_enabled"), True)
+        normalized["weather_enabled"] = _bool(normalized.get("weather_enabled"), True)
+        normalized["weather_city"] = str(normalized.get("weather_city") or "").strip()[:24]
+        normalized["weather_city_list"] = _text_list(normalized.get("weather_city_list"))[:12]
+        codes = normalized.get("weather_city_codes")
+        normalized["weather_city_codes"] = (
+            {
+                str(key)[:24]: str(value).strip()
+                for key, value in codes.items()
+                if isinstance(key, str) and isinstance(value, str) and str(value).strip()
+            }
+            if isinstance(codes, dict)
+            else {}
+        )
+        normalized["file_reader_enabled"] = _bool(
+            normalized.get("file_reader_enabled"), True
+        )
+        normalized["file_reader_progress_seconds"] = int(
+            round(
+                _number(
+                    normalized.get("file_reader_progress_seconds"), 15.0, 5.0, 120.0
+                )
+            )
+        )
+        normalized["file_reader_record"] = _bool(
+            normalized.get("file_reader_record"), True
+        )
         normalized["todo_items"] = _text_list(normalized.get("todo_items"))
         normalized["voice_chime_enabled"] = _bool(normalized.get("voice_chime_enabled"), False)
         normalized["music_enabled"] = _bool(normalized.get("music_enabled"), True)

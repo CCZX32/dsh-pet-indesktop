@@ -57,3 +57,4 @@
 | L042 | 2026-10-22 | 截图四动作 + 快速对话 | 动作条补齐提取文字/翻译/问问肥鱼/复制图像；OCR 归 `tool.ocr`（本地 rapidocr 优先、AI 兜底）；`on_action` 按 priority 回退；点桌宠气泡开快速对话并与完整窗共用会话。 | RegionPick、on_action、priority、tool.ocr、rapidocr、QuickChatPort、bubble.clicked |
 | L043 | 2026-10-22 | 动作条对比度 | 显式深色按钮文字/禁用灰，修深色主题下浅条白字看不清；像素级回归 + 重建安装。 | QSS、ButtonText、对比度、screen-selection-bar |
 | L044 | 2026-10-22 | AI 模块分布盘点 | core/mod 代码表、core 里没有的业务、启动/传输/窗口/OCR 实测占用与四项已知耦合；纯文档批次。 | AI 模块、core 占用、7.1MB、145MB、ChatTruncated、ARCHITECTURE 23 |
+| L045 | 2026-10-22 | P4-a 取数/天气/文件解读 | 新增 `HttpPort`（按请求路由、共享 deadline、4MB 上限）与 `tool.weather`、`tool.file-reader` 两个可导入 mod；安装器两条 unchecked 任务；`files.read` 能力。 | HttpPort、fetch_url、prefer_direct、retry_statuses、tool.weather、open-meteo、tool.file-reader、on_drop、files.read |

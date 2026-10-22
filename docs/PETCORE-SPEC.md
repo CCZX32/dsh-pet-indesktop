@@ -544,3 +544,35 @@ petcore/
   （6.4 MB / 77.9 ms）；OCR 引擎首次识别 +145 MB 常驻。
 - 详细代码表、占用与结论见
   [`PETCORE-ARCHITECTURE.md` §23](PETCORE-ARCHITECTURE.md#23-ai-对话模块分布与-core-占用2026-10-22)。
+
+## 23. P4-a：通用取数端口与两个业务 mod（2026-10-22）
+
+**Core 只加一条端口，业务留在 `examples/petcore-mods/`。**
+
+| 项 | 落点 |
+|---|---|
+| `HttpPort` 契约 | `petcore/contracts/http.py`：`HttpRequest/HttpResponse/HttpError`，`params` 由 core 编码 |
+| 传输与路由 | `petcore/net/http.py::fetch_url`：`prefer_direct`、`retry_statuses`、共享 deadline、`max_bytes` |
+| 端口实现 | `petcore/ui/ports.py::CoreHttpPort`，装配进 `HostPorts.http`；`CoreHost.ports` 供设置页取用 |
+| 天气 | `tool.weather`：中国天气网直连 + open-meteo 代理兜底；6s/请求、15s 总预算 |
+| 文件解读 | `tool.file-reader`：`interaction.on_drop` → 有界读取 → `api.stream_chat` → 气泡 + `ChatPort.record` |
+
+规则：
+
+1. **路由按请求决定**，显式路由请求不改写进程级「固定直连」结论；换路由只发生在传输失败
+   或 500/502/504，404/429/503 与带 `Retry-After` 的响应不换。
+2. **mod 仍然不 import `petcore.net|api|account`**，也不 import `urllib`；`params` 编码由 core 做。
+3. **文件解读只读**：不修改/移动/删除被拖入的文件；路径不写日志正文；结果默认进会话，
+   可在设置里关掉。
+4. **默认安装口径不变**：两个新扩展都是安装向导可勾选项（`Flags: unchecked`），
+   装到 `{app}\mods\<id>` 并带 `.trusted`，不勾选完全不写盘。
+5. 新增能力声明 `files.read`（读取用户拖入的文本文件）；能力仍是声明，不是沙箱。
+
+实测（2026-10-22，本机）：
+
+| 场景 | 结果 |
+|---|---|
+| 中国天气网「鹿城」 | `鹿城 多云 20.3℃，西风 1级，湿度 58%`，0.26s |
+| 中国天气网「北京」 | `北京 多云 11.3℃，南风 2级，湿度 52%`，0.24s |
+| open-meteo 兜底「上海」 | `上海 局部多云 17.7℃，东北风 2级，湿度 71%`，4.51s（两跳） |
+| 不存在的城市 | 两源各点名原因，1.86s，不静默 |

@@ -6,6 +6,7 @@ from typing import Any, Callable, Protocol
 
 from .api import ApiPort
 from .chat import ChatPort, QuickChatPort
+from .http import HttpPort
 from .screen import ScreenAskPort, ScreenPort
 
 
@@ -155,3 +156,4 @@ class HostPorts:
     quick_chat: QuickChatPort | None = None
     screen: ScreenPort | None = None
     screen_ask: ScreenAskPort | None = None
+    http: HttpPort | None = None

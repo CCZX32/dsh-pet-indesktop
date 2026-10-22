@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import sys
 import time
@@ -13,6 +14,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from .. import paths
 from ..contracts.api import ApiMetadata, ApiRequest
 from ..contracts.host import HostPorts
+from ..contracts.http import HttpError, HttpRequest, HttpResponse
 
 logger = logging.getLogger("petcore.ui.ports")
 
@@ -452,6 +454,73 @@ class CoreApiPort:
         )
 
 
+class CoreHttpPort:
+    """通用取数端口：路由策略、失败分类、大小上限都在 core。
+
+    mod 只描述 URL/方法/头与路由偏好；拿不到代理配置、异常链和响应体以外的
+    任何东西（响应体本身可能很大，所以有 ``max_bytes`` 硬上限）。
+    """
+
+    def __init__(self, opener=None) -> None:
+        self._opener = opener
+
+    def request(self, request: HttpRequest) -> HttpResponse:
+        from ..net import errors as net_errors
+        from ..net.http import fetch_url
+
+        try:
+            status, headers, body = fetch_url(
+                request.url,
+                method=request.method,
+                headers=tuple(request.headers),
+                body=request.body,
+                params=tuple(request.params),
+                timeout=request.timeout,
+                prefer_direct=request.prefer_direct,
+                retry_statuses=tuple(request.retry_statuses),
+                max_bytes=request.max_bytes,
+                opener=self._opener,
+            )
+        except net_errors.NetworkError as exc:
+            raise HttpError(
+                str(getattr(exc, "reason", "") or "network"),
+                status=int(getattr(exc, "status", 0) or 0),
+                retry_after=getattr(exc, "retry_after", None),
+                message=str(exc),
+            ) from None
+        return HttpResponse(
+            status=status,
+            url=str(request.url),
+            headers=headers,
+            body=body,
+        )
+
+    def get_json(
+        self,
+        url: str,
+        *,
+        timeout: float = 10.0,
+        headers: tuple[tuple[str, str], ...] = (),
+        params: tuple[tuple[str, str], ...] = (),
+        prefer_direct: bool = False,
+    ):
+        response = self.request(
+            HttpRequest(
+                url=str(url),
+                timeout=float(timeout),
+                headers=tuple(headers),
+                params=tuple(params),
+                prefer_direct=bool(prefer_direct),
+            )
+        )
+        if response.status >= 400:
+            raise HttpError("protocol", status=response.status)
+        try:
+            return json.loads(response.text)
+        except ValueError:
+            raise HttpError("protocol", status=response.status) from None
+
+
 class WorkerNoticePort:
     """给 worker 的启动/崩溃/异常退出补上用户可见反馈（P3 验收项）。"""
 
@@ -583,4 +652,5 @@ def build_ports(host, window) -> HostPorts:
         quick_chat=getattr(host, "quick_chat", None),
         screen=QtScreenPort(host),
         screen_ask=getattr(host, "screen_ask", None),
+        http=CoreHttpPort(),
     )

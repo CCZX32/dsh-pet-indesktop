@@ -158,6 +158,7 @@ class CoreHost:
         self.features: FeatureManager | None = None
         self.quiet = None
         self.worker_host = WorkerHost()
+        self.ports = None
         from .ports import QuietMode
 
         self.quiet = QuietMode()
@@ -172,6 +173,7 @@ class CoreHost:
         from .ports import build_ports
 
         ports = build_ports(self, window)
+        self.ports = ports
         self.features = FeatureManager(ports, host=self)
         self.diagnostics.extend(self.features.load_builtin_features())
         self.diagnostics.extend(self.features.load_builtin_demo())

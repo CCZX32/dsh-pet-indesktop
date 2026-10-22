@@ -10,6 +10,7 @@ CAPABILITIES = frozenset(
         "settings.read",
         "settings.write",
         "network.request",
+        "files.read",
         "filesystem.user_data",
         "screenshot.capture",
         "process.spawn",

@@ -1,6 +1,6 @@
 # 可导入 petcore mod 样板
 
-这 6 个目录是**可安装的 feature mod 包**，不是 core 内置：
+这 8 个目录是**可安装的 feature mod 包**，不是 core 内置：
 
 - `fun.divination`：抽签
 - `fun.festival`：公历节日提醒
@@ -8,6 +8,8 @@
 - `voice.chime`：系统 TTS 报时
 - `media.music`：Windows 系统媒体键
 - `ai.chat`：AI 对话 + 截图提问（需要先在「设置 → API 与账户」配置服务与密钥）
+- `tool.weather`：天气实况（中国天气网直连 + open-meteo 代理兜底）
+- `tool.file-reader`：拖文件解读（读文本类文件 → AI 摘要，只读不删）
 
 ## 安装
 
@@ -18,6 +20,8 @@
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/voice.chime
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/media.music
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/ai.chat
+.venv/Scripts/python -m petcore mods install examples/petcore-mods/tool.weather
+.venv/Scripts/python -m petcore mods install examples/petcore-mods/tool.file-reader
 ```
 
 或一键：
@@ -31,7 +35,7 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 
 ### Windows 安装包
 
-正式安装包（`dist/dsh-pet-core-setup.exe`）把这 5 个包做成了安装向导里的可勾选项（默认不勾选），
+正式安装包（`dist/dsh-pet-core-setup.exe`）把这些包做成了安装向导里的可勾选项（默认不勾选），
 勾选后才装到 `{app}\mods\<id>`（安装目录下），并附一个 `.trusted` 标记文件——那是
 「安装器逐包授权」的证据，带着它就不需要再勾「允许功能扩展」。不勾选就完全不会
 写盘；卸载时随安装目录一起删除。
@@ -51,12 +55,13 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 
 `context.ports` 提供：
 
-- `presentation`：`say` / `play_animation` / `notify`
+- `presentation`：`say` / `play_animation` / `play_event` / `show_image` / `notify`
 - `scheduler`：`call_later` / `call_every` / `cancel`
 - `storage`：`data_dir(owner)` / `config_dir(owner)`
 - `config`：只读配置 `get(key, default)`；运行时代码不要直接持有 `host.config`
-- `interaction`：`on_click` / `on_drop` / `on_tick`
-- `pets`：只读宠物句柄
+- `interaction`：`on_click` / `on_drop` / `on_tick`（`on_drop` 拿到的是已投喂的文件路径列表）
+- `pets`：只读宠物句柄（含 `play_animation` / `play_event`）
+- `http`：普通取数 `request(HttpRequest)` / `get_json(url, params=…)`；路由与错误分类在 core
 - `quiet`：进程级免打扰
 
 运行时代码不要 import PySide6；需要回 GUI 线程用 `ports.scheduler.call_later()`。
