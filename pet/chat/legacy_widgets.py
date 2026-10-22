@@ -168,7 +168,7 @@ class MessageBubble(QFrame):
             root.setDirection(QHBoxLayout.Direction.RightToLeft)
 
     def _set_body_text(self, text: str) -> None:
-        """助手气泡按 Markdown 渲染（与现代窗同一 markdown_to_html 口径）；
+        """助手气泡按 Markdown 渲染；所有 chat surface 统一渲染，落盘原文不变。
         用户气泡保持纯文本（用户输入里的 < 符号等不当 HTML 解析）。"""
         self._raw_text = str(text)
         if self.role == "assistant" and text:
@@ -1145,7 +1145,15 @@ class ChatWindow(QDialog):
         self.store.save(self.session)
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
-        messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text, memory_payload=self._memory_injection())
+        messages = self.prompt_builder.build_messages(
+            self.settings, self.character_id, self.session.messages[:-1], text,
+            memory_payload=self._memory_injection(),
+            # 每宠键：config 可能是 slot 路由视图，必须从 get 逐键读（chat_settings()
+            # 转发主配置，读不到这只宠的场景卡）。与 widgets.py / quick_chat.py 同口径。
+            roleplay_enabled=bool(self.config.get("roleplay_enabled", False)),
+            roleplay_scene=str(self.config.get("roleplay_scene", "") or ""),
+            roleplay_cast=str(self.config.get("roleplay_cast", "") or ""),
+        )
         # 与 widgets.py 同款：id 必须先落本窗在途状态再 send（`started` 在
         # send() 内同步发出，晚赋值会让 `_started` 的 id 过滤恒命中）。
         request_id = uuid.uuid4().hex

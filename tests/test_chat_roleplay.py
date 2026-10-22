@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """AI 对话酒馆化：场景卡 + 扮演格式引导 + 括号动作段渲染。
 
-钉住四件事：
+钉住这些事：
 - 三个配置键是**每宠键**（真值在 slot 档案，默认关）；
-- 引导段逐字照 spec、只在 roleplay_enabled + 已注入 persona 时追加；
+- 引导段逐字照 spec，只在 roleplay_enabled + 有效 system prompt 非空时追加；
 - 场景卡空 = 只有引导段，非空才追加场景卡（cast 多行原样透传）；
-- modern 聊天窗把全角/半角/跨行括号动作段渲染成斜体弱色，落盘原文不变。
+- 所有 chat surface（modern / classic / 快速对话）统一渲染括号动作段，
+  落盘原文不变；
+- 动作段预处理不碰链接目标、裸 URL 与代码区间，动作段内的行内标记仍生效。
 """
 from __future__ import annotations
 
@@ -81,8 +83,8 @@ def test_guide_uses_the_exact_spec_wording():
     assert positions == sorted(positions)
 
 
-def test_guide_is_skipped_when_no_persona_was_injected():
-    """roleplay_enabled 但 persona 段为空：按 spec「已注入 persona 时」不追加。"""
+def test_guide_is_skipped_when_effective_system_prompt_is_empty():
+    """roleplay_enabled 但有效 system prompt 为空：没有身份的扮演没有意义，不追加。"""
     messages = PromptBuilder().build_messages(
         ChatSettings(default_system_prompt=""),
         "test-character",
@@ -95,6 +97,35 @@ def test_guide_is_skipped_when_no_persona_was_injected():
     system = messages[0]["content"]
     assert ROLEPLAY_GUIDE not in system
     assert "雨夜便利店" not in system
+
+
+def test_guide_contract_is_effective_system_prompt_not_persona_label(tmp_path):
+    """R8 契约：门槛是有效 system prompt，不是「persona 段」这个字面说法。
+
+    清空 System Prompt 且角色 manifest 无 persona → 不注入引导（场景卡也不注入）；
+    有全局默认人设时即便角色 manifest 没有 persona，引导照常注入。
+    """
+    builder = PromptBuilder(characters_root=tmp_path)
+    empty = builder.build_messages(
+        ChatSettings(default_system_prompt=""),
+        "no-persona",
+        [],
+        "你好",
+        roleplay_enabled=True,
+        roleplay_scene="雨夜便利店",
+        roleplay_cast="阿澈：擦杯子",
+    )[0]["content"]
+    assert ROLEPLAY_GUIDE not in empty
+    assert "雨夜便利店" not in empty and "阿澈" not in empty
+
+    with_default = builder.build_messages(
+        ChatSettings(default_system_prompt="你是默认人设。"),
+        "no-persona",
+        [],
+        "你好",
+        roleplay_enabled=True,
+    )[0]["content"]
+    assert ROLEPLAY_GUIDE in with_default
 
 
 def test_guide_is_appended_after_persona():
@@ -240,6 +271,74 @@ def test_roleplay_keys_live_in_each_slot_profile(tmp_path):
     assert two.get("roleplay_cast") == "小满：转笔"
 
 
+def _slot_routed_config(tmp_path):
+    """构造一只宠的 SlotRoutedConfig 视图（每宠键从 slot 档案读）。"""
+    from pet import pet_profiles
+    from pet.config import Config
+    from pet.settings_slot_config import SlotRoutedConfig
+
+    main = Config(base=tmp_path)
+    main.dir.mkdir(parents=True, exist_ok=True)
+    written = pet_profiles.write_profile_settings(
+        main.dir,
+        1,
+        {
+            "roleplay_enabled": True,
+            "roleplay_scene": "一号角色的雨夜便利店。",
+            "roleplay_cast": "阿澈：擦杯子",
+        },
+    )
+    assert written.ok
+    instance = Config(base=tmp_path, instance_id="slot-1")
+    return SlotRoutedConfig(instance, main, 1)
+
+
+@pytest.mark.parametrize("surface", ["legacy", "quick"])
+def test_legacy_and_quick_read_roleplay_from_slot_profile(surface, tmp_path, qapp):
+    """R3：classic 聊天窗与快速对话都按每宠键传 roleplay_*，且走 config.get。"""
+    from pet.chat.legacy_widgets import ChatWindow
+    from pet.quick_chat import QuickChatBubble
+
+    route = _slot_routed_config(tmp_path)
+    sent: list[list[dict]] = []
+
+    def fake_send(messages, config, request_id=None):
+        sent.append(messages)
+        return request_id or "test-request"
+
+    if surface == "legacy":
+        window = ChatWindow(route, "shenshen")
+        window.service.send = fake_send
+        try:
+            window._begin_generation("你好")
+            route.set("roleplay_enabled", False)
+            window._begin_generation("再来")
+        finally:
+            window.close()
+            qapp.processEvents()
+    else:
+        bubble = QuickChatBubble(route)
+        bubble.service.send = fake_send
+        try:
+            bubble.input.setText("你好")
+            bubble._send()
+            route.set("roleplay_enabled", False)
+            bubble.input.setText("再来")
+            bubble._send()
+        finally:
+            bubble.close()
+            qapp.processEvents()
+
+    assert len(sent) == 2
+    enabled_system = sent[0][0]["content"]
+    disabled_system = sent[1][0]["content"]
+    assert ROLEPLAY_GUIDE in enabled_system
+    assert "一号角色的雨夜便利店。" in enabled_system
+    assert "阿澈：擦杯子" in enabled_system
+    assert ROLEPLAY_GUIDE not in disabled_system
+    assert "一号角色的雨夜便利店。" not in disabled_system
+
+
 # ---------------------------------------------------------------- 显示层
 def _fragments(html: str):
     from PySide6.QtGui import QTextDocument
@@ -265,6 +364,85 @@ def _fragments(html: str):
 
 def _action_fragments(html: str):
     return [item for item in _fragments(html) if item[1]]
+
+
+# ---------------------------------------------------------------- 动作段预处理边界
+def test_link_target_parentheses_stay_in_href():
+    """R1：markdown 链接目标里的半角括号不能被动作段 token 吞掉。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("看 [维基](https://x.org/a_(b)) 这篇")
+    href = html.split('href="', 1)[1].split('"', 1)[0]
+    assert href == "https://x.org/a_(b)"
+    assert "<span" not in href
+    assert "维基" in html
+
+
+def test_bare_url_with_parentheses_is_autolinked_whole():
+    """R1：裸 URL 里的括号整段留在链接里，不渲染成动作段。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("见 https://example.com/x_(y) 这篇")
+    assert 'href="https://example.com/x_(y)"' in html
+    assert "font-style:italic" not in html
+    assert not _action_fragments(html)
+
+
+def test_parentheses_inside_inline_code_are_not_actions():
+    """R1：行内代码里的括号原样留在代码里。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("`(x)`")
+    assert not _action_fragments(html)
+    assert "font-style:italic" not in html
+    assert "(x)" in html
+
+
+def test_action_cannot_cross_code_fence_boundary():
+    """R2：动作段起于围栏外、止于围栏内时必须跳过，围栏与后续正文都完好。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("（看这段：\n\n```\ncode）\n```\n完了")
+    assert "font-style:italic" not in html
+    assert "<pre" in html and "code）" in html
+    pre = html[html.index("<pre"):html.index("</pre>")]
+    assert "完了" not in pre
+    assert "完了" in html[html.index("</pre>"):]
+
+
+@pytest.mark.parametrize(
+    "text,outer",
+    [
+        ("(he said (quietly) then left)", "(he said (quietly) then left)"),
+        ("（他说（低声）然后走了）", "（他说（低声）然后走了）"),
+    ],
+)
+def test_one_level_nested_parentheses_render_outer_as_action(text, outer):
+    """R4：一层嵌套时外层整体作为动作段。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    actions = _action_fragments(markdown_to_html(text))
+    assert any(outer in fragment_text for fragment_text, _italic, _alpha in actions)
+
+
+def test_two_levels_of_nesting_still_only_take_the_innermost():
+    """R4：两层以上只取最内层，不无限递归。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    actions = _action_fragments(markdown_to_html("（最外（中间（最内）中间）最外）"))
+    assert any("（最内）" in fragment_text for fragment_text, _italic, _alpha in actions)
+    assert not any("（中间" in fragment_text for fragment_text, _italic, _alpha in actions)
+
+
+def test_action_inline_code_and_bold_are_parsed():
+    """R5：动作段内的 `x` 与 **x** 渲染成等宽/加粗，不残留字面标记。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("（指着 `设置` 图标）\n（**重点**动作）")
+    assert "font-style:italic" in html
+    assert "<code" in html and "<strong>" in html
+    assert "`" not in html and "**" not in html
+    assert "设置" in html and "重点" in html
 
 
 @pytest.mark.parametrize(
@@ -329,6 +507,31 @@ def test_rendering_never_mutates_the_original_text(tmp_path):
     assert loaded.messages[0].content == raw
 
 
+def test_all_chat_surfaces_share_one_action_renderer(tmp_path, qapp):
+    """R6：modern / classic / 快速对话三个入口统一渲染，输出逐字一致。"""
+    from pet.chat.legacy_widgets import MessageBubble as LegacyBubble
+    from pet.chat.widgets import MessageBubble as ModernBubble
+    from pet.config import Config
+    from pet.quick_chat import QuickChatBubble
+
+    src = "（她抬眼看你）台词 `设置` **重点**"
+    modern = ModernBubble("assistant", src)
+    legacy = LegacyBubble("assistant", src)
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        bubble._set_reply_text(src)
+        bubble._render_reply()
+        outputs = [modern.body.text(), legacy.body.text(), bubble.output.text()]
+        assert len(set(outputs)) == 1, outputs
+        assert "font-style:italic" in outputs[0]
+        assert "`" not in outputs[0] and "**" not in outputs[0]
+    finally:
+        modern.deleteLater()
+        legacy.deleteLater()
+        bubble.close()
+        qapp.processEvents()
+
+
 # ---------------------------------------------------------------- 设置 UI
 @pytest.fixture
 def qapp():
@@ -372,20 +575,89 @@ def test_settings_group_is_mounted_with_its_guide(tmp_path, monkeypatch, qapp):
         qapp.processEvents()
 
 
-def test_scene_dialog_enforces_limits_and_has_example_placeholders(qapp):
+def test_scene_dialog_has_example_placeholders(qapp):
     from pet.chat.ai_settings_page import RoleplaySceneDialog
 
     dialog = RoleplaySceneDialog("", "")
     try:
         assert dialog.scene_edit.placeholderText()
         assert dialog.cast_edit.placeholderText()
-        dialog.scene_edit.setPlainText("场" * 600)
-        dialog.cast_edit.setPlainText("人" * 700)
-        scene, cast = dialog.values()
-        assert len(scene) == 500
-        assert len(cast) == 600
     finally:
         dialog.deleteLater()
+
+
+def test_scene_dialog_counters_follow_input_and_turn_red(qapp):
+    """R7：两个编辑框实时字数计数，超限变红并给出可见提示。"""
+    from pet.chat.ai_settings_page import RoleplaySceneDialog
+    from pet.config import ROLEPLAY_SCENE_MAX_CHARS
+
+    dialog = RoleplaySceneDialog("", "")
+    dialog.show()
+    try:
+        dialog.scene_edit.setPlainText("场" * 3)
+        assert dialog.scene_counter.text() == f"3/{ROLEPLAY_SCENE_MAX_CHARS}"
+        assert "#c9362b" not in dialog.scene_counter.styleSheet()
+        over = "场" * (ROLEPLAY_SCENE_MAX_CHARS + 1)
+        dialog.scene_edit.setPlainText(over)
+        assert dialog.scene_counter.text() == (
+            f"{ROLEPLAY_SCENE_MAX_CHARS + 1}/{ROLEPLAY_SCENE_MAX_CHARS}")
+        assert "#c9362b" in dialog.scene_counter.styleSheet()
+        assert dialog.truncation_hint.isVisible()
+        assert "超出上限" in dialog.truncation_hint.text()
+        assert not dialog.save_button.isEnabled()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_scene_dialog_truncates_scene_with_ellipsis_and_cast_on_line_boundary(qapp):
+    """R7：场景补「…」；人物按整行截断，绝不出现半行；截断提示可见。"""
+    from pet.chat.ai_settings_page import RoleplaySceneDialog
+    from pet.config import ROLEPLAY_CAST_MAX_CHARS, ROLEPLAY_SCENE_MAX_CHARS
+
+    dialog = RoleplaySceneDialog("", "")
+    dialog.show()
+    try:
+        dialog.scene_edit.setPlainText("场" * (ROLEPLAY_SCENE_MAX_CHARS + 60))
+        one_line = "阿澈：" + "擦" * 40
+        cast_lines = [one_line] * 20
+        dialog.cast_edit.setPlainText("\n".join(cast_lines))
+        scene, cast = dialog.values()
+        assert len(scene) == ROLEPLAY_SCENE_MAX_CHARS
+        assert scene.endswith("…")
+        kept = cast.split("\n")
+        assert kept == cast_lines[: len(kept)]  # 只保留整行，没有半行
+        assert len(kept) < len(cast_lines)
+        assert len(cast) <= ROLEPLAY_CAST_MAX_CHARS
+        assert dialog.truncation_hint.isVisible()
+        assert "截断" in dialog.truncation_hint.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_scene_dialog_blocks_save_while_over_limit(qapp):
+    """R7：超限时保存按钮禁用（不许静默截断），删到范围内才能保存。"""
+    from pet.chat.ai_settings_page import RoleplaySceneDialog
+    from pet.config import ROLEPLAY_SCENE_MAX_CHARS
+
+    dialog = RoleplaySceneDialog("", "")
+    dialog.show()
+    try:
+        dialog.scene_edit.setPlainText("场" * 600)
+        assert not dialog.save_button.isEnabled()
+        dialog.save_button.click()          # 禁用状态下点不动
+        assert dialog.isVisible()
+        assert "超出上限" in dialog.truncation_hint.text()
+        dialog.scene_edit.setPlainText("场" * (ROLEPLAY_SCENE_MAX_CHARS - 1))
+        assert dialog.save_button.isEnabled()
+        dialog.save_button.click()
+        assert not dialog.isVisible()
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
 
 
 def test_settings_save_routes_roleplay_keys_to_each_slot(tmp_path, monkeypatch, qapp):

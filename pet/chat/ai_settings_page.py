@@ -884,6 +884,9 @@ class RoleplaySceneDialog(QDialog):
         self.scene_edit.setPlainText(str(scene or ""))
         self.scene_edit.setMinimumHeight(100)
         root.addWidget(self.scene_edit)
+        self.scene_counter = QLabel(self)
+        self.scene_counter.setObjectName("roleplay-scene-counter")
+        root.addWidget(self.scene_counter)
 
         cast_label = QLabel(
             f"在场人物（每行一个「名字：一句辨识度描述」，≤{ROLEPLAY_CAST_MAX_CHARS} 字）",
@@ -895,21 +898,113 @@ class RoleplaySceneDialog(QDialog):
         self.cast_edit.setPlainText(str(cast or ""))
         self.cast_edit.setMinimumHeight(120)
         root.addWidget(self.cast_edit)
+        self.cast_counter = QLabel(self)
+        self.cast_counter.setObjectName("roleplay-cast-counter")
+        root.addWidget(self.cast_counter)
+
+        self.truncation_hint = QLabel(self)
+        self.truncation_hint.setObjectName("roleplay-truncation-hint")
+        self.truncation_hint.setWordWrap(True)
+        self.truncation_hint.setStyleSheet("color: #c9362b;")
+        self.truncation_hint.hide()
+        root.addWidget(self.truncation_hint)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.save_button.setText("保存")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._on_save_clicked)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+        self._truncated = False       # 本次 values() 是否发生了截断（防御分支用）
+        self.scene_edit.textChanged.connect(self._on_edited)
+        self.cast_edit.textChanged.connect(self._on_edited)
+        self._update_counters()
+
+    @staticmethod
+    def _truncate_scene(text: str) -> tuple[str, bool]:
+        """场景按字符截断，保留末尾 ``…``（总长仍不超过上限）。"""
+        if len(text) <= ROLEPLAY_SCENE_MAX_CHARS:
+            return text, False
+        return text[: ROLEPLAY_SCENE_MAX_CHARS - 1] + "…", True
+
+    @staticmethod
+    def _truncate_cast(text: str) -> tuple[str, bool]:
+        """人物按整行截断：放不下的整行直接不要，绝不从某一行中间切断。"""
+        kept: list[str] = []
+        used = 0
+        for line in text.split("\n"):
+            extra = len(line) + (1 if kept else 0)
+            if used + extra > ROLEPLAY_CAST_MAX_CHARS:
+                return "\n".join(kept), True
+            kept.append(line)
+            used += extra
+        return text, False
+
+    @staticmethod
+    def _set_counter(label: QLabel, length: int, limit: int) -> bool:
+        label.setText(f"{length}/{limit}")
+        over = length > limit
+        label.setStyleSheet("color: #c9362b;" if over else "color: rgba(128,128,128,0.9);")
+        return over
+
+    def _update_counters(self) -> None:
+        scene_over = self._set_counter(
+            self.scene_counter, len(self.scene_edit.toPlainText()), ROLEPLAY_SCENE_MAX_CHARS)
+        cast_over = self._set_counter(
+            self.cast_counter, len(self.cast_edit.toPlainText()), ROLEPLAY_CAST_MAX_CHARS)
+        over = scene_over or cast_over
+        if over:
+            # 超限就不让保存：用户看得见红计数与这句话，自己删到范围内。
+            # 不做「保存时静默截断」——那是把用户写的内容无声丢掉。
+            self.truncation_hint.setText("超出上限，请删减到上限以内再保存（不会自动截断）")
+            self.truncation_hint.show()
+        else:
+            self.truncation_hint.hide()
+        self.save_button.setEnabled(not over)
+
+    def _on_edited(self) -> None:
+        self._update_counters()
+
+    def _show_truncation(self, scene_cut: bool, cast_cut: bool) -> None:
+        parts: list[str] = []
+        if scene_cut:
+            parts.append(f"场景描述超出 {ROLEPLAY_SCENE_MAX_CHARS} 字，已截断并补「…」。")
+        if cast_cut:
+            parts.append(
+                f"在场人物超出 {ROLEPLAY_CAST_MAX_CHARS} 字，已按整行截断（没有切断某一行）。")
+        self.truncation_hint.setText(" ".join(parts))
+        self.truncation_hint.show()
+
+    def _on_save_clicked(self) -> None:
+        """保存。内容超限时保存按钮是禁用的（见 ``_update_counters``），点不动。
+
+        下面这条 ``_truncated`` 分支只是防御：万一外部代码绕开按钮直接 accept，
+        也不会把截断后的内容当成用户原样内容静默存下去。
+        """
+        self.values()
+        if self._truncated:
+            return
+        self.accept()
+
     def values(self) -> tuple[str, str]:
-        """返回按 spec 上限截断后的 (场景描述, 在场人物)；多行内部换行原样保留。"""
-        scene = self.scene_edit.toPlainText().strip()[:ROLEPLAY_SCENE_MAX_CHARS]
-        cast = self.cast_edit.toPlainText().strip()[:ROLEPLAY_CAST_MAX_CHARS]
+        """返回 (场景描述, 在场人物)，多行内部换行原样保留。
+
+        正常路径（用户在对话框里操作）不会走到截断：超限时保存按钮禁用，用户必须先删。
+        这里的截断只是**防御性兜底**（外部代码直接调 values 时），场景按字符截断并补
+        ``…``、人物按整行截断，一旦发生就把提示摆出来。
+        """
+        scene_raw = self.scene_edit.toPlainText().strip()
+        cast_raw = self.cast_edit.toPlainText().strip()
+        scene, scene_cut = self._truncate_scene(scene_raw)
+        cast, cast_cut = self._truncate_cast(cast_raw)
+        self._truncated = scene_cut or cast_cut
+        if self._truncated:
+            self._show_truncation(scene_cut, cast_cut)
         return scene, cast
 
 
