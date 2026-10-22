@@ -1661,10 +1661,10 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 **验证**
 
 - 全量门禁：`pytest tests/test_petcore_*.py tests/test_architecture.py -q`
-  → **1151 passed in 68.33s**；`ruff` 全绿；`python -m petcore --check` exit 0。
+  → **1153 passed in 89.74s**；`ruff` 全绿；`python -m petcore --check` exit 0。
 - 真实本地 OCR：`HELLO 123` 冷启动 **1954ms**、暖 **791ms**、进程 RSS **145MB**。
 - 动作调度：priority 回退、原文传递、异常降级、迟到结果丢弃均有测试。
-- 打包与静默安装：setup **257,459,336 字节**、签名 Valid；安装目录 733MB；
+- 打包与静默安装：setup **257,472,704 字节**、签名 Valid；安装目录 733MB；
   静默安装 exit 0，`--check` 显示 `ai.chat 1.4.0` / `tool.ocr 1.0.0` 均 enabled、
   `diagnostics []`；`{app}\mods\tool.ocr\.trusted` 存在，应用已重启。
 
@@ -1675,3 +1675,30 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 - OCR 引擎常驻进程内（约 145MB），与主分支「一次一个子进程」不同。
 - 真实桌面动作条点击的肉眼验收、混合 DPI 下的快速气泡定位未实机确认。
 - 主动识屏未做。
+
+## L043 · 2026-10-22 · 截图动作条文字对比度
+
+**范围**：用户反馈四动作条里「提取文字/翻译/复制图像」文字发白，与浅色条混在一起。
+
+**根因**：覆盖层是 Tool 窗口，按钮未显式指定 `color`，深色系统主题下继承白色
+`ButtonText`；浅色条 + 白字 = 看不清。禁用态用的 `rgba(29,33,41,90)` 也偏淡。
+
+**改动**
+
+- `petcore/ui/screen/overlay.py`（+13/−9）：条内所有 `QPushButton` 显式
+  `color: #1d2129`；禁用态 `#8a8f99`（不透明灰）；问问肥鱼禁用态提亮为
+  `rgba(255,255,255,210)`；条背景提高到 250 不透明度、边框加深到 70。
+- `tests/test_petcore_screen_ask.py`（+46）：新增 QSS 断言与「深色 palette 下
+  按钮文字仍是深色」的像素级回归（对照组把颜色换成白色后深色像素显著减少）。
+
+**验证**
+
+- `pytest tests/test_petcore_screen_ask.py -q` → **29 passed**；`ruff` 通过。
+- 像素回归：深色 palette 下「翻译」按钮矩形内深色像素 > 10；改回白字后 < 5。
+- 重建签名 setup（257,472,704 字节）并静默升级 `E:\dsh-pet-core`（exit 0）；
+  安装后 `--check`：`ai.chat 1.4.0` / `tool.ocr 1.0.0` enabled、`diagnostics []`；
+  像素回归覆盖真实渲染路径，真实桌面目视由用户确认。
+
+**未验证 / 边界**
+
+- 仅覆盖浅色操作条 + 深色系统主题这一组合；如果以后做深色操作条，需要重新配文字色。

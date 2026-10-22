@@ -109,21 +109,24 @@ class _ActionBar(QFrame):
         layout.addWidget(self.cancel_button)
         self.setStyleSheet(
             "#screen-selection-bar {"
-            "  background: rgba(250, 250, 252, 245);"
-            "  border: 1px solid rgba(0, 0, 0, 60);"
+            "  background: rgba(250, 250, 252, 250);"
+            "  border: 1px solid rgba(0, 0, 0, 70);"
             "  border-radius: 8px;"
             "}"
+            # 必须在 bar 上显式指定文字色：覆盖层是 Tool 窗口，深色系统主题下
+            # 按钮会继承白色 ButtonText，落在浅色条上等于看不见。
             "#screen-selection-bar QPushButton {"
             "  border: none; border-radius: 5px; font-size: 12px; padding: 5px 10px;"
+            "  color: #1d2129;"
             "}"
             "#screen-selection-bar QPushButton:hover { background: rgba(0, 0, 0, 18); }"
-            "#screen-selection-bar QPushButton:disabled { color: rgba(29, 33, 41, 90); }"
+            "#screen-selection-bar QPushButton:disabled { color: #8a8f99; }"
             "QPushButton#screen-selection-ask {"
             "  background: #1677e8; color: #ffffff; font-weight: 600;"
             "}"
             "QPushButton#screen-selection-ask:hover { background: #3d8ef0; }"
             "QPushButton#screen-selection-ask:disabled {"
-            "  background: rgba(22, 119, 232, 60); color: rgba(255, 255, 255, 170);"
+            "  background: rgba(22, 119, 232, 45); color: rgba(255, 255, 255, 210);"
             "}"
             "QPushButton#screen-selection-cancel {"
             "  background: transparent; color: #1d2129;"

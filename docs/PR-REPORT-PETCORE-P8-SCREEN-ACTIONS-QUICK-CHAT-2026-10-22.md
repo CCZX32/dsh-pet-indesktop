@@ -89,7 +89,7 @@
 
    ```bash
    QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py tests/test_architecture.py -q
-   # 1151 passed in 68.33s
+   # 1153 passed in 89.74s
    .venv/Scripts/ruff check pet/ tests/ petcore/ examples/petcore-mods
    # All checks passed
    QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m petcore --check --out .scratch/p8-check.json
@@ -99,7 +99,7 @@
 3. **打包与安装**（实跑）：
 
    ```
-   setup  dist/dsh-pet-core-setup.exe  257,459,336 bytes  签名 Valid
+   setup  dist/dsh-pet-core-setup.exe  257,472,704 bytes  签名 Valid
    app    E:\dsh-pet-core              733 MB（含 _internal/resources/rapidocr_models）
    install exit 0；/TASKS 含 mod_aichat,mod_ocr + 原有 5 个扩展
    安装后 --check：version 0.1.0，diagnostics []
@@ -122,3 +122,14 @@
 - 快速对话与完整聊天窗共用会话，不另建历史；没有快捷热键/菜单入口（按需求只做
   点气泡）。
 - 主动识屏不在本轮。
+
+## 补记：动作条文字对比度（L043）
+
+用户反馈「提取文字 / 翻译 / 复制图像」文字发白。根因是按钮没有显式 `color`，
+深色系统主题下继承白色 `ButtonText`，落在浅色操作条上与背景融合。
+
+- 修复：条内按钮显式 `#1d2129`，禁用态 `#8a8f99`，问问肥鱼禁用态提亮；条背景
+  250 不透明度、边框 70。
+- 回归：`test_action_bar_text_stays_dark_under_a_dark_palette` 在深色 palette 下
+  统计「翻译」按钮矩形内的深色像素（>10），并把颜色换成白色作为对照组（<5），
+  证明断言能抓住这个问题。`test_petcore_screen_ask.py` 29 passed。

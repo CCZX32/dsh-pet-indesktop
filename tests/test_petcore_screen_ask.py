@@ -702,3 +702,61 @@ def test_select_region_too_small_selection_is_cancelled(app) -> None:
             grab=lambda target: _image(200, 120),
             overlay_factory=factory,
         )
+
+
+def test_action_bar_sets_explicit_readable_text_colors(app) -> None:
+    """深色系统主题下按钮不能继承白色 ButtonText，否则浅色条上看不见。"""
+    overlay = SelectionOverlay(
+        _image(200, 120),
+        FakeScreen(200, 120),
+        capabilities={"ocr": True, "translate": False, "ask": True, "copy": True},
+    )
+    try:
+        qss = overlay.action_bar().styleSheet()
+        assert "#screen-selection-bar QPushButton {" in qss
+        assert "color: #1d2129" in qss
+        assert "color: #8a8f99" in qss
+        assert "color: rgba(29, 33, 41, 90)" not in qss
+    finally:
+        overlay.close()
+
+
+def test_action_bar_text_stays_dark_under_a_dark_palette(app) -> None:
+    """深色主题下（ButtonText=白）按钮文字仍必须是深色，否则与浅色条融合。"""
+    from PySide6.QtGui import QColor, QPalette
+
+    original = app.palette()
+    dark = QPalette(original)
+    dark.setColor(QPalette.ColorRole.ButtonText, QColor("#ffffff"))
+    dark.setColor(QPalette.ColorRole.WindowText, QColor("#ffffff"))
+    app.setPalette(dark)
+    overlay = SelectionOverlay(
+        _image(200, 120),
+        FakeScreen(200, 120),
+        capabilities={"ocr": True, "translate": True, "ask": True, "copy": True},
+    )
+    try:
+        bar = overlay.action_bar()
+        bar.adjustSize()
+        bar.show()
+
+        def dark_pixels() -> int:
+            image = bar.grab().toImage()
+            geo = bar.translate_button.geometry()
+            count = 0
+            for y in range(max(0, geo.top()), min(image.height(), geo.bottom() + 1)):
+                for x in range(max(0, geo.left()), min(image.width(), geo.right() + 1)):
+                    if image.pixelColor(x, y).lightness() < 100:
+                        count += 1
+            return count
+
+        assert dark_pixels() > 10
+        # 对照组：把文字改成白色（复现修复前的继承行为），深色像素应显著减少。
+        bar.setStyleSheet(
+            bar.styleSheet().replace("color: #1d2129;", "color: #ffffff;")
+        )
+        bar.adjustSize()
+        assert dark_pixels() < 5
+    finally:
+        app.setPalette(original)
+        overlay.close()
