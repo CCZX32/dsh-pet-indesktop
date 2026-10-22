@@ -953,10 +953,14 @@ class RoleplaySceneDialog(QDialog):
         return over
 
     def _update_counters(self) -> None:
+        # 计数与禁用判据必须和 values() 的落盘口径一致：先 strip 再算长度。
+        # 否则尾随空行会让计数超限、保存按钮被锁死，而 values() 实际存的是合规内容。
         scene_over = self._set_counter(
-            self.scene_counter, len(self.scene_edit.toPlainText()), ROLEPLAY_SCENE_MAX_CHARS)
+            self.scene_counter, len(self.scene_edit.toPlainText().strip()),
+            ROLEPLAY_SCENE_MAX_CHARS)
         cast_over = self._set_counter(
-            self.cast_counter, len(self.cast_edit.toPlainText()), ROLEPLAY_CAST_MAX_CHARS)
+            self.cast_counter, len(self.cast_edit.toPlainText().strip()),
+            ROLEPLAY_CAST_MAX_CHARS)
         over = scene_over or cast_over
         if over:
             # 超限就不让保存：用户看得见红计数与这句话，自己删到范围内。

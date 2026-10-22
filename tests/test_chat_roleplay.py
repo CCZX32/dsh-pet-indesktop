@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 
 import pytest
 
@@ -366,7 +368,82 @@ def _action_fragments(html: str):
     return [item for item in _fragments(html) if item[1]]
 
 
+def _hrefs(html: str) -> list[str]:
+    return re.findall(r'href="([^"]*)"', html)
+
+
 # ---------------------------------------------------------------- 动作段预处理边界
+def test_prewrapped_autolink_is_not_double_wrapped():
+    """F1：已经写在 <...> 里的 URL 不再被二次包裹成 ``<<...>>``。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("<https://x.org/a_(b)>")
+    assert _hrefs(html) == ["https://x.org/a_(b)"]
+    assert "&lt;https" not in html
+    assert "&gt;" not in html
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("详见 https://example.com/x) 这一页", "https://example.com/x"),
+        ("(https://x.org/a)", "https://x.org/a"),
+        ("(https://x.org/paper_(2024))", "https://x.org/paper_(2024)"),
+    ],
+)
+def test_bare_url_trims_unbalanced_closing_paren(text, expected):
+    """F2：右括号按 URL 内的括号配平决定去留，不能焊进 href。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    assert _hrefs(markdown_to_html(text)) == [expected]
+
+
+@pytest.mark.parametrize(
+    "punct",
+    [".", ",", ";", ":", "!", "?", '"', "'", "》", "」", "】"],
+)
+def test_bare_url_trims_trailing_sentence_punctuation(punct):
+    """F2：尾随句末标点不属于链接。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html(f"见 https://example.com/x_(y){punct} 后面")
+    assert _hrefs(html) == ["https://example.com/x_(y)"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["(a （b) c）", "(他停了一下（叹气) 然后说）"],
+)
+def test_crossing_parentheses_never_duplicate_text(text):
+    """F3：交叉嵌套的动作区间必须两两不相交，渲染可见文字长度与原文一致。"""
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.markdown_view import markdown_to_html
+
+    QApplication.instance() or QApplication([])
+    doc = QTextDocument()
+    doc.setHtml(markdown_to_html(text))
+    assert doc.toPlainText() == text
+    assert len(doc.toPlainText()) == len(text)
+
+
+def test_action_pairing_latency_budget(qapp):
+    """F4：括号配对与 token 还原来回都是线性量级，整段渲染不超过预算。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    cases = [
+        ("paren-dense 10KB", "(a)" * 2500, 0.150),
+        ("deep 2500", "(" * 2500 + "x" + ")" * 2500, 0.150),
+        ("normal 6.5KB", "（他停下脚步，看着窗外的雨。）\n" * 300, 0.020),
+    ]
+    for name, text, budget in cases:
+        started = time.perf_counter()
+        markdown_to_html(text)
+        elapsed = time.perf_counter() - started
+        assert elapsed < budget, f"{name}: {elapsed * 1000:.1f} ms"
+
+
 def test_link_target_parentheses_stay_in_href():
     """R1：markdown 链接目标里的半角括号不能被动作段 token 吞掉。"""
     from pet.chat.markdown_view import markdown_to_html
@@ -605,6 +682,25 @@ def test_scene_dialog_counters_follow_input_and_turn_red(qapp):
         assert dialog.truncation_hint.isVisible()
         assert "超出上限" in dialog.truncation_hint.text()
         assert not dialog.save_button.isEnabled()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_scene_dialog_counts_stripped_text_and_allows_save(qapp):
+    """F7：计数与禁用都用 strip 后的长度，与 values() 的落盘口径一致。"""
+    from pet.chat.ai_settings_page import RoleplaySceneDialog
+    from pet.config import ROLEPLAY_SCENE_MAX_CHARS
+
+    dialog = RoleplaySceneDialog("", "")
+    dialog.show()
+    try:
+        dialog.scene_edit.setPlainText("场" * ROLEPLAY_SCENE_MAX_CHARS + "\n\n  ")
+        assert dialog.scene_counter.text() == f"{ROLEPLAY_SCENE_MAX_CHARS}/{ROLEPLAY_SCENE_MAX_CHARS}"
+        assert "#c9362b" not in dialog.scene_counter.styleSheet()
+        assert dialog.save_button.isEnabled()
+        assert not dialog.truncation_hint.isVisible()
     finally:
         dialog.close()
         dialog.deleteLater()

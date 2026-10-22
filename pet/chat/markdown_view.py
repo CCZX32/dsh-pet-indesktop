@@ -10,6 +10,8 @@
 - 去掉文档级字体，让气泡沿用聊天窗口 QSS 的字体字号；代码换等宽字体并加浅底色。
 - 场景扮演的动作段（括号包裹）在 Markdown 解析前先换 token，解析后还原成斜体弱色；
   modern 聊天窗、classic 聊天窗与快速对话气泡**统一走这里渲染**，落盘原文不变。
+- 动作段是括号形状启发式：正文里的函数调用 ``f(x)``、``(共 3 个)`` 也会被当作
+  动作段。这是已知限制，不按长度/含中文/含数字去猜（那样只会引入新的误判）。
 """
 from __future__ import annotations
 
@@ -31,9 +33,11 @@ _HEADING_MAP = {'xx-large': 'x-large', 'x-large': 'large'}
 # 括号配对与嵌套层级在 _action_spans 里处理：只允许一层嵌套（外层整体作为动作段），
 # 两层以上回退到只取最内层，不递归。
 _INLINE_CODE = re.compile(r'`[^`\n]*`')
-# 裸 URL：从 http(s):// 起，到空白或中文标点为止。动作段预处理前先圈出来，
-# 避免把 URL 里的半角括号当成动作段（那会把 token 塞进 href）。
-_URL = re.compile(r'https?://[^\s，。、；：！？（）【】《》〈〉「」『』“”‘’…—～·]+')
+# 裸 URL：从 http(s):// 起，到空白或中文标点为止；尖括号是 autolink 的边界，
+# 必须排除，否则会把 `<url>` 的收尾 `>` 一起吃进链接。半角括号先收下，末尾
+# 再按括号配平与句末标点修剪（见 _trim_url）。
+_URL = re.compile(r'https?://[^\s<>，。、；：！？（）【】《》〈〉「」『』“”‘’…—～·]+')
+_URL_TRAILING = '.,;:!?"\'》」】'
 _LINK_TARGET_OPEN = re.compile(r'\]\(')
 # 斜体 + 弱色：半透明灰在浅色/深色气泡里都比正文弱一档（跟随主题的对比关系，
 # 不写死某一种主题的底色）。整段（含括号）一起渲染。
@@ -105,8 +109,30 @@ def _link_target_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def _trim_url(url: str) -> str:
+    """剪掉 URL 末尾不属于链接的字符。
+
+    右括号按配平决定：URL 内 ``(`` 多于 ``)`` 时，末尾这个 ``)`` 才属于链接；
+    否则剪掉。句末标点一律剪掉。只处理末尾，中间的括号保持原样。
+    """
+    while url:
+        last = url[-1]
+        if last in _URL_TRAILING:
+            url = url[:-1]
+        elif last == ')' and url.count(')') > url.count('('):
+            url = url[:-1]
+        else:
+            break
+    return url
+
+
 def _url_ranges(text: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in _URL.finditer(text)]
+    ranges: list[tuple[int, int]] = []
+    for match in _URL.finditer(text):
+        url = _trim_url(match.group())
+        if url:
+            ranges.append((match.start(), match.start() + len(url)))
+    return ranges
 
 
 def _autolink_bare_urls(text: str) -> str:
@@ -118,82 +144,99 @@ def _autolink_bare_urls(text: str) -> str:
     """
     code = _code_ranges(text)
     links = _link_target_ranges(text)
-    edits = []
+    edits: list[tuple[int, int, str]] = []
     for match in _URL.finditer(text):
-        url = match.group()
-        if '(' not in url and ')' not in url:
+        raw = match.group()
+        url = _trim_url(raw)
+        if not url:
             continue
-        if _overlaps((match.start(), match.end()), code):
+        # 含括号的 URL 要显式包起来；尾随字符被剪掉时也要重包，否则 Qt 会把
+        # 剪掉的 `)` 继续算进链接。两者都不满足时交给 Qt 自带 autolink。
+        if '(' not in raw and ')' not in raw and url == raw:
             continue
-        if _overlaps((match.start(), match.end()), links):
+        start = match.start()
+        end = start + len(url)
+        if _overlaps((start, end), code):
+            continue
+        if _overlaps((start, end), links):
             continue  # 链接目标本身有 markdown 语法，括号配对交给解析器
-        if (match.start() > 0 and text[match.start() - 1] == '<'
+        if (start > 0 and text[start - 1] == '<'
                 and match.end() < len(text) and text[match.end()] == '>'):
-            continue  # 已经是 <url> 形式
-        edits.append(match)
+            continue  # 已经是 <url> 形式，绝不二次包裹
+        edits.append((start, end, url))
     if not edits:
         return text
     chunks: list[str] = []
     last = 0
-    for match in edits:
-        chunks.append(text[last:match.start()])
-        chunks.append('<' + match.group() + '>')
-        last = match.end()
+    for start, end, url in edits:
+        chunks.append(text[last:start])
+        chunks.append('<' + url + '>')
+        last = end
     chunks.append(text[last:])
     return ''.join(chunks)
 
 
-def _paren_pairs(text: str, opening: str, closing: str) -> list[tuple[int, int]]:
-    """把同一种括号按栈配对，返回所有 ``(start, end)`` 区间（含括号本身）。"""
-    stack: list[int] = []
-    pairs: list[tuple[int, int]] = []
+def _action_candidates(text: str) -> list[tuple[int, int]]:
+    """单遍扫描全文，配对括号并返回动作段候选（已做一层嵌套取舍）。
+
+    全角 ``（）`` 与半角 ``()`` 各自一个栈，不跨类型配对。每遇到开括号把
+    ``[start, has_child, has_grandchild]`` 压栈；遇到闭括号弹出本类型最内层
+    未闭合的开括号并产出区间，同时把「有孩子 / 有孙子」记到父帧上。空括号
+    （``()``）不算动作段，也不参与嵌套层级。
+
+    取区间的口径与旧实现一致：根区间没有孙层时取根（允许一层嵌套）；有孙层
+    时只取没有子括号的叶子（最内层）。每个字符只访问一次，总体 O(n)。
+    """
+    stacks: dict[str, list[list]] = {'（': [], '(': []}
+    closers = {'）': '（', ')': '('}
+    candidates: list[tuple[int, int]] = []
     for index, char in enumerate(text):
-        if char == opening:
-            stack.append(index)
-        elif char == closing and stack:
-            pairs.append((stack.pop(), index + 1))
-    return pairs
+        if char in stacks:
+            stacks[char].append([index, False, False])
+            continue
+        opening = closers.get(char)
+        if opening is None:
+            continue
+        stack = stacks[opening]
+        if not stack:
+            continue
+        start, has_child, has_grandchild = stack.pop()
+        end = index + 1
+        if end - start <= 2:  # 空括号不是动作段，也不能算父区间的子层
+            continue
+        if stack:
+            parent = stack[-1]
+            parent[1] = True
+            if has_child:
+                parent[2] = True
+        elif not has_grandchild:
+            # 根区间没有孙层：整段作为动作段（一层嵌套在外层里）。
+            candidates.append((start, end))
+        if not has_child and stack:
+            # 深层嵌套里的叶子：外层不取时由它出面，交给后面的不相交过滤去重。
+            candidates.append((start, end))
+    return candidates
 
 
 def _action_spans(text: str) -> list[tuple[int, int]]:
-    """动作段候选区间：允许一层括号嵌套，两层以上只取最内层。
+    """动作段区间：单遍配对后裁成两两不相交。
 
-    先按括号配对建树，再挑区间：
-    - 顶层括号若无孙层（最多一层嵌套），整段作为动作段；
-    - 有孙层时外层不取，只取没有子括号的最内层；
-    - 已经被外层选中的内层不重复添加。
+    动作段内含受保护区（URL/代码）时整段不渲染为动作段，属已知限制
+    （4.5 评估），见 ``_action_ranges``。
     """
-    pairs = _paren_pairs(text, '（', '）') + _paren_pairs(text, '(', ')')
-    pairs = [pair for pair in pairs if pair[1] - pair[0] > 2]  # 空括号不是动作段
-    if not pairs:
+    candidates = _action_candidates(text)
+    if not candidates:
         return []
-    contains = [
-        [j for j, inner in enumerate(pairs)
-         if j != i and outer[0] <= inner[0] and inner[1] <= outer[1]]
-        for i, outer in enumerate(pairs)
-    ]
-    parents = [
-        [j for j, outer in enumerate(pairs)
-         if j != i and outer[0] <= pair[0] and pair[1] <= outer[1]]
-        for i, pair in enumerate(pairs)
-    ]
-    selected: list[tuple[int, int]] = []
-    for index, pair in enumerate(pairs):
-        children = contains[index]
-        if parents[index]:
-            # 嵌套层：只有最内层（没有子括号）才取，避免两层以上递归。
-            if not children:
-                selected.append(pair)
-        elif any(contains[child] for child in children):
-            continue  # 顶层但有两层以上嵌套：外层不取，交给最内层
-        else:
-            selected.append(pair)
-    # 被另一个已选区间完整包住的内层丢弃（一层嵌套时外层已经在里面了）。
-    return sorted(
-        pair for pair in selected
-        if not any(other != pair and other[0] <= pair[0] and pair[1] <= other[1]
-                   for other in selected)
-    )
+    # F3：交叉嵌套（`(a （b) c）`）会让两种括号的区间相交，而 tokenize 要求
+    # 区间有序且两两不相交。按 (start, -end) 排序后单遍扫描，先出现且更长者胜。
+    candidates.sort(key=lambda span: (span[0], -span[1]))
+    spans: list[tuple[int, int]] = []
+    last_end = -1
+    for start, end in candidates:
+        if start >= last_end:
+            spans.append((start, end))
+            last_end = end
+    return spans
 
 
 def _action_ranges(text: str) -> list[tuple[int, int]]:
@@ -224,6 +267,8 @@ def _tokenize_actions(text: str) -> tuple[str, list[tuple[str, str]]]:
     先换 token 还让跨行动作段作为一个整体（不会在段落切分时被拆散）。
     """
     spans = _action_ranges(text)
+    # tokenize 的前置条件：区间已排序且两两不相交（_action_spans 已显式过滤）。
+    assert all(left[1] <= right[0] for left, right in zip(spans, spans[1:]))
     if not spans:
         return text, []
     prefix = '\u2063AR'
@@ -266,10 +311,20 @@ def _render_action_inline(text: str) -> str:
 
 
 def _restore_actions(html: str, replacements: list[tuple[str, str]]) -> str:
-    for token, action in replacements:
-        rendered = _render_action_inline(action)
-        html = html.replace(token, f'<span style="{_ACTION_STYLE}">{rendered}</span>')
-    return html
+    """单遍还原所有动作 token，避免逐个 ``str.replace`` 退化成 O(k·n)。"""
+    if not replacements:
+        return html
+    mapping = dict(replacements)
+    # token 形如 prefix + 序号 + "\u2063"；prefix 由 _tokenize_actions 保证
+    # 不在正文里出现，因此这个模式只会命中原样保留的 token。
+    prefix = replacements[0][0][:-1].rstrip('0123456789')
+    token_pattern = re.compile(re.escape(prefix) + r'\d+\u2063')
+
+    def render(match: re.Match[str]) -> str:
+        token = match.group()
+        return f'<span style="{_ACTION_STYLE}">{_render_action_inline(mapping[token])}</span>'
+
+    return token_pattern.sub(render, html)
 
 
 def preserve_line_breaks(text: str) -> str:
