@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,8 +22,10 @@ from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
 
 from pet.chat.memory import (
+    ARCHIVE_DUP_RATIO,
     INJECT_CHAR_LIMIT,
     MAX_ENTRIES,
+    MAX_HIT_WRITE_ATTEMPTS,
     MAX_TOTAL_CHARS,
     ChatMemory,
     _hit_queue_for,
@@ -198,6 +201,71 @@ def test_clear_removes_file(tmp_path):
     assert mem.clear() is True  # 本来就不存在 = 已清空
 
 
+# ---------------------------------------------------------------- v2f L4/L5/L6
+def test_apply_ops_noop_does_not_rewrite_file(tmp_path):
+    """v2f L4：FORGET 未命中 = 空操作，不写盘且返回 False（mtime 不变）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    mem.add("周三有课")
+    before_mtime = path.stat().st_mtime_ns
+    before_text = path.read_text(encoding="utf-8")
+
+    assert mem.apply_ops(
+        [{"op": "FORGET", "text": "不存在的记忆"}], source="auto") is False
+    assert path.stat().st_mtime_ns == before_mtime
+    assert path.read_text(encoding="utf-8") == before_text
+
+
+def test_add_dedup_refresh_enforces_budget(tmp_path):
+    """v2f L5：盘上 12 条共 6000 字符时，去重刷新也要收敛到 4000 预算内。"""
+    path = tmp_path / "memory.json"
+    base = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    texts = [f"{index:02d}-" + "长" * 497 for index in range(12)]
+    assert sum(len(text) for text in texts) == 6000
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "entries": [
+                    {
+                        "id": f"old-{index}",
+                        "text": text,
+                        "source": "manual",
+                        "layer": "fact",
+                        "created_at": (base - timedelta(minutes=index)).isoformat(),
+                        "updated_at": (base - timedelta(minutes=index)).isoformat(),
+                        "hits": 1,
+                    }
+                    for index, text in enumerate(texts)
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    mem = ChatMemory(path, clock=_clock())
+    refreshed, created = mem.add(texts[0])
+    assert created is False
+    entries = mem.load()
+    assert texts[0] in {entry["text"] for entry in entries}
+    assert sum(len(entry["text"]) for entry in entries) <= MAX_TOTAL_CHARS
+    assert len(entries) == 8  # 12 × 500 → 8 × 500
+
+
+def test_note_recalled_hit_increments_persisted_hits(tmp_path):
+    """v2f L6：命中落盘同时 hits += 1（淘汰/注入排序都看 hits）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    assert topic["hits"] == 1
+    mem.note_recalled([topic["id"]])
+    assert mem.flush_hits(5.0) is True
+    persisted = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert persisted["hits"] == 2
+
+
 # ---------------------------------------------------------------- v2c M1/M3
 def test_auto_apply_ops_cannot_unarchive_topic_by_changing_layer(tmp_path):
     """M1：自动提炼把归档 topic 改层成 fact 不能绕过归档（仍不注入）。"""
@@ -255,6 +323,65 @@ def test_auto_apply_ops_can_still_forget_archived_topic(tmp_path):
     assert mem.apply_ops(
         [{"op": "FORGET", "text": "那个鉴权 bug 用 token"}], source="auto") is True
     assert mem.load() == []
+
+
+# ---------------------------------------------------------------- v2f N1/N3
+def test_auto_reaffirm_never_renews_topic_activity(tmp_path):
+    """v2f N1：第 13/26/39 天自动重申只 +hits，第 15 天仍归档、recall 不命中。"""
+    path = tmp_path / "memory.json"
+    state = {"now": datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)}
+    mem = ChatMemory(path, clock=lambda: state["now"])
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    created = topic["created_at"]
+
+    for day in (13, 26, 39):
+        state["now"] = topic_at = datetime.fromisoformat(created) + timedelta(days=day)
+        assert mem.apply_ops(
+            [{"op": "ADD", "text": "那个鉴权 bug 用 token"}], source="auto"
+        ) is True
+        persisted = next(
+            e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+            if e["id"] == topic["id"])
+        assert persisted["last_hit_at"] == topic["last_hit_at"]
+        assert persisted["updated_at"] == topic["updated_at"]
+
+    day15 = datetime.fromisoformat(created) + timedelta(days=15)
+    loaded = mem.load()
+    assert is_archived(loaded[0], day15) is True
+    assert recall(loaded, "token", now=day15, turn_index=2).entries == ()
+
+    day52 = datetime.fromisoformat(created) + timedelta(days=52)
+    assert is_archived(loaded[0], day52) is True
+    assert recall(loaded, "token", now=day52, turn_index=2).entries == ()
+    assert topic_at > day15  # 重申确实发生在第 15 天之后
+
+
+def test_auto_add_near_duplicate_of_archived_memory_is_discarded(tmp_path):
+    """v2f N3：换说法新建会被归档 Jaccard 挡住；手动来源不受限。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    archived, _ = mem.add("我在准备十月底的考试", layer="topic")
+    assert mem.set_archived(archived["id"], True) is True
+    before = path.read_text(encoding="utf-8")
+
+    assert ARCHIVE_DUP_RATIO == 0.6
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "在准备十月底的考试（考完要复盘）"}],
+        source="auto",
+    ) is False
+    assert path.read_text(encoding="utf-8") == before
+    loaded = mem.load()
+    assert len(loaded) == 1
+    assert recall(loaded, "十月底的考试", turn_index=2).entries == ()
+    assert "考完要复盘" not in render_injection(loaded)
+
+    # 手动来源不受归档去重限制（手动钉仍是恢复/新建的合法入口）。
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "在准备十月底的考试（考完要复盘）"}],
+        source="manual",
+    ) is True
+    assert any(
+        "考完要复盘" in entry["text"] for entry in mem.load())
 
 
 # ---------------------------------------------------------------- 指令解析
@@ -697,6 +824,36 @@ def test_hit_write_failure_keeps_pending_and_retries(tmp_path, monkeypatch):
         e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
         if e["id"] == topic["id"])
     assert persisted["last_hit_at"] == hit_at.isoformat()
+
+
+def test_hit_write_gives_up_after_five_failures_with_one_warning(
+    tmp_path, monkeypatch, caplog
+):
+    """v2f L1：连续失败 5 次后放弃本批（flush True），只记一条无 traceback 的 warning。"""
+    import pet.chat.memory as memory_mod
+
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    monkeypatch.setattr(ChatMemory, "_write", lambda self, entries: False)
+    # 把退避压到毫秒级：仍走同一套指数退避/放弃逻辑，避免测试真等 15s。
+    monkeypatch.setattr(memory_mod, "_FAIL_RETRY_SECONDS", 0.01)
+    assert MAX_HIT_WRITE_ATTEMPTS == 5
+
+    mem.note_recalled([topic["id"]], now=datetime.now().astimezone())
+    with caplog.at_level(logging.WARNING, logger="pet.chat.memory"):
+        assert mem.flush_hits(5.0) is True
+
+    queue = _hit_queue_for(path)
+    with queue._cond:
+        assert queue._pending == {}
+        assert queue._failures == 0
+    warnings = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "放弃本批" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is None
 
 
 def test_about_to_quit_flushes_chat_memory_hits(tmp_path, monkeypatch):

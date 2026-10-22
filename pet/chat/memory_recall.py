@@ -9,6 +9,8 @@
 - user 层恒定注入（≤600 字符，按 importance + 新近度截）；
 - fact/lesson/topic 按需命中 top-3（≤600 字符），首轮（turn_index<=1）不命中；
 - 打分 = BM25 长度归一后的 idf 分 × 艾宾浩斯衰减 × importance；
+- 命中门槛（v2f）：至少一个长度 ≥2 的命中词；只保留本轮最高分 25% 以上的
+  条目（相对门槛随语料自适应，绝对 idf 门槛会随 df/N 漂移）；score ≤ 0 永不注入；
 - 已见去重：top-3 的前 2 条不排除已见，第 3 条起跳过已见；
 - topic 连续 14 天未命中自动归档（归档条目不参与命中）；
 - 空命中不注入占位。
@@ -20,6 +22,7 @@ v2b：条目/查询关键词上限放宽到整条记忆（48 / 64），ASCII 单
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import threading
@@ -50,10 +53,11 @@ MAX_KEYWORDS = 48
 #: 条目稀释的 coverage 因子。
 BM25_K1 = 1.2
 BM25_B = 0.6
-#: 最低命中门槛：命中词里至少一个长度 ≥2，且命中词的 idf 和 ≥ 0.15。
-#: 出处：v2c 盲审实测（20 条真实风格记忆 × 30 句无关闲聊）：放宽关键词后
-#: 误注入从 3/30 涨到 7/30，0.15 是实测能压回基线的下限。
-MIN_SCORE = 0.15
+#: 命中门槛（v2f）：删掉「命中词 idf 和 ≥ MIN_SCORE」这条绝对门槛——idf 随
+#: df/N 漂移，全库共享一个主题词时（df/N→1）同主题条目会被整体挡掉。改为
+#: 相对门槛：只保留本轮最高分 25% 以上的条目，门槛随语料自适应。
+#: v2c 误注入基线（20 条真实风格记忆 × 30 句无关闲聊）实测仍为 1/30。
+RELATIVE_MIN_RATIO = 0.25
 
 _QUERY_KEYWORD_LIMIT = 64
 _SECONDS_PER_DAY = 86400.0
@@ -266,9 +270,11 @@ def score_entry(
 ) -> float:
     """单条打分：BM25 长度归一的命中 idf 和 × 衰减 × importance；无命中 = 0。
 
-    命中词必须至少有一个长度 ≥2，且命中词 idf 和 ≥ ``MIN_SCORE``（v2c M4：
-    单字符/全库常见词不足以支撑一次注入）。``avgdl`` 缺省按本条自身长度兜底，
-    生产路径（``rank_entries`` / ``recall``）会传入全库均值。
+    门槛①：命中词必须至少有一个长度 ≥2（v2c M4：单字符/全库常见词不足以
+    支撑一次注入）。绝对 idf 门槛已删除（v2f N2：它随 df/N 漂移，会让共享
+    主题词的整组记忆检索不到）；相对门槛由 ``recall`` 用本轮最高分统一应用。
+    ``avgdl`` 缺省按本条自身长度兜底，生产路径（``rank_entries`` / ``recall``）
+    会传入全库均值。
     """
     keywords = _entry_keywords(entry)
     if not keywords or not query_keywords:
@@ -280,8 +286,8 @@ def score_entry(
     if not any(len(keyword) >= 2 for keyword in matched):
         return 0.0
     intersection = sum(idf.get(keyword, 0.0) for keyword in matched)
-    # 门槛②：命中词 idf 和低于 MIN_SCORE 视为噪声（常见词/单字组合）。
-    if intersection < MIN_SCORE:
+    # score ≤ 0（无 idf 权重或衰减下溢）永不返回正分，调用方据此排除注入。
+    if intersection <= 0.0:
         return 0.0
     corpus_avgdl = avgdl if avgdl is not None and avgdl > 0 else float(len(keywords))
     denominator = 1.0 + BM25_K1 * (
@@ -386,6 +392,20 @@ def render_user_snapshot(
     return text
 
 
+def _entry_key(entry: dict[str, Any]) -> str:
+    """已见去重键：优先持久化 ``id``；老条目缺 id 时用正文哈希（不落盘）。
+
+    v2f L3：缺 id 的条目若统一返回空串，所有条目共享同一个已见键，第 3 个
+    名额从第二轮起永久关闭。这里用正文的 sha1 十六进制保证不同条目键不同；
+    该键只在进程内 ``_SEEN`` 使用，不改变磁盘结构。
+    """
+    entry_id = str(entry.get("id", "") or "").strip()
+    if entry_id:
+        return entry_id
+    text = str(entry.get("text", ""))
+    return "text:" + hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
 def recall(
     entries: list[dict[str, Any]],
     query: str,
@@ -400,6 +420,8 @@ def recall(
 
     已见规则：排序后的前 2 条无论是否已见都注入；第 3 条起跳过已见，
     顺延到下一个未见条目（防止「越搜越偏」）。
+    v2f N2：相对门槛只在本轮最高分 25% 以上的条目里选（最高分 ≤0 直接不注入），
+    绝不让 score ≤ 0 的条目进入注入段。
     """
     seen_ids = frozenset(str(item) for item in (seen or ()))
     if int(turn_index) <= 1:
@@ -412,11 +434,20 @@ def recall(
     ranked = rank_entries(entries, query, now=moment, idf=idf, avgdl=avgdl)
     if not ranked:
         return RecallResult(seen=seen_ids)
+    best_score = ranked[0][0]
+    if best_score <= 0:
+        return RecallResult(seen=seen_ids)
+    cutoff = best_score * RELATIVE_MIN_RATIO
+    # 先按门槛筛出候选，再做已见去重：这里的 index 就是"排序后的前 2 条"。
+    candidates = [
+        (score, entry) for score, entry in ranked
+        if score > 0 and score >= cutoff
+    ]
     selected: list[dict[str, Any]] = []
-    for index, (_score, entry) in enumerate(ranked):
+    for index, (_score, entry) in enumerate(candidates):
         if len(selected) >= max(1, int(top_k)):
             break
-        entry_id = str(entry.get("id", ""))
+        entry_id = _entry_key(entry)
         if index < 2 or entry_id not in seen_ids:
             selected.append(entry)
     if not selected:
@@ -424,7 +455,7 @@ def recall(
     text, included = _render_entries(_RECALL_HEADER, selected, char_limit)
     if not included:
         return RecallResult(seen=seen_ids)
-    updated = seen_ids | {str(entry.get("id", "")) for entry in included}
+    updated = seen_ids | {_entry_key(entry) for entry in included}
     return RecallResult(entries=included, text=text, seen=frozenset(updated))
 
 
@@ -469,8 +500,14 @@ def augment_for_turn(
     has_history = bool(history)
     session = (str(session_key or ""), _history_key(history))
     if not has_history:
+        # v2f L2：首轮清空必须按 session_key 前缀清掉该会话的**所有**历史桶。
+        # 旧代码只 pop (session_key, "")，而正常键是 (session_key, 首条消息 id)，
+        # 永远对不上，是死代码。
+        prefix = str(session_key or "")
         with _SEEN_LOCK:
-            _SEEN.pop(session, None)
+            stale_keys = [key for key in _SEEN if key[0] == prefix]
+            for key in stale_keys:
+                _SEEN.pop(key, None)
         return ""
     with _SEEN_LOCK:
         seen = _SEEN.get(session, frozenset())
