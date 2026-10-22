@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -35,7 +37,8 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
-from .memory import ChatMemory, memory_path
+from .memory import LAYERS, ChatMemory, layer_of, memory_path
+from .memory_recall import LAYER_LABELS, is_archived
 from .themes import CHAT_UI_STYLE_LABELS, CHAT_UI_VIEW_ASPECT, theme_names
 from .utils import _safe_emit
 
@@ -282,8 +285,10 @@ class _AiSettingsPage(QWidget):
         root.addWidget(SettingsSection("记忆", [
             SettingRow(
                 "chat_memory_enabled", "记住用户的事",
-                "开启后，每次对话都会带上你钉下的记忆（在对话里说「记住：……」，或点"
-                "消息气泡上的图钉添加）；关闭只是不再带入，已存的记忆保留。默认开启。",
+                "开启后，每次对话都会带上你的记忆：偏好恒注，事实/教训/话题按需命中。"
+                "对话里可说「记住：……」（事实）、「记住偏好：……」「记住教训：……」"
+                "「记住话题：……」，或点消息气泡上的图钉添加；关闭只是不再带入，"
+                "已存的记忆保留。默认开启。",
                 self.chat_memory_enabled,
             ),
             SettingRow(
@@ -300,7 +305,8 @@ class _AiSettingsPage(QWidget):
             ),
             SettingRow(
                 "chat_memory_manage", "记忆管理",
-                "按角色保存在本地（最多 100 条 / 4000 字），可查看、单条删除或全部清空。",
+                "按角色保存在本地（最多 100 条 / 4000 字），按四层分组；可单条改层、"
+                "删除、恢复已归档的话题，或一键清空全部四层。",
                 self.chat_memory_manage_btn,
             ),
         ], self))
@@ -813,7 +819,7 @@ class _AiSettingsPage(QWidget):
 
 
 class ChatMemoryDialog(QDialog):
-    """「记忆管理」对话框：查看 / 单条删除 / 全部清空（清空走确认）。
+    """「记忆管理」对话框：四层分组 / 单条改层 / 删除 / 归档 topic 恢复 / 全部清空。
 
     每次操作后从 ChatMemory 重读重排：本对话框（可能在独立设置进程）与主进程
     聊天窗的「记住：……」/「钉为记忆」写同一个 memory.json，展示以盘上为准。
@@ -822,7 +828,7 @@ class ChatMemoryDialog(QDialog):
     def __init__(self, memory: ChatMemory, parent=None):
         super().__init__(parent)
         self.memory = memory
-        self._rows: list[QWidget] = []
+        self._rows: list[QWidget] = []  # 只数条目行（组标题不计），兼容旧测试口径
         self.setObjectName("chat-memory-dialog")
         self.setWindowTitle("记忆管理")
         self.setMinimumWidth(460)
@@ -861,43 +867,96 @@ class ChatMemoryDialog(QDialog):
         return len(self._rows)
 
     def _reload(self) -> None:
-        for row in self._rows:
-            self.host_layout.removeWidget(row)
-            row.deleteLater()
+        # 清空所有布局项（含上一次的 stretch），避免反复改层/恢复后残留 spacer。
+        while self.host_layout.count():
+            item = self.host_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         self._rows = []
-        entries = self.memory.load()
-        if not entries:
-            empty = QLabel("还没有记忆。在对话里说「记住：……」，或点消息气泡上的图钉添加。", self.host)
+        groups = self.memory.load_grouped()
+        now = datetime.now().astimezone()
+        total = sum(len(entries) for entries in groups.values())
+        if not total:
+            empty = QLabel(
+                "还没有记忆。在对话里说「记住：……」「记住偏好：……」「记住教训：……」"
+                "「记住话题：……」，或点消息气泡上的图钉添加。",
+                self.host,
+            )
             empty.setWordWrap(True)
             self.host_layout.addWidget(empty)
             self._rows.append(empty)
-        for entry in entries:
-            row = QWidget(self.host)
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
-            source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
-            source_badge.setObjectName("chat-memory-source")
-            source_badge.setStyleSheet(
-                "color: rgba(128,128,128,0.9); font-size: 11px;"
-                "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
-            layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
-            text = QLabel(str(entry.get("text", "")), row)
-            text.setWordWrap(True)
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            layout.addWidget(text, 1)
-            delete_btn = QPushButton("删除", row)
-            delete_btn.setProperty("variant", "ghost")
-            entry_id = str(entry.get("id", ""))
-            delete_btn.clicked.connect(lambda _checked=False, eid=entry_id: self._delete_entry(eid))
-            layout.addWidget(delete_btn)
-            self.host_layout.addWidget(row)
-            self._rows.append(row)
+        for layer in LAYERS:
+            entries = groups[layer]
+            if not entries:
+                continue
+            header = QLabel(f"{LAYER_LABELS[layer]}（{len(entries)}）", self.host)
+            header.setObjectName(f"chat-memory-group-{layer}")
+            header.setStyleSheet(
+                "font-weight: 600; color: rgba(160,160,160,0.95); margin-top: 4px;")
+            self.host_layout.addWidget(header)
+            for entry in entries:
+                row = self._entry_row(entry, layer, now)
+                self.host_layout.addWidget(row)
+                self._rows.append(row)
         self.host_layout.addStretch(1)
-        real = len(entries)
-        self.count_label.setText(f"共 {real} 条（上限 100 条 / 4000 字）" if real else "")
-        self.clear_btn.setEnabled(real > 0)
+        self.count_label.setText(
+            f"共 {total} 条（上限 100 条 / 4000 字）" if total else "")
+        self.clear_btn.setEnabled(total > 0)
+
+    def _entry_row(self, entry: dict, layer: str, now: datetime) -> QWidget:
+        row = QWidget(self.host)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
+        source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
+        source_badge.setObjectName("chat-memory-source")
+        source_badge.setStyleSheet(
+            "color: rgba(128,128,128,0.9); font-size: 11px;"
+            "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
+        layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
+        archived = layer == "topic" and is_archived(entry, now)
+        text = QLabel(str(entry.get("text", "")), row)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if archived:
+            text.setStyleSheet("color: rgba(128,128,128,0.6);")
+        layout.addWidget(text, 1)
+        entry_id = str(entry.get("id", ""))
+        # 单条改层：四层下拉（改层立即落盘并重排）
+        layer_combo = QComboBox(row)
+        layer_combo.setObjectName(f"chat-memory-layer-{entry_id}")
+        layer_combo.setFixedWidth(92)
+        for name in LAYERS:
+            layer_combo.addItem(LAYER_LABELS[name], name)
+        layer_combo.setCurrentIndex(LAYERS.index(layer_of(entry)))
+        layer_combo.currentIndexChanged.connect(
+            lambda _index, eid=entry_id, combo=layer_combo: self._change_layer(
+                eid, str(combo.currentData())))
+        layout.addWidget(layer_combo, 0, Qt.AlignmentFlag.AlignTop)
+        if archived:
+            restore_btn = QPushButton("恢复", row)
+            restore_btn.setObjectName(f"chat-memory-restore-{entry_id}")
+            restore_btn.setProperty("variant", "ghost")
+            restore_btn.clicked.connect(
+                lambda _checked=False, eid=entry_id: self._restore_entry(eid))
+            layout.addWidget(restore_btn, 0, Qt.AlignmentFlag.AlignTop)
+        delete_btn = QPushButton("删除", row)
+        delete_btn.setProperty("variant", "ghost")
+        delete_btn.clicked.connect(lambda _checked=False, eid=entry_id: self._delete_entry(eid))
+        layout.addWidget(delete_btn)
+        return row
+
+    def _change_layer(self, entry_id: str, layer: str) -> None:
+        if not self.memory.update_layer(entry_id, layer):
+            QMessageBox.warning(self, "改层失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()
+
+    def _restore_entry(self, entry_id: str) -> None:
+        if not self.memory.restore_topic(entry_id):
+            QMessageBox.warning(self, "恢复失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()
 
     def _delete_entry(self, entry_id: str) -> None:
         if not self.memory.remove(entry_id):

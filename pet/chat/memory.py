@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""AI 对话全局记忆（档 A：手动钉记忆）— ChatMemory。
+"""AI 对话全局记忆（档 A 手动钉 + v2a 四层）— ChatMemory。
 
-设计稿：`.scratch/feature-modules/CHAT-GLOBAL-MEMORY.md`（档 A 先行，零 LLM 成本）。
+设计稿：`.scratch/feature-modules/CHAT-GLOBAL-MEMORY.md`（档 A 先行，零 LLM 成本）
+与 `.scratch/memory-v2/SPEC-v2a.md`（四层 / 按需命中）。
 
 - 存储文件：`<config_dir>/sessions[-实例]/<character_id>/memory.json`（**按角色**——
   不同角色记不同人格事实；多实例经 SessionStore 的实例后缀目录天然隔离）；
-- 结构：`{version, entries: [{id, text, source, created_at, updated_at, hits}]}`，
-  新条目在头部；上限 100 条 / 4000 字符，超限按 hits 少 + 最老淘汰；
-- 两个入口：对话里「记住：……」（指令解析，`parse_remember_command`）与
-  消息气泡「钉为记忆」；重复钉同一文本按文本去重（updated_at 刷新 + hits+1）；
-- 注入：`render_injection` 生成「关于用户的记忆」段（硬字符上限，超出按
-  hits/时间截），由 PromptBuilder.build_messages 追加到 system 末尾；
+- 结构：`{version, entries: [{id, text, source, layer, keywords, created_at,
+  updated_at, hits}]}`；老条目缺 `layer` 读取即 `fact`、缺 `keywords` 现场 bigram
+  兜底（**不迁移、不改写老文件**）；新条目在头部；上限 100 条 / 4000 字符，
+  超限按 hits 少 + 最老淘汰；
+- 四层：`user` 恒定注入；`fact/lesson/topic` 第二轮起按需命中；topic 连续 14 天
+  未命中自动归档（`archived`，不参与命中，UI 可恢复）；
+- 两个入口：对话里「记住[偏好/教训/话题]：……」（指令解析，
+  `parse_remember_command`）与消息气泡「钉为记忆」；重复钉同一文本按文本去重
+  （updated_at 刷新 + hits+1）；
+- 注入：`injection_text` 只返回 user 快照（硬字符上限），并按线程暂存条目；
+  `PromptBuilder.build_messages` 用真实用户消息补上 fact/lesson/topic 命中段。
   `chat_memory_enabled` 关 = 注入段为空，零成本。
 
 存储纪律照抄 `pet/proactive_memory.py`（三层锁，直接复用它的进程内锁表与
@@ -52,6 +58,20 @@ from ..proactive.memory import (
     _resolved,
     lock_path_for,
 )
+from .memory_recall import (
+    DEFAULT_LAYER,
+    LAYERS,
+    MAX_KEYWORDS,
+    archive_stale_topics,
+    clear_staged_injection,
+    extract_keywords,
+    is_archived,
+    layer_of,
+    normalize_layer,
+    recall,
+    render_user_snapshot,
+    stage_injection,
+)
 from .session_store import SessionStore
 
 log = logging.getLogger(__name__)
@@ -63,8 +83,29 @@ MAX_ENTRY_CHARS = 500
 #: 注入段的硬字符上限（设计稿 §4：条列，带字符上限，超出按 hits/时间截）。
 INJECT_CHAR_LIMIT = 1200
 
-#: 「记住：……」指令前缀（中英文冒号都认）。
-REMEMBER_PREFIXES = ("记住：", "记住:")
+#: 手动钉四前缀（中英文冒号都认；长前缀在前，避免被「记住：」抢匹配）。
+_REMEMBER_LAYERS = (
+    ("记住偏好：", "user"),
+    ("记住偏好:", "user"),
+    ("记住教训：", "lesson"),
+    ("记住教训:", "lesson"),
+    ("记住话题：", "topic"),
+    ("记住话题:", "topic"),
+    ("记住：", "fact"),
+    ("记住:", "fact"),
+)
+REMEMBER_PREFIXES = tuple(prefix for prefix, _layer in _REMEMBER_LAYERS)
+
+
+class RememberCommand(str):
+    """「记住…：」解析结果：字符串本体 + ``layer``，兼容只读正文的老调用方。"""
+
+    layer: str
+
+    def __new__(cls, value: str, layer: str) -> RememberCommand:
+        instance = super().__new__(cls, value)
+        instance.layer = normalize_layer(layer)
+        return instance
 
 #: 注入段头：说明这是用户事实清单，防止模型逐字复述。
 _INJECT_HEADER = (
@@ -93,15 +134,16 @@ def memory_path(config_dir, instance_id: str, character_id: str) -> Path:
 
 
 def parse_remember_command(text: str) -> str | None:
-    """「记住：…」「记住:…」开头 → 指令正文（strip 后，可能是空串）；非指令 → None。
+    """「记住[偏好/教训/话题]：…」开头 → 指令正文；非指令 → None。
 
-    空串与 None 必须区分：空串是"指令到了但没说要记什么"（调用方给提示气泡），
-    None 是"这根本不是记忆指令"（走正常发送）。
+    返回的是 ``RememberCommand``（str 子类，额外带 ``layer``）：老调用方继续把
+    它当正文传给 ``ChatMemory.add``，层信息不会在调用链上丢失。空串与 None 必须
+    区分：空串是"指令到了但没说要记什么"，None 是"这根本不是记忆指令"。
     """
     stripped = str(text or "").strip()
-    for prefix in REMEMBER_PREFIXES:
+    for prefix, layer in _REMEMBER_LAYERS:
         if stripped.startswith(prefix):
-            return stripped[len(prefix):].strip()
+            return RememberCommand(stripped[len(prefix):].strip(), layer)
     return None
 
 
@@ -138,16 +180,68 @@ def _iso_sort_key(value) -> float:
         return 0.0
 
 
-def injection_text(enabled: bool, config_dir, instance_id: str, character_id: str) -> str:
+def _clean_keyword_list(value: Any) -> list[str]:
+    """ops / 条目里的 keywords → 去重、小写、≤MAX_KEYWORDS 的字符串列表。"""
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        token = str(item or "").strip().lower()
+        if token and token not in cleaned:
+            cleaned.append(token)
+        if len(cleaned) >= MAX_KEYWORDS:
+            break
+    return cleaned
+
+
+def _normalized_entry(
+    entry: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """纯读副本：补 layer / keywords，并把超期 topic 标成 archived（不写盘）。"""
+    item = dict(entry)
+    item["layer"] = layer_of(item)
+    keywords = _clean_keyword_list(item.get("keywords"))
+    item["keywords"] = keywords or extract_keywords(item.get("text", ""))
+    if item["layer"] == "topic" and not item.get("archived") and is_archived(item, now):
+        item["archived"] = True
+    return item
+
+
+def injection_text(
+    enabled: bool,
+    config_dir,
+    instance_id: str,
+    character_id: str,
+    *,
+    user_text: str | None = None,
+    turn_index: int = 2,
+    seen: frozenset[str] | set[str] | None = None,
+    now: datetime | None = None,
+) -> str:
     """生成注入段的总入口：`chat_memory_enabled` 关 / 无记忆 / 读不到 → 空串。
+
+    默认只返回 user 快照，同时把本次读到的条目暂存到当前线程，等
+    ``PromptBuilder.build_messages`` 用真实用户消息补 fact/lesson/topic 命中段
+    （聊天窗调用签名不变）。显式传 ``user_text`` 时直接返回「user 快照 + 命中」
+    两段，便于测试/其它调用方一次拿全。
 
     纯读（只拿本地 I/O 窄锁，不碰写者的宽锁与跨进程锁）：读者要么看到旧快照、
     要么看到新快照，永远不会看到半截文件（写入走原子替换）。
     """
     if not enabled:
+        clear_staged_injection()
         return ""
     memory = ChatMemory(memory_path(config_dir, instance_id, character_id))
-    return render_injection(memory.load())
+    entries = memory.load()
+    user_section = render_user_snapshot(entries, now=now)
+    if user_text is None:
+        stage_injection(entries, session_key=str(memory.path), note_hits=memory.note_recalled)
+        return user_section
+    clear_staged_injection()
+    result = recall(entries, str(user_text), seen=seen, now=now, turn_index=turn_index)
+    return "\n\n".join(part for part in (user_section, result.text) if part)
 
 
 class ChatMemory:
@@ -223,9 +317,29 @@ class ChatMemory:
         return []
 
     def load(self) -> list[dict[str, Any]]:
-        """读取记忆列表（新条目在前）。纯读：只与"本地正在写盘"互斥一瞬间。"""
+        """读取记忆列表（新条目在前）。纯读，只与"本地正在写盘"互斥一瞬间。
+
+        老条目在返回的副本上补 ``layer=fact`` 与现场 bigram ``keywords``；
+        **不写盘**，盘上文件保持原样（无迁移）。
+        """
         entries = self._read_entries_strict()
-        return [] if entries is None else entries
+        moment = datetime.now().astimezone()
+        return [_normalized_entry(entry, now=moment) for entry in (entries or [])]
+
+    def load_grouped(self) -> dict[str, list[dict[str, Any]]]:
+        """按四层分组读取；组内按 updated_at 倒序，四个键恒存在。"""
+        groups: dict[str, list[dict[str, Any]]] = {layer: [] for layer in LAYERS}
+        for entry in self.load():
+            groups[layer_of(entry)].append(entry)
+        for items in groups.values():
+            items.sort(
+                key=lambda entry: (
+                    _iso_sort_key(entry.get("updated_at")),
+                    str(entry.get("id", "")),
+                ),
+                reverse=True,
+            )
+        return groups
 
     # ------------------------------------------------------------ 跨进程锁
     def _try_file_lock(self, qlock: QLockFile) -> bool:
@@ -242,17 +356,32 @@ class ChatMemory:
         return False
 
     # ------------------------------------------------------------ 写
-    def add(self, text: str, source: str = "manual") -> tuple[dict[str, Any], bool] | None:
+    def add(
+        self,
+        text: str,
+        source: str = "manual",
+        *,
+        layer: str | None = None,
+    ) -> tuple[dict[str, Any], bool] | None:
         """新增/刷新一条记忆（读→改→写整体跨进程互斥）。
 
-        返回 ``(entry, created)``：``created=False`` 表示同一文本已在记忆里
-        （去重：updated_at 刷新 + hits+1，不新增条目）。返回 None：文本为空、
-        读失败或拿不到跨进程锁——后两种情况盘上**一个字节都没动**（绝不把只含
-        新条目的快照盖到旧记忆头上）。
+        ``layer`` 缺省时从 ``RememberCommand`` 或完整「记住…：」文本里取；再缺省
+        按 ``fact``。返回 ``(entry, created)``：``created=False`` 表示同一文本已
+        在记忆里（去重：updated_at 刷新 + hits+1，不新增条目）。返回 None：文本
+        为空、读失败或拿不到跨进程锁——后两种情况盘上**一个字节都没动**。
         """
-        text = str(text or "").strip()[:MAX_ENTRY_CHARS]
-        if not text:
+        layer_hint = layer or getattr(text, "layer", None)
+        raw = str(text or "").strip()
+        if not layer_hint:
+            parsed = parse_remember_command(raw)
+            if parsed is not None:
+                layer_hint = getattr(parsed, "layer", None)
+                raw = str(parsed).strip()
+        raw = raw[:MAX_ENTRY_CHARS]
+        if not raw:
             return None
+        explicit_layer = normalize_layer(layer_hint) if layer_hint else None
+        keywords = extract_keywords(raw)
         with self._lock:
             qlock = QLockFile(str(self._lock_file))
             if not self._try_file_lock(qlock):
@@ -264,21 +393,37 @@ class ChatMemory:
                     return None
                 now = self._clock().isoformat()
                 for entry in entries:
-                    if str(entry.get("text", "")) == text:
+                    if str(entry.get("text", "")) == raw:
                         entry["updated_at"] = now
                         entry["hits"] = int(entry.get("hits", 0) or 0) + 1
+                        if explicit_layer is not None:
+                            entry["layer"] = explicit_layer
+                            entry.pop("archived", None)
+                        else:
+                            entry["layer"] = layer_of(entry)
+                        entry["keywords"] = (
+                            _clean_keyword_list(entry.get("keywords")) or keywords
+                        )
+                        if layer_of(entry) == "topic":
+                            entry["last_hit_at"] = now
+                            entry.pop("archived", None)  # 重新钉 = 恢复活跃话题
                         entries.remove(entry)
                         entries.insert(0, entry)
                         self._write(entries)
                         return entry, False
+                entry_layer = explicit_layer or DEFAULT_LAYER
                 entry = {
                     "id": uuid.uuid4().hex,
-                    "text": text,
+                    "text": raw,
                     "source": str(source or "manual"),
+                    "layer": entry_layer,
+                    "keywords": keywords,
                     "created_at": now,
                     "updated_at": now,
                     "hits": 1,
                 }
+                if entry_layer == "topic":
+                    entry["last_hit_at"] = now
                 entries.insert(0, entry)
                 self._enforce_limits(entries, protected=(entry,))
                 self._write(entries)
@@ -295,6 +440,11 @@ class ChatMemory:
         - UPDATE：命中 = 同 ADD 命中（重申）；未命中按 ADD；
         - FORGET：按文本命中删除；未命中忽略。
 
+        v2a：ops 可带 ``layer``（fact/lesson/topic，缺省 fact）与 ``keywords``
+        （≤6，缺省现场 bigram 兜底）。老格式无这两个字段，按 fact + 现场提取兼容；
+        自动提炼重申已有条目时，ops 没显式给 layer 就不覆盖原层（避免把 user
+        偏好降级成 fact）。
+
         返回本次有没有真的落盘（空操作 / 读失败 / 拿不到跨进程锁 = False，
         后两种情况盘上一个字节都没动）。
         """
@@ -304,8 +454,13 @@ class ChatMemory:
                 continue
             op = str(item.get("op", "")).strip().upper()
             text = str(item.get("text", "")).strip()[:MAX_ENTRY_CHARS]
-            if op in ("ADD", "UPDATE", "FORGET") and text:
-                normalized.append((op, text))
+            if op not in ("ADD", "UPDATE", "FORGET") or not text:
+                continue
+            explicit_layer = (
+                normalize_layer(item.get("layer")) if item.get("layer") else None
+            )
+            keywords = _clean_keyword_list(item.get("keywords"))
+            normalized.append((op, text, explicit_layer, keywords))
         if not normalized:
             return False
         with self._lock:
@@ -319,7 +474,7 @@ class ChatMemory:
                     return False
                 now = self._clock().isoformat()
                 added: list[dict[str, Any]] = []
-                for op, text in normalized:
+                for op, text, explicit_layer, keywords in normalized:
                     found = next((e for e in entries if str(e.get("text", "")) == text), None)
                     if op == "FORGET":
                         if found is not None:
@@ -331,20 +486,127 @@ class ChatMemory:
                     if found is not None:
                         found["updated_at"] = now
                         found["hits"] = int(found.get("hits", 0) or 0) + 1
+                        if explicit_layer is not None:
+                            found["layer"] = explicit_layer
+                            found.pop("archived", None)
+                        else:
+                            found["layer"] = layer_of(found)
+                        found["keywords"] = (
+                            keywords
+                            or _clean_keyword_list(found.get("keywords"))
+                            or extract_keywords(text)
+                        )
+                        if layer_of(found) == "topic":
+                            found["last_hit_at"] = now
+                            found.pop("archived", None)
                         entries.remove(found)
                         entries.insert(0, found)
                         continue
+                    entry_layer = explicit_layer or DEFAULT_LAYER
                     entry = {
                         "id": uuid.uuid4().hex,
                         "text": text,
                         "source": str(source or "auto"),
+                        "layer": entry_layer,
+                        "keywords": keywords or extract_keywords(text),
                         "created_at": now,
                         "updated_at": now,
                         "hits": 1,
                     }
+                    if entry_layer == "topic":
+                        entry["last_hit_at"] = now
                     entries.insert(0, entry)
                     added.append(entry)
                 self._enforce_limits(entries, protected=tuple(added))
+                return self._write(entries)
+            finally:
+                qlock.unlock()
+
+    def update_layer(self, entry_id: str, layer: str) -> bool:
+        """单条改层（UI 下拉）；目标不存在 = 已达成 → True。"""
+        target = normalize_layer(layer)
+        with self._lock:
+            qlock = QLockFile(str(self._lock_file))
+            if not self._try_file_lock(qlock):
+                return False
+            try:
+                entries = self._read_entries_strict()
+                if entries is None:
+                    log.warning("对话记忆读取失败，本次不改层: %s", self.path)
+                    return False
+                found = next(
+                    (e for e in entries if str(e.get("id")) == str(entry_id)), None)
+                if found is None:
+                    return True
+                now = self._clock().isoformat()
+                found["layer"] = target
+                found["updated_at"] = now
+                found.pop("archived", None)
+                if target == "topic":
+                    found["last_hit_at"] = now
+                return self._write(entries)
+            finally:
+                qlock.unlock()
+
+    def set_archived(self, entry_id: str, archived: bool) -> bool:
+        """归档 / 恢复一条 topic；恢复时刷新 last_hit_at，避免立刻又被自动归档。"""
+        with self._lock:
+            qlock = QLockFile(str(self._lock_file))
+            if not self._try_file_lock(qlock):
+                return False
+            try:
+                entries = self._read_entries_strict()
+                if entries is None:
+                    log.warning("对话记忆读取失败，本次不改归档态: %s", self.path)
+                    return False
+                found = next(
+                    (e for e in entries if str(e.get("id")) == str(entry_id)), None)
+                if found is None:
+                    return True
+                found["archived"] = bool(archived)
+                if not archived:
+                    now = self._clock().isoformat()
+                    found["last_hit_at"] = now
+                    found["updated_at"] = now
+                return self._write(entries)
+            finally:
+                qlock.unlock()
+
+    def restore_topic(self, entry_id: str) -> bool:
+        """恢复归档 topic（UI「恢复」按钮）。"""
+        return self.set_archived(entry_id, False)
+
+    def note_recalled(
+        self,
+        entry_ids: list[str],
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """记录一次命中：刷新 topic 的 last_hit_at，并顺带归档超期 topic。
+
+        由 recall 注入后调用（只影响 topic；没有 topic 命中且无超期 topic 时
+        不落盘）。返回本次是否真的写盘。
+        """
+        ids = {str(item) for item in (entry_ids or [])}
+        moment = now or self._clock()
+        with self._lock:
+            qlock = QLockFile(str(self._lock_file))
+            if not self._try_file_lock(qlock):
+                return False
+            try:
+                entries = self._read_entries_strict()
+                if entries is None:
+                    log.warning("对话记忆读取失败，本次不记录命中: %s", self.path)
+                    return False
+                changed = False
+                for entry in entries:
+                    if (str(entry.get("id")) in ids
+                            and layer_of(entry) == "topic"):
+                        entry["last_hit_at"] = moment.isoformat()
+                        changed = True
+                changed = archive_stale_topics(entries, moment) or changed
+                if not changed:
+                    return False
                 return self._write(entries)
             finally:
                 qlock.unlock()

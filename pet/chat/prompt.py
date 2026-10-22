@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from .models import ChatMessage, ChatSettings
+from .memory_recall import augment_for_turn
 
 def load_character_manifest(root:Path,character_id:str):
     try: raw=json.loads((Path(root)/character_id/'manifest.json').read_text(encoding='utf-8'))
@@ -58,13 +59,17 @@ class PromptBuilder:
     def build_messages(self,settings,character_id,history,user_text,role_prompt=None,now=None,memory_text=None):
         """时间感知：历史用户消息前加发送时间标记，system 末尾附当前时间与距上条消息的间隔。
         时间取自已落盘的 ChatMessage.created_at，只在发给模型时附加，不改动会话文件。
-        memory_text（「关于用户的记忆」段，pet/chat/memory.render_injection 渲染）追加在
-        system 最末、与 time_context 同级；None/空 = 不注入，输出与无记忆逐字节一致。"""
+        memory_text（user 层快照，pet/chat/memory.injection_text 渲染）追加在
+        system 最末、与 time_context 同级；fact/lesson/topic 的按需命中由
+        augment_for_turn 用本次真实用户消息补第二段（首轮不命中）。
+        None/空 = 不注入，输出与无记忆逐字节一致。"""
         now=(now or datetime.now().astimezone()).astimezone()
         system=self.effective_system_prompt(settings,character_id,role_prompt)
         system=(system+'\n\n'+time_context(history,now)).strip()
         memory_text=str(memory_text or '').strip()
         if memory_text: system=(system+'\n\n'+memory_text).strip()
+        recall_text=augment_for_turn(history,user_text,now=now)
+        if recall_text: system=(system+'\n\n'+recall_text).strip()
         trimmed=self.trim_history(history,settings.history_message_limit,settings.history_char_limit)
         return [{'role':'system','content':system},*({'role':m.role,'content':stamp_message(m)} for m in trimmed),{'role':'user','content':user_text.strip()}]
     @staticmethod

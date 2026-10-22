@@ -259,12 +259,14 @@ def test_render_injection_prefers_high_hits():
 
 
 def test_injection_text_disabled_is_empty(tmp_path):
-    root = tmp_path / "sessions"
     path = memory_path(tmp_path, "", "shenshen")
     mem = ChatMemory(path, clock=_clock())
-    mem.add("我不吃辣")
+    mem.add("我不吃辣", layer="user")
+    mem.add("周三有课")  # fact：不再恒注，留给第二轮起的按需命中
     assert injection_text(False, tmp_path, "", "shenshen") == ""
-    assert "我不吃辣" in injection_text(True, tmp_path, "", "shenshen")
+    section = injection_text(True, tmp_path, "", "shenshen")
+    assert "我不吃辣" in section
+    assert "周三有课" not in section
     assert injection_text(True, tmp_path, "", "别的角色") == ""  # 按角色隔离
 
 
@@ -404,16 +406,24 @@ def test_legacy_window_remember_command_and_pin(tmp_path, monkeypatch):
 
 
 def test_begin_generation_injects_memory_into_system(tmp_path, monkeypatch):
-    """真实生成路径：有记忆时发给模型的 system 含记忆段；关掉开关后逐字节回到基线。"""
+    """真实生成路径：首轮只注 user 快照；第二轮起 fact 按需命中；关开关回到基线。"""
     window, sent = _modern_window(tmp_path, monkeypatch)
     try:
-        _win_memory(window).add("我不吃辣")
+        _win_memory(window).add("我不吃辣", layer="user")
+        _win_memory(window).add("周三有课", layer="fact")
         window.input.setPlainText("晚上吃什么")
         window.send_message()
         assert len(sent) == 1
         system = sent[0][0][0]["content"]
         assert "关于用户的记忆" in system
         assert "我不吃辣" in system
+        assert "周三有课" not in system  # 首轮不命中 fact
+        # 第二轮：带历史，fact 命中注入
+        window.input.setPlainText("周三有课吗")
+        window.send_message()
+        assert len(sent) == 2
+        second = sent[1][0][0]["content"]
+        assert "周三有课" in second
         # 关开关：注入段为空，与无记忆逐字节一致
         window.config.set("chat_memory_enabled", False)
         baseline = window.prompt_builder.build_messages(
@@ -421,9 +431,9 @@ def test_begin_generation_injects_memory_into_system(tmp_path, monkeypatch):
         )
         window.input.setPlainText("晚上吃什么")
         window.send_message()
-        assert len(sent) == 2
-        assert sent[1][0][0]["content"] == baseline[0]["content"]
-        assert "关于用户的记忆" not in sent[1][0][0]["content"]
+        assert len(sent) == 3
+        assert sent[2][0][0]["content"] == baseline[0]["content"]
+        assert "关于用户的记忆" not in sent[2][0][0]["content"]
     finally:
         window.close()
         window.deleteLater()
@@ -535,6 +545,50 @@ def test_settings_memory_manager_list_delete_and_clear(tmp_path, monkeypatch):
             assert not path.exists()
             assert dialog._row_count() == 1  # 空态提示行
             assert dialog.clear_btn.isEnabled() is False
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+    finally:
+        page.deleteLater()
+
+
+def test_memory_manager_groups_layers_changes_layer_and_restores_topic(tmp_path, monkeypatch):
+    """UI：四层分组；单条下拉改层；归档 topic 灰显 + 恢复。"""
+    from datetime import timedelta
+
+    from PySide6.QtWidgets import QComboBox, QLabel, QPushButton
+
+    from pet.chat.memory import LAYERS
+    from pet.chat.memory_recall import is_archived
+
+    config, page = _settings_page(tmp_path, monkeypatch)
+    try:
+        path = memory_path(config.dir, "", str(config.get("character")))
+        stale_at = datetime.now().astimezone() - timedelta(days=16)
+        stale_mem = ChatMemory(path, clock=lambda: stale_at)
+        stale, _ = stale_mem.add("旧话题", layer="topic")
+        mem = ChatMemory(path)
+        user, _ = mem.add("我不吃辣", layer="user")
+        fact, _ = mem.add("周三有课", layer="fact")
+        mem.add("别再把配置删了", layer="lesson")
+        dialog = page._open_memory_manager()
+        try:
+            assert dialog._row_count() == 4
+            labels = [label.text() for label in dialog.findChildren(QLabel)]
+            for text in ("用户偏好", "事实", "教训", "话题"):
+                assert any(text in label for label in labels), text
+            # 单条下拉改层：fact → lesson
+            combo = dialog.findChild(QComboBox, f"chat-memory-layer-{fact['id']}")
+            assert combo is not None
+            combo.setCurrentIndex(LAYERS.index("lesson"))
+            assert next(e for e in mem.load() if e["id"] == fact["id"])["layer"] == "lesson"
+            # 归档 topic：灰显 + 恢复按钮，点恢复后不再归档
+            restore = dialog.findChild(QPushButton, f"chat-memory-restore-{stale['id']}")
+            assert restore is not None
+            restore.click()
+            restored = next(e for e in mem.load() if e["id"] == stale["id"])
+            assert restored["archived"] is False
+            assert is_archived(restored, datetime.now().astimezone()) is False
         finally:
             dialog.close()
             dialog.deleteLater()
