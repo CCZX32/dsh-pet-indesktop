@@ -165,6 +165,9 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 - `petcore/ui/ports.py`：`QtScheduler`、`AudioAdapter`、`StorageAdapter`、`PetRegistry`、`InteractionAdapter`、`QuietMode`；`HostPorts` 新增 `pets`/`interaction`/`quiet`。
 - P4-a 新增 `HostPorts.http`（`CoreHttpPort`）：唯一普通取数出口；路由策略、错误分类与
   体积上限都在 `petcore/net/http.py::fetch_url`，mod 只给 URL/参数/路由偏好。
+- P4-b 新增 `HostPorts.speech`（`CoreSpeechPort`）：合成、缓存、预检、密钥全在
+  `petcore/speech/` + `petcore/net/tts.py`；动画循环用 `play_animation(loop=True)` /
+  `release_loop()`，探头/击飞/拖拽接管时自动解除。
 - `FeatureContext.host` 暴露宿主（只读使用），使 mod 能读取共享配置；mod 仍不应直接 import `pet.*`。
 - 菜单贡献统一 `<owner>:<contribution>`；每个有菜单的 mod 必须有设置页。
 

@@ -6,6 +6,7 @@ import itertools
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from .. import paths
 from ..contracts.api import ApiMetadata, ApiRequest
 from ..contracts.host import HostPorts
 from ..contracts.http import HttpError, HttpRequest, HttpResponse
+from ..contracts.speech import SpeechError, SpeechRequest
 
 logger = logging.getLogger("petcore.ui.ports")
 
@@ -121,6 +123,126 @@ class AudioAdapter:
             self.window.sound.set_volume(float(volume))
         except Exception:
             pass
+
+
+class CoreSpeechPort:
+    """``SpeechPort`` 的 core 门面：合成在后台线程，播放走唯一共享音频通道。
+
+    分工与线程：
+
+    - :meth:`speak` 立刻返回 token，合成（可能联网、可能秒级）跑在 daemon 线程；
+    - 合成完成后**回到 GUI 线程播放**（``scheduler`` 存在时走 ``call_later(0)``）：
+      ``QSoundEffect`` / ``QMediaPlayer`` 必须在有事件循环的线程上创建；
+    - ``on_done`` / ``on_error`` 在 ``scheduler`` 或直接调用方线程里执行（GUI 线程）；
+    - :meth:`stop` 只拦「还没开始播放」的那一次：合成中的 token 被摘掉后，
+      产物照旧进缓存，但不会再出声、也不会回调。
+
+    ``AudioAdapter.play`` 可能抛异常或返回 ``False``，两者都按
+    :class:`SpeechError`\\ ``("unavailable")`` 处理。
+    """
+
+    def __init__(self, service, audio, *, scheduler=None) -> None:
+        self.service = service
+        self.audio = audio
+        self._scheduler = scheduler
+        self._counter = itertools.count(1)
+        self._lock = threading.Lock()
+        self._inflight: set[str] = set()
+
+    # ------------------------------------------------------------ 转发
+    def providers(self):
+        return self.service.providers()
+
+    def preflight(self, provider: str = "") -> str:
+        return self.service.preflight(provider)
+
+    def synthesize(self, request: SpeechRequest):
+        return self.service.synthesize(request)
+
+    def cache_dir(self) -> Path:
+        return self.service.cache_dir()
+
+    def set_secret(self, provider: str, field: str, value: str) -> None:
+        self.service.set_secret(provider, field, value)
+
+    def secret_status(self, provider: str) -> dict[str, bool]:
+        return self.service.secret_status(provider)
+
+    # ------------------------------------------------------------ 播放
+    def speak(self, request, *, on_done=None, on_error=None) -> str:
+        token = f"speech-{next(self._counter)}"
+        with self._lock:
+            self._inflight.add(token)
+        worker = threading.Thread(
+            target=self._run,
+            args=(token, request, on_done, on_error),
+            name=f"petcore-{token}",
+            daemon=True,
+        )
+        worker.start()
+        return token
+
+    def stop(self, token: str = "") -> None:
+        with self._lock:
+            if token:
+                self._inflight.discard(token)
+            else:
+                self._inflight.clear()
+
+    def playing(self) -> bool:
+        with self._lock:
+            return bool(self._inflight)
+
+    # ------------------------------------------------------------ 线程
+    def _run(self, token: str, request, on_done, on_error) -> None:
+        try:
+            result = self.service.synthesize(request)
+        except SpeechError as exc:
+            self._finish(token, on_error, exc)
+            return
+        except Exception as exc:  # noqa: BLE001 - 统一收敛成 SpeechError
+            self._finish(token, on_error, SpeechError("unavailable", type(exc).__name__))
+            return
+        self._dispatch(lambda: self._play(token, result, on_done, on_error))
+
+    def _dispatch(self, callback) -> None:
+        scheduler = self._scheduler
+        if scheduler is None:
+            callback()
+            return
+        try:
+            scheduler.call_later(0, callback)
+        except Exception:  # noqa: BLE001 - 调度器坏了也别把声音吞掉
+            logger.debug("speech scheduler unavailable", exc_info=True)
+            callback()
+
+    def _play(self, token: str, result, on_done, on_error) -> None:
+        with self._lock:
+            if token not in self._inflight:
+                return  # 播放前被 stop()：不出声、不回调
+        try:
+            played = self.audio.play(result.path)
+        except Exception as exc:  # noqa: BLE001 - 端口实现可能抛
+            self._finish(token, on_error, SpeechError("unavailable", type(exc).__name__))
+            return
+        if played is False:
+            self._finish(
+                token, on_error, SpeechError("unavailable", "音频通道不可用")
+            )
+            return
+        self._finish(token, on_done, result)
+
+    def _finish(self, token: str, callback, payload) -> None:
+        with self._lock:
+            if token not in self._inflight:
+                return
+            self._inflight.discard(token)
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except Exception:  # noqa: BLE001 - 回调是 mod 的，不能反过来打断 core
+            logger.exception("speech callback failed")
 
 
 class StorageAdapter:
@@ -628,10 +750,13 @@ def build_ports(host, window) -> HostPorts:
     credentials = getattr(host, "api_credentials", None)
     config = getattr(host, "config", None)
     api = CoreApiPort(host, store, credentials) if store is not None and credentials is not None else None
+    scheduler = QtScheduler()
+    audio = AudioAdapter(window)
+    speech_service = getattr(host, "speech", None)
     return HostPorts(
         presentation=host.presentation_port(),
-        scheduler=QtScheduler(),
-        audio=AudioAdapter(window),
+        scheduler=scheduler,
+        audio=audio,
         storage=StorageAdapter(host.root),
         resources=ResourcesAdapter(),
         config=QtConfigPort(config) if config is not None else None,
@@ -653,4 +778,9 @@ def build_ports(host, window) -> HostPorts:
         screen=QtScreenPort(host),
         screen_ask=getattr(host, "screen_ask", None),
         http=CoreHttpPort(),
+        speech=(
+            CoreSpeechPort(speech_service, audio, scheduler=scheduler)
+            if speech_service is not None
+            else None
+        ),
     )

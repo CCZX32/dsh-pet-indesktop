@@ -290,3 +290,45 @@ host/settings_page.py  启用、进度间隔（5–120s）、是否写入聊天�
 
 `files.read` 是 P4 新增的能力声明（读取用户拖入的任意文本文件）；它同样只是声明，
 不是沙箱。文件解读**只读**：不修改、不移动、不删除被拖入的文件，路径不写日志正文。
+
+## 12. P4 端口：语音合成 `SpeechPort`（2026-10-22）
+
+`HostPorts.speech` 是 mod 说话的唯一入口。合成、缓存、失败兜底、密钥全在 core；
+mod 只决定「说什么、什么时候说、用哪个后端」。
+
+| 方法 | 用途 |
+|---|---|
+| `providers()` | 后端列表（`id/label/online/fields/available/reason`）；缺依赖或许可证时 `available=False` |
+| `preflight(provider="")` | 无网预检：解析后端链、把失效音色换默认，返回最终 provider id |
+| `synthesize(request)` | **阻塞**合成（缓存命中直接返回）；预缓存放后台线程时用 |
+| `speak(request, on_done=, on_error=)` | 后台合成 + 共享音频通道播放，返回 token |
+| `stop(token="")` / `playing()` | 取消尚未开始的播放 / 是否在播 |
+| `set_secret(provider, field, value)` / `secret_status(provider)` | 密钥只进钥匙串（owner `speech.<provider>`） |
+
+`SpeechRequest` 字段：`text/provider/voice/rate/pitch/volume/cache_key`。
+`provider` 留空 = core 配置的 `speech_backend`；`cache_key` 留空 = core 按 provider +
+音色生成（**换音色必须换缓存键**）。
+
+错误：`SpeechError.reason ∈ unavailable/network/timeout/auth/rate_limit/protocol/cache`。
+界面只读 reason，不解析供应商异常文本。
+
+`petcore --check` 的 `speech` 字段（backend/fallback/cache_dir/providers）是
+「冻结包是否真的带 edge-tts/winrt/pycaw」的第一证据；provider 缺依赖或许可证时
+会写进 `reason`。
+
+### 动画循环
+
+唱歌/报时这类「持续一段时间的动作」用：
+
+```python
+ports.presentation.play_animation("悠闲哼歌", loop=True)   # 一直播
+ports.presentation.release_loop()                          # 当前这圈播完回行为链
+```
+
+探头、击飞、拖拽接管时 Core 会自动解除循环；`play_animation` 返回 `False` 表示角色
+没有这个素材，mod 应安静降级（不要自己找替代素材名）。
+
+### 参考实现
+
+- `examples/petcore-mods/voice.chime` 1.1.0：日程/台词/预缓存/免打扰 + 设置页（含四家后端与密钥状态）。
+- `examples/petcore-mods/media.music` 1.1.0：SMTC + 歌词（`HostPorts.http`）+ 唱跳循环 + 播放器启动。

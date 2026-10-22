@@ -105,9 +105,13 @@ class _PresentationAdapter:
         if window is not None:
             window.say(text, duration_ms)
 
-    def play_animation(self, name: str) -> bool:
+    def play_animation(self, name: str, *, loop: bool = False) -> bool:
         window = self._window()
-        return bool(window is not None and window.play_animation(name))
+        return bool(window is not None and window.play_animation(name, loop=loop))
+
+    def release_loop(self) -> bool:
+        window = self._window()
+        return bool(window is not None and window.release_loop())
 
     def show_image(
         self, path, caption: str = "", *, duration_ms: int = 4000, scale: float = 1.0
@@ -139,6 +143,11 @@ class CoreHost:
         self.api_store = ApiStore(self.root)
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
+        from ..speech import SpeechService
+
+        self.speech = SpeechService(
+            self.root, config=self.config, credentials=self.api_credentials
+        )
         self.chat = ChatController(self, self.root)
         self.quick_chat = QuickChatController(self)
         from .screen import ScreenAskController

@@ -160,6 +160,7 @@
 - [petcore 插件市场 v1（2026-10-22）](PR-REPORT-PETCORE-MARKET-2026-10-22.md)：静态索引 + GitHub Release artifact + SHA-256 + 安装/更新/回滚、扩展管理左导航「插件市场」、`petcore market` CLI、npm 结论；改市场链路或评估分发方案时必读。
 - [petcore 截图四动作 + 快速对话气泡（2026-10-22）](PR-REPORT-PETCORE-P8-SCREEN-ACTIONS-QUICK-CHAT-2026-10-22.md)：动作条补齐提取文字/翻译/问问肥鱼/复制图像，OCR 归 `tool.ocr`（本地 rapidocr 优先、AI 兜底），core 只留端口与结果窗；点桌宠气泡开快速对话并与完整窗共用会话。排查「截图只有问答/没有 OCR/点气泡没反应」时必读。
 - [petcore 截图灰屏修复 + 深度思考/联网搜索（2026-10-22）](PR-REPORT-PETCORE-P7-THINKING-SEARCH-2026-10-22.md)：`grab_screen_image` 强制 QImage/DPR=1（Qt6 QPixmap 会让覆盖层整层不画=灰屏）、thinking/reasoning_effort 与思维链面板回显、联网 planner（web_search/fetch_url）+ 四引擎 + 搜索 Key 只进钥匙串；改 AI 思考/联网、截图冻结帧或排查「截图全灰/没有思考过程/联网没反应」时必读。
+- [petcore P4-b 语音端口·报时·音乐歌词（2026-10-22）](PR-REPORT-PETCORE-P4B-SPEECH-MUSIC-2026-10-22.md)：Core `SpeechPort`（edge/豆包/MiMo/SAPI + 缓存/预检/钥匙串）与 `play_animation(loop=True)`/`release_loop()`；`voice.chime`、`media.music` 重写为 1.1.0（歌词两源、SMTC、唱跳）。排查「报时没声音 / 唱歌动画不断 / 歌词不显示 / mod 里怎么合成语音」时必读。
 - [petcore P4-a 取数端口·天气·文件解读（2026-10-22）](PR-REPORT-PETCORE-P4A-HTTP-WEATHER-FILE-READER-2026-10-22.md)：新增 `HostPorts.http`（单请求路由、共享 deadline、4MB 上限）与 `tool.weather`、`tool.file-reader` 两个可导入 mod；安装器两条 unchecked 任务、`files.read` 能力、七条全局配置键。排查「天气没反应 / 拖文件不解读 / mod 里怎么发 HTTP」时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。

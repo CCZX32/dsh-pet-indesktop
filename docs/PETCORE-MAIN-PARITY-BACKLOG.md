@@ -48,8 +48,8 @@
 | 动画目录 | 13 类 GraphType 全映射（Touch_Head/Say/Sleep/StartUP/Work/Raised_Dynamic…） | 只映射 idle/turn/move/click/drag/random/events；其余无播放入口 | P12 | 每类至少一个入口 + 播放测试 |
 | 彩蛋 | 头像/提示行/标题/目录均可配 | 菜单行头像取目录首图（不可单独配）、提示固定「请点击」；图片大小/字号已可调 | P9 | 设置可配 avatar/hint |
 | 点击音效 | duck 按压/释放配对音 | 单次随机音 | P9 | 按下/松开配对 |
-| 音乐 | SMTC/播放器识别、歌词、唱跳动画、播放器启动 | `media.music` 示例只有系统媒体键 | P10 | 歌词同步 + 唱歌动画 |
-| 语音 | TTS provider、自言自语语音、口型、语音报时 | `voice.chime` 示例用 `QTextToSpeech` 朗读时间 | P10 | provider 抽象 + 口型 |
+| 音乐 | SMTC/播放器识别、歌词、唱跳动画、播放器启动 | 已对齐（P4-b）：`media.music` 1.1.0 有 SMTC、两源歌词（直连→代理一次）、LRC/偏移/节流、唱跳循环、四播放器启动；真实播放器下的逐行验证待用户环境 | P5 收口 | 有播放器时跑一遍唱跳与歌词 |
+| 语音 | TTS provider、自言自语语音、口型、语音报时 | 已对齐（P4-b，口型除外）：core `SpeechPort` 四家后端 + 缓存/预检/钥匙串；`voice.chime` 重写并去掉 Qt；口型主分支也没实现，不在本轮 | P5 收口 | 真机四后端各合成一条 |
 | 设置域 | 桌宠/互动/菜单/语音/文件识别/AI/自动化/关于 | 8 页；缺 AI/自动化/语音/文件/更新/桌面组件/天气 | P9–P11 | 每域有页与搜索 |
 | 右键菜单 | AI 对话/看屏幕/截图提问/音乐控制/天气/余额/Agent/主动识屏/待办/报时/抽签/节日/检查更新 | AI 三项（P3）+ 天气、文件解读（P4-a）已加；音乐/Agent/主动识屏/余额/检查更新仍缺 | P4-b/P4-c | 菜单项 + 设置落点 + coverage |
 | 诊断/性能 | FPS/GPU/网络监控、卡顿采样 | 关于页诊断文本 + 日志 | P12 | 实时指标页 |
@@ -77,8 +77,8 @@
 | 文件识别 | 拖文件解读、菜单入口、设置页 | 已对齐（P4-a）：`tool.file-reader` 订阅 `on_drop`，有界读取 + 心跳气泡 + 入会话（可关）；只读不删；菜单「解读刚才拖入的文件」 |
 | 检查更新 / 在线更新 | 版本检查、下载、替换、回滚 | P11（需确认 Core 自更新是否仍是非目标） |
 | 待办/节日/报时/抽签官方化 | 目前是 `examples/petcore-mods/` 可导入样板，不是默认功能 | P11 |
-| 歌词 / Now Playing / 唱歌 | 播放器识别、歌词对齐、唱跳动画 | P10 |
-| TTS provider / 自语语音 / 口型 | 多后端、音色语速、口型同步 | P10 |
+| 歌词 / Now Playing / 唱歌 | 播放器识别、歌词对齐、唱跳动画 | 已对齐（P4-b）：`media.music` 1.1.0；真实播放器下的逐行同步待用户环境验证 |
+| TTS provider / 自语语音 / 口型 | 多后端、音色语速、口型同步 | 已对齐（P4-b，口型除外）：core `SpeechPort` 四家后端；口型主分支亦未实现 |
 
 ### 3.3 交互与系统
 
@@ -91,10 +91,11 @@
 
 ## 4. 默认安装口径差异（容易误判为“已对齐”）
 
-以下 5 个扩展在 `examples/petcore-mods/`，安装向导勾选才会装到
+以下 9 个扩展在 `examples/petcore-mods/`，安装向导勾选才会装到
 `{app}\mods\<id>`；不勾选时菜单/设置里完全没有：
 
-`fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music`。
+`fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music`、
+`ai.chat`、`tool.ocr`、`tool.weather`、`tool.file-reader`。
 
 因此**不能**把“示例 mod 存在”当成“默认功能已交付”。要宣称对齐，必须在
 安装向导勾选后跑一遍真实安装验收。

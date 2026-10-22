@@ -344,3 +344,19 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 
 **计划变更**：原计划天气命令含 `tomorrow`，实际只做 `show`——主分支右键也只有「显示天气」，
 逐城市子菜单需要 mod 动态 populate 端口，留到 P4-c 菜单模板批次一起评估。
+
+## 24. P4-b：SpeechPort / 报时 / 音乐歌词（2026-10-22）
+
+| 项 | 状态 |
+|---|---|
+| SpeechPort | 完成：edge/豆包/MiMo/SAPI 四家；缓存、预检、重试、默认音色兜底、钥匙串 |
+| 动画循环接缝 | 完成：`play_animation(loop=True)` + `release_loop()`；探头/击飞/拖拽自动解除 |
+| `voice.chime` | 完成：重写到 SpeechPort，6 档日程、台词轮换、预缓存、免打扰丢弃、`voice_chime_*` 11 键 |
+| `media.music` | 完成：SMTC、歌词两源（直连→代理一次）、LRC/偏移/节流、唱跳循环、四播放器启动 |
+| 配置 | 完成：`speech_*` 8 键 + `voice_chime_*` 11 键 + `music_*` 10 键全部全局作用域并归一化 |
+| 打包 | 完成：构建补 `edge_tts`、`winrt.windows.media.*`、`pycaw` |
+| 未做 | 真实播放器下的唱跳/歌词逐行验证（本机无播放器）、豆包/MiMo 真实合成（无 Key）、口型（主分支也没有） |
+
+**计划变更**：原计划「TTS provider 由 mod 声明字段、core 只暴露 providers」保留；
+但 provider 的**传输**全部落在 `petcore/net/tts.py`，因此 `voice.chime` 不再需要
+`QTextToSpeech`，PySide6 在它的运行时里彻底消失。

@@ -234,7 +234,7 @@ petcore/
   发现/启停/安装流程。
 - feature 只能在 `--allow-feature-mods`、或带安装器授信标记 `.trusted` 的用户
   mods 目录下加载；默认只加载内置 demo。没有热卸载与沙箱，文档必须如实说明。
-- Windows 安装向导把 5 个官方示例扩展做成可勾选项：不勾选就不写盘；勾选时装到
+- Windows 安装向导把随附官方扩展做成可勾选项（默认不勾）：不勾选就不写盘；勾选时装到
   安装目录 `{app}\mods\<id>` 并带 `.trusted`。卸载随 `{app}` 一起删除。
 - 贡献类型：菜单动作、设置页、角色/音效/台词/主题内容、事件订阅；跨域不互相
   import。
@@ -412,7 +412,7 @@ petcore/
   配置推送、取消、错误、退出回收、owner 替换和可选心跳超时。
 - CoreHost 持有单一 WorkerHost；退出流程会先收口 worker。业务 worker 仍需在 P3/P4 由 mod 接入。
 - 设置常规页可从角色目录构建并安装 content mod；旧素材目录补齐 VPet Graph 类别的寻址映射。
-- 安装器的 5 个官方离线 feature 默认不勾选，勾选才写盘；它们继续保持 feature mod 边界。
+- 安装器的随附官方 feature 默认不勾选，勾选才写盘；它们继续保持 feature mod 边界。
 
 ## 18. P3 账户基础（2026-10-22）
 
@@ -576,3 +576,37 @@ petcore/
 | 中国天气网「北京」 | `北京 多云 11.3℃，南风 2级，湿度 52%`，0.24s |
 | open-meteo 兜底「上海」 | `上海 局部多云 17.7℃，东北风 2级，湿度 71%`，4.51s（两跳） |
 | 不存在的城市 | 两源各点名原因，1.86s，不静默 |
+
+## 24. P4-b：语音端口、报时与音乐歌词（2026-10-22）
+
+**合成与传输归 core，日程与台词归 mod。**
+
+| 层 | 落点 |
+|---|---|
+| 契约 | `petcore/contracts/speech.py`：`SpeechRequest/SpeechResult/SpeechProviderInfo/SpeechError/SpeechPort` |
+| 传输 | `petcore/net/tts.py`：edge-tts(WSS)、豆包 SSE、MiMo(OpenAI 兼容)、`PROVIDER_SPECS` |
+| 离线 | `petcore/platform/sapi.py`：Windows SAPI5（ctypes COM，线程级 `CoInitialize`） |
+| 服务 | `petcore/speech/service.py`：后端链、无网预检换默认音色、缓存（非空才命中）、2 次重试 + 默认音色兜底、失败删产物、密钥 owner `speech.<provider>` |
+| 端口 | `petcore/ui/ports.py::CoreSpeechPort`：后台合成 → `AudioAdapter` 共享音频通道 → 回调；`stop/playing` |
+| 报时 | `voice.chime` 1.1.0：6 档日程 + 自定义时刻、按日轮换台词、朗读/气泡文案分离、60 秒预缓存、免打扰丢弃 |
+| 音乐 | `media.music` 1.1.0：SMTC 检测、歌词两源（直连→代理一次）、LRC 解析/偏移、唱跳循环、播放器启动 |
+
+**动画循环接缝**：`PresentationPort.play_animation(name, loop=True)` 让一段素材一直播，
+`release_loop()` 解除；探头、击飞、拖拽接管时 `_on_finished()` 自动解除，不破
+「探头/抛掷只允许 idle/转向」的既有闸门。
+
+规则：
+
+1. **mod 不自己合成、不 import 网络库**：`voice.chime`/`media.music` 只经
+   `HostPorts.speech` / `HostPorts.http`；后者是 P4-a 的端口。
+2. **缓存命中要求非空文件**：0 字节产物会被删除并重新合成（边缘 TTS 曾因此永久静音）。
+3. **音色失效必须兜底**：`preflight()` 无网也能把未知音色换成默认值；`synthesize()`
+   再兜底一次默认音色。
+4. **密钥只进钥匙串**：owner `speech.edge|speech.doubao|speech.mimo`，`config.json`
+   与 `api.json` 不许出现；设置页只显示状态，不回显值。
+5. **歌词路由**：直连优先，只在传输失败或 500/502/504 且无 `Retry-After` 时切一次代理，
+   共享同一 deadline；不重试、不落盘音频、不记录 URL/代理/密钥。
+6. **默认安装口径不变**：`voice.chime`/`media.music` 仍是安装向导可勾选（默认不勾）。
+
+实测（2026-10-22，本机）：edge 合成 26,208 B / 3.39s，缓存命中 0.0s；SAPI 97,234 B
+wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47ms 返回明确原因。

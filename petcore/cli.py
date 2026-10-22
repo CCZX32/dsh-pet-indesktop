@@ -80,6 +80,36 @@ def _menu_ids(nodes) -> set[str]:
     return found
 
 
+def _speech_report(root: Path, config: Config) -> dict:
+    """`--check` 的语音证据：后端、缓存目录与每家 provider 的可用性。
+
+    冻结包里 `edge_tts`/`winrt` 是惰性 import，静态分析收不全；这里用
+    ``importlib.util.find_spec`` 探模块是否真的随包存在（不 import 本体）。
+    """
+    try:
+        from .api.credentials import KeyringCredentials
+        from .speech.service import SpeechService
+
+        service = SpeechService(root, config=config, credentials=KeyringCredentials())
+        return {
+            "backend": service.backend(),
+            "fallback": service.fallback(),
+            "cache_dir": str(service.cache_dir()),
+            "cached_files": service.cache.count(),
+            "providers": [
+                {
+                    "id": item.id,
+                    "online": bool(item.online),
+                    "available": bool(item.available),
+                    "reason": str(item.reason or ""),
+                }
+                for item in service.providers()
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001 - 诊断不能把 --check 拖垮
+        return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | None = None) -> int:
     from .content.collect import collect_characters
     from .ui import menu_layout
@@ -160,6 +190,7 @@ def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | N
             "builtin_count": len(talk_images.image_files(builtin_dir)),
             "builtin_readable": len(talk_images.readable_images(builtin_dir)),
         },
+        "speech": _speech_report(root, config),
     }
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     print(payload)

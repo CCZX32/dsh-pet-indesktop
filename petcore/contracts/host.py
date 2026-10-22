@@ -8,6 +8,7 @@ from .api import ApiPort
 from .chat import ChatPort, QuickChatPort
 from .http import HttpPort
 from .screen import ScreenAskPort, ScreenPort
+from .speech import SpeechPort
 
 
 class PresentationPort(Protocol):
@@ -20,7 +21,8 @@ class PresentationPort(Protocol):
         duration_ms: int = 4000,
         scale: float = 1.0,
     ) -> bool: ...
-    def play_animation(self, name: str) -> bool: ...
+    def play_animation(self, name: str, *, loop: bool = False) -> bool: ...
+    def release_loop(self) -> bool: ...
     def play_event(self, group: str, variant: str | int | None = None) -> bool: ...
     def notify(self, title: str, message: str, *, force: bool = False) -> None: ...
 
@@ -157,3 +159,4 @@ class HostPorts:
     screen: ScreenPort | None = None
     screen_ask: ScreenAskPort | None = None
     http: HttpPort | None = None
+    speech: SpeechPort | None = None

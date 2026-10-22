@@ -5,8 +5,8 @@
 - `fun.divination`：抽签
 - `fun.festival`：公历节日提醒
 - `reminder.todo`：待办清单
-- `voice.chime`：系统 TTS 报时
-- `media.music`：Windows 系统媒体键
+- `voice.chime`：语音报时（走 core `SpeechPort`：edge / SAPI / 豆包 / MiMo）
+- `media.music`：Now Playing（SMTC）+ 歌词 + 唱跳动画 + 播放器启动
 - `ai.chat`：AI 对话 + 截图提问（需要先在「设置 → API 与账户」配置服务与密钥）
 - `tool.weather`：天气实况（中国天气网直连 + open-meteo 代理兜底）
 - `tool.file-reader`：拖文件解读（读文本类文件 → AI 摘要，只读不删）
@@ -62,6 +62,8 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
 - `interaction`：`on_click` / `on_drop` / `on_tick`（`on_drop` 拿到的是已投喂的文件路径列表）
 - `pets`：只读宠物句柄（含 `play_animation` / `play_event`）
 - `http`：普通取数 `request(HttpRequest)` / `get_json(url, params=…)`；路由与错误分类在 core
+- `speech`：`providers/preflight/synthesize/speak/stop/set_secret`；合成、缓存与密钥在 core
+- `presentation.play_animation(name, loop=True)` / `release_loop()`：持续动作（唱歌/报时）
 - `quiet`：进程级免打扰
 
 运行时代码不要 import PySide6；需要回 GUI 线程用 `ports.scheduler.call_later()`。

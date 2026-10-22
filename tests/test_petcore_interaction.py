@@ -164,3 +164,57 @@ def test_config_normalizes_interaction_keys(tmp_path: Path) -> None:
     assert config.get("playback_speed") == 2.0
     assert config.get("throw_strength") == "standard"
     assert config.get("active_pets") == [0, 2, 9]
+
+
+# ---------------------------------------------------------------- 动画循环接缝（P4-b）
+
+
+class _LoopClip:
+    def __init__(self) -> None:
+        self.starts = 0
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def stop(self) -> None:
+        return
+
+    def clear_callbacks(self) -> None:
+        return
+
+
+def test_animation_loop_replays_until_released(window, monkeypatch) -> None:
+    clip = _LoopClip()
+    window._clip = clip
+    window._loop_active = True
+    monkeypatch.setattr(window, "isVisible", lambda: True)
+
+    window._on_finished()
+
+    assert clip.starts == 1
+    assert window._loop_active is True
+    assert window.release_loop() is True
+    assert window.release_loop() is False
+
+
+def test_animation_loop_is_cancelled_by_effects_lock(window, monkeypatch) -> None:
+    clip = _LoopClip()
+    window._clip = clip
+    window._loop_active = True
+    monkeypatch.setattr(window, "isVisible", lambda: True)
+    monkeypatch.setattr(window, "_effects_lock_active", lambda: True)
+
+    window._on_finished()
+
+    assert window._loop_active is False
+    assert clip.starts == 0
+
+
+def test_play_spec_clears_the_loop(window) -> None:
+    from petcore.contracts.content import AnimationSpec
+    from petcore.engine.enums import AnimatType
+
+    window._loop_active = True
+    window._play_spec(AnimationSpec(name="missing", graph=None, animat=AnimatType.SINGLE), "act")
+
+    assert window._loop_active is False

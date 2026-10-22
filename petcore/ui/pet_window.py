@@ -116,6 +116,7 @@ class PetWindow(QWidget):
         self._pixmap = None
         self._action_kind: str | None = None
         self._pending_flip = False
+        self._loop_active = False
         self._probe_drag_throw = False
         self._move_plan: dict | None = None
         self._move_loop = 0
@@ -344,6 +345,7 @@ class PetWindow(QWidget):
         self._play_spec(spec, "idle")
 
     def _play_spec(self, spec: AnimationSpec, kind: str) -> None:
+        self._loop_active = False
         if self._effects_lock_active() and not self._spec_allowed_while_locked(spec):
             # 主分支 _effects_filter_switch：探头/彩蛋接管期间只允许待机与转向，
             # 其它素材（act/click/手动播放）一律降级待机。
@@ -421,6 +423,15 @@ class PetWindow(QWidget):
     def _on_finished(self) -> None:
         if not self.isVisible():
             return
+        if self._loop_active:
+            # 循环接缝（唱歌/报时）：被探头、击飞、拖拽接管时立即解除，
+            # 否则同一段素材一直重播，行为链永远不掷骰。
+            if self._effects_lock_active() or self.dragging or self.motion.thrown:
+                self._loop_active = False
+            else:
+                if self._clip is not None:
+                    self._clip.start()
+                return
         if self._move_plan is not None:
             loops = int(self._move_plan.get("loops") or 1)
             if self._clip is not None and self._move_loop + 1 < loops:
@@ -1249,7 +1260,7 @@ class PetWindow(QWidget):
             # 窗口已销毁（关闭/退出）时 singleShot 仍可能落地。
             return
 
-    def play_animation(self, name: str) -> bool:
+    def play_animation(self, name: str, *, loop: bool = False) -> bool:
         self._cancel_animation_gap()
         spec = (
             self.catalog.find(name, AnimatType.SINGLE)
@@ -1259,7 +1270,14 @@ class PetWindow(QWidget):
         if spec is None:
             return False
         self._play_spec(spec, self._kind_for_spec(spec))
+        self._loop_active = bool(loop)
         return True
+
+    def release_loop(self) -> bool:
+        """解除 ``play_animation(loop=True)``；当前这圈播完就回行为链。"""
+        was = bool(getattr(self, "_loop_active", False))
+        self._loop_active = False
+        return was
 
     @staticmethod
     def _kind_for_spec(spec: AnimationSpec) -> str:

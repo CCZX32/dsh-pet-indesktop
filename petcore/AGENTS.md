@@ -124,6 +124,16 @@
   路径不写日志正文；扫描 20000 文件/2 秒、单次 200000 字符，超出要如实提示。
 - **能力声明**：新增能力必须先登记 `contracts/capabilities.py`（P4-a 加了 `files.read`）；
   能力只是声明与用户授权，不是沙箱。
+- **语音合成只在 core**：mod 只经 `HostPorts.speech`；`petcore/net/tts.py` 是唯一
+  import edge-tts / 豆包 / MiMo 的地方，`petcore/speech/` 禁 Qt；缓存命中必须**非空**，
+  失败产物立刻删除；音色失效要无网兜底（`preflight`），`synthesize` 再兜底默认音色；
+  密钥 owner 固定 `speech.<provider>`，`config.json`/`api.json` 不许出现。
+- **动画循环**：`play_animation(name, loop=True)` 只给「持续动作」（唱歌/报时）；
+  `_play_spec()` 是循环的唯一清除点，`release_loop()` 只解除标志。探头、击飞、拖拽
+  接管时 `_on_finished()` 必须先解除循环，不许让循环绕过「探头只播 idle/转向」的闸门。
+- **歌词**：直连优先，最多切一次代理（同一 deadline，仅传输失败或 500/502/504，
+  带 `Retry-After` 不切）；不重试、不落盘音频、不记录 URL/代理/密钥；歌词气泡
+  同一行只冒一次且间隔 ≥2s；无播放器时命令必须给明确原因。
 - **朝向口径**：角色素材原生朝左，`facing == "right"` 才水平镜像（同主分支）。
   `PetState.facing` 默认 `left`；反了就是「位移方向和面朝向相反」。
 - **碰边反馈**：抛掷/弹射按「离地→接触」的接触沿触发 `_on_motion_bounce()`，每次

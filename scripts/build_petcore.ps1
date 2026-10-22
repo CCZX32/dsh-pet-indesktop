@@ -59,9 +59,16 @@ $pyiArgs = @(
     "--hidden-import", "pet.frameseq_provision",
     "--hidden-import", "PIL",
     # 内置/示例 mod 以数据形式随包分发，PyInstaller 静态分析看不到它们的惰性 import：
-    # psutil（网络信息/回收内存）、QtTextToSpeech（示例 mod voice.chime）。
+    # psutil（网络信息/回收内存）、QtTextToSpeech（voice.chime 旧实现，仍保留以防回退）。
     "--hidden-import", "psutil",
     "--hidden-import", "PySide6.QtTextToSpeech",
+    # P4-b 语音：edge-tts 在 petcore/net/tts.py 里惰性 import；SMTC 走 winrt，
+    # 峰值检测走 pycaw（media.music 扩展）。漏收就是「装了扩展但合成/识别不可用」。
+    "--collect-submodules", "edge_tts",
+    "--hidden-import", "winrt.windows.media.control",
+    "--hidden-import", "winrt.windows.foundation",
+    "--hidden-import", "winrt.windows.storage.streams",
+    "--hidden-import", "pycaw",
     # API 密钥存系统钥匙串（惰性 import）：keyring 的 Windows 后端与依赖必须显式收集。
     "--hidden-import", "keyring.backends.Windows",
     "--collect-submodules", "keyring",

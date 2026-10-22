@@ -58,6 +58,34 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "file_reader_enabled",
         "file_reader_progress_seconds",
         "file_reader_record",
+        "speech_backend",
+        "speech_fallback",
+        "speech_voice",
+        "speech_rate",
+        "speech_volume",
+        "speech_cache_limit",
+        "speech_doubao_voice",
+        "speech_mimo_voice",
+        "voice_chime_enabled",
+        "voice_chime_schedule",
+        "voice_chime_times",
+        "voice_chime_show_bubble",
+        "voice_chime_quotes",
+        "voice_chime_anim",
+        "voice_chime_provider",
+        "voice_chime_voice",
+        "voice_chime_rate",
+        "voice_chime_volume",
+        "music_enabled",
+        "music_sing_enabled",
+        "music_sing_grace_seconds",
+        "music_lyric_enabled",
+        "music_lyric_lead_seconds",
+        "music_lyric_cache_limit",
+        "music_lyric_offset_seconds",
+        "music_browser_media_enabled",
+        "music_player_paths",
+        "music_player",
     }
 )
 
@@ -160,7 +188,33 @@ DEFAULTS: dict[str, Any] = {
     "file_reader_record": True,
     "todo_items": [],
     "voice_chime_enabled": False,
+    "voice_chime_schedule": "hourly",
+    "voice_chime_times": [],
+    "voice_chime_show_bubble": True,
+    "voice_chime_quotes": [],
+    "voice_chime_anim": "悠闲哼歌",
+    "voice_chime_provider": "",
+    "voice_chime_voice": "",
+    "voice_chime_rate": 1.0,
+    "voice_chime_volume": 1.0,
     "music_enabled": True,
+    "music_sing_enabled": True,
+    "music_sing_grace_seconds": 5.0,
+    "music_lyric_enabled": True,
+    "music_lyric_lead_seconds": 0.3,
+    "music_lyric_cache_limit": 80,
+    "music_lyric_offset_seconds": 0.0,
+    "music_browser_media_enabled": False,
+    "music_player_paths": {},
+    "music_player": "",
+    "speech_backend": "edge",
+    "speech_fallback": "sapi",
+    "speech_voice": "",
+    "speech_rate": 1.0,
+    "speech_volume": 1.0,
+    "speech_cache_limit": 200,
+    "speech_doubao_voice": "",
+    "speech_mimo_voice": "",
     "menu_hidden": [],
     "menu_order": [],
     "menu_layout": None,
@@ -279,6 +333,45 @@ def _text_list(value: Any) -> list[str]:
 _CLICK_SOUND_KINDS = frozenset({"builtin", "file", "folder"})
 _CLICK_SOUND_BUILTINS = frozenset({"default", "duck"})
 _CLICK_SOUND_PATH_MAX = 500
+
+#: 语音合成的可选后端（与 ``petcore.net.tts.PROVIDER_SPECS`` 的 id 对应；这里不
+#: import 那个模块，配置层不该把网络实现拖进启动路径）。
+_SPEECH_BACKENDS = frozenset({"edge", "sapi", "doubao", "mimo"})
+
+
+def _speech_backend(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in _SPEECH_BACKENDS else DEFAULTS["speech_backend"]
+
+
+def _speech_fallback(value: Any) -> str:
+    """空串表示「不要回退」；未知值回落默认后备（``sapi``）。"""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return text if text in _SPEECH_BACKENDS else DEFAULTS["speech_fallback"]
+
+
+_CHIME_SCHEDULES = ("hourly", "every_30", "every_15", "every_5", "every_minute", "custom")
+
+
+def _chime_schedule(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in _CHIME_SCHEDULES else DEFAULTS["voice_chime_schedule"]
+
+
+def _clock_times(value: Any) -> list[str]:
+    """``HH:MM`` 列表清洗：非法项丢弃、去重、按时间排序。"""
+    items: list[str] = []
+    for raw in value if isinstance(value, (list, tuple)) else ():
+        text = str(raw or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            continue
+        hour, minute = int(parts[0]), int(parts[1])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            items.append(f"{hour:02d}:{minute:02d}")
+    return sorted(set(items))
 
 
 def _click_sound_pack(value: Any) -> dict[str, str]:
@@ -558,6 +651,89 @@ class Config:
         normalized["todo_items"] = _text_list(normalized.get("todo_items"))
         normalized["voice_chime_enabled"] = _bool(normalized.get("voice_chime_enabled"), False)
         normalized["music_enabled"] = _bool(normalized.get("music_enabled"), True)
+        normalized["voice_chime_schedule"] = _chime_schedule(
+            normalized.get("voice_chime_schedule")
+        )
+        normalized["voice_chime_times"] = _clock_times(
+            normalized.get("voice_chime_times")
+        )
+        normalized["voice_chime_show_bubble"] = _bool(
+            normalized.get("voice_chime_show_bubble"), True
+        )
+        normalized["voice_chime_quotes"] = _text_list(normalized.get("voice_chime_quotes"))
+        normalized["voice_chime_anim"] = str(
+            normalized.get("voice_chime_anim") or ""
+        ).strip()[:64]
+        normalized["voice_chime_provider"] = str(
+            normalized.get("voice_chime_provider") or ""
+        ).strip().lower()[:32]
+        normalized["voice_chime_voice"] = str(
+            normalized.get("voice_chime_voice") or ""
+        ).strip()[:64]
+        normalized["voice_chime_rate"] = _number(
+            normalized.get("voice_chime_rate"), 1.0, 0.5, 2.0
+        )
+        normalized["voice_chime_volume"] = _number(
+            normalized.get("voice_chime_volume"), 1.0, 0.0, 1.0
+        )
+        normalized["music_sing_enabled"] = _bool(
+            normalized.get("music_sing_enabled"), True
+        )
+        normalized["music_sing_grace_seconds"] = _number(
+            normalized.get("music_sing_grace_seconds"), 5.0, 0.0, 120.0
+        )
+        normalized["music_lyric_enabled"] = _bool(
+            normalized.get("music_lyric_enabled"), True
+        )
+        normalized["music_lyric_lead_seconds"] = _number(
+            normalized.get("music_lyric_lead_seconds"), 0.3, -2.0, 3.0
+        )
+        normalized["music_lyric_cache_limit"] = int(
+            round(
+                _number(normalized.get("music_lyric_cache_limit"), 80.0, 1.0, 2000.0)
+            )
+        )
+        normalized["music_lyric_offset_seconds"] = _number(
+            normalized.get("music_lyric_offset_seconds"), 0.0, -3.0, 3.0
+        )
+        normalized["music_browser_media_enabled"] = _bool(
+            normalized.get("music_browser_media_enabled"), False
+        )
+        paths = normalized.get("music_player_paths")
+        normalized["music_player_paths"] = (
+            {
+                str(key): str(value).strip()
+                for key, value in paths.items()
+                if isinstance(key, str)
+                and isinstance(value, str)
+                and str(value).strip()
+            }
+            if isinstance(paths, dict)
+            else {}
+        )
+        normalized["music_player"] = str(
+            normalized.get("music_player") or ""
+        ).strip()[:32]
+        normalized["speech_backend"] = _speech_backend(normalized.get("speech_backend"))
+        normalized["speech_fallback"] = _speech_fallback(normalized.get("speech_fallback"))
+        normalized["speech_voice"] = (
+            str(normalized.get("speech_voice") or "").strip()[:64]
+        )
+        normalized["speech_rate"] = _number(
+            normalized.get("speech_rate"), 1.0, 0.5, 2.0
+        )
+        normalized["speech_volume"] = _number(
+            normalized.get("speech_volume"), 1.0, 0.0, 1.0
+        )
+        normalized["speech_cache_limit"] = int(
+            round(_number(normalized.get("speech_cache_limit"), 200.0, 10.0, 2000.0))
+        )
+        normalized["speech_doubao_voice"] = (
+            str(normalized.get("speech_doubao_voice") or "").strip()[:64]
+        )
+        normalized["speech_mimo_voice"] = (
+            str(normalized.get("speech_mimo_voice") or "").strip()[:64]
+        )
         frameseq = str(normalized.get("frameseq") or "auto")
         normalized["frameseq"] = frameseq if frameseq in {"auto", "off", "only"} else "auto"
         normalized["allow_feature_mods"] = _bool(normalized.get("allow_feature_mods"), False)

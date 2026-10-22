@@ -1799,3 +1799,83 @@ host-only feature 落地，默认不装。
 - 文件解读依赖 Core 的 `file_feeding_enabled`（关闭时不会收到 drop 事件），已在
   MOD-FORMAT §8 写明。
 - 两个 mod 的设置页只做了离屏测试，真实窗口在 900×620 / 125% DPI 下未实机对照。
+
+## L046 · 2026-10-22 · P4-b 语音端口 + 报时 + 音乐歌词 + 动画循环
+
+**范围**：`PETCORE-HANDOFF-PLAN` §P4 第二段。Core 新增 `SpeechPort`（合成/缓存/预检/
+密钥在 core）与动画循环接缝；`voice.chime` 重写、`media.music` 从「媒体键」升级为
+Now Playing + 歌词 + 唱跳。两个 mod 仍是可导入包（安装向导默认不勾）。
+
+**改动**（`git diff --cached --numstat` 口径）
+
+- `petcore/contracts/speech.py`（新，111）：`SpeechRequest/SpeechResult/
+  SpeechProviderInfo/SpeechError/SpeechPort`，7 类失败 reason。
+- `petcore/net/tts.py`（新，603）：edge-tts(WSS)、豆包 SSE、MiMo(OpenAI 兼容)、
+  `PROVIDER_SPECS`/`DEFAULT_VOICES`；第三方网络栈只在这里 import。
+- `petcore/speech/{__init__,cache,service}.py`（新，13/112/341）：后端链、无网预检、
+  非空缓存、2 次重试 + 默认音色兜底、失败删产物、按 mtime 裁剪缓存。
+- `petcore/platform/sapi.py`（新，212）：Windows SAPI5（ctypes COM + 线程级 CoInitialize）。
+- `petcore/contracts/host.py`（+4/-1）：`PresentationPort.play_animation(loop=)` /
+  `release_loop()`、`HostPorts.speech`。
+- `petcore/ui/ports.py`（+132/-2）：`CoreSpeechPort`（后台合成 → 共享 `AudioAdapter` →
+  回调，`stop/playing`），`build_ports` 装配。
+- `petcore/ui/pet_window.py`（+19/-1）：`_loop_active`；`_play_spec()` 唯一清除点；
+  `_on_finished()` 在探头/击飞/拖拽接管时解除循环；`release_loop()`。
+- `petcore/ui/app.py`（+11/-2）：`_PresentationAdapter` 转发 loop/release；
+  `CoreHost.speech = SpeechService(...)`（惰性 import）。
+- `petcore/config.py`（+176）：`speech_*` 8 键、`voice_chime_*` 11 键、`music_*` 10 键，
+  全部全局作用域 + 归一化（日程白名单、`HH:MM` 清洗、速率/音量夹取、播放器路径清理）。
+- `examples/petcore-mods/voice.chime/`（1.1.0）：删除旧 `factory.py`（-134），新增
+  `schedule.py`/`quotes.py`/`runtime.py`/`settings_page.py`/`host/__init__.py`；
+  运行时无 PySide6。
+- `examples/petcore-mods/media.music/`（1.1.0）：`now_playing.py`(450)/`lyrics.py`(519)/
+  `players.py`(74)/`runtime.py`(496)/`settings_page.py`(376)/`host/__init__.py`，
+  `factory.py` 变包入口 shim（+38/-140）。
+- `tests/test_petcore_speech.py`（464 / 16）、`tests/test_petcore_chime_mod.py`
+  （478 / 25）、`tests/test_petcore_music_mod.py`（683 / 29）、
+  `tests/test_petcore_interaction.py`（+54 / 3 条循环接缝）。
+- `petcore/cli.py`（+34）：`--check` 新增 `speech` 字段（backend/fallback/cache_dir/
+  providers 可用性），冻结包是否真带 edge-tts/winrt/pycaw 的第一证据。
+- `scripts/build_petcore.ps1`（+8/-1）：收集 `edge_tts`、`winrt.windows.media.*`、`pycaw`。
+- 文档：SPEC §24、ROADMAP §24、MOD-FORMAT §12、ARCHITECTURE §14、ANIMATION-BACKLOG、
+  parity backlog §2/§3.2/§4、examples README、`petcore/AGENTS.md` 三条红线。
+
+**行为变化与理由**
+
+- 合成与传输归 core：`voice.chime` 不再 `import QTextToSpeech`，四家后端共享缓存与
+  失败兜底；密钥只进钥匙串（owner `speech.<provider>`）。
+- 缓存命中要求非空文件：0 字节产物在边缘 TTS 上曾造成「永久静音」。
+- 唱跳用循环接缝：`play_animation(loop=True)` + `release_loop()`，探头/击飞/拖拽
+  接管时自动解除，不绕既有素材闸门。
+- 歌词直连优先、最多切一次代理（同一 deadline，仅传输失败或 500/502/504，
+  带 `Retry-After` 不切）；不重试、不落盘音频、不记录 URL/代理/密钥。
+
+**验证**
+
+- 全量门禁：`pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q` → **1282 passed**；
+  `ruff check pet/ tests/ petcore/ examples/petcore-mods` 全绿；
+  `python -m petcore --check` 退出码 0。
+- 新增测试 74 条（speech 17 / chime 25 / music 29 / loop 3）。
+- 真实合成（子代理实测）：edge 26,208 B / 3.39s，缓存命中 0.0s；SAPI 97,234 B wav；
+  `speech_backend="sapi"` 118,834 B、缓存命中 0.25s。
+- 真实合成（新配置 + `SpeechService` 复测）：providers `edge=True/sapi=True/
+  doubao=False/mimo=False`（无 Key）；edge 20,304 B / 2.99s，二次命中 0.000s。
+- 真实歌词：`CoreHttpPort` 抓到 33 行（酷狗源，0.66s，网易云只给翻唱被拒后回退）。
+- SMTC：本机无播放器时 47ms 返回「系统里没有正在播放的媒体会话」；transport 命令给明确原因。
+- 性能（单次采样）：`import petcore.net.tts` +5.3MB/46.6ms（首次合成才加载）；
+  `petcore.speech.service` +1.9MB/9.1ms；`SpeechService()` +0.0MB/0.0ms；
+  加载 `voice.chime` 包 +14.5MB/86.3ms（含设置页 Qt 控件，仅安装并启用时）。
+- 冻结包：setup 258,499,016 B、签名有效；静默安装 exit 0；安装版 `--check`
+  `diagnostics []`、`voice.chime`/`media.music` 均 1.1.0 enabled、
+  `speech.providers` edge/sapi Available、doubao/mimo `auth`；安装后进程存活
+  （PID 20528，RSS 108.6 MB）。冻结包内真实发声未点过（留用户验收）。
+
+**未验证 / 边界**
+
+- 真实播放器下的唱跳与逐行歌词同步未验证（本机没有正在播放的会话）。
+- 豆包/MiMo 真实合成本机无 Key；两者报 `auth`，错误分类与字段已测。
+- 豆包音调（pitch）未移植 ffmpeg `asetrate` 链，`pitch` 字段对豆包无效（其余后端生效）。
+- 口型主分支也未实现，不在本轮。
+- 循环解除后会等当前这圈播完才回行为链（最长一个 clip 时长），不是硬切。
+- `voice.chime` 的预缓存线程是 daemon、`stop()` 不 join（阻塞的网络合成不能拖住退出）。
