@@ -103,8 +103,11 @@ class PromptBuilder:
         augment_for_turn 用本次真实用户消息补第二段（首轮不命中）。
         None/空 = 不注入，输出与无记忆逐字节一致。
         roleplay_*：每宠场景卡；未显式传入时从 settings 上读同名属性（测试/旧调用方
-        直接构造 ChatSettings() 时为默认关）。只在 roleplay_enabled=True 且 persona
-        段确实非空时追加——留空场景卡 = 只有格式引导。"""
+        直接构造 ChatSettings() 时为默认关）。引导的注入门槛是**有效 system prompt
+        非空**（role_prompt → 角色 manifest 的 persona → 全局默认人设），不是
+        「persona 段」字面：清空 System Prompt 且角色 manifest 无 persona 时，没有
+        身份的扮演没有意义，引导与场景卡都不注入。场景/人物留空只表示不额外约束
+        设定，引导仍会追加。"""
         now=(now or datetime.now().astimezone()).astimezone()
         if roleplay_enabled is None:
             roleplay_enabled=bool(getattr(settings,'roleplay_enabled',False))
