@@ -51,3 +51,4 @@
 | L036 | 2026-10-22 | P3 流式/窗口/截图/热键 | Core 流式 SSE、ChatPort 聊天窗口、内存截图端口与四条可并存热键；菜单/设置同步。 | stream_chat、ChatPort、ChatWindow、ScreenPort、hotkeys、ai 快捷键 |
 | L037 | 2026-10-22 | P3 ai.chat 扩展 | host-only AI 对话扩展（prompt/路由/截图提问/设置页）+ 安装器可选任务。 | ai.chat、host-only、prompt、vision、installer、opt-in |
 | L038 | 2026-10-22 | 构建签名/打包收尾 | 本机开发证书签名 exe/setup（SAC 4551 拦截），构建脚本支持 -SignThumbprint，P3 安装包产出并验证。 | code signing、Smart App Control、4551、SignThumbprint、ISCC、setup |
+| L039 | 2026-10-22 | P3 对话/识屏/截图提问 | 主分支现代双栏对话窗移植、看看屏幕气泡+静默入历史、框选截图问答窗与 10% 鲸蛙彩蛋、`ScreenAskPort`、按宠命令派发。 | ChatWindow、modern UI、record、ScreenAskPort、capture_region、jingwa、slot dispatch |

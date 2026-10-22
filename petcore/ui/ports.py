@@ -408,14 +408,12 @@ class WorkerNoticePort:
 
 
 class QtScreenPort:
-    """截屏端口：只读当前屏到内存，不落盘。"""
+    """截屏端口：只读屏幕到内存，不落盘。"""
 
     def __init__(self, host) -> None:
         self.host = host
 
-    def capture(self, *, pet_slot: int | None = None):
-        from ..platform.screenshot import capture_screen
-
+    def _window(self, pet_slot: int | None):
         window = None
         pets = getattr(self.host, "pets", None)
         if pets is not None and pet_slot is not None:
@@ -423,8 +421,22 @@ class QtScreenPort:
                 window = pets.window_for_slot(int(pet_slot))
             except Exception:
                 window = None
-        window = window or getattr(self.host, "window", None)
-        return capture_screen(window)
+        return window or getattr(self.host, "window", None)
+
+    def capture(self, *, pet_slot: int | None = None):
+        from ..platform.screenshot import capture_screen
+
+        return capture_screen(self._window(pet_slot))
+
+    def capture_region(self, *, pet_slot: int | None = None):
+        from .screen.selection import select_region
+
+        return select_region(self._window(pet_slot))
+
+    def foreground_app(self) -> str:
+        from ..platform.foreground import foreground_app_info
+
+        return foreground_app_info()
 
 
 def build_ports(host, window) -> HostPorts:
@@ -451,4 +463,5 @@ def build_ports(host, window) -> HostPorts:
         ),
         chat=getattr(host, "chat", None),
         screen=QtScreenPort(host),
+        screen_ask=getattr(host, "screen_ask", None),
     )

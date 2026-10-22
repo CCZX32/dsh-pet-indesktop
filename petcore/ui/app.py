@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import sys
 from pathlib import Path
@@ -55,6 +56,19 @@ HOTKEY_COMMANDS = {
 def _mod_diagnostics(result) -> list[str]:
     diagnostics = getattr(result, "diagnostics", None) or []
     return [str(item) for item in diagnostics]
+
+
+def _invoke_feature_command(command, slot: int | None) -> object:
+    """调用扩展命令；命令声明了 ``slot`` 参数就带上发起者。"""
+    if slot is None:
+        return command()
+    try:
+        parameters = inspect.signature(command).parameters
+    except (TypeError, ValueError):
+        return command()
+    if "slot" in parameters:
+        return command(slot=int(slot))
+    return command()
 
 
 class _PresentationAdapter:
@@ -126,6 +140,9 @@ class CoreHost:
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
         self.chat = ChatController(self, self.root)
+        from .screen import ScreenAskController
+
+        self.screen_ask = ScreenAskController(self, self.root)
         self.menu_model = MenuModel()
         self.load_result = None
         self._characters: list = []
@@ -226,7 +243,11 @@ class CoreHost:
     def run_feature_command(
         self, owner: str, command_id: str, *, slot: int | None = None
     ) -> bool:
-        """菜单/热键的统一入口：扩展缺失时明确提示，不静默失败。"""
+        """菜单/热键的统一入口：扩展缺失时明确提示，不静默失败。
+
+        ``slot`` 是发起命令的桌宠；扩展命令若声明了 ``slot`` 参数就带上它，
+        子宠菜单里的 AI 对话/截图提问才会落在子宠自己的窗口与会话上。
+        """
         command = None
         if self.features is not None:
             command = self.features.command(owner, command_id)
@@ -234,7 +255,7 @@ class CoreHost:
             self._notify_missing_feature(owner)
             return False
         try:
-            command()
+            _invoke_feature_command(command, slot)
         except Exception:
             logger.exception("feature command failed: %s/%s", owner, command_id)
             self._notify(slot, "扩展执行失败，详情见日志")

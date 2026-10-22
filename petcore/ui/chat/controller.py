@@ -2,6 +2,9 @@
 
 每个 ``(owner, pet_slot)`` 一个窗口；会话按 slot + 角色落盘，互不串流。
 mod 通过端口注册「用户发送 / 停止」回调，窗口关闭只隐藏、不销毁历史。
+
+``record()`` 允许在**没有窗口**的情况下把消息写进会话（「看看屏幕」这类静默同步），
+所以每个方法的 ``state.window`` 都可能是 ``None``。
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ class _ChatState:
     slot: int
     store: SessionStore
     session: ChatSession
-    window: ChatWindow
+    window: ChatWindow | None = None
     submit_callback: Callable[[str, int], None] | None = None
     stop_callback: Callable[[int], None] | None = None
     active: bool = False
@@ -42,6 +45,7 @@ class ChatController(QObject):
     token_received = Signal(str, str, int)
     done_received = Signal(str, str, int)
     error_received = Signal(str, str, str, int)
+    record_received = Signal(str, str, str, int)
 
     def __init__(self, host, root: Path) -> None:
         super().__init__(host if isinstance(host, QObject) else None)
@@ -53,6 +57,7 @@ class ChatController(QObject):
         self.token_received.connect(self._apply_token)
         self.done_received.connect(self._apply_done)
         self.error_received.connect(self._apply_error)
+        self.record_received.connect(self._apply_record)
 
     # ---------------------------------------------------------------- 公共状态
     def states(self) -> dict[tuple[str, int], _ChatState]:
@@ -66,27 +71,42 @@ class ChatController(QObject):
     # ---------------------------------------------------------------- ChatPort
     def open(self, owner: str, *, pet_slot: int | None = None, title: str = "") -> bool:
         state = self._ensure(owner, pet_slot)
+        window = state.window
+        if window is None:
+            return False
         if title:
-            state.window.setWindowTitle(str(title))
-        state.window.show()
-        state.window.raise_()
-        state.window.activateWindow()
+            window.setWindowTitle(str(title))
+        window.show()
+        window.raise_()
+        window.activateWindow()
         return True
 
     def append(
         self, owner: str, role: str, text: str, *, pet_slot: int | None = None
     ) -> None:
         state = self._ensure(owner, pet_slot)
-        state.window.append_message(role, text)
+        if state.window is not None:
+            state.window.append_message(role, text)
         state.session.append(role, text)
         self._save(state)
+
+    def record(
+        self, owner: str, role: str, text: str, *, pet_slot: int | None = None
+    ) -> None:
+        """静默写入历史：不创建、不显示窗口；窗口已存在时顺带补上气泡。
+
+        ``record`` 可能由后台线程调用（「看看屏幕」的收尾），因此和
+        ``token/done/error`` 一样走信号：GUI 线程才碰控件。
+        """
+        text = str(text or "").strip()
+        if not text:
+            return
+        self.record_received.emit(str(owner), str(role or "user"), text, self._slot(pet_slot))
 
     def token(self, owner: str, delta: str, *, pet_slot: int | None = None) -> None:
         self.token_received.emit(str(owner), str(delta or ""), self._slot(pet_slot))
 
-    def done(
-        self, owner: str, text: str = "", *, pet_slot: int | None = None
-    ) -> None:
+    def done(self, owner: str, text: str = "", *, pet_slot: int | None = None) -> None:
         self.done_received.emit(str(owner), str(text or ""), self._slot(pet_slot))
 
     def error(
@@ -102,12 +122,22 @@ class ChatController(QObject):
         )
 
     def history(self, owner: str, *, pet_slot: int | None = None) -> list[dict[str, str]]:
-        state = self._ensure(owner, pet_slot)
+        state = self._ensure(owner, pet_slot, with_window=False)
         return [dict(item) for item in state.session.messages]
+
+    def take_attachments(
+        self, owner: str, *, pet_slot: int | None = None
+    ) -> list[dict]:
+        """取走该 ``(owner, slot)`` 上一次提交的附件（取一次即清空）。"""
+        state = self._states.get((str(owner), self._slot(pet_slot)))
+        if state is None:
+            return []
+        items = state.extras.pop("attachments", None) or []
+        return [dict(item) for item in items if isinstance(item, dict)]
 
     def close(self, owner: str, *, pet_slot: int | None = None) -> None:
         state = self._states.get((str(owner), self._slot(pet_slot)))
-        if state is not None:
+        if state is not None and state.window is not None:
             state.window.hide()
 
     def cancel(self, owner: str, *, pet_slot: int | None = None) -> None:
@@ -119,12 +149,13 @@ class ChatController(QObject):
                 state.stop_callback(state.slot)
             except Exception:
                 logger.exception("chat stop callback failed")
-        state.window.finish_stream(state.window.stream_text())
+        if state.window is not None:
+            state.window.finish_stream(state.window.stream_text())
         state.active = False
 
     def is_open(self, owner: str, *, pet_slot: int | None = None) -> bool:
         state = self._states.get((str(owner), self._slot(pet_slot)))
-        return bool(state is not None and state.window.isVisible())
+        return bool(state is not None and state.window is not None and state.window.isVisible())
 
     def on_submit(
         self, owner: str, callback: Callable[[str, int], None]
@@ -147,6 +178,19 @@ class ChatController(QObject):
                 return 0
         return 0
 
+    def _config(self):
+        return getattr(self.host, "config", None)
+
+    def _config_get(self, key: str, default=None):
+        config = self._config()
+        if config is None:
+            return default
+        try:
+            value = config.get(key, default)
+        except Exception:
+            return default
+        return default if value is None else value
+
     def _character_for(self, slot: int) -> str:
         pets = getattr(self.host, "pets", None)
         if pets is not None:
@@ -154,46 +198,65 @@ class ChatController(QObject):
             config = getattr(window, "config", None)
             if config is not None:
                 return str(config.get("character") or "default")
-        config = getattr(self.host, "config", None)
+        config = self._config()
         if config is not None:
             return str(config.get("character") or "default")
         return "default"
 
-    def _ensure(self, owner: str, pet_slot: int | None) -> _ChatState:
+    def _ensure(
+        self, owner: str, pet_slot: int | None, *, with_window: bool = True
+    ) -> _ChatState:
         owner = str(owner)
         slot = self._slot(pet_slot)
         key = (owner, slot)
         state = self._states.get(key)
-        if state is not None:
-            return state
-        store = SessionStore(self.root, slot=slot, character_id=self._character_for(slot))
-        sessions = store.list_sessions()
-        session = sessions[0] if sessions else store.new_session()
+        if state is None:
+            store = SessionStore(self.root, slot=slot, character_id=self._character_for(slot))
+            sessions = store.list_sessions()
+            session = sessions[0] if sessions else store.new_session()
+            state = _ChatState(
+                owner=owner, slot=slot, store=store, session=session, window=None
+            )
+            self._states[key] = state
+        if with_window and state.window is None:
+            self._create_window(state)
+        return state
+
+    def _create_window(self, state: _ChatState) -> ChatWindow:
+        key = (state.owner, state.slot)
         window = ChatWindow(
-            title=self._title(owner, slot),
+            title=self._title(state.owner, state.slot),
             font_size=self._font_size(),
+            character_id=self._character_for(state.slot),
+            accent=str(self._config_get("chat_accent", "") or ""),
+            background=str(self._config_get("chat_background", "") or ""),
+            always_on_top=bool(self._config_get("chat_always_on_top", False)),
+            provider=str(self._config_get("ai_model", "") or ""),
         )
         window.submitted.connect(lambda text, s=key: self._on_submit(s, text))
         window.stop_requested.connect(lambda s=key: self._on_stop(s))
         window.cleared.connect(lambda s=key: self._on_clear(s))
-        window.session_selected.connect(lambda session_id, s=key: self._on_session(s, session_id))
-        window.closed.connect(lambda s=key: self._on_closed(s))
-        window.set_history(sessions, session.session_id)
-        window.load_messages(session.messages)
-        state = _ChatState(
-            owner=owner, slot=slot, store=store, session=session, window=window
+        window.session_selected.connect(
+            lambda session_id, s=key: self._on_session(s, session_id)
         )
-        self._states[key] = state
-        return state
+        window.closed.connect(lambda s=key: self._on_closed(s))
+        window.pin_toggled.connect(self._on_pin_toggled)
+        try:
+            sessions = state.store.list_sessions()
+        except OSError:
+            sessions = []
+        window.set_history(sessions, state.session.session_id)
+        window.load_messages(state.session.messages)
+        state.window = window
+        return window
 
     def _title(self, owner: str, slot: int) -> str:
         suffix = "主桌宠" if slot == 0 else f"桌宠 {slot}"
         return f"AI 对话 · {suffix}"
 
     def _font_size(self) -> int:
-        config = getattr(self.host, "config", None)
         try:
-            return int(config.get("ui_font_size") or 13) if config is not None else 13
+            return int(self._config_get("ui_font_size", 13))
         except (TypeError, ValueError):
             return 13
 
@@ -203,21 +266,37 @@ class ChatController(QObject):
         except OSError:
             logger.warning("chat session save failed", exc_info=True)
 
+    def _apply_record(self, owner: str, role: str, text: str, slot: int) -> None:
+        state = self._ensure(owner, slot, with_window=False)
+        state.session.append(role, text)
+        self._save(state)
+        if state.window is not None:
+            state.window.append_message(role, text)
+            self._refresh_history(state)
+
     def _apply_token(self, owner: str, delta: str, slot: int) -> None:
         state = self._ensure(owner, slot)
+        window = state.window
+        if window is None:
+            return
         if not state.active:
-            state.window.begin_stream()
+            window.begin_stream()
             state.session.append("assistant", "")
             state.active = True
-        state.window.append_token(delta)
+        window.append_token(delta)
 
     def _apply_done(self, owner: str, text: str, slot: int) -> None:
         state = self._ensure(owner, slot)
-        state.window.finish_stream(text)
+        window = state.window
+        if window is not None:
+            window.finish_stream(text)
         final = str(text or "")
         if not final:
-            messages = state.window.messages()
-            final = messages[-1]["content"] if messages else ""
+            if window is not None:
+                messages = window.messages()
+                final = messages[-1]["content"] if messages else ""
+            elif state.session.messages:
+                final = str(state.session.messages[-1].get("content") or "")
         # 用窗口的最终内容覆盖会话里那条空的 assistant 记录。
         if state.session.messages and state.session.messages[-1].get("role") == "assistant":
             state.session.messages[-1]["content"] = final[:24_000]
@@ -229,7 +308,8 @@ class ChatController(QObject):
 
     def _apply_error(self, owner: str, reason: str, message: str, slot: int) -> None:
         state = self._ensure(owner, slot)
-        state.window.show_error(reason, message)
+        if state.window is not None:
+            state.window.show_error(reason, message)
         if state.session.messages and state.session.messages[-1].get("content") == "":
             state.session.messages.pop()
         state.active = False
@@ -237,12 +317,15 @@ class ChatController(QObject):
 
     def _on_submit(self, key: tuple[str, int], text: str) -> None:
         state = self._states.get(key)
-        if state is None:
+        if state is None or state.window is None:
             return
+        attachments = state.window.take_attachments()
         callback = self._submit_registry.get(state.owner)
         if callback is None:
             state.window.show_error("no_handler", "没有扩展接管这个对话窗口")
             return
+        if attachments:
+            state.extras["attachments"] = attachments
         state.window.append_message("user", text)
         state.session.append("user", text)
         self._save(state)
@@ -265,6 +348,7 @@ class ChatController(QObject):
             return
         state.session = state.store.new_session()
         state.active = False
+        state.extras.pop("attachments", None)
         self._refresh_history(state)
 
     def _on_session(self, key: tuple[str, int], session_id: str) -> None:
@@ -273,13 +357,15 @@ class ChatController(QObject):
             return
         if not session_id:
             state.session = state.store.new_session()
-            state.window.load_messages([])
+            if state.window is not None:
+                state.window.load_messages([])
         else:
             loaded = state.store.load(session_id)
             if loaded is None:
                 return
             state.session = loaded
-            state.window.load_messages(loaded.messages)
+            if state.window is not None:
+                state.window.load_messages(loaded.messages)
         state.active = False
         self._refresh_history(state)
 
@@ -288,7 +374,19 @@ class ChatController(QObject):
         if state is not None:
             self._save(state)
 
+    def _on_pin_toggled(self, on: bool) -> None:
+        config = self._config()
+        if config is None:
+            return
+        try:
+            config.set("chat_always_on_top", bool(on))
+            config.save()
+        except OSError:
+            logger.warning("chat pin preference save failed", exc_info=True)
+
     def _refresh_history(self, state: _ChatState) -> None:
+        if state.window is None:
+            return
         try:
             sessions = state.store.list_sessions()
         except OSError:

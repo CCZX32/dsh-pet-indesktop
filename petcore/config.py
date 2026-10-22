@@ -29,6 +29,13 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "ai_service",
         "ai_model",
         "ai_system_prompt",
+        "ai_vision_enabled",
+        "ai_temperature",
+        "ai_look_screen_auto_open",
+        "chat_always_on_top",
+        "chat_follow_pet",
+        "chat_background",
+        "chat_accent",
         "last_settings_page",
         "menu_hidden",
         "menu_layout",
@@ -78,6 +85,13 @@ DEFAULTS: dict[str, Any] = {
     "ai_service": "",
     "ai_model": "",
     "ai_system_prompt": "",
+    "ai_vision_enabled": True,
+    "ai_temperature": 0.7,
+    "ai_look_screen_auto_open": False,
+    "chat_always_on_top": False,
+    "chat_follow_pet": False,
+    "chat_background": "",
+    "chat_accent": "",
     "click_squash_enabled": True,
     "click_squash_ms": 220,
     "drag_physics_enabled": False,
@@ -508,6 +522,25 @@ class Config:
         normalized["ai_service"] = str(normalized.get("ai_service") or "").strip()
         normalized["ai_model"] = str(normalized.get("ai_model") or "").strip()
         normalized["ai_system_prompt"] = str(normalized.get("ai_system_prompt") or "")[:4000]
+        normalized["ai_vision_enabled"] = _bool(
+            normalized.get("ai_vision_enabled"), True
+        )
+        normalized["ai_temperature"] = _number(
+            normalized.get("ai_temperature"), 0.7, 0.0, 2.0
+        )
+        normalized["ai_look_screen_auto_open"] = _bool(
+            normalized.get("ai_look_screen_auto_open"), False
+        )
+        normalized["chat_always_on_top"] = _bool(
+            normalized.get("chat_always_on_top"), False
+        )
+        normalized["chat_follow_pet"] = _bool(normalized.get("chat_follow_pet"), False)
+        normalized["chat_background"] = str(
+            normalized.get("chat_background") or ""
+        ).strip()[:500]
+        normalized["chat_accent"] = str(
+            normalized.get("chat_accent") or ""
+        ).strip()[:32]
         normalized["menu_hidden"] = _text_list(normalized.get("menu_hidden"))
         normalized["menu_order"] = _text_list(normalized.get("menu_order"))
         layout = normalized.get("menu_layout")

@@ -199,10 +199,21 @@
 - **对话通道唯一**：mod 只能经 `HostPorts.chat`（`ChatPort`）驱动聊天窗口；窗口、
   Markdown、会话、取消都在 core。`token/done/error` 可能来自后台线程，controller
   必须用信号排队，不许在 worker 线程碰控件；`petcore/chat/` 保持 Qt-free。
+- **对话窗是主分支移植**：`petcore/ui/chat/` 的现代双栏窗（`deepseek-sidebar` /
+  `chat-main` / `chat-main-header` / `floating-composer`）是唯一实现，不许再另写
+  一套极简窗口。窗口按 `(owner, pet_slot)` 隔离；`ChatPort.record()` 只写会话和
+  已存在的窗口，**不得因后台结果主动唤出窗口**。
 - **流式传输只在 core**：SSE/代理兜底/取消/错误分类都在 `petcore/api/chat.py`；
   扩展与 `petcore/chat/` 不得 import `petcore.net`/`petcore.api`（架构守卫）。
-- **截图不落盘**：`ScreenPort.capture()` 返回内存 PNG；转 data URL 由调用方用标准库
-  完成，core 不写临时文件、日志不记录图片内容。
+- **截图不落盘**：`ScreenPort.capture()` / `capture_region()` 返回内存 PNG；转 data URL
+  由调用方用标准库完成，core 不写临时文件、日志不记录图片内容。
+- **看看屏幕**：答复先落发起宠气泡，再 `ChatPort.record()` 静默入历史；默认不打开
+  对话窗，只有 `ai_look_screen_auto_open` 为真才主动唤出。4 秒冷却与忙碌提示同主分支。
+- **截图提问端口**：框选、窗口、多轮消息在 core（`ScreenAskPort`），模型调用由 mod
+  在 `on_ask(question, png, history, slot)` 回调里完成；回调跑后台线程，只碰纯数据。
+  截图问答标题固定 DS 鲸鱼；等待时 10% 抽鲸蛙，每次请求只抽一次，独立于菜单彩蛋。
+- **命令按宠派发**：`run_feature_command(..., slot=)` 对声明 `slot` 参数的扩展命令
+  必须传入发起者；子宠菜单的 AI/截图不得落到主宠窗口。
 - **四条热键独立**：显示隐藏 / AI 对话 / 看看屏幕 / 截图提问各有独立 Win32 id 与
   配置键；注册失败必须气泡 + 设置行可见，扩展缺失时提示「AI 扩展未安装」。
 - **气泡同层**：`always_on_top` 变化必须同步 `bubble.set_host_on_top()`，彩蛋弹窗用

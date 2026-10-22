@@ -6,7 +6,7 @@ from typing import Any, Callable, Protocol
 
 from .api import ApiPort
 from .chat import ChatPort
-from .screen import ScreenPort
+from .screen import ScreenAskPort, ScreenPort
 
 
 class PresentationPort(Protocol):
@@ -138,3 +138,4 @@ class HostPorts:
     api: ApiPort | None = None
     chat: ChatPort | None = None
     screen: ScreenPort | None = None
+    screen_ask: ScreenAskPort | None = None

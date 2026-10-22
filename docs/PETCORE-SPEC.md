@@ -430,11 +430,12 @@ petcore/
 
 - **流式对话**：`petcore/api/chat.py` 提供 `stream_chat()`（SSE / 一次性 JSON 回退、
   取消、超时、代理兜底、稳定错误分类）；`ApiPort.stream_chat()` 是 mod 唯一入口。
-- **聊天宿主**：`ChatPort` + `petcore/ui/chat/`（窗口、Markdown 流式合帧、停止/清空、
-  历史下拉、按 `(owner, slot)` 隔离）；会话复用 `petcore/chat/session_store.py`。
-  跨线程只走信号，worker 线程不碰 Qt。
-- **截图提问**：`ScreenPort.capture()` → `ScreenCapture.png`（内存 PNG）→ 多模态消息
-  `image_url: data:image/png;base64,…`；实测 1920×1200@1.5 抓屏 204.7ms、PNG 367KB。
+- **聊天宿主**：`ChatPort` + `petcore/ui/chat/`（主分支同款双栏对话窗、Markdown
+  气泡、流式合帧、停止/新建会话、附件、按 `(owner, slot)` 隔离）；会话复用
+  `petcore/chat/session_store.py`。跨线程只走信号，worker 线程不碰 Qt。
+- **截图提问**：`ScreenPort.capture_region()` 负责框选（Core 覆盖层），
+  `ScreenAskPort` 负责提问窗口；两者都只处理内存 PNG。整屏 `ScreenPort.capture()`
+  仍用于「看看屏幕」，实测 1920×1200@1.5 抓屏 204.7ms、PNG 367KB。
 - **热键**：`hotkey_toggle_pet` / `hotkey_open_chat` / `hotkey_look_screen` /
   `hotkey_screen_capture`，四条各自独立的 Win32 id；失败在设置页与气泡可见。
 - **AI 扩展**：`examples/petcore-mods/ai.chat` 是参考实现（host-only）：prompt/人格/
@@ -444,3 +445,24 @@ petcore/
   `scripts/make_dev_signing_cert.ps1`）；exe 在 `--check` 前签名，setup 在 ISCC 后签名。
   未签名产物会被本机 Smart App Control 拦下（4551），这不是代码问题。
 - **未做**：OCR、翻译、框选、主动识屏、Agent、TTS（P4）。
+
+## 19. 对话 / 识屏 / 截图提问的最终边界（2026-10-22）
+
+这一节冻结「效果对齐主分支，但执行仍归 mod」的边界，后续不要再把窗口或传输重写一遍。
+
+- **对话窗口是 Core**：`petcore/ui/chat/` 直接移植主分支的现代双栏对话窗（侧栏会话、
+  标题栏、Markdown 气泡、附件、浮动输入框、置顶/最小化/关闭）。mod 只能经
+  `HostPorts.chat` 提交、流式回传、停止；不得 import PySide6 自己造窗口。
+- **主对话与截图提问是两个窗口**：主对话用 `ChatPort`，截图提问用
+  `ScreenAskPort`；两者都按 `(owner, pet_slot)` 隔离，互不串流。
+- **看看屏幕**：Core 只提供整屏 `ScreenCapture`（含前台应用描述）；mod 负责
+  prompt 与请求。答复必须先落到发起宠的气泡，再通过 `ChatPort.record()` **静默**
+  写入该宠的会话记录；不得主动唤出对话窗口，除非 `ai_look_screen_auto_open=true`。
+- **截图提问**：框选覆盖层、图片预览、多轮消息、加载态与 10% 鲸蛙加载彩蛋都在
+  Core；mod 只通过 `ScreenAskPort.on_ask(question, png, history, slot) -> str`
+  同步返回整段答复（Core 在后台线程调用它）。图片只在内存中流转，不落盘、不进日志。
+- **彩蛋口径**：截图提问窗口标题栏固定 DS 鲸鱼；等待答复时按
+  `random.random() < 0.1` 抽一次鲸蛙，整次请求保持不轮播。这个彩蛋独立于桌宠菜单的
+  「鲸鱼娘彩蛋」，不复用后者的图片目录/概率配置。
+- **失败可见**：没有 API 服务、缺少扩展、视觉开关关闭、框选取消分别给出不同反馈；
+  取消框选是静默返回，不算错误。

@@ -1413,3 +1413,64 @@ GPT 的 P0–P6 计划与历史 P1-A…P8.4 重名不同义（新 P1=配置作�
 - 开发证书只在本机可信；正式分发必须换成 CA 证书。
 - 完整安装向导 E2E（安装/升级/卸载）未在本机跑，避免影响现有 `E:\dsh-pet-core` 安装。
 - 真实 DeepSeek / 视觉模型端到端仍未跑（无可用密钥）。
+
+## L039 · 2026-10-22 · P3 收口：对话窗 / 看看屏幕 / 截图提问
+
+**范围**：把主分支已经验证过的对话窗与识屏交互搬进 Core，`ai.chat` 继续只负责
+prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发。
+
+**改动**
+
+- `petcore/ui/chat/`（新增 `themes.py` 244、`markdown_view.py` 85、`styles.py` 162、
+  `icons.py` 129、`widgets.py` 905；重写 `window.py` 926+/197−、`controller.py`
+  138+/40−）：移植主分支现代双栏对话窗（侧栏会话、Markdown 气泡、附件、浮动输入框、
+  置顶/最小化、无边框拖拽/缩放、紧凑抽屉），新增 `record()` 静默写历史与
+  `take_attachments()`。
+- `petcore/ui/screen/`（新增 6 个文件、1603 行）：框选覆盖层、DPR 裁剪、
+  `ScreenAskWindow`（多轮、图片仅内存、DS 鲸鱼标题、10% 鲸蛙加载彩蛋）与
+  `ScreenAskController`；保持 Qt 在 Core、网络在 mod。
+- `petcore/contracts/screen.py`：`ScreenCapture.app_info`、`ScreenError`、
+  `ScreenSelectionCancelled`、`ScreenPort.capture_region/foreground_app`、`ScreenAskPort`。
+- `petcore/contracts/host.py` / `petcore/ui/ports.py` / `petcore/ui/app.py`：
+  `HostPorts.screen_ask`、`QtScreenPort` 框选与前台应用；`CoreHost` 持有
+  `ScreenAskController`；`run_feature_command(slot=)` 对声明 `slot` 的扩展命令按宠派发。
+- `petcore/platform/foreground.py`（新 92 行）+ `petcore/platform/screenshot.py`：
+  抓屏附带「进程名 | 窗口标题」，框选裁切复用同一编码路径。
+- `examples/petcore-mods/ai.chat/host/factory.py`（371+/81−，版本 1.1.0）：看看屏幕
+  改为气泡答复 + `ChatPort.record()` 静默入历史（默认不打开对话窗，
+  `ai_look_screen_auto_open` 才唤出）；4 秒冷却/忙碌提示；截图提问改走框选 +
+  `ScreenAskPort.on_ask(question, png, history, slot) -> str`；对话提交去重当前问题并
+  支持附件图片。
+- `petcore/config.py`：持久化 `ai_vision_enabled` / `ai_temperature` /
+  `ai_look_screen_auto_open` / `chat_always_on_top` / `chat_follow_pet` /
+  `chat_background` / `chat_accent`（此前 `ai_vision_enabled` 会被 normalize 丢掉）。
+- `petcore/AGENTS.md`：新增对话窗移植、看看屏幕静默入历史、`ScreenAskPort` 边界、
+  截图彩蛋独立、命令按宠派发五条红线。
+- `docs/PETCORE-SPEC.md` §16/§19、`docs/PETCORE-ROADMAP.md` §20/§22、
+  `docs/PETCORE-MAIN-PARITY-BACKLOG.md` §3.1 同步。
+- 测试：`tests/test_petcore_chat_ui.py` 重写（15 条）、`tests/test_petcore_screen_ask.py`
+  新增 23 条、`tests/test_petcore_ai_mod.py` 扩到 13 条、
+  `tests/test_petcore_feature_command_slot.py` 新增 1 条。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py
+  tests/test_architecture.py tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q`
+  → **1058 passed in 41.05s**。
+- `.venv/Scripts/ruff check pet/ tests/ petcore/` → 全绿。
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m petcore --check` → exit 0，
+  `diagnostics=[]`、`menu_template=json`。
+- 性能探针（offscreen，n=20/50/200）：首次打开对话窗 23.7ms；`record()` 中位 1.72ms
+  / p95 2.78ms；追加一条气泡 1.18ms；`ScreenAskWindow.start` 中位 13.99ms / p95 15.31ms；
+  `begin_waiting` 0.02ms；`pick_loading_icon` <0.01ms；`foreground_app_info` 0.02ms。
+- 视觉：offscreen `grab()` 渲染对话窗（双栏、右对齐用户气泡、Markdown、底部输入区）与
+  截图问答窗（鲸鱼标题、图片 chip、用户气泡、加载鲸鱼 + 状态、输入行）。
+
+**未验证 / 边界**
+
+- 真实 DeepSeek / 视觉模型端到端未跑（无可用密钥）；真实桌面框选只做了 offscreen
+  事件循环验证，未在本机真实桌面拖选。
+- 未移植主分支的思考/联网过程面板、会话批量管理/重命名/删除、跟随桌宠定位、
+  OCR/翻译/复制动作条、主动识屏与每日预算；已记入 parity backlog。
+- `chat_follow_pet` 已持久化但窗口暂不跟随桌宠移动；`chat_background` 只支持
+  `builtin:<theme>` 或绝对路径，不含主分支的裁切/透明度/填充键。

@@ -43,7 +43,7 @@ def _target_screen(window=None) -> QScreen | None:
     return QGuiApplication.primaryScreen()
 
 
-def _encode_png(image: QImage) -> bytes:
+def encode_png(image: QImage) -> bytes:
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     if not image.save(buffer, "PNG"):
@@ -55,8 +55,11 @@ def _encode_png(image: QImage) -> bytes:
     return data
 
 
-def capture_screen(window=None, *, screen: QScreen | None = None) -> ScreenCapture:
-    """抓 ``screen``（缺省为窗口所在屏，再退主屏）的整屏内容。"""
+_encode_png = encode_png
+
+
+def grab_screen_image(screen: QScreen | None = None, window=None) -> tuple[QImage, QScreen]:
+    """抓整屏并返回 ``(QImage, QScreen)``；框选覆盖层复用它冻结画面。"""
     target = screen or _target_screen(window)
     if target is None:
         raise ScreenshotError("no_screen", "没有可用的显示器")
@@ -64,12 +67,30 @@ def capture_screen(window=None, *, screen: QScreen | None = None) -> ScreenCaptu
         image = target.grabWindow(0)
     except Exception as exc:  # noqa: BLE001 - 平台插件失败统一成稳定 reason
         logger.debug("grabWindow failed", exc_info=True)
-        raise ScreenshotError("capture_failed", f"无法读取屏幕内容：{type(exc).__name__}") from exc
+        raise ScreenshotError(
+            "capture_failed", f"无法读取屏幕内容：{type(exc).__name__}"
+        ) from exc
     if image is None or image.isNull():
         raise ScreenshotError("capture_failed", "无法读取屏幕内容")
+    return image, target
+
+
+def capture_from_image(image: QImage, *, screen_name: str = "") -> ScreenCapture:
+    """把已在内存里的画面编码成 ``ScreenCapture``（框选裁切后使用）。"""
+    if image is None or image.isNull():
+        raise ScreenshotError("capture_failed", "截图为空")
+    from .foreground import foreground_app_info
+
     return ScreenCapture(
-        png=_encode_png(image),
+        png=encode_png(image),
         width=int(image.width()),
         height=int(image.height()),
-        screen_name=str(target.name() or ""),
+        screen_name=str(screen_name or ""),
+        app_info=foreground_app_info(),
     )
+
+
+def capture_screen(window=None, *, screen: QScreen | None = None) -> ScreenCapture:
+    """抓 ``screen``（缺省为窗口所在屏，再退主屏）的整屏内容。"""
+    image, target = grab_screen_image(screen, window)
+    return capture_from_image(image, screen_name=str(target.name() or ""))
