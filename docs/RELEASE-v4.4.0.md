@@ -10,6 +10,20 @@
 功能越加越多，设置页和右键菜单对大多数用户已经过载；AI 对话开始需要「记性」。
 本版把这三件一次做完，外加一轮成体系的缺陷收口。
 
+## 下载哪个
+
+| 你是 | 下这个 |
+|---|---|
+| Windows 大多数人 | `…-webm-chat-setup.exe`（安装版，推荐） |
+| Windows 不想安装 | `…-webm-chat-portable.zip`（解压即用） |
+| macOS（Apple 芯片） | `…-webm-chat-macos-arm64.zip` |
+| Linux | `…-webm-chat-linux-x86_64.zip` |
+| 安卓 | `dsh-pet-android-…apk` |
+
+名字里带 `webm-chat` = 带 AI 对话；不带 `-chat` 的 `webm` 版是纯桌宠（没有对话功能）。
+不要 AI 对话的话，下哪个都行——chat 版在 设置 → 功能 里把「AI 对话」勾掉就和纯桌宠版一样。
+每一行后面的 sha256 是校验值，普通用户不用管。
+
 ## 一、素材与播放：无损帧序列
 
 以前每播放一帧动画，后台 ffmpeg 就现场解一帧——24fps 的动画每秒就是 24 次解码，
