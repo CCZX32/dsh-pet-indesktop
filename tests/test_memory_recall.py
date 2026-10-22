@@ -598,6 +598,44 @@ def test_note_recalled_empty_ids_archive_via_internal_api(tmp_path):
     assert persisted["archived"] is True
 
 
+def test_note_hits_reports_all_injected_layers(tmp_path):
+    """发版交叉审 M1：fact/lesson 命中也计入 hits（淘汰与注入排序都依据 hits）。
+
+    旧实现只上报 topic，fact/lesson 的 hits 永远停在 1。走真实产品路径
+    （build_messages → augment_for_turn → daemon 落盘）核对。"""
+    import dataclasses
+
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: NOW)
+    fact, _ = mem.add("用户不吃香菜", layer="fact")
+    lesson, _ = mem.add("推荐香菜前先问口味", layer="lesson")
+    payload = memory_payload(mem, True)
+    captured: list[list[str]] = []
+    original = payload.note_hits
+
+    def _spy(ids: list[str]) -> None:
+        captured.append(list(ids))
+        original(ids)
+
+    payload = dataclasses.replace(payload, note_hits=_spy)
+
+    builder = PromptBuilder()
+    builder.build_messages(
+        _settings(), "cat", _history(), "香菜过敏怎么办",
+        now=NOW, memory_payload=payload,
+    )
+    assert captured and set(captured[-1]) == {fact["id"], lesson["id"]}
+    assert mem.flush_hits(5.0) is True
+    persisted = {
+        e["id"]: e
+        for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+    }
+    assert persisted[fact["id"]]["hits"] == 2
+    assert persisted[lesson["id"]]["hits"] == 2
+    # last_hit_at 仍只刷新 topic（分层纪律不变）
+    assert "last_hit_at" not in persisted[fact["id"]]
+
+
 # ---------------------------------------------------------------- 手动钉四前缀
 @pytest.mark.parametrize(
     ("raw", "body", "layer"),

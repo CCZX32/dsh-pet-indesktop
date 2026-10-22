@@ -265,6 +265,9 @@ def _run(path: Path, turns: list[tuple[str, str]], provider, provider_config) ->
     ops = parse_ops(raw)
     if ops:
         memory.apply_ops(ops, source="auto")
+    elif str(raw or "").strip():
+        # 有输出却解析不出（截断/格式漂移）：静默丢弃会让"记不住事"无从排查。
+        log.warning("记忆提炼输出无法解析为操作（%d 字符），本批丢弃", len(str(raw)))
 
 
 def _complete(provider, messages: list[dict[str, Any]], config) -> str:
@@ -276,11 +279,17 @@ def _complete(provider, messages: list[dict[str, Any]], config) -> str:
             "model": config.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 512,
+            # 发版交叉审 H1：512 装不下带 layer+keywords 的新格式（5 条×20 关键词
+            # 实测 ~569 tokens，8×48 上限形态 ~1665），截断后整批静默丢弃；给足
+            # 上限形态的余量。
+            "max_tokens": 2048,
             "temperature": 0.2,
         }
         payload.update(thinking_payload(config, force_disable=True))
         message = complete_json(payload, config, None)
+        if isinstance(message, dict) and message.get("finish_reason") == "length":
+            # 输出被服务端截断：这批多半解析不出，但必须留下线索而不是静默丢弃。
+            log.warning("记忆提炼输出被 max_tokens 截断，本批可能丢失")
         content = message.get("content") if isinstance(message, dict) else ""
         return str(content or "")[:_RESPONSE_CHAR_LIMIT]
     cancel = threading.Event()

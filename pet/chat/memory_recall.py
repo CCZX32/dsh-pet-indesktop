@@ -491,7 +491,7 @@ def augment_for_turn(
     ``MemoryPayload`` 显式传给 ``build_messages``——不再有线程暂存，因此同一
     线程上的另一个会话不可能取走别人的记忆。
 
-    ``note_hits`` 每轮都会收到本轮命中的 topic id（可能为空）：空列表让
+    ``note_hits`` 每轮都会收到本轮被注入条目的 id（可能为空）：空列表让
     ``note_recalled`` 有机会做一次低频的归档巡检（v2b 盲审 F）。
     """
     query = str(user_text or "").strip()
@@ -519,12 +519,13 @@ def augment_for_turn(
             while len(_SEEN) > _SEEN_MAX_SESSIONS:
                 _SEEN.popitem(last=False)
     if note_hits is not None:
-        topics = [
-            str(entry.get("id", "")) for entry in result.entries
-            if layer_of(entry) == "topic"
-        ]
+        # 发版交叉审 M1：上报全部被注入条目的 id，不只 topic——fact/lesson 的
+        # hits 也要累计（淘汰与注入排序都看 hits）；``last_hit_at`` 的刷新仍
+        # 只留给 topic（``_apply_hit_batch`` 内部分层判断）。空列表仍会触发一次
+        # 低频归档巡检（v2b 盲审 F）。
+        hit_ids = [str(entry.get("id", "")) for entry in result.entries]
         try:
-            note_hits(topics)
+            note_hits(hit_ids)
         except Exception:  # noqa: BLE001 - 命中记录失败绝不打断对话
             pass
     return result.text

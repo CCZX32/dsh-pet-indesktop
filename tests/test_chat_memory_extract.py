@@ -321,6 +321,32 @@ def test_extraction_happy_path_writes_auto_entry(tmp_path):
     assert "我不吃辣，晚上吃什么" in rendered and "吃点清淡的吧" in rendered
 
 
+def test_extraction_output_budget_covers_layered_format(tmp_path):
+    """发版交叉审 H1：max_tokens 必须装得下带 layer+keywords 的新格式
+    （5 条×20 关键词实测 ~569 tokens，上限形态 ~1665；512 会静默整批丢弃）。"""
+    provider = _RecordingProvider('[{"op":"ADD","text":"我不吃辣"}]')
+    assert _schedule(tmp_path, _config(tmp_path), provider) is True
+    _join_extract_threads()
+    assert provider.complete_calls[0]["max_tokens"] >= 2048
+
+
+def test_extraction_truncated_output_logs_warning(tmp_path, caplog):
+    """H1：服务端截断（finish_reason=length）必须留下日志，不许静默丢批。"""
+
+    class _Truncated(_RecordingProvider):
+        def _complete_json(self, payload, config, _holder):
+            self.complete_calls.append(payload)
+            return {"content": '[{"op":"ADD","text":"我不吃', "finish_reason": "length"}
+
+    with caplog.at_level("WARNING"):
+        assert _schedule(tmp_path, _config(tmp_path), _Truncated()) is True
+        _join_extract_threads()
+    assert not (tmp_path / "memory.json").exists()
+    messages = [rec.message for rec in caplog.records]
+    assert any("截断" in message for message in messages)
+    assert any("无法解析" in message for message in messages)
+
+
 # ---------------------------------------------------------------- 静默
 def test_extract_exception_never_raises(tmp_path, caplog):
     class _Boom:
