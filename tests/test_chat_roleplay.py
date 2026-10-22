@@ -465,6 +465,127 @@ def test_bare_url_with_parentheses_is_autolinked_whole():
     assert not _action_fragments(html)
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("见 https://x.org/a 完", "https://x.org/a"),
+        ("见 https://x.org/a，然后", "https://x.org/a"),
+        ("见 https://x.org/a。", "https://x.org/a"),
+        ("见 https://x.org/a?q=%E4%B8%AD", "https://x.org/a?q=%E4%B8%AD"),
+        ("见 https://x.org/中文", "https://x.org/中文"),
+        ("http://x.org:8080/a", "http://x.org:8080/a"),
+        ("见 www.example.com，然后", "https://www.example.com"),
+        ("见www.example.com，然后", "https://www.example.com"),
+    ],
+)
+def test_bare_urls_are_always_autolinked(text, expected):
+    """v2e R1：紧跟中文/全角标点、带 query、带端口、裸域名都必须点得动。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    assert _hrefs(markdown_to_html(text)) == [expected]
+
+
+def test_link_target_and_bold_wrapped_url_keep_their_href():
+    """v2e R1：链接目标与 ``**...**`` 里的 URL 不重复包裹，href 保持原样。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    wiki = markdown_to_html("[维基](https://x.org/a_(b))")
+    assert _hrefs(wiki) == ["https://x.org/a_(b)"]
+    assert wiki.count("<a ") == 1
+
+    bold = markdown_to_html("**参考：https://x.org/a_(b)**")
+    assert _hrefs(bold) == ["https://x.org/a_(b)"]
+    assert "font-weight:700" in bold
+
+
+@pytest.mark.parametrize(
+    "text,emphasis",
+    [
+        ("见 *https://x.org/a_(b)*", "font-style:italic"),
+        ("**参考：https://x.org/a_(b)**", "font-weight:700"),
+        ("https://x.org/a_(b)**重点**", "font-weight:700"),
+    ],
+)
+def test_url_stops_before_emphasis_markers(text, emphasis):
+    """v2e R4：``*``/``**`` 不能被吃进 href；强调必须恢复，不按字面显示。"""
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.markdown_view import markdown_to_html
+
+    QApplication.instance() or QApplication([])
+    html = markdown_to_html(text)
+    assert _hrefs(html) == ["https://x.org/a_(b)"]
+    assert emphasis in html
+    doc = QTextDocument()
+    doc.setHtml(html)
+    assert "*" not in doc.toPlainText()
+
+
+def test_bare_url_inside_link_label_does_not_split_the_anchor():
+    """v2e R5：标签里的 URL 不插尖括号；一个链接仍是一个 ``<a>``。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    text = "看 [说明 https://x.org/a_(b) 页](https://y.org/)"
+    html = markdown_to_html(text)
+    assert _hrefs(html) == ["https://y.org/"]
+    assert html.count("<a ") == 1
+    visible = "".join(item[0] for item in _fragments(html))
+    assert "说明 https://x.org/a_(b) 页" in visible
+
+
+def test_unclosed_parenthesis_is_not_an_action():
+    """既有正例：未闭合括号不上色。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html("（她抬手说了一半")
+    assert not _action_fragments(html)
+    assert "font-style:italic" not in html
+
+
+@pytest.mark.parametrize(
+    "text,inner",
+    [
+        ("（她笑（小声）说 https://x.org/a）", "（小声）"),
+        ("（看 https://x.org/a 然后（笑））", "（笑）"),
+    ],
+)
+def test_outer_action_with_url_falls_back_to_inner(text, inner):
+    """v2e R7：外层动作段含 URL 被丢弃时，内层干净子段仍要渲染成斜体。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    html = markdown_to_html(text)
+    assert _hrefs(html) == ["https://x.org/a"]
+    actions = _action_fragments(html)
+    assert any(inner in fragment_text for fragment_text, _italic, _alpha in actions), html
+    assert "".join(item[0] for item in _fragments(html)) == text
+
+
+def test_action_ranges_latency_with_half_inline_code(qapp):
+    """v2e R2：一半括号一半行内代码的 20KB 输入不再走 O(k·m) 相交判断。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    started = time.perf_counter()
+    markdown_to_html("（动作）`x`" * 2000)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.150, f"half paren+code 20KB: {elapsed * 1000:.1f} ms"
+
+
+def test_link_target_scan_latency_budget(qapp):
+    """v2e R3：``](`` 密集输入用单遍扫描，两条预算都要过。"""
+    from pet.chat.markdown_view import markdown_to_html
+
+    cases = [
+        ("many ]( 10KB", "](" * 5000, 0.150),
+        ("many ]( 3000", "](" * 1000, 0.050),
+    ]
+    for name, text, budget in cases:
+        started = time.perf_counter()
+        markdown_to_html(text)
+        elapsed = time.perf_counter() - started
+        assert elapsed < budget, f"{name}: {elapsed * 1000:.1f} ms"
+
+
 def test_parentheses_inside_inline_code_are_not_actions():
     """R1：行内代码里的括号原样留在代码里。"""
     from pet.chat.markdown_view import markdown_to_html

@@ -1,6 +1,8 @@
 """AI 回复的 Markdown 渲染（pet/chat/markdown_view.py + MessageBubble）。"""
 from __future__ import annotations
 
+import re
+
 from PySide6.QtWidgets import QApplication
 
 from pet.chat.markdown_view import markdown_to_html, preserve_line_breaks
@@ -18,6 +20,30 @@ def test_single_newlines_become_hard_breaks_outside_code_fences():
     assert out[1] == "第二行"  # 段落末行（下一行空）不加
     assert out[4] == "code a"  # 代码块内原样
     assert out[5] == "code b"
+
+
+def test_different_fence_char_inside_code_block_does_not_close_it():
+    """v2e R6：``` 块里的 ~~~ 行只是内容，不能提前收尾。"""
+    _app()
+    src = "```\n~~~\n（这是代码里的括号）\n```\n后面的（动作）"
+    html = markdown_to_html(src)
+    pre = "".join(re.findall(r'<pre[^>]*>.*?</pre>', html, re.S))
+    assert "~~~" in pre
+    assert "（这是代码里的括号）" in pre
+    assert "font-style:italic" not in pre
+    assert "font-style:italic" in html[html.rindex("</pre>"):]
+
+
+def test_shorter_closing_fence_inside_code_block_does_not_close_it():
+    """v2e R6：开启围栏 4 个反引号，块内 3 个反引号的行不能收尾。"""
+    _app()
+    src = "````\n```\n（代码里的括号）\n````\n后面的（动作）"
+    html = markdown_to_html(src)
+    pre = "".join(re.findall(r'<pre[^>]*>.*?</pre>', html, re.S))
+    assert "```" in pre
+    assert "（代码里的括号）" in pre
+    assert "font-style:italic" not in pre
+    assert "font-style:italic" in html[html.rindex("</pre>"):]
 
 
 def test_table_right_after_text_line_still_renders_as_table():
