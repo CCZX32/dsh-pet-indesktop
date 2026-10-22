@@ -242,3 +242,19 @@ def test_spring_drag_release_in_dead_zone_snaps():
     center_y = sprite.pos.y() + 90
     assert SECOND.contains(center_x, center_y) or MAIN.contains(center_x, center_y), \
         f"弹簧档松手后身体中心仍在空洞里: ({center_x}, {center_y})"
+
+
+def test_floor_on_shorter_secondary_is_its_own_bottom():
+    """异高屏地板回归（用户实机 2026-10-22：副屏上运动时宠沉到主屏地板线、
+    静止又被拉回）——副屏（x<0）上的抛掷地板必须是副屏自己的底（1032），
+    不是并集最深的底（1392）。"""
+    sprite = _corridor_sprite((-500.0, 700.0))
+    controller = ThrowPhysicsController(QRectF(MAIN))
+    bounds = controller._effective_bounds(sprite)
+    assert bounds.left() == -1920.0          # 侧墙仍是并集外接（过缝通行保留）
+    assert bounds.bottom() == pytest.approx(1032.0 - 1, abs=2)  # 地板 = 副屏的底
+    # 下落实测：从 y=700 掉到副屏地板（1032-180=852）停住，不沉到 1392
+    sprite.velocity = QPointF(0.0, 0.0)
+    sprite.interaction_state = INTERACTION_THROWN
+    _throw_until_rest(sprite, controller)
+    assert sprite.pos.y() <= 852.0 + 2, f"副屏上沉到了 {sprite.pos.y()}（主屏地板线）"

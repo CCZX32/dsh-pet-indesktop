@@ -22,6 +22,7 @@ from PySide6.QtCore import QPointF, QRect, QRectF
 
 from . import physics as physics_mod
 from .pet_sprite import INTERACTION_NORMAL, INTERACTION_THROWN
+from .window_placement import DesktopArea, band_bounds
 
 
 def _united(rects) -> QRect:
@@ -78,21 +79,35 @@ class ThrowPhysicsController:
             self._advance_thrown(sprite, float(dt))
 
     def _effective_bounds(self, sprite) -> QRectF:
-        """这次积分该用的边界：多矩形跨屏域按**并集外接矩形**（过缝通行语义）。
+        """这次积分该用的边界：**侧墙并集外接 + 地板按身体 x 带**。
 
-        跨屏时 sprite 的合法域是多块屏的并集（``_clamp_rects``）。旧实现取
-        「离身体最近的那一块屏」做反弹边界：墙挡着身体、身体中心过不去、
-        墙就永远不收——并列双屏下抛掷被永久锁在本屏（issue #319）。
-        band 收窄语义（4.2.1 legacy）修好了 #319 但在**异高屏**上制造新墙：
-        主屏正对副屏下方空洞的那条带永远过不去（用户实机，2026-10-22）。
-        定稿语义改为「通行域 = 并集外接矩形（含空洞），静止域 = 各屏本身」：
-        穿缝任意过，落地时身体不被并集覆盖则由落点吸附收进最近的屏
-        （``_snap_into_screen_if_needed`` 鸭子类型调用 pet_sprite 同名方法）。
-        单矩形域（单屏/未开跨屏）并集恒等于该矩形，行为逐位不变。
+        跨屏时 sprite 的合法域是多块屏的并集（``_clamp_rects``）。三面语义
+        演进：最初取「离身体最近的那一块屏」——墙挡着身体、中心过不去、
+        墙就永远不收，并列双屏抛掷被永久锁在本屏（issue #319）；换纯并集
+        外接后侧墙对了，但**地板也取了并集最深的底**——异高屏（主 1392 +
+        副 1032）上副屏的宠会沉到主屏地板线（用户实机：运动时掉到屏幕
+        下面、静止又被吸附拉回，2026-10-22）。
+        定稿：左右墙 = 并集外接（过缝通行）；上下界 = band_bounds 的纵向
+        部分（与身体 x 带相交的屏决定地板——在副屏上地板就是副屏的底，
+        跨缝时取较深一侧）。单矩形域恒等，行为逐位不变。
         """
         clamp_rects = getattr(sprite, "_clamp_rects", None)
         if clamp_rects:
-            return QRectF(_united(clamp_rects))
+            union = _united(clamp_rects)
+            body_local = sprite._body_local_rect()
+            body = QRect(
+                int(sprite.pos.x() + body_local.x()),
+                int(sprite.pos.y() + body_local.y()),
+                body_local.width(), body_local.height(),
+            )
+            area = DesktopArea(
+                bounds=union,
+                screens=tuple(QRect(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+                              for r in clamp_rects),
+            )
+            band = band_bounds(area, body)
+            return QRectF(union.left(), band.top(),
+                          union.width(), band.bottom() - band.top() + 1)
         return QRectF(self._bounds)
 
     def _snap_into_screen_if_needed(self, sprite) -> None:
