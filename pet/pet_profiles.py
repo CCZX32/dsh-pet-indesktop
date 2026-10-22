@@ -213,6 +213,8 @@ PER_PET_SETTING_KEYS = frozenset({
     "self_talk_min_interval", "self_talk_max_interval",
     "self_talk_speak_enabled", "self_talk_bubble_style", "bubble_text_scale",
     "click_show_balance", "click_show_self_talk",
+    # 场景扮演（每只宠一张场景卡：角色级设定，不同角色可以演不同的戏）
+    "roleplay_enabled", "roleplay_scene", "roleplay_cast",
     # 角色（per-pet 素材库）
     "character",
 }) | {"collision_enabled"}

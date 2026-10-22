@@ -18,6 +18,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from pet.chat.memory import ChatMemory, memory_path
+from pet.chat.memory_recall import is_archived
 from pet.chat.memory_extract import (
     EXTRACT_INTERVAL_SECONDS,
     parse_ops,
@@ -111,6 +112,72 @@ def test_parse_ops_caps_count_and_text_length():
     assert len(parse_ops(raw)) == _MAX_OPS
     long_op = parse_ops('[{"op":"ADD","text":"' + "长" * 1000 + '"}]')
     assert len(long_op[0]["text"]) == _OP_TEXT_CHARS
+
+
+def test_parse_ops_new_layer_and_keywords_format():
+    ops = parse_ops(
+        '[{"op":"ADD","text":"别再把配置删了","layer":"lesson",'
+        '"keywords":["配置","删除"]}]'
+    )
+    assert ops == [
+        {
+            "op": "ADD",
+            "text": "别再把配置删了",
+            "layer": "lesson",
+            "keywords": ["配置", "删除"],
+        }
+    ]
+
+
+def test_parse_ops_invalid_layer_and_empty_keywords_are_dropped():
+    ops = parse_ops('[{"op":"ADD","text":"普通事实","layer":"bogus","keywords":[]}]')
+    assert ops == [{"op": "ADD", "text": "普通事实"}]
+
+
+def test_apply_ops_persists_layer_and_keywords(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "别再把配置删了", "layer": "lesson",
+          "keywords": ["配置", "删除"]}],
+        source="auto",
+    ) is True
+    entry = mem.load()[0]
+    assert entry["layer"] == "lesson"
+    assert entry["keywords"] == ["配置", "删除"]
+
+
+def test_apply_ops_old_format_falls_back_to_fact_and_bigrams(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    mem.apply_ops([{"op": "ADD", "text": "周三有课"}], source="auto")
+    entry = mem.load()[0]
+    assert entry["layer"] == "fact"
+    assert entry["keywords"]
+
+
+def test_apply_ops_auto_mention_keeps_existing_layer(tmp_path):
+    mem = ChatMemory(tmp_path / "memory.json")
+    mem.add("我不吃辣", layer="user")
+    mem.apply_ops([{"op": "ADD", "text": "我不吃辣"}], source="auto")
+    entry = mem.load()[0]
+    assert entry["layer"] == "user"
+    assert entry["source"] == "manual"
+
+
+def test_apply_ops_auto_reaffirm_keeps_archived_topic(tmp_path):
+    """D：老格式 ops（无 layer/keywords）重申归档 topic，不得静默解除归档。"""
+    mem = ChatMemory(tmp_path / "memory.json")
+    entry, _ = mem.add("那个 Bug", layer="topic")
+    assert mem.set_archived(entry["id"], True) is True
+    mem.apply_ops([{"op": "ADD", "text": "那个 Bug"}], source="auto")
+    persisted = mem.load()[0]
+    assert persisted["archived"] is True
+    assert is_archived(persisted) is True
+    # 带显式 layer 的自动 UPDATE 也不能解除（自动来源一律不许复活）。
+    mem.apply_ops(
+        [{"op": "UPDATE", "text": "那个 Bug", "layer": "topic"}], source="auto")
+    persisted = mem.load()[0]
+    assert persisted["archived"] is True
+    assert is_archived(persisted) is True
 
 
 # ---------------------------------------------------------------- 合并（ChatMemory.apply_ops）
@@ -252,6 +319,32 @@ def test_extraction_happy_path_writes_auto_entry(tmp_path):
     assert payload["stream"] is False
     rendered = str(payload["messages"])
     assert "我不吃辣，晚上吃什么" in rendered and "吃点清淡的吧" in rendered
+
+
+def test_extraction_output_budget_covers_layered_format(tmp_path):
+    """发版交叉审 H1：max_tokens 必须装得下带 layer+keywords 的新格式
+    （5 条×20 关键词实测 ~569 tokens，上限形态 ~1665；512 会静默整批丢弃）。"""
+    provider = _RecordingProvider('[{"op":"ADD","text":"我不吃辣"}]')
+    assert _schedule(tmp_path, _config(tmp_path), provider) is True
+    _join_extract_threads()
+    assert provider.complete_calls[0]["max_tokens"] >= 2048
+
+
+def test_extraction_truncated_output_logs_warning(tmp_path, caplog):
+    """H1：服务端截断（finish_reason=length）必须留下日志，不许静默丢批。"""
+
+    class _Truncated(_RecordingProvider):
+        def _complete_json(self, payload, config, _holder):
+            self.complete_calls.append(payload)
+            return {"content": '[{"op":"ADD","text":"我不吃', "finish_reason": "length"}
+
+    with caplog.at_level("WARNING"):
+        assert _schedule(tmp_path, _config(tmp_path), _Truncated()) is True
+        _join_extract_threads()
+    assert not (tmp_path / "memory.json").exists()
+    messages = [rec.message for rec in caplog.records]
+    assert any("截断" in message for message in messages)
+    assert any("无法解析" in message for message in messages)
 
 
 # ---------------------------------------------------------------- 静默

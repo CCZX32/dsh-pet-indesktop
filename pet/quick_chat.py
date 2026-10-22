@@ -401,8 +401,15 @@ class QuickChatBubble(QFrame):
         self.hint_label.setText("思考中…")
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
+        # 气泡快速对话刻意不注入记忆：一次性问答，注入只会拖慢首字；它仍然
+        # 通过 service.memory_extract_hook 参与后台提炼（见 _schedule_memory_extract）。
         messages = self.prompt_builder.build_messages(
-            self.settings, self.character_id, self.session.messages[:-1], text
+            self.settings, self.character_id, self.session.messages[:-1], text,
+            # 每宠键：config 可能是 slot 路由视图，必须从 get 逐键读（chat_settings()
+            # 转发主配置，读不到这只宠的场景卡）。与 widgets.py / legacy_widgets.py 同口径。
+            roleplay_enabled=bool(self.config.get("roleplay_enabled", False)),
+            roleplay_scene=str(self.config.get("roleplay_scene", "") or ""),
+            roleplay_cast=str(self.config.get("roleplay_cast", "") or ""),
         )
         self._request_pet_window = self.pet_window
         self._active_request_id = self.service.send(messages, config)
@@ -518,7 +525,7 @@ class QuickChatBubble(QFrame):
         self.page_label.setText(f"{self._page + 1}/{len(self._pages)}")
 
     def _set_output_markdown(self, text: str) -> None:
-        """助手回复按 Markdown 渲染（与现代聊天窗同一 markdown_to_html 口径）。
+        """助手回复按 Markdown 渲染；所有 chat surface 统一渲染，落盘原文不变。
 
         空文本清空即可；非空走 RichText。分页是对纯文本切的，跨页围栏代码块
         可能渲染不完整——气泡本来就是预览面，全文在聊天窗（分页为既有行为，

@@ -3165,6 +3165,7 @@ class AppShell:
         # 退出标记（R2 第五缺口）：在途自动拉起 worker 凭它中止或补偿收口——
         # 否则「退出时登记表为空 → worker 随后 spawn 登记」会留下永远无人收的进程。
         self._quitting = True
+        self._flush_chat_memory_hits()
         # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win
@@ -3298,6 +3299,17 @@ class AppShell:
         # 设置页进程隔离：释放 config 目录 watcher 与两个定时器（无主 QTimer 的
         # timeout 连接会从 Qt C++ 侧强引用住本对象图，不停则阻碍回收）。
         self._teardown_config_watcher()
+
+    def _flush_chat_memory_hits(self) -> None:
+        """退出前冲刷对话记忆命中队列（L2）：带总超时，失败只记日志。"""
+        try:
+            from .chat.memory import flush_pending_hits
+        except ImportError:
+            return  # 纯桌宠构建没有 chat 模块
+        try:
+            flush_pending_hits(timeout=2.0)
+        except Exception:
+            logging.exception("退出时冲刷对话记忆命中失败")
 
     @classmethod
     def _shutdown_live_for_tests(cls) -> None:

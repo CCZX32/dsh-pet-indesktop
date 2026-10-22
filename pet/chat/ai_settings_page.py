@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import ROLEPLAY_CAST_MAX_CHARS, ROLEPLAY_SCENE_MAX_CHARS
 from ..settings_widgets import (
     ModernSelect,
     _line_edit,
@@ -35,7 +39,8 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
-from .memory import ChatMemory, memory_path
+from .memory import LAYERS, ChatMemory, layer_of, memory_path
+from .memory_recall import LAYER_LABELS, is_archived
 from .themes import CHAT_UI_STYLE_LABELS, CHAT_UI_VIEW_ASPECT, theme_names
 from .utils import _safe_emit
 
@@ -149,6 +154,14 @@ class _AiSettingsPage(QWidget):
         self.vision_model = _line_edit(provider.vision_model)
         self.vision_url = _line_edit(provider.vision_base_url)
         self.vision_key = _line_edit(password=True)
+        # 场景扮演（每宠键）：人设决定「它是谁」，场景卡决定「在哪演」，两组互独立。
+        # 真值走 config.get/set 的每宠路由，不塞进 chat 全局段。
+        self.roleplay_enabled = ToggleSwitch()
+        self.roleplay_enabled.setChecked(bool(config.get("roleplay_enabled", False)))
+        self._roleplay_scene = str(config.get("roleplay_scene") or "")
+        self._roleplay_cast = str(config.get("roleplay_cast") or "")
+        self.roleplay_scene_btn = QPushButton("场景卡…", self)
+        self.roleplay_scene_btn.clicked.connect(self._edit_roleplay_scene)
 
         self._background_themes = list(theme_names())
         self._background_values = {
@@ -234,6 +247,20 @@ class _AiSettingsPage(QWidget):
             SettingRow("system_prompt", "System Prompt", "定义桌宠对话时的身份、语气和行为。", self.prompt, stacked=True),
             SettingRow("connection_test", "连接测试", self.test_result.text(), self.test_button),
         ], self))
+        root.addWidget(SettingsSection("场景扮演", [
+            SettingRow(
+                "roleplay_enabled", "场景扮演",
+                "开启后 AI 会演这个场景：动作 + 台词，并且自己带出环境细节、在场其他人的动静和"
+                "场景推进，不再只是你一句我一句。场景卡约定在哪演、现场有谁；人设决定它是谁，"
+                "两组互不影响。",
+                self.roleplay_enabled,
+            ),
+            SettingRow(
+                "roleplay_scene", "场景卡",
+                "留空则只开启扮演格式，不约束设定。",
+                self.roleplay_scene_btn,
+            ),
+        ], self))
         thinking_web_rows = [
             SettingRow(
                 "thinking_mode", "深度思考",
@@ -282,8 +309,10 @@ class _AiSettingsPage(QWidget):
         root.addWidget(SettingsSection("记忆", [
             SettingRow(
                 "chat_memory_enabled", "记住用户的事",
-                "开启后，每次对话都会带上你钉下的记忆（在对话里说「记住：……」，或点"
-                "消息气泡上的图钉添加）；关闭只是不再带入，已存的记忆保留。默认开启。",
+                "开启后，每次对话都会带上你的记忆：偏好恒注，事实/教训/话题按需命中。"
+                "对话里可说「记住：……」（事实）、「记住偏好：……」「记住教训：……」"
+                "「记住话题：……」，或点消息气泡上的图钉添加；关闭只是不再带入，"
+                "已存的记忆保留。默认开启。",
                 self.chat_memory_enabled,
             ),
             SettingRow(
@@ -300,7 +329,8 @@ class _AiSettingsPage(QWidget):
             ),
             SettingRow(
                 "chat_memory_manage", "记忆管理",
-                "按角色保存在本地（最多 100 条 / 4000 字），可查看、单条删除或全部清空。",
+                "按角色保存在本地（最多 100 条 / 4000 字），按四层分组；可单条改层、"
+                "删除、恢复已归档的话题，或一键清空全部四层。",
                 self.chat_memory_manage_btn,
             ),
         ], self))
@@ -740,6 +770,14 @@ class _AiSettingsPage(QWidget):
         self.test_result.setStyleSheet("color: #16843b;" if ok else "color: #c9362b;")
         self._test_thread = None
 
+    def _edit_roleplay_scene(self) -> None:
+        """打开场景卡编辑窗；结果先留在本页，随宿主的 save() 一起按每宠键落盘。"""
+        dialog = RoleplaySceneDialog(self._roleplay_scene, self._roleplay_cast, self)
+        accepted = dialog.exec()
+        if accepted == QDialog.DialogCode.Accepted:
+            self._roleplay_scene, self._roleplay_cast = dialog.values()
+        dialog.deleteLater()
+
     def save(self) -> None:
         # 保存前基于磁盘最新配置重取快照：另一个设置窗口（AI 设置/桌宠设置 AI 页）
         # 可能在本窗口打开期间改过 Provider 结构；先保留本窗口的 provider 草稿/
@@ -761,6 +799,10 @@ class _AiSettingsPage(QWidget):
         for pid in list(self.settings.providers):
             self._apply_draft_to_provider(pid)
         self.settings.default_system_prompt = self.prompt.toPlainText().strip()
+        # 场景扮演三键是每宠键：SlotRoutedConfig 会把它们写进这只宠的 slot 档案。
+        self.config.set("roleplay_enabled", self.roleplay_enabled.isChecked())
+        self.config.set("roleplay_scene", self._roleplay_scene)
+        self.config.set("roleplay_cast", self._roleplay_cast)
         self._apply_web_search_settings()
         self.config.set("chat_ui_style", self.chat_ui_style.currentData())
         self._capture_background_value()
@@ -812,8 +854,166 @@ class _AiSettingsPage(QWidget):
         return dialog
 
 
+class RoleplaySceneDialog(QDialog):
+    """场景卡编辑窗：场景描述多行 + 在场人物多行（每行一个「名字：描述」）。"""
+
+    SCENE_PLACEHOLDER = "示例：雨夜的便利店，灯管忽明忽暗，货架上只剩最后一盒草莓牛奶。"
+    CAST_PLACEHOLDER = "示例：店员阿澈：总在擦同一个杯子，说话前先叹口气。"
+
+    def __init__(self, scene: str = "", cast: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("roleplay-scene-dialog")
+        self.setWindowTitle("场景卡")
+        self.setMinimumWidth(520)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(10)
+
+        intro = QLabel(
+            "场景卡决定「在哪演」，人设决定「它是谁」，两组互不影响。"
+            "留空则只开启扮演格式，不约束设定。",
+            self,
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        scene_label = QLabel(f"场景描述（时间 / 地点 / 氛围，≤{ROLEPLAY_SCENE_MAX_CHARS} 字）", self)
+        root.addWidget(scene_label)
+        self.scene_edit = QPlainTextEdit(self)
+        self.scene_edit.setPlaceholderText(self.SCENE_PLACEHOLDER)
+        self.scene_edit.setPlainText(str(scene or ""))
+        self.scene_edit.setMinimumHeight(100)
+        root.addWidget(self.scene_edit)
+        self.scene_counter = QLabel(self)
+        self.scene_counter.setObjectName("roleplay-scene-counter")
+        root.addWidget(self.scene_counter)
+
+        cast_label = QLabel(
+            f"在场人物（每行一个「名字：一句辨识度描述」，≤{ROLEPLAY_CAST_MAX_CHARS} 字）",
+            self,
+        )
+        root.addWidget(cast_label)
+        self.cast_edit = QPlainTextEdit(self)
+        self.cast_edit.setPlaceholderText(self.CAST_PLACEHOLDER)
+        self.cast_edit.setPlainText(str(cast or ""))
+        self.cast_edit.setMinimumHeight(120)
+        root.addWidget(self.cast_edit)
+        self.cast_counter = QLabel(self)
+        self.cast_counter.setObjectName("roleplay-cast-counter")
+        root.addWidget(self.cast_counter)
+
+        self.truncation_hint = QLabel(self)
+        self.truncation_hint.setObjectName("roleplay-truncation-hint")
+        self.truncation_hint.setWordWrap(True)
+        self.truncation_hint.setStyleSheet("color: #c9362b;")
+        self.truncation_hint.hide()
+        root.addWidget(self.truncation_hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self.save_button.setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self._on_save_clicked)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._truncated = False       # 本次 values() 是否发生了截断（防御分支用）
+        self.scene_edit.textChanged.connect(self._on_edited)
+        self.cast_edit.textChanged.connect(self._on_edited)
+        self._update_counters()
+
+    @staticmethod
+    def _truncate_scene(text: str) -> tuple[str, bool]:
+        """场景按字符截断，保留末尾 ``…``（总长仍不超过上限）。"""
+        if len(text) <= ROLEPLAY_SCENE_MAX_CHARS:
+            return text, False
+        return text[: ROLEPLAY_SCENE_MAX_CHARS - 1] + "…", True
+
+    @staticmethod
+    def _truncate_cast(text: str) -> tuple[str, bool]:
+        """人物按整行截断：放不下的整行直接不要，绝不从某一行中间切断。"""
+        kept: list[str] = []
+        used = 0
+        for line in text.split("\n"):
+            extra = len(line) + (1 if kept else 0)
+            if used + extra > ROLEPLAY_CAST_MAX_CHARS:
+                return "\n".join(kept), True
+            kept.append(line)
+            used += extra
+        return text, False
+
+    @staticmethod
+    def _set_counter(label: QLabel, length: int, limit: int) -> bool:
+        label.setText(f"{length}/{limit}")
+        over = length > limit
+        label.setStyleSheet("color: #c9362b;" if over else "color: rgba(128,128,128,0.9);")
+        return over
+
+    def _update_counters(self) -> None:
+        # 计数与禁用判据必须和 values() 的落盘口径一致：先 strip 再算长度。
+        # 否则尾随空行会让计数超限、保存按钮被锁死，而 values() 实际存的是合规内容。
+        scene_over = self._set_counter(
+            self.scene_counter, len(self.scene_edit.toPlainText().strip()),
+            ROLEPLAY_SCENE_MAX_CHARS)
+        cast_over = self._set_counter(
+            self.cast_counter, len(self.cast_edit.toPlainText().strip()),
+            ROLEPLAY_CAST_MAX_CHARS)
+        over = scene_over or cast_over
+        if over:
+            # 超限就不让保存：用户看得见红计数与这句话，自己删到范围内。
+            # 不做「保存时静默截断」——那是把用户写的内容无声丢掉。
+            self.truncation_hint.setText("超出上限，请删减到上限以内再保存（不会自动截断）")
+            self.truncation_hint.show()
+        else:
+            self.truncation_hint.hide()
+        self.save_button.setEnabled(not over)
+
+    def _on_edited(self) -> None:
+        self._update_counters()
+
+    def _show_truncation(self, scene_cut: bool, cast_cut: bool) -> None:
+        parts: list[str] = []
+        if scene_cut:
+            parts.append(f"场景描述超出 {ROLEPLAY_SCENE_MAX_CHARS} 字，已截断并补「…」。")
+        if cast_cut:
+            parts.append(
+                f"在场人物超出 {ROLEPLAY_CAST_MAX_CHARS} 字，已按整行截断（没有切断某一行）。")
+        self.truncation_hint.setText(" ".join(parts))
+        self.truncation_hint.show()
+
+    def _on_save_clicked(self) -> None:
+        """保存。内容超限时保存按钮是禁用的（见 ``_update_counters``），点不动。
+
+        下面这条 ``_truncated`` 分支只是防御：万一外部代码绕开按钮直接 accept，
+        也不会把截断后的内容当成用户原样内容静默存下去。
+        """
+        self.values()
+        if self._truncated:
+            return
+        self.accept()
+
+    def values(self) -> tuple[str, str]:
+        """返回 (场景描述, 在场人物)，多行内部换行原样保留。
+
+        正常路径（用户在对话框里操作）不会走到截断：超限时保存按钮禁用，用户必须先删。
+        这里的截断只是**防御性兜底**（外部代码直接调 values 时），场景按字符截断并补
+        ``…``、人物按整行截断，一旦发生就把提示摆出来。
+        """
+        scene_raw = self.scene_edit.toPlainText().strip()
+        cast_raw = self.cast_edit.toPlainText().strip()
+        scene, scene_cut = self._truncate_scene(scene_raw)
+        cast, cast_cut = self._truncate_cast(cast_raw)
+        self._truncated = scene_cut or cast_cut
+        if self._truncated:
+            self._show_truncation(scene_cut, cast_cut)
+        return scene, cast
+
+
 class ChatMemoryDialog(QDialog):
-    """「记忆管理」对话框：查看 / 单条删除 / 全部清空（清空走确认）。
+    """「记忆管理」对话框：四层分组 / 单条改层 / 删除 / 归档 topic 恢复 / 全部清空。
 
     每次操作后从 ChatMemory 重读重排：本对话框（可能在独立设置进程）与主进程
     聊天窗的「记住：……」/「钉为记忆」写同一个 memory.json，展示以盘上为准。
@@ -822,7 +1022,7 @@ class ChatMemoryDialog(QDialog):
     def __init__(self, memory: ChatMemory, parent=None):
         super().__init__(parent)
         self.memory = memory
-        self._rows: list[QWidget] = []
+        self._rows: list[QWidget] = []  # 只数条目行（组标题不计），兼容旧测试口径
         self.setObjectName("chat-memory-dialog")
         self.setWindowTitle("记忆管理")
         self.setMinimumWidth(460)
@@ -861,43 +1061,99 @@ class ChatMemoryDialog(QDialog):
         return len(self._rows)
 
     def _reload(self) -> None:
-        for row in self._rows:
-            self.host_layout.removeWidget(row)
-            row.deleteLater()
+        # 清空所有布局项（含上一次的 stretch），避免反复改层/恢复后残留 spacer。
+        while self.host_layout.count():
+            item = self.host_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         self._rows = []
-        entries = self.memory.load()
-        if not entries:
-            empty = QLabel("还没有记忆。在对话里说「记住：……」，或点消息气泡上的图钉添加。", self.host)
+        groups = self.memory.load_grouped()
+        now = datetime.now().astimezone()
+        total = sum(len(entries) for entries in groups.values())
+        if not total:
+            empty = QLabel(
+                "还没有记忆。在对话里说「记住：……」「记住偏好：……」「记住教训：……」"
+                "「记住话题：……」，或点消息气泡上的图钉添加。",
+                self.host,
+            )
             empty.setWordWrap(True)
             self.host_layout.addWidget(empty)
             self._rows.append(empty)
-        for entry in entries:
-            row = QWidget(self.host)
-            layout = QHBoxLayout(row)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
-            source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
-            source_badge.setObjectName("chat-memory-source")
-            source_badge.setStyleSheet(
-                "color: rgba(128,128,128,0.9); font-size: 11px;"
-                "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
-            layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
-            text = QLabel(str(entry.get("text", "")), row)
-            text.setWordWrap(True)
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            layout.addWidget(text, 1)
-            delete_btn = QPushButton("删除", row)
-            delete_btn.setProperty("variant", "ghost")
-            entry_id = str(entry.get("id", ""))
-            delete_btn.clicked.connect(lambda _checked=False, eid=entry_id: self._delete_entry(eid))
-            layout.addWidget(delete_btn)
-            self.host_layout.addWidget(row)
-            self._rows.append(row)
+        for layer in LAYERS:
+            entries = groups[layer]
+            if not entries:
+                continue
+            header = QLabel(f"{LAYER_LABELS[layer]}（{len(entries)}）", self.host)
+            header.setObjectName(f"chat-memory-group-{layer}")
+            header.setStyleSheet(
+                "font-weight: 600; color: rgba(160,160,160,0.95); margin-top: 4px;")
+            self.host_layout.addWidget(header)
+            for entry in entries:
+                row = self._entry_row(entry, layer, now)
+                self.host_layout.addWidget(row)
+                self._rows.append(row)
         self.host_layout.addStretch(1)
-        real = len(entries)
-        self.count_label.setText(f"共 {real} 条（上限 100 条 / 4000 字）" if real else "")
-        self.clear_btn.setEnabled(real > 0)
+        self.count_label.setText(
+            f"共 {total} 条（上限 100 条 / 4000 字）" if total else "")
+        self.clear_btn.setEnabled(total > 0)
+
+    def _entry_row(self, entry: dict, layer: str, now: datetime) -> QWidget:
+        row = QWidget(self.host)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        # 来源标记：manual = 手动钉（档 A），auto = 回复后自动提炼（档 B）
+        source_badge = QLabel("自动" if str(entry.get("source")) == "auto" else "手动", row)
+        source_badge.setObjectName("chat-memory-source")
+        source_badge.setStyleSheet(
+            "color: rgba(128,128,128,0.9); font-size: 11px;"
+            "border: 1px solid rgba(128,128,128,0.35); border-radius: 4px; padding: 0 4px;")
+        layout.addWidget(source_badge, 0, Qt.AlignmentFlag.AlignTop)
+        archived = layer == "topic" and is_archived(entry, now)
+        text = QLabel(str(entry.get("text", "")), row)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if archived:
+            text.setStyleSheet("color: rgba(128,128,128,0.6);")
+        layout.addWidget(text, 1)
+        entry_id = str(entry.get("id", ""))
+        if not archived:
+            # 单条改层：四层下拉（改层立即落盘并重排）。归档行不渲染层下拉
+            # （v2b E：`update_layer` 会清 archived，等于第二条静默恢复通道），
+            # 只保留「恢复」按钮。
+            layer_combo = QComboBox(row)
+            layer_combo.setObjectName(f"chat-memory-layer-{entry_id}")
+            layer_combo.setFixedWidth(92)
+            for name in LAYERS:
+                layer_combo.addItem(LAYER_LABELS[name], name)
+            layer_combo.setCurrentIndex(LAYERS.index(layer_of(entry)))
+            layer_combo.currentIndexChanged.connect(
+                lambda _index, eid=entry_id, combo=layer_combo: self._change_layer(
+                    eid, str(combo.currentData())))
+            layout.addWidget(layer_combo, 0, Qt.AlignmentFlag.AlignTop)
+        if archived:
+            restore_btn = QPushButton("恢复", row)
+            restore_btn.setObjectName(f"chat-memory-restore-{entry_id}")
+            restore_btn.setProperty("variant", "ghost")
+            restore_btn.clicked.connect(
+                lambda _checked=False, eid=entry_id: self._restore_entry(eid))
+            layout.addWidget(restore_btn, 0, Qt.AlignmentFlag.AlignTop)
+        delete_btn = QPushButton("删除", row)
+        delete_btn.setProperty("variant", "ghost")
+        delete_btn.clicked.connect(lambda _checked=False, eid=entry_id: self._delete_entry(eid))
+        layout.addWidget(delete_btn)
+        return row
+
+    def _change_layer(self, entry_id: str, layer: str) -> None:
+        if not self.memory.update_layer(entry_id, layer):
+            QMessageBox.warning(self, "改层失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()
+
+    def _restore_entry(self, entry_id: str) -> None:
+        if not self.memory.restore_topic(entry_id):
+            QMessageBox.warning(self, "恢复失败", "记忆文件正被占用，请稍后再试。")
+        self._reload()
 
     def _delete_entry(self, entry_id: str) -> None:
         if not self.memory.remove(entry_id):

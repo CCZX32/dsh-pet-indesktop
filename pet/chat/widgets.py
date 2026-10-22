@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 from .geometry import best_position_near_pet
 from .lifecycle import release_window_when_idle
 from .markdown_view import markdown_to_html
-from .memory import ChatMemory, injection_text, parse_remember_command
+from .memory import ChatMemory, MemoryPayload, memory_payload, parse_remember_command
 from .memory_extract import schedule_extraction
 from .models import ChatMessage
 from .pet_link import PetChatLink
@@ -2268,11 +2268,16 @@ class ChatWindow(QDialog):
             user_text=user_text, reply_text=reply_text,
             provider=provider, provider_config=provider_config)
 
-    def _memory_injection(self) -> str:
-        """system 末尾的「关于用户的记忆」段；chat_memory_enabled 关 / 无记忆 → 空串。"""
-        return injection_text(
+    def _memory_injection(self) -> MemoryPayload:
+        """本轮注入快照；chat_memory_enabled 关 / 无记忆 → 空 payload。
+
+        v2b：改用显式 payload（user 快照 + 全量条目 + note_hits），不再依赖
+        线程暂存；记忆文件的读仍在 GUI 线程（既有行为），命中回写只入队。
+        """
+        return memory_payload(
+            self._chat_memory(),
             bool(self.config.get("chat_memory_enabled", True)),
-            self.config.dir, getattr(self.config, "instance_id", ""), self.character_id)
+        )
 
     def _handle_remember_command(self, display_text: str, command: str) -> None:
         """「记住：……」指令落记忆 + 确认气泡；存储/读回失败如实告知，不静默。"""
@@ -2344,7 +2349,18 @@ class ChatWindow(QDialog):
         self.store.save(self.session)
         config = self.settings.active_config
         config.api_key = self.config.resolve_api_key(config)
-        messages = self.prompt_builder.build_messages(self.settings, self.character_id, self.session.messages[:-1], text, memory_text=self._memory_injection())
+        messages = self.prompt_builder.build_messages(
+            self.settings,
+            self.character_id,
+            self.session.messages[:-1],
+            text,
+            memory_payload=self._memory_injection(),
+            # 每宠键：config 可能是 slot 路由视图，必须从 get 逐键读（chat_settings()
+            # 转发主配置，读不到这只宠的场景卡）。
+            roleplay_enabled=bool(self.config.get("roleplay_enabled", False)),
+            roleplay_scene=str(self.config.get("roleplay_scene", "") or ""),
+            roleplay_cast=str(self.config.get("roleplay_cast", "") or ""),
+        )
         if image_payloads:
             messages[-1]["content"] = [{"type": "text", "text": text}, *image_payloads]
         self._last_user_payload = messages[-1].get("content") if image_payloads else None

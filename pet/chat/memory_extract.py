@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import feature_activation as _fa
-from .memory import ChatMemory, render_injection
+from .memory import MAX_KEYWORDS, ChatMemory, render_injection
 from .providers import thinking_payload
 
 log = logging.getLogger(__name__)
@@ -82,27 +82,51 @@ _EXTRACT_SYSTEM = (
     "（偏好、习惯、明确说过的个人信息、约定），输出严格的 JSON 操作列表。\n"
     "规则：\n"
     "1. 只输出 JSON 数组本身，不要输出任何其它文字、解释或 Markdown 代码围栏。\n"
-    "2. 每条操作形如 {\"op\":\"ADD\",\"text\":\"...\"}；op 只能是 ADD / UPDATE / FORGET。\n"
-    "3. 只记关于「用户」的长期事实；寒暄、闲聊、一次性请求、关于桌宠的事实都不记。\n"
-    "4. text 是一句简短的第一人称陈述（与已有记忆风格一致，如「我不吃辣」），不超过 50 字。\n"
-    "5. 已有记忆里已有同义事实时不要重复 ADD；事实有变化用 UPDATE；用户明确表示"
+    "2. 每条操作形如 {\"op\":\"ADD\",\"text\":\"...\",\"layer\":\"fact\","
+    "\"keywords\":[\"关键词\"]}；op 只能是 ADD / UPDATE / FORGET。\n"
+    "3. layer 只能是 fact / lesson / topic：稳定事实与偏好用 fact；"
+    "「上次搞错了 / 别再这样」这类教训用 lesson；带目标句的进行态用 topic。\n"
+    "4. keywords 是 0-48 个短关键词（优先 2 字词/实义词，尽量覆盖整条记忆），"
+    "用于以后按需检索。\n"
+    "5. 只记关于「用户」的长期事实；寒暄、闲聊、一次性请求、关于桌宠的事实都不记。\n"
+    "6. text 是一句简短的第一人称陈述（与已有记忆风格一致，如「我不吃辣」），不超过 50 字。\n"
+    "7. 已有记忆里已有同义事实时不要重复 ADD；事实有变化用 UPDATE；用户明确表示"
     "「别记了 / 忘掉」用 FORGET（text 填要删掉的那条已有记忆）。\n"
-    "6. 没有值得记住的内容时，输出 []。"
+    "8. 没有值得记住的内容时，输出 []。"
 )
 
 _EXTRACT_USER = (
     "【近期对话】\n{dialogue}\n\n"
     "【已有记忆】\n{existing}\n\n"
-    "请输出记忆操作 JSON 数组。"
+    "请输出记忆操作 JSON 数组（可带 layer 与 keywords 字段）。"
 )
 
+_EXTRACT_LAYERS = ("fact", "lesson", "topic")
 
-def parse_ops(raw: str) -> list[dict[str, str]]:
+
+def _clean_keywords(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        token = str(item or "").strip().lower()
+        if token and token not in cleaned:
+            cleaned.append(token)
+        if len(cleaned) >= MAX_KEYWORDS:
+            break
+    return cleaned
+
+
+def parse_ops(raw: str) -> list[dict[str, Any]]:
     """容错解析提炼输出为操作列表；解析失败 / 超预算按无操作（[]）处理。
 
     先整串 ``json.loads``，失败再截取首个 ``[`` 到末个 ``]``（模型在 JSON 前后
     包了废话的形态）；逐项校验：必须是 dict、op 在 ADD/UPDATE/FORGET 内、text
     非空（strip 后，截到单条上限）；操作总数截到 _MAX_OPS。
+
+    v2a：合法 ``layer``（fact/lesson/topic）与非空 ``keywords`` 原样带出；
+    老格式缺这两个字段时不补键（合并侧按 fact + 现场 bigram 兜底），保证
+    老 ops 的解析结果逐字节兼容。
     """
     text = str(raw or "").strip()[:_RESPONSE_CHAR_LIMIT]
     if not text:
@@ -118,14 +142,22 @@ def parse_ops(raw: str) -> list[dict[str, str]]:
             continue
         if not isinstance(data, list):
             continue
-        ops = []
+        ops: list[dict[str, Any]] = []
         for item in data[:_MAX_OPS]:
             if not isinstance(item, dict):
                 continue
             op = str(item.get("op", "")).strip().upper()
             op_text = str(item.get("text", "")).strip()[:_OP_TEXT_CHARS]
-            if op in _VALID_OPS and op_text:
-                ops.append({"op": op, "text": op_text})
+            if op not in _VALID_OPS or not op_text:
+                continue
+            parsed: dict[str, Any] = {"op": op, "text": op_text}
+            layer = str(item.get("layer", "")).strip().lower()
+            if layer in _EXTRACT_LAYERS:
+                parsed["layer"] = layer
+            keywords = _clean_keywords(item.get("keywords"))
+            if keywords:
+                parsed["keywords"] = keywords
+            ops.append(parsed)
         return ops
     return []
 
@@ -218,6 +250,8 @@ def _dialogue_transcript(turns: list[tuple[str, str]]) -> str:
 
 def _run(path: Path, turns: list[tuple[str, str]], provider, provider_config) -> None:
     memory = ChatMemory(path)
+    # v2b：默认排除归档条目（render_injection(include_archived=False)），
+    # 避免后台提炼把归档 topic 再喂回模型、一重申就被静默复活。
     existing = render_injection(memory.load())  # 自带 ≤1200 字符硬上限
     prompt = _EXTRACT_USER.format(
         dialogue=_dialogue_transcript(turns),
@@ -231,6 +265,9 @@ def _run(path: Path, turns: list[tuple[str, str]], provider, provider_config) ->
     ops = parse_ops(raw)
     if ops:
         memory.apply_ops(ops, source="auto")
+    elif str(raw or "").strip():
+        # 有输出却解析不出（截断/格式漂移）：静默丢弃会让"记不住事"无从排查。
+        log.warning("记忆提炼输出无法解析为操作（%d 字符），本批丢弃", len(str(raw)))
 
 
 def _complete(provider, messages: list[dict[str, Any]], config) -> str:
@@ -242,11 +279,17 @@ def _complete(provider, messages: list[dict[str, Any]], config) -> str:
             "model": config.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 512,
+            # 发版交叉审 H1：512 装不下带 layer+keywords 的新格式（5 条×20 关键词
+            # 实测 ~569 tokens，8×48 上限形态 ~1665），截断后整批静默丢弃；给足
+            # 上限形态的余量。
+            "max_tokens": 2048,
             "temperature": 0.2,
         }
         payload.update(thinking_payload(config, force_disable=True))
         message = complete_json(payload, config, None)
+        if isinstance(message, dict) and message.get("finish_reason") == "length":
+            # 输出被服务端截断：这批多半解析不出，但必须留下线索而不是静默丢弃。
+            log.warning("记忆提炼输出被 max_tokens 截断，本批可能丢失")
         content = message.get("content") if isinstance(message, dict) else ""
         return str(content or "")[:_RESPONSE_CHAR_LIMIT]
     cancel = threading.Event()

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,15 +22,19 @@ from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
 
 from pet.chat.memory import (
+    ARCHIVE_DUP_RATIO,
     INJECT_CHAR_LIMIT,
     MAX_ENTRIES,
+    MAX_HIT_WRITE_ATTEMPTS,
     MAX_TOTAL_CHARS,
     ChatMemory,
+    _hit_queue_for,
     injection_text,
     memory_path,
     parse_remember_command,
     render_injection,
 )
+from pet.chat.memory_recall import TOPIC_ARCHIVE_DAYS, is_archived, recall
 from pet.chat.prompt import PromptBuilder
 
 
@@ -196,6 +201,212 @@ def test_clear_removes_file(tmp_path):
     assert mem.clear() is True  # 本来就不存在 = 已清空
 
 
+# ---------------------------------------------------------------- v2f L4/L5/L6
+def test_apply_ops_noop_does_not_rewrite_file(tmp_path):
+    """v2f L4：FORGET 未命中 = 空操作，不写盘且返回 False（mtime 不变）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    mem.add("周三有课")
+    before_mtime = path.stat().st_mtime_ns
+    before_text = path.read_text(encoding="utf-8")
+
+    assert mem.apply_ops(
+        [{"op": "FORGET", "text": "不存在的记忆"}], source="auto") is False
+    assert path.stat().st_mtime_ns == before_mtime
+    assert path.read_text(encoding="utf-8") == before_text
+
+
+def test_add_dedup_refresh_enforces_budget(tmp_path):
+    """v2f L5：盘上 12 条共 6000 字符时，去重刷新也要收敛到 4000 预算内。"""
+    path = tmp_path / "memory.json"
+    base = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    texts = [f"{index:02d}-" + "长" * 497 for index in range(12)]
+    assert sum(len(text) for text in texts) == 6000
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "entries": [
+                    {
+                        "id": f"old-{index}",
+                        "text": text,
+                        "source": "manual",
+                        "layer": "fact",
+                        "created_at": (base - timedelta(minutes=index)).isoformat(),
+                        "updated_at": (base - timedelta(minutes=index)).isoformat(),
+                        "hits": 1,
+                    }
+                    for index, text in enumerate(texts)
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    mem = ChatMemory(path, clock=_clock())
+    refreshed, created = mem.add(texts[0])
+    assert created is False
+    entries = mem.load()
+    assert texts[0] in {entry["text"] for entry in entries}
+    assert sum(len(entry["text"]) for entry in entries) <= MAX_TOTAL_CHARS
+    assert len(entries) == 8  # 12 × 500 → 8 × 500
+
+
+def test_note_recalled_hit_increments_persisted_hits(tmp_path):
+    """v2f L6：命中落盘同时 hits += 1（淘汰/注入排序都看 hits）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    assert topic["hits"] == 1
+    mem.note_recalled([topic["id"]])
+    assert mem.flush_hits(5.0) is True
+    persisted = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert persisted["hits"] == 2
+
+
+# ---------------------------------------------------------------- v2c M1/M3
+def test_auto_apply_ops_cannot_unarchive_topic_by_changing_layer(tmp_path):
+    """M1：自动提炼把归档 topic 改层成 fact 不能绕过归档（仍不注入）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    assert mem.set_archived(topic["id"], True) is True
+
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "那个鉴权 bug 用 token", "layer": "fact"}],
+        source="auto",
+    ) is True
+
+    loaded = mem.load()[0]
+    assert loaded["layer"] == "topic"  # explicit_layer 被忽略
+    assert loaded["archived"] is True  # 归档态未丢
+    assert is_archived(loaded) is True
+    assert recall([loaded], "token", turn_index=2).entries == ()
+
+
+def test_auto_apply_ops_does_not_refresh_implicit_stale_topic(tmp_path):
+    """M3：盘上还没有 archived 键的隐式超期 topic，自动重申也不得复活。"""
+    path = tmp_path / "memory.json"
+    stale_at = datetime.now().astimezone() - timedelta(days=TOPIC_ARCHIVE_DAYS + 1)
+    old = ChatMemory(path, clock=lambda: stale_at)
+    topic, _ = old.add("那个鉴权 bug 用 token", layer="topic")
+    before = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert "archived" not in before  # 隐式超期：盘上没有 archived 键
+
+    later = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    assert later.apply_ops(
+        [{"op": "ADD", "text": "那个鉴权 bug 用 token", "layer": "fact"}],
+        source="auto",
+    ) is True
+
+    after = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert after["layer"] == "topic"
+    assert after["last_hit_at"] == before["last_hit_at"]
+    assert after["updated_at"] == before["updated_at"]
+    assert "archived" not in after
+    assert is_archived(after) is True
+    assert recall([later.load()[0]], "token", turn_index=2).entries == ()
+
+
+def test_auto_apply_ops_can_still_forget_archived_topic(tmp_path):
+    """M1：FORGET（删除）是允许的——用户/模型要求忘掉归档条目。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    assert mem.set_archived(topic["id"], True) is True
+    assert mem.apply_ops(
+        [{"op": "FORGET", "text": "那个鉴权 bug 用 token"}], source="auto") is True
+    assert mem.load() == []
+
+
+def test_auto_reaffirm_never_demotes_manual_user_layer(tmp_path):
+    """发版终审（高）：自动重申带 layer=fact 也不得把手动 user 偏好降级。
+
+    降级后该偏好不再恒定注入——render_user_snapshot 立即变空。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    entry, created = mem.add("我不吃辣", layer="user")
+    assert created is True
+
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "我不吃辣", "layer": "fact"}], source="auto") is True
+
+    loaded = next(e for e in mem.load() if e["id"] == entry["id"])
+    assert loaded["layer"] == "user"
+    assert loaded["hits"] == 2
+    from pet.chat.memory_recall import render_user_snapshot
+    assert "我不吃辣" in render_user_snapshot(mem.load())
+    # 手动通道仍然可以改层（语义不变）。
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "我不吃辣", "layer": "fact"}], source="manual") is True
+    assert next(e for e in mem.load() if e["id"] == entry["id"])["layer"] == "fact"
+
+
+# ---------------------------------------------------------------- v2f N1/N3
+def test_auto_reaffirm_never_renews_topic_activity(tmp_path):
+    """v2f N1：第 13/26/39 天自动重申只 +hits，第 15 天仍归档、recall 不命中。"""
+    path = tmp_path / "memory.json"
+    state = {"now": datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)}
+    mem = ChatMemory(path, clock=lambda: state["now"])
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    created = topic["created_at"]
+
+    for day in (13, 26, 39):
+        state["now"] = topic_at = datetime.fromisoformat(created) + timedelta(days=day)
+        assert mem.apply_ops(
+            [{"op": "ADD", "text": "那个鉴权 bug 用 token"}], source="auto"
+        ) is True
+        persisted = next(
+            e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+            if e["id"] == topic["id"])
+        assert persisted["last_hit_at"] == topic["last_hit_at"]
+        assert persisted["updated_at"] == topic["updated_at"]
+
+    day15 = datetime.fromisoformat(created) + timedelta(days=15)
+    loaded = mem.load()
+    assert is_archived(loaded[0], day15) is True
+    assert recall(loaded, "token", now=day15, turn_index=2).entries == ()
+
+    day52 = datetime.fromisoformat(created) + timedelta(days=52)
+    assert is_archived(loaded[0], day52) is True
+    assert recall(loaded, "token", now=day52, turn_index=2).entries == ()
+    assert topic_at > day15  # 重申确实发生在第 15 天之后
+
+
+def test_auto_add_near_duplicate_of_archived_memory_is_discarded(tmp_path):
+    """v2f N3：换说法新建会被归档 Jaccard 挡住；手动来源不受限。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    archived, _ = mem.add("我在准备十月底的考试", layer="topic")
+    assert mem.set_archived(archived["id"], True) is True
+    before = path.read_text(encoding="utf-8")
+
+    assert ARCHIVE_DUP_RATIO == 0.6
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "在准备十月底的考试（考完要复盘）"}],
+        source="auto",
+    ) is False
+    assert path.read_text(encoding="utf-8") == before
+    loaded = mem.load()
+    assert len(loaded) == 1
+    assert recall(loaded, "十月底的考试", turn_index=2).entries == ()
+    assert "考完要复盘" not in render_injection(loaded)
+
+    # 手动来源不受归档去重限制（手动钉仍是恢复/新建的合法入口）。
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "在准备十月底的考试（考完要复盘）"}],
+        source="manual",
+    ) is True
+    assert any(
+        "考完要复盘" in entry["text"] for entry in mem.load())
+
+
 # ---------------------------------------------------------------- 指令解析
 @pytest.mark.parametrize(
     ("raw", "expected"),
@@ -242,6 +453,16 @@ def test_render_injection_empty_entries_is_empty():
     assert render_injection([]) == ""
 
 
+def test_render_injection_excludes_archived_by_default():
+    """D：归档 topic 默认不喂回提炼/注入，显式 include_archived 才包含。"""
+    entries = _entries(["旧话题", "新话题"])
+    entries[0]["layer"] = "topic"
+    entries[0]["archived"] = True
+    assert "旧话题" not in render_injection(entries)
+    assert "新话题" in render_injection(entries)
+    assert "旧话题" in render_injection(entries, include_archived=True)
+
+
 def test_render_injection_hard_char_limit():
     entries = _entries([f"第{i}条" + "很长" * 100 for i in range(50)])
     section = render_injection(entries)
@@ -259,12 +480,14 @@ def test_render_injection_prefers_high_hits():
 
 
 def test_injection_text_disabled_is_empty(tmp_path):
-    root = tmp_path / "sessions"
     path = memory_path(tmp_path, "", "shenshen")
     mem = ChatMemory(path, clock=_clock())
-    mem.add("我不吃辣")
+    mem.add("我不吃辣", layer="user")
+    mem.add("周三有课")  # fact：不再恒注，留给第二轮起的按需命中
     assert injection_text(False, tmp_path, "", "shenshen") == ""
-    assert "我不吃辣" in injection_text(True, tmp_path, "", "shenshen")
+    section = injection_text(True, tmp_path, "", "shenshen")
+    assert "我不吃辣" in section
+    assert "周三有课" not in section
     assert injection_text(True, tmp_path, "", "别的角色") == ""  # 按角色隔离
 
 
@@ -404,16 +627,24 @@ def test_legacy_window_remember_command_and_pin(tmp_path, monkeypatch):
 
 
 def test_begin_generation_injects_memory_into_system(tmp_path, monkeypatch):
-    """真实生成路径：有记忆时发给模型的 system 含记忆段；关掉开关后逐字节回到基线。"""
+    """真实生成路径：首轮只注 user 快照；第二轮起 fact 按需命中；关开关回到基线。"""
     window, sent = _modern_window(tmp_path, monkeypatch)
     try:
-        _win_memory(window).add("我不吃辣")
+        _win_memory(window).add("我不吃辣", layer="user")
+        _win_memory(window).add("周三有课", layer="fact")
         window.input.setPlainText("晚上吃什么")
         window.send_message()
         assert len(sent) == 1
         system = sent[0][0][0]["content"]
         assert "关于用户的记忆" in system
         assert "我不吃辣" in system
+        assert "周三有课" not in system  # 首轮不命中 fact
+        # 第二轮：带历史，fact 命中注入
+        window.input.setPlainText("周三有课吗")
+        window.send_message()
+        assert len(sent) == 2
+        second = sent[1][0][0]["content"]
+        assert "周三有课" in second
         # 关开关：注入段为空，与无记忆逐字节一致
         window.config.set("chat_memory_enabled", False)
         baseline = window.prompt_builder.build_messages(
@@ -421,9 +652,9 @@ def test_begin_generation_injects_memory_into_system(tmp_path, monkeypatch):
         )
         window.input.setPlainText("晚上吃什么")
         window.send_message()
-        assert len(sent) == 2
-        assert sent[1][0][0]["content"] == baseline[0]["content"]
-        assert "关于用户的记忆" not in sent[1][0][0]["content"]
+        assert len(sent) == 3
+        assert sent[2][0][0]["content"] == baseline[0]["content"]
+        assert "关于用户的记忆" not in sent[2][0][0]["content"]
     finally:
         window.close()
         window.deleteLater()
@@ -540,6 +771,138 @@ def test_settings_memory_manager_list_delete_and_clear(tmp_path, monkeypatch):
             dialog.deleteLater()
     finally:
         page.deleteLater()
+
+
+def test_memory_manager_groups_layers_changes_layer_and_restores_topic(tmp_path, monkeypatch):
+    """UI：四层分组；单条下拉改层；归档 topic 灰显 + 恢复。"""
+    from datetime import timedelta
+
+    from PySide6.QtWidgets import QComboBox, QLabel, QPushButton
+
+    from pet.chat.memory import LAYERS
+    from pet.chat.memory_recall import is_archived
+
+    config, page = _settings_page(tmp_path, monkeypatch)
+    try:
+        path = memory_path(config.dir, "", str(config.get("character")))
+        stale_at = datetime.now().astimezone() - timedelta(days=16)
+        stale_mem = ChatMemory(path, clock=lambda: stale_at)
+        stale, _ = stale_mem.add("旧话题", layer="topic")
+        mem = ChatMemory(path)
+        user, _ = mem.add("我不吃辣", layer="user")
+        fact, _ = mem.add("周三有课", layer="fact")
+        mem.add("别再把配置删了", layer="lesson")
+        dialog = page._open_memory_manager()
+        try:
+            assert dialog._row_count() == 4
+            labels = [label.text() for label in dialog.findChildren(QLabel)]
+            for text in ("用户偏好", "事实", "教训", "话题"):
+                assert any(text in label for label in labels), text
+            # 单条下拉改层：fact → lesson
+            combo = dialog.findChild(QComboBox, f"chat-memory-layer-{fact['id']}")
+            assert combo is not None
+            combo.setCurrentIndex(LAYERS.index("lesson"))
+            assert next(e for e in mem.load() if e["id"] == fact["id"])["layer"] == "lesson"
+            # 归档 topic：灰显 + 恢复按钮，点恢复后不再归档
+            archived_combo = dialog.findChild(QComboBox, f"chat-memory-layer-{stale['id']}")
+            assert archived_combo is None or not archived_combo.isEnabled()  # E：归档行不可改层
+            restore = dialog.findChild(QPushButton, f"chat-memory-restore-{stale['id']}")
+            assert restore is not None
+            restore.click()
+            restored = next(e for e in mem.load() if e["id"] == stale["id"])
+            assert restored["archived"] is False
+            assert is_archived(restored, datetime.now().astimezone()) is False
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+    finally:
+        page.deleteLater()
+
+
+# ---------------------------------------------------------------- v2c L1/L2
+def test_hit_write_failure_keeps_pending_and_retries(tmp_path, monkeypatch):
+    """L1：写盘失败不置 _last_write（不进 60s 去抖），批次留在 _pending 重试。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    hit_at = datetime.now().astimezone()
+
+    real_write = ChatMemory._write
+
+    def broken(self, entries):
+        return False
+
+    monkeypatch.setattr(ChatMemory, "_write", broken)
+    mem.note_recalled([topic["id"]], now=hit_at)
+    assert mem.flush_hits(0.5) is False
+
+    queue = _hit_queue_for(path)
+    with queue._cond:
+        assert topic["id"] in queue._pending
+        assert topic["id"] not in queue._last_write
+
+    monkeypatch.setattr(ChatMemory, "_write", real_write)
+    assert mem.flush_hits(5.0) is True
+    persisted = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert persisted["last_hit_at"] == hit_at.isoformat()
+
+
+def test_hit_write_gives_up_after_five_failures_with_one_warning(
+    tmp_path, monkeypatch, caplog
+):
+    """v2f L1：连续失败 5 次后放弃本批（flush True），只记一条无 traceback 的 warning。"""
+    import pet.chat.memory as memory_mod
+
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    monkeypatch.setattr(ChatMemory, "_write", lambda self, entries: False)
+    # 把退避压到毫秒级：仍走同一套指数退避/放弃逻辑，避免测试真等 15s。
+    monkeypatch.setattr(memory_mod, "_FAIL_RETRY_SECONDS", 0.01)
+    assert MAX_HIT_WRITE_ATTEMPTS == 5
+
+    mem.note_recalled([topic["id"]], now=datetime.now().astimezone())
+    with caplog.at_level(logging.WARNING, logger="pet.chat.memory"):
+        assert mem.flush_hits(5.0) is True
+
+    queue = _hit_queue_for(path)
+    with queue._cond:
+        assert queue._pending == {}
+        assert queue._failures == 0
+    warnings = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "放弃本批" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is None
+
+
+def test_about_to_quit_flushes_chat_memory_hits(tmp_path, monkeypatch):
+    """L2：aboutToQuit 收口会调用 flush_pending_hits（带超时），不再丢去抖窗口。"""
+    from pet import app as app_mod
+    from pet.chat import memory as memory_mod
+    from pet.chat import session_store as session_store_mod
+    from pet.config import Config
+
+    calls: list[float] = []
+    monkeypatch.setattr(
+        memory_mod, "flush_pending_hits",
+        lambda timeout=2.0: calls.append(timeout) or 0,
+    )
+    # 退出收口的会话写盘 worker 与记忆 flush 无关，避免永久关闭影响同进程后续用例。
+    monkeypatch.setattr(session_store_mod, "close_all_writers", lambda *a, **k: True)
+
+    shell = app_mod.AppShell(_qapp(), Config(tmp_path), enable_chat=False)
+    shell._teardown_fps_capture = lambda **kwargs: None
+    shell._teardown_config_watcher = lambda: None
+    try:
+        shell._on_about_to_quit()
+    finally:
+        app_mod.AppShell._shutdown_live_for_tests()
+
+    assert calls == [2.0], f"aboutToQuit 未调用记忆 flush：{calls}"
 
 
 def _yes_button(_buttons):

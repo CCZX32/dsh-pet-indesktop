@@ -134,6 +134,10 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "quiet_also_on_fullscreen",
         "quiet_minutes_default",
         "bubble_text_scale",
+        # 2026-10-22 场景扮演 3 键（每宠键；默认关 / 场景与人物留空）
+        "roleplay_cast",
+        "roleplay_enabled",
+        "roleplay_scene",
         "rx",
         "ry",
         "scale",
@@ -241,6 +245,8 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 静默提炼，关 = 只保留手动钉；非 NULL 接受键），白名单 158。
 # 2026-10-21 加提炼频率 1 键（chat_memory_extract_interval，默认 5=每 5 轮提炼
 # 一次；共创者定稿的 token 成本闸），白名单 159。
+# 2026-10-22 加场景扮演 3 键（roleplay_enabled / roleplay_scene / roleplay_cast；
+# 每宠键，默认关/空），白名单 162。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 
