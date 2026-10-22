@@ -2755,22 +2755,12 @@ class ChatWindow(QDialog):
             self._bottom(always=True)
 
     def done(self, result: int) -> None:
-        """所有收口路径（X / Esc / reject）统一「收起即销毁」。
+        """所有收口路径（X / Esc / reject）统一「收尾 + 收起即销毁」。
 
-        ``WA_DeleteOnClose`` 只覆盖 ``close()``；QDialog 的 Esc 走 ``reject()``，
-        不经过 closeEvent，光靠属性会留下一个隐藏但活着的窗口。``done()`` 是
-        这几条路径的公共出口，销毁排在这里。
-        """
-        super().done(result)
-        release_window_when_idle(self, self.service)
-
-    def closeEvent(self, event) -> None:
-        """关闭即销毁：收尾本轮回复、停止生成、解除桌宠位置监听。
-
-        ``super().closeEvent`` 在窗口可见时走 ``reject()``：发出 ``finished``
-        （app 层靠它清缓存槽）、经 ``done()`` 排队销毁。**不要先 hide 再调
-        super**——QDialog 的 closeEvent 只在 ``isVisible()`` 时 reject，先隐藏
-        就既不发明 finished 也不走销毁，槽位会留下一个死对象。
+        Esc 走 ``reject() → done()``，**不经过 closeEvent**——收尾（落库未排空的
+        回复、停止生成、解除桌宠位置监听）必须和销毁一样挂在这个公共出口上，
+        只写 closeEvent 会让 Esc 留下指向已销毁窗口的监听器（发版终审 A1）。
+        ``WA_DeleteOnClose`` 只覆盖 ``close()``，所以销毁也排在这里。
         """
         # 模型已完成、打字机仍在排空时关窗：worker 已回收，service.stop() 既
         # 不取消任何东西也不会补发 stopped 信号，而定时器一停 _pending_finish_text
@@ -2781,4 +2771,14 @@ class ChatWindow(QDialog):
         self._typewriter_timer.stop()
         self.service.stop()
         self.set_pet_window(None)
+        super().done(result)
+        release_window_when_idle(self, self.service)
+
+    def closeEvent(self, event) -> None:
+        """收尾与销毁统一在 ``done()``（X 与 Esc 的公共出口），这里只转发。
+
+        ``super().closeEvent`` 在窗口可见时走 ``reject()`` → ``done()``。
+        **不要先 hide 再调 super**——QDialog 的 closeEvent 只在 ``isVisible()``
+        时 reject，先隐藏就既不发明 finished 也不走销毁，槽位会留下死对象。
+        """
         super().closeEvent(event)

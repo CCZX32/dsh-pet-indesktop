@@ -336,3 +336,27 @@ def test_flash_hint_timer_uses_context_object(tmp_path, kind, monkeypatch):
             if obj is not None and shiboken6.isValid(obj):
                 obj.deleteLater()
         inst.chat_window = None
+
+
+def test_esc_close_also_runs_full_cleanup(tmp_path, kind):
+    """Esc 关窗（reject→done，不经 closeEvent）必须跑完整收尾：销毁窗口、
+    清缓存槽、停止生成、解除桌宠位置监听——发版终审 A1：Esc 曾绕过
+    closeEvent 里的全部收尾，留下指向已销毁窗口的监听（pet 每移动一次
+    tick 就抛 RuntimeError）。"""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    inst = _make_instance(tmp_path)
+    inst.config.set("chat_follow_pet", True)
+    inst.config.save()
+    win = _open(kind, inst)
+    try:
+        assert len(inst.win.position_listeners) == 1
+        esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        win.keyPressEvent(esc)
+        _pump_deferred()
+        assert not shiboken6.isValid(win), "Esc 后窗口仍存活"
+        assert inst.win.position_listeners == [], "Esc 后位置监听没解除"
+        assert inst.modern_chat_window is None and inst.legacy_chat_window is None
+    finally:
+        _pump_deferred()

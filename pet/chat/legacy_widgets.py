@@ -1315,16 +1315,16 @@ class ChatWindow(QDialog):
         self._update_bubble_widths()
 
     def done(self, result: int) -> None:
-        """所有收口路径（X / Esc / reject）统一「收起即销毁」（与 modern 同款）。"""
+        """所有收口路径（X / Esc / reject）统一「收尾 + 收起即销毁」（与 modern
+        同款）。Esc 走 ``reject() → done()`` 不经过 closeEvent——收尾（停止生成、
+        解除桌宠位置监听）必须挂在公共出口上（发版终审 A1）。
+        """
+        self.service.stop()
+        self.set_pet_window(None)
         super().done(result)
         release_window_when_idle(self, self.service)
 
     def closeEvent(self, event) -> None:
-        """关闭即销毁：停止生成、解除桌宠位置监听，随后由 ``done()`` 排队销毁。
-
-        不先 hide：QDialog 的 closeEvent 只在窗口可见时 reject（发出 finished，
-        app 层靠它清缓存槽），先隐藏会绕过整条收口语义（同 modern 窗口）。
-        """
-        self.service.stop()
-        self.set_pet_window(None)
+        """收尾与销毁统一在 ``done()``，这里只转发（super 在可见时 reject →
+        done）。不先 hide：先隐藏会绕过整条收口语义（同 modern 窗口）。"""
         super().closeEvent(event)
