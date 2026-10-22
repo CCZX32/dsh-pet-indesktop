@@ -38,6 +38,7 @@
 | `petcore/ui/chat/controller.py` | +48/−1 | `reasoning_received` / `status_received` 排队信号；窗口不存在时丢弃；`_apply_done()` 把 `reasoning`/`activity` 落进 assistant 记录。**为什么**：worker 线程不能碰控件；重开会话要能回显。 |
 | `petcore/ui/chat/window.py` | +38/−1 | `append_reasoning()` / `add_activity()` / `last_thinking()`；`load_messages()` 调 `restore_thinking()`；`finish_stream()` 记录思维链。**为什么**：UI 骨架早已存在但无调用方。 |
 | `petcore/chat/session_store.py` | +12/−3 | `from_dict()` 保留可选 `reasoning` / `activity`；`messages` 类型放宽为 `Any`。**为什么**：旧会话（无字段）照常加载，新会话能回显。 |
+| `examples/petcore-mods/ai.chat/mod.json` | +1/−1 | 版本 1.2.0 → 1.3.0。**为什么**：设置页与运行时行为都变了，升级/市场要能区分。 |
 | `examples/petcore-mods/ai.chat/host/runtime.py` | +42 | 读 6 个配置键；`_start()` 传 `thinking`/`reasoning_effort`/`on_reasoning`/`on_status`/`web_search`；视觉请求沿用思考设置。**为什么**：运行时只做编排，传输在 core。 |
 | `examples/petcore-mods/ai.chat/host/settings_page.py` | +225 | 两个新分区 + 引擎/Key 可见性 + Key 存钥匙串 + 取消时控件复位 + 搜索关键词。**为什么**：设置是唯一入口且要能搜到行。 |
 | `petcore/AGENTS.md` | +10 | 新增四条红线：思考/联网传输只在 core、截图冻结帧必须 QImage、进度只进已开窗口、搜索 Key 只在钥匙串。**为什么**：防止后续又把网络/窗口重写一遍。 |

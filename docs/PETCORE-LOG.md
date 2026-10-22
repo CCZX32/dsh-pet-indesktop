@@ -1585,6 +1585,7 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 - `examples/petcore-mods/ai.chat/host/settings_page.py`（+225）：「深度思考」
   （模式 + 强度，强度仅在开启时显示）与「联网搜索」（开关/引擎/Key/条数/读正文）；
   Key 走端口进钥匙串，取消时控件复位，搜索关键词补齐。
+- `examples/petcore-mods/ai.chat/mod.json`：版本 1.2.0 → 1.3.0（新增思考/联网设置与运行时接线）。
 - 测试：`test_petcore_screenshot.py`（+38/−2）、`test_petcore_screen_ask.py`
   （+14/−1）、`test_petcore_api_chat.py`（+212/−2）、`test_petcore_websearch.py`
   （+150，新）、`test_petcore_chat_ui.py`（+48）、`test_petcore_ai_mod.py`（+145）。
