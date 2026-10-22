@@ -9,7 +9,14 @@ from petcore.mods.loader import load_mods
 from petcore.mods.manifest import load_manifest
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "petcore-mods"
-IDS = ("fun.divination", "fun.festival", "reminder.todo", "voice.chime", "media.music")
+IDS = (
+    "fun.divination",
+    "fun.festival",
+    "reminder.todo",
+    "voice.chime",
+    "media.music",
+    "tool.ocr",
+)
 
 
 def test_example_mods_validate_and_load() -> None:

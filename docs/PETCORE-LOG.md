@@ -1612,3 +1612,66 @@ prompt/路由；新增 `ScreenAskPort`，并让扩展命令按发起桌宠派发
 - 真实桌面拖选只验证了抓帧与绘制，拖拽交互由 offscreen 事件测试覆盖。
 - HDR 屏冻结帧仍走 Qt `grabWindow`，未移植 DXGI FP16（可能发灰）。
 - 思考/联网设置是全局键（同 `ai_model`/`ai_temperature`），不是主分支的 per-provider。
+
+## L042 · 2026-10-22 · 截图动作条（OCR 归 mod）+ 快速对话气泡
+
+**范围**：把截图提问补成主分支的四个动作，并按「业务在 mod、core 只留端口与窗口」
+的口径加入快速对话气泡。
+
+**改动**
+
+- `petcore/contracts/screen.py`（+54/−2）：`ACTION_*`、`RegionPick`、
+  `ScreenPort.capture_region(ai_available=)`、`ScreenAskPort.open_action/on_action
+  (priority, actions)`。
+- `petcore/contracts/chat.py`（+25）：`QuickChatPort`。
+- `petcore/contracts/host.py`（+9/−1）：`ResourcesPort`、`HostPorts.resources/
+  quick_chat`。
+- `petcore/ui/screen/overlay.py`（+69/−14）：四动作条、capabilities/reasons、
+  `accepted(action, rect)`、Enter 默认动作（ocr→ask→copy）。
+- `petcore/ui/screen/selection.py`（+60/−11）：返回 `RegionPick`、`copy` 写剪贴板、
+  兼容旧单参数 accepted。
+- `petcore/ui/screen/controller.py`（+148/−1）：`on_action` 注册表、
+  `supports_action`、`open_action` 后台调度与 generation 校验。
+- `petcore/ui/screen/ask_window.py`（+6/−2）：`start(chip=)`、`status_text()`。
+- `petcore/ui/chat/quick.py`（+286，新）：快速对话气泡（标题/状态/Markdown/输入/
+  去聊天窗/贴桌宠定位与 40ms 跟随）。
+- `petcore/ui/chat/quick_controller.py`（+238，新）：按 `(owner, slot)` 隔离、
+  排队信号、共用会话。
+- `petcore/ui/chat/controller.py`（+14/−6）：`append_to_session()`。
+- `petcore/ui/bubble.py`（+12/−1）：`clicked` 信号 + 内部 QLabel 透传鼠标。
+- `petcore/ui/pet_window.py`（+7）：气泡点击 → `host.open_quick_chat(slot)`。
+- `petcore/ui/app.py`（+13/−1）：`QuickChatController` 与 `open_quick_chat()`。
+- `petcore/ui/ports.py`（+42/−2）：`ResourcesAdapter`、能力表、`quick_chat`。
+- `examples/petcore-mods/tool.ocr/`（+291，新）：本地 OCR（rapidocr、显式
+  onnxruntime session、模型来自 `resources/rapidocr_models`、失败回退 AI）。
+- `examples/petcore-mods/ai.chat/host/prompts.py`（+44）：OCR/翻译消息与目标语言。
+- `examples/petcore-mods/ai.chat/host/runtime.py`（+149/−2）：`RegionPick` 分派、
+  `_on_action`、快速对话提交与流式。
+- `examples/petcore-mods/ai.chat/host/constants.py`（+3）：`QUICK_HISTORY`。
+- `examples/petcore-mods/ai.chat/mod.json`（+1/−1）：1.3.0 → 1.4.0。
+- `packaging/petcore.iss`（+3）：`mod_ocr` 任务与 `tool.ocr` 文件。
+- `scripts/build_petcore.ps1`（+18）：rapidocr/模型进包。
+- 测试：`test_petcore_screen_ask.py`（+83/−15）、`test_petcore_screen_actions.py`
+  （+128，新）、`test_petcore_quick_chat.py`（+188，新）、`test_petcore_ocr_mod.py`
+  （+163，新）、`test_petcore_ai_mod.py`（+131/−3）、`test_petcore_example_mods.py`
+  与 `test_petcore_installer.py`（+11/−2）。
+- 文档：`PETCORE-SPEC.md` §21、`PETCORE-MAIN-PARITY-BACKLOG.md` AI/截图两行、
+  `petcore/AGENTS.md` 五条红线、P8 PR 报告。
+
+**验证**
+
+- 全量门禁：`pytest tests/test_petcore_*.py tests/test_architecture.py -q`
+  → **1151 passed in 68.33s**；`ruff` 全绿；`python -m petcore --check` exit 0。
+- 真实本地 OCR：`HELLO 123` 冷启动 **1954ms**、暖 **791ms**、进程 RSS **145MB**。
+- 动作调度：priority 回退、原文传递、异常降级、迟到结果丢弃均有测试。
+- 打包与静默安装：setup **257,459,336 字节**、签名 Valid；安装目录 733MB；
+  静默安装 exit 0，`--check` 显示 `ai.chat 1.4.0` / `tool.ocr 1.0.0` 均 enabled、
+  `diagnostics []`；`{app}\mods\tool.ocr\.trusted` 存在，应用已重启。
+
+**未验证 / 边界**
+
+- rapidocr/onnxruntime/cv2 随 exe 打包（体积显著增大）；不装 `tool.ocr` 时功能
+  不启用，但依赖仍在包里。
+- OCR 引擎常驻进程内（约 145MB），与主分支「一次一个子进程」不同。
+- 真实桌面动作条点击的肉眼验收、混合 DPI 下的快速气泡定位未实机确认。
+- 主动识屏未做。

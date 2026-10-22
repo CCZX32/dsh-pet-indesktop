@@ -31,7 +31,7 @@ from .menu_layout import (
     migrate_p9_menu,
     resolve,
 )
-from .chat import ChatController
+from .chat import ChatController, QuickChatController
 from .menu_model import MenuItem, MenuModel
 from .pet_manager import PetManager, SHARED_KEYS
 from .pet_window import PetWindow
@@ -140,6 +140,7 @@ class CoreHost:
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
         self.chat = ChatController(self, self.root)
+        self.quick_chat = QuickChatController(self)
         from .screen import ScreenAskController
 
         self.screen_ask = ScreenAskController(self, self.root)
@@ -261,6 +262,17 @@ class CoreHost:
             self._notify(slot, "扩展执行失败，详情见日志")
             return False
         return True
+
+    def open_quick_chat(self, slot: int = 0) -> bool:
+        """点桌宠气泡：打开该宠的快速对话；没有 handler 时明确提示。"""
+        owner = "ai.chat"
+        controller = getattr(self, "quick_chat", None)
+        if controller is None:
+            return False
+        if not controller.has_handler(owner):
+            self._notify_missing_feature(owner)
+            return False
+        return bool(controller.open(owner, pet_slot=int(slot)))
 
     def _notify_missing_feature(self, owner: str) -> None:
         label = "AI 扩展" if owner == "ai.chat" else f"扩展 {owner}"

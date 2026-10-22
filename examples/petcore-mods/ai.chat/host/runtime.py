@@ -19,12 +19,14 @@ import time
 
 from petcore.contracts.api import WebSearchOptions
 
-from .constants import LOOK_SCREEN_COOLDOWN_S, MAX_HISTORY, OWNER
+from .constants import LOOK_SCREEN_COOLDOWN_S, MAX_HISTORY, OWNER, QUICK_HISTORY
 from .prompts import (
     ask_messages,
     chat_messages,
     look_screen_messages,
+    ocr_messages,
     system_prompt,
+    translate_messages,
 )
 
 
@@ -37,6 +39,7 @@ class AiChatRuntime:
             "screen_capture": self.screen_capture,
         }
         self._cancels: dict[int, threading.Event] = {}
+        self._quick_cancels: dict[int, threading.Event] = {}
         self._threads: dict[int, threading.Thread] = {}
         self._unsubs: list = []
         self._look_busy: set[int] = set()
@@ -63,6 +66,9 @@ class AiChatRuntime:
 
     def _screen_ask(self):
         return getattr(self.context.ports, "screen_ask", None)
+
+    def _quick(self):
+        return getattr(self.context.ports, "quick_chat", None)
 
     def _service_id(self) -> str:
         api = self._api()
@@ -240,15 +246,32 @@ class AiChatRuntime:
         if screen is None or ask is None:
             self._say("这个安装没有开放截图提问能力")
             return
-        if not self._vision_enabled():
-            self._say("设置里关掉了视觉模型，先开启再截图提问")
-            return
         try:
-            capture = screen.capture_region(pet_slot=target)
+            picked = screen.capture_region(
+                pet_slot=target,
+                ai_available=bool(self._service_id() and self._vision_enabled()),
+            )
         except Exception as exc:  # noqa: BLE001
             if getattr(exc, "reason", "") == "cancelled":
                 return
             self._say(f"截屏失败：{getattr(exc, 'reason', '') or type(exc).__name__}")
+            return
+        capture = getattr(picked, "capture", picked)
+        action = str(getattr(picked, "action", "ask") or "ask")
+        if action == "copy":
+            self._say("已复制图像", duration_ms=3000)
+            return
+        if action in ("ocr", "translate"):
+            ask.open_action(
+                OWNER,
+                action,
+                capture,
+                pet_slot=target,
+                text=str(getattr(picked, "text", "") or ""),
+            )
+            return
+        if not self._vision_enabled():
+            self._say("设置里关掉了视觉模型，先开启再截图提问")
             return
         if not self._service_id():
             self._say("还没有可用的 API 服务，请先在「设置 → API 与账户」里填写")
@@ -286,6 +309,28 @@ class AiChatRuntime:
         messages = chat_messages(self._prompt(), history, text, images, limit=MAX_HISTORY)
         self._start(slot, messages)
 
+    def _on_quick_submit(self, text: str, slot: int) -> None:
+        """快速对话气泡提交：同一会话、更短历史、同一人格。"""
+        quick = self._quick()
+        if quick is None:
+            return
+        text = str(text or "").strip()
+        if not text:
+            return
+        if not self._service_id():
+            quick.error(
+                OWNER, "no_service", "还没有可用的 API 服务", pet_slot=slot
+            )
+            return
+        try:
+            history = quick.history(OWNER, pet_slot=slot)
+        except Exception:
+            history = []
+        messages = chat_messages(
+            self._prompt(), history, text, [], limit=QUICK_HISTORY
+        )
+        self._start_quick(slot, messages)
+
     def _on_ask(self, question: str, image_png: bytes, history: list[dict], slot: int) -> str:
         """截图提问窗口的回调（在 core 的后台线程里执行，同步返回整段答复）。"""
         api = self._api()
@@ -311,10 +356,100 @@ class AiChatRuntime:
             return ""
         return str(getattr(result, "text", "") or "").strip()
 
+    def _on_action(self, action: str, source_text: str, png: bytes, slot: int) -> str:
+        """提取文字 / 翻译的 AI 回退（core 后台线程调用，同步返回整段文本）。"""
+        action = str(action or "")
+        if action not in ("ocr", "translate"):
+            return ""
+        api = self._api()
+        service_id = self._service_id()
+        if api is None or not service_id:
+            raise RuntimeError("还没有可用的 API 服务，请先在「设置 → API 与账户」里填写")
+        image_url = (
+            "data:image/png;base64,"
+            + base64.b64encode(bytes(png or b"")).decode("ascii")
+        )
+        if action == "ocr":
+            messages = ocr_messages(self._prompt(), image_url)
+        else:
+            messages = translate_messages(self._prompt(), source_text, image_url)
+        result = api.stream_chat(
+            service_id,
+            messages,
+            model=str(self._config_value("ai_model", "") or ""),
+            temperature=self._temperature(),
+            thinking=self._thinking(),
+            reasoning_effort=self._reasoning_effort(),
+        )
+        if getattr(result, "cancelled", False):
+            return ""
+        return str(getattr(result, "text", "") or "").strip()
+
     def _on_stop(self, slot: int) -> None:
         cancel = self._cancels.get(int(slot))
         if cancel is not None:
             cancel.set()
+
+    def _start_quick(self, slot: int, messages) -> None:
+        quick = self._quick()
+        api = self._api()
+        if quick is None or api is None:
+            return
+        previous = self._quick_cancels.get(slot)
+        if previous is not None:
+            previous.set()
+        cancel = threading.Event()
+        self._quick_cancels[slot] = cancel
+        service_id = self._service_id()
+        model = str(self._config_value("ai_model", "") or "")
+        temperature = self._temperature()
+
+        def run() -> None:
+            partial: list[str] = []
+
+            def delta(value: str) -> None:
+                partial.append(value)
+                quick.token(OWNER, value, pet_slot=slot)
+
+            def reasoning(value: str) -> None:
+                quick.reasoning(OWNER, value, pet_slot=slot)
+
+            def status(line: str) -> None:
+                quick.status(OWNER, line, pet_slot=slot)
+
+            try:
+                result = api.stream_chat(
+                    service_id,
+                    messages,
+                    model=model,
+                    temperature=temperature,
+                    on_delta=delta,
+                    on_reasoning=reasoning,
+                    on_status=status,
+                    thinking=self._thinking(),
+                    reasoning_effort=self._reasoning_effort(),
+                    web_search=self._web_search(),
+                    cancel=cancel,
+                )
+            except Exception as exc:  # noqa: BLE001
+                reason = str(getattr(exc, "reason", "") or "network")
+                if cancel.is_set():
+                    quick.done(OWNER, "".join(partial), pet_slot=slot)
+                else:
+                    quick.error(OWNER, reason, str(exc), pet_slot=slot)
+            else:
+                if getattr(result, "cancelled", False):
+                    quick.done(OWNER, "".join(partial), pet_slot=slot)
+                else:
+                    quick.done(
+                        OWNER,
+                        str(getattr(result, "text", "") or "".join(partial)),
+                        pet_slot=slot,
+                    )
+            finally:
+                self._quick_cancels.pop(slot, None)
+
+        threading.Thread(target=run, name=f"ai-quick-{slot}", daemon=True).start()
 
     def _start(self, slot: int, messages) -> None:
         chat = self._chat()
@@ -444,13 +579,29 @@ class AiChatRuntime:
         if chat is not None:
             self._unsubs.append(chat.on_submit(OWNER, self._on_submit))
             self._unsubs.append(chat.on_stop(OWNER, self._on_stop))
+        quick = self._quick()
+        if quick is not None:
+            self._unsubs.append(quick.on_submit(OWNER, self._on_quick_submit))
         if ask is not None:
             self._unsubs.append(ask.on_ask(OWNER, self._on_ask))
+            register = getattr(ask, "on_action", None)
+            if callable(register):
+                self._unsubs.append(
+                    register(
+                        OWNER,
+                        self._on_action,
+                        priority=100,
+                        actions=("ocr", "translate"),
+                    )
+                )
 
     def stop(self) -> None:
         for cancel in list(self._cancels.values()):
             cancel.set()
         self._cancels.clear()
+        for cancel in list(self._quick_cancels.values()):
+            cancel.set()
+        self._quick_cancels.clear()
         for unsubscribe in self._unsubs:
             try:
                 unsubscribe()

@@ -124,3 +124,68 @@ def ask_messages(
             }
         )
     return messages
+
+
+OCR_PROMPT = (
+    "请完整提取图片中的所有文字，按原顺序与换行输出。不要翻译、不要解释、"
+    "不要总结；没有文字就回复「没有识别到文字」。"
+)
+TRANSLATE_TEXT_PROMPT = (
+    "把下面的文字翻译成{target}，保留原有换行与段落；只输出译文，不要解释。\n\n{text}"
+)
+TRANSLATE_IMAGE_PROMPT = (
+    "先完整识别图片中的文字，再翻译成{target}；保留原有换行与段落，"
+    "按「原文」与「译文」两段输出。"
+)
+
+
+def target_language(text: str) -> str:
+    """自动目标语言：中日韩占多数 → 英文，否则中文（同主分支口径）。"""
+    cjk = sum(1 for char in str(text or "") if "\u4e00" <= char <= "\u9fff"
+              or "\u3040" <= char <= "\u30ff" or "\uac00" <= char <= "\ud7af")
+    latin = sum(1 for char in str(text or "") if char.isascii() and char.isalpha())
+    return "英文" if cjk > latin else "中文"
+
+
+def ocr_messages(system: str, image_url: str) -> list[dict]:
+    """提取文字：视觉模型，只要文字，不许改写。"""
+    return [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": OCR_PROMPT},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        },
+    ]
+
+
+def translate_messages(
+    system: str, source_text: str, image_url: str = "", *, target: str = ""
+) -> list[dict]:
+    """翻译：有本地 OCR 原文时走纯文本，没有才把图交给视觉模型。"""
+    text = str(source_text or "").strip()
+    language = str(target or "").strip() or target_language(text)
+    messages = [{"role": "system", "content": system}]
+    if text:
+        messages.append(
+            {
+                "role": "user",
+                "content": TRANSLATE_TEXT_PROMPT.format(target=language, text=text),
+            }
+        )
+        return messages
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": TRANSLATE_IMAGE_PROMPT.format(target=language),
+                },
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        }
+    )
+    return messages

@@ -138,6 +138,19 @@ class ChatController(QObject):
         state = self._ensure(owner, pet_slot, with_window=False)
         return [dict(item) for item in state.session.messages]
 
+    def append_to_session(
+        self, owner: str, role: str, text: str, *, pet_slot: int | None = None
+    ) -> None:
+        """同步写入会话（快速对话用）：有完整窗口时顺带补气泡。"""
+        state = self._ensure(owner, pet_slot, with_window=False)
+        if not str(text or "").strip():
+            return
+        state.session.append(role, text)
+        self._save(state)
+        if state.window is not None:
+            state.window.append_message(role, text)
+            self._refresh_history(state)
+
     def take_attachments(
         self, owner: str, *, pet_slot: int | None = None
     ) -> list[dict]:
@@ -362,12 +375,7 @@ class ChatController(QObject):
             logger.warning("chat session save failed", exc_info=True)
 
     def _apply_record(self, owner: str, role: str, text: str, slot: int) -> None:
-        state = self._ensure(owner, slot, with_window=False)
-        state.session.append(role, text)
-        self._save(state)
-        if state.window is not None:
-            state.window.append_message(role, text)
-            self._refresh_history(state)
+        self.append_to_session(owner, role, text, pet_slot=slot)
 
     def _apply_token(self, owner: str, delta: str, slot: int) -> None:
         state = self._ensure(owner, slot)

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "tool.ocr",
+  "name": "Local OCR",
+  "name_zh": "本地 OCR",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/__init__.py:create_host",
+  "capabilities": [
+    "screenshot.capture"
+  ]
+}

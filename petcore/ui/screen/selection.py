@@ -19,16 +19,33 @@ from PySide6.QtCore import QEventLoop, QRect
 from PySide6.QtGui import QCursor, QGuiApplication, QImage
 from PySide6.QtWidgets import QWidget
 
-from ...contracts.screen import ScreenCapture, ScreenError, ScreenSelectionCancelled
+from ...contracts.screen import (
+    ACTION_ASK,
+    ACTION_COPY,
+    ACTION_OCR,
+    ACTION_TRANSLATE,
+    RegionPick,
+    ScreenError,
+    ScreenSelectionCancelled,
+)
 from ...media.images import sanitize_dpr
 from ...platform.screenshot import capture_from_image, grab_screen_image
 
 __all__ = [
+    "DEFAULT_CAPABILITIES",
     "MIN_SELECTION_SIDE",
     "SelectionRect",
     "normalize_drag",
     "select_region",
 ]
+
+#: 缺省动作条能力（旧调用方不传时保持「问 + 提取文字 + 复制」可用）。
+DEFAULT_CAPABILITIES = {
+    ACTION_OCR: True,
+    ACTION_TRANSLATE: False,
+    ACTION_ASK: True,
+    ACTION_COPY: True,
+}
 
 #: 选区的最小边长（逻辑像素）。8 的依据：小于 8 的拖拽只可能是误触——真截一块
 #: 进去也读不出任何内容，于是「确认」后用户只会拿到一次白跑的会话。门槛卡在
@@ -164,12 +181,18 @@ def _crop(image: QImage, selection: SelectionRect, dpr: float) -> QImage:
     return cropped
 
 
-def _run_overlay(overlay) -> SelectionRect:
+def _run_overlay(overlay) -> tuple[str, SelectionRect]:
     """显示覆盖层并等一次确认；取消/关闭都返回空结果。"""
     outcome: dict[str, object] = {}
     loop = QEventLoop()
 
-    def on_accepted(selection) -> None:
+    def on_accepted(*args) -> None:
+        # 新签名 (action, selection)；旧测试替身可能只发 selection。
+        if len(args) >= 2:
+            action, selection = args[0], args[1]
+        else:
+            action, selection = "ask", (args[0] if args else None)
+        outcome["action"] = str(action or "")
         outcome["selection"] = selection
         loop.quit()
 
@@ -194,7 +217,19 @@ def _run_overlay(overlay) -> SelectionRect:
     selection = outcome.get("selection")
     if not usable(selection):
         raise ScreenSelectionCancelled()
-    return selection
+    return str(outcome.get("action") or "ask"), selection
+
+
+def _copy_image_to_clipboard(image: QImage) -> bool:
+    """把裁好的图放进系统剪贴板；平台剪贴板不可用时不抛（动作仍算完成）。"""
+    try:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setImage(image)
+        return True
+    except Exception:  # noqa: BLE001 - 剪贴板是外部状态，失败不该拖垮截图
+        return False
 
 
 def select_region(
@@ -203,13 +238,15 @@ def select_region(
     screen=None,
     grab: Callable | None = None,
     overlay_factory: Callable | None = None,
-) -> ScreenCapture:
-    """让用户框选一块屏幕区域并返回裁好的 :class:`ScreenCapture`。
+    capabilities: dict[str, bool] | None = None,
+    reasons: dict[str, str] | None = None,
+) -> RegionPick:
+    """让用户框选一块屏幕区域、在动作条上选一个动作，返回裁好的画面 + 动作。
 
     ``grab`` 缺省用 :func:`grab_screen_image`（冻结整屏）；``overlay_factory``
     缺省是 :class:`~petcore.ui.screen.overlay.SelectionOverlay`，签名
-    ``factory(frame: QImage, screen)``，返回对象需带 ``accepted(object)`` /
-    ``cancelled(str)`` 两个信号与 ``show()`` / ``close()``。
+    ``factory(frame: QImage, screen, capabilities=..., reasons=...)``。
+    ``copy`` 动作在这里完成剪贴板写入（core UI 层，不经过任何 mod）。
     """
     target = _target_screen(window, screen)
     if target is None:
@@ -219,17 +256,29 @@ def select_region(
     if image is None or image.isNull():
         raise ScreenError("capture_failed", "无法读取屏幕内容")
 
+    caps = dict(DEFAULT_CAPABILITIES)
+    caps.update({str(k): bool(v) for k, v in (capabilities or {}).items()})
     factory = overlay_factory
     if factory is None:
         from .overlay import SelectionOverlay
 
         factory = SelectionOverlay
-    overlay = factory(image, target)
-    selection = _run_overlay(overlay)
+    try:
+        overlay = factory(
+            image, target, capabilities=caps, reasons=dict(reasons or {})
+        )
+    except TypeError:  # 旧测试替身不支持 capabilities 关键字
+        overlay = factory(image, target)
+    action, selection = _run_overlay(overlay)
 
     cropped = _crop(image, selection, _image_dpr(image, target))
+    if action == ACTION_COPY:
+        _copy_image_to_clipboard(cropped)
     try:
         name = str(target.name() or "")
     except Exception:
         name = ""
-    return capture_from_image(cropped, screen_name=name)
+    return RegionPick(
+        capture=capture_from_image(cropped, screen_name=name),
+        action=action,
+    )

@@ -15,7 +15,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from petcore.config import Config
-from petcore.contracts.screen import ScreenCapture
+from petcore.contracts.screen import RegionPick, ScreenCapture
 from petcore.mods.feature import import_entrypoint
 from petcore.mods.manifest import load_manifest
 
@@ -159,6 +159,8 @@ class FakeScreen:
     def __init__(self) -> None:
         self.calls = 0
         self.region_calls = 0
+        self.region_action = "ask"
+        self.ai_available = True
 
     def capture(self, *, pet_slot=None):
         self.calls += 1
@@ -170,9 +172,13 @@ class FakeScreen:
             app_info="code.exe | main.py",
         )
 
-    def capture_region(self, *, pet_slot=None):
+    def capture_region(self, *, pet_slot=None, ai_available=True):
         self.region_calls += 1
-        return ScreenCapture(png=b"region-png", width=8, height=6, screen_name="fake")
+        self.ai_available = bool(ai_available)
+        return RegionPick(
+            ScreenCapture(png=b"region-png", width=8, height=6, screen_name="fake"),
+            self.region_action,
+        )
 
     def foreground_app(self):
         return "code.exe | main.py"
@@ -181,11 +187,21 @@ class FakeScreen:
 class FakeScreenAsk:
     def __init__(self) -> None:
         self.opened: list[tuple] = []
+        self.open_actions: list[tuple] = []
         self.callback = None
+        self.action_callback = None
 
     def open(self, owner, capture, *, pet_slot=None, title=""):
         self.opened.append((owner, capture, pet_slot, title))
         return True
+
+    def open_action(self, owner, action, capture, *, text="", pet_slot=None):
+        self.open_actions.append((owner, action, capture, text, pet_slot))
+        return True
+
+    def on_action(self, owner, callback, *, priority=100, actions=()):
+        self.action_callback = callback
+        return lambda: None
 
     def on_ask(self, owner, callback):
         self.callback = callback
@@ -199,6 +215,51 @@ class FakeScreenAsk:
 
     def close(self, owner, *, pet_slot=None):
         return None
+
+
+class FakeQuickChat:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.submit_callback = None
+        self.history_messages: list[dict] = []
+        self.done_event = threading.Event()
+
+    def on_submit(self, owner, callback):
+        self.submit_callback = callback
+        return lambda: None
+
+    def history(self, owner, *, pet_slot=None):
+        return list(self.history_messages)
+
+    def open(self, owner, *, pet_slot=None):
+        self.calls.append(("open", pet_slot))
+        return True
+
+    def close(self, owner, *, pet_slot=None):
+        return None
+
+    def is_open(self, owner, *, pet_slot=None):
+        return True
+
+    def token(self, owner, delta, *, pet_slot=None):
+        self.calls.append(("token", delta))
+
+    def reasoning(self, owner, delta, *, pet_slot=None):
+        self.calls.append(("reasoning", delta))
+
+    def status(self, owner, text, *, pet_slot=None):
+        self.calls.append(("status", text))
+
+    def done(self, owner, text="", *, pet_slot=None):
+        self.calls.append(("done", text))
+        self.done_event.set()
+
+    def error(self, owner, reason, message="", *, pet_slot=None):
+        self.calls.append(("error", reason, message))
+        self.done_event.set()
+
+    def open_full_chat(self, owner, *, pet_slot=None):
+        self.calls.append(("open_full_chat", pet_slot))
 
 
 class FakePets:
@@ -249,6 +310,7 @@ def _context(tmp_path: Path, *, service: bool = True):
     ports = SimpleNamespace(
         api=FakeApi(service=service),
         chat=FakeChat(),
+        quick_chat=FakeQuickChat(),
         screen=FakeScreen(),
         screen_ask=FakeScreenAsk(),
         pets=FakePets(),
@@ -658,3 +720,88 @@ def test_settings_page_marks_in_memory_search_keys(qt_app, tmp_path: Path) -> No
         assert "重启即丢" in page.web_key_state.text()
     finally:
         page.close()
+
+
+def test_copy_action_only_reports_copied(runtime) -> None:
+    runtime.context.ports.screen.region_action = "copy"
+    runtime.screen_capture(2)
+    presentation = runtime.context.ports.presentation
+    ask = runtime.context.ports.screen_ask
+    assert presentation.said[-1] == "已复制图像"
+    assert ask.opened == [] and ask.open_actions == []
+
+
+def test_ocr_action_opens_the_action_window(runtime) -> None:
+    runtime.context.ports.screen.region_action = "ocr"
+    runtime.screen_capture(2)
+    ask = runtime.context.ports.screen_ask
+    screen = runtime.context.ports.screen
+    assert screen.ai_available is True
+    assert ask.open_actions and ask.open_actions[0][1] == "ocr"
+    assert ask.open_actions[0][2].png == b"region-png"
+    assert ask.opened == []
+
+
+def test_action_callback_builds_the_ocr_prompt(runtime) -> None:
+    reply = runtime._on_action("ocr", "", b"png-bytes", 2)
+    assert reply == "答案"
+    messages = runtime.context.ports.api.requests[0]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "完整提取" in messages[1]["content"][0]["text"]
+
+
+def test_translate_uses_the_local_source_text(runtime) -> None:
+    reply = runtime._on_action("translate", "第一行\n第二行", b"png-bytes", 2)
+    assert reply == "答案"
+    messages = runtime.context.ports.api.requests[0]["messages"]
+    assert isinstance(messages[1]["content"], str)
+    assert "第一行" in messages[1]["content"]
+    assert "英文" in messages[1]["content"]  # 中日韩占多数 → 英文（同主分支口径）
+
+
+def test_translate_without_local_text_uses_the_vision_prompt(runtime) -> None:
+    runtime._on_action("translate", "", b"png-bytes", 2)
+    messages = runtime.context.ports.api.requests[0]["messages"]
+    assert isinstance(messages[1]["content"], list)
+    assert "翻译" in messages[1]["content"][0]["text"]
+
+
+def test_unknown_action_is_ignored(runtime) -> None:
+    assert runtime._on_action("copy", "", b"png", 2) == ""
+    assert runtime.context.ports.api.requests == []
+
+
+def test_quick_submit_streams_to_the_quick_bubble(runtime) -> None:
+    quick = runtime.context.ports.quick_chat
+    quick.history_messages = [{"role": "user", "content": "在吗"}]
+    runtime._on_quick_submit("在吗", 2)
+    assert quick.done_event.wait(5)
+    assert ("token", "答") in quick.calls and ("token", "案") in quick.calls
+    assert quick.calls[-1] == ("done", "答案")
+
+
+def test_quick_submit_without_service_reports_an_error(tmp_path: Path) -> None:
+    context = _context(tmp_path, service=False)
+    runtime = _create_host(context).runtime_factory(context)
+    quick = context.ports.quick_chat
+    runtime._on_quick_submit("在吗", 2)
+    assert ("error", "no_service", "还没有可用的 API 服务") in quick.calls
+
+
+def test_vision_off_still_allows_copy_and_local_ocr(runtime) -> None:
+    runtime.context.host.config.set("ai_vision_enabled", False)
+    screen = runtime.context.ports.screen
+    ask = runtime.context.ports.screen_ask
+    presentation = runtime.context.ports.presentation
+
+    screen.region_action = "copy"
+    runtime.screen_capture(2)
+    assert presentation.said[-1] == "已复制图像"
+
+    screen.region_action = "ocr"
+    runtime.screen_capture(2)
+    assert ask.open_actions[-1][1] == "ocr"
+
+    screen.region_action = "ask"
+    runtime.screen_capture(2)
+    assert "视觉模型" in presentation.said[-1]

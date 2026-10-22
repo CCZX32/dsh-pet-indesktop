@@ -509,3 +509,24 @@ petcore/
   `devicePixelRatio == 1.0`（裸设备像素）。Qt6 的 `QScreen.grabWindow` 返回
   `QPixmap`，直接交给 `QPainter.drawImage` 会抛 TypeError，覆盖层整层画不出来
   （用户看到的是一整屏灰色）；裁切/编码仍能工作，所以「框出来的图正常」。
+
+## 21. P8 截图动作条与快速对话（2026-10-22）
+
+- **动作条四个动作**：提取文字 / 翻译 / 问问肥鱼 / 复制图像。core 只提供覆盖层、
+  按钮可点性、结果窗与剪贴板；`copy` 在 core 完成（PNG 在内存里写系统剪贴板），
+  其余动作交给扩展。
+- **动作调度**：`ScreenAskPort.on_action(owner, callback, priority=, actions=)` 是
+  处理者注册表；core 按 priority 从小到大调用，回调返回空串或抛异常就换下一个。
+  这就是「本地 OCR 优先、AI 兜底」的机制，core 里没有任何引擎判断或提示词。
+- **本地 OCR 是扩展**：`examples/petcore-mods/tool.ocr`（加装扩展，安装任务
+  `mod_ocr` 默认不勾）用 rapidocr + `resources/rapidocr_models`（经
+  `ResourcesPort.bundle_path` 取路径），显式自建 onnxruntime session，不下载模型。
+  失败返回空串，由 `ai.chat` 的视觉模型兜底；引擎异常不弹给用户。
+- **翻译**：`ai.chat` 注册 `translate`；有本地 OCR 原文时走纯文本翻译，没有时把
+  图交给视觉模型；目标语言自动判定（中日韩占多→英文，否则中文）。
+- **快速对话**：点桌宠气泡 → `SpeechBubble.clicked` → `CoreHost.open_quick_chat`
+  → `QuickChatPort`；紧凑气泡（标题/状态/Markdown 输出/输入/去聊天窗）在 core，
+  流式回答在 `ai.chat`。与完整聊天窗共用同一会话，提交前落 user、完成后落
+  assistant，`去聊天窗` 看到同一段对话。
+- **依赖现实**：冻结包无法让 mod 自己安装 Python 包，`rapidocr` / `onnxruntime` /
+  `cv2` 随 exe 打包；没有安装 `tool.ocr` 时这些代码不会被调用，动作条按能力置灰。

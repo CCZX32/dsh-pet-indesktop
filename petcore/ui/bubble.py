@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -102,6 +102,9 @@ def _scaled_pixmap(
 
 
 class SpeechBubble(QWidget):
+    #: 左键点在气泡上：桌宠用来打开「快速对话」（主分支同一条入口）。
+    clicked = Signal()
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -115,17 +118,20 @@ class SpeechBubble(QWidget):
         self._host_on_top = True
 
         self.label = QLabel("")
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.label.setWordWrap(True)
         self.label.setMaximumWidth(_MAX_WIDTH)
         self.label.setStyleSheet(_TEXT_QSS)
 
         self.caption_label = QLabel("")
+        self.caption_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.caption_label.setObjectName("bubbleCaption")
         self.caption_label.setMaximumWidth(MAX_IMAGE_SIDE + 2 * _IMAGE_PAD)
         self.caption_label.setStyleSheet(_CAPTION_QSS)
         self.caption_label.hide()
 
         self.image_label = QLabel("")
+        self.image_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.image_label.setObjectName("bubbleImage")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setContentsMargins(_IMAGE_PAD, _IMAGE_PAD, _IMAGE_PAD, _IMAGE_PAD)
@@ -290,6 +296,11 @@ class SpeechBubble(QWidget):
         if key == self._place_key:
             return
         self._place(anchor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.button() == Qt.MouseButton.LeftButton and self.isVisible():
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
     def _place(self, anchor: QRect) -> None:
         """贴着角色锚点放：上居中 → 上偏左右 → 两侧 → 下方，且不压住角色。"""

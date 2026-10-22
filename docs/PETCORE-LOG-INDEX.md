@@ -54,3 +54,4 @@
 | L039 | 2026-10-22 | P3 对话/识屏/截图提问 | 主分支现代双栏对话窗移植、看看屏幕气泡+静默入历史、框选截图问答窗与 10% 鲸蛙彩蛋、`ScreenAskPort`、按宠命令派发。 | ChatWindow、modern UI、record、ScreenAskPort、capture_region、jingwa、slot dispatch |
 | L040 | 2026-10-22 | AI 边界收口 | `ai.chat` 拆成包入口+prompts/runtime/settings；线程安全 Scheduler、只读 ConfigPort、移除 SettingsPort；聊天窗背景/强调色/跟随/置顶设置与实时预览；截图历史明确不落盘。 | package entrypoint、SchedulerBridge、ConfigPort、runtime no Qt、apply_appearance、follow pet、trusted settings UI |
 | L041 | 2026-10-22 | 截图灰屏 + 思考/联网 | 冻结帧强制 QImage/DPR=1（QPixmap 导致 drawImage 崩溃=灰屏）；thinking/reasoning_effort、思维链面板与回显；联网 planner（web_search/fetch_url）、四引擎、搜索 Key 只进钥匙串。 | grab_screen_image、QPixmap、reasoning_content、research、websearch、thinking、ChatPort.status |
+| L042 | 2026-10-22 | 截图四动作 + 快速对话 | 动作条补齐提取文字/翻译/问问肥鱼/复制图像；OCR 归 `tool.ocr`（本地 rapidocr 优先、AI 兜底）；`on_action` 按 priority 回退；点桌宠气泡开快速对话并与完整窗共用会话。 | RegionPick、on_action、priority、tool.ocr、rapidocr、QuickChatPort、bubble.clicked |

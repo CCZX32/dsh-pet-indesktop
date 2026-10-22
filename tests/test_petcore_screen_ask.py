@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, QObject, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPixmap
+from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -393,8 +393,8 @@ def test_normalize_drag_reverse_and_bounds() -> None:
 
 def test_overlay_drag_arms_selection_and_enter_confirms(app) -> None:
     overlay = SelectionOverlay(_image(200, 120), FakeScreen())
-    accepted: list[SelectionRect] = []
-    overlay.accepted.connect(accepted.append)
+    accepted: list[tuple[str, SelectionRect]] = []
+    overlay.accepted.connect(lambda action, rect: accepted.append((action, rect)))
     try:
         overlay.mousePressEvent(
             _mouse(
@@ -427,7 +427,7 @@ def test_overlay_drag_arms_selection_and_enter_confirms(app) -> None:
         assert not overlay.action_bar().isHidden()
 
         _key(overlay, Qt.Key.Key_Return)
-        assert accepted == [SelectionRect(20, 20, 30, 25)]
+        assert accepted == [("ocr", SelectionRect(20, 20, 30, 25))]
     finally:
         overlay.close()
 
@@ -467,8 +467,8 @@ def test_overlay_ignores_a_tiny_drag_and_escape_cancels(app) -> None:
 
 def test_overlay_double_click_inside_selection_confirms(app) -> None:
     overlay = SelectionOverlay(_image(200, 120), FakeScreen())
-    accepted: list[SelectionRect] = []
-    overlay.accepted.connect(accepted.append)
+    accepted: list[tuple[str, SelectionRect]] = []
+    overlay.accepted.connect(lambda action, rect: accepted.append((action, rect)))
     try:
         overlay.select_rect(SelectionRect(20, 20, 30, 25))
         overlay.mouseDoubleClickEvent(
@@ -480,21 +480,21 @@ def test_overlay_double_click_inside_selection_confirms(app) -> None:
                 Qt.MouseButton.LeftButton,
             )
         )
-        assert accepted == [SelectionRect(20, 20, 30, 25)]
+        assert accepted == [("ocr", SelectionRect(20, 20, 30, 25))]
     finally:
         overlay.close()
 
 
 def test_overlay_action_bar_buttons_confirm_and_cancel(app) -> None:
     overlay = SelectionOverlay(_image(200, 120), FakeScreen())
-    accepted: list[SelectionRect] = []
+    accepted: list[tuple[str, SelectionRect]] = []
     cancelled: list[str] = []
-    overlay.accepted.connect(accepted.append)
+    overlay.accepted.connect(lambda action, rect: accepted.append((action, rect)))
     overlay.cancelled.connect(cancelled.append)
     try:
         overlay.select_rect(SelectionRect(20, 20, 30, 25))
         overlay.action_bar().ask_button.click()
-        assert accepted == [SelectionRect(20, 20, 30, 25)]
+        assert accepted == [("ask", SelectionRect(20, 20, 30, 25))]
 
         overlay.select_rect(SelectionRect(20, 20, 30, 25))
         overlay.action_bar().cancel_button.click()
@@ -526,6 +526,72 @@ def test_overlay_paints_no_dim_before_and_dim_after_selection(app) -> None:
         assert painted.pixelColor(190, 5).red() < 0x80   # 选区外压暗
     finally:
         overlay.close()
+
+
+def test_overlay_capabilities_gate_buttons_and_default_falls_back(app) -> None:
+    overlay = SelectionOverlay(
+        _image(200, 120),
+        FakeScreen(200, 120),
+        capabilities={"ocr": False, "translate": False, "ask": True, "copy": True},
+        reasons={"ocr": "未安装本地 OCR 扩展"},
+    )
+    accepted: list[tuple[str, SelectionRect]] = []
+    overlay.accepted.connect(lambda action, rect: accepted.append((action, rect)))
+    try:
+        bar = overlay.action_bar()
+        assert bar.ocr_button.isEnabled() is False
+        assert "OCR" in bar.ocr_button.toolTip()
+        assert bar.translate_button.isEnabled() is False
+        assert bar.ask_button.isEnabled() is True
+
+        overlay.select_rect(SelectionRect(20, 20, 30, 25))
+        assert overlay.default_action() == "ask"
+        _key(overlay, Qt.Key.Key_Return)
+        assert accepted == [("ask", SelectionRect(20, 20, 30, 25))]
+    finally:
+        overlay.close()
+
+
+def test_overlay_copy_action_is_always_available(app) -> None:
+    overlay = SelectionOverlay(
+        _image(200, 120),
+        FakeScreen(200, 120),
+        capabilities={"ocr": False, "translate": False, "ask": False, "copy": True},
+    )
+    accepted: list[tuple[str, SelectionRect]] = []
+    overlay.accepted.connect(lambda action, rect: accepted.append((action, rect)))
+    try:
+        overlay.select_rect(SelectionRect(5, 5, 20, 20))
+        assert overlay.default_action() == "copy"
+        overlay.action_bar().copy_button.click()
+        assert accepted == [("copy", SelectionRect(5, 5, 20, 20))]
+    finally:
+        overlay.close()
+
+
+def test_select_region_copy_returns_pick_and_fills_clipboard(app) -> None:
+    from PySide6.QtCore import QTimer
+
+    def factory(image, target, **kwargs):
+        overlay = SelectionOverlay(image, target, **kwargs)
+        QTimer.singleShot(
+            0,
+            lambda: (
+                overlay.select_rect(SelectionRect(0, 0, 20, 10)),
+                overlay.confirm("copy"),
+            ),
+        )
+        return overlay
+
+    pick = select_region(
+        screen=FakeScreen(200, 120),
+        grab=lambda target: _image(200, 120, color=0xFF336699),
+        overlay_factory=factory,
+    )
+    assert pick.action == "copy"
+    assert (pick.capture.width, pick.capture.height) == (20, 10)
+    image = QGuiApplication.clipboard().image()
+    assert image.isNull() is False
 
 
 def test_overlay_accepts_a_qpixmap_frame_instead_of_painting_gray(app) -> None:
@@ -561,12 +627,13 @@ def test_select_region_real_overlay_confirms_through_the_event_loop(app) -> None
         made.append(overlay)
         return overlay
 
-    capture = select_region(
+    pick = select_region(
         screen=FakeScreen(200, 120),
         grab=lambda target: (_image(200, 120), target),
         overlay_factory=factory,
     )
-    assert (capture.width, capture.height) == (20, 10)
+    assert (pick.capture.width, pick.capture.height) == (20, 10)
+    assert pick.action == "ocr"
     assert made and made[0].isVisible() is False
 
 
@@ -583,11 +650,12 @@ def test_select_region_crops_by_dpr_and_closes_overlay(app) -> None:
         made.append(overlay)
         return overlay
 
-    capture = select_region(
+    pick = select_region(
         screen=screen,
         grab=lambda target: (frame, target),
         overlay_factory=factory,
     )
+    capture = pick.capture
     assert made and made[0].shown is True and made[0].closed is True
     assert (capture.width, capture.height) == (60, 40)  # 物理像素
     assert capture.screen_name == "fake-screen"
@@ -601,10 +669,10 @@ def test_select_region_forwards_a_bare_image_from_injected_grab(app) -> None:
     def factory(image, target):
         return FakeOverlay(image, target, rect=SelectionRect(0, 0, 20, 10))
 
-    capture = select_region(
+    pick = select_region(
         screen=screen, grab=lambda target: frame, overlay_factory=factory
     )
-    assert (capture.width, capture.height) == (20, 10)
+    assert (pick.capture.width, pick.capture.height) == (20, 10)
 
 
 def test_select_region_cancel_raises_and_closes_overlay(app) -> None:

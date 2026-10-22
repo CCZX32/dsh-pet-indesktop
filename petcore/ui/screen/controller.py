@@ -22,12 +22,24 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from ...contracts.screen import ScreenCapture
+from ...contracts.screen import (
+    ACTION_ASK,
+    ACTION_COPY,
+    ACTION_OCR,
+    ACTION_TRANSLATE,
+    ScreenCapture,
+)
 from .ask_window import DEFAULT_QUESTION, ScreenAskWindow
 
 logger = logging.getLogger("petcore.ui.screen")
 
 AskCallback = Callable[[str, bytes, list[dict], int], str]
+ActionCallback = Callable[[str, str, bytes, int], str]
+
+_ACTION_TITLES = {
+    "ocr": "截图提取文字",
+    "translate": "截图翻译",
+}
 
 
 @dataclass
@@ -39,6 +51,7 @@ class _AskState:
     history: list[dict] = field(default_factory=list)
     pending_question: str = ""
     generation: int = 0
+    action: str = ""
 
 
 class ScreenAskController(QObject):
@@ -47,6 +60,8 @@ class ScreenAskController(QObject):
     # (owner, pet_slot, generation, 文本)
     _reply_ready = Signal(str, int, int, str)
     _reply_failed = Signal(str, int, int, str)
+    _action_ready = Signal(str, int, int, str)
+    _action_failed = Signal(str, int, int, str)
 
     def __init__(self, host, root: Path | str | None = None) -> None:
         super().__init__(host if isinstance(host, QObject) else None)
@@ -54,8 +69,11 @@ class ScreenAskController(QObject):
         self.root = Path(root) if root is not None else None
         self._states: dict[tuple[str, int], _AskState] = {}
         self._ask_registry: dict[str, AskCallback] = {}
+        self._action_registry: list[tuple[int, str, tuple[str, ...], ActionCallback]] = []
         self._reply_ready.connect(self._apply_reply)
         self._reply_failed.connect(self._apply_failure)
+        self._action_ready.connect(self._apply_action_reply)
+        self._action_failed.connect(self._apply_action_failure)
 
     # ---------------------------------------------------------------- 公共状态
 
@@ -79,6 +97,7 @@ class ScreenAskController(QObject):
         state.capture = capture
         state.history.clear()
         state.pending_question = ""
+        state.action = ""
         state.window.start(capture, title)
         return True
 
@@ -107,6 +126,80 @@ class ScreenAskController(QObject):
                 self._ask_registry.pop(owner, None)
 
         return unsubscribe
+
+    def on_action(
+        self,
+        owner: str,
+        callback: ActionCallback,
+        *,
+        priority: int = 100,
+        actions: tuple[str, ...] = (),
+    ) -> Callable[[], None]:
+        """注册「提取文字 / 翻译」处理者；按 priority 从小到大尝试。"""
+        owner = str(owner)
+        declared = tuple(str(item) for item in actions) or (
+            ACTION_OCR,
+            ACTION_TRANSLATE,
+            ACTION_ASK,
+            ACTION_COPY,
+        )
+        entry = (int(priority), owner, declared, callback)
+        self._action_registry.append(entry)
+        self._action_registry.sort(key=lambda item: item[0])
+
+        def unsubscribe() -> None:
+            try:
+                self._action_registry.remove(entry)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    def supports_action(self, action: str) -> bool:
+        return any(action in declared for _p, _o, declared, _cb in self._action_registry)
+
+    def open_action(
+        self,
+        owner: str,
+        action: str,
+        capture: ScreenCapture,
+        *,
+        text: str = "",
+        pet_slot: int | None = None,
+    ) -> bool:
+        """单轮动作（提取文字 / 翻译）：结果窗 + 后台按优先级调用处理者。"""
+        action = str(action or ACTION_OCR)
+        state = self._ensure(owner, pet_slot)
+        state.generation += 1
+        state.capture = capture
+        state.history.clear()
+        state.pending_question = ""
+        state.action = action
+        state.window.start(
+            capture,
+            _ACTION_TITLES.get(action, "截图"),
+            chip="识别结果会显示在这里 · 可选中复制",
+        )
+        handlers = [
+            entry for entry in list(self._action_registry) if action in entry[2]
+        ]
+        if not handlers:
+            state.window.end_waiting("没有可用的识别引擎：请安装 OCR 或 AI 对话扩展")
+            return False
+        state.window.begin_waiting()
+        threading.Thread(
+            target=self._action_worker,
+            args=(
+                (state.owner, state.slot),
+                state.generation,
+                action,
+                str(text or ""),
+                bytes(capture.png),
+            ),
+            daemon=True,
+            name=f"petcore-screen-action-{state.slot}",
+        ).start()
+        return True
 
     # ---------------------------------------------------------------- 内部
 
@@ -199,3 +292,57 @@ class ScreenAskController(QObject):
         # 失败不落假答复：历史保持「已完成回合」，这一问不算完成。
         state.pending_question = ""
         state.window.end_waiting(f"发送失败：{reason}")
+
+    # ---------------------------------------------------------------- 动作调度
+
+    def _action_worker(
+        self,
+        key: tuple[str, int],
+        generation: int,
+        action: str,
+        source_text: str,
+        png: bytes,
+    ) -> None:
+        handlers = [
+            (owner, callback)
+            for _priority, owner, declared, callback in list(self._action_registry)
+            if action in declared
+        ]
+        reasons: list[str] = []
+        for owner, callback in handlers:
+            try:
+                reply = callback(action, source_text, png, key[1])
+            except Exception as exc:  # noqa: BLE001 - 一个引擎失败就换下一个
+                logger.debug(
+                    "screen action %s failed in %s: %s", action, owner, type(exc).__name__
+                )
+                reasons.append(type(exc).__name__)
+                continue
+            text = str(reply or "").strip()
+            if text:
+                self._action_ready.emit(key[0], key[1], generation, text)
+                return
+            reasons.append("empty")
+        logger.debug("screen action %s produced no text: %s", action, reasons)
+        self._action_failed.emit(key[0], key[1], generation, action)
+
+    def _apply_action_reply(
+        self, owner: str, slot: int, generation: int, text: str
+    ) -> None:
+        state = self._states.get((owner, slot))
+        if state is None or generation != state.generation:
+            return
+        state.action = ""
+        state.window.append_assistant(text)
+        state.window.end_waiting()
+
+    def _apply_action_failure(
+        self, owner: str, slot: int, generation: int, action: str
+    ) -> None:
+        state = self._states.get((owner, slot))
+        if state is None or generation != state.generation:
+            return
+        state.action = ""
+        state.window.end_waiting(
+            "没有可用的识别引擎：本地 OCR 与 AI 扩展都没有返回内容"
+        )

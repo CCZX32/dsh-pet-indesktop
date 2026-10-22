@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .api import ApiPort
-from .chat import ChatPort
+from .chat import ChatPort, QuickChatPort
 from .screen import ScreenAskPort, ScreenPort
 
 
@@ -87,6 +87,12 @@ class StoragePort(Protocol):
     def config_dir(self, owner: str) -> Path: ...
 
 
+class ResourcesPort(Protocol):
+    """应用只读资源目录（随包分发的模型/素材）；mod 不需要 import ``petcore.paths``。"""
+
+    def bundle_path(self, *parts: str) -> Path: ...
+
+
 class ConfigPort(Protocol):
     """只读配置端口：读 core 的全局配置，写操作一律留在 core。"""
 
@@ -132,6 +138,7 @@ class HostPorts:
     audio: AudioPort | None = None
     credentials: CredentialsPort | None = None
     storage: StoragePort | None = None
+    resources: ResourcesPort | None = None
     config: ConfigPort | None = None
     commands: CommandPort | None = None
     menu: MenuPort | None = None
@@ -145,5 +152,6 @@ class HostPorts:
     quiet: QuietPort | None = None
     api: ApiPort | None = None
     chat: ChatPort | None = None
+    quick_chat: QuickChatPort | None = None
     screen: ScreenPort | None = None
     screen_ask: ScreenAskPort | None = None

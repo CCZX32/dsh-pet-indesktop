@@ -205,6 +205,20 @@
   已存在的窗口，**不得因后台结果主动唤出窗口**。
 - **流式传输只在 core**：SSE/代理兜底/取消/错误分类都在 `petcore/api/chat.py`；
   扩展与 `petcore/chat/` 不得 import `petcore.net`/`petcore.api`（架构守卫）。
+- **截图动作条**：core 只提供框选、四动作条（提取文字/翻译/问问肥鱼/复制图像）、
+  结果窗与剪贴板；OCR 引擎、翻译提示词、AI 问答全在 mod。`ScreenAskPort.on_action`
+  按 `priority` 从小到大调用、空串/异常即换下一个，「本地优先、AI 兜底」由注册顺序
+  决定，core 不认识任何具体引擎。
+- **本地 OCR 归 mod**：`tool.ocr` 用 rapidocr + 随包模型（`resources/rapidocr_models`
+  经 `ResourcesPort.bundle_path` 暴露），core 不 import rapidocr、不写业务提示词；
+  识别失败返回空串交给 AI，不把引擎异常弹给用户。
+- **快速对话**：点桌宠气泡 → `SpeechBubble.clicked` → `CoreHost.open_quick_chat`
+  → `QuickChatPort`；窗口与输入在 core，流式回答在 mod。与完整聊天窗**共用同一
+  会话**（提交前 core 落 user、完成后落 assistant），不得另建历史。
+- **气泡可点**：气泡里的文字/图片 QLabel 必须 `WA_TransparentForMouseEvents`，
+  否则点击被标签吞掉，快速对话永远打不开。
+- **随附扩展任务**：`packaging/petcore.iss` 的 `mod_ocr` 与其他官方 feature 一样
+  默认不勾选；勾选才把 `tool.ocr` 写到 `{app}\mods\tool.ocr` 并带 `.trusted`。
 - **思考/联网传输只在 core**：`thinking` / `reasoning_effort` 的 payload、思维链
   `reasoning_content` 解析（只走 `on_reasoning`，不拼正文）、联网检索轮与
   `fetch_url` 都在 `petcore/api/chat.py`；搜索引擎实现只在 `petcore/net/websearch.py`。

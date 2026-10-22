@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -505,15 +506,52 @@ class QtScreenPort:
 
         return capture_screen(self._window(pet_slot))
 
-    def capture_region(self, *, pet_slot: int | None = None):
+    def capture_region(self, *, pet_slot: int | None = None, ai_available: bool = True):
+        """框选 + 动作条；能力表由「已注册的动作处理者 + AI 是否可用」决定。
+
+        本地 OCR / 翻译的具体实现都在扩展里，core 只按 ``on_action`` 的声明
+        决定按钮是否可点，不认识任何引擎。
+        """
         from .screen.selection import select_region
 
-        return select_region(self._window(pet_slot))
+        controller = getattr(self.host, "screen_ask", None)
+        supports = getattr(controller, "supports_action", None)
+        has_ocr = bool(callable(supports) and supports("ocr"))
+        has_translate = bool(callable(supports) and supports("translate"))
+        ai = bool(ai_available)
+        capabilities = {
+            "ocr": has_ocr or ai,
+            "translate": has_translate and ai,
+            "ask": ai,
+            "copy": True,
+        }
+        no_ai = "未配置 AI 服务（设置 → API 与账户）"
+        reasons = {
+            "ocr": "未安装 OCR 扩展，也没有可用的 AI 服务",
+            "translate": no_ai,
+            "ask": no_ai,
+        }
+        return select_region(
+            self._window(pet_slot),
+            capabilities=capabilities,
+            reasons=reasons,
+        )
 
     def foreground_app(self) -> str:
         from ..platform.foreground import foreground_app_info
 
         return foreground_app_info()
+
+
+class ResourcesAdapter:
+    """只读资源目录：冻结包指向 ``_MEIPASS``，源码树指向仓库根。"""
+
+    def bundle_path(self, *parts: str) -> Path:
+        if paths.is_frozen():
+            base = Path(getattr(sys, "_MEIPASS", paths.install_root() / "_internal"))
+        else:
+            base = paths.repo_root()
+        return base.joinpath(*[str(part) for part in parts])
 
 
 def build_ports(host, window) -> HostPorts:
@@ -526,6 +564,7 @@ def build_ports(host, window) -> HostPorts:
         scheduler=QtScheduler(),
         audio=AudioAdapter(window),
         storage=StorageAdapter(host.root),
+        resources=ResourcesAdapter(),
         config=QtConfigPort(config) if config is not None else None,
         pets=PetRegistry(host),
         interaction=InteractionAdapter(host),
@@ -541,6 +580,7 @@ def build_ports(host, window) -> HostPorts:
             else None
         ),
         chat=getattr(host, "chat", None),
+        quick_chat=getattr(host, "quick_chat", None),
         screen=QtScreenPort(host),
         screen_ask=getattr(host, "screen_ask", None),
     )

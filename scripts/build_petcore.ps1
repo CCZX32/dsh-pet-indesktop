@@ -66,8 +66,26 @@ $pyiArgs = @(
     "--hidden-import", "keyring.backends.Windows",
     "--collect-submodules", "keyring",
     "--collect-submodules", "win32ctypes",
+    # 本地 OCR（tool.ocr 扩展）：模型随包分发，rapidocr 的惰性 import 静态分析看不到。
+    # 与主分支 build_onedir.ps1 同一口径：显式带 config.yaml/default_models.yaml，
+    # 否则 rapidocr 会走「模型路径为空就下载」的分支。
+    "--add-data", "$root/resources/rapidocr_models;resources/rapidocr_models",
+    "--collect-submodules", "rapidocr",
+    "--hidden-import", "onnxruntime",
+    "--hidden-import", "cv2",
+    "--hidden-import", "numpy",
+    "--hidden-import", "omegaconf",
     "packaging/petcore_entry.py"
 )
+$rapidocrDir = (& $python -c "import os, rapidocr; print(os.path.dirname(rapidocr.__file__))").Trim()
+if ($rapidocrDir) {
+    foreach ($cfgName in @("config.yaml", "default_models.yaml")) {
+        $cfgPath = Join-Path $rapidocrDir $cfgName
+        if (Test-Path $cfgPath) {
+            $pyiArgs = @($pyiArgs[0], $pyiArgs[1], "--add-data", "$cfgPath;rapidocr") + $pyiArgs[2..($pyiArgs.Count - 1)]
+        }
+    }
+}
 if ($Clean) {
     $pyiArgs = @($pyiArgs[0], $pyiArgs[1], "--clean") + $pyiArgs[2..($pyiArgs.Count - 1)]
 }

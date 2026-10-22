@@ -49,6 +49,7 @@ Name: "mod_todo"; Description: "待办清单（reminder.todo）"; GroupDescripti
 Name: "mod_chime"; Description: "整点报时（voice.chime）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_music"; Description: "音乐信息（media.music）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_aichat"; Description: "AI 对话（ai.chat，需自备 API）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
+Name: "mod_ocr"; Description: "本地 OCR（tool.ocr，离线提取文字）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 
 [Files]
 Source: "..\dist\dsh-pet-core\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -67,13 +68,15 @@ Source: "..\examples\petcore-mods\media.music\*"; DestDir: "{app}\mods\media.mus
 Source: "trust_marker.txt"; DestDir: "{app}\mods\media.music"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_music
 Source: "..\examples\petcore-mods\ai.chat\*"; DestDir: "{app}\mods\ai.chat"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_aichat
 Source: "trust_marker.txt"; DestDir: "{app}\mods\ai.chat"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_aichat
+Source: "..\examples\petcore-mods\tool.ocr\*"; DestDir: "{app}\mods\tool.ocr"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_ocr
+Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.ocr"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_ocr
 
 [Icons]
 Name: "{autoprograms}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"
 Name: "{autodesktop}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\dsh-pet-core.exe"; Description: "{cm:LaunchProgram,dsh-pet core}"; Flags: nowait postinstall
+Filename: "{app}\dsh-pet-core.exe"; Description: "{cm:LaunchProgram,dsh-pet core}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function PreviousInstallDir(): String;

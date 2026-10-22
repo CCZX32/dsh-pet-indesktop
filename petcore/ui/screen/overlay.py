@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QWidget
 
+from ...contracts.screen import ACTION_ASK, ACTION_COPY, ACTION_OCR, ACTION_TRANSLATE
 from .selection import (
     MIN_SELECTION_SIDE,
     SelectionRect,
@@ -71,7 +72,15 @@ def _as_image(frame):
 class _ActionBar(QFrame):
     """选区操作条：松手后浮在选区下方的 pill（子控件，事件不落到覆盖层）。"""
 
-    triggered = Signal(str)  # "ask" / "cancel"
+    triggered = Signal(str)  # ocr / translate / ask / copy / cancel
+
+    #: (动作 id, 按钮文字, objectName 后缀)
+    SPECS = (
+        (ACTION_OCR, "提取文字", "ocr"),
+        (ACTION_TRANSLATE, "翻译", "translate"),
+        (ACTION_ASK, "问问肥鱼", "ask"),
+        (ACTION_COPY, "复制图像", "copy"),
+    )
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -80,11 +89,19 @@ class _ActionBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(4)
-        self.ask_button = QPushButton("问问肥鱼", self)
-        self.ask_button.setObjectName("screen-selection-ask")
-        self.ask_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.ask_button.clicked.connect(lambda: self.triggered.emit("ask"))
-        layout.addWidget(self.ask_button)
+        self.buttons: dict[str, QPushButton] = {}
+        for action, label, suffix in self.SPECS:
+            button = QPushButton(label, self)
+            button.setObjectName(f"screen-selection-{suffix}")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, a=action: self.triggered.emit(a))
+            layout.addWidget(button)
+            self.buttons[action] = button
+        # 兼容旧调用方/测试的属性名。
+        self.ocr_button = self.buttons[ACTION_OCR]
+        self.translate_button = self.buttons[ACTION_TRANSLATE]
+        self.ask_button = self.buttons[ACTION_ASK]
+        self.copy_button = self.buttons[ACTION_COPY]
         self.cancel_button = QPushButton("取消", self)
         self.cancel_button.setObjectName("screen-selection-cancel")
         self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -97,17 +114,32 @@ class _ActionBar(QFrame):
             "  border-radius: 8px;"
             "}"
             "#screen-selection-bar QPushButton {"
-            "  border: none; border-radius: 5px; font-size: 12px; padding: 5px 12px;"
+            "  border: none; border-radius: 5px; font-size: 12px; padding: 5px 10px;"
             "}"
             "#screen-selection-bar QPushButton:hover { background: rgba(0, 0, 0, 18); }"
+            "#screen-selection-bar QPushButton:disabled { color: rgba(29, 33, 41, 90); }"
             "QPushButton#screen-selection-ask {"
             "  background: #1677e8; color: #ffffff; font-weight: 600;"
             "}"
             "QPushButton#screen-selection-ask:hover { background: #3d8ef0; }"
+            "QPushButton#screen-selection-ask:disabled {"
+            "  background: rgba(22, 119, 232, 60); color: rgba(255, 255, 255, 170);"
+            "}"
             "QPushButton#screen-selection-cancel {"
             "  background: transparent; color: #1d2129;"
             "}"
         )
+
+    def apply_capabilities(
+        self, capabilities: dict[str, bool] | None, reasons: dict[str, str] | None = None
+    ) -> None:
+        caps = dict(capabilities or {})
+        notes = dict(reasons or {})
+        for action, button in self.buttons.items():
+            enabled = bool(caps.get(action, True))
+            button.setEnabled(enabled)
+            button.setToolTip("" if enabled else str(notes.get(action) or "当前不可用"))
+        self.cancel_button.setEnabled(True)
 
 
 class SelectionOverlay(QWidget):
@@ -118,11 +150,17 @@ class SelectionOverlay(QWidget):
     （本类只用它们的 ``geometry()`` / ``devicePixelRatio()`` / ``name()``）。
     """
 
-    accepted = Signal(object)  # SelectionRect
-    cancelled = Signal(str)    # 取消理由（"esc" / "toolbar"）
+    accepted = Signal(str, object)  # (动作 id, SelectionRect)
+    cancelled = Signal(str)         # 取消理由（"esc" / "toolbar"）
 
     def __init__(
-        self, frame: QImage | None = None, screen=None, parent: QWidget | None = None
+        self,
+        frame: QImage | None = None,
+        screen=None,
+        parent: QWidget | None = None,
+        *,
+        capabilities: dict[str, bool] | None = None,
+        reasons: dict[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._frame = _as_image(frame)
@@ -132,6 +170,7 @@ class SelectionOverlay(QWidget):
         self._dragging = False
         self._inside_press = False
         self._result_emitted = False
+        self._capabilities = dict(capabilities or {})
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -144,7 +183,18 @@ class SelectionOverlay(QWidget):
         self._apply_screen_geometry()
         self._bar = _ActionBar(self)
         self._bar.triggered.connect(self._on_action)
+        self._bar.apply_capabilities(self._capabilities, reasons)
         self._bar.hide()
+
+    def action_enabled(self, action: str) -> bool:
+        return bool(self._capabilities.get(action, True))
+
+    def default_action(self) -> str:
+        """Enter / 双击的默认动作：优先提取文字，其次问，最后复制。"""
+        for action in (ACTION_OCR, ACTION_ASK, ACTION_COPY):
+            if self.action_enabled(action):
+                return action
+        return ACTION_COPY
 
     # ------------------------------------------------------------ 只读视图
 
@@ -315,7 +365,9 @@ class SelectionOverlay(QWidget):
         if action == "cancel":
             self.cancel("toolbar")
             return
-        self.confirm()
+        if not self.action_enabled(action):
+            return
+        self.confirm(action)
 
     # ---------------------------------------------------------------- 确认/取消
 
@@ -328,12 +380,15 @@ class SelectionOverlay(QWidget):
         else:
             self._bar.hide()
 
-    def confirm(self) -> bool:
-        """确认当前选区；空/过小选区什么都不做（返回 False）。"""
+    def confirm(self, action: str | None = None) -> bool:
+        """确认当前选区（缺省动作按 ``default_action()``）；空/过小选区返回 False。"""
         if not usable(self._selection):
             return False
+        chosen = str(action or self.default_action())
+        if not self.action_enabled(chosen):
+            return False
         self._result_emitted = True
-        self.accepted.emit(self._selection)
+        self.accepted.emit(chosen, self._selection)
         return True
 
     def cancel(self, reason: str = "cancel") -> None:

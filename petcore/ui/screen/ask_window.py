@@ -356,13 +356,13 @@ class ScreenAskWindow(QFrame):
 
     # ---------------------------------------------------------------- 对外
 
-    def start(self, capture: ScreenCapture, title: str = "") -> None:
+    def start(self, capture: ScreenCapture, title: str = "", *, chip: str = "") -> None:
         """开新会话：换缩略图、清消息、重置等待态，然后显示并聚焦输入框。"""
         self._capture = capture
         if title:
             self.setWindowTitle(str(title))
         self._thumb.setPixmap(self._thumb_pixmap(capture))
-        self._chip_text.setText("截图已就位 · 发送时随问题一起给 AI")
+        self._chip_text.setText(chip or "截图已就位 · 发送时随问题一起给 AI")
         self.clear_messages()
         self.end_waiting()
         self.input.clear()
@@ -477,6 +477,10 @@ class ScreenAskWindow(QFrame):
         self._status.setVisible(bool(text))
         color = "#d9534f" if error else self._palette_colors["hint"]
         self._status.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def status_text(self) -> str:
+        """状态行当前文本（测试/诊断用）。"""
+        return self._status.text()
 
     # ------------------------------------------------------------ 展示与几何
 

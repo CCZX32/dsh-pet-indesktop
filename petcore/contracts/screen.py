@@ -16,6 +16,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+#: 框选动作条上的四个动作（mod 与 core 共用同一组字符串）。
+ACTION_OCR = "ocr"
+ACTION_TRANSLATE = "translate"
+ACTION_ASK = "ask"
+ACTION_COPY = "copy"
+ACTIONS = (ACTION_OCR, ACTION_TRANSLATE, ACTION_ASK, ACTION_COPY)
+
 
 @dataclass(frozen=True, slots=True)
 class ScreenCapture:
@@ -25,6 +32,14 @@ class ScreenCapture:
     screen_name: str = ""
     #: 抓屏当刻的前台应用「进程名 | 窗口标题」；拿不到时为空串。
     app_info: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RegionPick:
+    """一次框选的结果：裁好的画面 + 用户在动作条上选的动作。"""
+
+    capture: ScreenCapture
+    action: str = ACTION_ASK
 
 
 class ScreenError(RuntimeError):
@@ -50,8 +65,15 @@ class ScreenSelectionCancelled(ScreenError):
 class ScreenPort(Protocol):
     def capture(self, *, pet_slot: int | None = None) -> ScreenCapture: ...
 
-    def capture_region(self, *, pet_slot: int | None = None) -> ScreenCapture:
-        """弹框选覆盖层并返回裁好的画面；取消时抛 :class:`ScreenSelectionCancelled`。"""
+    def capture_region(
+        self, *, pet_slot: int | None = None, ai_available: bool = True
+    ) -> RegionPick:
+        """弹框选覆盖层并返回裁好的画面 + 动作；取消时抛
+        :class:`ScreenSelectionCancelled`。
+
+        ``ai_available`` 只控制动作条上「问问肥鱼 / 翻译」的可点性（本地 OCR 由
+        扩展自己注册，core 不判断）。``copy`` 的剪贴板写入也在这里完成。
+        """
         ...
 
     def foreground_app(self) -> str:
@@ -66,6 +88,10 @@ class ScreenAskPort(Protocol):
     ``(question, image_png, history, pet_slot)``，返回模型答复文本；抛异常时窗口
     显示错误。``history`` 是此前已完成的多轮 ``{role, content}`` 文本副本，
     不含本轮问题、也不含图片（图只在首轮由回调自己拼）。
+
+    ``on_action`` 是「提取文字 / 翻译」的处理者注册表：core 按 ``priority``
+    从小到大依次调用，回调返回空串或抛异常时换下一个。这样「本地 OCR 优先、
+    AI 兜底」由扩展的注册顺序决定，core 不认识任何具体引擎。
     """
 
     def open(
@@ -76,6 +102,18 @@ class ScreenAskPort(Protocol):
         pet_slot: int | None = None,
         title: str = "",
     ) -> bool: ...
+
+    def open_action(
+        self,
+        owner: str,
+        action: str,
+        capture: ScreenCapture,
+        *,
+        text: str = "",
+        pet_slot: int | None = None,
+    ) -> bool:
+        """单轮动作结果窗（提取文字 / 翻译）；``text`` 是上游已识别的原文。"""
+        ...
 
     def close(self, owner: str, *, pet_slot: int | None = None) -> None: ...
 
@@ -88,3 +126,17 @@ class ScreenAskPort(Protocol):
         owner: str,
         callback: Callable[[str, bytes, list[dict], int], str],
     ) -> Callable[[], None]: ...
+
+    def on_action(
+        self,
+        owner: str,
+        callback: Callable[[str, str, bytes, int], str],
+        *,
+        priority: int = 100,
+        actions: tuple[str, ...] = (),
+    ) -> Callable[[], None]:
+        """注册动作处理者；``actions`` 声明它能处理哪些动作（缺省全部）。
+
+        返回取消注册的函数。core 用这份声明决定动作条按钮是否可点。
+        """
+        ...

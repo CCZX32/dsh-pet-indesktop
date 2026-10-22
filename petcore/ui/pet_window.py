@@ -108,6 +108,7 @@ class PetWindow(QWidget):
         self.library = ClipLibrary(str(config.get("frameseq") or "auto"))
         self.sound = SoundPlayer(float(config.get("volume") or 0.8))
         self.bubble = SpeechBubble()
+        self.bubble.clicked.connect(self._on_bubble_clicked)
         self.bubble.set_text_scale(self._text_scale_factor())
         self.bubble.set_stream_mode(self.stream_capture_mode)
         self._clip = None
@@ -1158,6 +1159,12 @@ class PetWindow(QWidget):
         # 设置页只写配置，这里在每次新气泡前同步一次字号（未变时是空操作）。
         self.bubble.set_text_scale(self._text_scale_factor())
         self.bubble.show_text(text, self.bubble_anchor_rect(), duration_ms)
+
+    def _on_bubble_clicked(self) -> None:
+        """点气泡 = 打开快速对话（主分支同一条入口）。"""
+        opener = getattr(self.host, "open_quick_chat", None)
+        if callable(opener):
+            opener(self.slot)
 
     def _text_scale_factor(self) -> float:
         try:
