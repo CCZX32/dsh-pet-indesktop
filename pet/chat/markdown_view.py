@@ -20,7 +20,8 @@ import re
 
 from PySide6.QtGui import QTextDocument
 
-_FENCE = re.compile(r'^\s{0,3}(```|~~~)')
+_FENCE = re.compile(r'^\s{0,3}(`{3,}|~{3,})')
+_LINK_TARGET_MAX_CHARS = 2000
 _BODY_STYLE = re.compile(r'<body style="[^"]*">')
 _LINK_COLOR = re.compile(r'(<a href="[^"]*">)<span style=" color:#[0-9a-fA-F]{6};">')
 _TABLE_DELIM = re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$')
@@ -30,15 +31,24 @@ _MONO_STYLED = "font-family:'Consolas','Courier New',monospace; background-color
 _HEADING_SIZE = re.compile(r'font-size:(xx-large|x-large);')
 _HEADING_MAP = {'xx-large': 'x-large', 'x-large': 'large'}
 # 场景扮演的动作段：全角（）或半角 () 整段包裹；允许多行（跨行连续动作段）。
-# 括号配对与嵌套层级在 _action_spans 里处理：只允许一层嵌套（外层整体作为动作段），
-# 两层以上回退到只取最内层，不递归。
+# 括号配对与嵌套层级在 _action_candidates 里处理：只允许一层嵌套（外层整体作为
+# 动作段），两层以上回退到只取最内层，不递归；有效性过滤在 _action_ranges。
 _INLINE_CODE = re.compile(r'`[^`\n]*`')
-# 裸 URL：从 http(s):// 起，到空白或中文标点为止；尖括号是 autolink 的边界，
-# 必须排除，否则会把 `<url>` 的收尾 `>` 一起吃进链接。半角括号先收下，末尾
-# 再按括号配平与句末标点修剪（见 _trim_url）。
-_URL = re.compile(r'https?://[^\s<>，。、；：！？（）【】《》〈〉「」『』“”‘’…—～·]+')
-_URL_TRAILING = '.,;:!?"\'》」】'
-_LINK_TARGET_OPEN = re.compile(r'\]\(')
+# 裸 URL：http(s):// 或 www. 开头，到空白或中文标点为止；尖括号是 autolink
+# 的边界，必须排除，否则会把 `<url>` 的收尾 `>` 一起吃进链接。`*` 与反引号是
+# Markdown 强调/行内代码的边界，也不能吃进 URL——否则
+# ``https://x.org/a_(b)**重点**`` 会把「重点」整段焊进 href。半角括号先收下，
+# 末尾再按括号配平与句末标点修剪（见 _trim_url）。
+_URL = re.compile(
+    r'(?:https?://|(?<![A-Za-z0-9.])www\.)'
+    r'[^\s<>，。、；：！？（）【】《》〈〉「」『』“”‘’…—～·`*]+',
+    re.IGNORECASE,
+)
+_URL_TRAILING = (
+    '.,;:!?"\''
+    '`*_]}'
+    '>~》」】'
+)
 # 斜体 + 弱色：半透明灰在浅色/深色气泡里都比正文弱一档（跟随主题的对比关系，
 # 不写死某一种主题的底色）。整段（含括号）一起渲染。
 _ACTION_STYLE = 'font-style:italic; color:rgba(128,128,128,0.88);'
@@ -53,26 +63,67 @@ def _is_table_header(lines, i) -> bool:
     return 0 <= i < len(lines) - 1 and '|' in lines[i] and bool(_TABLE_DELIM.match(lines[i + 1]))
 
 
-def _overlaps(span: tuple[int, int], ranges: list[tuple[int, int]]) -> bool:
-    """区间交集非空（端点相接不算相交）。"""
-    start, end = span
-    return any(start < range_end and range_start < end for range_start, range_end in ranges)
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """排序后合并重叠/相接区间，供双指针判断使用。"""
+    if not ranges:
+        return []
+    ordered = sorted(ranges)
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            if end > last_end:
+                merged[-1] = (last_start, end)
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _intersect_flags(
+    spans: list[tuple[int, int]], ranges: list[tuple[int, int]]
+) -> list[bool]:
+    """``spans`` 已按起点升序：双指针判断每个区间是否与任一 ``ranges`` 相交。"""
+    merged = _merge_ranges(ranges)
+    flags: list[bool] = []
+    index = 0
+    for start, end in spans:
+        while index < len(merged) and merged[index][1] <= start:
+            index += 1
+        flags.append(index < len(merged) and merged[index][0] < end)
+    return flags
+
+
+def _fence_marker(line: str) -> tuple[str, int, str] | None:
+    """返回行首围栏的 (字符, 长度, 行内剩余内容)；不是围栏行返回 None。"""
+    match = _FENCE.match(line)
+    if match is None:
+        return None
+    run = match.group(1)
+    return run[0], len(run), line[match.end():]
 
 
 def _fenced_ranges(text: str) -> list[tuple[int, int]]:
-    """围栏代码块的字符区间。"""
+    """围栏代码块的字符区间。
+
+    单遍状态机：记住开启围栏的字符与长度，只有行首、同字符、长度不小于开启
+    围栏且其后没有内容的行才收尾；``~`` 行不能提前关掉 ``` 块。
+    """
     ranges: list[tuple[int, int]] = []
     position = 0
-    fence_start = None
+    fence: tuple[str, int] | None = None
+    fence_start = 0
     for line in text.splitlines(keepends=True):
-        if _FENCE.match(line):
-            if fence_start is None:
+        marker = _fence_marker(line)
+        if fence is None:
+            if marker is not None:
+                fence = (marker[0], marker[1])
                 fence_start = position
-            else:
-                ranges.append((fence_start, position + len(line)))
-                fence_start = None
+        elif (marker is not None and marker[0] == fence[0]
+              and marker[1] >= fence[1] and not marker[2].strip()):
+            ranges.append((fence_start, position + len(line)))
+            fence = None
         position += len(line)
-    if fence_start is not None:
+    if fence is not None:
         ranges.append((fence_start, len(text)))
     return ranges
 
@@ -86,44 +137,76 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
     return _fenced_ranges(text) + _inline_code_ranges(text)
 
 
-def _link_target_ranges(text: str) -> list[tuple[int, int]]:
-    """Markdown 链接目标 ``](...)`` 的字符区间。
+def _link_ranges(text: str) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """单遍扫描出链接目标与链接标签区间。
 
-    从目标的左括号起按括号配对往后数，URL 里的成对括号（``a_(b)``）也算目标的一部分；
-    目标不跨行，扫到行尾仍未闭合就当没有这个链接目标。
+    返回 ``(targets, labels)``：
+
+    - ``targets``：``](...)`` 从 ``]`` 到配对 ``)`` 的区间；目标内成对括号
+      （``a_(b)``）靠同一遍的括号栈配对，目标不跨行，超长目标按防御上限丢弃。
+    - ``labels``：``[`` 到 ``](`` 的区间，供 R1 的裸 URL 包裹跳过标签文本。
+
+    每个 ``]`` 只弹栈一次，每个括号只入栈/出栈一次，总体 O(n)。
     """
-    ranges: list[tuple[int, int]] = []
-    for match in _LINK_TARGET_OPEN.finditer(text):
-        depth = 0
-        for index in range(match.end() - 1, len(text)):
-            char = text[index]
-            if char == '\n':
-                break
-            if char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    ranges.append((match.start(), index + 1))
-                    break
-    return ranges
+    targets: list[tuple[int, int]] = []
+    labels: list[tuple[int, int]] = []
+    brackets: list[int] = []
+    parens: list[int] = []
+    for index, char in enumerate(text):
+        if char == '[':
+            brackets.append(index)
+        elif char == ']':
+            if not brackets:
+                continue
+            label_start = brackets.pop()
+            if index + 1 < len(text) and text[index + 1] == '(':
+                labels.append((label_start, index + 2))
+        elif char == '(':
+            parens.append(index)
+        elif char == ')':
+            if not parens:
+                continue
+            opening = parens.pop()
+            # 只有紧跟在 ']' 后面的 '(' 才是链接目标起点；目标内的嵌套括号
+            # 也会入栈，但它们的起点前不是 ']'，不会被误认成新目标。
+            if opening > 0 and text[opening - 1] == ']':
+                start = opening - 1
+                end = index + 1
+                if end - start <= _LINK_TARGET_MAX_CHARS:
+                    targets.append((start, end))
+        elif char == '\n':
+            # 链接目标不跨行：清空未闭合的括号，避免跨行误配。
+            parens.clear()
+    targets.sort()
+    labels.sort()
+    return targets, labels
+
+
+def _link_target_ranges(text: str) -> list[tuple[int, int]]:
+    """Markdown 链接目标 ``](...)`` 的字符区间。"""
+    return _link_ranges(text)[0]
 
 
 def _trim_url(url: str) -> str:
     """剪掉 URL 末尾不属于链接的字符。
 
     右括号按配平决定：URL 内 ``(`` 多于 ``)`` 时，末尾这个 ``)`` 才属于链接；
-    否则剪掉。句末标点一律剪掉。只处理末尾，中间的括号保持原样。
+    否则剪掉。句末标点、强调符、代码符一律剪掉。只处理末尾，中间的括号保持
+    原样；括号计数只做一次，避免长尾括号退化成 O(n²)。
     """
-    while url:
-        last = url[-1]
+    end = len(url)
+    opens = url.count('(')
+    closes = url.count(')')
+    while end:
+        last = url[end - 1]
         if last in _URL_TRAILING:
-            url = url[:-1]
-        elif last == ')' and url.count(')') > url.count('('):
-            url = url[:-1]
+            end -= 1
+        elif last == ')' and closes > opens:
+            closes -= 1
+            end -= 1
         else:
             break
-    return url
+    return url[:end]
 
 
 def _url_ranges(text: str) -> list[tuple[int, int]]:
@@ -136,33 +219,43 @@ def _url_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def _autolink_bare_urls(text: str) -> str:
-    """把含括号的裸 URL 包成 ``<...>``：Qt 的自动链接不认括号，不包就整段不成链。
+    """把所有裸 URL 包成 ``<...>``，交给 md4c 当显式 autolink 解析。
 
-    只动代码区间外、且不在 markdown 链接目标里的裸 URL；目标本身已有解析语法，
-    括号配对交给 Markdown。返回用于解析的新文本，原文本不被修改（落盘原文由
-    调用方保证）。
+    Qt/md4c 的自动链接在紧跟中文、全角标点、query 里的 ``%`` 或路径含中文时
+    会静默失败（用户看到纯文本、点不动），所以不再依赖它：``_URL`` 命中的
+    裸 URL 一律显式包裹。``www.`` 开头的裸域名补 ``https://`` 作为 href。
+
+    受保护区（代码区间 / 链接目标 / 链接标签 / 已在 ``<...>`` 内）跳过；区间
+    判断用排序 + 双指针，不做两两比较。返回用于解析的新文本，原文本不被修改
+    （落盘原文由调用方保证）。
     """
-    code = _code_ranges(text)
-    links = _link_target_ranges(text)
-    edits: list[tuple[int, int, str]] = []
-    for match in _URL.finditer(text):
-        raw = match.group()
-        url = _trim_url(raw)
+    targets, labels = _link_ranges(text)
+    protected = _code_ranges(text) + targets + labels
+    matches = list(_URL.finditer(text))
+    if not matches:
+        return text
+    spans: list[tuple[int, int]] = []
+    candidates: list[tuple[int, int, str]] = []
+    for match in matches:
+        url = _trim_url(match.group())
         if not url:
-            continue
-        # 含括号的 URL 要显式包起来；尾随字符被剪掉时也要重包，否则 Qt 会把
-        # 剪掉的 `)` 继续算进链接。两者都不满足时交给 Qt 自带 autolink。
-        if '(' not in raw and ')' not in raw and url == raw:
             continue
         start = match.start()
         end = start + len(url)
-        if _overlaps((start, end), code):
+        spans.append((start, end))
+        candidates.append((start, end, url))
+    if not spans:
+        return text
+    blocked = _intersect_flags(spans, protected)
+    edits: list[tuple[int, int, str]] = []
+    for (start, end, url), is_blocked in zip(candidates, blocked):
+        if is_blocked:
             continue
-        if _overlaps((start, end), links):
-            continue  # 链接目标本身有 markdown 语法，括号配对交给解析器
         if (start > 0 and text[start - 1] == '<'
-                and match.end() < len(text) and text[match.end()] == '>'):
+                and end < len(text) and text[end] == '>'):
             continue  # 已经是 <url> 形式，绝不二次包裹
+        if not url.lower().startswith(('http://', 'https://')):
+            url = 'https://' + url
         edits.append((start, end, url))
     if not edits:
         return text
@@ -213,16 +306,51 @@ def _action_candidates(text: str) -> list[tuple[int, int]]:
             # 根区间没有孙层：整段作为动作段（一层嵌套在外层里）。
             candidates.append((start, end))
         if not has_child and stack:
-            # 深层嵌套里的叶子：外层不取时由它出面，交给后面的不相交过滤去重。
+            # 深层嵌套里的叶子：外层不取时由它出面，交给后面的有效性过滤与
+            # 不相交选择去重。
             candidates.append((start, end))
     return candidates
 
 
-def _action_spans(text: str) -> list[tuple[int, int]]:
-    """动作段区间：单遍配对后裁成两两不相交。
+def _partial_inline_flags(
+    candidates: list[tuple[int, int]], inline: list[tuple[int, int]]
+) -> list[bool]:
+    """判断候选区间是否与行内代码**部分**相交。
 
-    动作段内含受保护区（URL/代码）时整段不渲染为动作段，属已知限制
-    （4.5 评估），见 ``_action_ranges``。
+    行内代码完整落在候选区间内（动作段包住 ``x``）不算部分相交；只要有任一端点
+    落在代码区间内部就跳过。端点集合排序后与行内区间做双指针扫描，O(k log k + m)，
+    不做候选 × 代码的两两比较。
+    """
+    if not candidates or not inline:
+        return [False] * len(candidates)
+    endpoints: list[tuple[int, int]] = []
+    for index, (start, end) in enumerate(candidates):
+        endpoints.append((start, index))
+        endpoints.append((end, index))
+    endpoints.sort()
+    ordered_inline = sorted(inline)
+    flags = [False] * len(candidates)
+    pointer = 0
+    for position, index in endpoints:
+        while pointer < len(ordered_inline) and ordered_inline[pointer][1] <= position:
+            pointer += 1
+        if pointer < len(ordered_inline):
+            start, end = ordered_inline[pointer]
+            if start < position < end:
+                flags[index] = True
+    return flags
+
+
+def _action_ranges(text: str) -> list[tuple[int, int]]:
+    """动作段区间：先按有效性过滤候选，再裁成两两不相交。
+
+    动作段内含受保护区（URL/代码/链接目标）时整段不渲染为动作段，属已知限制
+    （4.5 评估）。有效性判断全部走排序 + 双指针：
+
+    - 围栏/链接目标/裸 URL：任何相交都跳过；
+    - 行内代码：部分相交跳过，整段动作完整包住代码时保留（R5 要还原等宽样式）；
+    - 最后才做不相交选择。外层因 URL 失效时内层候选仍留在流里，于是回退到
+      内层（R7），而不是把内层也提前吃掉。
     """
     candidates = _action_candidates(text)
     if not candidates:
@@ -230,33 +358,18 @@ def _action_spans(text: str) -> list[tuple[int, int]]:
     # F3：交叉嵌套（`(a （b) c）`）会让两种括号的区间相交，而 tokenize 要求
     # 区间有序且两两不相交。按 (start, -end) 排序后单遍扫描，先出现且更长者胜。
     candidates.sort(key=lambda span: (span[0], -span[1]))
+    protected = (_fenced_ranges(text) + _link_target_ranges(text)
+                 + _url_ranges(text))
+    blocked = _intersect_flags(candidates, protected)
+    partial = _partial_inline_flags(candidates, _inline_code_ranges(text))
     spans: list[tuple[int, int]] = []
     last_end = -1
-    for start, end in candidates:
+    for (start, end), is_blocked, is_partial in zip(candidates, blocked, partial):
+        if is_blocked or is_partial:
+            continue
         if start >= last_end:
             spans.append((start, end))
             last_end = end
-    return spans
-
-
-def _action_ranges(text: str) -> list[tuple[int, int]]:
-    fenced = _fenced_ranges(text)
-    inline = _inline_code_ranges(text)
-    protected = _link_target_ranges(text) + _url_ranges(text)
-    spans: list[tuple[int, int]] = []
-    for span in _action_spans(text):
-        # 围栏/链接目标/裸 URL：交集非空一律跳过。R2 的判据是起点终点都在区间外，
-        # 起于围栏外、止于围栏内的匹配会把围栏符吞进斜体 span。
-        if _overlaps(span, fenced) or _overlaps(span, protected):
-            continue
-        # 行内代码：部分相交（起止点落在代码里或跨边界）跳过；整段动作**完整包住**
-        # 一个行内代码时不跳过——R5 要在动作段里把 `x` 还原成等宽样式，而不是把
-        # 整个动作段让给 Markdown 解析。
-        if any(span[0] < end and start < span[1]
-               and not (span[0] <= start and end <= span[1])
-               for start, end in inline):
-            continue
-        spans.append(span)
     return spans
 
 
@@ -267,7 +380,7 @@ def _tokenize_actions(text: str) -> tuple[str, list[tuple[str, str]]]:
     先换 token 还让跨行动作段作为一个整体（不会在段落切分时被拆散）。
     """
     spans = _action_ranges(text)
-    # tokenize 的前置条件：区间已排序且两两不相交（_action_spans 已显式过滤）。
+    # tokenize 的前置条件：区间已排序且两两不相交（_action_ranges 已显式过滤）。
     assert all(left[1] <= right[0] for left, right in zip(spans, spans[1:]))
     if not spans:
         return text, []
@@ -335,19 +448,25 @@ def preserve_line_breaks(text: str) -> str:
     """
     lines = str(text).split('\n')
     out = []
-    in_fence = False
+    fence: tuple[str, int] | None = None
     for i, line in enumerate(lines):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            out.append(line)
-            continue
-        if in_fence:
+        marker = _fence_marker(line)
+        if fence is None:
+            if marker is not None:
+                fence = (marker[0], marker[1])
+                out.append(line)
+                continue
+        else:
+            if (marker is not None and marker[0] == fence[0]
+                    and marker[1] >= fence[1] and not marker[2].strip()):
+                fence = None
             out.append(line)
             continue
         if _is_table_header(lines, i) and out and out[-1].strip() and '|' not in out[-1]:
             out.append('')
         nxt = lines[i + 1] if i + 1 < len(lines) else ''
-        if (line.strip() and nxt.strip() and not _FENCE.match(nxt) and not _is_table_header(lines, i + 1)
+        if (line.strip() and nxt.strip() and _fence_marker(nxt) is None
+                and not _is_table_header(lines, i + 1)
                 and not line.endswith('  ') and not line.endswith('\\')):
             line += '  '
         out.append(line)
@@ -355,7 +474,7 @@ def preserve_line_breaks(text: str) -> str:
 
 
 def markdown_to_html(text: str, *, link_color: str = '#3994ff') -> str:
-    # 带括号的裸 URL 先包成 <...> 再解析：Qt 的自动链接只认到括号前，不包会断链。
+    # 裸 URL 先包成 <...> 再解析：Qt 的自动链接在中文/全角标点后不生效，不包会断链。
     source = _autolink_bare_urls(str(text))
     source, actions = _tokenize_actions(source)
     doc = QTextDocument()
