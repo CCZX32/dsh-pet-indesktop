@@ -40,6 +40,13 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/setup_packaging.ps1
 # 默认窗口化（无终端窗口）；只排障时加 -Console
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 -Clean -Installer
 
+# 代码签名（Windows 11 Smart App Control 会拦截未签名的新构建，错误码 4551）：
+# 一次性创建「本机开发证书」并信任（只写 CurrentUser，不需要管理员）
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/make_dev_signing_cert.ps1
+# 之后把打印出的指纹传给构建脚本；exe 会在 --check 冒烟前签好，setup 在 ISCC 之后签
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 `
+  -Clean -Installer -SignThumbprint <证书指纹>
+
 # 把旧素材打成一个 content 包
 .venv/Scripts/python -m petcore pack-legacy shenshen --out ./dist/shenshen.zip
 

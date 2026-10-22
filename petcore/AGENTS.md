@@ -145,6 +145,12 @@
 - **打包工具**：PyInstaller 安装在 `.venv`；Inno Setup 便携安装在
   `tools/InnoSetup`（不入库）。默认 `--windowed`（不许出现终端窗口），
   `-Console` 只给排障用；`sys.stdout is None` 由 `cli._ensure_streams()` 兜底。
+- **构建产物必须签名**：本机 Smart App Control 会拦截未签名的新构建
+  （`CreateProcess` 返回 4551「An Application Control policy has blocked this file」），
+  PyInstaller exe 与 Inno setup 都会被拦。用
+  `scripts/make_dev_signing_cert.ps1` 建本机信任的开发证书，构建时传
+  `-SignThumbprint <指纹>`；签名必须发生在 `--check` 冒烟**之前**，setup 在 ISCC
+  之后签。开发证书只在本机可信，正式分发要换 CA 证书。
 - **扩展授信**：安装器投放的官方 feature 包带 `.trusted` 标记（`mods/trust.py`），
   与全局 `allow_feature_mods` 并列；loader 与 `ui/app.py` 只认 `mod.enabled`，
   不许再各自复读全局开关。

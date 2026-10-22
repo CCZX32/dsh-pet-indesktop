@@ -50,3 +50,4 @@
 | L035 | 2026-10-22 | 编号统一 | 历史批次改名 H1–H8.4，P0–P6 只表示未来交付阶段；ROADMAP §0 加换算表，SPEC/LOG-INDEX/INDEX 同步。 | numbering、H series、P0–P6、ROADMAP §0、mapping |
 | L036 | 2026-10-22 | P3 流式/窗口/截图/热键 | Core 流式 SSE、ChatPort 聊天窗口、内存截图端口与四条可并存热键；菜单/设置同步。 | stream_chat、ChatPort、ChatWindow、ScreenPort、hotkeys、ai 快捷键 |
 | L037 | 2026-10-22 | P3 ai.chat 扩展 | host-only AI 对话扩展（prompt/路由/截图提问/设置页）+ 安装器可选任务。 | ai.chat、host-only、prompt、vision、installer、opt-in |
+| L038 | 2026-10-22 | 构建签名/打包收尾 | 本机开发证书签名 exe/setup（SAC 4551 拦截），构建脚本支持 -SignThumbprint，P3 安装包产出并验证。 | code signing、Smart App Control、4551、SignThumbprint、ISCC、setup |

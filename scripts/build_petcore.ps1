@@ -2,10 +2,16 @@
 # 用法：
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 -Clean
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 -Clean -Installer
+#   # 代码签名（Smart App Control / SmartScreen 会拦截未签名的构建产物）：
+#   pwsh ... -Clean -Installer -SignThumbprint <证书指纹>
+#   证书需在 Cert:\CurrentUser\My，并把公钥导入 CurrentUser\Root + TrustedPublisher；
+#   见 docs/ONEDIR_PACKAGING.md「构建产物签名」。
 param(
     [switch]$Clean,
     [switch]$Installer,
-    [switch]$Console
+    [switch]$Console,
+    [string]$SignThumbprint = "",
+    [string]$TimestampServer = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +21,23 @@ Set-Location $root
 $python = Join-Path $root ".venv/Scripts/python.exe"
 if (-not (Test-Path $python)) {
     throw "missing .venv/Scripts/python.exe; create the venv first"
+}
+
+function Sign-Artifact([string]$Path) {
+    if (-not $SignThumbprint) { return }
+    if (-not (Test-Path $Path)) { throw "cannot sign missing file: $Path" }
+    $cert = Get-Item "Cert:\CurrentUser\My\$SignThumbprint" -ErrorAction Stop
+    try {
+        $sig = Set-AuthenticodeSignature -FilePath $Path -Certificate $cert `
+            -HashAlgorithm SHA256 -TimestampServer $TimestampServer
+    } catch {
+        Write-Host "timestamp server unavailable, signing without timestamp: $($_.Exception.Message)"
+        $sig = Set-AuthenticodeSignature -FilePath $Path -Certificate $cert -HashAlgorithm SHA256
+    }
+    if ($sig.Status -ne "Valid") {
+        throw "signature invalid for $Path : $($sig.Status) $($sig.StatusMessage)"
+    }
+    Write-Host "signed: $Path ($($cert.Subject))"
 }
 
 $pyiArgs = @(
@@ -64,6 +87,9 @@ if (-not (Test-Path $exe)) {
     throw "missing build output: $exe"
 }
 
+# Smart App Control/SmartScreen 会拦截未签名的新构建：先签名再冒烟。
+Sign-Artifact $exe
+
 Write-Host "== smoke --check =="
 & $exe --check --out "$root/dist/check.json"
 if ($LASTEXITCODE -ne 0) {
@@ -82,5 +108,7 @@ if ($Installer) {
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }
-    Write-Host "installer: $root/dist/dsh-pet-core-setup.exe"
+    $setup = Join-Path $root "dist/dsh-pet-core-setup.exe"
+    Sign-Artifact $setup
+    Write-Host "installer: $setup"
 }

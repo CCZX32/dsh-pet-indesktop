@@ -440,4 +440,7 @@ petcore/
 - **AI 扩展**：`examples/petcore-mods/ai.chat` 是参考实现（host-only）：prompt/人格/
   路由在 mod，传输/窗口/密钥在 core；安装向导提供可勾选项（默认不勾）。无扩展时
   菜单/热键会明确提示「AI 扩展未安装」。
+- **打包签名**：构建脚本支持 `-SignThumbprint`（开发证书见
+  `scripts/make_dev_signing_cert.ps1`）；exe 在 `--check` 前签名，setup 在 ISCC 后签名。
+  未签名产物会被本机 Smart App Control 拦下（4551），这不是代码问题。
 - **未做**：OCR、翻译、框选、主动识屏、Agent、TTS（P4）。

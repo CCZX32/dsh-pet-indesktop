@@ -95,31 +95,28 @@ python -m petcore --check         → exit 0
 - 无扩展时：`run_feature_command` 返回 False 并气泡提示「AI 扩展未安装」。
 - Worker 失败：`WorkerNoticePort` 把 on_error/异常退出转成气泡提示（有测试）。
 
-**打包验证（受阻，环境原因）**
+**打包与签名（已完成）**
 
-`scripts/build_petcore.ps1 -Installer` 的 PyInstaller 阶段成功，但随后的
-`--check` 冒烟启动失败。定位证据：
+根因是环境：本机 **Smart App Control** 拦截未签名的新构建
+（`WinError 4551 = "An Application Control policy has blocked this file."`），
+PyInstaller 的空 hello 程序同样被拦，与 petcore 代码无关。解决方式：
+
+- 新增 `scripts/make_dev_signing_cert.ps1`：创建本机开发证书（CurrentUser\My），
+  把公钥导入 `CurrentUser\Root` + `CurrentUser\TrustedPublisher`（不需要管理员）。
+- `scripts/build_petcore.ps1` 新增 `-SignThumbprint`：**exe 在 `--check` 之前签名**，
+  setup 在 ISCC 之后签名；时间戳服务器不可用时退回无时间戳签名并给出提示。
+- 签名后 Smart App Control 放行。
 
 ```text
-WinError 4551 -> "An Application Control policy has blocked this file."
-Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy
-  VerifiedAndReputablePolicyState = 1   # Smart App Control 强制开启
+dsh-pet-core.exe    | Valid | CN=DSH Pet Core Dev, O=DSH Pet, C=CN
+dsh-pet-core-setup.exe | Valid | CN=DSH Pet Core Dev, O=DSH Pet, C=CN
+setup: 194,139,120 字节（ISCC 112.953s）
+packaged --check: exit 0, menu_template=json, diagnostics=[]
+ai.chat 安装到临时数据根后 --check: mods=['ai.chat'], diagnostics=[]
 ```
 
-对照实验：`C:\Windows\System32
-otepad.exe` 复制到仓库目录后可正常启动；
-用 `pyinstaller --onedir --windowed` 构建的**空 hello 程序**同样被拦；
-仓库里 14:59 构建的旧 setup 同样被拦。结论：**本机 Smart App Control 拦截所有
-未签名的新构建可执行文件**，与 petcore 代码/打包配置无关。
-
-因此：
-
-- 源码级验证全部通过（1019 passed / ruff / `python -m petcore --check` exit 0）。
-- **没有产出 P3 安装包**；`dist/dsh-pet-core-setup.exe` 仍是 14:59 的旧产物（P1/P2），
-  不要用它验收本阶段。
-- 解除方式（需用户决定）：关闭 Smart App Control（Windows 设置 → 隐私和安全性 →
-  Windows 安全中心 → 应用和浏览器控制 → 智能应用控制），或对构建产物做代码签名。
-  本轮不修改系统安全设置。
+边界：这是**本机开发证书**，别的机器不信任它；正式分发必须换 CA 证书。
+完整安装向导 E2E（升级/卸载）未在本机执行，避免影响现有安装。
 
 **未验证 / 限制**
 

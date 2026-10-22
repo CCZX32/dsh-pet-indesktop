@@ -1349,7 +1349,7 @@ GPT 的 P0–P6 计划与历史 P1-A…P8.4 重名不同义（新 P1=配置作�
 - 对照：复制到仓库目录的 notepad 可启动；PyInstaller 构建的空 hello 程序同样被拦；
   旧 setup 同样被拦。与 petcore 代码无关。
 - 结论：本轮**没有产出 P3 安装包**；`dist/dsh-pet-core-setup.exe` 仍是 14:59 的旧产物。
-  解除需用户关闭 Smart App Control 或给产物签名。
+  解除需用户关闭 Smart App Control 或给产物签名。**（L038 已用本机开发证书签名解决。）**
 
 **未验证**
 
@@ -1380,3 +1380,36 @@ GPT 的 P0–P6 计划与历史 P1-A…P8.4 重名不同义（新 P1=配置作�
 **未验证**
 
 - 真实模型下的多轮对话质量；视觉模型对 367KB 截图的接受度（不同服务上限不同）。
+
+## L038 · 2026-10-22 · 构建产物签名与 P3 打包收尾
+
+**改动**
+
+- `scripts/make_dev_signing_cert.ps1`（新）：创建本机开发用代码签名证书
+  （`CN=DSH Pet Core Dev`，RSA 3072 / SHA256，3 年），公钥导入
+  `CurrentUser\Root` + `CurrentUser\TrustedPublisher`；`-Remove` 可撤销信任。
+- `scripts/build_petcore.ps1`：新增 `-SignThumbprint` 与 `-TimestampServer`；
+  exe 在 `--check` 冒烟前签名，setup 在 ISCC 之后签名；时间戳失败退回无时间戳，
+  签名状态非 Valid 直接报错。
+- `petcore/README.md`：补「签名后构建」两条命令。
+- `petcore/AGENTS.md`：新增红线（未签名产物会被 Smart App Control 拦截；签名在
+  `--check` 之前）。
+- `docs/PETCORE-SPEC.md` §16：补打包签名口径。
+- `docs/PR-REPORT-PETCORE-P3-AI-2026-10-22.md`：「打包验证（受阻）」改写为
+  「打包与签名（已完成）」，附签名状态与安装路径验证。
+
+**验证**
+
+- 签名状态：`dsh-pet-core.exe` / `dsh-pet-core-setup.exe` 均 `Valid`，
+  `CN=DSH Pet Core Dev`。
+- 打包：ISCC 112.953s，setup **194,139,120 字节**；打包后 `--check` exit 0、
+  `menu_template=json`、`diagnostics=[]`。
+- 扩展安装路径：`--root <临时目录> mods install examples/petcore-mods/ai.chat`
+  → `installed ai.chat 1.0.0`；`--check` 输出 `mods=['ai.chat']`、`diagnostics=[]`。
+- 源码门禁：1019 passed（未改代码，签名只动构建脚本/文档）。
+
+**未验证 / 边界**
+
+- 开发证书只在本机可信；正式分发必须换成 CA 证书。
+- 完整安装向导 E2E（安装/升级/卸载）未在本机跑，避免影响现有 `E:\dsh-pet-core` 安装。
+- 真实 DeepSeek / 视觉模型端到端仍未跑（无可用密钥）。
