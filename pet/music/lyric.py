@@ -63,6 +63,12 @@ _UA = (
 _TIME_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
 # 只有标签、没有时间戳的行，如 [ti:歌名] —— 按 LRC 规范跳过。
 _TAG_RE = re.compile(r"^\[[a-zA-Z#]+:[^\]]*\]\s*$")
+#: 整行就是制作信息的「歌词行」（汽水/网易云等源把 credits 写成带时间戳的行，
+#: 显示出来就是「第一句：作词 / 作曲 / 编曲……」还挤掉对齐锚点——issue #338、
+#: #331 同族）。只过滤「整行全是 credits」的行，唱到一半提到作词的不会误伤。
+_CREDIT_RE = re.compile(
+    r"^(作词|作曲|编曲|制作人|制作|监制|出品|录音|混音|母带|和声|吉他|贝斯|鼓|键盘|"
+    r"企划|统筹|视觉|封面|词|曲|OP|SP)\b\s*[:：]")
 # [offset:±毫秒] 需要叠加到所有时间点上。
 _OFFSET_RE = re.compile(r"\[offset:\s*([+-]?\d+)\s*\]", re.IGNORECASE)
 
@@ -117,9 +123,8 @@ def parse_lrc(text: str) -> list[LyricLine]:
     - 一行有多个时间戳时（``[00:01][00:05]同一句``）展开成多条。
     - 应用 ``[offset:]`` 偏移。
     - 保留空文本行（间奏），调用方据此可让气泡保持上一句或清空。
-
-    注意：**不**过滤"带时间戳但不是歌词"的元信息行（如 ``[00:05] 词：方文山``），
-    这是产品上明确接受的行为。
+    - 过滤整行是制作信息的行（``[00:05] 词：方文山`` 这类带时间戳的 credits，
+      issue #338/#331；此前「明确接受」的口径被两位用户的实机反馈推翻）。
     """
     offset_sec = 0.0
     match = _OFFSET_RE.search(text)
@@ -142,6 +147,8 @@ def parse_lrc(text: str) -> list[LyricLine]:
             continue
         # 时间戳之后的剩余内容即歌词文本。
         body = stripped[stamps[-1].end():].strip()
+        if body and _CREDIT_RE.match(body):
+            continue  # 整行是制作信息（带时间戳的 credits）：不是歌词
         for stamp in stamps:
             at = _parse_stamp(stamp.group(1), stamp.group(2), stamp.group(3)) + offset_sec
             lines.append(LyricLine(at=max(0.0, at), text=body))

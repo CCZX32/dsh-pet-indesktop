@@ -2,6 +2,8 @@
 """Compact macOS project-menu appearance used exclusively by modern layout."""
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QMenu, QWidget
@@ -86,6 +88,13 @@ def apply_modern_menu_style(menu: QMenu, appearance: dict | None = None) -> None
     menu.setProperty("modernAppearance", appearance)
     menu.setProperty("modernDark", dark)
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    if sys.platform == "win32":
+        # QMenu 是 Qt::Popup，窗口标志里没有 Qt::FramelessWindowHint；而 Windows QPA
+        # 的 setWindowLayered() 只在「没有原生边框」（WS_CHILD 或 FramelessWindowHint）
+        # 时才给带 alpha 的表面挂 WS_EX_LAYERED。少了它，圆角之外的透明像素会被当成
+        # 不透明黑，菜单四角就是黑边。补上之后窗口才走逐像素 alpha，系统投影也才正常。
+        # （根因分析致谢社区 PR #341 @nolocus）
+        menu.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
     font_size = max(10, min(18, int(appearance.get("ui_font_size") or 13)))
     font = system_ui_font(font_size, QFont.Weight.Normal)
     requested_font = str(appearance.get("ui_font") or "system")

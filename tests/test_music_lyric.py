@@ -48,14 +48,17 @@ def test_parse_lrc_skips_tag_only_lines():
     assert lines[0].text == "正文"
 
 
-def test_parse_lrc_keeps_timestamped_metadata_lines():
-    """带时间戳的元信息行**不过滤**——这是产品上明确接受的行为。
-
-    QQ音乐歌词开头就是「曲名 - 歌手」和「词：xxx」，预期会显示出来。
-    """
-    text = "[00:00.00]曲名 - 歌手\n[00:05.55]词：方文山\n[00:22.23]天涯的尽头是风沙"
+def test_parse_lrc_drops_timestamped_credit_lines_compact():
+    """带时间戳的 credits 行（「词：方文山」「编曲：xx」等整行制作信息）被过滤
+    ——issue #338/#331：credits 被当歌词显示且挤掉对齐锚点。但「曲名 - 歌手」
+    这类非 credits 形态的开头行保留（QQ音乐歌词开头的惯例）。"""
+    text = (
+        "[00:00.00]曲名 - 歌手\n"
+        "[00:05.55]词：方文山\n"
+        "[00:22.23]天涯的尽头是风沙"
+    )
     lines = parse_lrc(text)
-    assert [x.text for x in lines] == ["曲名 - 歌手", "词：方文山", "天涯的尽头是风沙"]
+    assert [x.text for x in lines] == ["曲名 - 歌手", "天涯的尽头是风沙"]
 
 
 def test_parse_lrc_multiple_stamps_on_one_line():
@@ -2763,3 +2766,27 @@ def test_name_matches_feat_split_has_both_word_boundaries():
     assert music_lyric._name_matches("FLOW feat.GRANRODEO", "FLOW、GRANRODEO")
     assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")
     assert music_lyric._name_matches("FLOW ft. GRANRODEO", "FLOW/GRANRODEO")
+
+
+def test_parse_lrc_drops_timestamped_credit_lines():
+    """带时间戳的 credits 行（汽水/网易云源的「作词/作曲/编曲」等）不再被当歌词
+    ——issue #338（credits 被显示）/ #331（对齐锚点被挤掉）同族。整行都是
+    credits 才过滤；真正唱到「作词」的歌词行保留。"""
+    from pet.music.lyric import parse_lrc
+
+    text = "\n".join([
+        "[ti:歌名]",
+        "[00:00.50] 作词：某某",
+        "[00:01.00] 作曲：某某",
+        "[00:01.50] 编曲：某某工作室",
+        "[00:02.00] 真正的第一句",
+        "[00:05.00] 我唱到一半",
+        "[00:08.00] 这首歌讲作词的故事",  # 含「作词」但整行不是 credits → 保留
+        "[00:10.00] ",  # 间奏空行保留
+    ])
+    lines = parse_lrc(text)
+    texts = [line.text for line in lines]
+    assert "真正的第一句" in texts[0]
+    assert "这首歌讲作词的故事" in texts
+    assert not any("作词：" in t or "作曲：" in t or "编曲：" in t for t in texts)
+    assert lines[0].at == pytest.approx(2.0)
