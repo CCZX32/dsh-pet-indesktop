@@ -108,10 +108,10 @@ class TestBundleChecks:
             (menu / "modern.json").write_bytes("新版菜单".encode("gbk"))
         else:
             (menu / "modern.json").write_text("新版菜单", encoding="utf-8")
-        # 中文素材文件名
-        videos = root / "assets" / "characters" / "shenshen" / "videos" / "random"
+        # 中文素材文件名（哨兵取 core 闭包内的 click 段——random/events 不进包）
+        videos = root / "assets" / "characters" / "shenshen" / "videos" / "click"
         videos.mkdir(parents=True)
-        (videos / "吃Token.webm").write_bytes(b"fake")
+        (videos / "点击回应-挠痒咯咯笑.webm").write_bytes(b"fake")
         return root
 
     def test_clean_bundle_passes(self, checker, tmp_path):
@@ -131,18 +131,18 @@ class TestBundleChecks:
 
     def test_missing_chinese_asset_fails(self, checker, tmp_path):
         root = self._build_bundle(tmp_path)
-        (root / "assets" / "characters" / "shenshen" / "videos" / "random" / "吃Token.webm").unlink()
+        (root / "assets" / "characters" / "shenshen" / "videos" / "click" / "点击回应-挠痒咯咯笑.webm").unlink()
         errors = checker.check_bundle(root)
-        assert any("吃Token" in error for error in errors)
+        assert any("挠痒咯咯笑" in error for error in errors)
 
     def test_directory_named_with_needle_does_not_count_as_asset(self, checker, tmp_path):
         root = self._build_bundle(tmp_path)
-        asset = root / "assets" / "characters" / "shenshen" / "videos" / "random" / "吃Token.webm"
+        asset = root / "assets" / "characters" / "shenshen" / "videos" / "click" / "点击回应-挠痒咯咯笑.webm"
         asset.unlink()
         # 只有同名目录、没有实际文件时，仍必须判定为缺失（防止目录名误报存在）
-        asset.parent.joinpath("吃Token").mkdir()
+        asset.parent.joinpath("挠痒咯咯笑").mkdir()
         errors = checker.check_bundle(root)
-        assert any("吃Token" in error for error in errors)
+        assert any("挠痒咯咯笑" in error for error in errors)
 
 
 # Linux 回归：Fcitx 会话必须保留 fcitx 输入法上下文，供随包的匹配 Qt 插件加载。

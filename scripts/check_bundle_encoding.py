@@ -41,8 +41,10 @@ EXPECTED_CODE_LITERALS = (
     "DSH 桥接插件安装失败",
 )
 
-# 必须原样存在的包内中文文件名（webm 变体；gif 变体同名换扩展名）
-EXPECTED_FILENAME_NEEDLES = ("吃Token",)
+# 必须原样存在的包内中文文件名（webm 变体；gif 变体同名换扩展名）。
+# 注意只能取 core 闭包（click/drag/idle/move/turn）里的名字——发布形态是
+# 精简内置，random/events 已不进包（2026-10-22）。
+EXPECTED_FILENAME_NEEDLES = ("挠痒咯咯笑",)
 
 # 必须能按 UTF-8 严格解码的文本资源扩展名（webm/音频等二进制不在此列）
 TEXT_SUFFIXES = (".json", ".qss", ".txt", ".md")
