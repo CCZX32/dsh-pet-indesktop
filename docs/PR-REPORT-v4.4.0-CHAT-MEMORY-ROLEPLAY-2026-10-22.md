@@ -4,7 +4,7 @@
 - 日期：2026-10-22
 - 范围：AI 对话全局记忆四层化与按需注入、后台静默提炼、场景扮演（引导 + 场景卡 + 动作段渲染）、`markdown_view` URL/区间重写、多屏位置记忆（#319 后续）
 
-## 一、diff 规模
+## 一、修改文件说明（diff 规模）
 
 `git diff origin/main...HEAD`：26 文件，+4889/−142（其中测试约 +2900）。产品代码主体：
 
@@ -17,7 +17,7 @@
 | `pet/chat/prompt.py` | +70 级 | 扮演引导八条 + 场景卡注入 |
 | `pet/overlay_shell.py` | +121/−14 | 归属屏晚到补恢复、等待期归属保护、关机落盘、拒写日志升级 |
 
-## 二、性能实测（QT_QPA_PLATFORM=offscreen，本机 Windows / Python 3.13）
+## 二、性能分析（QT_QPA_PLATFORM=offscreen，本机 Windows / Python 3.13）
 
 | 路径 | 实测 |
 |---|---|
@@ -48,6 +48,6 @@
 - #319 修复合入后受影响面回归（overlay/screen/session/geometry 关键字扫）：1856 passed。
 - 终审修复后聚焦集（memory/recall/extract/markdown/roleplay）：234 passed，ruff 全绿；新测试均先红后绿。
 
-## 五、实机记录
+## 五、实机运行记录
 
 待用户实机验收（清单 `4.4.0验收清单.md`）：扮演场景活性、自动提炼静默性、链接可点、多屏重启位置记忆（真双屏热插拔无法自动验证，验收含此项）。**验收通过前不打 tag 不发布。**
