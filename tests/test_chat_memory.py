@@ -25,11 +25,13 @@ from pet.chat.memory import (
     MAX_ENTRIES,
     MAX_TOTAL_CHARS,
     ChatMemory,
+    _hit_queue_for,
     injection_text,
     memory_path,
     parse_remember_command,
     render_injection,
 )
+from pet.chat.memory_recall import TOPIC_ARCHIVE_DAYS, is_archived, recall
 from pet.chat.prompt import PromptBuilder
 
 
@@ -194,6 +196,65 @@ def test_clear_removes_file(tmp_path):
     assert mem.clear() is True
     assert not path.exists()
     assert mem.clear() is True  # 本来就不存在 = 已清空
+
+
+# ---------------------------------------------------------------- v2c M1/M3
+def test_auto_apply_ops_cannot_unarchive_topic_by_changing_layer(tmp_path):
+    """M1：自动提炼把归档 topic 改层成 fact 不能绕过归档（仍不注入）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    assert mem.set_archived(topic["id"], True) is True
+
+    assert mem.apply_ops(
+        [{"op": "ADD", "text": "那个鉴权 bug 用 token", "layer": "fact"}],
+        source="auto",
+    ) is True
+
+    loaded = mem.load()[0]
+    assert loaded["layer"] == "topic"  # explicit_layer 被忽略
+    assert loaded["archived"] is True  # 归档态未丢
+    assert is_archived(loaded) is True
+    assert recall([loaded], "token", turn_index=2).entries == ()
+
+
+def test_auto_apply_ops_does_not_refresh_implicit_stale_topic(tmp_path):
+    """M3：盘上还没有 archived 键的隐式超期 topic，自动重申也不得复活。"""
+    path = tmp_path / "memory.json"
+    stale_at = datetime.now().astimezone() - timedelta(days=TOPIC_ARCHIVE_DAYS + 1)
+    old = ChatMemory(path, clock=lambda: stale_at)
+    topic, _ = old.add("那个鉴权 bug 用 token", layer="topic")
+    before = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert "archived" not in before  # 隐式超期：盘上没有 archived 键
+
+    later = ChatMemory(path, clock=lambda: datetime.now().astimezone())
+    assert later.apply_ops(
+        [{"op": "ADD", "text": "那个鉴权 bug 用 token", "layer": "fact"}],
+        source="auto",
+    ) is True
+
+    after = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert after["layer"] == "topic"
+    assert after["last_hit_at"] == before["last_hit_at"]
+    assert after["updated_at"] == before["updated_at"]
+    assert "archived" not in after
+    assert is_archived(after) is True
+    assert recall([later.load()[0]], "token", turn_index=2).entries == ()
+
+
+def test_auto_apply_ops_can_still_forget_archived_topic(tmp_path):
+    """M1：FORGET（删除）是允许的——用户/模型要求忘掉归档条目。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个鉴权 bug 用 token", layer="topic")
+    assert mem.set_archived(topic["id"], True) is True
+    assert mem.apply_ops(
+        [{"op": "FORGET", "text": "那个鉴权 bug 用 token"}], source="auto") is True
+    assert mem.load() == []
 
 
 # ---------------------------------------------------------------- 指令解析
@@ -606,6 +667,62 @@ def test_memory_manager_groups_layers_changes_layer_and_restores_topic(tmp_path,
             dialog.deleteLater()
     finally:
         page.deleteLater()
+
+
+# ---------------------------------------------------------------- v2c L1/L2
+def test_hit_write_failure_keeps_pending_and_retries(tmp_path, monkeypatch):
+    """L1：写盘失败不置 _last_write（不进 60s 去抖），批次留在 _pending 重试。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=_clock())
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    hit_at = datetime.now().astimezone()
+
+    real_write = ChatMemory._write
+
+    def broken(self, entries):
+        return False
+
+    monkeypatch.setattr(ChatMemory, "_write", broken)
+    mem.note_recalled([topic["id"]], now=hit_at)
+    assert mem.flush_hits(0.5) is False
+
+    queue = _hit_queue_for(path)
+    with queue._cond:
+        assert topic["id"] in queue._pending
+        assert topic["id"] not in queue._last_write
+
+    monkeypatch.setattr(ChatMemory, "_write", real_write)
+    assert mem.flush_hits(5.0) is True
+    persisted = next(
+        e for e in json.loads(path.read_text(encoding="utf-8"))["entries"]
+        if e["id"] == topic["id"])
+    assert persisted["last_hit_at"] == hit_at.isoformat()
+
+
+def test_about_to_quit_flushes_chat_memory_hits(tmp_path, monkeypatch):
+    """L2：aboutToQuit 收口会调用 flush_pending_hits（带超时），不再丢去抖窗口。"""
+    from pet import app as app_mod
+    from pet.chat import memory as memory_mod
+    from pet.chat import session_store as session_store_mod
+    from pet.config import Config
+
+    calls: list[float] = []
+    monkeypatch.setattr(
+        memory_mod, "flush_pending_hits",
+        lambda timeout=2.0: calls.append(timeout) or 0,
+    )
+    # 退出收口的会话写盘 worker 与记忆 flush 无关，避免永久关闭影响同进程后续用例。
+    monkeypatch.setattr(session_store_mod, "close_all_writers", lambda *a, **k: True)
+
+    shell = app_mod.AppShell(_qapp(), Config(tmp_path), enable_chat=False)
+    shell._teardown_fps_capture = lambda **kwargs: None
+    shell._teardown_config_watcher = lambda: None
+    try:
+        shell._on_about_to_quit()
+    finally:
+        app_mod.AppShell._shutdown_live_for_tests()
+
+    assert calls == [2.0], f"aboutToQuit 未调用记忆 flush：{calls}"
 
 
 def _yes_button(_buttons):

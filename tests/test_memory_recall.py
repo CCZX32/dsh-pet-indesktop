@@ -30,6 +30,7 @@ from pet.chat.memory import (
 from pet.chat.memory_recall import (
     HALF_LIFE_DAYS,
     MAX_KEYWORDS,
+    MIN_SCORE,
     RECALL_TOP_K,
     TOPIC_ARCHIVE_DAYS,
     _now,
@@ -185,11 +186,12 @@ def test_score_grows_with_idf():
 
 
 def test_coverage_favors_entry_with_fewer_unmatched_keywords():
+    """v2c M2：长度归一（BM25）取代 coverage——短条目不再因分母小占便宜。"""
     entries = [
         _entry("focused", keywords=["alpha"]),
         _entry("diffuse", keywords=["alpha", "beta"]),
     ]
-    # beta 在另一条里也出现，idf 相同口径下 focused 的覆盖率更高
+    # beta 在另一条里也出现，idf 相同口径下 focused 的长度归一更低
     scores = _scores(entries, "alpha")
     assert scores["focused"] > scores["diffuse"]
 
@@ -206,7 +208,13 @@ def test_importance_manual_and_lesson_are_weighted():
     auto = _entry("自动", keywords=["alpha"], source="auto")
     manual = _entry("手动", keywords=["alpha"], source="manual")
     lesson = _entry("教训", layer="lesson", keywords=["alpha"], source="auto")
-    scores = _scores([auto, manual, lesson], "alpha")
+    # MIN_SCORE=0.15：alpha 在小语料里 df=3/3，idf 会被压到 0.15 以下；
+    # 加无关条目把 idf 抬回可判定区间，再比较 importance。
+    noise = [
+        _entry(f"噪声-{index}", keywords=[f"noise{index}"])
+        for index in range(20)
+    ]
+    scores = _scores([auto, manual, lesson, *noise], "alpha")
     assert scores["手动"] > scores["自动"]
     assert scores["教训"] > scores["自动"]
 
@@ -231,6 +239,157 @@ def test_now_dead_branch_merged():
     aware = naive.astimezone()
     assert _now(naive) == aware
     assert _now(aware) == aware
+
+
+# ---------------------------------------------------------------- v2c M2：BM25
+#: 盲审反例的长条目关键词（48 个，前 6 个覆盖 cap=6 的对比）。
+_LONG_ENTRY_KEYWORDS = [
+    "鉴权", "token", "登录", "权限", "刷新", "过期", "失败", "重试",
+    "接口", "服务", "证书", "会话", "缓存", "网关", "报错", "堆栈",
+    "复现", "修复", "验证", "回滚", "配置", "环境", "测试", "限流",
+    "熔断", "降级", "监控", "告警", "链路", "超时", "并发", "数据库",
+    "索引", "迁移", "备份", "恢复", "部署", "容器", "镜像", "启动",
+    "停止", "健康", "检查", "依赖", "升级", "兼容", "文档", "回放",
+]
+assert len(_LONG_ENTRY_KEYWORDS) == MAX_KEYWORDS == 48
+
+
+@pytest.mark.parametrize("cap", [6, MAX_KEYWORDS])
+def test_bm25_length_normalization_keeps_long_entry_first(cap):
+    """M2 盲审反例：长条目 + 三条两字短条目，查询同时命中。
+
+    旧 coverage 下长条目 5/48 对短条目 1.0；BM25 长度归一后长条目必须
+    排第 1（不只是进 top-3），且 cap=6 / 48 两遍都不能反转。
+    """
+    long_entry = _entry(
+        "关于那个鉴权 bug 的完整记录",
+        keywords=_LONG_ENTRY_KEYWORDS[:cap],
+    )
+    shorts = [_entry(text, keywords=[text]) for text in ("发版", "日志", "灰度")]
+    entries = [long_entry, *shorts]
+    query = "鉴权 token 登录 发版 日志 灰度"
+    ranked = rank_entries(entries, query, now=NOW)
+    assert ranked[0][1]["text"] == long_entry["text"], (
+        f"cap={cap} 时长条目被短条目挤出第 1：{[e['text'] for _s, e in ranked]}")
+    assert all(ranked[0][0] > score for score, _entry_ in ranked[1:])
+    result = recall(entries, query, now=NOW)
+    assert result.entries[0]["text"] == long_entry["text"]
+
+
+# ---------------------------------------------------------------- v2c M4：误注入
+def test_single_ascii_and_version_parts_are_not_keywords():
+    """M4：单字符 ASCII 不入关键词；4.4.0 只留整串 + 含点分段。"""
+    keywords = extract_keywords("版本 4.4.0 a b 他说第 4 点")
+    assert "4.4.0" in keywords
+    assert "4.4" in keywords
+    assert "4.0" in keywords
+    assert "4" not in keywords
+    assert "0" not in keywords
+    assert "a" not in keywords
+    assert "b" not in keywords
+
+
+def test_version_entry_not_hit_by_bare_number_but_hit_by_full_version():
+    """M4：4.4.0 的条目不得被「第 4 点」命中，但必须被完整版本号命中。"""
+    version = _entry("版本 4.4.0 修了几个崩溃")
+    assert recall([version], "他说第 4 点还要再确认一下", now=NOW).entries == ()
+    result = recall([version], "4.4.0 还有问题吗", now=NOW)
+    assert [e["text"] for e in result.entries] == ["版本 4.4.0 修了几个崩溃"]
+
+
+def test_single_char_and_common_idf_below_min_score_are_gated():
+    """M4：命中词至少一个长度 ≥2，且命中 idf 和 ≥ MIN_SCORE。"""
+    assert rank_entries(
+        [_entry("单字", keywords=["点"])], "点", now=NOW) == []
+    common = [_entry(f"常见-{index}", keywords=["发版"]) for index in range(30)]
+    assert rank_entries(common, "发版", now=NOW) == []
+    assert MIN_SCORE == 0.15
+
+
+_CHITCHAT_MEMORIES = [
+    "我不吃辣，口味清淡",
+    "我通常十一点前就睡了",
+    "我在准备十月底的考试",
+    "生日是三月十七号",
+    "我养了只猫，叫团子",
+    "我住在杭州，周末常去西湖",
+    "我在做后端开发，主要写 Python",
+    "我讨厌别人迟到",
+    "我喝咖啡不加糖",
+    "我每周三有日语课",
+    "版本 4.4.0 修了几个崩溃",
+    "上次把配置文件删了，别再用 rm -rf",
+    "显示器是 27 寸 4K，刷新率 144 Hz",
+    "Python 版本是 3.11",
+    "Qt 版本是 6.5",
+    "我在控制体重，晚饭不吃主食",
+    "手机尾号是 8848",
+    "我周末常打羽毛球",
+    "我对花生过敏",
+    "我计划十二月去日本旅行",
+]
+
+_CHITCHAT_LINES = [
+    "今天天气怎么样",
+    "晚上吃什么好呢",
+    "他说第 4 点还要再确认一下",
+    "你能讲个笑话吗",
+    "我有点累了",
+    "刚才那个电影好看吗",
+    "帮我查一下明天几点日出",
+    "最近有什么新闻",
+    "你觉得这个颜色怎么样",
+    "我找不到钥匙了",
+    "我 3 点还有个会",
+    "外面下雨了吗",
+    "这首歌叫什么名字",
+    "我明天要早起",
+    "这个要等 5 分钟",
+    "这个游戏好玩吗",
+    "我刚刚看到一只鸟",
+    "你能推荐一本书吗",
+    "第 1 步怎么做",
+    "我买了新鞋子",
+    "先做 2 个版本试试",
+    "帮我写一句祝福语",
+    "今天工作好忙",
+    "6 点下班",
+    "我想换个发型",
+    "这个功能怎么用",
+    "我的电脑有点卡",
+    "你最喜欢什么颜色",
+    "明天会更好吗",
+    "随便聊聊吧",
+]
+
+
+def test_chitchat_false_injection_rate_stays_at_baseline():
+    """M4 盲审构造：20 条真实风格记忆 × 30 句无关闲聊，注入轮数 ≤ 3/30。
+
+    盲审脚本实测放宽关键词后 7/30；本机用同规模语料重建（含多个版本号与
+    带数字的闲聊）时旧实现 5/30、修复后 1/30（只剩「版本」这一处真实词命中）。
+    """
+    memories = [_entry(text) for text in _CHITCHAT_MEMORIES]
+    injected = [
+        line for line in _CHITCHAT_LINES
+        if recall(memories, line, now=NOW, turn_index=2).entries
+    ]
+    assert len(injected) <= 3, f"误注入 {len(injected)}/30：{injected}"
+
+
+# ---------------------------------------------------------------- v2c L3：超长查询
+def test_extract_keywords_long_cjk_query_is_bounded_and_fast():
+    """L3：100k CJK 查询达到 limit 立即停，关键词数 ≤ limit 且耗时 <3ms。"""
+    text = "测" * 100_000
+    timings: list[float] = []
+    keywords: list[str] = []
+    for _ in range(5):
+        started = time.perf_counter()
+        keywords = extract_keywords(text, limit=64)
+        timings.append(time.perf_counter() - started)
+    elapsed = min(timings)
+    assert elapsed < 0.003, f"100k CJK 查询耗时 {elapsed * 1000:.3f}ms"
+    assert len(keywords) <= 64
 
 
 # ---------------------------------------------------------------- 命中 / 已见

@@ -129,6 +129,9 @@ _REPLACE_ATTEMPTS = 5
 
 #: 命中记录落盘去抖：同一 topic 两次写盘至少隔 60s（内存缓存立即可见）。
 HIT_WRITE_DEBOUNCE_SECONDS = 60.0
+#: 命中写盘失败后的短退避：失败批次留在 _pending 等下一轮，但不许忙转
+#: （锁超时 / 磁盘错误时立即重试会烧满 CPU）。
+_FAIL_RETRY_SECONDS = 1.0
 #: 归档巡检最小间隔：无 topic 命中的轮次只做内存判断，不每轮读盘。
 ARCHIVE_SWEEP_SECONDS = 60.0
 #: 进程内 last_hit_at 缓存上限（按条目 id，超限丢最老的写入记录）。
@@ -388,16 +391,31 @@ class _HitWriteQueue:
                     self._thread = None
                     self._cond.notify_all()
                     return
+            succeeded = None
             try:
-                self._write_batch(*work)
+                succeeded = self._write_batch(*work)
             except Exception:  # noqa: BLE001 - 命中记录失败只写日志
                 log.exception("对话记忆命中记录写盘失败（已静默）: %s", self.path)
             with self._cond:
                 now = time.monotonic()
-                for entry_id in work[0]:
-                    self._last_write[entry_id] = now
-                if work[1] is not None:
-                    self._last_sweep = now
+                if succeeded is True:
+                    # L1：只有真正落盘才进入 60s 去抖窗口。
+                    for entry_id in work[0]:
+                        self._last_write[entry_id] = now
+                if succeeded is not None:
+                    # 巡检已处理（含"无变化"）：同样进入 60s 低频窗口。
+                    if work[1] is not None:
+                        self._last_sweep = now
+                else:
+                    # 失败不置 _last_write（否则该命中 60s 内不再重试），
+                    # 把本批放回 _pending 等下一轮；短退避避免失败时忙转。
+                    # ``False``（条目已不存在/巡检无变化）是"无需写盘"，不是失败。
+                    for entry_id, moment in work[0].items():
+                        self._pending.setdefault(entry_id, moment)
+                    if work[1] is not None and (
+                            self._sweep_moment is None or work[1] > self._sweep_moment):
+                        self._sweep_moment = work[1]
+                    self._cond.wait(timeout=_FAIL_RETRY_SECONDS)
                 self._cond.notify_all()
 
     def _collect_locked(self) -> tuple[dict[str, datetime], datetime | None] | None:
@@ -433,7 +451,7 @@ class _HitWriteQueue:
         self,
         ids: dict[str, datetime],
         sweep_moment: datetime | None,
-    ) -> bool:
+    ) -> bool | None:
         memory = ChatMemory(self.path, clock=self._clock)
         return memory._apply_hit_batch(ids, sweep_moment)
 
@@ -457,6 +475,35 @@ def _cached_hits(path: Path) -> dict[str, datetime]:
     with _HIT_QUEUES_LOCK:
         queue = _HIT_QUEUES.get(key)
     return queue.cached_hits() if queue is not None else {}
+
+
+def flush_pending_hits(timeout: float = 2.0) -> int:
+    """退出收口：冲刷本进程所有记忆文件的命中/归档队列。
+
+    ``timeout`` 是全部队列共享的总预算；超时/单队列异常只记日志、绝不抛出
+    （退出收尾必须尽力而为）。返回干净收口的队列数。生产调用点是
+    ``pet/app.py`` 的 aboutToQuit 收口（L2：否则去抖窗口内的命中随 daemon
+    线程一起丢弃）。
+    """
+    with _HIT_QUEUES_LOCK:
+        queues = list(_HIT_QUEUES.values())
+    if not queues:
+        return 0
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    clean = 0
+    for queue in queues:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0.0:
+            log.warning("对话记忆命中队列退出前预算耗尽: %s", queue.path)
+            continue
+        try:
+            if queue.flush(remaining):
+                clean += 1
+            else:
+                log.warning("对话记忆命中队列退出前未写完: %s", queue.path)
+        except Exception:  # noqa: BLE001 - 退出路径只记日志
+            log.exception("对话记忆命中队列退出前冲刷失败: %s", queue.path)
+    return clean
 
 
 class ChatMemory:
@@ -630,7 +677,10 @@ class ChatMemory:
                         )
                         if layer_of(entry) == "topic":
                             entry["last_hit_at"] = now
-                            entry.pop("archived", None)  # 重新钉 = 恢复活跃话题
+                            # L4：手动钉 = 恢复。``add`` 是唯一手动通道，所以这里
+                            # 无条件丢掉归档标记；自动通道必须走 ``apply_ops``，
+                            # 不得改走 ``add()``（否则自动提炼会借手动通道复活归档）。
+                            entry.pop("archived", None)
                         entries.remove(entry)
                         entries.insert(0, entry)
                         self._write(entries)
@@ -669,6 +719,10 @@ class ChatMemory:
         自动提炼重申已有条目时，ops 没显式给 layer 就不覆盖原层（避免把 user
         偏好降级成 fact）。
 
+        v2c：``source != "manual"`` 时，已归档或隐式超期的条目只 +hits，不改层、
+        不刷 updated_at/last_hit_at、不改关键词（FORGET 仍可删除）；手动重申
+        保留「改层 + 恢复」语义。自动通道一律走本方法，不得改走 ``add()``。
+
         返回本次有没有真的落盘（空操作 / 读失败 / 拿不到跨进程锁 = False，
         后两种情况盘上一个字节都没动）。
         """
@@ -696,8 +750,10 @@ class ChatMemory:
                 if entries is None:
                     log.warning("对话记忆读取失败，本次不合并提炼操作: %s", self.path)
                     return False
-                now = self._clock().isoformat()
+                moment = self._clock()
+                now = moment.isoformat()
                 added: list[dict[str, Any]] = []
+                manual = str(source or "").strip().lower() == "manual"
                 for op, text, explicit_layer, keywords in normalized:
                     found = next((e for e in entries if str(e.get("text", "")) == text), None)
                     if op == "FORGET":
@@ -708,11 +764,18 @@ class ChatMemory:
                         continue
                     # ADD / UPDATE 未命中按 ADD；UPDATE 命中 = 重申
                     if found is not None:
+                        # v2c M1/M3：自动来源对「已归档 / 隐式超期」条目只允许
+                        # 重申计数（+hits），不改层、不刷 updated_at/last_hit_at、
+                        # 不改关键词——否则后台提炼一重申就把归档 topic 静默复活。
+                        # 显式归档与 is_archived 的隐式口径必须同源（M3）。
+                        if not manual and is_archived(found, moment):
+                            found["hits"] = int(found.get("hits", 0) or 0) + 1
+                            continue
                         found["updated_at"] = now
                         found["hits"] = int(found.get("hits", 0) or 0) + 1
-                        # v2b：自动来源不得解除归档（否则后台提炼一重申就把
-                        # 归档 topic 静默复活）；只有手动来源（手动钉）可以。
-                        manual = str(source or "").strip().lower() == "manual"
+                        # v2b：手动来源（手动钉）可以改层并解除归档；自动来源
+                        # 只保留「非归档条目」的现有重申语义。
+                        restored = manual and explicit_layer is not None
                         if explicit_layer is not None:
                             found["layer"] = explicit_layer
                             if manual:
@@ -724,7 +787,8 @@ class ChatMemory:
                             or _clean_keyword_list(found.get("keywords"))
                             or extract_keywords(text)
                         )
-                        if layer_of(found) == "topic" and not bool(found.get("archived")):
+                        if layer_of(found) == "topic" and (
+                                restored or not is_archived(found, moment)):
                             found["last_hit_at"] = now
                         entries.remove(found)
                         entries.insert(0, found)
@@ -834,17 +898,21 @@ class ChatMemory:
         self,
         hits: dict[str, datetime],
         sweep_moment: datetime | None,
-    ) -> bool:
-        """worker 专用：一次读改写落盘命中时间 + 超期 topic 归档；返回是否写盘。"""
+    ) -> bool | None:
+        """worker 专用：一次读改写落盘命中时间 + 超期 topic 归档。
+
+        ``True`` = 已写盘；``False`` = 无需写盘（条目已不存在/巡检无变化）；
+        ``None`` = 写盘失败（拿不到锁 / 读失败 / 写失败），调用方保留批次重试。
+        """
         with self._lock:
             qlock = QLockFile(str(self._lock_file))
             if not self._try_file_lock(qlock):
-                return False
+                return None
             try:
                 entries = self._read_entries_strict()
                 if entries is None:
                     log.warning("对话记忆读取失败，本次不记录命中: %s", self.path)
-                    return False
+                    return None
                 changed = False
                 for entry in entries:
                     entry_id = str(entry.get("id"))
@@ -856,7 +924,7 @@ class ChatMemory:
                     changed = archive_stale_topics(entries, sweep_moment) or changed
                 if not changed:
                     return False
-                return self._write(entries)
+                return True if self._write(entries) else None
             finally:
                 qlock.unlock()
 
