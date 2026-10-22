@@ -6,6 +6,10 @@
 >
 > 写入规则：每次追加 log 条目时同步加一行；`tests/test_petcore_docs.py` 校验
 > `LNNN` 一一对应。
+>
+> 编号约定：历史行里的 `P1-A…P8.4` 是旧编号，等价于
+> [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) §0 的 `H1-A…H8.4`；
+> 2026-10-22 起新计划使用 `P0–P6`，两套不要混用。
 
 | 编号 | 日期 | 批次/主题 | 一句话 | 关键词 |
 |---|---|---|---|---|
@@ -42,3 +46,5 @@
 | L031 | 2026-10-22 | P3 Core 账户/余额基础 | Core 账户服务、余额缓存/错误分类、钥匙串读取和 `ApiPort.fetch_balance()`。 | AccountService、BalanceResult、cache、keyring、ApiPort、DeepSeek |
 | L032 | 2026-10-22 | P3 每宠会话/worker 请求接缝 | 增加按 slot/角色隔离的会话存储、消息限制和 WorkerSession.request 协议接缝。 | SessionStore、ChatSession、slot、character、request、delta、done |
 | L033 | 2026-10-22 | 插件市场 v1 | 静态索引 + 多源 artifact + SHA-256 + 安装/更新/回滚 + 市场设置页 + `petcore market` CLI；npm 只留 URL 接口。 | market、index、sha256、Range、resume、backup、rollback、market-lock、page_market、allow_feature_mods |
+| L034 | 2026-10-22 | 安装器口径修正 | 5 个官方扩展恢复默认不勾选（iss `Flags: unchecked` + 测试反转），文档口径同步；顺手修正 README 的安装位置。 | opt-in、unchecked、iss、installer、examples README |
+| L035 | 2026-10-22 | 编号统一 | 历史批次改名 H1–H8.4，P0–P6 只表示未来交付阶段；ROADMAP §0 加换算表，SPEC/LOG-INDEX/INDEX 同步。 | numbering、H series、P0–P6、ROADMAP §0、mapping |

@@ -49,7 +49,8 @@ def test_bundled_mods_install_under_the_app_directory() -> None:
         assert f"{{app}}\\mods\\{mod_id}" in text
 
 
-def test_official_feature_tasks_are_default_selected() -> None:
+def test_official_feature_tasks_are_opt_in() -> None:
+    """5 个官方扩展默认不勾选：不勾选就完全不写盘（用户口径）。"""
     lines = _iss_text().splitlines()
     task_lines = {
         mod_id: next(line for line in lines if f'Name: "mod_{suffix}"' in line)
@@ -61,7 +62,7 @@ def test_official_feature_tasks_are_default_selected() -> None:
             ("media.music", "music"),
         )
     }
-    assert all("Flags: unchecked" not in line for line in task_lines.values())
+    assert all("Flags: unchecked" in line for line in task_lines.values())
 
 
 def test_install_mods_dir_is_only_used_when_frozen(tmp_path: Path, monkeypatch) -> None:

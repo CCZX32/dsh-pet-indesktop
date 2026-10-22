@@ -72,7 +72,8 @@
   「基础扩展」。第三方 feature 仍受 `allow_feature_mods` 控制。
   `fun.divination`/`fun.festival`/`reminder.todo`/`voice.chime`/`media.music` 在
   `examples/petcore-mods/`，是可导入样板，不得再放回 builtin；Windows 安装向导会把
-  它们做成可勾选项（不勾选不写盘），装好后带 `.trusted` 标记，归「加装扩展」。
+  它们做成可勾选项且**默认不勾选**（不勾选完全不写盘，`Flags: unchecked`），装好后带
+  `.trusted` 标记，归「加装扩展」。
 - **移动同步**：窗口位置只能由 `move_position_at_frame(plan, frames_elapsed)` 按
   clip 帧号与 `move_curves` 推进；移动开始必须先设置 `state.facing` 再渲染首帧。
   不许恢复固定 33ms 线性步进或只按 `state.facing` 猜方向。

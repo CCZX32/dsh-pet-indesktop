@@ -1115,6 +1115,7 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 - `CoreHost` 持有 WorkerHost，`HostPorts.worker` 注入；退出时统一收口 worker。
 - 设置常规页增加角色目录导入；旧素材 Graph 映射补齐 Touch_Head/Say/Sleep/StartUP/Work/Raised。
 - 安装器 5 个官方离线 feature 默认选中，README 与安装器测试同步。
+  （**L034 起已回退为默认不勾选**：该默认值与「不勾选就真不装」的用户口径冲突。）
 
 **验证**
 
@@ -1219,3 +1220,74 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 - 数字签名、CDN/OSS 镜像、npm 通道（只保留 URL 层接口）均按计划留到后续。
 
 ---
+
+## L034 · 2026-10-22 · 官方扩展恢复「默认不勾选」
+
+**改动**
+
+- `packaging/petcore.iss`：5 个 `mod_*` 任务加 `Flags: unchecked`，注释改为
+  「默认不勾选；勾选才写入安装目录，不勾选完全不落盘」。
+- `tests/test_petcore_installer.py`：`test_official_feature_tasks_are_default_selected`
+  → `test_official_feature_tasks_are_opt_in`，断言由「不得出现 `Flags: unchecked`」
+  改为「每个任务都必须有」。
+- `examples/petcore-mods/README.md`：措辞回到「可勾选项（默认不勾选）」；顺带修正
+  安装位置（`%APPDATA%\dsh-pet-core\mods\<id>` → `{app}\mods\<id>`，与 iss 一致）。
+- 口径同步：`PETCORE-FUNCTION-MATRIX`、`PETCORE-HANDOFF-PLAN`、`PETCORE-SPEC` §14、
+  `PETCORE-ROADMAP` §20、`PETCORE-MAIN-PARITY-BACKLOG`、`petcore/AGENTS.md` 全部改成
+  「可选安装（默认不勾）」。
+- `docs/PR-REPORT-PETCORE-P2-WORKER-OFFLINE-2026-10-22.md` 追加修正章节。
+
+**理由**
+
+用户最初口径是「setup 里可勾选，不勾选就真不会安装到本地」；P2 把默认值改成了勾选，
+功能上仍可选、但默认行为反了。恢复默认不勾选，勾选后才写 `{app}\mods\<id>` 与 `.trusted`。
+
+**验证**
+
+- `pytest tests/test_petcore_installer.py -q` → 7 passed。
+- `pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q` → **985 passed**。
+- `ruff check pet/ tests/ petcore/` → 全绿。
+- `python -m petcore --check` → 退出 0。
+- 重新出包（增量 `-Installer`，ISCC 完成后）：`dist/dsh-pet-core-setup.exe`
+  **192,675,082 字节**；主 exe `Subsystem=2`；打包后 `--check` exit 0、
+  `menu_template=json`、`diagnostics=[]`、`self_talk_images.readable=24`；
+  冻结包内 `market --offline list` / `market doctor` 均可运行（doctor 对未创建的
+  索引仓库返回 HTTP 404 诊断，属预期）。
+
+**未验证**
+
+- 安装向导里 5 个勾选框的**实际初始状态**尚未用截图确认（iss `Flags: unchecked`
+  是 Inno 文档语义，测试只断言源码文本）。下次安装时人工看一眼。
+
+---
+
+## L035 · 2026-10-22 · 阶段编号统一：历史批次 H1–H8.4 vs 交付阶段 P0–P6
+
+**改动**
+
+- `docs/PETCORE-ROADMAP.md`：新增 §0「编号约定」与换算表；§3、§6–§19 的标题与 §2
+  批次表由 `P1-A…P8.4` 改名为 `H1-A…H8.4`；§20 的 `P0–P6` 保持不变。
+- `docs/PETCORE-SPEC.md`：§10–§14 标题改 `H6/H7/H8/H8.1/H8.4`，并在 §10 前加一行
+  说明「历史批次 vs 当前交付阶段」。
+- `docs/PETCORE-LOG-INDEX.md`：读取规则后补编号约定（历史行里的 P = H）。
+- `docs/INDEX.md`：ROADMAP 条目改写，强调 §0 编号约定。
+- 历史文档（`PETCORE-LOG.md` 既有条目、`docs/PR-REPORT-PETCORE-P1…P8…` 文件名）
+  保持原样，不做回填重命名。
+
+**理由**
+
+GPT 的 P0–P6 计划与历史 P1-A…P8.4 重名不同义（新 P1=配置作用域，旧 P1=UI 风格），
+两份文档已经并存。用 H 系列承接历史、P0–P6 只表示未来阶段，避免继续误读。
+
+**验证**
+
+- `pytest tests/test_petcore_docs.py tests/test_pr_report_discipline.py -q` → 237 passed。
+- 全量 petcore 门禁 985 passed、ruff 全绿（同 L034 那一轮）。
+- `grep "^## " docs/PETCORE-ROADMAP.md`：§3/§6–§19 均为 H 前缀，§20/§21 未受影响的
+  P0–P6 与市场章节保持原样。
+
+**未验证 / 风险**
+
+- `docs/PR-REPORT-PETCORE-P1-SCOPE-2026-10-22.md` 等**新**报告仍叫 P1/P2/P3（指新轴），
+  与历史 `P1C/P1F/P2/P3` 文件名并存；文件名不改，正文已在 ROADMAP §0 有换算口径。

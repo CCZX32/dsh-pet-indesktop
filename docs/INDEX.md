@@ -346,7 +346,7 @@
 | [`PETCORE-MOD-FORMAT.md`](PETCORE-MOD-FORMAT.md) | `mod.json` 字段、校验、发现/启停、安装与能力模型。 | 新增/修改 mod 包、改加载器或安装流程前必读。 |
 | [`PETCORE-MARKET.md`](PETCORE-MARKET.md) | 插件市场 v1：静态索引契约、来源与缓存、下载校验、安装/更新/回滚、生效语义、npm 结论与信任边界。 | 改 `petcore/market/`、市场设置页、索引仓库，或排查「插件装不上 / 更新或回滚失败 / 索引过期」时必读。 |
 | [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读。 |
-| [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、P1–P8 路线、Core/mod 边界与延后项。 | 规划后续功能迁包或评估重构进度前必读。 |
+| [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、历史批次 H1–H8.4、当前交付阶段 P0–P6、编号约定（§0）与延后项。 | 规划后续功能迁包、评估重构进度，或分不清「P1」指哪套编号时必读。 |
 | [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md) | petcore ↔ 主分支功能差距台账：已对齐 / 部分 / 未做、默认安装口径、计划批次与验收方式。 | 回答「还差什么」「这个域算不算完成」「示例 mod 能不能算默认功能」前必读；每轮收口更新。 |
 | [`PETCORE-FUNCTION-MATRIX-2026-10-22.md`](PETCORE-FUNCTION-MATRIX-2026-10-22.md) | 2026-10-22 主分支 v4.3.4 与 petcore 的完整功能矩阵、阶段归属和有意差异。 | 做主分支对齐审查、判断某项是否已交付或分派迁移阶段前必读。 |
 | [`PETCORE-HANDOFF-PLAN-2026-10-22.md`](PETCORE-HANDOFF-PLAN-2026-10-22.md) | P0–P6 的 AI 交接计划：每阶段边界、依赖、验收、用户效果和提交标题。 | 把 petcore 后续阶段交给另一个 AI 或开始一个新阶段前必读。 |

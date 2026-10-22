@@ -46,7 +46,7 @@ petcore/
   contracts/   端口与数据契约（只用标准库）
   net/         唯一联网出口：代理兜底、失败分类（标准库）
   api/         API 服务规格、探测、凭据端口实现（密钥只进钥匙串）
-  account/     账户与额度（P7 落地，网络同样只经 net/）
+  account/     账户与额度（H7 落地，网络同样只经 net/）
   media/       Clip 后端、库、fallback、音效（唯一允许适配 pet.* 媒体实现的层）
   content/     旧素材只读适配、mod 内容、收集、打包（legacy.py 允许 import pet.*）
   mods/        manifest、发现、启停、安装、feature 宿主、CLI
@@ -283,7 +283,10 @@ petcore/
 - 后续：P3 网络/worker 域（F01/F02/F03/F04/F05/F06/F07/F09），P4 动画与性能 backlog（共享解码、预测预热、WebM 全量、VPet PNG、Agent 联动动画、音乐唱歌、动态岛、head_box 精细探头）。见 [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md)。
 
 
-## 10. P6 已落地（2026-10-20）
+> 本章及以下 P6/P7/P8.x 已按 ROADMAP §0 的编号约定改称 H6…H8.4（历史批次）；
+> 当前交付阶段用 P0–P6，见 §15 与 ROADMAP §20。
+
+## 10. H6 已落地（2026-10-20）
 
 - **动画节拍**：待机一圈结束即掷骰（此前 IDEL 的 `B_LOOP + loop=True` 被 `advance()`
   原样续播，桌宠永远停在待机）；`animation_gap_seconds` 改为「间隙继续播待机、到点掷骰」；
@@ -300,9 +303,9 @@ petcore/
 - **core API**：`contracts/api.py`（`ApiMetadata/ApiRequest/ApiPort`）、`petcore/api/`
   （规格校验、`api.json` 原子写、keyring 凭据、文本探测）；设置页「API 与账户」；
   菜单「工具与帮助 → API 与账户」；`HostPorts.api` 与 `CoreApiPort`。
-- **账户**：P8 落地（P7 只做交互/安装/扩展管理/彩蛋与音效；`account/` 仍留占位）。
+- **账户**：H8 落地（H7 只做交互/安装/扩展管理/彩蛋与音效；`account/` 仍留占位）。
 
-## 11. P7 已落地（2026-10-21）
+## 11. H7 已落地（2026-10-21）
 
 - **探头/击飞**：碰撞确认重叠后先授权 `arm_throw_egg()` 再退出探头；飞行/彩蛋期间
   只允许 idle/转向；`motion.thrown` 不掷骰、左键点击返回；低速碰撞立即回正。
@@ -315,7 +318,7 @@ petcore/
   的图片（可配置目录/标题）；点击音效包支持默认/小黄鸭/自定义文件/文件夹，
   碰撞与碰边复用同一音源。
 
-## 12. P8 已落地（2026-10-21）
+## 12. H8 已落地（2026-10-21）
 
 - **多宠推动**：轻碰分离不再取消移动计划、不再切 `thrown`；被推开的宠把漫游计划
   整体平移继续走。探头宠物在轻碰时按无限质量处理，只推开对方；真撞击（≥300px/s）
@@ -333,7 +336,7 @@ petcore/
 - **差距台账**：新增 [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md)，
   后续 P9–P12 的待办以该表为准。
 
-## 13. P8.1 已落地（2026-10-21）
+## 13. H8.1 已落地（2026-10-21）
 
 - **字号与图片大小**：`ui_font_size`（10–18）同步设置页、右键菜单与彩蛋菜单行；
   `bubble_text_scale`（50–300%）控制气泡文字/内边距；`easter_egg_image_scale`
@@ -361,7 +364,7 @@ petcore/
 - **托盘菜单**：独立于右键菜单（显示/隐藏桌宠、桌宠设置、数据目录、重载扩展、
   逐宠显示/隐藏/回右下角/退出这只、退出）；托盘左键也能切换显示。
 
-## 14. P8.4 已落地（2026-10-21）
+## 14. H8.4 已落地（2026-10-21）
 
 - **鼠标穿透归位托盘**：右键菜单不再有「点击穿透」（`migrate_p9_menu()` 幂等摘除
   旧布局里的该项）；托盘菜单新增可勾选「鼠标穿透」，一次作用到所有桌宠，开启时
@@ -402,7 +405,7 @@ petcore/
   配置推送、取消、错误、退出回收、owner 替换和可选心跳超时。
 - CoreHost 持有单一 WorkerHost；退出流程会先收口 worker。业务 worker 仍需在 P3/P4 由 mod 接入。
 - 设置常规页可从角色目录构建并安装 content mod；旧素材目录补齐 VPet Graph 类别的寻址映射。
-- 安装器的 5 个官方离线 feature 默认选中，用户仍可取消；它们继续保持 feature mod 边界。
+- 安装器的 5 个官方离线 feature 默认不勾选，勾选才写盘；它们继续保持 feature mod 边界。
 
 ## 18. P3 账户基础（2026-10-22）
 

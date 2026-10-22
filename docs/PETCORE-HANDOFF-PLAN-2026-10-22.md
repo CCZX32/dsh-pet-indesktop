@@ -19,9 +19,9 @@
 
 ## P2 WorkerHost、媒体解耦与离线默认能力
 
-- 负责：WorkerHost、JSONL 生命周期、媒体后端接口、完整 Graph 类别、GUI 角色导入、5 个 example mod 默认安装。
+- 负责：WorkerHost、JSONL 生命周期、媒体后端接口、完整 Graph 类别、GUI 角色导入、5 个 example mod 可选安装（默认不勾选，勾选才写盘）。
 - 禁止：让业务 mod 直接 import Core 网络实现；不把 example mod 改成 Core 内置。
-- 验收：真实子进程测试；安装包默认有待办/节日/抽签/报时/音乐；目录和 zip 角色都能导入预览。
+- 验收：真实子进程测试；安装包勾选后有可用的待办/节日/抽签/报时/音乐；目录和 zip 角色都能导入预览。
 - 提交：`feat(petcore): add worker host and offline parity mods`。
 
 ## P3 API/账户与 AI/识屏

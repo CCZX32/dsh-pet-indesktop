@@ -144,7 +144,7 @@
 - **迁移与回滚**：v4 全局配置、slot 配置、会话、待办、API 规格和凭据引用尚无迁移协议。
 - **WorkerHost**：只有协议和端口，没有真实子进程宿主、心跳、取消、超时、重启和代次拒收。
 - **账户**：API 设置已存在，`petcore/account/`、余额缓存和额度服务未实现。
-- **默认安装**：5 个 example mod 仍不能按“示例存在”计为默认功能；后续 P2 要求安装包默认安装。
+- **默认安装**：5 个 example mod 仍不能按“示例存在”计为默认功能；安装向导里它们是可选安装，默认不勾选。
 
 有意差异：播放速率维持 `0.5–2.0x`；不支持 VPet LPS/PNG；首轮最多 16 只桌宠。
 
@@ -165,7 +165,7 @@
 | 统一 WorkerHost | 已对齐（基础） | `tests/test_petcore_worker.py` 真实子进程测试 |
 | 角色目录 GUI 导入 | 已对齐（基础） | `tests/test_petcore_character_pack.py` |
 | VPet Graph 类别寻址 | 已对齐（映射） | `build_animations()` 文件夹映射测试 |
-| 5 个官方 feature 默认安装 | 已对齐（安装任务） | `test_official_feature_tasks_are_default_selected` |
+| 5 个官方 feature 可选安装（默认不勾） | 已对齐（安装任务） | `test_official_feature_tasks_are_opt_in` |
 | 旧 `pet` 媒体后端解耦 | 未做 | `petcore/media/backends.py` 仍为适配层 |
 | AI/识屏/Agent worker 业务 | 未做 | P3/P4 |
 

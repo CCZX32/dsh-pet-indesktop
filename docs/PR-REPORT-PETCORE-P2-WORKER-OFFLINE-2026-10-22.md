@@ -82,3 +82,45 @@ All checks passed!
 
 本阶段可 `git revert`。默认扩展只改变安装向导初始勾选，不改变已安装用户的数据目录；
 WorkerHost 未启动时不创建线程或子进程。
+
+---
+
+## 追加修正（2026-10-22）：官方离线扩展恢复「默认不勾选」
+
+### 修改文件说明
+
+| 文件 | 增删 | 改动意图 |
+|---|---:|---|
+| `packaging/petcore.iss` | +6 / −6（numstat） | 5 个 `mod_*` 任务加 `Flags: unchecked`，注释改成「默认不勾选」。 |
+| `tests/test_petcore_installer.py` | +3 / −3 | 用例改名 `..._opt_in`，断言由「不得有 unchecked」反转为「必须有」。 |
+| `examples/petcore-mods/README.md` | +2 / −2 | 措辞回到「默认不勾选」；安装位置从 `%APPDATA%…` 修正为 `{app}\mods\<id>`。 |
+| `docs/{PETCORE-FUNCTION-MATRIX,PETCORE-HANDOFF-PLAN,PETCORE-SPEC,PETCORE-ROADMAP,PETCORE-MAIN-PARITY-BACKLOG}` | 各 1–2 行 | 把「默认安装/默认选中」统一改成「可选安装（默认不勾）」。 |
+| `petcore/AGENTS.md` | +1 / −1 | 红线补「默认不勾选（`Flags: unchecked`）」。 |
+| `docs/PETCORE-LOG.md` / `PETCORE-LOG-INDEX.md` | +68 / +6（含 L035） | L034 记录本次回退，L035 记录编号统一。 |
+
+### 为什么回退
+
+用户口径（本轮重构的原始需求）：安装向导里可勾选，**不勾选就真不会安装到本地**。
+P2 把 5 个任务改成默认选中，虽然仍可取消，但默认行为与口径相反，且会让「core 保持
+最小、业务功能按需装」的边界被默认值模糊掉。
+
+### 性能分析
+
+只改 Inno Setup 任务的初始勾选状态，不影响打包体积、安装步骤、运行时依赖，也没有
+新增 IO/线程/网络。安装后的行为差异仅是「默认少写 5 个目录」，磁盘占用只会更小。
+
+### 实机运行记录
+
+```text
+pytest tests/test_petcore_installer.py -q          → 7 passed in 1.93s
+pytest tests/test_petcore_*.py tests/test_architecture.py \
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q
+                                                   → 985 passed in 62.44s
+ruff check pet/ tests/ petcore/                    → All checks passed!
+python -m petcore --check                          → exit 0
+```
+
+安装器重新出包（增量 `-Installer`）：`dist/dsh-pet-core-setup.exe` **192,675,082 字节**，
+主 exe `Subsystem=2`，打包后 `--check` exit 0、`menu_template=json`、`diagnostics=[]`、
+`self_talk_images.readable=24`；冻结包内 `market --offline list` 与 `market doctor` 正常。
+向导勾选框的**实际初始状态**仍需在真实安装时人工确认一次（iss 语义测试只校验源码文本）。
