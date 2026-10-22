@@ -22,7 +22,6 @@ from PySide6.QtCore import QPointF, QRect, QRectF
 
 from . import physics as physics_mod
 from .pet_sprite import INTERACTION_NORMAL, INTERACTION_THROWN
-from .window_placement import DesktopArea, band_bounds
 
 
 def _united(rects) -> QRect:
@@ -79,31 +78,32 @@ class ThrowPhysicsController:
             self._advance_thrown(sprite, float(dt))
 
     def _effective_bounds(self, sprite) -> QRectF:
-        """这次积分该用的边界：多矩形跨屏域按**身体带并集**（legacy band 语义）。
+        """这次积分该用的边界：多矩形跨屏域按**并集外接矩形**（过缝通行语义）。
 
         跨屏时 sprite 的合法域是多块屏的并集（``_clamp_rects``）。旧实现取
         「离身体最近的那一块屏」做反弹边界：墙挡着身体、身体中心过不去、
         墙就永远不收——并列双屏下抛掷被永久锁在本屏（issue #319）。
-        改回 legacy ``window_placement.band_bounds`` 的语义：与身体 x 带
-        相交的屏决定左右、与 y 带相交的屏决定上下——并列双屏右墙在副屏
-        右缘（飞行穿缝），错位拼接仍挡「不属于任何显示器」的空洞。
-        单矩形域（单屏/未开跨屏）band 结果恒等于该矩形，行为逐位不变。
+        band 收窄语义（4.2.1 legacy）修好了 #319 但在**异高屏**上制造新墙：
+        主屏正对副屏下方空洞的那条带永远过不去（用户实机，2026-10-22）。
+        定稿语义改为「通行域 = 并集外接矩形（含空洞），静止域 = 各屏本身」：
+        穿缝任意过，落地时身体不被并集覆盖则由落点吸附收进最近的屏
+        （``_snap_into_screen_if_needed`` 鸭子类型调用 pet_sprite 同名方法）。
+        单矩形域（单屏/未开跨屏）并集恒等于该矩形，行为逐位不变。
         """
         clamp_rects = getattr(sprite, "_clamp_rects", None)
         if clamp_rects:
-            body_local = sprite._body_local_rect()
-            body = QRect(
-                int(sprite.pos.x() + body_local.x()),
-                int(sprite.pos.y() + body_local.y()),
-                body_local.width(), body_local.height(),
-            )
-            area = DesktopArea(
-                bounds=_united(clamp_rects),
-                screens=tuple(QRect(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
-                              for r in clamp_rects),
-            )
-            return QRectF(band_bounds(area, body))
+            return QRectF(_united(clamp_rects))
         return QRectF(self._bounds)
+
+    def _snap_into_screen_if_needed(self, sprite) -> None:
+        """落点吸附：静止时身体不被各屏并集覆盖 → 收进最近的屏（SPEC §语义）。
+
+        实现唯一来源是 pet_sprite 的同名方法（鸭子类型调用，防两份拷贝漂移
+        ——k3 盲审 A1）；fake sprite 没有该方法时静默 no-op。
+        """
+        snap = getattr(sprite, "_snap_into_screen_if_needed", None)
+        if callable(snap):
+            snap()
 
     def _sprite_bounds(self, sprite) -> tuple[float, float, float, float]:
         """sprite 左上角的可活动范围：身体框贴 bounds 四边（V-2）。
@@ -150,7 +150,9 @@ class ThrowPhysicsController:
         speed = math.hypot(vx, vy)
         if physics_mod.is_at_rest(py, vx, vy, bottom, bounced_any, speed):
             # 落地静止：velocity 归零停住（advance 只对 "normal" 积分，
-            # 归零后原地不动），交还行为控制器
+            # 归零后原地不动），交还行为控制器。交还前先落点吸附——过缝
+            # 通行语义下飞行可穿空洞，但静止不许落在里面（SPEC §语义）
+            self._snap_into_screen_if_needed(sprite)
             sprite.set_velocity(QPointF(0, 0))
             # F4：速率必须先复位——duration() 除以 playback_speed
             # （webm_clip.py:1387-1390），留着飞行倍率会让落地后的第一次

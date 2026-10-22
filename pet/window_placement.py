@@ -5,9 +5,11 @@ Qt window implementation.  PetWindow retains thin compatibility methods that
 pass itself as the host, so existing callers and test patches continue to work.
 
 多显示器活动区域也在这里：``desktop_area()`` 取一次拖拽/抛掷的桌面快照
-（``DesktopArea``），``band_bounds()`` 按宠物当前所在的屏幕带收窄它，
-``move_window_towards`` / ``throw_bounds`` 在有快照时用它、没有快照时逐位退回
-本屏语义（单屏用户与漫游/落位/边缘探头不受影响）。见
+（``DesktopArea``），``band_bounds()`` 按宠物当前所在的屏幕带收窄它——
+**仅 legacy/capture 路径**（``move_window_towards`` / ``throw_bounds``）仍在用；
+overlay 路径 2026-10-22 起改用过缝通行语义（``snap_to_nearest_screen`` +
+各收口吸附，见 ``docs/PR-REPORT-CROSS-SCREEN-CORRIDOR-2026-10-22.md``）。
+没有快照时逐位退回本屏语义（单屏用户与漫游/落位/边缘探头不受影响）。见
 ``docs/PR-REPORT-ISSUE-186-TRAY-MENU-2026-09-23.md``。
 """
 
@@ -20,7 +22,7 @@ from typing import Any
 import logging
 
 from PySide6.QtCore import QPoint, QRect
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QRegion
 
 from . import catalog
 
@@ -124,6 +126,47 @@ def desktop_area() -> DesktopArea | None:
     for rect in rects[1:]:
         bounds = bounds.united(rect)
     return DesktopArea(bounds=bounds, screens=tuple(rects))
+
+
+def snap_to_nearest_screen(body: QRect, screens) -> QPoint | None:
+    """落点吸附：身体**不被各屏并集完整覆盖**时，返回身体框的**新左上角**，
+    把它收进最近的屏的最近边缘（完整收入该屏可用区，取位移最小的落点）；
+    已被并集覆盖（在某屏内、或合法跨缝）或没有可用屏时返回 None（不吸附）。
+
+    覆盖判定用并集（QRegion）而不是「身体中心在屏内」——中心在屏内但半身
+    悬在空洞上的情形同样要吸附，否则半个宠隐形到下一次 NORMAL 位移才被
+    推回（k3 盲审 A2；与 pet_sprite.set_pos 的 ``_rect_covered`` 同口径）。
+
+    用途：跨屏「过缝通行 + 落点吸附」语义——拖拽松手/抛掷落地时的静止域
+    收口（.scratch/cross-screen-corridor/SPEC.md）。纯函数，不含 Qt 对象依赖。
+    """
+    rects = [r for r in (screens or ()) if r is not None and r.isValid()]
+    if not rects:
+        return None
+    union = QRegion()
+    for rect in rects:
+        union = union.united(QRegion(rect))
+    if QRegion(body).subtracted(union).isEmpty():
+        return None
+    cx, cy = body.center().x(), body.center().y()
+    best = None
+    for rect in rects:
+        dx = max(rect.left() - cx, 0, cx - rect.right())
+        dy = max(rect.top() - cy, 0, cy - rect.bottom())
+        dist = dx * dx + dy * dy
+        if best is None or dist < best[0]:
+            best = (dist, rect)
+    target = best[1]
+    # 身体框钳进目标屏（身体比屏大时 clamp_span 的小屏兜底：贴上/左缘）
+    new_x = min(max(cx - body.width() / 2, float(target.left())),
+                float(target.right()) + 1 - body.width())
+    new_y = min(max(cy - body.height() / 2, float(target.top())),
+                float(target.bottom()) + 1 - body.height())
+    if target.width() < body.width():
+        new_x = float(target.left())
+    if target.height() < body.height():
+        new_y = float(target.top())
+    return QPoint(int(new_x), int(new_y))
 
 
 def band_bounds(area: DesktopArea, body: QRect) -> QRect:
