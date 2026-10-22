@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MerZlin/dsh-pet-extensions/market-index.schema.json",
+  "title": "petcore market index",
+  "type": "object",
+  "required": ["schema_version", "packages"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string" },
+    "packages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/package" }
+    }
+  },
+  "$defs": {
+    "package": {
+      "type": "object",
+      "required": ["id", "kind", "latest", "versions"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "kind": { "enum": ["content", "feature"] },
+        "name": { "type": "string" },
+        "name_zh": { "type": "string", "maxLength": 128 },
+        "summary_zh": { "type": "string" },
+        "summary": { "type": "string" },
+        "author": { "type": "string" },
+        "homepage": { "type": "string" },
+        "categories": { "type": "array", "items": { "type": "string" } },
+        "latest": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "api_version": { "type": "string" },
+        "core_requires": { "type": "string" },
+        "execution": { "enum": ["host-only", "worker"] },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "platforms": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "certified": { "type": "boolean" },
+        "blocked": { "type": "boolean" },
+        "blocked_reason": { "type": "string" },
+        "superseded_by": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" }
+          ]
+        },
+        "screenshots": { "type": "array", "items": { "type": "string" } },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/version" }
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "required": ["version", "size", "sha256", "urls"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "released_at": { "type": "string" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "urls": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^(https?|file)://" }
+        },
+        "changelog": { "type": "string" },
+        "yanked": { "type": "boolean" }
+      }
+    }
+  }
+}

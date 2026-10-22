@@ -1164,3 +1164,58 @@ IDEL 素材是 `B_LOOP + loop=True`，`AnimationPlayer.advance()` 原样返回�
 **未完成**
 
 - 会话尚未接入 AI worker 或聊天 UI；业务接入继续属于 P3 后续。
+
+---
+
+## L033 · 2026-10-22 · 插件市场 v1（索引/下载/安装/回滚/UI/CLI）
+
+**改动**
+
+- 新增 `petcore/market/`：索引模型与状态、ETag + 磁盘缓存的多源读取、大小/SHA-256 校验、
+  `.part` 续传编排、staging → 备份 → 原子安装、`market-lock.json`、回滚与 CLI。
+- 新增 `petcore/net/market.py`：索引 GET（含 GitHub Contents API base64）与 Range 下载，
+  复用 `net/http.urlopen` 的「系统代理优先、失败改直连」。
+- `petcore/mods/install.py` 暴露 `open_pack()` 供市场复用解包；`petcore/cli.py` 接入
+  `petcore market list/show/install/update/rollback/doctor`。
+- 新增设置页 `page_market.py`，注册到「扩展管理」左导航（顺序：扩展管理 → 插件市场）；
+  新增全局键 `market_index_url`（默认空 = 官方索引），feature 安装仍受 `allow_feature_mods`。
+- 文档：新增 `PETCORE-MARKET.md` 与 `market-index.schema.json`，更新 INDEX / ROADMAP /
+  MOD-FORMAT §6.2 / Phase 4 设计文档指针。
+
+**文件（`git diff --numstat` + 新增行数）**
+
+| 文件 | 变化 |
+|---|---|
+| `petcore/market/{__init__,errors,verify,download,source,model,install,cli}.py` | 新增 1730 行 |
+| `petcore/net/market.py` | 新增 178 行 |
+| `petcore/ui/settings/page_market.py` | 新增 536 行 |
+| `petcore/ui/settings/page_extensions.py` | +5 |
+| `petcore/cli.py` | +18 |
+| `petcore/config.py` | +2 |
+| `petcore/mods/install.py` | +7 |
+| `docs/{PETCORE-MARKET.md,market-index.schema.json}` | 新增 283 行 |
+| `docs/INDEX.md` / `PETCORE-MOD-FORMAT.md` / `PETCORE-ROADMAP.md` / Phase 4 文档 | +28 / −1 |
+| `petcore/AGENTS.md` | +5 / −2（导航顺序与市场边界） |
+| `tests/test_petcore_market_{model,source,net,install,cli,ui}.py` | 新增 1266 行 |
+| `tests/test_petcore_extensions_nav.py` | +26 / −16（导航新增「插件市场」契约） |
+| `docs/PETCORE-LOG.md` / `PETCORE-LOG-INDEX.md` | +50 / +1（L033） |
+
+**验证**
+
+- `pytest tests/test_petcore_market*.py -q` → `53 passed in 24.90s`。
+- `pytest tests/test_petcore_*.py tests/test_architecture.py -q` → `689 passed in 56.23s`。
+- `ruff check pet/ tests/ petcore/` → 通过；`python -m petcore --check` → `diagnostics: []`。
+- 实测（`.scratch/market-bench.py`，本机 Win11 / Py3.12.10）：500 包索引解析中位
+  **12.4 ms**、峰值 **1.9 MB**；索引冷读 18.8 ms、内存命中 <0.1 ms；1 MB artifact
+  下载 31.8 ms、SHA-256 1.15 ms、安装 31.2 ms；50 包列表首次刷新 8.6 ms、重建 0.49 ms。
+- 真实 `windows` 平台截图（`.scratch/market-page-real.png`）：状态标签、可更新/阻止、
+  feature 与索引源设置均正常渲染；本地 HTTP 端到端覆盖安装/更新/回滚/离线缓存。
+- 全量 pytest：`9092 passed / 18 skipped / 2 failed`（21m32s）；两条失败均为测试顺序/
+  负载问题（见报告 §五.4），修复 palette 泄漏后相关两族 `178 passed / 1 skipped`。
+
+**未完成**
+
+- `MerZlin/dsh-pet-extensions` 索引仓库尚未创建，未对真实 GitHub raw 做端到端；
+- 数字签名、CDN/OSS 镜像、npm 通道（只保留 URL 层接口）均按计划留到后续。
+
+---

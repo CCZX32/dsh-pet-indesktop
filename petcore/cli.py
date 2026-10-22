@@ -198,6 +198,24 @@ def main(argv: list[str] | None = None) -> int:
             tokens.extend(["--mods-dir", item])
         return mods_main(tokens + raw[mods_index + 1 :])
 
+    market_index = None
+    if raw[:1] not in (["pack-character"], ["pack-legacy"], ["autostart"], ["provision"]):
+        market_index = _subcommand_index(raw, ("market",))
+    if market_index is not None:
+        from .market.cli import main as market_main
+
+        global_args, _extra_args = _parser().parse_known_args(raw[:market_index])
+        try:
+            root = _resolve_root(global_args)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        tokens: list[str] = []
+        if raw[:market_index]:
+            tokens.extend(["--root", str(root)])
+        tokens.extend(str(item) for item in _extra_args)
+        return market_main(tokens + raw[market_index + 1 :])
+
     if raw[:1] == ["pack-character"]:
         parser = argparse.ArgumentParser(prog="petcore pack-character")
         parser.add_argument("source", type=Path)

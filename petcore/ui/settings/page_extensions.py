@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .base import SettingsPage
+from .page_market import MarketPage
 from .page_mods import ModsPage
 
 logger = logging.getLogger("petcore.ui.settings.extensions")
@@ -139,6 +140,10 @@ class ExtensionsPage(SettingsPage):
         mods_page = ModsPage(host, self)
         mods_page.prepare_embedded()
         self._register("mods", "扩展管理", mods_page, STANDALONE_GROUP)
+
+        market_page = MarketPage(host, self)
+        market_page.prepare_embedded()
+        self._register("market", "插件市场", market_page, STANDALONE_GROUP)
 
         for spec, page in self._contributed_pages():
             self._register_contribution(spec, page)

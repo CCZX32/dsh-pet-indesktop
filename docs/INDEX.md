@@ -154,6 +154,7 @@
 - [petcore P7 探头/击飞·安装器·扩展管理·彩蛋音效（2026-10-21）](PR-REPORT-PETCORE-P7-2026-10-21.md)：击飞旋转改为碰撞授权、飞行接管态不掷骰/点击忽略、探头只 idle/转向、setup 鲸鱼娘图标与 `{app}\mods` 扩展、扩展页竖向分组导航、`name_zh`、彩蛋图片与点击音效包；改这些行为时必读。
 - [petcore P8 多宠推动·气泡跟随·设置重组·打包回归（2026-10-21）](PR-REPORT-PETCORE-P8-2026-10-21.md)：轻碰推动与探头优先、子宠单独退出、气泡跟随/图片、彩蛋菜单行、互动页 8 分页、Core 内置特性归位、扩展分组可折叠、安装向导目录页与菜单模板打包兜底；排查「推不动/气泡不跟/右键缺项/设置太长/安装路径消失」时必读。
 - [petcore P8.1 字号/彩蛋图片·菜单结构·弹弓与直播兼容（2026-10-21）](PR-REPORT-PETCORE-P8-1-2026-10-21.md)：界面/气泡字号、彩蛋图片大小、自语配图概率、彩蛋置顶与菜单尾部、播放动画缩略图、弹弓右键抑制、点击监听补挂、X 保存、直播捕获兼容；排查「字太小/彩蛋不在顶部/发射后弹菜单/点击台词不生效/直播抓不到」时必读。
+- [petcore 插件市场 v1（2026-10-22）](PR-REPORT-PETCORE-MARKET-2026-10-22.md)：静态索引 + GitHub Release artifact + SHA-256 + 安装/更新/回滚、扩展管理左导航「插件市场」、`petcore market` CLI、npm 结论；改市场链路或评估分发方案时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。
 
@@ -343,6 +344,7 @@
 |---|---|---|
 | [`PETCORE-ARCHITECTURE.md`](PETCORE-ARCHITECTURE.md) | `petcore` 的分层、契约、启动路径、数据目录与 VPet 对应关系。 | 改 `petcore/` 任何模块、判断 core 与 mod 边界前必读。 |
 | [`PETCORE-MOD-FORMAT.md`](PETCORE-MOD-FORMAT.md) | `mod.json` 字段、校验、发现/启停、安装与能力模型。 | 新增/修改 mod 包、改加载器或安装流程前必读。 |
+| [`PETCORE-MARKET.md`](PETCORE-MARKET.md) | 插件市场 v1：静态索引契约、来源与缓存、下载校验、安装/更新/回滚、生效语义、npm 结论与信任边界。 | 改 `petcore/market/`、市场设置页、索引仓库，或排查「插件装不上 / 更新或回滚失败 / 索引过期」时必读。 |
 | [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读。 |
 | [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、P1–P8 路线、Core/mod 边界与延后项。 | 规划后续功能迁包或评估重构进度前必读。 |
 | [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md) | petcore ↔ 主分支功能差距台账：已对齐 / 部分 / 未做、默认安装口径、计划批次与验收方式。 | 回答「还差什么」「这个域算不算完成」「示例 mod 能不能算默认功能」前必读；每轮收口更新。 |

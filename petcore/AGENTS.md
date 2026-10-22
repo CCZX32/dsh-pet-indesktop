@@ -96,11 +96,14 @@
 - **安装向导目录页**：`packaging/petcore.iss` 必须 `DisableDirPage=no` 且
   `UsePreviousAppDir=yes`；每次打开向导都显示路径页，检测到同 `AppId` 已安装时
   预选上次安装目录（`InstallLocation`）。不许用 `auto` 把目录页藏掉。
-- **扩展管理**：左侧竖向导航（`#extensionsNav`）顺序为「扩展管理 → 基础扩展 →
-  加装扩展」，两个组头可点击折叠；`tabs` 门面只为兼容旧测试/深链，不要退回横向标签。
+- **扩展管理**：左侧竖向导航（`#extensionsNav`）顺序为「扩展管理 → 插件市场 →
+  基础扩展 → 加装扩展」，两个组头可点击折叠；`tabs` 门面只为兼容旧测试/深链，不要退回横向标签。
   `基础扩展` 只放 `petcore/builtin` 接缝包；安装向导 `.trusted` 与用户导入都算
   `加装扩展`。mod 展示优先 `manifest.name_zh`；Core 内置项标「已并入 Core」且
   禁用启停/卸载。
+- **插件市场**：市场是 Core 基础设施（`petcore/market/` + 设置页），不是可停用的 mod；
+  索引只存元数据，artifact 走有序 URL 列表；feature 安装仍受 `allow_feature_mods`。
+  契约见 `docs/PETCORE-MARKET.md`，改市场、索引格式或下载链路前必读。
 - **彩蛋/音效**：`easter_egg` 菜单 → `window.show_easter_egg()`；点击音效走
   `media/click_sound.py` 的 `click_sound_pack`（默认/duck/文件/文件夹），碰撞与碰边
   复用同一入口；不许回到硬编码 `click.wav`。

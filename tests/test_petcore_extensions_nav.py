@@ -82,20 +82,29 @@ def test_nav_puts_mods_first_then_group_headers(app, tmp_path):
     extensions = _extensions(dialog)
     nav = extensions.nav
     labels = [nav.item(row).text() for row in range(nav.count())]
-    assert labels == ["扩展管理", "▾ 基础扩展", "基础一号", "▾ 加装扩展", "加装一号"]
+    assert labels == [
+        "扩展管理",
+        "插件市场",
+        "▾ 基础扩展",
+        "基础一号",
+        "▾ 加装扩展",
+        "加装一号",
+    ]
 
-    for row in (1, 3):
+    for row in (2, 4):
         flags = nav.item(row).flags()
         assert not (flags & Qt.ItemFlag.ItemIsSelectable)
         assert flags & Qt.ItemFlag.ItemIsEnabled
 
     assert nav.item(0).data(Qt.ItemDataRole.UserRole) == "mods"
-    assert nav.item(2).data(Qt.ItemDataRole.UserRole) == "extension:base.one"
-    assert nav.item(4).data(Qt.ItemDataRole.UserRole) == "extension:addon.one"
+    assert nav.item(1).data(Qt.ItemDataRole.UserRole) == "market"
+    assert nav.item(3).data(Qt.ItemDataRole.UserRole) == "extension:base.one"
+    assert nav.item(5).data(Qt.ItemDataRole.UserRole) == "extension:addon.one"
 
-    assert extensions.tabs.labels() == ("扩展管理", "基础一号", "加装一号")
+    assert extensions.tabs.labels() == ("扩展管理", "插件市场", "基础一号", "加装一号")
     assert extensions.tabs.keys() == (
         "mods",
+        "market",
         "extension:base.one",
         "extension:addon.one",
     )
@@ -118,20 +127,20 @@ def test_group_headers_collapse_their_children(app, tmp_path):
         )
         app.processEvents()
 
-    base_header = nav.item(1)
-    assert nav.item(2).isHidden() is False
+    base_header = nav.item(2)
+    assert nav.item(3).isHidden() is False
 
     click_item(base_header)
     assert base_header.text().startswith("▸")
-    assert nav.item(2).isHidden() is True
+    assert nav.item(3).isHidden() is True
     assert extensions.is_group_collapsed("base") is True
     # 折叠只影响导航可见性，标签门面与页面注册不变。
-    assert extensions.tabs.labels() == ("扩展管理", "基础一号", "加装一号")
+    assert extensions.tabs.labels() == ("扩展管理", "插件市场", "基础一号", "加装一号")
     assert nav.currentItem().text() == "扩展管理"
 
     click_item(base_header)
     assert base_header.text().startswith("▾")
-    assert nav.item(2).isHidden() is False
+    assert nav.item(3).isHidden() is False
     assert extensions.is_group_collapsed("base") is False
     dialog.close()
 
@@ -147,7 +156,7 @@ def test_deep_link_expands_a_collapsed_group(app, tmp_path):
         nav.viewport(),
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
-        nav.visualItemRect(nav.item(1)).center(),
+        nav.visualItemRect(nav.item(2)).center(),
     )
     app.processEvents()
     assert extensions.is_group_collapsed("base") is True
@@ -155,7 +164,7 @@ def test_deep_link_expands_a_collapsed_group(app, tmp_path):
     extensions.select_tab("extension:base.one")
 
     assert extensions.is_group_collapsed("base") is False
-    assert nav.item(2).isHidden() is False
+    assert nav.item(3).isHidden() is False
     assert extensions.tabs.currentKey() == "extension:base.one"
     dialog.close()
 
@@ -165,9 +174,9 @@ def test_core_feature_pages_never_show_in_extension_nav(app, tmp_path):
     host.settings_pages = host.features.settings_pages
     dialog = SettingsDialog(host)
     extensions = _extensions(dialog)
-    # 7 个内置特性的设置页全部内嵌进 Core 页，扩展导航只剩「扩展管理」。
-    assert extensions.tabs.labels() == ("扩展管理",)
-    assert [nav_row for nav_row in extensions._row_keys.values()] == ["mods"]
+    # 7 个内置特性的设置页全部内嵌进 Core 页，扩展导航只剩「扩展管理」与「插件市场」。
+    assert extensions.tabs.labels() == ("扩展管理", "插件市场")
+    assert [nav_row for nav_row in extensions._row_keys.values()] == ["mods", "market"]
     dialog.close()
 
 
@@ -211,12 +220,13 @@ def test_empty_group_keeps_its_header(app, tmp_path):
     labels = [nav.item(row).text() for row in range(nav.count())]
     assert labels == [
         "扩展管理",
+        "插件市场",
         "▾ 基础扩展",
         "（暂无）",
         "▾ 加装扩展",
         "（暂无）",
     ]
-    assert extensions.tabs.labels() == ("扩展管理",)
+    assert extensions.tabs.labels() == ("扩展管理", "插件市场")
     dialog.close()
 
 

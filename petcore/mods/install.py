@@ -196,6 +196,13 @@ def _install_json(manifest_id: str, version: str, files: dict[str, str]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
+def open_pack(
+    source: Path, work_root: Path | None = None
+) -> Iterator[Path]:
+    """公开的解包入口：目录原样返回，zip 解到临时目录（调用方负责生命周期）。"""
+    return _source_pack(Path(source), work_root)
+
+
 def install(source: Path, root: Path, *, force: bool = False) -> tuple[bool, str]:
     root = Path(root)
     mods_root = root / "mods"

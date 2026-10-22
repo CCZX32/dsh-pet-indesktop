@@ -20,6 +20,7 @@ GLOBAL_CONFIG_KEYS = frozenset(
     {
         "active_pets",
         "allow_feature_mods",
+        "market_index_url",
         "click_through",
         "hotkey_toggle_pet",
         "last_settings_page",
@@ -62,6 +63,7 @@ DEFAULTS: dict[str, Any] = {
     "easter_egg_display": "bubble",
     "frameseq": "auto",
     "allow_feature_mods": False,
+    "market_index_url": "",
     "edge_probe_enabled": False,
     "hotkey_toggle_pet": "",
     "click_squash_enabled": True,

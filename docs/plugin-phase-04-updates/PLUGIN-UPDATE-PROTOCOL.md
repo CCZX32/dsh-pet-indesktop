@@ -1,5 +1,7 @@
 # Core 与 DLC 更新协议
 
+> **petcore 现行实现以 [`../PETCORE-MARKET.md`](../PETCORE-MARKET.md) 为准**；本文保留为 Phase 4 的设计历史（catalog 字段、staging/active 指针思路仍具参考价值）。
+
 > 状态：设计协议，基线日期 2026-09-24。本文补充 [`PLUGIN-DLC-ARCHITECTURE.md`](../plugin-phase-01-foundation/PLUGIN-DLC-ARCHITECTURE.md)；当前 Core 更新接口仍以 `pet/updater.py` 和 `pet/update_settings.py` 为准，不在本文中推翻。
 
 ## 1. 两条独立更新链

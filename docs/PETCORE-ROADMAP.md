@@ -276,3 +276,19 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 
 执行纪律：每阶段先写红测试，完成代码/验证/报告后更新四份必同步文档并创建一个
 可运行的本地提交。播放速率 `0.5–2.0x`、VPet LPS/PNG 和首轮 16 宠上限是明确有意差异。
+
+## 21. 插件市场 v1（2026-10-22）
+
+静态索引 + artifact 多源 + 下载校验 + 安装/更新/回滚已落地，作为 Core 的
+`petcore/market/` 与设置页「插件市场」；契约见 [`PETCORE-MARKET.md`](PETCORE-MARKET.md)。
+
+| 项 | 状态 |
+|---|---|
+| 索引 | 完成：`index.json` schema 1、ETag/disk cache、官方 raw → GitHub Contents API 备用源、自定义镜像 |
+| 下载 | 完成：多 URL 回退、`.part` Range 续传、size + SHA-256 |
+| 安装 | 完成：staging → manifest 交叉校验 → 备份 → 原子替换 → `market-lock.json` |
+| 更新/回滚 | 完成：版本比较、最近 2 份备份、回滚后反向备份 |
+| UI | 完成：扩展管理左导航「插件市场」、搜索/分类/状态、离线过期提示 |
+| CLI | 完成：`petcore market list/show/install/update/rollback/doctor` |
+| 官方索引仓库 | 待创建：`MerZlin/dsh-pet-extensions`（本批只冻结契约与 schema） |
+| 签名/CDN/npm | 明确不做：见 `PETCORE-MARKET.md` §8 与 §10 |

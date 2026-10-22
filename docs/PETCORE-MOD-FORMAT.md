@@ -135,6 +135,13 @@ python -m petcore mods doctor
 标「随安装包」，不能在设置里卸载。用户自己导入的包仍装到数据目录 `mods/`，同样归
 「加装扩展」，可单独卸载。
 
+### 6.2 市场安装
+
+`petcore market install` 与设置页「插件市场」走同一套 `petcore/market/` 模块：索引
+元数据、下载、SHA-256 校验、备份、原子替换与回滚。市场安装的包同样落用户数据目录
+`mods/<id>`，feature 包仍受 `allow_feature_mods` 约束，不会因为来自市场就自动授信。
+索引格式、来源缓存、回滚与生效语义见 [`PETCORE-MARKET.md`](PETCORE-MARKET.md)。
+
 ## 7. 能力与边界
 
 能力是**声明 + 用户授权**，不是沙箱。首版不提供：
@@ -142,7 +149,7 @@ python -m petcore mods doctor
 - 第三方代码的默认执行；
 - Python 模块热卸载；
 - worker 监管（协议已定义，实现留给 P1/P3）；
-- 在线更新、签名与分发。
+- 签名与沙箱；在线更新与多源下载见 [`PETCORE-MARKET.md`](PETCORE-MARKET.md)。
 
 ## 8. 内置 feature 与端口（P2）
 
