@@ -193,3 +193,38 @@ python -m petcore mods doctor
 3. 第三方 mod 不要写 `host_page`：它们仍应只出现在「扩展管理 → 加装扩展」。
 4. 新增 Core 内置特性时必须同时补：`CORE_FEATURE_IDS`、`host_page`、
    `tests/test_petcore_builtin_mods.py` 的映射断言。
+
+## 10. P3 端口：对话、截图与 AI 扩展示例
+
+P3 新增两条 mod 可见端口，AI 执行放在 mod，传输与窗口留在 Core：
+
+| 端口 | 能力 | 谁实现 |
+|---|---|---|
+| `HostPorts.chat`（`ChatPort`） | `open/append/token/done/error/close/cancel/is_open/history` + `on_submit/on_stop` | `petcore/ui/chat/controller.py` |
+| `HostPorts.screen`（`ScreenPort`） | `capture(pet_slot=...) -> ScreenCapture(png, width, height, screen_name)` | `petcore/platform/screenshot.py` |
+| `HostPorts.api`（扩展） | `stream_chat(service_id, messages, *, model, temperature, timeout, on_delta, cancel)` | `petcore/api/chat.py` |
+
+约定：
+
+1. **mod 不碰 Qt**：聊天窗口由 `ChatPort` 驱动；`token/done/error` 可以从后台线程调用，
+   controller 用 Qt 信号排队到 GUI 线程。`petcore/chat/` 保持 Qt-free（架构守卫）。
+2. **传输只在 core**：SSE、代理兜底、取消与错误分类都在 `petcore/api/chat.py`；
+   扩展不得 import `petcore.net`/`petcore.api`（`test_mods_use_ports_not_core_transport`）。
+3. **截图不落盘**：`ScreenCapture.png` 是内存字节；转 data URL 由调用方自己做
+   （示例用标准库 `base64`），Core 不写临时文件、不记录正文。
+4. **流式回调线程**：`on_delta` 在请求线程里执行，只做入队/信号，不能直接改控件。
+5. **停止语义**：`ChatPort.on_stop` 收到停止后置位自己的 `threading.Event`，
+   下一次 `stream_chat` 检查取消并返回 `cancelled=True`。
+
+### 参考实现：`examples/petcore-mods/ai.chat`
+
+```text
+mod.json           kind=feature, execution=host-only,
+                   capabilities=[network.request, screenshot.capture,
+                                 speech.present, settings.read, settings.write]
+host/factory.py    三条命令 open / look_screen / screen_capture；
+                   注册 chat.on_submit / on_stop；prompt 组装 + 路由 + 视觉内联
+```
+
+安装：`petcore mods install examples/petcore-mods/ai.chat`（或安装向导勾选，默认不勾）。
+没有安装时，右键菜单与三条热键会气泡提示「AI 扩展未安装」，不会静默无响应。

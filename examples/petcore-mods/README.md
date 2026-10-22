@@ -1,12 +1,13 @@
 # 可导入 petcore mod 样板
 
-这 5 个目录是**可安装的 feature mod 包**，不是 core 内置：
+这 6 个目录是**可安装的 feature mod 包**，不是 core 内置：
 
 - `fun.divination`：抽签
 - `fun.festival`：公历节日提醒
 - `reminder.todo`：待办清单
 - `voice.chime`：系统 TTS 报时
 - `media.music`：Windows 系统媒体键
+- `ai.chat`：AI 对话 + 截图提问（需要先在「设置 → API 与账户」配置服务与密钥）
 
 ## 安装
 
@@ -16,6 +17,7 @@
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/reminder.todo
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/voice.chime
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/media.music
+.venv/Scripts/python -m petcore mods install examples/petcore-mods/ai.chat
 ```
 
 或一键：

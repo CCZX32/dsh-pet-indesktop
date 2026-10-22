@@ -7,7 +7,7 @@ mod 只看见「服务元数据 + 一次解析结果」，**永远拿不到也�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,3 +45,14 @@ class ApiPort(Protocol):
     def subscribe(self, callback: Callable[[], None]) -> Callable[[], None]: ...
     def open_settings(self) -> None: ...
     def fetch_balance(self, service_id: str, *, force: bool = False) -> Any: ...
+    def stream_chat(
+        self,
+        service_id: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        model: str = "",
+        temperature: float | None = None,
+        timeout: float = 60.0,
+        on_delta: Callable[[str], None] | None = None,
+        cancel: Any | None = None,
+    ) -> Any: ...

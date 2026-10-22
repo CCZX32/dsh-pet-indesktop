@@ -308,6 +308,21 @@ class AppearancePage(SettingsPage):
             "全局快捷键，至少包含一个修饰键；留空表示不绑定。",
         )
 
+        ai_card = self.section("AI 快捷键")
+        self.hotkey_open_chat = self._ai_hotkey_row(
+            ai_card, "AI 对话快捷键", "hotkey_open_chat", "open_chat"
+        )
+        self.hotkey_look_screen = self._ai_hotkey_row(
+            ai_card, "看看屏幕快捷键", "hotkey_look_screen", "look_screen"
+        )
+        self.hotkey_screen_capture = self._ai_hotkey_row(
+            ai_card, "截图提问快捷键", "hotkey_screen_capture", "screen_capture"
+        )
+        privacy = QLabel("截图只读取当前屏幕并直接发给模型，不写入磁盘。", ai_card)
+        privacy.setWordWrap(True)
+        privacy.setStyleSheet("color:#8b93a1;")
+        ai_card.add_row("截图隐私", privacy, "需要 AI 扩展声明截屏能力，未安装时快捷键会明确提示。")
+
         text_card = self.section("文字")
         self.ui_font_size_spin = make_spin(self)
         self.ui_font_size_spin.setAccessibleName("界面字号")
@@ -418,6 +433,42 @@ class AppearancePage(SettingsPage):
             setter = getattr(window, "set_stream_capture_mode", None)
             if callable(setter):
                 setter(bool(enabled), persist=False)
+
+    def _ai_hotkey_row(self, card, label: str, key: str, kind: str):
+        edit = QLineEdit(self)
+        edit.setPlaceholderText("例如 Ctrl+Alt+K（留空 = 不绑定）")
+        edit.setText(str(self.config().get(key) or ""))
+        edit.setMinimumWidth(220)
+        edit.editingFinished.connect(
+            lambda e=edit, k=key, n=kind: self._on_ai_hotkey_finished(e, k, n)
+        )
+        card.add_row(
+            label,
+            edit,
+            "全局快捷键，至少包含一个修饰键；留空表示不绑定。",
+        )
+        return edit
+
+    def _on_ai_hotkey_finished(self, edit: QLineEdit, key: str, kind: str) -> None:
+        raw = edit.text().strip()
+        normalized = hotkey_spec.normalize(raw)
+        if raw and not normalized:
+            edit.setText(str(self.config().get(key) or ""))
+            QMessageBox.warning(
+                self,
+                "快捷键",
+                "无法识别这个组合键；请使用类似 Ctrl+Alt+K 的写法，至少包含一个修饰键。",
+            )
+            return
+        edit.setText(normalized)
+        self.config().set(key, normalized)
+        applier = getattr(self.host, "set_hotkey", None)
+        if callable(applier):
+            try:
+                applier(normalized, kind=kind)
+            except TypeError:
+                pass
+        self.changed.emit()
 
     def _on_hotkey_finished(self) -> None:
         raw = self.hotkey_edit.text().strip()

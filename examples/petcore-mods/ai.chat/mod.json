@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "kind": "feature",
+  "id": "ai.chat",
+  "name": "AI chat",
+  "name_zh": "AI 对话",
+  "version": "1.0.0",
+  "api_version": "1",
+  "core_requires": ">=0.1.0,<1.0.0",
+  "author": "dsh-pet",
+  "execution": "host-only",
+  "entrypoint": "host/factory.py:create_host",
+  "capabilities": [
+    "network.request",
+    "screenshot.capture",
+    "speech.present",
+    "settings.read",
+    "settings.write"
+  ]
+}

@@ -190,6 +190,15 @@
 - **鼠标穿透只在托盘**：右键菜单模板不含 `click_through`，旧布局由
   `migrate_p9_menu()` 幂等摘除；托盘「鼠标穿透」一次作用所有桌宠并气泡说明恢复位置。
   穿透开启后右键菜单自己点不到，托盘是唯一稳定恢复入口（同主分支）。
+- **对话通道唯一**：mod 只能经 `HostPorts.chat`（`ChatPort`）驱动聊天窗口；窗口、
+  Markdown、会话、取消都在 core。`token/done/error` 可能来自后台线程，controller
+  必须用信号排队，不许在 worker 线程碰控件；`petcore/chat/` 保持 Qt-free。
+- **流式传输只在 core**：SSE/代理兜底/取消/错误分类都在 `petcore/api/chat.py`；
+  扩展与 `petcore/chat/` 不得 import `petcore.net`/`petcore.api`（架构守卫）。
+- **截图不落盘**：`ScreenPort.capture()` 返回内存 PNG；转 data URL 由调用方用标准库
+  完成，core 不写临时文件、日志不记录图片内容。
+- **四条热键独立**：显示隐藏 / AI 对话 / 看看屏幕 / 截图提问各有独立 Win32 id 与
+  配置键；注册失败必须气泡 + 设置行可见，扩展缺失时提示「AI 扩展未安装」。
 - **气泡同层**：`always_on_top` 变化必须同步 `bubble.set_host_on_top()`，彩蛋弹窗用
   `EasterEggPopup(..., on_top=)`；气泡旗标统一由 `SpeechBubble._window_flags()` 生成，
   不许在别处直接 `setWindowFlags`（会漏掉置顶/不接受焦点）。

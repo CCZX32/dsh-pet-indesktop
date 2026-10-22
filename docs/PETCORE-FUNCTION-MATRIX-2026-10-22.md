@@ -12,8 +12,8 @@
 | 角色与素材 | 角色发现、热加载、角色包、WebM/GIF/帧序列 | CLI 和旧素材适配已实现 | P2 | GUI 导入缺失，媒体仍适配旧 `pet` |
 | 菜单与设置 | 现代菜单、编排器、搜索、非模态设置 | Core 已实现 | 保持 | 业务域设置页尚未齐全 |
 | 自言自语/点击台词 | 台词、配图、角色档案、朗读 | Core feature 已实现 | P1/P4 | 当前配置读取主宠 |
-| AI 对话 | 会话、流式输出、Markdown、历史、模型路由 | 未实现 | P3 | Worker 只有协议 |
-| 识屏/截图提问 | 截图、OCR、翻译、视觉模型、主动识屏 | 未实现 | P3 | 需要 worker 和隐私门 |
+| AI 对话 | 会话、流式输出、Markdown、历史、模型路由 | 部分：Core 流式/窗口/会话 + `ai.chat` 扩展 | P3 完成 | `test_petcore_api_chat.py`、`test_petcore_chat_ui.py`、`test_petcore_ai_mod.py` |
+| 识屏/截图提问 | 截图、OCR、翻译、视觉模型、主动识屏 | 部分：截图提问（全屏、仅内存）；OCR/翻译/主动识屏未做 | P4 | `test_petcore_screenshot.py`；无框选/OCR |
 | Agent 联动 | DSH、Claude、Cursor、自定义 Agent、富事件状态 | 未实现 | P4 | 需要 worker/事件聚合 |
 | API/账户/余额 | 服务规格、钥匙串、余额、缓存、自动刷新 | API 基础已实现，账户未实现 | P3 | `petcore/account/` 不存在 |
 | 音乐 | 播放器入口、SMTC、歌名、歌词、唱歌动画 | 只有系统媒体键样板 | P4 | example 不应视作默认交付 |

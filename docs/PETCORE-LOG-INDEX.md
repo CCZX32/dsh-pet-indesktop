@@ -48,3 +48,5 @@
 | L033 | 2026-10-22 | 插件市场 v1 | 静态索引 + 多源 artifact + SHA-256 + 安装/更新/回滚 + 市场设置页 + `petcore market` CLI；npm 只留 URL 接口。 | market、index、sha256、Range、resume、backup、rollback、market-lock、page_market、allow_feature_mods |
 | L034 | 2026-10-22 | 安装器口径修正 | 5 个官方扩展恢复默认不勾选（iss `Flags: unchecked` + 测试反转），文档口径同步；顺手修正 README 的安装位置。 | opt-in、unchecked、iss、installer、examples README |
 | L035 | 2026-10-22 | 编号统一 | 历史批次改名 H1–H8.4，P0–P6 只表示未来交付阶段；ROADMAP §0 加换算表，SPEC/LOG-INDEX/INDEX 同步。 | numbering、H series、P0–P6、ROADMAP §0、mapping |
+| L036 | 2026-10-22 | P3 流式/窗口/截图/热键 | Core 流式 SSE、ChatPort 聊天窗口、内存截图端口与四条可并存热键；菜单/设置同步。 | stream_chat、ChatPort、ChatWindow、ScreenPort、hotkeys、ai 快捷键 |
+| L037 | 2026-10-22 | P3 ai.chat 扩展 | host-only AI 对话扩展（prompt/路由/截图提问/设置页）+ 安装器可选任务。 | ai.chat、host-only、prompt、vision、installer、opt-in |

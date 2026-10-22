@@ -154,6 +154,7 @@
 - [petcore P7 探头/击飞·安装器·扩展管理·彩蛋音效（2026-10-21）](PR-REPORT-PETCORE-P7-2026-10-21.md)：击飞旋转改为碰撞授权、飞行接管态不掷骰/点击忽略、探头只 idle/转向、setup 鲸鱼娘图标与 `{app}\mods` 扩展、扩展页竖向分组导航、`name_zh`、彩蛋图片与点击音效包；改这些行为时必读。
 - [petcore P8 多宠推动·气泡跟随·设置重组·打包回归（2026-10-21）](PR-REPORT-PETCORE-P8-2026-10-21.md)：轻碰推动与探头优先、子宠单独退出、气泡跟随/图片、彩蛋菜单行、互动页 8 分页、Core 内置特性归位、扩展分组可折叠、安装向导目录页与菜单模板打包兜底；排查「推不动/气泡不跟/右键缺项/设置太长/安装路径消失」时必读。
 - [petcore P8.1 字号/彩蛋图片·菜单结构·弹弓与直播兼容（2026-10-21）](PR-REPORT-PETCORE-P8-1-2026-10-21.md)：界面/气泡字号、彩蛋图片大小、自语配图概率、彩蛋置顶与菜单尾部、播放动画缩略图、弹弓右键抑制、点击监听补挂、X 保存、直播捕获兼容；排查「字太小/彩蛋不在顶部/发射后弹菜单/点击台词不生效/直播抓不到」时必读。
+- [petcore P3 收口：AI 对话·截图提问·热键（2026-10-22）](PR-REPORT-PETCORE-P3-AI-2026-10-22.md)：Core 流式 SSE、ChatPort/ChatWindow、内存截图端口、四条全局热键与 ai.chat 参考扩展；改对话/截屏/热键，或排查「点 AI 没反应 / 热键无效 / 截图落盘」时必读。
 - [petcore 插件市场 v1（2026-10-22）](PR-REPORT-PETCORE-MARKET-2026-10-22.md)：静态索引 + GitHub Release artifact + SHA-256 + 安装/更新/回滚、扩展管理左导航「插件市场」、`petcore market` CLI、npm 结论；改市场链路或评估分发方案时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。

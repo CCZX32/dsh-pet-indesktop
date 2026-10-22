@@ -1362,6 +1362,14 @@ class PetWindow(QWidget):
     def quit_app(self) -> None:
         self.host.quit_app()
 
+    def run_ai_command(self, command_id: str) -> bool:
+        """菜单/热键共用的 AI 入口；扩展缺失时由 core 负责提示。"""
+        runner = getattr(self.host, "run_feature_command", None)
+        if callable(runner):
+            return bool(runner("ai.chat", command_id, slot=self.slot))
+        self.say("AI 扩展未安装：可在「扩展管理 → 插件市场」安装")
+        return False
+
     def quit_from_menu(self) -> None:
         """右键「退出」：主宠退整个应用，子宠只收回自己。"""
         if self.slot == 0:

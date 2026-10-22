@@ -23,6 +23,12 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "market_index_url",
         "click_through",
         "hotkey_toggle_pet",
+        "hotkey_open_chat",
+        "hotkey_look_screen",
+        "hotkey_screen_capture",
+        "ai_service",
+        "ai_model",
+        "ai_system_prompt",
         "last_settings_page",
         "menu_hidden",
         "menu_layout",
@@ -66,6 +72,12 @@ DEFAULTS: dict[str, Any] = {
     "market_index_url": "",
     "edge_probe_enabled": False,
     "hotkey_toggle_pet": "",
+    "hotkey_open_chat": "",
+    "hotkey_look_screen": "",
+    "hotkey_screen_capture": "",
+    "ai_service": "",
+    "ai_model": "",
+    "ai_system_prompt": "",
     "click_squash_enabled": True,
     "click_squash_ms": 220,
     "drag_physics_enabled": False,
@@ -487,6 +499,15 @@ class Config:
         normalized["hotkey_toggle_pet"] = hotkey_spec.normalize(
             normalized.get("hotkey_toggle_pet")
         )
+        for hotkey_key in (
+            "hotkey_open_chat",
+            "hotkey_look_screen",
+            "hotkey_screen_capture",
+        ):
+            normalized[hotkey_key] = hotkey_spec.normalize(normalized.get(hotkey_key))
+        normalized["ai_service"] = str(normalized.get("ai_service") or "").strip()
+        normalized["ai_model"] = str(normalized.get("ai_model") or "").strip()
+        normalized["ai_system_prompt"] = str(normalized.get("ai_system_prompt") or "")[:4000]
         normalized["menu_hidden"] = _text_list(normalized.get("menu_hidden"))
         normalized["menu_order"] = _text_list(normalized.get("menu_order"))
         layout = normalized.get("menu_layout")

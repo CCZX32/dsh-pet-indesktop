@@ -349,6 +349,83 @@ class CoreApiPort:
     def fetch_balance(self, service_id: str, *, force: bool = False):
         return self.host.account.fetch_balance(service_id, force=force)
 
+    def stream_chat(
+        self,
+        service_id: str,
+        messages,
+        *,
+        model: str = "",
+        temperature: float | None = None,
+        timeout: float = 60.0,
+        on_delta=None,
+        cancel=None,
+    ):
+        """Core 唯一的对话出口：mod 只给消息，HTTP/SSE 与密钥都在这里。"""
+        from ..api.chat import stream_chat
+
+        return stream_chat(
+            self.resolve(service_id),
+            messages,
+            model=model,
+            temperature=temperature,
+            timeout=timeout,
+            on_delta=on_delta,
+            cancel=cancel,
+        )
+
+
+class WorkerNoticePort:
+    """给 worker 的启动/崩溃/异常退出补上用户可见反馈（P3 验收项）。"""
+
+    def __init__(self, inner, notify) -> None:
+        self._inner = inner
+        self._notify = notify
+
+    def start(self, owner: str, argv, env=None, **kwargs):
+        inner_error = kwargs.pop("on_error", None)
+        inner_exit = kwargs.pop("on_exit", None)
+
+        def on_error(exc):
+            logger.warning("worker %s error: %s", owner, type(exc).__name__)
+            self._safe_notify(f"扩展 {owner} 的后台进程出错，已停止")
+            if callable(inner_error):
+                inner_error(exc)
+
+        def on_exit(code):
+            if code not in (0, None):
+                self._safe_notify(f"扩展 {owner} 的后台进程异常退出（{code}）")
+            if callable(inner_exit):
+                inner_exit(code)
+
+        kwargs.update(on_error=on_error, on_exit=on_exit)
+        return self._inner.start(owner, argv, env=env, **kwargs)
+
+    def _safe_notify(self, message: str) -> None:
+        try:
+            self._notify(message)
+        except Exception:
+            logger.debug("worker notice failed", exc_info=True)
+
+
+class QtScreenPort:
+    """截屏端口：只读当前屏到内存，不落盘。"""
+
+    def __init__(self, host) -> None:
+        self.host = host
+
+    def capture(self, *, pet_slot: int | None = None):
+        from ..platform.screenshot import capture_screen
+
+        window = None
+        pets = getattr(self.host, "pets", None)
+        if pets is not None and pet_slot is not None:
+            try:
+                window = pets.window_for_slot(int(pet_slot))
+            except Exception:
+                window = None
+        window = window or getattr(self.host, "window", None)
+        return capture_screen(window)
+
 
 def build_ports(host, window) -> HostPorts:
     store = getattr(host, "api_store", None)
@@ -364,5 +441,14 @@ def build_ports(host, window) -> HostPorts:
         quiet=getattr(host, "quiet", None),
         credentials=credentials,
         api=api,
-        worker=getattr(host, "worker_host", None),
+        worker=(
+            WorkerNoticePort(
+                host.worker_host,
+                lambda message: host._notify(None, message),
+            )
+            if getattr(host, "worker_host", None) is not None
+            else None
+        ),
+        chat=getattr(host, "chat", None),
+        screen=QtScreenPort(host),
     )

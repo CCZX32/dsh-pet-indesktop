@@ -48,6 +48,7 @@ Name: "mod_festival"; Description: "节日提醒（fun.festival）"; GroupDescri
 Name: "mod_todo"; Description: "待办清单（reminder.todo）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_chime"; Description: "整点报时（voice.chime）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_music"; Description: "音乐信息（media.music）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
+Name: "mod_aichat"; Description: "AI 对话（ai.chat，需自备 API）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 
 [Files]
 Source: "..\dist\dsh-pet-core\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -64,6 +65,8 @@ Source: "..\examples\petcore-mods\voice.chime\*"; DestDir: "{app}\mods\voice.chi
 Source: "trust_marker.txt"; DestDir: "{app}\mods\voice.chime"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_chime
 Source: "..\examples\petcore-mods\media.music\*"; DestDir: "{app}\mods\media.music"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_music
 Source: "trust_marker.txt"; DestDir: "{app}\mods\media.music"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_music
+Source: "..\examples\petcore-mods\ai.chat\*"; DestDir: "{app}\mods\ai.chat"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_aichat
+Source: "trust_marker.txt"; DestDir: "{app}\mods\ai.chat"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_aichat
 
 [Icons]
 Name: "{autoprograms}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"

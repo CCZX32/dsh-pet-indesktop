@@ -45,6 +45,7 @@ def test_bundled_mods_install_under_the_app_directory() -> None:
         "reminder.todo",
         "voice.chime",
         "media.music",
+        "ai.chat",
     ):
         assert f"{{app}}\\mods\\{mod_id}" in text
 
@@ -60,6 +61,7 @@ def test_official_feature_tasks_are_opt_in() -> None:
             ("reminder.todo", "todo"),
             ("voice.chime", "chime"),
             ("media.music", "music"),
+            ("ai.chat", "aichat"),
         )
     }
     assert all("Flags: unchecked" in line for line in task_lines.values())

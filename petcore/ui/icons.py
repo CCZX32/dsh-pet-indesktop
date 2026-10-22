@@ -122,6 +122,14 @@ def _draw(name: str, painter: QPainter) -> None:
     elif name == "quit":
         painter.drawArc(QRectF(10, 9, 16, 16), 120 * 16, 300 * 16)
         painter.drawLine(QPointF(18, 6), QPointF(18, 17))
+    elif name == "chat":
+        bubble = QPainterPath()
+        bubble.addRoundedRect(QRectF(6, 7, 24, 17), 5, 5)
+        painter.drawPath(bubble)
+        painter.drawLine(QPointF(12, 24), QPointF(12, 30))
+        painter.drawLine(QPointF(12, 30), QPointF(18, 24))
+        painter.drawLine(QPointF(11, 13), QPointF(25, 13))
+        painter.drawLine(QPointF(11, 17), QPointF(21, 17))
     elif name == "play":
         painter.drawPolygon([QPointF(14, 8), QPointF(28, 18), QPointF(14, 28)])
     elif name == "speed":

@@ -1291,3 +1291,92 @@ GPT 的 P0–P6 计划与历史 P1-A…P8.4 重名不同义（新 P1=配置作�
 
 - `docs/PR-REPORT-PETCORE-P1-SCOPE-2026-10-22.md` 等**新**报告仍叫 P1/P2/P3（指新轴），
   与历史 `P1C/P1F/P2/P3` 文件名并存；文件名不改，正文已在 ROADMAP §0 有换算口径。
+
+## L036 · 2026-10-22 · P3 流式对话、聊天宿主、截图与热键
+
+**改动**
+
+- `petcore/api/chat.py`（新，194 行）：`stream_chat()` —— SSE 逐段解析、一次性 JSON
+  回退、`cancel` 轮询、超时、`net/http` 代理兜底；错误统一成 `net/errors` 的稳定
+  reason；日志不记正文与密钥。
+- `petcore/contracts/api.py`：`ApiPort.stream_chat(...)`；`petcore/ui/ports.py::CoreApiPort`
+  转发并注入 keyring 解析出的 `ApiRequest`。
+- `petcore/contracts/chat.py`（新）+ `petcore/ui/chat/`（新，window 289 / controller 296 行）：
+  `ChatPort` 实现、Markdown 流式合帧（50ms）、停止/清空/历史下拉、按 `(owner, slot)`
+  隔离；跨线程只用 Qt 信号，worker 线程不碰控件。
+- `petcore/contracts/screen.py`（新）+ `petcore/platform/screenshot.py`（新，75 行）：
+  `ScreenPort.capture()` 用 `QScreen.grabWindow(0)` 抓整屏到内存 PNG；不写盘。
+  `contracts/screen.py` 只留数据类（`contracts` 必须 stdlib-only）。
+- `petcore/platform/hotkeys.py`：单条 → 多条命名注册（每条独立 Win32 id），保留
+  `apply(text, cb)` 旧签名；`active_texts()`、`clear(name)`。
+- `petcore/ui/ports.py`：`WorkerNoticePort` —— worker 出错/异常退出转成用户可见提示
+  （补齐 P3 验收「Worker 取消/超时/崩溃有用户反馈」）。
+- `petcore/ui/app.py`：`HOTKEY_CONFIGS`/`HOTKEY_COMMANDS` 四条映射；
+  `set_hotkey(text, kind=...)`；`run_feature_command()` 统一分发与「扩展未安装」提示。
+- `petcore/config.py`：新增 `hotkey_open_chat` / `hotkey_look_screen` /
+  `hotkey_screen_capture` / `ai_service` / `ai_model` / `ai_system_prompt`（全局键）。
+- `petcore/ui/menu_actions.py` + 模板 + `menu_layout` + `coverage.py`：右键新增
+  「AI 对话 / 看看屏幕 / 截图提问」；`icons.py` 增加 chat 图标。
+- `petcore/ui/settings/pages_core.py`：常规页新增「AI 快捷键」三条 + 截图隐私说明。
+- `tests/`：新增 `test_petcore_api_chat.py`(6)、`test_petcore_chat_ui.py`(6)、
+  `test_petcore_screenshot.py`(4)、`test_petcore_hotkeys.py`(5)；
+  `test_petcore_architecture.py` 增加 3 条守卫（chat Qt-free、mod 不 import 传输、
+  engine 不 import ui）；`test_petcore_worker.py` 增加 worker 失败反馈；
+  `test_petcore_menu_layout.py` 顺序断言更新。
+
+**行为**
+
+- AI 对话窗口归 core：mod 通过 `ChatPort` 发事件；流式逐字显示、停止即时生效、
+  历史按宠/角色落盘。`petcore/chat/` 仍零网络、零 Qt。
+- 截图提问：整屏抓取 → 内存 PNG → 多模态 `image_url`，全程不落盘。
+- 热键：四条并存，失败可见。
+
+**验证**
+
+- `pytest tests/test_petcore_*.py tests/test_architecture.py tests/test_pr_report_discipline.py
+  tests/test_ci_workflows.py -q` → **1019 passed**。
+- `ruff check pet/ tests/ petcore/` → 全绿。
+- 性能探针（`.scratch/p3_probe.py`，本机）：本地 SSE 100 段首段 **38.3ms**、总
+  **45.8ms**；窗口 300 段/50 次合帧 **21.8ms（0.4ms/次）**；真实屏幕 1920×1200@1.5
+  抓屏 **204.7ms**、PNG **367KB**。
+
+**打包受阻（环境）**
+
+- `-Installer` 的 PyInstaller 成功，但 `--check` 冒烟启动被系统拦截：
+  `WinError 4551 = "An Application Control policy has blocked this file."`，
+  `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState = 1`
+  → 本机 **Smart App Control** 强制开启，拦截未签名的新构建 exe。
+- 对照：复制到仓库目录的 notepad 可启动；PyInstaller 构建的空 hello 程序同样被拦；
+  旧 setup 同样被拦。与 petcore 代码无关。
+- 结论：本轮**没有产出 P3 安装包**；`dist/dsh-pet-core-setup.exe` 仍是 14:59 的旧产物。
+  解除需用户关闭 Smart App Control 或给产物签名。
+
+**未验证**
+
+- 真实 DeepSeek 端到端的首 token 延迟（本机无可用密钥，探针只测传输开销）。
+- 抓屏在 GUI 线程同步执行（约 205ms），用户按热键会有一次可感知停顿。
+
+---
+
+## L037 · 2026-10-22 · ai.chat 参考扩展与安装口径
+
+**改动**
+
+- `examples/petcore-mods/ai.chat/`（新）：`mod.json`（host-only、capabilities
+  network.request/screenshot.capture/speech.present/settings.read/write）+
+  `host/factory.py`（399 行）：`open`/`look_screen`/`screen_capture` 三条命令、
+  `chat.on_submit/on_stop`、系统提示词 + 历史组装、截图内联、错误回退、设置页
+  （服务/模型/提示词/视觉开关）。
+- `packaging/petcore.iss`：新增 `mod_aichat` 任务（`Flags: unchecked`）+ 文件与
+  `.trusted` 投放，和其余 5 个官方扩展同口径。
+- `examples/petcore-mods/README.md`：从 5 个改 6 个，补 ai.chat 安装命令。
+- 测试：`test_petcore_ai_mod.py`(7)；`test_petcore_installer.py` 两个清单补 ai.chat。
+
+**验证**
+
+- 全量 petcore 门禁 1019 passed（含新增 7 条 + worker 反馈 1 条）；ruff 全绿。
+- 打包后验证见 PR 报告「实机运行记录」。
+
+**未验证**
+
+- 真实模型下的多轮对话质量；视觉模型对 367KB 截图的接受度（不同服务上限不同）。

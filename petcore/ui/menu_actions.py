@@ -317,6 +317,27 @@ def core_items(window) -> dict[str, MenuItem]:
             "playback_speed", "播放速率", populate=populate_speed, icon="speed", order=15
         ),
         "size": MenuItem("size", "大小", populate=populate_scale, icon="size", order=20),
+        "ai_chat": MenuItem(
+            "ai_chat",
+            "AI 对话",
+            callback=lambda: window.run_ai_command("open"),
+            icon="chat",
+            order=21,
+        ),
+        "look_screen": MenuItem(
+            "look_screen",
+            "看看屏幕",
+            callback=lambda: window.run_ai_command("look_screen"),
+            icon="screen",
+            order=22,
+        ),
+        "screen_capture": MenuItem(
+            "screen_capture",
+            "截图提问",
+            callback=lambda: window.run_ai_command("screen_capture"),
+            icon="screen",
+            order=23,
+        ),
         "drag_physics": MenuItem(
             "drag_physics",
             "拖动物理",

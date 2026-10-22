@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .api import ApiPort
+from .chat import ChatPort
+from .screen import ScreenPort
 
 
 class PresentationPort(Protocol):
@@ -134,3 +136,5 @@ class HostPorts:
     interaction: InteractionPort | None = None
     quiet: QuietPort | None = None
     api: ApiPort | None = None
+    chat: ChatPort | None = None
+    screen: ScreenPort | None = None

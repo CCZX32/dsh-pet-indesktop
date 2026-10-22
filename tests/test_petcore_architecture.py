@@ -105,3 +105,39 @@ def test_engine_public_modules_exist() -> None:
         "pet_state.py",
     ):
         assert (PKG / "engine" / name).exists()
+
+
+def test_chat_sessions_stay_qt_free_and_network_free() -> None:
+    """``petcore/chat`` 只做会话与存储：worker 也要能用，不许碰 Qt 或网络。"""
+    for path in (PKG / "chat").rglob("*.py"):
+        imports = _imports(path)
+        assert not any(
+            name.startswith(("PySide6", "PyQt5", "PyQt6", "shiboken6")) for name in imports
+        ), f"{path} must stay Qt-free: {imports}"
+        assert not any(
+            name.split(".")[0] in {"urllib", "http", "socket", "requests"}
+            or name.startswith(("petcore.net", "petcore.api", "petcore.account"))
+            for name in imports
+        ), f"{path} must stay network-free: {imports}"
+
+
+def test_mods_use_ports_not_core_transport() -> None:
+    """扩展（内置 + 示例）只能拿端口，不许 import Core 的联网实现。"""
+    forbidden = {"petcore.net", "petcore.api", "petcore.account"}
+    offenders: list[str] = []
+    for root in (PKG / "builtin", ROOT / "examples" / "petcore-mods"):
+        for path in root.rglob("*.py"):
+            for name in _imports(path):
+                if name in forbidden or any(name.startswith(f"{item}.") for item in forbidden):
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()} -> {name}")
+    assert not offenders, offenders
+
+
+def test_engine_never_imports_ui() -> None:
+    """UI 只能单向依赖 engine；反向 import 会把 Qt 拖进纯逻辑层。"""
+    offenders: list[str] = []
+    for path in (PKG / "engine").rglob("*.py"):
+        for name in _imports(path):
+            if name.startswith("petcore.ui"):
+                offenders.append(f"{path.name} -> {name}")
+    assert not offenders, offenders

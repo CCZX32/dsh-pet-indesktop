@@ -193,7 +193,14 @@ petcore/
     `migrate_p9_menu()` 幂等摘除）；托盘菜单的「鼠标穿透」一次作用到所有桌宠并
     用气泡说明恢复位置。设置页「外观与交互 → 点击穿透」保留为第二个入口。
     理由：穿透开启后右键菜单本身点不到，托盘是唯一稳定的恢复入口（与主分支一致）。
-43. **图片按设备像素比装载**：彩蛋弹窗、气泡配图、菜单头像一律走
+43. **对话只有一条通道**：mod 只能通过 `HostPorts.chat`（`ChatPort`）驱动聊天窗口；
+    窗口、Markdown 渲染、会话落盘与取消都在 core。流式 HTTP/SSE 只能出现在
+    `petcore/api/`，`petcore/chat/` 保持 Qt-free 且零网络依赖。
+44. **截图只走内存**：截屏由 core 的 `ScreenPort` 提供，PNG 直接内联进请求，
+    **不写磁盘、不写日志正文**；未声明 `screenshot.capture` 的扩展拿不到端口。
+45. **热键失败必须可见**：四条全局热键（显示隐藏 / AI 对话 / 看看屏幕 / 截图提问）
+    各自独立注册；注册失败要落到气泡与设置行，不许静默。
+46. **图片按设备像素比装载**：彩蛋弹窗、气泡配图、菜单头像一律走
     `petcore/media/images.py`（`load_pixmap/scale_pixmap/logical_size/screen_dpr`）：
     逻辑尺寸上限 × 屏幕 `devicePixelRatio` = 物理解码尺寸，pixmap 写回 DPR，
     QLabel 只设逻辑尺寸。禁止「先缩到逻辑像素再交给 QLabel」——1.5 倍缩放的
@@ -418,3 +425,19 @@ petcore/
   API Key、服务凭据或 worker 状态。
 
 
+
+## 16. P3 落地（2026-10-22）
+
+- **流式对话**：`petcore/api/chat.py` 提供 `stream_chat()`（SSE / 一次性 JSON 回退、
+  取消、超时、代理兜底、稳定错误分类）；`ApiPort.stream_chat()` 是 mod 唯一入口。
+- **聊天宿主**：`ChatPort` + `petcore/ui/chat/`（窗口、Markdown 流式合帧、停止/清空、
+  历史下拉、按 `(owner, slot)` 隔离）；会话复用 `petcore/chat/session_store.py`。
+  跨线程只走信号，worker 线程不碰 Qt。
+- **截图提问**：`ScreenPort.capture()` → `ScreenCapture.png`（内存 PNG）→ 多模态消息
+  `image_url: data:image/png;base64,…`；实测 1920×1200@1.5 抓屏 204.7ms、PNG 367KB。
+- **热键**：`hotkey_toggle_pet` / `hotkey_open_chat` / `hotkey_look_screen` /
+  `hotkey_screen_capture`，四条各自独立的 Win32 id；失败在设置页与气泡可见。
+- **AI 扩展**：`examples/petcore-mods/ai.chat` 是参考实现（host-only）：prompt/人格/
+  路由在 mod，传输/窗口/密钥在 core；安装向导提供可勾选项（默认不勾）。无扩展时
+  菜单/热键会明确提示「AI 扩展未安装」。
+- **未做**：OCR、翻译、框选、主动识屏、Agent、TTS（P4）。

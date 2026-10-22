@@ -51,7 +51,7 @@
 | 音乐 | SMTC/播放器识别、歌词、唱跳动画、播放器启动 | `media.music` 示例只有系统媒体键 | P10 | 歌词同步 + 唱歌动画 |
 | 语音 | TTS provider、自言自语语音、口型、语音报时 | `voice.chime` 示例用 `QTextToSpeech` 朗读时间 | P10 | provider 抽象 + 口型 |
 | 设置域 | 桌宠/互动/菜单/语音/文件识别/AI/自动化/关于 | 8 页；缺 AI/自动化/语音/文件/更新/桌面组件/天气 | P9–P11 | 每域有页与搜索 |
-| 右键菜单 | AI 对话/看屏幕/截图提问/音乐控制/天气/余额/Agent/主动识屏/待办/报时/抽签/节日/检查更新 | 缺上述条目 | P9–P11 | 菜单项 + 设置落点 + coverage |
+| 右键菜单 | AI 对话/看屏幕/截图提问/音乐控制/天气/余额/Agent/主动识屏/待办/报时/抽签/节日/检查更新 | AI 三项已加（P3）；其余仍缺 | P4 | 菜单项 + 设置落点 + coverage |
 | 诊断/性能 | FPS/GPU/网络监控、卡顿采样 | 关于页诊断文本 + 日志 | P12 | 实时指标页 |
 | 平台 | Windows/macOS 实机 | 仅 Windows 实机；macOS/Linux 未验证 | P12 | 两平台冒烟 |
 
@@ -62,8 +62,8 @@
 | 功能 | 说明 | 计划 |
 |---|---|---|
 | DeepSeek 账户与余额 | 登录态、token、余额查询、余额档位动画 | P8 后续（`petcore/account/`） |
-| AI 对话 | chat/persona/快捷对话/模型路由/聊天记录 | P9 |
-| 识屏 / 截图提问 / 主动识屏 | 截屏、框选、模型调用、主动触发与限流 | P9 |
+| AI 对话 | chat/persona/快捷对话/模型路由/聊天记录 | 部分（P3）：Core 流式/窗口/会话 + `ai.chat` 扩展；快捷对话未做 | P3 完成 |
+| 识屏 / 截图提问 / 主动识屏 | 截屏、框选、模型调用、主动触发与限流 | 部分（P3）：全屏截图提问（仅内存）；OCR/翻译/框选/主动识屏未做 | P4 |
 | Agent 联动 | DSH/Claude/Cursor 等事件、本轮消费、Agent 六态动画 | P10 |
 | Worker 运行时 | `contracts/worker.py` 已有协议，执行层未实现 | P9 |
 
@@ -83,7 +83,7 @@
 
 | 功能 | 说明 | 计划 |
 |---|---|---|
-| 三个全局热键 | `open_chat`/`look_screen`/`screen_capture`；petcore 只有显示/隐藏 | P9/P11 |
+| 三个全局热键 | `open_chat`/`look_screen`/`screen_capture` | 已对齐（P3）：四条热键并存、失败可见 | 保持 |
 | 预测预热 / 共享解码 / FPS 治理 | 性能层仍在 backlog | P12 |
 | VPet PNG 后端 | 直接读 VPet 角色包 | P12 |
 | macOS / Linux | 打包、输入、窗口行为 | P12 |
@@ -167,7 +167,7 @@
 | VPet Graph 类别寻址 | 已对齐（映射） | `build_animations()` 文件夹映射测试 |
 | 5 个官方 feature 可选安装（默认不勾） | 已对齐（安装任务） | `test_official_feature_tasks_are_opt_in` |
 | 旧 `pet` 媒体后端解耦 | 未做 | `petcore/media/backends.py` 仍为适配层 |
-| AI/识屏/Agent worker 业务 | 未做 | P3/P4 |
+| AI/识屏/Agent worker 业务 | 对话与截图提问已接（P3）；Agent/OCR/翻译未做 | P4 |
 
 ## 10. P3 Core 账户基础（2026-10-22）
 
@@ -176,6 +176,6 @@
 | Core 余额服务/缓存/错误分类 | 已对齐（基础） | `tests/test_petcore_account.py` |
 | `HostPorts.api.fetch_balance()` | 已对齐（协议） | `tests/test_petcore_api.py`、account tests |
 | 余额菜单、自动刷新、档位动画 | 未做 | 等异步 UI/worker 阶段 |
-| AI/识屏/Agent 业务 | 未做 | P3/P4 后续 |
+| AI/识屏/Agent 业务 | 对话与截图提问已接（P3）；其余未做 | P4 后续 |
 
 | 每宠聊天会话存储 | 已对齐（基础） | `tests/test_petcore_sessions.py`；尚未接入聊天 UI |

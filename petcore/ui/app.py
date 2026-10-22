@@ -30,12 +30,26 @@ from .menu_layout import (
     migrate_p9_menu,
     resolve,
 )
+from .chat import ChatController
 from .menu_model import MenuItem, MenuModel
 from .pet_manager import PetManager, SHARED_KEYS
 from .pet_window import PetWindow
 from .tray import TrayIcon
 
 logger = logging.getLogger("petcore.ui.app")
+
+#: 全局快捷键：配置键 + 动作（AI 三条都走 ai.chat 的 feature command）。
+HOTKEY_CONFIGS = {
+    "toggle_pet": "hotkey_toggle_pet",
+    "open_chat": "hotkey_open_chat",
+    "look_screen": "hotkey_look_screen",
+    "screen_capture": "hotkey_screen_capture",
+}
+HOTKEY_COMMANDS = {
+    "open_chat": ("ai.chat", "open"),
+    "look_screen": ("ai.chat", "look_screen"),
+    "screen_capture": ("ai.chat", "screen_capture"),
+}
 
 
 def _mod_diagnostics(result) -> list[str]:
@@ -111,6 +125,7 @@ class CoreHost:
         self.api_store = ApiStore(self.root)
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
+        self.chat = ChatController(self, self.root)
         self.menu_model = MenuModel()
         self.load_result = None
         self._characters: list = []
@@ -207,6 +222,40 @@ class CoreHost:
             command()
         except Exception:
             logger.exception("feature command failed: %s/%s", owner, command_id)
+
+    def run_feature_command(
+        self, owner: str, command_id: str, *, slot: int | None = None
+    ) -> bool:
+        """菜单/热键的统一入口：扩展缺失时明确提示，不静默失败。"""
+        command = None
+        if self.features is not None:
+            command = self.features.command(owner, command_id)
+        if command is None:
+            self._notify_missing_feature(owner)
+            return False
+        try:
+            command()
+        except Exception:
+            logger.exception("feature command failed: %s/%s", owner, command_id)
+            self._notify(slot, "扩展执行失败，详情见日志")
+            return False
+        return True
+
+    def _notify_missing_feature(self, owner: str) -> None:
+        label = "AI 扩展" if owner == "ai.chat" else f"扩展 {owner}"
+        self._notify(None, f"{label}未安装：可在「扩展管理 → 插件市场」安装")
+
+    def _notify(self, slot: int | None, message: str) -> None:
+        window = self.window
+        if slot is not None and self.pets is not None:
+            window = self.pets.window_for_slot(int(slot)) or window
+        window = window or self._active_window
+        say = getattr(window, "say", None)
+        if callable(say):
+            try:
+                say(message, 6000)
+            except Exception:
+                logger.debug("notify failed", exc_info=True)
 
     def settings_pages(self):
         return self.features.settings_pages() if self.features is not None else []
@@ -362,19 +411,36 @@ class CoreHost:
         if self.hotkeys is None:
             self.hotkeys = GlobalHotkeyService(self.app)
             self.hotkeys.install()
-        self.set_hotkey(str(self.config.get("hotkey_toggle_pet") or ""))
+        for kind, key in HOTKEY_CONFIGS.items():
+            self.set_hotkey(str(self.config.get(key) or ""), persist=False, kind=kind)
 
-    def set_hotkey(self, text: str, *, persist: bool = True) -> tuple[bool, str]:
+    def set_hotkey(
+        self, text: str, *, persist: bool = True, kind: str = "toggle_pet"
+    ) -> tuple[bool, str]:
+        key = HOTKEY_CONFIGS.get(str(kind))
+        if key is None:
+            return False, "未知的快捷键类型"
         normalized = hotkey_spec.normalize(text)
         if persist:
-            self.config.set("hotkey_toggle_pet", normalized)
+            self.config.set(key, normalized)
             self.config.save()
         if self.hotkeys is None:
             return True, ""
-        ok, message = self.hotkeys.apply(normalized, self._toggle_pet_visible)
+        ok, message = self.hotkeys.apply(
+            normalized, self._hotkey_callback(kind), name=str(kind)
+        )
         if not ok:
-            logger.warning("无法注册全局快捷键 %s：%s", normalized, message)
+            logger.warning("无法注册全局快捷键 %s(%s)：%s", normalized, kind, message)
         return ok, message
+
+    def _hotkey_callback(self, kind: str):
+        if kind == "toggle_pet":
+            return self._toggle_pet_visible
+        command = HOTKEY_COMMANDS.get(str(kind))
+        if command is None:
+            return lambda: None
+        owner, command_id = command
+        return lambda: self.run_feature_command(owner, command_id)
 
     def _toggle_pet_visible(self) -> None:
         if self.pets is not None:
