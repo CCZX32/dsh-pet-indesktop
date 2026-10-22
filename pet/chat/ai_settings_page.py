@@ -250,8 +250,9 @@ class _AiSettingsPage(QWidget):
         root.addWidget(SettingsSection("场景扮演", [
             SettingRow(
                 "roleplay_enabled", "场景扮演",
-                "开启后 AI 回复按「动作 + 台词」演，并可附带一张场景卡约定在哪演、现场有谁。"
-                "人设决定它是谁，场景卡决定在哪演，两组互不影响。",
+                "开启后 AI 会演这个场景：动作 + 台词，并且自己带出环境细节、在场其他人的动静和"
+                "场景推进，不再只是你一句我一句。场景卡约定在哪演、现场有谁；人设决定它是谁，"
+                "两组互不影响。",
                 self.roleplay_enabled,
             ),
             SettingRow(
