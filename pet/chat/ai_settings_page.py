@@ -1019,17 +1019,20 @@ class ChatMemoryDialog(QDialog):
             text.setStyleSheet("color: rgba(128,128,128,0.6);")
         layout.addWidget(text, 1)
         entry_id = str(entry.get("id", ""))
-        # 单条改层：四层下拉（改层立即落盘并重排）
-        layer_combo = QComboBox(row)
-        layer_combo.setObjectName(f"chat-memory-layer-{entry_id}")
-        layer_combo.setFixedWidth(92)
-        for name in LAYERS:
-            layer_combo.addItem(LAYER_LABELS[name], name)
-        layer_combo.setCurrentIndex(LAYERS.index(layer_of(entry)))
-        layer_combo.currentIndexChanged.connect(
-            lambda _index, eid=entry_id, combo=layer_combo: self._change_layer(
-                eid, str(combo.currentData())))
-        layout.addWidget(layer_combo, 0, Qt.AlignmentFlag.AlignTop)
+        if not archived:
+            # 单条改层：四层下拉（改层立即落盘并重排）。归档行不渲染层下拉
+            # （v2b E：`update_layer` 会清 archived，等于第二条静默恢复通道），
+            # 只保留「恢复」按钮。
+            layer_combo = QComboBox(row)
+            layer_combo.setObjectName(f"chat-memory-layer-{entry_id}")
+            layer_combo.setFixedWidth(92)
+            for name in LAYERS:
+                layer_combo.addItem(LAYER_LABELS[name], name)
+            layer_combo.setCurrentIndex(LAYERS.index(layer_of(entry)))
+            layer_combo.currentIndexChanged.connect(
+                lambda _index, eid=entry_id, combo=layer_combo: self._change_layer(
+                    eid, str(combo.currentData())))
+            layout.addWidget(layer_combo, 0, Qt.AlignmentFlag.AlignTop)
         if archived:
             restore_btn = QPushButton("恢复", row)
             restore_btn.setObjectName(f"chat-memory-restore-{entry_id}")

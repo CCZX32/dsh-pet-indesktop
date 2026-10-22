@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,12 +24,15 @@ from pet.chat.memory import (
     injection_text,
     layer_of,
     memory_path,
+    memory_payload,
     parse_remember_command,
 )
 from pet.chat.memory_recall import (
     HALF_LIFE_DAYS,
+    MAX_KEYWORDS,
     RECALL_TOP_K,
     TOPIC_ARCHIVE_DAYS,
+    _now,
     archive_stale_topics,
     extract_keywords,
     is_archived,
@@ -137,7 +141,28 @@ def test_extract_keywords_bigram_and_words_and_cap():
     assert "不吃" in keywords
     assert "python" in keywords
     assert "pytest" in keywords
-    assert len(extract_keywords("很长" * 100)) <= 6
+    # v2b A：上限放宽到整条记忆（48），不再只留前 6 个 bigram。
+    assert len(extract_keywords("很长" * 100)) <= MAX_KEYWORDS
+    assert MAX_KEYWORDS == 48
+
+
+def test_long_entry_keyword_cap_recalls_exam_topic():
+    """盲审反例 1：条目关键词不能只留前 6 个 bigram（考试被截掉）。"""
+    entries = [_entry("我在准备十月底的考试"), _entry("今天天气不错")]
+    result = recall(entries, "考试还有两周，有点紧张", now=NOW)
+    assert [e["text"] for e in result.entries][:1] == ["我在准备十月底的考试"]
+    assert "今天天气不错" not in [e["text"] for e in result.entries]
+
+
+def test_version_number_produces_bigrams_and_recalls():
+    """盲审反例 2：4.4.0 这类数字 token 不再按长度丢弃，且产出 4.4/4.0 bigram。"""
+    keywords = extract_keywords("版本 4.4.0 修了几个崩溃")
+    assert "4.4" in keywords
+    assert "4.0" in keywords
+    entries = [_entry("版本 4.4.0 修了几个崩溃"), _entry("今天天气不错")]
+    result = recall(entries, "4.4.0 还有问题吗", now=NOW)
+    assert [e["text"] for e in result.entries][:1] == ["版本 4.4.0 修了几个崩溃"]
+    assert "今天天气不错" not in [e["text"] for e in result.entries]
 
 
 def test_score_grows_with_keyword_intersection():
@@ -184,6 +209,28 @@ def test_importance_manual_and_lesson_are_weighted():
     scores = _scores([auto, manual, lesson], "alpha")
     assert scores["手动"] > scores["自动"]
     assert scores["教训"] > scores["自动"]
+
+
+def test_global_idf_keeps_relative_order_when_unrelated_entries_added():
+    """G：idf 用全部未归档条目统计，加无关条目后既有条目相对排序不变。"""
+    focused = _entry("focused", keywords=["alpha"])
+    diffuse = _entry("diffuse", keywords=["alpha", "beta"])
+    baseline = recall([focused, diffuse], "alpha", now=NOW)
+    assert [e["text"] for e in baseline.entries] == ["focused", "diffuse"]
+    noise = [
+        _entry(f"无关-{index}", keywords=[f"zz{index}"])
+        for index in range(39)
+    ]
+    grown = recall([focused, diffuse, *noise], "alpha", now=NOW)
+    assert [e["text"] for e in grown.entries] == ["focused", "diffuse"]
+
+
+def test_now_dead_branch_merged():
+    """H：naive 与 aware 都按本地时区归一，语义不变。"""
+    naive = datetime(2026, 10, 21, 12, 0)
+    aware = naive.astimezone()
+    assert _now(naive) == aware
+    assert _now(aware) == aware
 
 
 # ---------------------------------------------------------------- 命中 / 已见
@@ -254,20 +301,49 @@ def test_archive_stale_topics_only_touches_topics():
     assert "archived" not in old_fact
 
 
-def test_topic_auto_archive_persists_and_restore_unarchives(tmp_path):
+def test_topic_auto_archive_persists_via_product_path(tmp_path):
+    """F：产品路径落盘（build_messages → augment_for_turn → note_recalled 巡检）。
+
+    不是直接调 ``note_recalled([])`` 的假绿断言：这里从真实 prompt 构建进入，
+    由 daemon 写盘线程把 ``archived=True`` 落到 memory.json，再读盘核对。
+    """
     path = tmp_path / "memory.json"
-    mem = ChatMemory(path, clock=lambda: NOW)
-    entry, _ = mem.add("那个 Bug", layer="topic")
+    first = ChatMemory(path, clock=lambda: NOW)
+    entry, _ = first.add("那个 Bug", layer="topic")
     later = NOW + timedelta(days=TOPIC_ARCHIVE_DAYS + 1)
     later_mem = ChatMemory(path, clock=lambda: later)
-    assert later_mem.note_recalled([]) is True
-    archived = later_mem.load()[0]
-    assert archived["archived"] is True
-    assert is_archived(archived, later) is True
+    payload = memory_payload(later_mem, True)
+
+    builder = PromptBuilder()
+    builder.build_messages(
+        _settings(), "cat", _history(), "完全无关的句子",
+        now=later, memory_payload=payload,
+    )
+    assert later_mem.flush_hits(5.0) is True
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    persisted = next(e for e in raw["entries"] if e["id"] == entry["id"])
+    assert persisted["archived"] is True
+    assert is_archived(persisted, later) is True
+
     assert later_mem.set_archived(entry["id"], False) is True
     restored = later_mem.load()[0]
     assert restored["archived"] is False
     assert is_archived(restored, later) is False
+
+
+def test_note_recalled_empty_ids_archive_via_internal_api(tmp_path):
+    """F 补充：覆盖内部异步批量 API——空命中同样触发归档巡检并最终落盘。"""
+    path = tmp_path / "memory.json"
+    first = ChatMemory(path, clock=lambda: NOW)
+    entry, _ = first.add("那个 Bug", layer="topic")
+    later = NOW + timedelta(days=TOPIC_ARCHIVE_DAYS + 1)
+    later_mem = ChatMemory(path, clock=lambda: later)
+    later_mem.note_recalled([])
+    assert later_mem.flush_hits(5.0) is True
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    persisted = next(e for e in raw["entries"] if e["id"] == entry["id"])
+    assert persisted["archived"] is True
 
 
 # ---------------------------------------------------------------- 手动钉四前缀
@@ -309,6 +385,19 @@ def test_add_accepts_full_remember_command_text(tmp_path):
     assert entry["layer"] == "user"
 
 
+def test_manual_pin_remember_topic_unarchives(tmp_path):
+    """D：手动钉「记住话题：」是允许解除归档的入口（自动来源不允许）。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: NOW)
+    entry, _ = mem.add("记住话题：那个 Bug")
+    assert mem.set_archived(entry["id"], True) is True
+    assert mem.load()[0]["archived"] is True
+    again, created = mem.add("记住话题：那个 Bug")
+    assert created is False
+    assert "archived" not in again
+    assert mem.load()[0].get("archived") is not True
+
+
 # ---------------------------------------------------------------- 首轮/次轮注入集成
 def _settings():
     return ChatSettings()
@@ -338,16 +427,152 @@ def test_prompt_first_turn_skips_recall_then_second_turn_hits(tmp_path):
     mem.add("周三有课", layer="fact")
     builder = PromptBuilder()
     now = datetime(2026, 10, 21, 12, 0).astimezone()
+    payload = memory_payload(mem, True)
 
-    first_memory = injection_text(True, tmp_path, "", "shenshen")
     first = builder.build_messages(
-        _settings(), "cat", [], "周三有课吗", now=now, memory_text=first_memory
+        _settings(), "cat", [], "周三有课吗", now=now, memory_payload=payload
     )
     assert "我不吃辣" in first[0]["content"]
     assert "周三有课" not in first[0]["content"]
 
-    second_memory = injection_text(True, tmp_path, "", "shenshen")
     second = builder.build_messages(
-        _settings(), "cat", _history(), "周三有课吗", now=now, memory_text=second_memory
+        _settings(), "cat", _history(), "周三有课吗",
+        now=now, memory_payload=payload,
     )
     assert "周三有课" in second[0]["content"]
+
+
+# ---------------------------------------------------------------- v2b B：显式 payload
+def _payload_for(tmp_path, character_id: str, text: str):
+    path = memory_path(tmp_path, "", character_id)
+    mem = ChatMemory(path)
+    mem.add(text, layer="fact")
+    return memory_payload(mem, True)
+
+
+def test_payloads_do_not_cross_sessions(tmp_path):
+    """B：A/B 两个 payload 交替构建，各自只拿到自己的条目（不再串会话）。"""
+    builder = PromptBuilder()
+    now = datetime(2026, 10, 21, 12, 0).astimezone()
+    payload_a = _payload_for(tmp_path, "alpha", "周三有课")
+    payload_b = _payload_for(tmp_path, "beta", "我不吃辣")
+
+    first = builder.build_messages(
+        _settings(), "cat", _history(), "周三有课吗", now=now, memory_payload=payload_a)
+    second = builder.build_messages(
+        _settings(), "cat", _history(), "我不吃辣吗", now=now, memory_payload=payload_b)
+    third = builder.build_messages(
+        _settings(), "cat", _history(), "周三有课吗", now=now, memory_payload=payload_a)
+
+    assert "周三有课" in first[0]["content"]
+    assert "我不吃辣" not in first[0]["content"]
+    assert "我不吃辣" in second[0]["content"]
+    assert "周三有课" not in second[0]["content"]
+    assert "周三有课" in third[0]["content"]
+
+
+def test_payload_exception_does_not_pollute_next_build(tmp_path, monkeypatch):
+    """B：一次构建中途抛异常，不应留下任何可供下一次取走的暂存状态。"""
+    import pet.chat.prompt as prompt_mod
+
+    builder = PromptBuilder()
+    now = datetime(2026, 10, 21, 12, 0).astimezone()
+    payload_a = _payload_for(tmp_path, "alpha", "周三有课")
+    payload_b = _payload_for(tmp_path, "beta", "我不吃辣")
+    real_augment = prompt_mod.augment_for_turn
+    calls = {"count": 0}
+
+    def flaky(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("构建中途失败")
+        return real_augment(*args, **kwargs)
+
+    monkeypatch.setattr(prompt_mod, "augment_for_turn", flaky)
+    with pytest.raises(RuntimeError):
+        builder.build_messages(
+            _settings(), "cat", _history(), "周三有课吗", now=now, memory_payload=payload_a)
+    recovered = builder.build_messages(
+        _settings(), "cat", _history(), "我不吃辣吗", now=now, memory_payload=payload_b)
+    assert "我不吃辣" in recovered[0]["content"]
+    assert "周三有课" not in recovered[0]["content"]
+
+
+def test_payload_wins_over_memory_text_without_duplicate_injection(tmp_path):
+    """B：memory_text 与 memory_payload 同时给时以 payload 为准，不重复注入。"""
+    builder = PromptBuilder()
+    now = datetime(2026, 10, 21, 12, 0).astimezone()
+    payload = _payload_for(tmp_path, "alpha", "周三有课")
+    messages = builder.build_messages(
+        _settings(), "cat", _history(), "周三有课吗", now=now,
+        memory_text="【关于用户的记忆】\n- 不该出现", memory_payload=payload)
+    system = messages[0]["content"]
+    assert "不该出现" not in system
+    assert system.count("周三有课") == 1
+
+
+def test_build_messages_without_payload_is_byte_identical():
+    """B 硬约束：未传 memory_payload 时输出与改动前逐字节一致（固定输入）。"""
+    now = datetime(2026, 10, 21, 12, 0).astimezone()
+    history = [
+        ChatMessage("user", "上一条", created_at=(now - timedelta(minutes=5)).isoformat(),
+                    message_id="m1"),
+        ChatMessage("assistant", "回复", created_at=(now - timedelta(minutes=4, seconds=30)).isoformat(),
+                    message_id="m2"),
+    ]
+    messages = PromptBuilder().build_messages(
+        _settings(), "cat", history, "你好", now=now)
+    assert messages == [
+        {
+            "role": "system",
+            "content": (
+                "你是一只可爱的桌面宠物，请用自然、友善的中文和用户交流。\n\n"
+                "【时间信息】当前时间：2026-10-21 周三 12:00。对话记录中用户消息开头的"
+                "「[日期 时间]」是系统自动附加的发送时间，用来帮助你感知时间的流逝"
+                "（例如隔了多久没聊、现在是白天还是深夜、日期是否变了），回复时自然地"
+                "体现即可；不要在回复中复述或模仿这种时间标记。"
+            ),
+        },
+        {"role": "user", "content": "[2026-10-21 周三 11:55] 上一条"},
+        {"role": "assistant", "content": "回复"},
+        {"role": "user", "content": "你好"},
+    ]
+
+
+# ---------------------------------------------------------------- v2b C：异步命中写盘
+def test_topic_hit_build_messages_fast_and_persists_async(tmp_path):
+    """C：GUI 线程构建 <5ms；命中 last_hit_at 最终由 daemon 线程落盘。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path)
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    payload = memory_payload(mem, True)
+    builder = PromptBuilder()
+    now = datetime(2026, 10, 21, 12, 0).astimezone()
+
+    started = time.perf_counter()
+    messages = builder.build_messages(
+        _settings(), "cat", _history(), "那个 Bug 怎么样了",
+        now=now, memory_payload=payload)
+    elapsed = time.perf_counter() - started
+    assert "那个 Bug" in messages[0]["content"]
+    assert elapsed < 0.005, f"GUI 线程构建耗时 {elapsed * 1000:.2f}ms，超过 5ms"
+
+    assert mem.flush_hits(5.0) is True
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    persisted = next(e for e in raw["entries"] if e["id"] == topic["id"])
+    assert datetime.fromisoformat(persisted["last_hit_at"]) >= datetime.fromisoformat(
+        persisted["created_at"])
+
+
+def test_note_recalled_cache_visible_before_disk_write(tmp_path):
+    """C：命中先更新进程内缓存（load 立即可见），随后由 daemon 线程落盘。"""
+    path = tmp_path / "memory.json"
+    mem = ChatMemory(path, clock=lambda: NOW)
+    topic, _ = mem.add("那个 Bug", layer="topic")
+    later = NOW + timedelta(days=3)
+    mem.note_recalled([topic["id"]], now=later)
+    assert mem.load()[0]["last_hit_at"] == later.isoformat()
+    assert mem.flush_hits(5.0) is True
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    persisted = next(e for e in raw["entries"] if e["id"] == topic["id"])
+    assert persisted["last_hit_at"] == later.isoformat()

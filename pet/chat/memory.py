@@ -15,9 +15,13 @@
 - 两个入口：对话里「记住[偏好/教训/话题]：……」（指令解析，
   `parse_remember_command`）与消息气泡「钉为记忆」；重复钉同一文本按文本去重
   （updated_at 刷新 + hits+1）；
-- 注入：`injection_text` 只返回 user 快照（硬字符上限），并按线程暂存条目；
-  `PromptBuilder.build_messages` 用真实用户消息补上 fact/lesson/topic 命中段。
+- 注入：`injection_text` 只返回 user 快照（硬字符上限，不再暂存条目）；
+  聊天窗改用 `memory_payload` 生成的显式 `MemoryPayload`（user 快照 + 全量
+  条目 + 会话命名空间），`PromptBuilder.build_messages` 用真实用户消息补上
+  fact/lesson/topic 命中段。旧调用方仍可用 `injection_text` / `memory_text`。
   `chat_memory_enabled` 关 = 注入段为空，零成本。
+- 命中记录：`note_recalled` 只更新进程内 `last_hit_at` 缓存并入队，磁盘写
+  由单飞 daemon 线程完成（同一 topic ≥60s 去抖），GUI 线程零磁盘写。
 
 存储纪律照抄 `pet/proactive_memory.py`（三层锁，直接复用它的进程内锁表与
 锁文件约定，不新造轮子）：
@@ -42,8 +46,10 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -62,15 +68,14 @@ from .memory_recall import (
     DEFAULT_LAYER,
     LAYERS,
     MAX_KEYWORDS,
+    USER_CHAR_LIMIT,
     archive_stale_topics,
-    clear_staged_injection,
     extract_keywords,
     is_archived,
     layer_of,
     normalize_layer,
     recall,
     render_user_snapshot,
-    stage_injection,
 )
 from .session_store import SessionStore
 
@@ -122,6 +127,13 @@ _READ_ATTEMPTS = 3
 _UNLINK_ATTEMPTS = 5
 _REPLACE_ATTEMPTS = 5
 
+#: 命中记录落盘去抖：同一 topic 两次写盘至少隔 60s（内存缓存立即可见）。
+HIT_WRITE_DEBOUNCE_SECONDS = 60.0
+#: 归档巡检最小间隔：无 topic 命中的轮次只做内存判断，不每轮读盘。
+ARCHIVE_SWEEP_SECONDS = 60.0
+#: 进程内 last_hit_at 缓存上限（按条目 id，超限丢最老的写入记录）。
+_HIT_CACHE_LIMIT = 512
+
 
 def memory_path(config_dir, instance_id: str, character_id: str) -> Path:
     """记忆文件路径：`<config_dir>/sessions[-实例]/<character_id>/memory.json`。
@@ -147,21 +159,31 @@ def parse_remember_command(text: str) -> str | None:
     return None
 
 
-def render_injection(entries: list[dict[str, Any]], char_limit: int = INJECT_CHAR_LIMIT) -> str:
+def render_injection(
+    entries: list[dict[str, Any]],
+    char_limit: int = INJECT_CHAR_LIMIT,
+    *,
+    include_archived: bool = False,
+) -> str:
     """把记忆条目渲染成 system 末尾的「关于用户的记忆」段；无条目 → 空串。
 
     选取优先级：hits 高 → 最近更新；段长有硬上限（`char_limit`），第一条放不下的
     条目处截断（"超出按 hits/时间截"，不跳着拣短条目——顺序就是优先级）。
+    v2b：默认**排除归档 topic**（后台提炼不再把归档条目喂回模型而静默复活）；
+    显式 ``include_archived=True`` 才包含。
     """
     if not entries:
         return ""
     limit = max(200, int(char_limit))
+    moment = datetime.now().astimezone()
 
     def _key(entry: dict[str, Any]) -> tuple:
         return (-int(entry.get("hits", 0) or 0), -_iso_sort_key(entry.get("updated_at")))
 
     section = _INJECT_HEADER
     for entry in sorted(entries, key=_key):
+        if not include_archived and is_archived(entry, moment):
+            continue
         text = str(entry.get("text", "")).strip()
         if not text:
             continue
@@ -222,26 +244,219 @@ def injection_text(
 ) -> str:
     """生成注入段的总入口：`chat_memory_enabled` 关 / 无记忆 / 读不到 → 空串。
 
-    默认只返回 user 快照，同时把本次读到的条目暂存到当前线程，等
-    ``PromptBuilder.build_messages`` 用真实用户消息补 fact/lesson/topic 命中段
-    （聊天窗调用签名不变）。显式传 ``user_text`` 时直接返回「user 快照 + 命中」
-    两段，便于测试/其它调用方一次拿全。
+    默认只返回 user 快照；**不再暂存条目**（v2b：暂存会把 A 会话的记忆串进
+    同一线程上 B 会话的注入）。需要按需命中的调用方改用
+    ``memory_payload`` + ``build_messages(memory_payload=...)``。
+    显式传 ``user_text`` 时直接返回「user 快照 + 命中」两段，便于测试/其它
+    调用方一次拿全（旧签名继续可用）。
 
     纯读（只拿本地 I/O 窄锁，不碰写者的宽锁与跨进程锁）：读者要么看到旧快照、
     要么看到新快照，永远不会看到半截文件（写入走原子替换）。
     """
     if not enabled:
-        clear_staged_injection()
         return ""
     memory = ChatMemory(memory_path(config_dir, instance_id, character_id))
     entries = memory.load()
     user_section = render_user_snapshot(entries, now=now)
     if user_text is None:
-        stage_injection(entries, session_key=str(memory.path), note_hits=memory.note_recalled)
         return user_section
-    clear_staged_injection()
     result = recall(entries, str(user_text), seen=seen, now=now, turn_index=turn_index)
     return "\n\n".join(part for part in (user_section, result.text) if part)
+
+
+@dataclass
+class MemoryPayload:
+    """一轮对话要注入的记忆快照（显式传参，替代已删除的线程暂存）。
+
+    ``text`` 是 system 末尾的 user 层快照；``entries`` 是全量条目（按需命中用）；
+    ``session_key`` 是 ``_SEEN`` 的命名空间（记忆文件路径）；``note_hits`` 是
+    命中回写回调（通常是 ``ChatMemory.note_recalled``）。
+    """
+
+    text: str = ""
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    session_key: str = ""
+    note_hits: Callable[[list[str]], Any] | None = None
+
+
+def memory_payload(
+    memory: "ChatMemory",
+    enabled: bool,
+    *,
+    char_limit: int = USER_CHAR_LIMIT,
+) -> MemoryPayload:
+    """纯读地生成一轮注入快照：不暂存、不写盘。
+
+    ``enabled=False`` 或没有条目时返回空 payload；命中回写回调只在本进程的
+    内存里记录（真正的落盘由 ``note_recalled`` 的 daemon 线程去做）。
+    """
+    if not enabled:
+        return MemoryPayload()
+    entries = memory.load()
+    if not entries:
+        return MemoryPayload(session_key=str(memory.path))
+    return MemoryPayload(
+        text=render_user_snapshot(entries, char_limit=char_limit),
+        entries=entries,
+        session_key=str(memory.path),
+        note_hits=memory.note_recalled,
+    )
+
+
+class _HitWriteQueue:
+    """按记忆文件路径共享的命中写盘队列：GUI 线程只入队，daemon 线程单飞落盘。
+
+    合并去重：同一 topic 在排队期间被多次命中只保留最新时间；同一 topic 两次
+    落盘至少间隔 ``HIT_WRITE_DEBOUNCE_SECONDS``（内存缓存立即更新）。
+    归档巡检（超期 topic 写 ``archived=True``）由 ``sweep_archive`` / 低频巡检
+    触发，是一次性变更，不受命中去抖限制。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._cond = threading.Condition()
+        self._pending: dict[str, datetime] = {}
+        self._cache: dict[str, datetime] = {}
+        self._last_write: dict[str, float] = {}
+        self._last_sweep: float | None = None
+        self._sweep_moment: datetime | None = None
+        self._force = False
+        self._thread: threading.Thread | None = None
+        self._clock: Callable[[], datetime] = lambda: datetime.now().astimezone()
+
+    # ------------------------------------------------------------ 入队 / 查询
+    def record(
+        self,
+        ids: set[str],
+        moment: datetime,
+        clock: Callable[[], datetime],
+    ) -> None:
+        with self._cond:
+            self._clock = clock
+            for entry_id in ids:
+                self._pending[entry_id] = moment
+                self._cache.pop(entry_id, None)
+                self._cache[entry_id] = moment
+            while len(self._cache) > _HIT_CACHE_LIMIT:
+                self._cache.pop(next(iter(self._cache)))
+            # 首轮巡检立即到期（不依赖进程 uptime 是否已过 60s）；之后低频。
+            if (self._last_sweep is None
+                    or time.monotonic() - self._last_sweep >= ARCHIVE_SWEEP_SECONDS):
+                self._sweep_moment = moment
+            if not self._pending and self._sweep_moment is None:
+                return  # 空命中且不在巡检窗口：不启动线程
+            self._ensure_thread_locked()
+            self._cond.notify_all()
+
+    def request_sweep(self, moment: datetime) -> None:
+        with self._cond:
+            self._sweep_moment = moment
+            self._ensure_thread_locked()
+            self._cond.notify_all()
+
+    def cached_hits(self) -> dict[str, datetime]:
+        with self._cond:
+            return dict(self._cache)
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        """强制忽略去抖把排队命中/巡检写盘，并等到 worker 退出（测试用）。"""
+        with self._cond:
+            self._force = True
+            self._ensure_thread_locked()
+            self._cond.notify_all()
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while self._thread is not None and self._thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    # ------------------------------------------------------------ worker
+    def _ensure_thread_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="chat-memory-hit-write")
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                work = self._collect_locked()
+                if work is None:
+                    self._thread = None
+                    self._cond.notify_all()
+                    return
+            try:
+                self._write_batch(*work)
+            except Exception:  # noqa: BLE001 - 命中记录失败只写日志
+                log.exception("对话记忆命中记录写盘失败（已静默）: %s", self.path)
+            with self._cond:
+                now = time.monotonic()
+                for entry_id in work[0]:
+                    self._last_write[entry_id] = now
+                if work[1] is not None:
+                    self._last_sweep = now
+                self._cond.notify_all()
+
+    def _collect_locked(self) -> tuple[dict[str, datetime], datetime | None] | None:
+        while True:
+            now = time.monotonic()
+            if self._force:
+                ids = dict(self._pending)
+                self._pending.clear()
+                sweep = self._sweep_moment
+                self._sweep_moment = None
+                self._force = False
+                return (ids, sweep) if (ids or sweep is not None) else None
+            ready: dict[str, datetime] = {}
+            wait_for: float | None = None
+            for entry_id, moment in self._pending.items():
+                last = self._last_write.get(entry_id)
+                if last is None or now - last >= HIT_WRITE_DEBOUNCE_SECONDS:
+                    ready[entry_id] = moment
+                else:
+                    remain = HIT_WRITE_DEBOUNCE_SECONDS - (now - last)
+                    wait_for = remain if wait_for is None else min(wait_for, remain)
+            if ready or self._sweep_moment is not None:
+                for entry_id in ready:
+                    self._pending.pop(entry_id, None)
+                sweep = self._sweep_moment
+                self._sweep_moment = None
+                return ready, sweep
+            if not self._pending:
+                return None
+            self._cond.wait(timeout=wait_for if wait_for is not None else 1.0)
+
+    def _write_batch(
+        self,
+        ids: dict[str, datetime],
+        sweep_moment: datetime | None,
+    ) -> bool:
+        memory = ChatMemory(self.path, clock=self._clock)
+        return memory._apply_hit_batch(ids, sweep_moment)
+
+
+_HIT_QUEUES: dict[Path, _HitWriteQueue] = {}
+_HIT_QUEUES_LOCK = threading.Lock()
+
+
+def _hit_queue_for(path: Path | str) -> _HitWriteQueue:
+    key = _resolved(path)
+    with _HIT_QUEUES_LOCK:
+        queue = _HIT_QUEUES.get(key)
+        if queue is None:
+            queue = _HitWriteQueue(key)
+            _HIT_QUEUES[key] = queue
+        return queue
+
+
+def _cached_hits(path: Path) -> dict[str, datetime]:
+    key = _resolved(path)
+    with _HIT_QUEUES_LOCK:
+        queue = _HIT_QUEUES.get(key)
+    return queue.cached_hits() if queue is not None else {}
 
 
 class ChatMemory:
@@ -320,11 +535,20 @@ class ChatMemory:
         """读取记忆列表（新条目在前）。纯读，只与"本地正在写盘"互斥一瞬间。
 
         老条目在返回的副本上补 ``layer=fact`` 与现场 bigram ``keywords``；
-        **不写盘**，盘上文件保持原样（无迁移）。
+        **不写盘**，盘上文件保持原样（无迁移）。进程内已记录、尚未落盘的命中
+        （``note_recalled`` 去抖窗口内的 ``last_hit_at``）在副本上先行生效。
         """
         entries = self._read_entries_strict()
         moment = datetime.now().astimezone()
-        return [_normalized_entry(entry, now=moment) for entry in (entries or [])]
+        cached = _cached_hits(self.path)
+        loaded: list[dict[str, Any]] = []
+        for entry in entries or []:
+            item = dict(entry)
+            hit = cached.get(str(item.get("id", "")))
+            if hit is not None and layer_of(item) == "topic":
+                item["last_hit_at"] = hit.isoformat()
+            loaded.append(_normalized_entry(item, now=moment))
+        return loaded
 
     def load_grouped(self) -> dict[str, list[dict[str, Any]]]:
         """按四层分组读取；组内按 updated_at 倒序，四个键恒存在。"""
@@ -486,9 +710,13 @@ class ChatMemory:
                     if found is not None:
                         found["updated_at"] = now
                         found["hits"] = int(found.get("hits", 0) or 0) + 1
+                        # v2b：自动来源不得解除归档（否则后台提炼一重申就把
+                        # 归档 topic 静默复活）；只有手动来源（手动钉）可以。
+                        manual = str(source or "").strip().lower() == "manual"
                         if explicit_layer is not None:
                             found["layer"] = explicit_layer
-                            found.pop("archived", None)
+                            if manual:
+                                found.pop("archived", None)
                         else:
                             found["layer"] = layer_of(found)
                         found["keywords"] = (
@@ -496,9 +724,8 @@ class ChatMemory:
                             or _clean_keyword_list(found.get("keywords"))
                             or extract_keywords(text)
                         )
-                        if layer_of(found) == "topic":
+                        if layer_of(found) == "topic" and not bool(found.get("archived")):
                             found["last_hit_at"] = now
-                            found.pop("archived", None)
                         entries.remove(found)
                         entries.insert(0, found)
                         continue
@@ -541,7 +768,10 @@ class ChatMemory:
                 now = self._clock().isoformat()
                 found["layer"] = target
                 found["updated_at"] = now
-                found.pop("archived", None)
+                # 只在「改到别的层」时丢掉归档标记（话题已不是话题，标记无意义）；
+                # 仍在 topic 层就把归档态留着，避免这里成为第二条静默恢复通道。
+                if target != "topic":
+                    found.pop("archived", None)
                 if target == "topic":
                     found["last_hit_at"] = now
                 return self._write(entries)
@@ -581,14 +811,31 @@ class ChatMemory:
         entry_ids: list[str],
         *,
         now: datetime | None = None,
-    ) -> bool:
-        """记录一次命中：刷新 topic 的 last_hit_at，并顺带归档超期 topic。
+    ) -> None:
+        """记录一次命中（v2b：GUI 线程只更新内存缓存并入队，不碰磁盘）。
 
-        由 recall 注入后调用（只影响 topic；没有 topic 命中且无超期 topic 时
-        不落盘）。返回本次是否真的写盘。
+        真正的 ``last_hit_at`` 落盘与超期 topic 归档在按路径单飞的 daemon 线程
+        里完成；同一 topic 两次落盘 ≥60s 去抖，排队期间合并去重。任何写盘异常
+        只写日志。空 ``entry_ids`` 也会触发一次低频归档巡检（≥60s 一次）。
         """
         ids = {str(item) for item in (entry_ids or [])}
         moment = now or self._clock()
+        _hit_queue_for(self.path).record(ids, moment, self._clock)
+
+    def sweep_archive(self, *, now: datetime | None = None) -> None:
+        """主动安排一次超期 topic 归档巡检（异步；测试可随后 ``flush_hits``）。"""
+        _hit_queue_for(self.path).request_sweep(now or self._clock())
+
+    def flush_hits(self, timeout: float = 5.0) -> bool:
+        """等本路径所有排队中的命中/归档写盘完成（测试与退出前的等待点）。"""
+        return _hit_queue_for(self.path).flush(timeout)
+
+    def _apply_hit_batch(
+        self,
+        hits: dict[str, datetime],
+        sweep_moment: datetime | None,
+    ) -> bool:
+        """worker 专用：一次读改写落盘命中时间 + 超期 topic 归档；返回是否写盘。"""
         with self._lock:
             qlock = QLockFile(str(self._lock_file))
             if not self._try_file_lock(qlock):
@@ -600,11 +847,13 @@ class ChatMemory:
                     return False
                 changed = False
                 for entry in entries:
-                    if (str(entry.get("id")) in ids
-                            and layer_of(entry) == "topic"):
+                    entry_id = str(entry.get("id"))
+                    moment = hits.get(entry_id)
+                    if moment is not None and layer_of(entry) == "topic":
                         entry["last_hit_at"] = moment.isoformat()
                         changed = True
-                changed = archive_stale_topics(entries, moment) or changed
+                if sweep_moment is not None:
+                    changed = archive_stale_topics(entries, sweep_moment) or changed
                 if not changed:
                     return False
                 return self._write(entries)

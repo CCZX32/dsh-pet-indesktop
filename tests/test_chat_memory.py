@@ -242,6 +242,16 @@ def test_render_injection_empty_entries_is_empty():
     assert render_injection([]) == ""
 
 
+def test_render_injection_excludes_archived_by_default():
+    """D：归档 topic 默认不喂回提炼/注入，显式 include_archived 才包含。"""
+    entries = _entries(["旧话题", "新话题"])
+    entries[0]["layer"] = "topic"
+    entries[0]["archived"] = True
+    assert "旧话题" not in render_injection(entries)
+    assert "新话题" in render_injection(entries)
+    assert "旧话题" in render_injection(entries, include_archived=True)
+
+
 def test_render_injection_hard_char_limit():
     entries = _entries([f"第{i}条" + "很长" * 100 for i in range(50)])
     section = render_injection(entries)
@@ -583,6 +593,8 @@ def test_memory_manager_groups_layers_changes_layer_and_restores_topic(tmp_path,
             combo.setCurrentIndex(LAYERS.index("lesson"))
             assert next(e for e in mem.load() if e["id"] == fact["id"])["layer"] == "lesson"
             # 归档 topic：灰显 + 恢复按钮，点恢复后不再归档
+            archived_combo = dialog.findChild(QComboBox, f"chat-memory-layer-{stale['id']}")
+            assert archived_combo is None or not archived_combo.isEnabled()  # E：归档行不可改层
             restore = dialog.findChild(QPushButton, f"chat-memory-restore-{stale['id']}")
             assert restore is not None
             restore.click()

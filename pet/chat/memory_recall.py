@@ -12,6 +12,10 @@
 - 已见去重：top-3 的前 2 条不排除已见，第 3 条起跳过已见；
 - topic 连续 14 天未命中自动归档（归档条目不参与命中）；
 - 空命中不注入占位。
+
+v2b：条目/查询关键词上限放宽到整条记忆（48 / 64），ASCII 单词与版本号也入
+关键词；idf 按**全部未归档条目**统计；注入候选改由显式 ``MemoryPayload`` 传入，
+不再使用线程暂存（``augment_for_turn`` 的 entries / session_key 由调用方给）。
 """
 
 from __future__ import annotations
@@ -38,11 +42,13 @@ TOPIC_ARCHIVE_DAYS = 14.0
 USER_CHAR_LIMIT = 600
 RECALL_CHAR_LIMIT = 600
 RECALL_TOP_K = 3
-MAX_KEYWORDS = 6
+MAX_KEYWORDS = 48
 
-_QUERY_KEYWORD_LIMIT = 16
+_QUERY_KEYWORD_LIMIT = 64
 _SECONDS_PER_DAY = 86400.0
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+", re.UNICODE)
+#: 拉丁/数字词（含版本号这类点分形式）与 CJK 串；版本号匹配后还会拆出相邻 bigram。
+_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*|[\u3400-\u4dbf\u4e00-\u9fff]+", re.UNICODE)
 _CJK_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff]+$")
 #: 高频虚词不单独成为关键词；只影响单字/整词，不影响含实义字的 bigram。
 _STOPWORDS = frozenset(
@@ -72,6 +78,8 @@ def extract_keywords(text: Any, limit: int = MAX_KEYWORDS) -> list[str]:
     """从文本提取关键词：CJK bigram + 拉丁/数字词，去重、保序、截到 ``limit``。
 
     单字 CJK 且在虚词表里的跳过；双字 bigram 不拆（例如「不吃」「周三」）。
+    拉丁/数字词允许长度 1（``a`` / ``0`` 也收，靠 idf 与停用词去噪）；点分版本号
+    额外产出相邻段的 bigram（``4.4.0`` → ``4.4`` / ``4.0``）。
     同一套函数用于写入（手动钉/提炼 ops）与查询，避免两边口径漂移。
     """
     if limit <= 0:
@@ -93,7 +101,15 @@ def extract_keywords(text: Any, limit: int = MAX_KEYWORDS) -> list[str]:
                 continue
             for index in range(len(token) - 1):
                 _add(token[index:index + 2])
-        elif len(token) >= 2:
+        elif "." in token:
+            # 版本号：整串 + 各段 + 相邻段 bigram（4.4.0 → 4 / 4 / 0 / 4.4 / 4.0）。
+            _add(token)
+            parts = token.split(".")
+            for part in parts:
+                _add(part)
+            for index in range(len(parts) - 1):
+                _add(f"{parts[index]}.{parts[index + 1]}")
+        else:
             _add(token)
         if len(keywords) >= limit:
             break
@@ -124,8 +140,7 @@ def _entry_time(entry: dict[str, Any], *keys: str) -> float:
 
 
 def _now(now: datetime | None) -> datetime:
-    value = now or datetime.now().astimezone()
-    return value.astimezone() if value.tzinfo else value.astimezone()
+    return (now or datetime.now().astimezone()).astimezone()
 
 
 def decay(entry: dict[str, Any], now: datetime | None = None) -> float:
@@ -216,8 +231,13 @@ def rank_entries(
     query: str,
     *,
     now: datetime | None = None,
+    idf: dict[str, float] | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
-    """按命中分降序返回 ``(score, entry)``；user 层与归档 topic 不参与。"""
+    """按命中分降序返回 ``(score, entry)``；user 层与归档 topic 不参与。
+
+    ``idf`` 由调用方传入时按它打分（recall 用全部未归档条目统计，避免候选集
+    大小改变让排序反转）；不传则沿用旧口径按候选集现算。
+    """
     moment = _now(now)
     query_keywords = set(extract_keywords(query, limit=_QUERY_KEYWORD_LIMIT))
     if not query_keywords:
@@ -226,10 +246,10 @@ def rank_entries(
         entry for entry in entries
         if layer_of(entry) != "user" and not is_archived(entry, moment)
     ]
-    idf = _idf_map(candidates)
+    weights = idf if idf is not None else _idf_map(candidates)
     scored = []
     for entry in candidates:
-        score = score_entry(entry, query_keywords, idf, moment)
+        score = score_entry(entry, query_keywords, weights, moment)
         if score > 0:
             scored.append((score, entry))
     scored.sort(
@@ -313,7 +333,11 @@ def recall(
     seen_ids = frozenset(str(item) for item in (seen or ()))
     if int(turn_index) <= 1:
         return RecallResult(seen=seen_ids)
-    ranked = rank_entries(entries, query, now=now)
+    moment = _now(now)
+    # idf 用全部未归档条目统计（含 user 层）：候选集大小/无关条目增减不再
+    # 改变既有条目的相对稀有度（v2b 盲审 G：N=3 与 N=42 排序反转）。
+    idf = _idf_map([entry for entry in entries if not is_archived(entry, moment)])
+    ranked = rank_entries(entries, query, now=moment, idf=idf)
     if not ranked:
         return RecallResult(seen=seen_ids)
     selected: list[dict[str, Any]] = []
@@ -332,49 +356,10 @@ def recall(
     return RecallResult(entries=included, text=text, seen=frozenset(updated))
 
 
-# ---------------------------------------------------------------- 注入暂存 / 已见
-@dataclass
-class _PendingInjection:
-    entries: list[dict[str, Any]]
-    session_key: str
-    note_hits: Callable[[list[str]], Any] | None = None
-
-
-_PENDING = threading.local()
+# ---------------------------------------------------------------- 已见去重
 _SEEN_LOCK = threading.Lock()
 _SEEN: OrderedDict[tuple[str, str], frozenset[str]] = OrderedDict()
 _SEEN_MAX_SESSIONS = 128
-
-
-def stage_injection(
-    entries: list[dict[str, Any]],
-    *,
-    session_key: str = "",
-    note_hits: Callable[[list[str]], Any] | None = None,
-) -> None:
-    """由 ``memory.injection_text`` 暂存本次读到的条目；``prompt`` 消费后清空。
-
-    这是不改变聊天窗调用签名的接缝：调用方只把 user 快照传进
-    ``build_messages``，fact/lesson/topic 的命中在 ``build_messages`` 内按
-    真实用户消息补上。暂存按线程隔离（两个聊天窗各自的 GUI 调用栈互不串）。
-    """
-    _PENDING.context = _PendingInjection(
-        entries=list(entries),
-        session_key=str(session_key or ""),
-        note_hits=note_hits,
-    )
-
-
-def clear_staged_injection() -> None:
-    if getattr(_PENDING, "context", None) is not None:
-        del _PENDING.context
-
-
-def _take_staged_injection() -> _PendingInjection | None:
-    context = getattr(_PENDING, "context", None)
-    if context is not None:
-        del _PENDING.context
-    return context
 
 
 def _history_key(history: list[Any] | tuple[Any, ...] | None) -> str:
@@ -389,41 +374,48 @@ def _history_key(history: list[Any] | tuple[Any, ...] | None) -> str:
 
 
 def augment_for_turn(
+    entries: list[dict[str, Any]],
+    session_key: str,
     history: list[Any] | tuple[Any, ...] | None,
     user_text: str,
     *,
     now: datetime | None = None,
+    note_hits: Callable[[list[str]], Any] | None = None,
 ) -> str:
-    """消费暂存条目并返回本轮的 recall 段；没有暂存/首轮/无命中 → 空串。"""
-    context = _take_staged_injection()
-    if context is None:
-        return ""
+    """用显式传入的条目返回本轮的 recall 段；首轮/无命中 → 空串。
+
+    ``session_key`` 是 ``_SEEN`` 的命名空间（记忆文件路径），与条目一起由
+    ``MemoryPayload`` 显式传给 ``build_messages``——不再有线程暂存，因此同一
+    线程上的另一个会话不可能取走别人的记忆。
+
+    ``note_hits`` 每轮都会收到本轮命中的 topic id（可能为空）：空列表让
+    ``note_recalled`` 有机会做一次低频的归档巡检（v2b 盲审 F）。
+    """
     query = str(user_text or "").strip()
     if not query:
         return ""
     has_history = bool(history)
-    session = (context.session_key, _history_key(history))
+    session = (str(session_key or ""), _history_key(history))
     if not has_history:
         with _SEEN_LOCK:
             _SEEN.pop(session, None)
         return ""
     with _SEEN_LOCK:
         seen = _SEEN.get(session, frozenset())
-    result = recall(context.entries, query, seen=seen, now=now, turn_index=2)
+    result = recall(entries, query, seen=seen, now=now, turn_index=2)
     if result.seen:
         with _SEEN_LOCK:
             _SEEN[session] = result.seen
             _SEEN.move_to_end(session)
             while len(_SEEN) > _SEEN_MAX_SESSIONS:
                 _SEEN.popitem(last=False)
-    if result.entries and context.note_hits is not None:
+    if note_hits is not None:
         topics = [
             str(entry.get("id", "")) for entry in result.entries
             if layer_of(entry) == "topic"
         ]
-        if topics:
-            try:
-                context.note_hits(topics)
-            except Exception:  # noqa: BLE001 - 命中记录失败绝不打断对话
-                pass
+        try:
+            note_hits(topics)
+        except Exception:  # noqa: BLE001 - 命中记录失败绝不打断对话
+            pass
     return result.text

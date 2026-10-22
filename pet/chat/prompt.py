@@ -95,12 +95,15 @@ class PromptBuilder:
             if prompt.strip(): return prompt.strip()
         return settings.default_system_prompt.strip()
     def build_messages(self,settings,character_id,history,user_text,role_prompt=None,now=None,memory_text=None,
-                       roleplay_enabled=None,roleplay_scene=None,roleplay_cast=None):
+                       roleplay_enabled=None,roleplay_scene=None,roleplay_cast=None,memory_payload=None):
         """时间感知：历史用户消息前加发送时间标记，system 末尾附当前时间与距上条消息的间隔。
         时间取自已落盘的 ChatMessage.created_at，只在发给模型时附加，不改动会话文件。
         memory_text（user 层快照，pet/chat/memory.injection_text 渲染）追加在
         system 最末、与 time_context 同级；fact/lesson/topic 的按需命中由
         augment_for_turn 用本次真实用户消息补第二段（首轮不命中）。
+        v2b：优先使用显式 memory_payload（pet/chat/memory.memory_payload）——
+        它的 text 作 user 快照、entries 作命中候选、session_key 作已见命名空间，
+        并负责调用 note_hits；与 memory_text 同时给时以 payload 为准（不重复注入）。
         None/空 = 不注入，输出与无记忆逐字节一致。
         roleplay_*：每宠场景卡；未显式传入时从 settings 上读同名属性（测试/旧调用方
         直接构造 ChatSettings() 时为默认关）。只在 roleplay_enabled=True 且 persona
@@ -116,9 +119,18 @@ class PromptBuilder:
         if roleplay_enabled and system.strip():
             system=(system+'\n\n'+roleplay_context(roleplay_scene,roleplay_cast)).strip()
         system=(system+'\n\n'+time_context(history,now)).strip()
+        if memory_payload is not None:
+            memory_text=memory_payload.text
         memory_text=str(memory_text or '').strip()
         if memory_text: system=(system+'\n\n'+memory_text).strip()
-        recall_text=augment_for_turn(history,user_text,now=now)
+        recall_text=augment_for_turn(
+            memory_payload.entries if memory_payload is not None else [],
+            memory_payload.session_key if memory_payload is not None else '',
+            history,
+            user_text,
+            now=now,
+            note_hits=memory_payload.note_hits if memory_payload is not None else None,
+        )
         if recall_text: system=(system+'\n\n'+recall_text).strip()
         trimmed=self.trim_history(history,settings.history_message_limit,settings.history_char_limit)
         return [{'role':'system','content':system},*({'role':m.role,'content':stamp_message(m)} for m in trimmed),{'role':'user','content':user_text.strip()}]
