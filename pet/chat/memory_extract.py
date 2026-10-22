@@ -86,7 +86,8 @@ _EXTRACT_SYSTEM = (
     "\"keywords\":[\"关键词\"]}；op 只能是 ADD / UPDATE / FORGET。\n"
     "3. layer 只能是 fact / lesson / topic：稳定事实与偏好用 fact；"
     "「上次搞错了 / 别再这样」这类教训用 lesson；带目标句的进行态用 topic。\n"
-    "4. keywords 是 0-6 个短关键词（优先 2 字词/实义词），用于以后按需检索。\n"
+    "4. keywords 是 0-48 个短关键词（优先 2 字词/实义词，尽量覆盖整条记忆），"
+    "用于以后按需检索。\n"
     "5. 只记关于「用户」的长期事实；寒暄、闲聊、一次性请求、关于桌宠的事实都不记。\n"
     "6. text 是一句简短的第一人称陈述（与已有记忆风格一致，如「我不吃辣」），不超过 50 字。\n"
     "7. 已有记忆里已有同义事实时不要重复 ADD；事实有变化用 UPDATE；用户明确表示"
@@ -249,6 +250,8 @@ def _dialogue_transcript(turns: list[tuple[str, str]]) -> str:
 
 def _run(path: Path, turns: list[tuple[str, str]], provider, provider_config) -> None:
     memory = ChatMemory(path)
+    # v2b：默认排除归档条目（render_injection(include_archived=False)），
+    # 避免后台提炼把归档 topic 再喂回模型、一重申就被静默复活。
     existing = render_injection(memory.load())  # 自带 ≤1200 字符硬上限
     prompt = _EXTRACT_USER.format(
         dialogue=_dialogue_transcript(turns),

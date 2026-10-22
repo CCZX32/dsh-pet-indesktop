@@ -18,6 +18,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from pet.chat.memory import ChatMemory, memory_path
+from pet.chat.memory_recall import is_archived
 from pet.chat.memory_extract import (
     EXTRACT_INTERVAL_SECONDS,
     parse_ops,
@@ -160,6 +161,23 @@ def test_apply_ops_auto_mention_keeps_existing_layer(tmp_path):
     entry = mem.load()[0]
     assert entry["layer"] == "user"
     assert entry["source"] == "manual"
+
+
+def test_apply_ops_auto_reaffirm_keeps_archived_topic(tmp_path):
+    """D：老格式 ops（无 layer/keywords）重申归档 topic，不得静默解除归档。"""
+    mem = ChatMemory(tmp_path / "memory.json")
+    entry, _ = mem.add("那个 Bug", layer="topic")
+    assert mem.set_archived(entry["id"], True) is True
+    mem.apply_ops([{"op": "ADD", "text": "那个 Bug"}], source="auto")
+    persisted = mem.load()[0]
+    assert persisted["archived"] is True
+    assert is_archived(persisted) is True
+    # 带显式 layer 的自动 UPDATE 也不能解除（自动来源一律不许复活）。
+    mem.apply_ops(
+        [{"op": "UPDATE", "text": "那个 Bug", "layer": "topic"}], source="auto")
+    persisted = mem.load()[0]
+    assert persisted["archived"] is True
+    assert is_archived(persisted) is True
 
 
 # ---------------------------------------------------------------- 合并（ChatMemory.apply_ops）
