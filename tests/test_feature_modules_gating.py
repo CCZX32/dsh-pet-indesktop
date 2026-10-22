@@ -2300,3 +2300,27 @@ def test_every_action_and_key_has_single_owner():
             assert key not in key_owners, (
                 f"配置键 {key} 同时归 {key_owners.get(key)} 与 {spec.id}")
             key_owners[key] = spec.id
+
+
+#: 永远不被门控的核心动作白名单（ds 目录化排查 4.3 节登记的守卫盲区）：
+#: 新增菜单动作必须要么归进 features 清单、要么进这里——两边都不在就是
+#: 「漏登记 = 永不被门控」，这条守卫让它立刻红。改这份名单要带着理由改。
+CORE_MENU_ACTION_IDS = frozenset({
+    "animations_hub", "autostart", "character", "check_update", "clear_spawned_pets",
+    "deepseek_web", "drag_physics", "edge_probe", "github_project", "golden_spin",
+    "hide_pet", "modern_settings", "no_move", "ojingjing", "on_top", "playback_speed",
+    "quark_download", "quiet_mode", "quit", "return_corner", "size", "spawn_pet",
+})
+
+
+def test_every_menu_action_is_owned_or_pinned_core():
+    """每个菜单动作要么归某个功能模块、要么在核心白名单——新功能动作漏登记
+    features.py 时会静默变成永不被门控（这条守卫堵的就是这个洞）。"""
+    from pet.context_menus.registry import MENU_ACTIONS
+    from pet.features import FEATURES
+
+    owned = {a for spec in FEATURES.values() for a in spec.menu_action_ids}
+    stray = [a for a in MENU_ACTIONS.ids if a not in owned and a not in CORE_MENU_ACTION_IDS]
+    assert not stray, (
+        f"菜单动作既不在 features 清单也不在核心白名单（会永不被门控）: {stray}；"
+        "新功能请登记 features.py 的 menu_action_ids，核心能力才进 CORE_MENU_ACTION_IDS")

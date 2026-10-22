@@ -62,7 +62,7 @@ SOFTWARE.
 - **Package**: [`lunar-python`](https://pypi.org/project/lunar-python/)（import 名 `lunar_python`）
 - **Author**: 6tail
 - **License**: MIT License
-- **Used by**: `pet/festival_calendar.py`（节日提醒的农历/节气计算）
+- **Used by**: `pet/festival/calendar.py`（节日提醒的农历/节气计算）
 - **为何选它**：流传更广的 `lunardate` / `zhdate` 均为 **GPL-3.0-or-later**
   （同源于 1988 年 Fung F. Lee / Ricky Yeung 的 GPLv2 `lunar` 项目），与本项目
   的 MIT 许可不兼容，**不可引入**。`lunar-python` 为 MIT、纯 Python、无数据
@@ -201,7 +201,7 @@ SOFTWARE.
   [`v2.6.0`](https://github.com/GameTechDev/PresentMon/releases/tag/v2.6.0)，
   资产 `PresentMon-2.6.0-x64.exe`
 - **License**: MIT License（`Copyright (C) 2017-2024 Intel Corporation`）
-- **Used by**: `pet/game_fps.py` 与 `pet/fps_monitor.py`——灵动岛「游戏帧率」段的
+- **Used by**: `pet/island/game_fps.py` 与 `pet/island/fps_monitor.py`——灵动岛「游戏帧率」段的
   数据源（读数口径是**目标应用的 Present 帧率**，来自该程序输出的
   `MsBetweenPresents`）
 - **校验**：exe 的 sha256 `b2a706bc6ad475749e3b7e3409263aa1e6906d45bdcf993f6dbc0f660188f1af`
@@ -217,7 +217,7 @@ SOFTWARE.
   目录），非 Windows 平台上这一段按「不支持」呈现
 - **安装包里的位置**：随 onedir 产物落在 `_internal/resources/presentmon/`，安装器
   整目录拷贝，因此 `LICENSE.txt` 与二进制一同随包分发（MIT 要求的声明随附）
-- **升级路径**：换版本必须同时改 `pet/game_fps.py` 的 `BACKEND_EXE_NAME`、
+- **升级路径**：换版本必须同时改 `pet/island/game_fps.py` 的 `BACKEND_EXE_NAME`、
   `REQUIRED_SHA256`、`SOURCE_TEXT` 与本文件——文件名带版本号（`PresentMon-2.6.0-x64.exe`）
   就是为了不让"同名不同版"成为静默替换
 
