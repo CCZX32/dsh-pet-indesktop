@@ -8,7 +8,7 @@
 - 四层 ``user/fact/lesson/topic``；缺省/未知层按 ``fact``；
 - user 层恒定注入（≤600 字符，按 importance + 新近度截）；
 - fact/lesson/topic 按需命中 top-3（≤600 字符），首轮（turn_index<=1）不命中；
-- 打分 = 关键词交集 idf 分 × 覆盖率 × 艾宾浩斯衰减 × importance；
+- 打分 = BM25 长度归一后的 idf 分 × 艾宾浩斯衰减 × importance；
 - 已见去重：top-3 的前 2 条不排除已见，第 3 条起跳过已见；
 - topic 连续 14 天未命中自动归档（归档条目不参与命中）；
 - 空命中不注入占位。
@@ -44,12 +44,34 @@ RECALL_CHAR_LIMIT = 600
 RECALL_TOP_K = 3
 MAX_KEYWORDS = 48
 
+#: BM25 长度归一常数：k1=1.2、b=0.6 是标准取值（Robertson & Zaragoza,
+#: "The Probabilistic Relevance Framework: BM25 and Beyond", 2009；
+#: Lucene/Elasticsearch 的 BM25Similarity 默认同值）。v2c 用它替换会被长
+#: 条目稀释的 coverage 因子。
+BM25_K1 = 1.2
+BM25_B = 0.6
+#: 最低命中门槛：命中词里至少一个长度 ≥2，且命中词的 idf 和 ≥ 0.15。
+#: 出处：v2c 盲审实测（20 条真实风格记忆 × 30 句无关闲聊）：放宽关键词后
+#: 误注入从 3/30 涨到 7/30，0.15 是实测能压回基线的下限。
+MIN_SCORE = 0.15
+
 _QUERY_KEYWORD_LIMIT = 64
 _SECONDS_PER_DAY = 86400.0
 #: 拉丁/数字词（含版本号这类点分形式）与 CJK 串；版本号匹配后还会拆出相邻 bigram。
 _TOKEN_RE = re.compile(
     r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*|[\u3400-\u4dbf\u4e00-\u9fff]+", re.UNICODE)
-_CJK_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fff]+$")
+
+
+def _is_cjk_token(token: str) -> bool:
+    """``_TOKEN_RE`` 的 CJK 分支：只看首字符即可（整段都在同一字符类里）。
+
+    不用 ``^[...]+$`` 重扫整段：100k 字的纯 CJK 查询上那是一次多余的线性扫描
+    （v2c L3 的耗时预算）。
+    """
+    first = token[0]
+    return "\u3400" <= first <= "\u4dbf" or "\u4e00" <= first <= "\u9fff"
+
+
 #: 高频虚词不单独成为关键词；只影响单字/整词，不影响含实义字的 bigram。
 _STOPWORDS = frozenset(
     "的 了 是 在 我 你 他 她 它 们 这 那 就 也 都 和 与 吗 呢 啊 呀 吧 哦 嗯 不 有".split()
@@ -78,41 +100,58 @@ def extract_keywords(text: Any, limit: int = MAX_KEYWORDS) -> list[str]:
     """从文本提取关键词：CJK bigram + 拉丁/数字词，去重、保序、截到 ``limit``。
 
     单字 CJK 且在虚词表里的跳过；双字 bigram 不拆（例如「不吃」「周三」）。
-    拉丁/数字词允许长度 1（``a`` / ``0`` 也收，靠 idf 与停用词去噪）；点分版本号
-    额外产出相邻段的 bigram（``4.4.0`` → ``4.4`` / ``4.0``）。
+    ASCII/数字词长度必须 ≥2（``a`` / ``0`` 这类单字符不入关键词，v2c M4：
+    否则「第 4 点」会命中版本号里的裸 ``4``）。点分版本号整串保留，并额外
+    产出相邻段的 bigram（``4.4.0`` → ``4.4.0`` / ``4.4`` / ``4.0``，**不**产出
+    裸 ``4`` / ``0``）。内层循环达到 ``limit`` 立即返回，避免超长 CJK 串先造出
+    全部 bigram（v2c L3）。
     同一套函数用于写入（手动钉/提炼 ops）与查询，避免两边口径漂移。
     """
     if limit <= 0:
         return []
-    raw = str(text or "").lower()
+    # 不整段 lower()：100k 纯 CJK 查询上那是白扫一遍；拉丁/数字 token 在
+    # 分支内各自 lower 即可，CJK 没有大小写。
+    raw = str(text or "")
     keywords: list[str] = []
     seen: set[str] = set()
+    scanned = 0
 
-    def _add(token: str) -> None:
+    def _add(token: str) -> bool:
+        """加入一个关键词；返回是否已处理到 ``limit`` 个候选。"""
+        nonlocal scanned
+        if scanned >= limit:
+            return True
+        scanned += 1
         if token and token not in seen and token not in _STOPWORDS:
             seen.add(token)
             keywords.append(token)
+        return scanned >= limit
 
     for match in _TOKEN_RE.finditer(raw):
         token = match.group(0)
-        if _CJK_RE.match(token):
+        if _is_cjk_token(token):
             if len(token) == 1:
-                _add(token)
+                if _add(token):
+                    break
                 continue
             for index in range(len(token) - 1):
-                _add(token[index:index + 2])
+                if _add(token[index:index + 2]):
+                    return keywords[:limit]
         elif "." in token:
-            # 版本号：整串 + 各段 + 相邻段 bigram（4.4.0 → 4 / 4 / 0 / 4.4 / 4.0）。
-            _add(token)
+            token = token.lower()
+            # 版本号：整串 + 相邻段 bigram（4.4.0 → 4.4.0 / 4.4 / 4.0）。
+            # 单段（4 / 0）在 v2c M4 起不再入关键词。
+            if _add(token):
+                return keywords[:limit]
             parts = token.split(".")
-            for part in parts:
-                _add(part)
             for index in range(len(parts) - 1):
-                _add(f"{parts[index]}.{parts[index + 1]}")
+                if _add(f"{parts[index]}.{parts[index + 1]}"):
+                    return keywords[:limit]
         else:
-            _add(token)
-        if len(keywords) >= limit:
-            break
+            token = token.lower()
+            # ASCII/数字词：单字符没有检索价值，还会制造「第 4 点」这类误命中。
+            if len(token) >= 2 and _add(token):
+                break
     return keywords[:limit]
 
 
@@ -195,17 +234,26 @@ def archive_stale_topics(entries: list[dict[str, Any]], now: datetime | None = N
     return changed
 
 
-def _idf_map(entries: list[dict[str, Any]]) -> dict[str, float]:
-    """BM25 风格 idf：``log(1 + (N - df + 0.5) / (df + 0.5))``。"""
+def _corpus_stats(entries: list[dict[str, Any]]) -> tuple[dict[str, float], float]:
+    """一次遍历算 idf 与 avgdl（BM25 长度归一的分母基准）。
+
+    ``idf`` 用全库未归档条目统计（v2b G 口径）；``avgdl`` 是同一批条目的
+    关键词个数均值。空语料返回 avgdl=1.0，避免除零。
+    """
     total = max(1, len(entries))
     document_frequency: dict[str, int] = {}
+    total_length = 0
     for entry in entries:
-        for keyword in set(_entry_keywords(entry)):
+        keywords = _entry_keywords(entry)
+        total_length += len(keywords)
+        for keyword in set(keywords):
             document_frequency[keyword] = document_frequency.get(keyword, 0) + 1
-    return {
+    idf = {
         keyword: math.log(1.0 + (total - frequency + 0.5) / (frequency + 0.5))
         for keyword, frequency in document_frequency.items()
     }
+    avgdl = total_length / total if total_length > 0 else 1.0
+    return idf, max(avgdl, 1e-9)
 
 
 def score_entry(
@@ -213,17 +261,33 @@ def score_entry(
     query_keywords: set[str],
     idf: dict[str, float],
     now: datetime | None = None,
+    *,
+    avgdl: float | None = None,
 ) -> float:
-    """单条打分：交集 idf 分 × 覆盖率 × 衰减 × importance；无交集 = 0。"""
+    """单条打分：BM25 长度归一的命中 idf 和 × 衰减 × importance；无命中 = 0。
+
+    命中词必须至少有一个长度 ≥2，且命中词 idf 和 ≥ ``MIN_SCORE``（v2c M4：
+    单字符/全库常见词不足以支撑一次注入）。``avgdl`` 缺省按本条自身长度兜底，
+    生产路径（``rank_entries`` / ``recall``）会传入全库均值。
+    """
     keywords = _entry_keywords(entry)
     if not keywords or not query_keywords:
         return 0.0
     matched = [keyword for keyword in keywords if keyword in query_keywords]
     if not matched:
         return 0.0
-    coverage = len(matched) / len(keywords)
+    # 门槛①：至少一个长度 ≥2 的命中词（排除「第 4 点」命中裸 4）。
+    if not any(len(keyword) >= 2 for keyword in matched):
+        return 0.0
     intersection = sum(idf.get(keyword, 0.0) for keyword in matched)
-    return intersection * coverage * decay(entry, now) * importance(entry)
+    # 门槛②：命中词 idf 和低于 MIN_SCORE 视为噪声（常见词/单字组合）。
+    if intersection < MIN_SCORE:
+        return 0.0
+    corpus_avgdl = avgdl if avgdl is not None and avgdl > 0 else float(len(keywords))
+    denominator = 1.0 + BM25_K1 * (
+        1.0 - BM25_B + BM25_B * len(keywords) / corpus_avgdl)
+    bm25 = intersection * (BM25_K1 + 1.0) / denominator
+    return bm25 * decay(entry, now) * importance(entry)
 
 
 def rank_entries(
@@ -232,11 +296,12 @@ def rank_entries(
     *,
     now: datetime | None = None,
     idf: dict[str, float] | None = None,
+    avgdl: float | None = None,
 ) -> list[tuple[float, dict[str, Any]]]:
     """按命中分降序返回 ``(score, entry)``；user 层与归档 topic 不参与。
 
-    ``idf`` 由调用方传入时按它打分（recall 用全部未归档条目统计，避免候选集
-    大小改变让排序反转）；不传则沿用旧口径按候选集现算。
+    ``idf`` / ``avgdl`` 由调用方传入时按它打分（recall 用全部未归档条目统计，
+    避免候选集大小改变让排序反转）；不传则沿用旧口径按候选集现算。
     """
     moment = _now(now)
     query_keywords = set(extract_keywords(query, limit=_QUERY_KEYWORD_LIMIT))
@@ -246,10 +311,16 @@ def rank_entries(
         entry for entry in entries
         if layer_of(entry) != "user" and not is_archived(entry, moment)
     ]
-    weights = idf if idf is not None else _idf_map(candidates)
+    if idf is not None and avgdl is not None:
+        weights, corpus_avgdl = idf, avgdl
+    else:
+        weights, corpus_avgdl = _corpus_stats(candidates)
+        if idf is not None:
+            weights = idf
     scored = []
     for entry in candidates:
-        score = score_entry(entry, query_keywords, weights, moment)
+        score = score_entry(
+            entry, query_keywords, weights, moment, avgdl=corpus_avgdl)
         if score > 0:
             scored.append((score, entry))
     scored.sort(
@@ -334,10 +405,11 @@ def recall(
     if int(turn_index) <= 1:
         return RecallResult(seen=seen_ids)
     moment = _now(now)
-    # idf 用全部未归档条目统计（含 user 层）：候选集大小/无关条目增减不再
+    # idf / avgdl 用全部未归档条目统计（含 user 层）：候选集大小/无关条目增减不再
     # 改变既有条目的相对稀有度（v2b 盲审 G：N=3 与 N=42 排序反转）。
-    idf = _idf_map([entry for entry in entries if not is_archived(entry, moment)])
-    ranked = rank_entries(entries, query, now=moment, idf=idf)
+    idf, avgdl = _corpus_stats(
+        [entry for entry in entries if not is_archived(entry, moment)])
+    ranked = rank_entries(entries, query, now=moment, idf=idf, avgdl=avgdl)
     if not ranked:
         return RecallResult(seen=seen_ids)
     selected: list[dict[str, Any]] = []
