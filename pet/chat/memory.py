@@ -768,7 +768,10 @@ class ChatMemory:
                 now = self._clock().isoformat()
                 found["layer"] = target
                 found["updated_at"] = now
-                found.pop("archived", None)
+                # 只在「改到别的层」时丢掉归档标记（话题已不是话题，标记无意义）；
+                # 仍在 topic 层就把归档态留着，避免这里成为第二条静默恢复通道。
+                if target != "topic":
+                    found.pop("archived", None)
                 if target == "topic":
                     found["last_hit_at"] = now
                 return self._write(entries)
