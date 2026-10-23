@@ -1919,6 +1919,16 @@ Now Playing + 歌词 + 唱跳。两个 mod 仍是可导入包（安装向导默�
 - 设置宽行：`SettingsCard.add_row(expand=True)` 改为纵向布局（文字块整行、控件另起一行）；非 expand 行的文字块包成 `settingTextBlock`，最小宽 180px。
 - 气泡：`label.setWordWrap(False)` + `QFontMetrics` 显式算宽高（最长行 + 4px，下限 96；行数 × lineSpacing + 2），`setFixedSize()`；副标题同宽并 `heightForWidth()`；图片说明改固定宽 + 按宽算高；`show_text()` 在 `show()` 后再 `adjustSize()+_place()` 一次，消除「慢一句」；分页末页孤行从前页借一行。
 
-**验证**：`ruff` 全绿；聚焦 95 passed；离线复现探针从「4 字 26×13 / hfw 28」变为「96×17 / hfw 17」，5/10 字均单行，长文 8 页 0 条超宽行。全量门禁与安装包复验见 PR 报告「第二轮修正」。
+**验证**：`ruff` 全绿；聚焦 348 passed（含 docs）；全量 1302 passed；`python -m petcore --check` exit 0。离线复现探针从「4 字 26×13 / hfw 28」变为「96×17 / hfw 17」，5/10 字均单行，长文 8 页 0 条超宽行。安装包复验见 PR 报告「第二轮修正」。
 
 **未验证 / 风险**：真实桌面右键菜单截图（需启动安装版人工确认）；迁移会改写用户 layout 中 Core 项的位置（只搬模板明确放在 hub 之外的项，幂等）；`allowed` 为空时回退全部可见项，用户「隐藏所有 mod 项」的极端情况会重新出现。
+
+## L049 · 2026-10-23 · 设置窗口标题栏最小化/最大化
+
+**范围**：`petcore/ui/settings/dialog.py`、`tests/test_petcore_settings.py` + 文档。
+
+**改了什么**：`SettingsDialog.__init__` 在原生旗标上补 `WindowMinMaxButtonsHint`，标题栏出现最小化/最大化按钮；非模态、X 保存、取消/Esc 回滚、Enter 保存的语义不变；最大化/还原由系统处理，首次显示仍按宠物位置放置。
+
+**验证**：`test_settings_dialog_has_minimize_and_maximize` 断言旗标含 MinMax/Close、非模态，并真实走 `showMinimized/showMaximized/showNormal` 状态；真实桌面抓图确认「— / □ / ×」三个原生按钮（`.scratch/settings-minmax.png`）；聚焦 settings 族与全量 1303 passed。
+
+**环境限制**：新 setup 在本机被 Smart App Control 拦截（签名有效、CodeIntegrity 3077/3118），改用 `dist/dsh-pet-core` 覆盖安装目录部署并 `--check` 通过。

@@ -695,3 +695,29 @@ def test_wide_rows_stack_text_above_control(app) -> None:
         assert block.minimumWidth() == 180
     finally:
         page.close()
+
+
+def test_settings_dialog_has_minimize_and_maximize(app, tmp_path: Path) -> None:
+    dialog = SettingsDialog(_host(tmp_path))
+    try:
+        flags = dialog.windowFlags()
+        assert flags & Qt.WindowType.WindowMinMaxButtonsHint
+        assert flags & Qt.WindowType.WindowCloseButtonHint
+        assert dialog.isModal() is False
+
+        dialog.show()
+        app.processEvents()
+        dialog.showMinimized()
+        app.processEvents()
+        assert dialog.isMinimized() is True
+
+        dialog.showMaximized()
+        app.processEvents()
+        assert dialog.isMaximized() is True
+
+        dialog.showNormal()
+        app.processEvents()
+        assert dialog.isMaximized() is False
+        assert dialog.isMinimized() is False
+    finally:
+        dialog.close()

@@ -110,6 +110,10 @@ class SettingsDialog(QDialog):
         self._live_timer.setInterval(16)
         self._live_timer.timeout.connect(self._apply_live)
         self.setObjectName("settingsDialog")
+        # 原生标题栏补上最小化/最大化；关闭按钮、非模态与保存语义保持不变。
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint
+        )
         if window is None or int(getattr(window, "slot", 0)) == 0:
             self.setWindowTitle("设置 · 主宠")
         else:

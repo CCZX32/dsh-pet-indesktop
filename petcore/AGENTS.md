@@ -191,6 +191,9 @@
   return；否则「发射玩法」会误弹菜单。
 - **设置关闭语义**：标题栏 X = `_commit()` 保存并关闭；「取消」/Esc 恢复打开时快照。
   改 `closeEvent`/`accept`/`reject` 时三者的语义必须保持这个区分。
+- **设置窗口按钮**：`SettingsDialog` 保留原生标题栏并带 `WindowMinMaxButtonsHint`
+  （最小化/最大化）；不要改成 frameless 自绘标题栏，也不要把最大化做成“铺满内容区”
+  的假最大化。最小化/还原时非模态、实时预览与保存/取消语义不变。
 - **直播捕获兼容**：`stream_capture_mode` 开启时宠物与气泡必须是普通顶层 `Window`
   （清掉 `WS_EX_TOOLWINDOW/WS_EX_NOACTIVATE`），关闭恢复 Tool；不得因此禁用多宠。
 - **动画缩略图**：分类子菜单只在 `aboutToShow` 填充；解码只能在非 GUI 线程（≤2），

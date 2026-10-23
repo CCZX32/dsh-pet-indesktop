@@ -274,3 +274,37 @@ exit 0
 2. 迁移会改写用户 layout 中 Core 项的位置；只搬模板明确放在 hub 之外的项，幂等。
 3. 用户在菜单编辑器里隐藏全部 mod 项的极端情况：`allowed` 为空时回退全部可见项，
    会重新显示（换取「旧 layout 不把扩展菜单变空」）。
+
+## 八、第三轮修正：设置窗口最小化/最大化（2026-10-23）
+
+### 8.1 修改文件说明
+
+| 文件 | 增删 | 改动意图 |
+|---|---|---|
+| `petcore/ui/settings/dialog.py` | +4 / −0 | `SettingsDialog` 在原生旗标上补 `WindowMinMaxButtonsHint`，标题栏出现最小化/最大化 |
+| `tests/test_petcore_settings.py` | +25 / −0 | 断言 MinMax/Close 旗标、非模态，并真实切换最小化/最大化/还原状态 |
+| `petcore/AGENTS.md`、`docs/PETCORE-LOG*.md` | +10 / −0 | 红线「保留原生标题栏 + MinMax，不改成 frameless 假最大化」+ L049 |
+
+### 8.2 性能分析
+
+- 只改窗口旗标，无新增线程/定时器/网络/磁盘；最小化/最大化由 Windows 与 Qt 处理。
+- 不影响首次放置：`place_beside_pet()` 仍在首次 `showEvent` 执行，`_placed` 只放行一次。
+
+### 8.3 实机运行记录
+
+- offscreen：`showMinimized()` → `isMinimized() is True`；`showMaximized()` →
+  `isMaximized() is True`；`showNormal()` 回到 neither。
+- 旗标同时保留 `WindowCloseButtonHint`，`isModal()` 仍为 False。
+- 全量门禁：`ruff` 全绿；1303 passed（103.28s）；`python -m petcore --check` 仍 exit 0。
+
+### 8.4 实机验证与环境限制
+
+- 真实桌面标题栏按钮已用截图确认：`SettingsDialog` 在 Windows 桌面显示
+  「— / □ / ×」三个原生按钮（`.scratch/settings-minmax.png`，1350×975 桌面抓取），
+  `flags` 含 `WindowMinMaxButtonsHint`、`isModal()` False。
+- **安装器在本机被 Smart App Control 拦截**：新构建的 `dsh-pet-core-setup.exe`
+  签名有效（`CN=DSH Pet Core Dev`），但启动时被 Device Guard/SAC 拦截
+  （CodeIntegrity 事件 3077/3118，Policy `{0283ac0f-…}`）。本轮改用
+  `dist/dsh-pet-core` 覆盖安装目录完成部署，安装版 `--check` 9 个 mod、
+  `diagnostics: []`。setup 文件本身已构建并签名，换到未启用 SAC 的机器或
+  允许该发布者后可正常安装；这是环境策略限制，不是安装包损坏。
