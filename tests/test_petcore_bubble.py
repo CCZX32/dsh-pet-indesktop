@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from petcore.config import Config
@@ -16,6 +16,7 @@ from petcore.contracts.content import CharacterSpec
 from petcore.ui.bubble import (
     BUBBLE_TEXT_COLUMN,
     BUBBLE_TEXT_COLUMN_MAX,
+    BUBBLE_TEXT_MIN_WIDTH,
     SpeechBubble,
     column_for_text,
 )
@@ -327,6 +328,52 @@ def test_subtitle_is_rendered_in_the_same_panel(app) -> None:
         assert bubble.subtitle_text() == "我在唱《测试曲》"
         assert bubble.subtitle_label.isVisible() is True
         assert bubble.subtitle_label.parent() is bubble.text_panel
-        assert bubble.label.maximumWidth() >= BUBBLE_TEXT_COLUMN
+        assert bubble.label.wordWrap() is False
+        assert bubble.subtitle_label.width() == bubble.label.width()
+        assert bubble.subtitle_label.width() >= BUBBLE_TEXT_MIN_WIDTH
+        assert (
+            bubble.subtitle_label.heightForWidth(bubble.subtitle_label.width())
+            <= bubble.subtitle_label.height()
+        )
+    finally:
+        bubble.close()
+
+
+def _assert_text_fits(bubble) -> None:
+    metrics = QFontMetrics(bubble.label.font())
+    assert bubble.label.wordWrap() is False
+    for line in bubble.label.text().split("\n"):
+        assert metrics.horizontalAdvance(line) <= bubble.label.width()
+    assert bubble.label.heightForWidth(bubble.label.width()) <= bubble.label.height()
+
+
+def test_short_text_stays_single_line_across_consecutive_shows(app) -> None:
+    bubble = SpeechBubble()
+    try:
+        for text in ("今天天气", "今天天气", "好的没问题", "一二三四五六七八九十"):
+            bubble.show_text(text, QRect(600, 600, 80, 80))
+            app.processEvents()
+            assert "\n" not in bubble.label.text(), text
+            assert bubble.label.width() >= BUBBLE_TEXT_MIN_WIDTH
+            _assert_text_fits(bubble)
+    finally:
+        bubble.close()
+
+
+def test_long_subtitle_wraps_inside_the_text_column(app) -> None:
+    bubble = SpeechBubble()
+    try:
+        bubble.show_text(
+            "歌词",
+            QRect(600, 600, 80, 80),
+            subtitle="我在唱《" + "歌" * 80 + "》",
+        )
+        app.processEvents()
+        assert bubble.subtitle_label.width() == bubble.label.width()
+        assert bubble.subtitle_label.width() <= column_for_text("歌词")
+        assert (
+            bubble.subtitle_label.heightForWidth(bubble.subtitle_label.width())
+            <= bubble.subtitle_label.height()
+        )
     finally:
         bubble.close()

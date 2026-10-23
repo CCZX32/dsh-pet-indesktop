@@ -29,6 +29,7 @@ from .menu_layout import (
     migrate_legacy,
     migrate_p8_menu,
     migrate_p9_menu,
+    migrate_p10_menu,
     resolve,
 )
 from .chat import ChatController, QuickChatController
@@ -234,6 +235,22 @@ class CoreHost:
             manifest = getattr(mod, "manifest", None)
             name = str(getattr(manifest, "name_zh", "") or getattr(manifest, "name", "") or "")
             labels[str(getattr(mod, "id", "") or "")] = name or str(getattr(mod, "id", ""))
+        # 内置接缝包（core.feature-demo 等）不在 loader 结果里，单独从包内 manifest 取名字。
+        from ..mods.manifest import load_manifest
+
+        for feature in getattr(self.features, "features", {}).values():
+            owner = str(getattr(feature, "owner", "") or "")
+            if not owner or owner in labels:
+                continue
+            try:
+                manifest, _problems = load_manifest(feature.path)
+            except Exception:
+                continue
+            if manifest is None:
+                continue
+            labels[owner] = (
+                str(getattr(manifest, "name_zh", "") or getattr(manifest, "name", "") or owner)
+            )
         self.menu_model.set_owner_labels(labels)
         self.menu_model.set_extension_skip_owners(CORE_FEATURE_IDS)
         for feature, contribution in self.features.menu_contributions():
@@ -357,6 +374,7 @@ class CoreHost:
         if isinstance(raw, dict):
             changed = migrate_p8_menu(raw)
             changed = migrate_p9_menu(raw) or changed
+            changed = migrate_p10_menu(raw) or changed
             if changed:
                 self.config.set("menu_layout", raw)
                 self.config.save()

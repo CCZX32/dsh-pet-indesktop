@@ -355,6 +355,9 @@ ports.presentation.release_loop()                          # 当前这圈播完�
   `self.section("…", level=3)` 作为 H3；Core 内嵌页（`host_page`）保持原 H2 分组。
 - 右键「扩展」：`MenuModel._populate_extensions()` 按 `owner` 聚合，每个 mod 一个
   二级子菜单；`CORE_FEATURE_IDS` 不进入该菜单。单菜单项的 mod 也建子菜单。
+  `extensions_hub.children` **只表达可见性**，不许平铺渲染；旧 layout 里被
+  `_append_mod_actions()` 塞进 hub 的 Core 项（links / 快捷启动 / 网络信息 /
+  回收内存 / 免打扰）由 `migrate_p10_menu()` 幂等搬回模板位置。
 
 ### 13.3 音乐识别范围
 

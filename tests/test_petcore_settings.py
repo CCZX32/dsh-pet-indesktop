@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QMessageBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 from petcore.config import Config
 from petcore.contracts.content import CharacterSpec
@@ -666,3 +673,25 @@ def test_interaction_rows_remain_reachable_from_menu_coverage(app, tmp_path):
             continue
         assert row in haystack, (menu_id, row)
     dialog.close()
+
+
+def test_wide_rows_stack_text_above_control(app) -> None:
+    page = SettingsPage(None)
+    try:
+        card = page.section("测试")
+        control = QWidget(page)
+        row = card.add_row("路径", control, "很长的提示" * 6, expand=True)
+        assert isinstance(row.layout(), QVBoxLayout)
+
+        page.resize(620, 760)
+        page.show()
+        app.processEvents()
+        assert control.width() > 400, control.width()
+
+        plain = card.add_row("选项", QWidget(page), "短提示")
+        assert isinstance(plain.layout(), QHBoxLayout)
+        block = plain.findChild(QWidget, "settingTextBlock")
+        assert block is not None
+        assert block.minimumWidth() == 180
+    finally:
+        page.close()

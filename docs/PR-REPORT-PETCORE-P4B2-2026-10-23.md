@@ -184,8 +184,93 @@ exit 0
    所以这条仍未实测。
 3. **设置页内的卸载按钮**：`ExtensionsPage.uninstall_mod()` 的 UI 路径（草稿询问、
    删页面、刷新导航）只跑了 offscreen/单元测试，没有在真实设置窗口里点过。
-3. **滚轮翻页**：offscreen 下验证了 `next_page()/previous_page()` 与分页状态；真实滚轮事件
+4. **滚轮翻页**：offscreen 下验证了 `next_page()/previous_page()` 与分页状态；真实滚轮事件
    与两页之间的计时未在桌面环境跑。
-4. **300% 字号 + 1.5 倍屏**：只做 offscreen 尺寸断言，未做像素级截图复核。
-5. **Python 模块热卸载**：卸载后 `reload_mods()` 不重载已导入的 C 扩展/第三方模块；
+5. **300% 字号 + 1.5 倍屏**：只做 offscreen 尺寸断言，未做像素级截图复核。
+6. **Python 模块热卸载**：卸载后 `reload_mods()` 不重载已导入的 C 扩展/第三方模块；
    彻底释放仍需重启进程。
+
+## 七、第二轮修正（2026-10-23，P4-b2.1）
+
+用户实测反馈三个问题：① 音乐设置「网易云音乐路径」的提示被压成一字一行；
+② 右键「扩展」仍是平铺列表，DeepSeek/GitHub/夸克也在扩展里；③ 4 个汉字的气泡
+被折成两行且显示不全。定位与修复如下。
+
+### 7.1 根因
+
+1. **菜单分组被 layout children 绕过**：`_append_mod_actions()` 把 mod action 追加进
+   `extensions_hub.children`；`MenuModel._append_node()` 先把 children 平铺渲染并标记
+   `placed`，`_populate_extensions()` 随后无项可分。旧 `menu_layout` 还把
+   `tool.links:*` / 快捷启动 / 网络信息 / 回收内存 / 免打扰 留在 hub，所以「工具与帮助」
+   一直是空的。与打包无关。
+2. **设置宽行**：`add_row(expand=True)` 仍用水平布局，文字列没有最小宽度；路径行控件
+   `QLineEdit(minWidth=260)+浏览` 把文字列挤到 1–2 字宽。
+3. **气泡尺寸**：`wordWrap=True` + `setMaximumWidth()` + `adjustSize()`。QLabel 的
+   `sizeForWidth()` 金比启发式会把宽度砍成 `w/2`、`w/4`，`sizeHint` 缓存又让气泡
+   「慢一句」；高度来自另一个宽度，QLabel 按 contentsRect 裁剪。离线复现：
+   `'今天天气'` 第二次调用 `label=26×13 / hfw=28`。
+
+### 7.2 修改文件说明
+
+| 文件 | 增删 | 改动意图 |
+|---|---|---|
+| `petcore/ui/menu_model.py` | +31 / −10 | hub 不再平铺 children；`_populate_extensions()` 接受 `allowed` 并按首次出现顺序分组；空集合回退全部可见项 |
+| `petcore/ui/menu_layout.py` | +88 / −0 | 新增 `migrate_p10_menu()` + `_template_slot()` / `_find_submenu()`，把模板放在 hub 之外的 Core action 搬回模板位置，幂等 |
+| `petcore/ui/app.py` | +24 / −1 | `reload_menu()` 调用 p10 迁移并持久化；内置接缝包从 manifest 补 `name_zh` |
+| `petcore/ui/settings/base.py` | +43 / −28 | `expand=True` 行改纵向布局；非 expand 行文字块包 `settingTextBlock`（最小宽 180） |
+| `petcore/ui/bubble.py` | +93 / −34 | `wordWrap=False` + `QFontMetrics` 显式宽高 + `setFixedSize`；副标题同宽 / `heightForWidth`；图片说明固定宽；`show()` 后再量一次；末页孤行重平衡 |
+| `tests/test_petcore_bubble.py` | +56 / −5 | 连续短句单行、每行放得进、`hfw == height`、长副标题不裁 |
+| `tests/test_petcore_menu.py` | +24 / −0 | hub `allowed` 只渲染 layout 可见项 |
+| `tests/test_petcore_menu_layout.py` | +62 / −0 | p10 迁移：links/quick-launch/network/memory → 工具与帮助，quiet-mode → 顶层，mod 项留在 hub，幂等 |
+| `tests/test_petcore_settings.py` | +23 / −2 | expand 行纵向、控件占满行宽、非 expand 文字块最小宽 180 |
+| `petcore/AGENTS.md`、`docs/PETCORE-LOG*.md` | +22 / −4 | 红线（hub children 不平铺 / expand 行纵向 / 气泡显式尺寸）+ L048 |
+
+### 7.3 性能分析
+
+命令：`PYTHONPATH=. QT_QPA_PLATFORM=offscreen .venv/Scripts/python`（同机，`processEvents`
+包含在计时内）。
+
+| 路径 | n | 中位 | p95 | 说明 |
+|---|---|---|---|---|
+| `show_text` 短句（4 字） | 200 | 0.349 ms | 0.768 ms | 含折行、固定尺寸、布局激活、显示 |
+| `show_text` 长句（40 段） | 100 | 0.939 ms | 1.642 ms | 8 页分页 + 固定尺寸 |
+| `migrate_p10_menu`（已迁移的真实 config） | 2000 | 0.552 ms | 0.973 ms | 只在启动/菜单重载跑一次，幂等返回 False |
+
+- 新增开销：气泡每次冒泡 <1 ms；菜单迁移只在启动时一次；无新增线程/网络/系统调用。
+- 内存：固定尺寸的 label 不缓存文本布局；`allowed_order` 是每次建菜单的临时 dict。
+
+### 7.4 实机运行记录
+
+- 气泡复现探针（修复后，同一实例连续调用）：
+  `'今天天气' 96×17 hfw=17 bubble=124×37`、`'好的没问题' 96×17 hfw=17`、
+  `'一二三四五六七八九十' 134×17 hfw=17`；40 段长文 8 页、每行
+  `horizontalAdvance <= label.width()` 0 条超宽、末页 3 行。
+- 长副标题：正文 96、副标题 248×76（`hfw=76`），不再横向裁切。
+- 真实 `%APPDATA%\dsh-pet-core\config.json` 的 `menu_layout` 迁移（只读副本）：
+  `tools_help` 变为 `quick-launch / api_settings / deepseek / github / quark / network /
+  memory`，`quiet-mode` 移到顶层，hub 只剩 `core.feature-demo` 与 mod 项；再次执行返回
+  False（幂等）。
+- 迁移后的 layout + `MenuModel` 离屏构建：hub 子菜单为
+  `core.feature-demo / 抽签 / 节日提醒 / 音乐 / 语音报时 / 待办提醒 / 文件解读 / 天气`，
+  音乐子菜单 9 项（歌词对齐、上下首、播放/暂停、停止、四个打开播放器）。
+- 设置页在 620×1600 离屏渲染：路径行变成「标题+提示整行、输入框+浏览按钮下一行」，
+  提示跨两行而非一字一行（`.scratch/p4b1-layout-620.png`）。
+- 门禁：`ruff` 全绿；聚焦 348 passed（含 docs）；全量
+  `pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q` →
+  **1302 passed**（136.75s）；`python -m petcore --check` exit 0、`diagnostics: []`。
+- 构建并签名：`dist/dsh-pet-core-setup.exe` 258,538,152 B，`CN=DSH Pet Core Dev`；
+  静默安装到 `E:\dsh-pet-core`，安装版 `--check` 在干净 `APPDATA` 下
+  `diagnostics: []`、9 个 mod 全部加载。
+- 真实迁移：启动安装版 12 秒让 `reload_menu()` 写回真实 `%APPDATA%` 的
+  `config.json`，随后读取：`tools_help = [quick-launch, api_settings, deepseek,
+  github, quark, network, memory]`、`quiet-mode` 在顶层、hub 只剩 `core.feature-demo`
+  与 mod 项。
+
+### 7.5 本轮未验证
+
+1. 真实桌面右键菜单截图（离屏菜单结构 + 真实 config 迁移已验证；菜单视觉与点击
+   仍建议在桌面环境人工确认一次）。
+2. 迁移会改写用户 layout 中 Core 项的位置；只搬模板明确放在 hub 之外的项，幂等。
+3. 用户在菜单编辑器里隐藏全部 mod 项的极端情况：`allowed` 为空时回退全部可见项，
+   会重新显示（换取「旧 layout 不把扩展菜单变空」）。

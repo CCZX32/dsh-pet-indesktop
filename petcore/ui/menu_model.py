@@ -195,10 +195,20 @@ class MenuModel:
             icon = _resolve_icon(node.get("icon"))
             if icon is not None:
                 submenu.setIcon(icon)
+            if item_id == "extensions_hub":
+                # hub 的 children 只表达「哪些 mod 项可见」，渲染一律交给分组器；
+                # 平铺 children 会让分组永远只剩一两条（旧 layout 的实测缺陷）。
+                allowed = None
+                if "children" in node:
+                    allowed = [
+                        str(child.get("id") or "")
+                        for child in node.get("children", ())
+                        if isinstance(child, dict) and child.get("type") == "action"
+                    ]
+                self._populate_extensions(submenu, placed, allowed)
+                return
             for child in node.get("children", ()):
                 self._append_node(submenu, child, placed)
-            if item_id == "extensions_hub":
-                self._populate_extensions(submenu, placed)
             return
         if node_type != "action" or item_id in placed:
             return
@@ -234,8 +244,19 @@ class MenuModel:
         if item.callback is not None:
             action.triggered.connect(lambda _checked=False, cb=item.callback: cb())
 
-    def _populate_extensions(self, menu: QMenu, placed: set[str]) -> None:
-        """「扩展」子菜单：按 mod（owner）分组，每组一个二级子菜单。"""
+    def _populate_extensions(
+        self, menu: QMenu, placed: set[str], allowed: list[str] | None = None
+    ) -> None:
+        """「扩展」子菜单：按 mod（owner）分组，每组一个二级子菜单。
+
+        ``allowed`` 是 layout 里 hub 的可见 action 列表：非空时只渲染这些项
+        （保留菜单编辑器的隐藏/裁剪语义）；为空或缺失时回退到全部可见项，
+        避免旧 layout 把整个扩展菜单变成「（暂无扩展）」。
+        """
+        allowed_order = {
+            action_id: index for index, action_id in enumerate(allowed or [])
+        }
+        allowed_set = set(allowed_order)
         groups: dict[str, list[MenuItem]] = {}
         for item in self._items.values():
             if item.owner == "core" or item.id in placed:
@@ -244,10 +265,20 @@ class MenuModel:
                 continue
             if not self._availability.get(item.id, True):
                 continue
+            if allowed_set and item.id not in allowed_set:
+                continue
             groups.setdefault(item.owner, []).append(item)
-        for owner in sorted(
-            groups, key=lambda key: (min(item.order for item in groups[key]), key)
-        ):
+
+        def group_key(owner: str) -> tuple:
+            items = groups[owner]
+            hints = [
+                allowed_order[item.id] for item in items if item.id in allowed_order
+            ]
+            if hints:
+                return (0, min(hints), owner)
+            return (1, min(item.order for item in items), owner)
+
+        for owner in sorted(groups, key=group_key):
             items = sorted(groups[owner], key=lambda entry: (entry.order, entry.label))
             submenu = menu.addMenu(self._owner_labels.get(owner) or owner)
             icon = _resolve_icon(next((item.icon for item in items if item.icon), ""))

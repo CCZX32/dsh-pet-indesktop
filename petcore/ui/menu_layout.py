@@ -640,6 +640,89 @@ def migrate_p9_menu(layout: dict) -> bool:
     return True
 
 
+def _find_submenu(nodes, submenu_id: str) -> dict | None:
+    for node in nodes if isinstance(nodes, list) else ():
+        if (
+            isinstance(node, dict)
+            and node.get("type") == "submenu"
+            and str(node.get("id") or "") == submenu_id
+        ):
+            return node
+    return None
+
+
+def _template_slot(template_nodes, action_id: str, submenu=None, submenu_index=None):
+    """返回 ``(所属模板子菜单, 子菜单在父级的序号, 模板 children, 序号)``。"""
+    for index, node in enumerate(template_nodes if isinstance(template_nodes, list) else ()):
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "action" and str(node.get("id") or "") == action_id:
+            return submenu, submenu_index, template_nodes, index
+        if node.get("type") == "submenu":
+            found = _template_slot(
+                node.get("children") or [], action_id, node, index
+            )
+            if found is not None:
+                return found
+    return None
+
+
+def migrate_p10_menu(layout: dict, template: Mapping | None = None) -> bool:
+    """把「模板放在扩展之外」的 action 从 ``extensions_hub`` 搬回模板位置（幂等）。
+
+    旧版 ``_append_mod_actions`` 会把所有新 action 塞进扩展子菜单，连
+    ``tool.links:*`` / 快捷启动 / 网络信息 / 回收内存 / 免打扰 这些 Core 项也不例外。
+    只搬模板里明确放在 hub 之外的项；模板外的 mod action 继续留在 hub，交给
+    ``MenuModel._populate_extensions()`` 按 owner 分组。
+    """
+    if not isinstance(layout, dict) or layout.get("layout_id") != DEFAULT_LAYOUT_ID:
+        return False
+    nodes = layout.get("nodes")
+    if not isinstance(nodes, list):
+        return False
+    hub = _find_submenu(nodes, "extensions_hub")
+    if hub is None:
+        return False
+    children = hub.get("children")
+    if not isinstance(children, list):
+        return False
+    try:
+        template_nodes = (template or load_default()).get("nodes", [])
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+    moved = False
+    for node in list(children):
+        if not isinstance(node, dict) or node.get("type") != "action":
+            continue
+        action_id = str(node.get("id") or "")
+        slot = _template_slot(template_nodes, action_id)
+        if slot is None:
+            continue
+        parent, parent_index, template_children, index = slot
+        if parent is not None and str(parent.get("id") or "") == "extensions_hub":
+            continue
+        children.remove(node)
+        if parent is None:
+            target = nodes
+            siblings = template_nodes
+        else:
+            target_parent = _find_submenu(nodes, str(parent.get("id") or ""))
+            if target_parent is None:
+                target_parent = deepcopy(parent)
+                target_parent["children"] = []
+                _insert_at_template_anchor(
+                    nodes, target_parent, template_nodes, int(parent_index or 0)
+                )
+            target = target_parent.setdefault("children", [])
+            siblings = parent.get("children") or []
+        _insert_at_template_anchor(target, node, siblings, int(index))
+        moved = True
+    if moved:
+        _clean_submenu_children(nodes)
+    return moved
+
+
 def _apply_legacy_hidden(nodes, hidden_ids: set[str]) -> None:
     for node in nodes if isinstance(nodes, list) else ():
         if not isinstance(node, dict):

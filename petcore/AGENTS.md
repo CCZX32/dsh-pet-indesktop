@@ -288,6 +288,16 @@
 - **扩展分组**：mod 设置页用一个 `group_heading(name_zh)`（H2）+ 若干
   `section(..., level=3)`（H3）；右键「扩展」按 `owner` 生成二级子菜单，
   `CORE_FEATURE_IDS` 不进入该菜单。单菜单项的 mod 也建子菜单。
+  **`extensions_hub.children` 只表达可见性，不许平铺渲染**；`_append_node()` 收集
+  children 作为 `allowed` 交给 `_populate_extensions()`。模板放在 hub 之外的 Core 项
+  （links/快捷启动/网络/回收内存/免打扰）由 `migrate_p10_menu()` 幂等搬回模板位置。
+- **设置宽行**：`SettingsCard.add_row(expand=True)` 必须是纵向布局（标题+提示占满整行，
+  控件另起一行）；非 expand 行的文字块有 180px 最小宽度。宽控件不许与文字抢同一行，
+  否则扩展管理的窄内容区会把提示压成一字一行。
+- **气泡尺寸显式化**：`QLabel.setWordWrap(False)` + `_wrap_lines()` 自行折行；
+  每次渲染用 `QFontMetrics` 算「最长行宽 + 4px（下限 96）」×「行数 × lineSpacing + 2」，
+  `label.setFixedSize()`，副标题同宽并 `heightForWidth()`；不许再用
+  `setMaximumWidth + adjustSize()`（Qt 的金比 sizeHint 会把短句压成两行并裁高）。
 - **气泡分页**：长文本按「短 3 行 / 长 6 行」分页，页码点 + 滚轮翻页；
   点击仍只打开快速对话（`clicked` 信号不许被翻页吃掉）；副标题与正文同一
   `bubblePanel`，列宽走 `column_for_text()`（248→360 × 字号缩放，按屏宽收敛）。

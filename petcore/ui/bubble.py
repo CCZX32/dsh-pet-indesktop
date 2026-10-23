@@ -8,7 +8,6 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..media.images import load_pixmap, logical_size, scale_pixmap, screen_dpr
 
-_MAX_WIDTH = 320
 #: 气泡内图片的等比缩放上限（宽与高都不超过它）。
 MAX_IMAGE_SIDE = 320
 _IMAGE_PAD = 8
@@ -20,6 +19,9 @@ BUBBLE_TEXT_COLUMN = 248
 BUBBLE_TEXT_COLUMN_MAX = 360
 BUBBLE_TEXT_GROWTH_CHARS = 60
 BUBBLE_TEXT_GROWTH_SPAN = 100
+#: label 的显式尺寸口径（主分支 `bubble_label_size`）：最短 96px，行宽余量 4px。
+BUBBLE_TEXT_MIN_WIDTH = 96
+BUBBLE_TEXT_SLACK = 4
 #: 每页最多行数：短文本 3 行，长文本 6 行。
 BUBBLE_MAX_LINES_SHORT = 3
 BUBBLE_MAX_LINES_LONG = 6
@@ -134,7 +136,7 @@ def column_for_text(text: str, scale: float = 1.0) -> int:
 def _wrap_lines(text: str, column_px: int, font) -> list[str]:
     """按字体实际宽度逐字折行；显式换行保留。"""
     metrics = QFontMetrics(font)
-    column = max(20, int(column_px))
+    column = max(20, int(column_px) - BUBBLE_TEXT_SLACK)
     lines: list[str] = []
     for paragraph in str(text or "").splitlines() or [""]:
         widths = {character: metrics.horizontalAdvance(character) for character in set(paragraph)}
@@ -170,7 +172,14 @@ def paginate_text(text: str, *, column_px: int, font, max_lines: int | None = No
         "\n".join(lines[index : index + limit])
         for index in range(0, len(lines), limit)
     ]
-    return [page for page in pages if page.strip()] or [str(text or "")]
+    pages = [page for page in pages if page.strip()] or [str(text or "")]
+    # 末页只剩一行会被误读成“被截断”；从前一页借一行过来（主分支同口径）。
+    if len(pages) > 1 and len(pages[-1].split("\n")) == 1:
+        previous = pages[-2].split("\n")
+        if len(previous) > 1:
+            pages[-2] = "\n".join(previous[:-1])
+            pages[-1] = previous[-1] + "\n" + pages[-1]
+    return pages
 
 
 
@@ -213,8 +222,7 @@ class SpeechBubble(QWidget):
 
         self.label = QLabel("")
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.label.setWordWrap(True)
-        self.label.setMaximumWidth(_MAX_WIDTH)
+        self.label.setWordWrap(False)
         self.label.setStyleSheet(_TEXT_QSS)
 
         self.subtitle_label = QLabel("")
@@ -385,6 +393,9 @@ class SpeechBubble(QWidget):
         self._place(anchor)
         self.show()
         self.raise_()
+        # 窗口显示后布局才最终生效：再量一次并重排，避免“永远慢一句”。
+        self.adjustSize()
+        self._place(anchor)
         self._schedule_page()
 
     def _column(self) -> int:
@@ -398,13 +409,17 @@ class SpeechBubble(QWidget):
                 column = min(column, max(80, area.width() - 2 * SCREEN_MARGIN - padding))
         return column
 
-    def _paginate(self) -> list[str]:
+    def _text_font(self):
+        self.label.ensurePolished()
         font = self.label.font()
         font.setPixelSize(_px(_TEXT_FONT_PX * self._text_scale))
+        return font
+
+    def _paginate(self) -> list[str]:
         return paginate_text(
             self._full_text,
             column_px=self._column(),
-            font=font,
+            font=self._text_font(),
         )
 
     def _render_text(self) -> None:
@@ -413,20 +428,53 @@ class SpeechBubble(QWidget):
             return
         self._page_index = max(0, min(self._page_index, len(self._pages) - 1))
         page = self._pages[self._page_index]
+        self.label.setWordWrap(False)
         self.label.setText(page)
-        self.label.setMaximumWidth(self._column())
+
+        font = self._text_font()
+        metrics = QFontMetrics(font)
+        lines = page.split("\n") or [""]
+        widest = max((metrics.horizontalAdvance(line) for line in lines), default=0)
+        width = max(
+            BUBBLE_TEXT_MIN_WIDTH,
+            min(self._column(), widest + BUBBLE_TEXT_SLACK),
+        )
+
         self.subtitle_label.setText(self._subtitle)
         self.subtitle_label.setVisible(bool(self._subtitle))
+        subtitle_height = 0
+        if self._subtitle:
+            self.subtitle_label.ensurePolished()
+            subtitle_metrics = QFontMetrics(self.subtitle_label.font())
+            subtitle_width = min(
+                self._column(),
+                subtitle_metrics.horizontalAdvance(self._subtitle) + BUBBLE_TEXT_SLACK,
+            )
+            width = max(width, BUBBLE_TEXT_MIN_WIDTH, subtitle_width)
+            subtitle_height = self.subtitle_label.heightForWidth(width)
+            if subtitle_height <= 0:
+                subtitle_height = self.subtitle_label.sizeHint().height()
+            self.subtitle_label.setFixedWidth(width)
+            self.subtitle_label.setFixedHeight(max(1, subtitle_height))
+
+        height = max(1, len(lines)) * metrics.lineSpacing() + 2
+        self.label.setFixedSize(width, height)
+
         if len(self._pages) > 1:
             dots = " ".join(
                 "●" if index == self._page_index else "○"
                 for index in range(len(self._pages))
             )
             self.pager.setText(dots)
+            self.pager.setFixedWidth(width)
             self.pager.show()
         else:
             self.pager.clear()
             self.pager.hide()
+
+        layout = self.text_panel.layout()
+        if layout is not None:
+            layout.activate()
         self.adjustSize()
 
     def _schedule_page(self) -> None:
@@ -503,19 +551,32 @@ class SpeechBubble(QWidget):
         self.label.clear()
         self.text_panel.hide()
         caption = str(caption or "").strip()
-        self.caption_label.setMaximumWidth(max_side + 2 * _IMAGE_PAD)
+        caption_width = max_side + 2 * _IMAGE_PAD
+        self.caption_label.setWordWrap(True)
+        self.caption_label.setFixedWidth(caption_width)
         self.caption_label.setText(caption)
         self.caption_label.setVisible(bool(caption))
+        if caption:
+            self.caption_label.ensurePolished()
+            caption_height = self.caption_label.heightForWidth(caption_width)
+            if caption_height <= 0:
+                caption_height = self.caption_label.sizeHint().height()
+            self.caption_label.setFixedHeight(max(1, caption_height))
         width, height = logical_size(pixmap)
         self.image_label.setFixedSize(
             width + 2 * _IMAGE_PAD, height + 2 * _IMAGE_PAD
         )
         self.image_label.setPixmap(pixmap)
         self.image_label.show()
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
         self.adjustSize()
         self._place(anchor)
         self.show()
         self.raise_()
+        self.adjustSize()
+        self._place(anchor)
         self._timer.start(max(800, int(duration_ms)))
         return True
 

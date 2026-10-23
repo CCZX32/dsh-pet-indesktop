@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -52,22 +53,24 @@ class SettingsCard(QFrame):
         row = QWidget(self)
         if sub:
             row.setProperty("subRow", True)
-        outer = QHBoxLayout(row)
-        outer.setContentsMargins(16 if not sub else 44, 10, 16, 10)
-        outer.setSpacing(18)
 
-        text_column = QVBoxLayout()
+        text_widget = QWidget(row)
+        text_widget.setObjectName("settingTextBlock")
+        text_column = QVBoxLayout(text_widget)
+        text_column.setContentsMargins(0, 0, 0, 0)
         text_column.setSpacing(2)
-        title = QLabel(label, row)
+        title = QLabel(label, text_widget)
         title.setObjectName("settingLabel")
         title.setWordWrap(True)
         text_column.addWidget(title)
         if hint:
-            hint_label = QLabel(hint, row)
+            hint_label = QLabel(hint, text_widget)
             hint_label.setObjectName("settingHint")
             hint_label.setWordWrap(True)
             text_column.addWidget(hint_label)
-        outer.addLayout(text_column, 1)
+        text_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
 
         if isinstance(control, _FOCUSABLE):
             title.setBuddy(control)
@@ -76,10 +79,24 @@ class SettingsCard(QFrame):
                 control.setAccessibleDescription(hint)
         if control.parent() is None:
             control.setParent(row)
-        alignment = Qt.AlignmentFlag.AlignVCenter
-        if not expand:
-            alignment |= Qt.AlignmentFlag.AlignRight
-        outer.addWidget(control, 1 if expand else 0, alignment)
+
+        if expand:
+            # 宽控件（路径、台词、结果框）另起一行：文字块独占整行宽度，
+            # 否则扩展管理这种窄内容区会把提示压成一字一行。
+            outer = QVBoxLayout(row)
+            outer.setContentsMargins(16 if not sub else 44, 10, 16, 10)
+            outer.setSpacing(6)
+            outer.addWidget(text_widget)
+            outer.addWidget(control)
+        else:
+            outer = QHBoxLayout(row)
+            outer.setContentsMargins(16 if not sub else 44, 10, 16, 10)
+            outer.setSpacing(18)
+            text_widget.setMinimumWidth(180)
+            outer.addWidget(text_widget, 1)
+            outer.addWidget(
+                control, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            )
         self._append(row)
         return row
 

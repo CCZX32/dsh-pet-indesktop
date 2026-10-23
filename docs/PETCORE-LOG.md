@@ -1906,3 +1906,19 @@ Now Playing + 歌词 + 唱跳。两个 mod 仍是可导入包（安装向导默�
 **验证**：`ruff check pet/ tests/ petcore/ examples/petcore-mods` 全绿；petcore 全量门禁与实机记录见 `docs/PR-REPORT-PETCORE-P4B2-2026-10-23.md`。
 
 **未验证 / 风险**：真实播放器下的识别范围过滤（本机无播放器）；安装版卸载（构建后复验）；Python 模块不热重载，卸载后仍需重启才彻底释放；`__pycache__` 保留在用户包目录时会被当作生成物删除。
+
+## L048 · 2026-10-23 · P4-b2.1 菜单分组落地 / 设置宽行 / 气泡显式尺寸
+
+**范围**：`petcore/ui/menu_model.py`、`menu_layout.py`、`petcore/ui/app.py`、`petcore/ui/settings/base.py`、`petcore/ui/bubble.py` + 测试与文档。
+
+**改了什么**
+
+- 菜单分组：`MenuModel._append_node()` 对 `extensions_hub` 不再平铺 children，只把 children 的 id 作为 `allowed` 传给 `_populate_extensions()`；`allowed` 为空时回退全部可见项，避免旧 layout 把扩展菜单变成空。
+- 旧 layout 迁移：新增 `migrate_p10_menu()`，把模板放在 hub 之外的 Core action（links / 快捷启动 / 网络信息 / 回收内存 / 免打扰）从 `extensions_hub` 搬回模板位置；`reload_menu()` 在 p8/p9 之后调用并持久化，幂等。
+- 内置包名：`_register_feature_menus()` 对不在 loader 结果里的内置接缝包补读 manifest 的 `name_zh`，扩展菜单不再显示 `core.feature-demo`。
+- 设置宽行：`SettingsCard.add_row(expand=True)` 改为纵向布局（文字块整行、控件另起一行）；非 expand 行的文字块包成 `settingTextBlock`，最小宽 180px。
+- 气泡：`label.setWordWrap(False)` + `QFontMetrics` 显式算宽高（最长行 + 4px，下限 96；行数 × lineSpacing + 2），`setFixedSize()`；副标题同宽并 `heightForWidth()`；图片说明改固定宽 + 按宽算高；`show_text()` 在 `show()` 后再 `adjustSize()+_place()` 一次，消除「慢一句」；分页末页孤行从前页借一行。
+
+**验证**：`ruff` 全绿；聚焦 95 passed；离线复现探针从「4 字 26×13 / hfw 28」变为「96×17 / hfw 17」，5/10 字均单行，长文 8 页 0 条超宽行。全量门禁与安装包复验见 PR 报告「第二轮修正」。
+
+**未验证 / 风险**：真实桌面右键菜单截图（需启动安装版人工确认）；迁移会改写用户 layout 中 Core 项的位置（只搬模板明确放在 hub 之外的项，幂等）；`allowed` 为空时回退全部可见项，用户「隐藏所有 mod 项」的极端情况会重新出现。

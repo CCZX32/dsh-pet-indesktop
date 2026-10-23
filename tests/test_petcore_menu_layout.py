@@ -14,6 +14,7 @@ from petcore.ui.menu_layout import (
     migrate_legacy,
     migrate_p8_menu,
     migrate_p9_menu,
+    migrate_p10_menu,
     normalize_separators,
     resolve,
 )
@@ -350,6 +351,61 @@ def test_tools_help_contains_web_links() -> None:
         "tool.links:quark_download",
     ):
         assert expected in ids
+
+
+def test_p10_moves_core_actions_out_of_the_extensions_hub() -> None:
+    layout = {
+        "schema_version": 1,
+        "layout_id": DEFAULT_LAYOUT_ID,
+        "nodes": [
+            {
+                "type": "submenu",
+                "id": "tools_help",
+                "label": "工具与帮助",
+                "visible": True,
+                "children": [{"type": "action", "id": "api_settings", "visible": True}],
+            },
+            {
+                "type": "submenu",
+                "id": "extensions_hub",
+                "label": "扩展",
+                "visible": True,
+                "children": [
+                    {"type": "action", "id": "tool.links:deepseek_web", "visible": True},
+                    {"type": "action", "id": "tool.links:github_project", "visible": True},
+                    {"type": "action", "id": "tool.links:quark_download", "visible": True},
+                    {"type": "action", "id": "tool.quick-launch:open_menu", "visible": True},
+                    {"type": "action", "id": "tool.network-info:show", "visible": True},
+                    {"type": "action", "id": "tool.memory-trim:trim", "visible": True},
+                    {"type": "action", "id": "tool.quiet-mode:quiet_30", "visible": True},
+                    {"type": "action", "id": "media.music:pause", "visible": True},
+                ],
+            },
+            {"type": "action", "id": "modern_settings", "visible": True},
+            {"type": "separator", "id": "system", "visible": True},
+            {"type": "action", "id": "quit", "visible": True},
+        ],
+    }
+
+    assert migrate_p10_menu(layout) is True
+
+    tools = next(node for node in layout["nodes"] if node.get("id") == "tools_help")
+    assert [child.get("id") for child in tools["children"]] == [
+        "tool.quick-launch:open_menu",
+        "api_settings",
+        "tool.links:deepseek_web",
+        "tool.links:github_project",
+        "tool.links:quark_download",
+        "tool.network-info:show",
+        "tool.memory-trim:trim",
+    ]
+    top_ids = [
+        node.get("id") for node in layout["nodes"] if node.get("type") == "action"
+    ]
+    assert "tool.quiet-mode:quiet_30" in top_ids
+    hub = next(node for node in layout["nodes"] if node.get("id") == "extensions_hub")
+    assert [child.get("id") for child in hub["children"]] == ["media.music:pause"]
+    assert migrate_p10_menu(layout) is False
 
 
 def test_mod_action_lands_in_extensions_hub() -> None:
