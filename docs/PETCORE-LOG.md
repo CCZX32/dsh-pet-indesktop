@@ -1879,3 +1879,30 @@ Now Playing + 歌词 + 唱跳。两个 mod 仍是可导入包（安装向导默�
 - 口型主分支也未实现，不在本轮。
 - 循环解除后会等当前这圈播完才回行为链（最长一个 clip 时长），不是硬切。
 - `voice.chime` 的预缓存线程是 daemon、`stop()` 不 join（阻塞的网络合成不能拖住退出）。
+
+## L047 · 2026-10-23 · P4-b2 扩展分组 / 可卸载 / 气泡分页 / 音乐识别
+
+**范围**：Core UI（settings base/style、menu model、bubble、app、page_mods、page_extensions、mods install/state/feature、contracts、config、installer）+ 9 个示例 mod 设置页 + 测试与文档。
+
+**改了什么**
+
+- `petcore/ui/settings/base.py`：新增 `group_heading()`（H2）与 `section(..., level=3)`（H3），H3 卡片左缩进 12px。
+- `petcore/ui/settings/style.py`：新增 `QLabel#groupTitle` / `QLabel#subsectionTitle`。
+- 7 个示例 mod 的设置页（ai.chat / fun.divination / fun.festival / reminder.todo / tool.file-reader / tool.weather / voice.chime）：一个 H2 + 原分组降为 H3。
+- `media.music` 设置页：H2「音乐」+ H3「播放与唱歌 / 歌词显示 / 识别范围 / 切歌与播放控制 / 播放器」，新增过滤开关、额外识别名、四个传输按钮，检测结果显示 `app_id`。
+- `petcore/ui/menu_model.py`：`_populate_extensions()` 按 owner 分组；新增 `set_owner_labels()` 与 `set_extension_skip_owners()`；`petcore/ui/app.py` 从 manifest 取 `name_zh` 并跳过 Core 内置特性。
+- `petcore/mods/install.py`：新增 `read_install_files()`、`_remove_listed()`、`remove_at()`；按 `install.json` 清单删除，`__pycache__/*.pyc` 一并清，未登记文件保留并报数量；无清单的 `.trusted` 包整目录删除（仍做边界与 `mod.json` 校验）。
+- `petcore/mods/state.py`：新增 `clear()`；`petcore/mods/feature.py`：新增 `stop_owner()`。
+- `petcore/ui/app.py`：新增 `CoreHost.uninstall_mod()` 与 `_drop_modules_under()`；UI 卸载顺序为「停 runtime → 撤菜单 → 清模块 → 删文件 → 重扫」。
+- `petcore/ui/settings/page_mods.py`：trusted 包不再禁用卸载，确认文案说明保留个人数据；删除请求交给 `ExtensionsPage.uninstall_mod()`。
+- `petcore/ui/settings/page_extensions.py`：新增 `uninstall_mod()` / `_drop_page()`，删除前对未保存的设置页询问保存/放弃/取消。
+- `petcore/ui/bubble.py`：列宽 `248→360`（`column_for_text`）、`paginate_text()`、页码点、滚轮翻页、副标题与正文同 `bubblePanel`；高度按屏幕夹取。
+- `petcore/contracts/host.py`、`ui/app.py`、`ui/ports.py`、`ui/pet_window.py`：`say()` 透传 `subtitle`。
+- `examples/petcore-mods/media.music`：`allowed_app_ids()` + `accepts_singing/pick_singing_session/transport` 的 `allowed_ids`；`music_filter_enabled` / `music_filter_extra_ids` 两键；歌词气泡副标题「我在唱《…》」，纯音乐「正在听《…》」。
+- `petcore/config.py`：两键进 GLOBAL/DEFAULTS/归一化。
+- `packaging/petcore.iss`：新增 `[UninstallDelete] {app}\mods`。
+- 文档：SPEC §25、ROADMAP §25、MOD-FORMAT §13、parity §12、AGENTS 红线、INDEX/LOG。
+
+**验证**：`ruff check pet/ tests/ petcore/ examples/petcore-mods` 全绿；petcore 全量门禁与实机记录见 `docs/PR-REPORT-PETCORE-P4B2-2026-10-23.md`。
+
+**未验证 / 风险**：真实播放器下的识别范围过滤（本机无播放器）；安装版卸载（构建后复验）；Python 模块不热重载，卸载后仍需重启才彻底释放；`__pycache__` 保留在用户包目录时会被当作生成物删除。

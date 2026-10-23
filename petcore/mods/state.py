@@ -69,5 +69,13 @@ def set_enabled(root: Path, mod_id: str, enabled: bool) -> None:
     _write_disabled(root, disabled)
 
 
+def clear(root: Path, mod_id: str) -> None:
+    """卸载后清掉停用记录，避免重装同名包继承旧的「停用」状态。"""
+    disabled = load_disabled(root)
+    if mod_id in disabled:
+        disabled.discard(mod_id)
+        _write_disabled(root, disabled)
+
+
 def is_enabled(root: Path, mod_id: str) -> bool:
     return mod_id not in load_disabled(root)

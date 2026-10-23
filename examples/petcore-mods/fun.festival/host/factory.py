@@ -56,8 +56,9 @@ class FestivalPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("节日提醒")
         self._initial = bool(self.config().get("festival_enabled", True))
-        card = self.section("节日")
+        card = self.section("节日", level=3)
         self.enabled = make_checkbox(self)
         self.enabled.setChecked(self._initial)
         self.enabled.toggled.connect(self._on_changed)

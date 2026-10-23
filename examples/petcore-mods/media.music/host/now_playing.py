@@ -145,9 +145,36 @@ def is_vetoed_session(app_id: str | None) -> bool:
     return normalized_app_id(app_id) in _VETO_APP_IDS
 
 
-def accepts_singing(session: Session, *, browser_media_enabled: bool = False) -> bool:
-    """该会话能不能进歌词/唱歌链路（唯一一份否决规则）。"""
+def allowed_app_ids(player_paths, *, extras: str = "") -> frozenset[str]:
+    """从已配置的播放器路径推导可识别的 SMTC 应用名（归一化）。
+
+    空集合表示「不做过滤」；非空时只有命中集合的会话才进唱歌/歌词链路。
+    额外识别名用于 AUMID 与 exe 名不一致的播放器（例如「汽水音乐」）。
+    """
+    values: set[str] = set()
+    if isinstance(player_paths, dict):
+        for path in player_paths.values():
+            name = str(path or "").strip().strip('"').replace("\\", "/").rsplit("/", 1)[-1]
+            normalized = normalized_app_id(name)
+            if normalized:
+                values.add(normalized)
+    for chunk in str(extras or "").replace("；", ",").replace("，", ",").replace("、", ",").split(","):
+        normalized = normalized_app_id(chunk)
+        if normalized:
+            values.add(normalized)
+    return frozenset(values)
+
+
+def accepts_singing(
+    session: Session,
+    *,
+    browser_media_enabled: bool = False,
+    allowed_ids: frozenset[str] | None = None,
+) -> bool:
+    """该会话能不能进歌词/唱歌链路（否决表 + 可选白名单）。"""
     if session.vetoed:
+        return False
+    if allowed_ids and normalized_app_id(session.app_id) not in allowed_ids:
         return False
     if session.media_type in (MEDIA_TYPE_VIDEO, MEDIA_TYPE_IMAGE):
         return False
@@ -161,6 +188,7 @@ def pick_singing_session(
     *,
     browser_media_enabled: bool = False,
     tracked_app_id: str = "",
+    allowed_ids: frozenset[str] | None = None,
 ) -> Session | None:
     """在**可接受候选**里为歌词/唱歌链路选会话。
 
@@ -171,7 +199,13 @@ def pick_singing_session(
     一个候选都没有时返回 ``None``。
     """
     accepted = [
-        session for session in sessions if accepts_singing(session, browser_media_enabled=browser_media_enabled)
+        session
+        for session in sessions
+        if accepts_singing(
+            session,
+            browser_media_enabled=browser_media_enabled,
+            allowed_ids=allowed_ids,
+        )
     ]
     if not accepted:
         return None
@@ -295,7 +329,9 @@ def _snapshot(session, index: int) -> Session:
     )
 
 
-async def _read_async(*, browser_media_enabled: bool, tracked_app_id: str):
+async def _read_async(
+    *, browser_media_enabled: bool, tracked_app_id: str, allowed_ids: frozenset[str] | None = None
+):
     manager_class = _manager_class()
     if manager_class is None:
         return None, unavailable_reason()
@@ -305,9 +341,20 @@ async def _read_async(*, browser_media_enabled: bool, tracked_app_id: str):
         return None, "系统里没有正在播放的媒体会话。"
     snapshots = [_snapshot(session, index) for index, session in enumerate(raw_sessions)]
     chosen = pick_singing_session(
-        snapshots, browser_media_enabled=browser_media_enabled, tracked_app_id=tracked_app_id
+        snapshots,
+        browser_media_enabled=browser_media_enabled,
+        tracked_app_id=tracked_app_id,
+        allowed_ids=allowed_ids,
     )
     if chosen is None:
+        blocked = [
+            session.app_id
+            for session in snapshots
+            if allowed_ids and normalized_app_id(session.app_id) not in allowed_ids
+        ]
+        if blocked:
+            names = "、".join(dict.fromkeys(name or "未知应用" for name in blocked))
+            return None, f"当前播放器（{names}）不在识别范围：设置 → 音乐 → 识别范围。"
         return None, "当前媒体会话不是音乐（视频或未开启的浏览器会话已被过滤）。"
     session = raw_sessions[chosen.index]
 
@@ -342,6 +389,7 @@ def read_playback_with_reason(
     *,
     browser_media_enabled: bool = False,
     tracked_app_id: str = "",
+    allowed_ids: frozenset[str] | None = None,
 ) -> tuple[Playback | None, str]:
     """采样当前曲目；读不到时第二项是给用户看的原因（不抛异常）。"""
     reason = unavailable_reason()
@@ -353,6 +401,7 @@ def read_playback_with_reason(
                 _read_async(
                     browser_media_enabled=bool(browser_media_enabled),
                     tracked_app_id=str(tracked_app_id or ""),
+                    allowed_ids=allowed_ids,
                 ),
                 CALL_TIMEOUT,
             )
@@ -367,23 +416,33 @@ def read_playback(
     *,
     browser_media_enabled: bool = False,
     tracked_app_id: str = "",
+    allowed_ids: frozenset[str] | None = None,
 ) -> Playback | None:
     """采样当前曲目；无播放器/无会话/任何异常都返回 ``None``。"""
     return read_playback_with_reason(
-        browser_media_enabled=browser_media_enabled, tracked_app_id=tracked_app_id
+        browser_media_enabled=browser_media_enabled,
+        tracked_app_id=tracked_app_id,
+        allowed_ids=allowed_ids,
     )[0]
 
 
 # ---------------------------------------------------------------- 传输控制
 
 
-def _pick_transport_session(manager, tracked_app_id: str):
+def _pick_transport_session(
+    manager, tracked_app_id: str, allowed_ids: frozenset[str] | None = None
+):
     """传输控制用选择器：跟随在播的会话，暂停时不跳到别的会话上。
 
     与唱歌链路刻意隔离：用户在看视频时点「暂停」就该暂停那个视频，所以这里既不做
-    媒体类型分层、也不做唱歌链路的否决。
+    媒体类型分层、也不做唱歌链路的否决；``allowed_ids`` 非空时只控制识别范围内的
+    播放器（与「只识别已配置播放器」的设置保持一致）。
     """
-    sessions = list(manager.get_sessions() or ())
+    sessions = [
+        session
+        for session in (manager.get_sessions() or ())
+        if not allowed_ids or normalized_app_id(_session_app_id(session)) in allowed_ids
+    ]
     if not sessions:
         return None
     wanted = normalized_app_id(tracked_app_id)
@@ -406,13 +465,17 @@ def _pick_transport_session(manager, tracked_app_id: str):
     return sessions[0]
 
 
-async def _transport_async(action: str, tracked_app_id: str) -> tuple[bool, str]:
+async def _transport_async(
+    action: str, tracked_app_id: str, allowed_ids: frozenset[str] | None = None
+) -> tuple[bool, str]:
     manager_class = _manager_class()
     if manager_class is None:
         return False, unavailable_reason()
     manager = await manager_class.request_async()
-    session = _pick_transport_session(manager, tracked_app_id)
+    session = _pick_transport_session(manager, tracked_app_id, allowed_ids)
     if session is None:
+        if allowed_ids:
+            return False, "识别范围内没有可控制的播放器：设置 → 音乐 → 识别范围。"
         return False, "当前没有可控制的播放器（请先在播放器里播放一首歌）。"
     info = _read_playback_info(session)
     controls = getattr(info, "controls", None)
@@ -435,7 +498,9 @@ async def _transport_async(action: str, tracked_app_id: str) -> tuple[bool, str]
     return ok, "" if ok else "这个播放器不支持切歌（网络电台之类）。"
 
 
-def transport(action: str, *, tracked_app_id: str = "") -> tuple[bool, str]:
+def transport(
+    action: str, *, tracked_app_id: str = "", allowed_ids: frozenset[str] | None = None
+) -> tuple[bool, str]:
     """发一个传输命令；返回 ``(是否成功, 失败原因)``，绝不抛异常。"""
     if action not in ACTION_LABELS:
         return False, f"不认识的操作：{action}"
@@ -443,7 +508,12 @@ def transport(action: str, *, tracked_app_id: str = "") -> tuple[bool, str]:
     if reason:
         return False, reason
     try:
-        return _run_sync(asyncio.wait_for(_transport_async(action, str(tracked_app_id or "")), CALL_TIMEOUT))
+        return _run_sync(
+            asyncio.wait_for(
+                _transport_async(action, str(tracked_app_id or ""), allowed_ids),
+                CALL_TIMEOUT,
+            )
+        )
     except (asyncio.TimeoutError, TimeoutError):
         return False, "系统媒体控制调用超时，请稍后重试。"
     except Exception:

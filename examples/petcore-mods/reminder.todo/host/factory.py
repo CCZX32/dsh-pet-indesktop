@@ -59,8 +59,9 @@ class TodoPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("待办提醒")
         self._initial = self._text()
-        card = self.section("清单")
+        card = self.section("清单", level=3)
         self.editor = QPlainTextEdit(self)
         self.editor.setPlaceholderText("每行一条待办")
         self.editor.setPlainText(self._initial)

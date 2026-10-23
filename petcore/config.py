@@ -86,6 +86,8 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "music_browser_media_enabled",
         "music_player_paths",
         "music_player",
+        "music_filter_enabled",
+        "music_filter_extra_ids",
     }
 )
 
@@ -207,6 +209,8 @@ DEFAULTS: dict[str, Any] = {
     "music_browser_media_enabled": False,
     "music_player_paths": {},
     "music_player": "",
+    "music_filter_enabled": False,
+    "music_filter_extra_ids": "",
     "speech_backend": "edge",
     "speech_fallback": "sapi",
     "speech_voice": "",
@@ -714,6 +718,12 @@ class Config:
         normalized["music_player"] = str(
             normalized.get("music_player") or ""
         ).strip()[:32]
+        normalized["music_filter_enabled"] = _bool(
+            normalized.get("music_filter_enabled"), False
+        )
+        normalized["music_filter_extra_ids"] = str(
+            normalized.get("music_filter_extra_ids") or ""
+        ).strip()[:200]
         normalized["speech_backend"] = _speech_backend(normalized.get("speech_backend"))
         normalized["speech_fallback"] = _speech_fallback(normalized.get("speech_fallback"))
         normalized["speech_voice"] = (

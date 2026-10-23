@@ -34,13 +34,15 @@ from .runtime import DEFAULTS
 class MusicPage(SettingsPage):
     title = "音乐"
     detect_done = Signal(str)
+    transport_done = Signal(str)
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
         config = self.config()
+        self.group_heading("音乐")
 
         # -------------------------------------------------------- 音乐信息
-        card = self.section("音乐信息")
+        card = self.section("播放与唱歌", level=3)
         self.enabled = make_checkbox(self)
         self.enabled.setChecked(bool(config.get("music_enabled", DEFAULTS["music_enabled"])))
         self.enabled.toggled.connect(lambda _checked=False: self._write("music_enabled", self.enabled.isChecked()))
@@ -88,7 +90,7 @@ class MusicPage(SettingsPage):
         card.add_row("检测结果", self.detect_status, "", expand=True)
 
         # -------------------------------------------------------- 歌词
-        lyric_card = self.section("歌词")
+        lyric_card = self.section("歌词显示", level=3)
         self.lyric = make_checkbox(self)
         self.lyric.setChecked(bool(config.get("music_lyric_enabled", DEFAULTS["music_lyric_enabled"])))
         self.lyric.toggled.connect(
@@ -153,8 +155,68 @@ class MusicPage(SettingsPage):
             "浏览器会把网页视频也报成音乐；默认不参与歌词与唱歌。",
         )
 
+        # -------------------------------------------------------- 识别范围
+        filter_card = self.section("识别范围", level=3)
+        self.filter_enabled = make_checkbox(self)
+        self.filter_enabled.setChecked(
+            bool(config.get("music_filter_enabled", DEFAULTS["music_filter_enabled"]))
+        )
+        self.filter_enabled.toggled.connect(
+            lambda _checked=False: self._write(
+                "music_filter_enabled", self.filter_enabled.isChecked()
+            )
+        )
+        filter_card.add_row(
+            "只识别指定播放器",
+            self.filter_enabled,
+            "开启后只认下面填了路径的播放器（以及下面的额外识别名）；"
+            "其它播放器即使正在播也不会唱歌/出歌词。",
+        )
+
+        self.filter_extra = QLineEdit(
+            str(config.get("music_filter_extra_ids", DEFAULTS["music_filter_extra_ids"]) or ""),
+            self,
+        )
+        self.filter_extra.setPlaceholderText("多个用逗号分隔，例如：汽水音乐")
+        self.filter_extra.editingFinished.connect(
+            lambda: self._write(
+                "music_filter_extra_ids", self.filter_extra.text().strip()
+            )
+        )
+        filter_card.add_row(
+            "额外识别名",
+            self.filter_extra,
+            "播放器上报的系统识别名不一定等于 exe 名；「检测当前播放」会显示识别名。",
+            expand=True,
+        )
+
+        # -------------------------------------------------------- 切歌
+        transport_card = self.section("切歌与播放控制", level=3)
+        buttons = QWidget(self)
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        for label, action in (
+            ("播放 / 暂停", "pause"),
+            ("上一首", "prev"),
+            ("下一首", "next"),
+            ("停止", "stop"),
+        ):
+            button = QPushButton(label, buttons)
+            button.clicked.connect(
+                lambda _checked=False, command=action: self._transport(command)
+            )
+            button_layout.addWidget(button)
+        button_layout.addStretch(1)
+        transport_card.add_row(
+            "播放控制",
+            buttons,
+            "与右键菜单的「音乐」命令是同一套实现；结果会以气泡提示。",
+            expand=True,
+        )
+
         # -------------------------------------------------------- 播放器
-        player_card = self.section("播放器")
+        player_card = self.section("播放器", level=3)
         self.player = QComboBox(self)
         self.player.setMinimumWidth(180)
         self.player.addItem("（不指定）", "")
@@ -188,6 +250,7 @@ class MusicPage(SettingsPage):
         )
 
         self.detect_done.connect(self._on_detect_done)
+        self.transport_done.connect(self._on_transport_done)
         self._initial = self._snapshot()
 
     # ---------------------------------------------------------------- 配置
@@ -218,6 +281,8 @@ class MusicPage(SettingsPage):
                 for key in players.player_keys()
                 if key in self.path_edits
             ),
+            bool(self.filter_enabled.isChecked()),
+            str(self.filter_extra.text().strip()),
         )
 
     def dirty(self) -> bool:
@@ -233,7 +298,9 @@ class MusicPage(SettingsPage):
         config.set("music_lyric_cache_limit", int(self.cache.value()))
         config.set("music_browser_media_enabled", bool(self.browser.isChecked()))
         config.set("music_player", str(self.player.currentData() or ""))
-        config.set("music_player_paths", dict(self._snapshot()[-1]))
+        config.set("music_player_paths", dict(self._snapshot()[8]))
+        config.set("music_filter_enabled", bool(self.filter_enabled.isChecked()))
+        config.set("music_filter_extra_ids", str(self.filter_extra.text().strip()))
         self._initial = self._snapshot()
 
     def discard_changes(self) -> None:
@@ -248,6 +315,8 @@ class MusicPage(SettingsPage):
             "music_browser_media_enabled": values[6],
             "music_player": values[7],
             "music_player_paths": {key: path for key, path in values[8] if path},
+            "music_filter_enabled": values[9],
+            "music_filter_extra_ids": values[10],
         }
         config = self.config()
         for key, value in mapping.items():
@@ -258,6 +327,7 @@ class MusicPage(SettingsPage):
             (self.sing, values[1]),
             (self.lyric, values[3]),
             (self.browser, values[6]),
+            (self.filter_enabled, values[9]),
         ):
             widget.blockSignals(True)
             widget.setChecked(bool(value))
@@ -282,6 +352,9 @@ class MusicPage(SettingsPage):
                 edit.blockSignals(True)
                 edit.setText(path)
                 edit.blockSignals(False)
+        self.filter_extra.blockSignals(True)
+        self.filter_extra.setText(values[10])
+        self.filter_extra.blockSignals(False)
         self.detect_status.setText("")
         self.changed.emit()
 
@@ -294,6 +367,9 @@ class MusicPage(SettingsPage):
             "下一首",
             "歌词",
             "唱歌",
+            "识别",
+            "切歌",
+            "播放控制",
             "网易云",
             "QQ音乐",
             "酷狗",
@@ -346,15 +422,30 @@ class MusicPage(SettingsPage):
             edit.setText(path)
         self._on_path_changed(key)
 
+    def _allowed_ids_from_ui(self) -> frozenset[str]:
+        """按当前控件状态算识别范围；开关关着就是空集合（不过滤）。"""
+        if not self.filter_enabled.isChecked():
+            return frozenset()
+        paths = {
+            key: edit.text().strip()
+            for key, edit in self.path_edits.items()
+            if edit.text().strip()
+        }
+        return now_playing.allowed_app_ids(
+            paths, extras=self.filter_extra.text().strip()
+        )
+
     def _detect(self) -> None:
         self.detect_button.setEnabled(False)
         self.detect_status.setText("正在读取系统媒体会话…")
         browser_media = bool(self.browser.isChecked())
+        allowed = self._allowed_ids_from_ui()
 
         def work() -> None:
             try:
                 playback, reason = now_playing.read_playback_with_reason(
-                    browser_media_enabled=browser_media
+                    browser_media_enabled=browser_media,
+                    allowed_ids=allowed or None,
                 )
             except Exception:
                 playback, reason = None, "读取系统媒体信息失败。"
@@ -362,7 +453,8 @@ class MusicPage(SettingsPage):
                 text = reason or "没有读到正在播放的曲目。"
             else:
                 state = "在播" if playback.playing else "已暂停"
-                text = f"{playback.label()}（{state}）"
+                app_id = playback.app_id or "未知"
+                text = f"{playback.label()}（{state}）· 识别名：{app_id}"
             try:
                 self.detect_done.emit(text)
             except RuntimeError:
@@ -374,3 +466,34 @@ class MusicPage(SettingsPage):
     def _on_detect_done(self, text: str) -> None:
         self.detect_status.setText(text)
         self.detect_button.setEnabled(True)
+
+    def _transport(self, action: str) -> None:
+        allowed = self._allowed_ids_from_ui()
+
+        def work() -> None:
+            try:
+                ok, reason = now_playing.transport(
+                    action, allowed_ids=allowed or None
+                )
+            except Exception:
+                ok, reason = False, "系统媒体控制调用失败，请稍后重试。"
+            if ok:
+                text = f"已{now_playing.ACTION_LABELS.get(action, action)}"
+            else:
+                text = reason or "系统媒体控制不可用"
+            try:
+                self.transport_done.emit(text)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=work, name="music-transport", daemon=True).start()
+
+    def _on_transport_done(self, text: str) -> None:
+        self.detect_status.setText(text)
+        port_factory = getattr(self.host, "presentation_port", None)
+        if not callable(port_factory):
+            return
+        try:
+            port_factory().say(text, force=True)
+        except Exception:
+            return

@@ -84,6 +84,9 @@ Name: "{autodesktop}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"; Tasks: d
 [Run]
 Filename: "{app}\dsh-pet-core.exe"; Description: "{cm:LaunchProgram,dsh-pet core}"; Flags: nowait postinstall skipifsilent
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\mods"
+
 [Code]
 function PreviousInstallDir(): String;
 var

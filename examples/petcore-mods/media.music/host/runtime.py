@@ -54,6 +54,8 @@ DEFAULTS = {
     "music_browser_media_enabled": False,
     "music_player_paths": {},
     "music_player": "",
+    "music_filter_enabled": False,
+    "music_filter_extra_ids": "",
 }
 
 
@@ -99,6 +101,7 @@ class MusicRuntime:
         self._pending: tuple[bool, str] = (False, "")
         self._inflight = False
         self._app_id = ""
+        self._title = ""
         self._track_key: tuple[str, str] | None = None
         self._lines: tuple[lyrics_mod.LyricLine, ...] = ()
         self._instrumental = False
@@ -159,6 +162,14 @@ class MusicRuntime:
             )
         return self._offset
 
+    def _allowed_ids(self) -> frozenset[str]:
+        """「只识别已配置播放器」的识别名集合；空集合表示不过滤。"""
+        if not self._flag("music_filter_enabled", False):
+            return frozenset()
+        paths = self._config_value("music_player_paths", {})
+        extras = str(self._config_value("music_filter_extra_ids", "") or "")
+        return now_playing.allowed_app_ids(paths if isinstance(paths, dict) else {}, extras=extras)
+
     def _cache(self) -> lyrics_mod.LyricsCache | None:
         storage = getattr(self.context.ports, "storage", None)
         if storage is None:
@@ -185,15 +196,16 @@ class MusicRuntime:
             return
         browser = self._flag("music_browser_media_enabled", False)
         tracked = self._app_id or self._preferred_app_id()
+        allowed = self._allowed_ids()
         worker = self._worker
         if worker is not None and worker.is_alive():
             if self._inflight:
                 return
             self._inflight = True
-            self._pending = (browser, tracked)
+            self._pending = (browser, tracked, allowed)
             self._wake.set()
             return
-        self._on_playback(self._read(browser, tracked))
+        self._on_playback(self._read(browser, tracked, allowed))
 
     def _on_playback(self, playback) -> None:
         self._inflight = False
@@ -222,12 +234,20 @@ class MusicRuntime:
             self._start_fetch(playback)
         self._sync_lyrics(playback, now)
 
-    def _read(self, browser_media_enabled: bool, tracked_app_id: str):
+    def _read(
+        self,
+        browser_media_enabled: bool,
+        tracked_app_id: str,
+        allowed_ids: frozenset[str] | None = None,
+    ):
+        kwargs = {
+            "browser_media_enabled": bool(browser_media_enabled),
+            "tracked_app_id": str(tracked_app_id or ""),
+        }
+        if allowed_ids:
+            kwargs["allowed_ids"] = allowed_ids
         try:
-            return self.read_playback(
-                browser_media_enabled=bool(browser_media_enabled),
-                tracked_app_id=str(tracked_app_id or ""),
-            )
+            return self.read_playback(**kwargs)
         except Exception:
             return None
 
@@ -256,6 +276,7 @@ class MusicRuntime:
 
     def _begin_track(self, playback: now_playing.Playback, now: float) -> None:
         self._track_key = playback.key()
+        self._title = str(playback.title or "")
         self._lines = ()
         self._instrumental = False
         self._lyric_index = -1
@@ -350,6 +371,33 @@ class MusicRuntime:
         self._lyric_index = -1
         if self._instrumental and self._sing_active:
             self._release()
+        if self._instrumental and self._title:
+            self._say_sung(f"正在听《{self._title}》", subtitle="")
+
+    def _subtitle(self) -> str:
+        """气泡副标题（主分支口径）：有曲名就常驻「我在唱《…》」。"""
+        return f"我在唱《{self._title}》" if self._title else ""
+
+    def _say_sung(self, text: str, *, subtitle: str, duration_ms: int = 4000, force: bool = False) -> bool:
+        """带副标题的气泡；旧版 presentation 端口不接受 subtitle 时退回纯文本。"""
+        presentation = self._presentation()
+        if presentation is None:
+            return False
+        try:
+            presentation.say(
+                text,
+                duration_ms=duration_ms,
+                force=force,
+                subtitle=subtitle,
+            )
+        except TypeError:
+            try:
+                presentation.say(text, duration_ms=duration_ms, force=force)
+            except Exception:
+                return False
+        except Exception:
+            return False
+        return True
 
     def _position(self, playback: now_playing.Playback, now: float) -> float:
         """播放位置：播放器上报就用真值，否则从观察到切曲的时刻本地累加。"""
@@ -379,13 +427,12 @@ class MusicRuntime:
         if self._last_bubble_at is not None and (now - self._last_bubble_at) < MIN_BUBBLE_SECONDS:
             return
         self._lyric_index = index
-        try:
-            presentation.say(
-                text,
-                duration_ms=lyrics_mod.line_duration_ms(self._lines, index),
-                force=False,
-            )
-        except Exception:
+        if not self._say_sung(
+            text,
+            subtitle=self._subtitle(),
+            duration_ms=lyrics_mod.line_duration_ms(self._lines, index),
+            force=False,
+        ):
             return
         self._last_bubble_at = now
 
@@ -401,8 +448,12 @@ class MusicRuntime:
         if not self._flag("music_enabled", True):
             self._say_forced("音乐控制已关闭：设置 → 扩展管理 → 音乐")
             return
+        allowed = self._allowed_ids()
+        kwargs = {"tracked_app_id": self._app_id}
+        if allowed:
+            kwargs["allowed_ids"] = allowed
         try:
-            ok, reason = self.control_playback(action, tracked_app_id=self._app_id)
+            ok, reason = self.control_playback(action, **kwargs)
         except Exception:
             ok, reason = False, "系统媒体控制调用失败，请稍后重试。"
         if ok:
@@ -450,8 +501,8 @@ class MusicRuntime:
                 self._wake.clear()
                 if self._closing.is_set():
                     break
-                browser, tracked = self._pending
-                playback = self._read(browser, tracked)
+                browser, tracked, allowed = self._pending
+                playback = self._read(browser, tracked, allowed)
                 self._post(lambda sample=playback: self._on_playback(sample))
         finally:
             # 线程退出时关掉本线程的常驻事件循环，别把未关闭的 loop 留给 GC。

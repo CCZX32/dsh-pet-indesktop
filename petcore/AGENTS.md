@@ -93,7 +93,7 @@
   `stop()` 无条件回正。
 - **安装器位置**：随附扩展落 `{app}\mods\<id>` + `.trusted`，`paths.install_mods_dir()`
   只在冻结包存在，loader 与 `ui/app.py` 的「用户 mod 根」都必须含它；用户导入仍落
-  数据目录 `mods/`。卸载随安装目录，设置页里这类包禁用卸载。
+  数据目录 `mods/`。随安装目录的包也可以在设置内卸载（只删包目录，个人数据保留）。
 - **安装向导目录页**：`packaging/petcore.iss` 必须 `DisableDirPage=no` 且
   `UsePreviousAppDir=yes`；每次打开向导都显示路径页，检测到同 `AppId` 已安装时
   预选上次安装目录（`InstallLocation`）。不许用 `auto` 把目录页藏掉。
@@ -281,6 +281,19 @@
   `media/images.py` 的 `load_pixmap/scale_pixmap/logical_size`：逻辑上限 × 屏幕
   `devicePixelRatio` 解码并写回 pixmap DPR，QLabel 只设逻辑尺寸。禁止把「已缩到
   逻辑像素、DPR=1」的 pixmap 交给 QLabel（1.5 倍屏会二次放大 = 用户说的「发虚」）。
+- **卸载顺序**：先 `FeatureManager.stop_owner()` + `menu_model.unregister_owner()` +
+  清包目录下的 `sys.modules`，再按 `install.json` 清单删文件，最后 `reload_mods()`。
+  未登记文件保留并报数量；`feature-data/<id>`、配置键、钥匙串一律不动；
+  `.trusted` 包同样可在设置内卸载，删 `{app}\mods\<id>` 并清 `mods-state.json` 停用记录。
+- **扩展分组**：mod 设置页用一个 `group_heading(name_zh)`（H2）+ 若干
+  `section(..., level=3)`（H3）；右键「扩展」按 `owner` 生成二级子菜单，
+  `CORE_FEATURE_IDS` 不进入该菜单。单菜单项的 mod 也建子菜单。
+- **气泡分页**：长文本按「短 3 行 / 长 6 行」分页，页码点 + 滚轮翻页；
+  点击仍只打开快速对话（`clicked` 信号不许被翻页吃掉）；副标题与正文同一
+  `bubblePanel`，列宽走 `column_for_text()`（248→360 × 字号缩放，按屏宽收敛）。
+- **音乐识别范围**：`music_filter_enabled` 默认关；开启后只放行
+  `music_player_paths` 的 exe 名 + `music_filter_extra_ids`；否决表仍是第二道闸；
+  过滤同时作用于唱歌、歌词与 `transport()`，被挡下时要点名播放器。
 
 
 ## 4. 变更纪律

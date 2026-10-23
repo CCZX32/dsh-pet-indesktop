@@ -45,6 +45,18 @@ class MenuModel:
         self._hidden: set[str] = set()
         self._order: list[str] = []
         self._font_size = 13
+        self._owner_labels: dict[str, str] = {}
+        self._extension_skip_owners: set[str] = set()
+
+    def set_owner_labels(self, labels: dict[str, str]) -> None:
+        """扩展子菜单的显示名（owner → 中文名）。"""
+        self._owner_labels = {
+            str(owner): str(label or owner) for owner, label in dict(labels or {}).items()
+        }
+
+    def set_extension_skip_owners(self, owners) -> None:
+        """已内嵌到 Core 页的内置特性：不进「扩展」子菜单。"""
+        self._extension_skip_owners = {str(owner) for owner in (owners or ())}
 
     def set_font_size(self, size: int) -> None:
         """菜单字号（px）：下一次 ``build()`` 生效，非法值回退 13。"""
@@ -223,17 +235,31 @@ class MenuModel:
             action.triggered.connect(lambda _checked=False, cb=item.callback: cb())
 
     def _populate_extensions(self, menu: QMenu, placed: set[str]) -> None:
+        """「扩展」子菜单：按 mod（owner）分组，每组一个二级子菜单。"""
+        groups: dict[str, list[MenuItem]] = {}
         for item in self._items.values():
             if item.owner == "core" or item.id in placed:
                 continue
+            if item.owner in self._extension_skip_owners:
+                continue
             if not self._availability.get(item.id, True):
                 continue
-            placed.add(item.id)
-            if item.populate is not None:
-                submenu = menu.addMenu(item.label)
-                item.populate(submenu)
-            else:
-                self._append_item(menu, item)
+            groups.setdefault(item.owner, []).append(item)
+        for owner in sorted(
+            groups, key=lambda key: (min(item.order for item in groups[key]), key)
+        ):
+            items = sorted(groups[owner], key=lambda entry: (entry.order, entry.label))
+            submenu = menu.addMenu(self._owner_labels.get(owner) or owner)
+            icon = _resolve_icon(next((item.icon for item in items if item.icon), ""))
+            if icon is not None:
+                submenu.setIcon(icon)
+            for item in items:
+                placed.add(item.id)
+                if item.populate is not None:
+                    child = submenu.addMenu(item.label)
+                    item.populate(child)
+                else:
+                    self._append_item(submenu, item)
         if not menu.actions():
             empty = menu.addAction("（暂无扩展）")
             empty.setEnabled(False)

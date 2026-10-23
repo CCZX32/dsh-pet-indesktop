@@ -78,8 +78,9 @@ class DivinationPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("抽签")
         self._initial = bool(self.config().get("divination_enabled", True))
-        card = self.section("每日一签")
+        card = self.section("每日一签", level=3)
         self.enabled = make_checkbox(self)
         self.enabled.setChecked(self._initial)
         self.enabled.toggled.connect(self._on_changed)

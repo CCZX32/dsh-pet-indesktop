@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QFontMetrics, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..media.images import load_pixmap, logical_size, scale_pixmap, screen_dpr
@@ -15,11 +15,22 @@ _IMAGE_PAD = 8
 BUBBLE_GAP = 6
 SCREEN_MARGIN = 4
 
+#: 文本列宽：短文本 248，超过 60 字逐步放宽到 360（主分支口径），再乘字号缩放。
+BUBBLE_TEXT_COLUMN = 248
+BUBBLE_TEXT_COLUMN_MAX = 360
+BUBBLE_TEXT_GROWTH_CHARS = 60
+BUBBLE_TEXT_GROWTH_SPAN = 100
+#: 每页最多行数：短文本 3 行，长文本 6 行。
+BUBBLE_MAX_LINES_SHORT = 3
+BUBBLE_MAX_LINES_LONG = 6
+
 #: 文本缩放系数（``bubble_text_scale`` 百分比 / 100）的支持区间。
 TEXT_SCALE_MIN = 0.5
 TEXT_SCALE_MAX = 3.0
 
 _TEXT_FONT_PX = 13
+_TEXT_SUBTITLE_FONT_PX = 11
+_TEXT_PAGER_FONT_PX = 10
 _TEXT_PADDING = (10, 14)
 _TEXT_RADIUS = 12
 _CAPTION_FONT_PX = 12
@@ -31,17 +42,40 @@ def _px(value: float) -> int:
     return max(1, int(round(value)))
 
 
+def _panel_margins(scale: float) -> tuple[int, int, int, int]:
+    horizontal = _px(_TEXT_PADDING[1] * scale)
+    vertical = _px(_TEXT_PADDING[0] * scale)
+    return (horizontal, vertical, horizontal, vertical)
+
+
+def _panel_qss(scale: float) -> str:
+    return (
+        "QWidget#bubblePanel{background:rgba(255,255,255,242);"
+        "border:1px solid rgba(120,150,180,180);border-radius:%dpx;}"
+        % _px(_TEXT_RADIUS * scale)
+    )
+
+
 def _text_qss(scale: float) -> str:
     return (
-        "QLabel{background:rgba(255,255,255,242);color:#243040;"
-        "border:1px solid rgba(120,150,180,180);border-radius:%dpx;"
-        "padding:%dpx %dpx;font-size:%dpx;}"
-        % (
-            _px(_TEXT_RADIUS * scale),
-            _px(_TEXT_PADDING[0] * scale),
-            _px(_TEXT_PADDING[1] * scale),
-            _px(_TEXT_FONT_PX * scale),
-        )
+        "QLabel{background:transparent;color:#243040;font-size:%dpx;}"
+        % _px(_TEXT_FONT_PX * scale)
+    )
+
+
+def _subtitle_qss(scale: float) -> str:
+    return (
+        "QLabel#bubbleSubtitle{background:transparent;color:rgba(36,48,64,190);"
+        "font-size:%dpx;font-weight:600;}"
+        % _px(_TEXT_SUBTITLE_FONT_PX * scale)
+    )
+
+
+def _pager_qss(scale: float) -> str:
+    return (
+        "QLabel#bubblePager{background:transparent;color:rgba(60,76,94,160);"
+        "font-size:%dpx;}"
+        % _px(_TEXT_PAGER_FONT_PX * scale)
     )
 
 
@@ -85,6 +119,61 @@ def clamp_image_scale(scale: float) -> float:
     return clamp_text_scale(scale)
 
 
+def column_for_text(text: str, scale: float = 1.0) -> int:
+    """文本列宽：短文本 248，超过 60 字逐步放宽到 360，再乘字号缩放。"""
+    scale = clamp_text_scale(scale)
+    length = len(str(text or ""))
+    if length <= BUBBLE_TEXT_GROWTH_CHARS:
+        grow = 0
+    else:
+        span = min(length - BUBBLE_TEXT_GROWTH_CHARS, BUBBLE_TEXT_GROWTH_SPAN)
+        grow = (BUBBLE_TEXT_COLUMN_MAX - BUBBLE_TEXT_COLUMN) * span // BUBBLE_TEXT_GROWTH_SPAN
+    return max(60, int(round((BUBBLE_TEXT_COLUMN + grow) * scale)))
+
+
+def _wrap_lines(text: str, column_px: int, font) -> list[str]:
+    """按字体实际宽度逐字折行；显式换行保留。"""
+    metrics = QFontMetrics(font)
+    column = max(20, int(column_px))
+    lines: list[str] = []
+    for paragraph in str(text or "").splitlines() or [""]:
+        widths = {character: metrics.horizontalAdvance(character) for character in set(paragraph)}
+        current = ""
+        width = 0
+        for character in paragraph:
+            advance = widths[character]
+            if current and width + advance > column:
+                lines.append(current)
+                current = character
+                width = advance
+            else:
+                current += character
+                width += advance
+        lines.append(current)
+    return lines
+
+
+def paginate_text(text: str, *, column_px: int, font, max_lines: int | None = None) -> list[str]:
+    """把长文本切成多页；短文本不超过 3 行，长文本每页 6 行。"""
+    lines = _wrap_lines(text, column_px, font)
+    limit = int(max_lines or 0)
+    if limit <= 0:
+        limit = (
+            BUBBLE_MAX_LINES_SHORT
+            if len(lines) <= BUBBLE_MAX_LINES_SHORT
+            else BUBBLE_MAX_LINES_LONG
+        )
+    limit = max(1, limit)
+    if len(lines) > BUBBLE_MAX_LINES_SHORT:
+        limit = max(limit, BUBBLE_MAX_LINES_LONG)
+    pages = [
+        "\n".join(lines[index : index + limit])
+        for index in range(0, len(lines), limit)
+    ]
+    return [page for page in pages if page.strip()] or [str(text or "")]
+
+
+
 def _scaled_pixmap(
     image, max_side: int = MAX_IMAGE_SIDE, dpr: float | None = None
 ) -> QPixmap | None:
@@ -116,12 +205,44 @@ class SpeechBubble(QWidget):
         self._text_scale = 1.0
         self._stream_mode = False
         self._host_on_top = True
+        self._full_text = ""
+        self._subtitle = ""
+        self._pages: list[str] = []
+        self._page_index = 0
+        self._duration_ms = 4000
 
         self.label = QLabel("")
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.label.setWordWrap(True)
         self.label.setMaximumWidth(_MAX_WIDTH)
         self.label.setStyleSheet(_TEXT_QSS)
+
+        self.subtitle_label = QLabel("")
+        self.subtitle_label.setObjectName("bubbleSubtitle")
+        self.subtitle_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.setStyleSheet(_subtitle_qss(1.0))
+        self.subtitle_label.hide()
+
+        self.pager = QLabel("")
+        self.pager.setObjectName("bubblePager")
+        self.pager.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.pager.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pager.setStyleSheet(_pager_qss(1.0))
+        self.pager.hide()
+
+        self.text_panel = QWidget(self)
+        self.text_panel.setObjectName("bubblePanel")
+        self.text_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.text_panel.setStyleSheet(_panel_qss(1.0))
+        panel_layout = QVBoxLayout(self.text_panel)
+        panel_layout.setContentsMargins(*_panel_margins(1.0))
+        panel_layout.setSpacing(2)
+        panel_layout.addWidget(self.subtitle_label)
+        panel_layout.addWidget(self.label)
+        panel_layout.addWidget(self.pager)
 
         self.caption_label = QLabel("")
         self.caption_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -143,7 +264,7 @@ class SpeechBubble(QWidget):
         layout.setSpacing(BUBBLE_GAP)
         layout.addWidget(self.caption_label)
         layout.addWidget(self.image_label)
-        layout.addWidget(self.label)
+        layout.addWidget(self.text_panel)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -171,7 +292,19 @@ class SpeechBubble(QWidget):
             return
         self._text_scale = value
         self.label.setStyleSheet(_text_qss(value))
+        self.subtitle_label.setStyleSheet(_subtitle_qss(value))
+        self.pager.setStyleSheet(_pager_qss(value))
+        self.text_panel.setStyleSheet(_panel_qss(value))
+        if self.text_panel.layout() is not None:
+            self.text_panel.layout().setContentsMargins(*_panel_margins(value))
         self.caption_label.setStyleSheet(_caption_qss(value))
+        if self._content_kind == "text" and self._full_text:
+            self._render_text()
+            if self._anchor is not None:
+                self._place(self._anchor)
+            if self.isVisible():
+                self._schedule_page()
+            return
         if self._anchor is None or not self.isVisible():
             return
         self.adjustSize()
@@ -226,7 +359,14 @@ class SpeechBubble(QWidget):
         self._apply_window_flags()
 
     # ---------------------------------------------------------------- 文本
-    def show_text(self, text: str, anchor: QRect, duration_ms: int = 4000) -> None:
+    def show_text(
+        self,
+        text: str,
+        anchor: QRect,
+        duration_ms: int = 4000,
+        *,
+        subtitle: str = "",
+    ) -> None:
         text = str(text or "").strip()
         if not text:
             return
@@ -235,13 +375,110 @@ class SpeechBubble(QWidget):
         self.caption_label.clear()
         self.image_label.hide()
         self.image_label.clear()
-        self.label.show()
-        self.label.setText(text)
-        self.adjustSize()
+        self.text_panel.show()
+        self._full_text = text
+        self._subtitle = str(subtitle or "").strip()
+        self._duration_ms = max(800, int(duration_ms))
+        self._page_index = 0
+        self._anchor = QRect(anchor)
+        self._render_text()
         self._place(anchor)
         self.show()
         self.raise_()
-        self._timer.start(max(800, int(duration_ms)))
+        self._schedule_page()
+
+    def _column(self) -> int:
+        column = column_for_text(self._full_text, self._text_scale)
+        anchor = self._anchor
+        if anchor is not None:
+            screen = QGuiApplication.screenAt(anchor.center()) or QGuiApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                padding = 2 * _px(_TEXT_PADDING[1] * self._text_scale)
+                column = min(column, max(80, area.width() - 2 * SCREEN_MARGIN - padding))
+        return column
+
+    def _paginate(self) -> list[str]:
+        font = self.label.font()
+        font.setPixelSize(_px(_TEXT_FONT_PX * self._text_scale))
+        return paginate_text(
+            self._full_text,
+            column_px=self._column(),
+            font=font,
+        )
+
+    def _render_text(self) -> None:
+        self._pages = self._paginate()
+        if not self._pages:
+            return
+        self._page_index = max(0, min(self._page_index, len(self._pages) - 1))
+        page = self._pages[self._page_index]
+        self.label.setText(page)
+        self.label.setMaximumWidth(self._column())
+        self.subtitle_label.setText(self._subtitle)
+        self.subtitle_label.setVisible(bool(self._subtitle))
+        if len(self._pages) > 1:
+            dots = " ".join(
+                "●" if index == self._page_index else "○"
+                for index in range(len(self._pages))
+            )
+            self.pager.setText(dots)
+            self.pager.show()
+        else:
+            self.pager.clear()
+            self.pager.hide()
+        self.adjustSize()
+
+    def _schedule_page(self) -> None:
+        total = max(1, sum(len(page) for page in self._pages))
+        share = len(self._pages[self._page_index]) / total if self._pages else 1.0
+        dwell = max(900, int(self._duration_ms * share))
+        self._timer.start(dwell)
+
+    def page_count(self) -> int:
+        return len(self._pages)
+
+    def page_index(self) -> int:
+        return self._page_index
+
+    def subtitle_text(self) -> str:
+        return self._subtitle
+
+    def next_page(self) -> bool:
+        """翻到下一页；已是最后一页时返回 False（由滚轮决定是否关闭）。"""
+        if self._page_index + 1 >= len(self._pages):
+            return False
+        self._page_index += 1
+        self._render_text()
+        if self._anchor is not None:
+            self._place(self._anchor)
+        self._schedule_page()
+        return True
+
+    def previous_page(self) -> bool:
+        if self._page_index <= 0:
+            return False
+        self._page_index -= 1
+        self._render_text()
+        if self._anchor is not None:
+            self._place(self._anchor)
+        self._schedule_page()
+        return True
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if self._content_kind != "text" or len(self._pages) <= 1:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        if delta < 0:
+            if not self.next_page():
+                self.hide()
+        elif not self.previous_page():
+            pass
+        event.accept()
 
     # ---------------------------------------------------------------- 图片
     def show_image(
@@ -260,8 +497,11 @@ class SpeechBubble(QWidget):
         if pixmap is None:
             return False
         self._content_kind = "image"
+        self._full_text = ""
+        self._subtitle = ""
+        self._pages = []
         self.label.clear()
-        self.label.hide()
+        self.text_panel.hide()
         caption = str(caption or "").strip()
         self.caption_label.setMaximumWidth(max_side + 2 * _IMAGE_PAD)
         self.caption_label.setText(caption)
@@ -345,4 +585,5 @@ class SpeechBubble(QWidget):
         y = above if above >= area.top() + SCREEN_MARGIN else min(
             area.bottom() - height - SCREEN_MARGIN, below
         )
+        y = max(area.top() + SCREEN_MARGIN, min(y, area.bottom() - height - SCREEN_MARGIN))
         self.move(int(x), int(y))

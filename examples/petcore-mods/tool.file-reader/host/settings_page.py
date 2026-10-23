@@ -14,6 +14,7 @@ class FileReaderPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("文件解读")
         config = self.config()
         self._initial = {
             "enabled": bool(config.get("file_reader_enabled", True)),
@@ -21,7 +22,7 @@ class FileReaderPage(SettingsPage):
             "record": bool(config.get("file_reader_record", True)),
         }
 
-        card = self.section("拖文件解读")
+        card = self.section("拖文件解读", level=3)
         self.enabled = make_checkbox(self)
         self.enabled.setChecked(self._initial["enabled"])
         self.enabled.toggled.connect(self._on_changed)

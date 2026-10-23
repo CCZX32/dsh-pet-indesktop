@@ -13,7 +13,12 @@ from PySide6.QtWidgets import QApplication
 
 from petcore.config import Config
 from petcore.contracts.content import CharacterSpec
-from petcore.ui.bubble import SpeechBubble
+from petcore.ui.bubble import (
+    BUBBLE_TEXT_COLUMN,
+    BUBBLE_TEXT_COLUMN_MAX,
+    SpeechBubble,
+    column_for_text,
+)
 from petcore.ui.pet_window import PetWindow
 
 
@@ -153,7 +158,8 @@ def test_set_text_scale_enlarges_the_text_style(app) -> None:
         bubble.show_text("放大一点", QRect(200, 400, 80, 80))
         before = bubble.label.styleSheet()
         assert "font-size:13px" in before
-        assert "padding:10px 14px" in before
+        assert "border-radius:12px" in bubble.text_panel.styleSheet()
+        assert bubble.text_panel.layout().contentsMargins().left() == 14
         height_before = bubble.height()
 
         bubble.set_text_scale(2.0)
@@ -161,7 +167,9 @@ def test_set_text_scale_enlarges_the_text_style(app) -> None:
         assert bubble.text_scale() == pytest.approx(2.0)
         after = bubble.label.styleSheet()
         assert "font-size:26px" in after
-        assert "padding:20px 28px" in after
+        assert "border-radius:24px" in bubble.text_panel.styleSheet()
+        assert bubble.text_panel.layout().contentsMargins().left() == 28
+        assert "font-size:22px" in bubble.subtitle_label.styleSheet()
         assert "font-size:24px" in bubble.caption_label.styleSheet()
         assert bubble.height() > height_before, "字号变大后气泡要重新 adjustSize"
         assert bubble.isVisible() is True
@@ -279,3 +287,46 @@ def test_text_and_image_bubbles_share_the_same_window(app, window, tmp_path) -> 
     assert id(window.bubble) == text_window
     assert window.bubble.windowFlags() == flags_before
     assert window.bubble.is_showing_image() is True
+
+
+def test_column_grows_with_text_length_and_scale() -> None:
+    assert column_for_text("短句") == BUBBLE_TEXT_COLUMN
+    assert column_for_text("长" * 400) == BUBBLE_TEXT_COLUMN_MAX
+    assert column_for_text("长" * 400, 2.0) == BUBBLE_TEXT_COLUMN_MAX * 2
+
+
+def test_long_text_paginates_and_wheel_pages(app) -> None:
+    bubble = SpeechBubble()
+    try:
+        text = "这是一句很长的台词。" * 120
+        bubble.show_text(text, QRect(600, 600, 80, 80))
+        assert bubble.page_count() > 1
+        assert bubble.pager.isVisible() is True
+        first = bubble.label.text()
+        assert "●" in bubble.pager.text()
+
+        assert bubble.next_page() is True
+        assert bubble.label.text() != first
+        assert bubble.page_index() == 1
+
+        bubble._timer.stop()
+        bubble.previous_page()
+        assert bubble.page_index() == 0
+    finally:
+        bubble.close()
+
+
+def test_subtitle_is_rendered_in_the_same_panel(app) -> None:
+    bubble = SpeechBubble()
+    try:
+        bubble.show_text(
+            "第一句歌词",
+            QRect(600, 600, 80, 80),
+            subtitle="我在唱《测试曲》",
+        )
+        assert bubble.subtitle_text() == "我在唱《测试曲》"
+        assert bubble.subtitle_label.isVisible() is True
+        assert bubble.subtitle_label.parent() is bubble.text_panel
+        assert bubble.label.maximumWidth() >= BUBBLE_TEXT_COLUMN
+    finally:
+        bubble.close()

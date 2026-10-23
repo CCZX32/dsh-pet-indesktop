@@ -336,6 +336,31 @@ def test_pick_singing_session_prefers_tracked_player_in_best_tier():
     )
 
 
+def test_allowed_app_ids_from_paths_and_extras():
+    assert now_playing.allowed_app_ids({}) == frozenset()
+    ids = now_playing.allowed_app_ids(
+        {"netease": r"C:\Program Files\Netease\cloudmusic.exe"},
+        extras="汽水音乐，QQMusic.exe",
+    )
+    assert ids == frozenset({"cloudmusic", "汽水音乐", "qqmusic"})
+
+
+def test_pick_singing_session_respects_allowlist():
+    netease = _session("cloudmusic.exe", index=0)
+    kugou = _session("kugou.exe", index=1)
+    allowed = frozenset({"cloudmusic"})
+
+    assert now_playing.pick_singing_session([kugou], allowed_ids=allowed) is None
+    assert (
+        now_playing.pick_singing_session(
+            [kugou, netease], allowed_ids=allowed
+        )
+        is netease
+    )
+    assert now_playing.accepts_singing(kugou, allowed_ids=allowed) is False
+    assert now_playing.accepts_singing(netease, allowed_ids=allowed) is True
+
+
 def test_player_registry_only_launches_configured_paths(tmp_path, monkeypatch):
     assert players_mod.player_keys() == ("netease", "qqmusic", "kugou", "soda")
     ok, message = players_mod.launch({}, "netease")
@@ -554,6 +579,47 @@ def test_transport_without_session_reports_reason():
     assert "没有可控制的播放器" in harness.presentation.said[-1]
 
 
+def test_runtime_passes_allowlist_only_when_filter_enabled():
+    harness = _Harness(
+        {
+            "music_enabled": True,
+            "music_player_paths": {"netease": r"C:\Netease\cloudmusic.exe"},
+            "music_filter_enabled": False,
+        }
+    )
+    seen: list[dict] = []
+
+    def read(**kwargs):
+        seen.append(kwargs)
+        return None
+
+    harness.runtime.read_playback = read
+    harness.poll()
+    assert "allowed_ids" not in seen[-1]
+
+    harness.ports.config.set("music_filter_enabled", True)
+    harness.poll()
+    assert seen[-1]["allowed_ids"] == frozenset({"cloudmusic"})
+
+
+def test_sung_bubble_carries_subtitle_when_port_supports_it():
+    class SubtitlePresentation(_Presentation):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def say(self, text, *, duration_ms=4000, force=False, subtitle=""):
+            self.calls.append((text, subtitle))
+
+    presentation = SubtitlePresentation()
+    harness = _Harness({}, presentation=presentation)
+    harness.runtime._title = "蝴蝶"
+
+    assert harness.runtime._say_sung("第一句", subtitle=harness.runtime._subtitle())
+
+    assert presentation.calls == [("第一句", "我在唱《蝴蝶》")]
+
+
 def test_transport_success_reports_action():
     harness = _Harness({"music_enabled": True})
     harness.runtime.control_playback = lambda action, *, tracked_app_id="": (True, "")
@@ -672,6 +738,25 @@ def test_settings_page_round_trip(app):
     assert page.sing.isChecked() is False
     assert host.config["music_sing_enabled"] is False
     assert host.config["music_player_paths"] == {"netease": "C:/CloudMusic/cloudmusic.exe"}
+
+
+def test_settings_page_has_h2_and_h3_groups(app):
+    from PySide6.QtWidgets import QLabel
+
+    page = sys.modules[HOST_PKG].MusicPage(_Host({"music_enabled": True}))
+    headings = [
+        (label.objectName(), label.text())
+        for label in page.findChildren(QLabel)
+        if label.objectName() in {"groupTitle", "subsectionTitle"}
+    ]
+    assert headings[0] == ("groupTitle", "音乐")
+    assert [text for name, text in headings if name == "subsectionTitle"] == [
+        "播放与唱歌",
+        "歌词显示",
+        "识别范围",
+        "切歌与播放控制",
+        "播放器",
+    ]
 
 
 def test_settings_page_detect_result_is_shown(app):

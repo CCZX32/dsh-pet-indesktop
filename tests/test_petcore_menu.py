@@ -483,3 +483,30 @@ def test_animation_actions_get_a_decoded_thumbnail(qapp, tmp_path: Path) -> None
         QTest.qWait(5)
     assert QSize(64, 51) in action.icon().availableSizes()
 
+
+
+def test_extensions_hub_groups_actions_per_mod(qapp) -> None:
+    model = MenuModel()
+    model.set_owner_labels({"mod.music": "音乐", "mod.weather": "天气"})
+    model.register(MenuItem("mod.music:next", "下一首", owner="mod.music", order=20))
+    model.register(MenuItem("mod.music:pause", "播放 / 暂停", owner="mod.music", order=10))
+    model.register(MenuItem("mod.weather:show", "看天气", owner="mod.weather", order=5))
+    model.set_extension_skip_owners({"fun.self-talk"})
+    model.register(MenuItem("fun.self-talk:say", "自言自语", owner="fun.self-talk", order=1))
+
+    menu = model.build_layout(
+        [
+            {
+                "type": "submenu",
+                "id": "extensions_hub",
+                "label": "扩展",
+                "children": [],
+            }
+        ]
+    )
+    hub = menu.actions()[0].menu()
+    assert [action.text() for action in hub.actions()] == ["天气", "音乐"]
+    assert [action.text() for action in hub.actions()[1].menu().actions()] == [
+        "播放 / 暂停",
+        "下一首",
+    ]

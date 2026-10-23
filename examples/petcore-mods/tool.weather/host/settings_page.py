@@ -37,6 +37,7 @@ class WeatherPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("天气")
         config = self.config()
         self._initial_enabled = bool(config.get("weather_enabled", True))
         self._initial_cities = normalize_city_list(config.get("weather_city_list", []))
@@ -44,7 +45,7 @@ class WeatherPage(SettingsPage):
         self._cities = list(self._initial_cities)
         self._current = self._initial_current
 
-        card = self.section("天气")
+        card = self.section("天气", level=3)
         self.enabled = make_checkbox(self)
         self.enabled.setChecked(self._initial_enabled)
         self.enabled.toggled.connect(self._on_enabled)

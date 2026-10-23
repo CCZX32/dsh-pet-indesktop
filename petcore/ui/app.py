@@ -20,7 +20,7 @@ from ..platform import hotkey_spec
 from ..platform.hotkeys import GlobalHotkeyService
 from ..platform.session import SessionWatcher
 from ..platform.worker import WorkerHost
-from ..mods.feature import FeatureManager
+from ..mods.feature import CORE_FEATURE_IDS, FeatureManager
 from .menu import install_core_menu
 from .menu_layout import (
     DEFAULT_LAYOUT_ID,
@@ -96,14 +96,25 @@ class _PresentationAdapter:
         """Return a presentation port bound to one pet window."""
         return _PresentationAdapter(self._host, window)
 
-    def say(self, text: str, *, duration_ms: int = 4000, force: bool = False) -> None:
+    def say(
+        self,
+        text: str,
+        *,
+        duration_ms: int = 4000,
+        force: bool = False,
+        subtitle: str = "",
+    ) -> None:
         if not force:
             quiet = getattr(self._host, "quiet", None)
             if quiet is not None and quiet.quiet_active():
                 return
         window = self._window()
         if window is not None:
-            window.say(text, duration_ms)
+            subtitle = str(subtitle or "").strip()
+            if subtitle:
+                window.say(text, duration_ms, subtitle=subtitle)
+            else:
+                window.say(text, duration_ms)
 
     def play_animation(self, name: str, *, loop: bool = False) -> bool:
         window = self._window()
@@ -218,6 +229,13 @@ class CoreHost:
     def _register_feature_menus(self) -> None:
         if self.features is None:
             return
+        labels: dict[str, str] = {}
+        for mod in getattr(self.load_result, "mods", ()) or ():
+            manifest = getattr(mod, "manifest", None)
+            name = str(getattr(manifest, "name_zh", "") or getattr(manifest, "name", "") or "")
+            labels[str(getattr(mod, "id", "") or "")] = name or str(getattr(mod, "id", ""))
+        self.menu_model.set_owner_labels(labels)
+        self.menu_model.set_extension_skip_owners(CORE_FEATURE_IDS)
         for feature, contribution in self.features.menu_contributions():
             label = str(contribution.data.get("label") or contribution.id)
             command_id = str(contribution.data.get("command") or contribution.id)
@@ -528,6 +546,52 @@ class CoreHost:
         if self.settings_dialog is dialog:
             self.settings_dialog = None
         dialog.deleteLater()
+
+    def uninstall_mod(self, mod_id: str) -> tuple[bool, str]:
+        """卸载一个扩展：先撤运行时与菜单贡献，再删受管文件，最后重扫。
+
+        个人数据（``feature-data/<id>``、配置键、钥匙串）一律保留；安装器投放的
+        ``.trusted`` 包同样可以卸载（只删 ``{app}\\mods\\<id>``）。
+        """
+        from ..mods import install as mod_install
+
+        target = next(
+            (
+                mod
+                for mod in (getattr(self.load_result, "mods", ()) or ())
+                if str(getattr(mod, "id", "")) == str(mod_id)
+            ),
+            None,
+        )
+        if target is None:
+            return False, f"扩展未安装：{mod_id}"
+        path = Path(getattr(target, "path", "") or "")
+        if self.features is not None:
+            self.features.stop_owner(str(mod_id))
+        self.menu_model.unregister_owner(str(mod_id))
+        self._drop_modules_under(path)
+        ok, message = mod_install.remove_at(path, root=self.root)
+        if ok:
+            self.reload_mods()
+        return ok, message
+
+    @staticmethod
+    def _drop_modules_under(path: Path) -> None:
+        """丢掉 ``__file__`` 落在该扩展目录下的模块，避免重装后复用旧模块对象。"""
+        try:
+            root = Path(path).resolve()
+        except OSError:
+            return
+        for name, module in list(sys.modules.items()):
+            location = getattr(module, "__file__", None)
+            if not location:
+                continue
+            try:
+                file_path = Path(location).resolve()
+            except OSError:
+                continue
+            if file_path == root or root in file_path.parents:
+                sys.modules.pop(name, None)
 
     def reload_mods(self) -> None:
         if self.features is not None:

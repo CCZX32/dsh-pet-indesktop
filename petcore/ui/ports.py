@@ -315,8 +315,12 @@ class PetHandleImpl:
     def hide(self) -> None:
         self.window.set_visible(False)
 
-    def say(self, text: str, duration_ms: int = 4000) -> None:
-        self.window.say(text, duration_ms)
+    def say(self, text: str, duration_ms: int = 4000, subtitle: str = "") -> None:
+        subtitle = str(subtitle or "").strip()
+        if subtitle:
+            self.window.say(text, duration_ms, subtitle=subtitle)
+        else:
+            self.window.say(text, duration_ms)
 
     def play_animation(self, name: str) -> bool:
         return self.window.play_animation(name)

@@ -81,11 +81,12 @@ class ChimePage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("语音报时")
         self._secret_fields: dict[str, QLineEdit] = {}
         self._secret_status: dict[str, QLabel] = {}
         self._initial = self._values_from_config()
 
-        timing = self.section("报时")
+        timing = self.section("报时", level=3)
         self.enabled = make_checkbox(self)
         timing.add_row(
             "启用语音报时",
@@ -118,7 +119,7 @@ class ChimePage(SettingsPage):
         self.animation.setPlaceholderText("如 悠闲哼歌；留空则不播放动画")
         timing.add_row("报时动画", self.animation, "报时瞬间播放一次动作动画；留空表示不动画。")
 
-        script = self.section("台词")
+        script = self.section("台词", level=3)
         self.quotes_edit = QPlainTextEdit(self)
         self.quotes_edit.setPlaceholderText("一行一条；留空则使用内置中文台词库")
         self.quotes_edit.setMinimumHeight(120)
@@ -129,7 +130,7 @@ class ChimePage(SettingsPage):
             expand=True,
         )
 
-        voice = self.section("声音")
+        voice = self.section("声音", level=3)
         self.provider = QComboBox(self)
         self.provider.setMinimumWidth(220)
         voice.add_row(
@@ -167,7 +168,7 @@ class ChimePage(SettingsPage):
         preview_layout.addWidget(self.preview_status, 1)
         voice.add_row("试听", preview_row, "按当前设置念一次现在的时间。", expand=True)
 
-        secrets = self.section("密钥")
+        secrets = self.section("密钥", level=3)
         for provider_id, label in SECRET_PROVIDERS:
             row = QWidget(self)
             row_layout = QHBoxLayout(row)

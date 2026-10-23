@@ -340,6 +340,18 @@ def test_new_default_action_is_merged_near_its_template_anchor() -> None:
     assert "default-action-added:new_action" in resolved.diagnostics
 
 
+def test_tools_help_contains_web_links() -> None:
+    layout = load_default()
+    tools = next(node for node in layout["nodes"] if node.get("id") == "tools_help")
+    ids = [child.get("id") for child in tools["children"]]
+    for expected in (
+        "tool.links:deepseek_web",
+        "tool.links:github_project",
+        "tool.links:quark_download",
+    ):
+        assert expected in ids
+
+
 def test_mod_action_lands_in_extensions_hub() -> None:
     resolved = resolve(
         None,

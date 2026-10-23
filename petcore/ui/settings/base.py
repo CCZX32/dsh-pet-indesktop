@@ -250,15 +250,27 @@ class SettingsPage(QWidget):
         else:
             layout.addWidget(widget)
 
-    def section(self, title: str) -> SettingsCard:
+    def group_heading(self, title: str) -> QLabel:
+        """mod 页的二级标题（H2）：一个 mod 的全部内容挂在它下面。"""
+        label = QLabel(title, self.content)
+        label.setObjectName("groupTitle")
+        label.setWordWrap(True)
+        self._append_section_widget(label)
+        return label
+
+    def section(self, title: str, *, level: int = 2) -> SettingsCard:
+        """分组卡片。``level=3`` 是 mod 页内的三级标题（H3）。"""
+        sub = int(level) >= 3
         wrapper = QWidget(self)
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12 if sub else 0, 0, 0, 0)
         layout.setSpacing(7)
         label = QLabel(title, wrapper)
-        label.setObjectName("sectionTitle")
+        label.setObjectName("subsectionTitle" if sub else "sectionTitle")
         label.setWordWrap(True)
         card = SettingsCard(wrapper)
+        if sub:
+            wrapper.setProperty("subSection", True)
         layout.addWidget(label)
         layout.addWidget(card)
         self._append_section_widget(wrapper)

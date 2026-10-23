@@ -311,7 +311,7 @@ def test_core_features_are_listed_as_merged_into_core(app, tmp_path):
     assert page.remove_button.isEnabled() is True
 
 
-def test_shipped_mod_cannot_be_removed_from_the_page(app, tmp_path):
+def test_shipped_mod_can_be_removed_but_keeps_personal_data(app, tmp_path):
     page = ModsPage(_host_with_mods(tmp_path))
     rows = {
         page.mods_list.item(row).data(Qt.ItemDataRole.UserRole): row
@@ -320,15 +320,15 @@ def test_shipped_mod_cannot_be_removed_from_the_page(app, tmp_path):
 
     trusted_row = rows["fun.festival"]
     page.mods_list.setCurrentRow(trusted_row)
-    assert page.remove_button.isEnabled() is False
-    assert "随安装程序卸载" in page.detail_label.text()
+    assert page.remove_button.isEnabled() is True
+    assert "可在此卸载" in page.detail_label.text()
     assert "Festival reminder" in page.detail_label.text()
     assert "ID：fun.festival" in page.detail_label.text()
 
     addon_row = rows["fun.divination"]
     page.mods_list.setCurrentRow(addon_row)
     assert page.remove_button.isEnabled() is True
-    assert "随安装程序卸载" not in page.detail_label.text()
+    assert "可在此卸载" not in page.detail_label.text()
 
 
 # ---------------------------------------------------------------- manifest 中文名

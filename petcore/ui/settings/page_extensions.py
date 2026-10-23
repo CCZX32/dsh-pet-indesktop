@@ -93,6 +93,7 @@ class ExtensionsPage(SettingsPage):
         self._pages: list[tuple[str, SettingsPage]] = []
         self._page_labels: list[tuple[str, str]] = []
         self._entries: dict[str, tuple[str, SettingsPage]] = {}
+        self._owners: dict[str, str] = {}
         self._grouped: dict[str, list[tuple[str, str]]] = {
             STANDALONE_GROUP: [],
             BASE_GROUP: [],
@@ -207,6 +208,7 @@ class ExtensionsPage(SettingsPage):
             )
             page = _HostedWidgetPage(self.host, page, label, self)
         self._register(key, label, page, _group_of(spec))
+        self._owners[key] = str(getattr(spec, "owner", "") or "")
 
     def _register(self, key: str, label: str, page: SettingsPage, group: str) -> None:
         self._pages.append((key, page))
@@ -217,6 +219,67 @@ class ExtensionsPage(SettingsPage):
             page.changed.connect(self.changed.emit)
         except Exception:
             pass
+
+    # ------------------------------------------------------------ 卸载
+    def uninstall_mod(self, mod_id: str) -> tuple[bool, str]:
+        """卸载扩展：先处理该扩展未保存的设置，再交给 Core 删文件并重扫。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        uninstall = getattr(self.host, "uninstall_mod", None)
+        if not callable(uninstall):
+            return False, "当前版本不支持在设置内卸载扩展"
+        keys = [key for key, owner in self._owners.items() if owner == mod_id]
+        dirty = [
+            self._entries[key][1]
+            for key in keys
+            if key in self._entries and self._entries[key][1].dirty()
+        ]
+        if dirty:
+            answer = QMessageBox.question(
+                self,
+                "扩展有未保存的修改",
+                f"扩展「{mod_id}」的设置页里还有未保存的修改。\n\n"
+                "删除扩展前要先处理这些修改。",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return False, "已取消卸载"
+            for page in dirty:
+                if answer == QMessageBox.StandardButton.Save:
+                    page.confirm_save()
+                else:
+                    page.discard_changes()
+        ok, message = uninstall(mod_id)
+        if not ok:
+            return ok, message
+        for key in keys:
+            self._drop_page(key)
+        self._fill_nav()
+        self.select_tab("mods")
+        mods_page = self._entries.get("mods", (None, None))[1]
+        refresh = getattr(mods_page, "_refresh", None)
+        if callable(refresh):
+            refresh()
+        return ok, message
+
+    def _drop_page(self, key: str) -> None:
+        entry = self._entries.pop(key, None)
+        self._owners.pop(key, None)
+        if entry is None:
+            return
+        page = entry[1]
+        self._pages = [(item_key, item) for item_key, item in self._pages if item_key != key]
+        for group, items in self._grouped.items():
+            self._grouped[group] = [pair for pair in items if pair[0] != key]
+        self.stack.removeWidget(page)
+        try:
+            page.dispose()
+        except Exception:
+            logger.warning("dispose of %s failed", key, exc_info=True)
+        page.deleteLater()
 
     # ------------------------------------------------------------ 左侧导航
     def _fill_nav(self) -> None:

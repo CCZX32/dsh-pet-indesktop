@@ -5,7 +5,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from petcore.mods.install import install, remove, validate
+from petcore.mods.install import install, remove, remove_at, validate
 
 
 def write_pack(base: Path, payload: dict, files: dict[str, str] | None = None) -> Path:
@@ -178,3 +178,43 @@ def test_validate(tmp_path):
     assert validate(archive) == []
     problems = validate(bad)
     assert any("version must be X.Y.Z" in item for item in problems)
+
+
+def test_remove_uses_manifest_and_keeps_unknown_files(tmp_path):
+    root = tmp_path / "data"
+    pack = write_pack(tmp_path / "src", content_payload())
+    assert install(pack, root)[0]
+    target = root / "mods" / "character.demo"
+    (target / "notes.txt").write_text("user data", encoding="utf-8")
+
+    ok, message = remove_at(target, root=root)
+
+    assert ok, message
+    assert (target / "notes.txt").is_file()
+    assert not (target / "mod.json").exists()
+    assert "kept" in message
+
+
+def test_remove_trusted_pack_without_install_manifest(tmp_path):
+    root = tmp_path / "data"
+    target = root / "mods" / "character.demo"
+    write_pack(target, content_payload())
+    (target / ".trusted").write_text("", encoding="utf-8")
+
+    ok, message = remove_at(target, root=root)
+
+    assert ok, message
+    assert not target.exists()
+
+
+def test_remove_clears_disabled_state(tmp_path):
+    from petcore.mods import state
+
+    root = tmp_path / "data"
+    pack = write_pack(tmp_path / "src", content_payload())
+    assert install(pack, root)[0]
+    state.set_enabled(root, "character.demo", False)
+
+    assert remove_at(root / "mods" / "character.demo", root=root)[0]
+
+    assert state.is_enabled(root, "character.demo") is True

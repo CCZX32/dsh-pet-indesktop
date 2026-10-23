@@ -132,8 +132,8 @@ python -m petcore mods doctor
 投放的官方扩展走**逐包授权**：装到安装目录 `{app}\mods\<id>`，目录里放一个
 `.trusted` 空文件即视为已授信（`petcore/mods/trust.py`），与全局开关并列；不勾选
 安装就不会有目录，卸载随 `{app}` 一起删除。这类包在扩展管理里归「加装扩展」，
-标「随安装包」，不能在设置里卸载。用户自己导入的包仍装到数据目录 `mods/`，同样归
-「加装扩展」，可单独卸载。
+标「随安装包」，**也可以在设置里单独卸载**（只删包目录，个人数据保留）。用户自己
+导入的包仍装到数据目录 `mods/`，同样归「加装扩展」，可单独卸载。
 
 ### 6.2 市场安装
 
@@ -332,3 +332,35 @@ ports.presentation.release_loop()                          # 当前这圈播完�
 
 - `examples/petcore-mods/voice.chime` 1.1.0：日程/台词/预缓存/免打扰 + 设置页（含四家后端与密钥状态）。
 - `examples/petcore-mods/media.music` 1.1.0：SMTC + 歌词（`HostPorts.http`）+ 唱跳循环 + 播放器启动。
+
+## 13. 卸载、分组与音乐识别（P4-b2，2026-10-23）
+
+### 13.1 卸载
+
+- **顺序**：先撤贡献（`FeatureManager.stop_owner` → `menu_model.unregister_owner` →
+  清 `sys.modules` 中位于包目录下的模块），再删文件，最后 `reload_mods()`。
+- **删除口径**：
+  - 用户导入包有 `install.json`：按 `files` 清单逐文件删除；`__pycache__`/`*.pyc`
+    视为生成物一并删；**未登记文件保留**并在消息里报数量；
+  - 安装器投放包（无 `install.json`，带 `.trusted`）：整目录删除，仍校验
+    `mods_root/<id>` 边界与 `mod.json` 存在；
+  - 个人数据（`feature-data/<id>`、配置键、钥匙串）一律不动。
+- **状态**：卸载会清 `mods-state.json` 的 `disabled` 条目，重装不继承停用。
+- **UI**：`.trusted` 包也能在「扩展管理 → 加装扩展」卸载；删除前询问未保存的扩展设置页
+  （保存 / 放弃 / 取消）。安装器卸载时 `[UninstallDelete]` 清 `{app}\mods`。
+
+### 13.2 设置页与菜单分组
+
+- mod 设置页：`self.group_heading("<name_zh>")` 一个 H2，功能组用
+  `self.section("…", level=3)` 作为 H3；Core 内嵌页（`host_page`）保持原 H2 分组。
+- 右键「扩展」：`MenuModel._populate_extensions()` 按 `owner` 聚合，每个 mod 一个
+  二级子菜单；`CORE_FEATURE_IDS` 不进入该菜单。单菜单项的 mod 也建子菜单。
+
+### 13.3 音乐识别范围
+
+- `music_filter_enabled`（默认 false）：开启后只放行识别名命中集合的 SMTC 会话。
+- 识别名来源：`music_player_paths` 的 exe 文件名（去 `.exe`、小写）+
+  `music_filter_extra_ids`（逗号/顿号分隔，AUMID 与 exe 名不一致时用）。
+- 否决表（浏览器/系统提示类）仍然生效；过滤同时作用于唱歌、歌词和传输控制。
+- 过滤命中失败时 `read_playback_with_reason()` 点名被挡下的播放器，不静默为空。
+- 设置页「检测当前播放」显示 `识别名：<app_id>`，方便填额外识别名。

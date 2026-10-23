@@ -249,15 +249,82 @@ def install(source: Path, root: Path, *, force: bool = False) -> tuple[bool, str
         return False, f"install failed: {exc}"
 
 
-def remove(root: Path, mod_id: str) -> tuple[bool, str]:
-    if not isinstance(mod_id, str) or not is_valid_id(mod_id):
+def read_install_files(path: Path) -> dict[str, str] | None:
+    """读 ``install.json`` 的逐文件摘要；缺失/损坏返回 None（安装器投放的包没有它）。"""
+    try:
+        raw = json.loads((Path(path) / INSTALL_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    files = raw.get("files") if isinstance(raw, dict) else None
+    if not isinstance(files, dict):
+        return None
+    return {
+        str(name): str(digest)
+        for name, digest in files.items()
+        if isinstance(name, str) and name and not Path(name).is_absolute()
+    }
+
+
+def _is_generated(relative: str) -> bool:
+    """运行时生成、卸载时可以一并删除的产物。"""
+    parts = PurePosixPath(relative).parts
+    return "__pycache__" in parts or relative.endswith(".pyc")
+
+
+def _remove_listed(target: Path, files: dict[str, str]) -> tuple[int, int]:
+    """按清单删除文件，返回 ``(已删除文件数, 未登记文件数)``。"""
+    removed = 0
+    for relative in sorted(files, key=lambda name: name.count("/"), reverse=True):
+        candidate = target / relative
+        if not path_within(target, candidate):
+            continue
+        try:
+            if candidate.is_file() or candidate.is_symlink():
+                candidate.unlink()
+                removed += 1
+        except FileNotFoundError:
+            continue
+    for path in sorted(target.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_dir() and not path.is_symlink():
+            try:
+                path.rmdir()
+            except OSError:
+                continue
+    known = set(files)
+    leftovers = 0
+    for path in target.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(target).as_posix()
+        if relative == INSTALL_FILE:
+            continue
+        if _is_generated(relative):
+            try:
+                path.unlink()
+            except OSError:
+                leftovers += 1
+            continue
+        if relative not in known:
+            leftovers += 1
+    return removed, leftovers
+
+
+def remove_at(target: Path, *, root: Path | None = None) -> tuple[bool, str]:
+    """卸载一个已安装的扩展包。
+
+    * 用户导入的包按其 ``install.json`` 清单逐文件删除，未登记文件保留；
+    * 安装器投放的包（无 ``install.json``）整目录删除，但仍做边界与 ``mod.json`` 校验；
+    * 个人数据（``feature-data/<id>``、配置键、钥匙串）一律不动。
+    """
+    from . import state as mod_state
+
+    target = Path(target)
+    mod_id = target.name
+    if not is_valid_id(mod_id):
         return False, f"invalid mod id: {mod_id!r}"
-    mods_root = Path(root) / "mods"
-    if not mods_root.is_dir():
-        return False, f"no mods directory: {mods_root}"
-    target = mods_root / mod_id
+    mods_root = target.parent
     if not target.is_dir():
-        return False, f"mod not installed: {mod_id}"
+        return False, f"mod not installed: {target}"
     try:
         resolved_root = mods_root.resolve()
         resolved = target.resolve()
@@ -267,11 +334,46 @@ def remove(root: Path, mod_id: str) -> tuple[bool, str]:
         return False, f"refusing to remove outside mods directory: {target}"
     if not (target / MOD_FILE).is_file():
         return False, f"not a mod pack: {target}"
+
+    files = read_install_files(target)
     try:
-        _remove_path(target)
+        if files is None:
+            _remove_path(target)
+            leftovers = 0
+        else:
+            _removed, leftovers = _remove_listed(target, files)
+            try:
+                (target / INSTALL_FILE).unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+        if leftovers:
+            message = f"removed {mod_id} ({leftovers} unrecognised file(s) kept in {target})"
+        elif target.exists():
+            message = f"removed {mod_id} (some files are still in use: {target})"
+        else:
+            message = f"removed {mod_id}"
     except OSError as exc:
         return False, f"remove failed: {exc}"
-    return True, f"removed {mod_id}"
+
+    state_root = Path(root) if root is not None else mods_root.parent
+    try:
+        mod_state.clear(state_root, mod_id)
+    except OSError:
+        pass
+    return True, message
+
+
+def remove(root: Path, mod_id: str) -> tuple[bool, str]:
+    if not isinstance(mod_id, str) or not is_valid_id(mod_id):
+        return False, f"invalid mod id: {mod_id!r}"
+    mods_root = Path(root) / "mods"
+    if not mods_root.is_dir():
+        return False, f"no mods directory: {mods_root}"
+    return remove_at(mods_root / mod_id, root=Path(root))
 
 
 def validate(source: Path) -> list[str]:

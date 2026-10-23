@@ -204,7 +204,7 @@ class ModsPage(SettingsPage):
             if core:
                 item.setToolTip("已并入 Core：设置见对应 Core 设置页")
             elif trusted:
-                item.setToolTip("随安装程序投放，卸载请使用安装程序")
+                item.setToolTip("随安装程序投放；可在此卸载，个人数据保留")
             self._mod_states[mod_id] = enabled
         if self.mods_list.count() == 0:
             placeholder = QListWidgetItem(self._empty_text(current_filter), self.mods_list)
@@ -262,7 +262,7 @@ class ModsPage(SettingsPage):
             if core:
                 parts.append("状态：已并入 Core，不再作为扩展启用/停用；设置见对应 Core 设置页")
             elif trusted:
-                parts.append("状态：随安装程序卸载，不能在此移除")
+                parts.append("状态：随安装程序投放；可在此卸载，个人数据保留")
             if kind == "feature" and not core:
                 if trusted:
                     parts.append("授权：随安装包投放，已启用")
@@ -317,9 +317,8 @@ class ModsPage(SettingsPage):
         core = mod_id is not None and mod_id in self._core_ids
         self.enable_button.setEnabled(enabled is False and not core)
         self.disable_button.setEnabled(enabled is True and not core)
-        self.remove_button.setEnabled(
-            mod_id is not None and not core and mod_id not in self._trusted_ids
-        )
+        # 安装器投放的包也能卸载：删除 `{app}\mods\<id>`，个人数据保留。
+        self.remove_button.setEnabled(mod_id is not None and not core)
         self._update_details(mod_id)
 
     def _set_status(self, text: str) -> None:
@@ -372,24 +371,40 @@ class ModsPage(SettingsPage):
     def _remove(self) -> None:
         mod_id = self._selected_mod()
         installer, _ = self._load_api()
-        if mod_id is None or installer is None or mod_id in self._trusted_ids:
+        if mod_id is None or installer is None:
             return
+        trusted = mod_id in self._trusted_ids
+        extra = (
+            "\n\n该扩展随安装程序投放；卸载后如需恢复，请重新运行安装向导或导入 ZIP。"
+            if trusted
+            else ""
+        )
         answer = QMessageBox.question(
             self,
             "卸载扩展",
-            f"确定要卸载扩展「{mod_id}」吗？这会删除扩展目录中的文件。",
+            f"确定要卸载扩展「{mod_id}」吗？\n\n"
+            "只会删除扩展程序文件；扩展的个人数据（缓存、记录、设置）都会保留。"
+            f"{extra}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            ok, message = installer.remove(self._root(), mod_id)
+            handler = getattr(self.parent(), "uninstall_mod", None)
+            if callable(handler):
+                ok, message = handler(mod_id)
+            else:
+                uninstall = getattr(self.host, "uninstall_mod", None)
+                if callable(uninstall):
+                    ok, message = uninstall(mod_id)
+                else:
+                    ok, message = installer.remove(self._root(), mod_id)
         except Exception as exc:
             ok, message = False, f"卸载失败：{exc}"
         self._set_status(message)
         if ok:
-            self._reload()
+            self._refresh()
 
     def _on_feature_toggled(self, checked: bool) -> None:
         config = getattr(self.host, "config", None)

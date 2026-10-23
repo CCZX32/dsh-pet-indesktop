@@ -128,10 +128,23 @@ QTreeWidget#menuEditorTree::item:selected {
     background: %(selected)s;
     color: %(title)s;
 }
+QLabel#groupTitle {
+    font-size: %(base_2)spx;
+    font-weight: 700;
+    color: %(title)s;
+}
 QLabel#sectionTitle {
     font-size: %(base)spx;
     font-weight: 600;
     color: %(section)s;
+}
+QLabel#subsectionTitle {
+    font-size: %(base_1)spx;
+    font-weight: 600;
+    color: %(section)s;
+}
+QWidget[subSection="true"] {
+    margin-left: 10px;
 }
 QLabel#settingLabel {
     font-size: %(base)spx;

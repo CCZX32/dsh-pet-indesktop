@@ -55,10 +55,11 @@ class AiChatPage(SettingsPage):
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
+        self.group_heading("AI 对话")
         self._initial = {key: self.config().get(key) for key in self._KEYS}
         self._background_value = str(self._initial.get("chat_background") or "")
 
-        card = self.section("模型")
+        card = self.section("模型", level=3)
         self.service_combo = QComboBox(self)
         self.service_combo.addItem("自动（第一个服务）", "")
         try:
@@ -88,7 +89,7 @@ class AiChatPage(SettingsPage):
         self.temperature_spin.valueChanged.connect(self._on_changed)
         card.add_row("温度", self.temperature_spin, "越高越发散，0.7 适合日常聊天。")
 
-        card2 = self.section("人格与视觉")
+        card2 = self.section("人格与视觉", level=3)
         self.prompt_edit = QPlainTextEdit(self)
         self.prompt_edit.setPlaceholderText("留空使用默认人格")
         self.prompt_edit.setPlainText(str(self._initial.get("ai_system_prompt") or ""))
@@ -115,7 +116,7 @@ class AiChatPage(SettingsPage):
             "默认只把结果同步进对话记录并用气泡回答；勾选后才主动唤出对话窗口。",
         )
 
-        card4 = self.section("深度思考")
+        card4 = self.section("深度思考", level=3)
         self.thinking_combo = QComboBox(self)
         self.thinking_combo.addItem("跟随模型默认", "auto")
         self.thinking_combo.addItem("开启深度思考", "enabled")
@@ -145,7 +146,7 @@ class AiChatPage(SettingsPage):
             "只在「开启深度思考」时发送；强度越高越慢、越耗 Token。",
         )
 
-        card5 = self.section("联网搜索")
+        card5 = self.section("联网搜索", level=3)
         self.web_check = make_checkbox(self)
         self.web_check.setChecked(bool(self._initial.get("ai_web_search", False)))
         self.web_check.toggled.connect(self._update_thinking_web_visibility)
@@ -217,7 +218,7 @@ class AiChatPage(SettingsPage):
         self._refresh_web_key_state()
         self._update_thinking_web_visibility()
 
-        card3 = self.section("对话窗外观")
+        card3 = self.section("对话窗外观", level=3)
         self.background_combo = QComboBox(self)
         self._rebuild_background_options()
         self.background_combo.currentIndexChanged.connect(self._on_background_changed)

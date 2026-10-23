@@ -195,3 +195,18 @@
 
 **仍缺（本段没做）**：天气逐城市子菜单与「明天」（主分支也没有）、歌词取词（P4-b）、
 主动识屏与每日预算（P4-c）、Agent 联动（P4-c）。
+
+## 12. P4-b2 已对齐（2026-10-23）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 右键「扩展」按 mod 分组 | 已对齐 | `tests/test_petcore_menu.py::test_extensions_hub_groups_actions_per_mod` |
+| mod 设置页 H2/H3 | 已对齐 | `tests/test_petcore_settings.py`；示例 mod 探针 7/7 |
+| 随安装包的扩展可卸载 | 已对齐（主分支更强） | `tests/test_petcore_install.py`（清单删除/未知文件保留/trusted 删除/停用记录清理） |
+| 气泡最大宽度与长文本 | 已对齐（换成分页） | `tests/test_petcore_bubble.py`（列宽 248→360、分页、页码、滚轮） |
+| 气泡副标题「我在唱《…》」 | 已对齐 | `tests/test_petcore_music_mod.py::test_sung_bubble_carries_subtitle_when_port_supports_it` |
+| 音乐只识别指定播放器 | 已对齐（主分支没有） | `tests/test_petcore_music_mod.py`（路径推导识别名 + 额外识别名 + 选择器过滤） |
+| 音乐设置页切歌入口 | 已对齐 | `MusicPage`「切歌与播放控制」四个按钮，复用 `now_playing.transport()` |
+
+**仍缺（P4-c）**：主动识屏、`ai.agent`、提醒域转正、菜单模板迁移；以及 VPet LPS 兼容、
+进程内 Python 模块热卸载（卸载仍要求重启完成的模块不重载）。

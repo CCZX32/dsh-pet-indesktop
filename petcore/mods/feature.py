@@ -296,6 +296,16 @@ class FeatureManager:
                 except Exception:
                     logger.warning("feature %s pet-removed hook failed", feature.owner, exc_info=True)
 
+    def stop_owner(self, owner: str) -> None:
+        """卸载前只停这一个扩展的 runtime，其余扩展继续运行。"""
+        feature = self.features.pop(str(owner), None)
+        if feature is None or feature.runtime is None:
+            return
+        try:
+            feature.runtime.stop()
+        except Exception:
+            logger.debug("feature stop failed: %s", owner, exc_info=True)
+
     def stop(self) -> None:
         for feature in self.features.values():
             if feature.runtime is not None:

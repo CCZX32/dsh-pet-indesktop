@@ -360,3 +360,34 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 **计划变更**：原计划「TTS provider 由 mod 声明字段、core 只暴露 providers」保留；
 但 provider 的**传输**全部落在 `petcore/net/tts.py`，因此 `voice.chime` 不再需要
 `QTextToSpeech`，PySide6 在它的运行时里彻底消失。
+
+## 25. P4-b2 修正批次与 P4-c 待办（2026-10-23）
+
+### 25.1 P4-b2（本轮）
+
+| 项 | 状态 |
+|---|---|
+| 右键「扩展」分组 | 完成：按 `owner` 生成二级子菜单，显示 manifest `name_zh`；Core 内置特性不再混入 |
+| mod 设置页层级 | 完成：`group_heading()`（H2）+ `section(level=3)`（H3）；9 个示例 mod 全部重排 |
+| 工具与帮助 | 核验：DeepSeek / GitHub / 夸克三个入口已在模板与 `tool.links` 中，补回归测试 |
+| mod 卸载 | 完成：`install.json` 清单逐文件删除、未知文件保留、`.trusted` 包可卸、先撤贡献再删文件、清 `mods-state.json`、草稿保护；个人数据保留 |
+| 气泡 | 完成：列宽 248→360 自适应、长文本分页 + 页码点 + 滚轮翻页、副标题与正文同一面板 |
+| 音乐 | 完成：`music_filter_enabled` / `music_filter_extra_ids`（按已配置播放器识别名过滤）、设置页「识别范围」「切歌与播放控制」、气泡副标题「我在唱《…》」 |
+| 打包 | 完成：`[UninstallDelete] {app}\mods`，清 `__pycache__` |
+| 文档 | 完成：SPEC §25、MOD-FORMAT §13、parity §12、log `L047`、PR 报告 |
+
+**计划变更**：P4-c 不在本轮实施，整体后移为下一批次（见 25.2）。「气泡可滚动」按主分支
+实际口径落为「分页 + 页码点 + 滚轮翻页」，不是滚动条。
+
+### 25.2 P4-c（待办，本轮未做）
+
+| 项 | 范围 |
+|---|---|
+| Core 窗口级抓屏 | `foreground_window_info()` 增 `hwnd/rect`；`capture_window()`、`dhash()`；`ScreenPort` 增窗口采样 |
+| `ai.chat` 主动识屏 | 白名单（进程名/`title:`）→ 停留 45s → dhash 去重 → 每日限额；默认关、只进气泡、不落盘 |
+| `ai.agent` 新 mod | DSH JSONL / Claude hooks / 自定义 JSONL；六态动画与气泡节流；来源开关 |
+| 提醒域转正 | `reminder.todo` / `fun.festival` / `fun.divination` 从样板转正式交付 |
+| 菜单模板迁移 | `menu_templates/petcore-default-v1.json` 增音乐、主动识屏、agent 节点；空组不显示 |
+
+**人工验收集中项**：真实双屏/混合 DPI、安装器全流程、真实钥匙串与余额请求、实际声卡、
+角色导入界面、非 Windows 窗口行为。
