@@ -38,6 +38,45 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "ai_web_engine",
         "ai_web_results",
         "ai_web_fetch",
+        "ai_proactive_enabled",
+        "ai_proactive_whitelist",
+        "ai_proactive_dwell_seconds",
+        "ai_proactive_change_threshold",
+        "ai_proactive_daily_cap",
+        "ai_proactive_cooldown_seconds",
+        "ai_proactive_min_interval_seconds",
+        "ai_proactive_require_idle",
+        "ai_proactive_min_idle_seconds",
+        "ai_proactive_dry_run",
+        "ai_proactive_pre_cue",
+        "ai_proactive_sync_chat",
+        "ai_agent_enabled",
+        "ai_agent_dsh_enabled",
+        "ai_agent_events_enabled",
+        "ai_agent_custom_agents",
+        "ai_agent_animation_enabled",
+        "ai_agent_activity_bubbles",
+        "ai_agent_done_notice",
+        "ai_agent_min_interval_seconds",
+        "ai_agent_sound_enabled",
+        "ai_agent_sound_volume",
+        "ai_agent_sound_cooldown_seconds",
+        "ai_agent_sound_start_path",
+        "ai_agent_sound_done_path",
+        "ai_agent_sound_error_path",
+        "island_enabled",
+        "island_show_icon",
+        "island_show_name",
+        "island_show_status",
+        "island_info_mode",
+        "island_custom_text",
+        "island_style",
+        "island_opacity",
+        "island_accent",
+        "island_click_action",
+        "island_metrics",
+        "island_x",
+        "island_y",
         "chat_always_on_top",
         "chat_follow_pet",
         "chat_background",
@@ -137,6 +176,45 @@ DEFAULTS: dict[str, Any] = {
     "ai_web_engine": "baidu",
     "ai_web_results": 5,
     "ai_web_fetch": True,
+    "ai_proactive_enabled": False,
+    "ai_proactive_whitelist": [],
+    "ai_proactive_dwell_seconds": 45,
+    "ai_proactive_change_threshold": 8,
+    "ai_proactive_daily_cap": 15,
+    "ai_proactive_cooldown_seconds": 300,
+    "ai_proactive_min_interval_seconds": 60,
+    "ai_proactive_require_idle": False,
+    "ai_proactive_min_idle_seconds": 30,
+    "ai_proactive_dry_run": False,
+    "ai_proactive_pre_cue": True,
+    "ai_proactive_sync_chat": True,
+    "ai_agent_enabled": False,
+    "ai_agent_dsh_enabled": True,
+    "ai_agent_events_enabled": True,
+    "ai_agent_custom_agents": [],
+    "ai_agent_animation_enabled": True,
+    "ai_agent_activity_bubbles": True,
+    "ai_agent_done_notice": True,
+    "ai_agent_min_interval_seconds": 2.0,
+    "ai_agent_sound_enabled": False,
+    "ai_agent_sound_volume": 0.65,
+    "ai_agent_sound_cooldown_seconds": 2.0,
+    "ai_agent_sound_start_path": "builtin:agent-start",
+    "ai_agent_sound_done_path": "builtin:agent-done",
+    "ai_agent_sound_error_path": "builtin:agent-error",
+    "island_enabled": False,
+    "island_show_icon": True,
+    "island_show_name": True,
+    "island_show_status": True,
+    "island_info_mode": "time",
+    "island_custom_text": "",
+    "island_style": "dark",
+    "island_opacity": 1.0,
+    "island_accent": "blue",
+    "island_click_action": "expand",
+    "island_metrics": ["cpu", "mem"],
+    "island_x": None,
+    "island_y": None,
     "chat_always_on_top": False,
     "chat_follow_pet": False,
     "chat_background": "",
@@ -332,6 +410,70 @@ def _text_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if isinstance(item, str)]
+
+
+#: 灵动岛指标段的合法 id（``gpu`` / ``fps`` 是保留字：本批未实现，配置里留了也不渲染）。
+ISLAND_METRIC_IDS = ("network", "cpu", "mem", "gpu", "fps")
+ISLAND_METRIC_LIMIT = 8
+#: 灵动岛的强调色词表。
+ISLAND_ACCENTS = ("blue", "green", "purple", "pink", "orange")
+
+
+def _island_metrics(value: Any) -> list[str]:
+    """清洗 ``island_metrics``：只留合法 id、去重、保序、限长（未知 id 直接丢）。"""
+    from .island.segments import BUILTIN_SEGMENT_IDS
+
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value:
+        metric_id = str(item or "").strip().lower()
+        if metric_id in result:
+            continue
+        if metric_id not in BUILTIN_SEGMENT_IDS or metric_id not in ISLAND_METRIC_IDS:
+            continue
+        result.append(metric_id)
+        if len(result) >= ISLAND_METRIC_LIMIT:
+            break
+    return result
+
+
+#: 自定义联动 Agent 条目上限（防配置文件被塞爆）。
+AGENT_LINK_MAX_CUSTOM = 8
+#: 内置来源占用的 key，自定义条目不得重复。
+AGENT_LINK_RESERVED_KEYS = frozenset({"dsh"})
+
+
+def _agent_link_key(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    if not 1 <= len(key) <= 32 or not key[0].isalnum():
+        return ""
+    if not all(char.isalnum() or char in "-_" for char in key):
+        return ""
+    return key
+
+
+def _agent_links(value: Any) -> list[dict]:
+    """清洗 ``ai_agent_custom_agents``：``[{key,name,path}]``，非法条目直接丢弃。"""
+    if not isinstance(value, list):
+        return []
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        if len(result) >= AGENT_LINK_MAX_CUSTOM:
+            break
+        if not isinstance(item, dict):
+            continue
+        key = _agent_link_key(item.get("key"))
+        if not key or key in seen or key in AGENT_LINK_RESERVED_KEYS:
+            continue
+        path = str(item.get("path") or "").strip()[:500]
+        if not path:
+            continue
+        name = str(item.get("name") or "").strip()[:50] or key
+        seen.add(key)
+        result.append({"key": key, "name": name, "path": path})
+    return result
 
 
 _CLICK_SOUND_KINDS = frozenset({"builtin", "file", "folder"})
@@ -786,6 +928,114 @@ class Config:
             _number(normalized.get("ai_web_results"), 5, 1, 10)
         )
         normalized["ai_web_fetch"] = _bool(normalized.get("ai_web_fetch"), True)
+        normalized["ai_proactive_enabled"] = _bool(
+            normalized.get("ai_proactive_enabled"), False
+        )
+        normalized["ai_proactive_whitelist"] = [
+            rule.strip()[:120]
+            for rule in _text_list(normalized.get("ai_proactive_whitelist"))
+            if rule.strip()
+        ][:50]
+        normalized["ai_proactive_dwell_seconds"] = int(
+            round(_number(normalized.get("ai_proactive_dwell_seconds"), 45, 15, 600))
+        )
+        normalized["ai_proactive_change_threshold"] = int(
+            round(_number(normalized.get("ai_proactive_change_threshold"), 8, 0, 32))
+        )
+        normalized["ai_proactive_daily_cap"] = int(
+            round(_number(normalized.get("ai_proactive_daily_cap"), 15, 1, 9999))
+        )
+        normalized["ai_proactive_cooldown_seconds"] = int(
+            round(_number(normalized.get("ai_proactive_cooldown_seconds"), 300, 30, 7200))
+        )
+        normalized["ai_proactive_min_interval_seconds"] = int(
+            round(
+                _number(normalized.get("ai_proactive_min_interval_seconds"), 60, 30, 3600)
+            )
+        )
+        normalized["ai_proactive_require_idle"] = _bool(
+            normalized.get("ai_proactive_require_idle"), False
+        )
+        normalized["ai_proactive_min_idle_seconds"] = int(
+            round(_number(normalized.get("ai_proactive_min_idle_seconds"), 30, 0, 3600))
+        )
+        normalized["ai_proactive_dry_run"] = _bool(
+            normalized.get("ai_proactive_dry_run"), False
+        )
+        normalized["ai_proactive_pre_cue"] = _bool(
+            normalized.get("ai_proactive_pre_cue"), True
+        )
+        normalized["ai_proactive_sync_chat"] = _bool(
+            normalized.get("ai_proactive_sync_chat"), True
+        )
+        normalized["ai_agent_enabled"] = _bool(normalized.get("ai_agent_enabled"), False)
+        normalized["ai_agent_dsh_enabled"] = _bool(
+            normalized.get("ai_agent_dsh_enabled"), True
+        )
+        normalized["ai_agent_events_enabled"] = _bool(
+            normalized.get("ai_agent_events_enabled"), True
+        )
+        normalized["ai_agent_custom_agents"] = _agent_links(
+            normalized.get("ai_agent_custom_agents")
+        )
+        normalized["ai_agent_animation_enabled"] = _bool(
+            normalized.get("ai_agent_animation_enabled"), True
+        )
+        normalized["ai_agent_activity_bubbles"] = _bool(
+            normalized.get("ai_agent_activity_bubbles"), True
+        )
+        normalized["ai_agent_done_notice"] = _bool(
+            normalized.get("ai_agent_done_notice"), True
+        )
+        normalized["ai_agent_min_interval_seconds"] = round(
+            _number(normalized.get("ai_agent_min_interval_seconds"), 2.0, 0.5, 10.0), 2
+        )
+        normalized["ai_agent_sound_enabled"] = _bool(
+            normalized.get("ai_agent_sound_enabled"), False
+        )
+        normalized["ai_agent_sound_volume"] = round(
+            _number(normalized.get("ai_agent_sound_volume"), 0.65, 0.0, 1.0), 2
+        )
+        normalized["ai_agent_sound_cooldown_seconds"] = round(
+            _number(normalized.get("ai_agent_sound_cooldown_seconds"), 2.0, 0.0, 10.0), 2
+        )
+        for _sound_key, _fallback in (
+            ("ai_agent_sound_start_path", "builtin:agent-start"),
+            ("ai_agent_sound_done_path", "builtin:agent-done"),
+            ("ai_agent_sound_error_path", "builtin:agent-error"),
+        ):
+            normalized[_sound_key] = (
+                str(normalized.get(_sound_key) or "").strip()[:500] or _fallback
+            )
+        normalized["island_enabled"] = _bool(normalized.get("island_enabled"), False)
+        for _island_flag in ("island_show_icon", "island_show_name", "island_show_status"):
+            normalized[_island_flag] = _bool(normalized.get(_island_flag), True)
+        mode = str(normalized.get("island_info_mode") or "time").strip().lower()
+        normalized["island_info_mode"] = mode if mode in {"time", "custom"} else "time"
+        normalized["island_custom_text"] = str(
+            normalized.get("island_custom_text") or ""
+        ).strip()[:80]
+        style = str(normalized.get("island_style") or "dark").strip().lower()
+        normalized["island_style"] = (
+            style if style in {"dark", "light", "glass"} else "dark"
+        )
+        normalized["island_opacity"] = round(
+            _number(normalized.get("island_opacity"), 1.0, 0.4, 1.0), 2
+        )
+        accent = str(normalized.get("island_accent") or "blue").strip().lower()
+        normalized["island_accent"] = accent if accent in ISLAND_ACCENTS else "blue"
+        action = str(normalized.get("island_click_action") or "expand").strip().lower()
+        normalized["island_click_action"] = (
+            action if action in {"expand", "toggle_pet"} else "expand"
+        )
+        normalized["island_metrics"] = _island_metrics(normalized.get("island_metrics"))
+        for _axis in ("island_x", "island_y"):
+            coordinate = _optional_number(normalized.get(_axis))
+            normalized[_axis] = (
+                int(round(coordinate))
+                if coordinate is not None and abs(coordinate) <= 100000
+                else None
+            )
         normalized["chat_always_on_top"] = _bool(
             normalized.get("chat_always_on_top"), False
         )

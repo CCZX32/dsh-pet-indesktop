@@ -132,11 +132,22 @@ def _request_thumbnail(window, action, name: str) -> None:
     if spec is None:
         return
     try:
-        from ..media.thumbnails import ThumbnailCache
+        from ..media.images import physical_side, sanitize_dpr, screen_dpr
+        from ..media.thumbnails import THUMBNAIL_MAX_SIDE, ThumbnailCache
 
-        ThumbnailCache.instance().request(
-            spec, lambda pixmap, target=action: _apply_thumbnail(target, pixmap)
-        )
+        ratio = sanitize_dpr(screen_dpr(window))
+        # 按物理像素解码：菜单里显示的是 THUMBNAIL_MAX_SIDE 逻辑像素的小图，
+        # 150%/200% 屏上不预放大就会糊。
+        limit = physical_side(THUMBNAIL_MAX_SIDE, ratio)
+
+        def apply(pixmap, target=action, dpr=ratio):
+            try:
+                pixmap.setDevicePixelRatio(dpr)
+            except RuntimeError:
+                return
+            _apply_thumbnail(target, pixmap)
+
+        ThumbnailCache.instance().request(spec, apply, max_side=limit)
     except Exception:
         logger.debug("thumbnail request failed for %s", name, exc_info=True)
 
@@ -411,6 +422,14 @@ def core_items(window) -> dict[str, MenuItem]:
             callback=window.move_to_primary,
             icon="screen",
             order=80,
+        ),
+        "dynamic_island": MenuItem(
+            "dynamic_island",
+            "灵动岛",
+            checked=lambda: bool(window.config.get("island_enabled")),
+            callback=lambda: window.toggle_dynamic_island(),
+            icon="pin",
+            order=27,
         ),
         "reload_mods": MenuItem(
             "reload_mods",

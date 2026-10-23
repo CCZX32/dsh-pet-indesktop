@@ -63,9 +63,9 @@
 |---|---|---|
 | DeepSeek 账户与余额 | 登录态、token、余额查询、余额档位动画 | P8 后续（`petcore/account/`） |
 | AI 对话 | chat/persona/快捷对话/模型路由/聊天记录 | 部分（P7 收口）：Core 已移植主分支现代双栏对话窗（侧栏会话、Markdown 气泡、附件、置顶）、流式/停止/会话落盘；外观四项（背景/强调色/跟随/置顶）有设置入口并实时预览；**深度思考**（`thinking` + `reasoning_effort`、思维链折叠面板、按会话回显）与**联网搜索**（规划轮 + `web_search`/`fetch_url` 工具、资料注入、状态行、博查/Tavily/百度/DDG 四引擎、搜索 Key 只进钥匙串）已接。`ai.chat` 仍负责 prompt/路由，运行时代码无 Qt。快速对话气泡（点桌宠气泡）已接，与完整窗共用会话；历史会话批量管理未做 | P8 / P4 |
-| 看看屏幕 | 整屏识屏、气泡答复、同步进聊天记录 | 已对齐（P3 收口）：气泡答复 + `ChatPort.record()` 静默入历史；默认不主动唤出窗口（`ai_look_screen_auto_open` 开关）；4 秒冷却与忙碌提示同主分支 | 保持 |
+| 看看屏幕 | 整屏识屏、气泡答复、同步进聊天记录 | 已对齐（P3 收口）：气泡答复 + `ChatPort.record()` 静默入历史；默认不主动唤出窗口（`ai_look_screen_auto_open` 开关）；4 秒冷却与忙碌提示同主分支；抓屏改**虚拟桌面**（所有显示器并集，同主分支 `all_screens=True`），多屏/混合 DPI 不再只抓宠物所在屏 | 保持 |
 | 截图提问 / 主动识屏 | 框选、截图问答浮窗、视觉模型、独立彩蛋 | 部分（P8）：四个动作全部接上——提取文字（`tool.ocr` 本地 rapidocr 优先，失败回退 `ai.chat` 视觉）、翻译（本地原文或视觉）、问问肥鱼、复制图像（core 剪贴板）；动作处理者按 priority 回退，core 不含 OCR/提示词。主动识屏与每日预算未做；HDR 屏仍未移植主分支 DXGI FP16 抓屏 | P4 |
-| Agent 联动 | DSH/Claude/Cursor 等事件、本轮消费、Agent 六态动画 | P10 |
+| Agent 联动 | DSH 桥目录 + 统一 `agent-events/*.jsonl` + 自定义事件文件，六态 → 联动动作/过程气泡/完成通知/音效；**只读**（不装插件、不注入 hooks） | 已对齐（P4-c2）：`ai.agent` 可卸载扩展；写方安装与 Cursor/OpenCode 直读见 c2.1 |
 | Worker 运行时 | `contracts/worker.py` 已有协议，执行层未实现 | P9 |
 
 ### 3.2 内容与提醒
@@ -73,7 +73,7 @@
 | 功能 | 说明 | 计划 |
 |---|---|---|
 | 天气 / 城市 | 天气查询、菜单、气泡/灵动岛展示 | 已对齐（P4-a）：`tool.weather` 双源双出口、城市列表/地区码、失败真名两源；菜单「天气」+ 设置页「立即查看」；灵动岛展示留 P5 |
-| 灵动岛 | 刘海/顶部胶囊、分段、聊天入口、与桌宠碰撞 | P11 |
+| 灵动岛 | 顶部胶囊、分段（CPU/内存/网络/时间）、告警色、点击展开卡片、拖动换位 | 部分（P5-a1）：胶囊 + 3 个内置段 + 卡片 + 13 个 `island_*` 键已落地；停靠细条、动效、余额主信息、第三方段、GPU/FPS、聊天与碰撞留 P5-a2 |
 | 文件识别 | 拖文件解读、菜单入口、设置页 | 已对齐（P4-a）：`tool.file-reader` 订阅 `on_drop`，有界读取 + 心跳气泡 + 入会话（可关）；只读不删；菜单「解读刚才拖入的文件」 |
 | 检查更新 / 在线更新 | 版本检查、下载、替换、回滚 | P11（需确认 Core 自更新是否仍是非目标） |
 | 待办/节日/报时/抽签官方化 | 目前是 `examples/petcore-mods/` 可导入样板，不是默认功能 | P11 |
@@ -210,3 +210,21 @@
 
 **仍缺（P4-c）**：主动识屏、`ai.agent`、提醒域转正、菜单模板迁移；以及 VPet LPS 兼容、
 进程内 Python 模块热卸载（卸载仍要求重启完成的模块不重载）。
+
+## 13. P4-c1 已对齐（2026-10-23）
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 前台窗口元数据（hwnd/rect） | 已对齐 | `petcore/platform/foreground.py`（DWM 扩展边框、cloaked 过滤、`idle_seconds()`） |
+| 窗口级抓图 | 已对齐（换实现） | `petcore/platform/screenshot.py::capture_window()`：整屏抓取 + 物理像素裁剪；主分支用 PIL 合成，未引新依赖 |
+| 64 位 dHash 去重 | 已对齐 | `petcore/platform/image_hash.py`；`tests/test_petcore_screenshot.py`（条纹位序、Hamming、裁剪） |
+| 主动识屏四道门 | 已对齐 | 白名单/停留 45 s/日上限 15/间隔 60 s/冷却 300 s/3 次失败熔断；`tests/test_petcore_proactive.py`（17 条） |
+| 只冒气泡、不唤窗 | 已对齐 | `test_petcore_ai_mod.py::test_runtime_proactive_answer_records_without_opening_the_window` |
+| 隐私双复核 | 已对齐 | `capture_foreground(expected_hwnd=)` 前后各查一次；不一致返回 `None` |
+| 菜单勾选项 + 设置分节 | 已对齐 | 模板 `ai.chat:proactive` + 通用合并；设置页「主动识屏」12 个键 |
+| 陪伴记忆（`proactive_memory`） | 未做 | 主分支最多 20 条的进程+活动记忆；需单独设计隐私口径，随 c2 评估 |
+| 免费视觉 provider（`prefer_free_provider`） | 未做 | 跟随 core 的 API 服务选择，暂不区分免费视觉端点 |
+| HDR 屏 DXGI 抓屏 | 未做 | 与主分支一致仍未移植；当前用 Qt 抓屏，HDR 可能偏色 |
+
+**仍缺（P4-c2/c3）**：`ai.agent`（DSH/自定义 JSONL、六态、节流）、提醒域转正
+（待办调度/农历节日/48 签）、菜单模板的音乐与 agent 节点、Claude hooks 注入。

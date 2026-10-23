@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRegularExpression
+from PySide6.QtCore import QRegularExpression, QTimer
 from PySide6.QtGui import QColor, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -18,9 +18,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -51,6 +53,18 @@ class AiChatPage(SettingsPage):
         "chat_accent",
         "chat_follow_pet",
         "chat_always_on_top",
+        "ai_proactive_enabled",
+        "ai_proactive_whitelist",
+        "ai_proactive_dwell_seconds",
+        "ai_proactive_change_threshold",
+        "ai_proactive_daily_cap",
+        "ai_proactive_cooldown_seconds",
+        "ai_proactive_min_interval_seconds",
+        "ai_proactive_require_idle",
+        "ai_proactive_min_idle_seconds",
+        "ai_proactive_dry_run",
+        "ai_proactive_pre_cue",
+        "ai_proactive_sync_chat",
     )
 
     def __init__(self, host, parent=None):
@@ -115,6 +129,162 @@ class AiChatPage(SettingsPage):
             self.auto_open_check,
             "默认只把结果同步进对话记录并用气泡回答；勾选后才主动唤出对话窗口。",
         )
+
+        card_proactive = self.section("主动识屏", level=3)
+        self.proactive_check = make_checkbox(self)
+        self.proactive_check.setChecked(bool(self._initial.get("ai_proactive_enabled", False)))
+        self.proactive_check.toggled.connect(self._on_changed)
+        card_proactive.add_row(
+            "启用主动识屏",
+            self.proactive_check,
+            "每 8 秒看一眼前台窗口；同一个窗口停留够久、画面变了才请求一次。"
+            "答复只冒气泡，不主动打开对话窗，截图不写入磁盘。",
+        )
+
+        whitelist_box = QWidget(self)
+        whitelist_layout = QVBoxLayout(whitelist_box)
+        whitelist_layout.setContentsMargins(0, 0, 0, 0)
+        whitelist_layout.setSpacing(6)
+        self.whitelist_edit = QPlainTextEdit(whitelist_box)
+        self.whitelist_edit.setPlaceholderText(
+            "每行一条：进程名（如 chrome.exe）或 title:关键词（如 title:*报告*）"
+        )
+        self.whitelist_edit.setMaximumHeight(96)
+        self.whitelist_edit.setPlainText(
+            "\n".join(
+                str(rule) for rule in (self._initial.get("ai_proactive_whitelist") or [])
+            )
+        )
+        self.whitelist_edit.textChanged.connect(self._on_changed)
+        whitelist_layout.addWidget(self.whitelist_edit)
+        self.proactive_add_button = QPushButton("从当前前台窗口添加…", whitelist_box)
+        self.proactive_add_button.clicked.connect(self._add_from_foreground)
+        whitelist_layout.addWidget(self.proactive_add_button)
+        card_proactive.add_row(
+            "白名单",
+            whitelist_box,
+            "白名单为空时完全不工作（不是「全窗口都看」）。"
+            "无前缀只匹配进程名；title: 前缀只匹配窗口标题，支持 * 与 ?。"
+            "点下面的按钮后有 3 秒时间切到目标软件。",
+            expand=True,
+        )
+
+        self.proactive_dwell_spin = QSpinBox(self)
+        self.proactive_dwell_spin.setRange(15, 600)
+        self.proactive_dwell_spin.setSuffix(" 秒")
+        self.proactive_dwell_spin.setValue(
+            int(self._initial.get("ai_proactive_dwell_seconds") or 45)
+        )
+        self.proactive_dwell_spin.valueChanged.connect(self._on_changed)
+        card_proactive.add_row(
+            "停留多久才看",
+            self.proactive_dwell_spin,
+            "同一个窗口连续停留超过这个时长才触发；默认 45 秒。",
+        )
+
+        self.proactive_threshold_spin = QSpinBox(self)
+        self.proactive_threshold_spin.setRange(0, 32)
+        self.proactive_threshold_spin.setValue(
+            int(self._initial.get("ai_proactive_change_threshold") or 8)
+        )
+        self.proactive_threshold_spin.valueChanged.connect(self._on_changed)
+        card_proactive.add_row(
+            "画面变化阈值",
+            self.proactive_threshold_spin,
+            "64 位画面指纹的差异位数；小于阈值算「没变」，不发请求。0 = 每次都发。",
+        )
+
+        self.proactive_cap_spin = QSpinBox(self)
+        self.proactive_cap_spin.setRange(1, 9999)
+        self.proactive_cap_spin.setSuffix(" 次")
+        self.proactive_cap_spin.setValue(int(self._initial.get("ai_proactive_daily_cap") or 15))
+        self.proactive_cap_spin.valueChanged.connect(self._on_changed)
+        card_proactive.add_row(
+            "每日上限",
+            self.proactive_cap_spin,
+            "按真实请求计数，到了当天就不再请求（静默，不打扰）。",
+        )
+
+        self.proactive_cooldown_spin = QSpinBox(self)
+        self.proactive_cooldown_spin.setRange(30, 7200)
+        self.proactive_cooldown_spin.setSingleStep(30)
+        self.proactive_cooldown_spin.setSuffix(" 秒")
+        self.proactive_cooldown_spin.setValue(
+            int(self._initial.get("ai_proactive_cooldown_seconds") or 300)
+        )
+        self.proactive_cooldown_spin.valueChanged.connect(self._on_changed)
+        card_proactive.add_row(
+            "两次请求的冷却",
+            self.proactive_cooldown_spin,
+            "一次主动识屏之后至少隔这么久才会再请求；默认 300 秒。",
+        )
+
+        self.proactive_interval_spin = QSpinBox(self)
+        self.proactive_interval_spin.setRange(30, 3600)
+        self.proactive_interval_spin.setSingleStep(10)
+        self.proactive_interval_spin.setSuffix(" 秒")
+        self.proactive_interval_spin.setValue(
+            int(self._initial.get("ai_proactive_min_interval_seconds") or 60)
+        )
+        self.proactive_interval_spin.valueChanged.connect(self._on_changed)
+        card_proactive.add_row(
+            "最小请求间隔",
+            self.proactive_interval_spin,
+            "两次请求之间的硬下限（含失败），防止连续刷额度。",
+        )
+
+        self.proactive_idle_check = make_checkbox(self)
+        self.proactive_idle_check.setChecked(
+            bool(self._initial.get("ai_proactive_require_idle", False))
+        )
+        self.proactive_idle_check.toggled.connect(self._sync_proactive_visibility)
+        self.proactive_idle_check.toggled.connect(self._on_changed)
+        card_proactive.add_row(
+            "只在我离开键盘时识屏",
+            self.proactive_idle_check,
+            "鼠标键盘有输入时不打扰你；默认关闭。",
+        )
+
+        self.proactive_idle_spin = QSpinBox(self)
+        self.proactive_idle_spin.setRange(0, 3600)
+        self.proactive_idle_spin.setSuffix(" 秒")
+        self.proactive_idle_spin.setValue(
+            int(self._initial.get("ai_proactive_min_idle_seconds") or 30)
+        )
+        self.proactive_idle_spin.valueChanged.connect(self._on_changed)
+        self._proactive_idle_row = card_proactive.add_row(
+            "闲置门槛",
+            self.proactive_idle_spin,
+            "键鼠空闲超过这个时长才算「离开」；关掉上一项时本项不生效。",
+        )
+
+        self.proactive_dry_check = make_checkbox(self)
+        self.proactive_dry_check.setChecked(bool(self._initial.get("ai_proactive_dry_run", False)))
+        self.proactive_dry_check.toggled.connect(self._on_changed)
+        card_proactive.add_row(
+            "只演练不请求",
+            self.proactive_dry_check,
+            "只写日志（进程名、窗口句柄、画面指纹），不发请求、不消耗额度。",
+        )
+
+        self.proactive_cue_check = make_checkbox(self)
+        self.proactive_cue_check.setChecked(bool(self._initial.get("ai_proactive_pre_cue", True)))
+        self.proactive_cue_check.toggled.connect(self._on_changed)
+        card_proactive.add_row(
+            "先冒「让我看看……」",
+            self.proactive_cue_check,
+            "请求前先给一句先兆，避免答复突然出现。",
+        )
+
+        self.proactive_sync_check = make_checkbox(self)
+        self.proactive_sync_check.setChecked(bool(self._initial.get("ai_proactive_sync_chat", True)))
+        self.proactive_sync_check.toggled.connect(self._on_changed)
+        card_proactive.add_row(
+            "同步进对话记录",
+            self.proactive_sync_check,
+            "答复同时写进该桌宠的会话（不会主动打开对话窗）。",
+        )
+        self._sync_proactive_visibility()
 
         card4 = self.section("深度思考", level=3)
         self.thinking_combo = QComboBox(self)
@@ -404,6 +574,74 @@ class AiChatPage(SettingsPage):
         self.accent_edit.clear()
         self._on_changed()
 
+    # ---------------------------------------------------------------- 主动识屏
+    def _sync_proactive_visibility(self, *_args) -> None:
+        row = getattr(self, "_proactive_idle_row", None)
+        if row is not None:
+            row.setEnabled(bool(self.proactive_idle_check.isChecked()))
+
+    def _foreground_window(self):
+        features = getattr(self.host, "features", None)
+        ports = getattr(features, "ports", None) if features is not None else None
+        screen = getattr(ports, "screen", None) if ports is not None else None
+        getter = getattr(screen, "foreground_window", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _add_from_foreground(self) -> None:
+        self.proactive_add_button.setEnabled(False)
+        self.proactive_add_button.setText("3 秒后采样…")
+        QTimer.singleShot(3000, self._sample_foreground)
+
+    def _sample_foreground(self) -> None:
+        self.proactive_add_button.setEnabled(True)
+        self.proactive_add_button.setText("从当前前台窗口添加…")
+        info = self._foreground_window()
+        process = str(getattr(info, "process", "") or "") if info is not None else ""
+        title = str(getattr(info, "title", "") or "") if info is not None else ""
+        if not process and not title:
+            QMessageBox.information(
+                self, "主动识屏", "没读到前台窗口。先切到目标软件，再点一次。"
+            )
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("主动识屏")
+        box.setText("把当前前台窗口加入白名单：")
+        box.setInformativeText(f"{process or '（未知进程）'} | {title or '（无标题）'}")
+        by_process = (
+            box.addButton("按软件", QMessageBox.ButtonRole.AcceptRole) if process else None
+        )
+        by_title = (
+            box.addButton("按标题关键词", QMessageBox.ButtonRole.AcceptRole) if title else None
+        )
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        rule = ""
+        if by_process is not None and clicked is by_process:
+            rule = process
+        elif by_title is not None and clicked is by_title:
+            keyword = title.strip()[:40]
+            rule = f"title:*{keyword}*" if keyword else ""
+        self._append_rule(rule)
+
+    def _append_rule(self, rule: str) -> None:
+        rule = str(rule or "").strip()
+        if not rule:
+            return
+        existing = [
+            line.strip()
+            for line in self.whitelist_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        if rule in existing:
+            return
+        self.whitelist_edit.setPlainText("\n".join(existing + [rule]))
+
     # ---------------------------------------------------------------- 数据
     def api(self):
         features = getattr(self.host, "features", None)
@@ -445,6 +683,42 @@ class AiChatPage(SettingsPage):
         config.set("chat_accent", self._accent_value())
         config.set("chat_follow_pet", bool(self.follow_check.isChecked()))
         config.set("chat_always_on_top", bool(self.on_top_check.isChecked()))
+        config.set(
+            "ai_proactive_enabled", bool(self.proactive_check.isChecked())
+        )
+        config.set(
+            "ai_proactive_whitelist",
+            [
+                line.strip()
+                for line in self.whitelist_edit.toPlainText().splitlines()
+                if line.strip()
+            ],
+        )
+        config.set(
+            "ai_proactive_dwell_seconds", int(self.proactive_dwell_spin.value())
+        )
+        config.set(
+            "ai_proactive_change_threshold", int(self.proactive_threshold_spin.value())
+        )
+        config.set("ai_proactive_daily_cap", int(self.proactive_cap_spin.value()))
+        config.set(
+            "ai_proactive_cooldown_seconds", int(self.proactive_cooldown_spin.value())
+        )
+        config.set(
+            "ai_proactive_min_interval_seconds",
+            int(self.proactive_interval_spin.value()),
+        )
+        config.set(
+            "ai_proactive_require_idle", bool(self.proactive_idle_check.isChecked())
+        )
+        config.set(
+            "ai_proactive_min_idle_seconds", int(self.proactive_idle_spin.value())
+        )
+        config.set("ai_proactive_dry_run", bool(self.proactive_dry_check.isChecked()))
+        config.set("ai_proactive_pre_cue", bool(self.proactive_cue_check.isChecked()))
+        config.set(
+            "ai_proactive_sync_chat", bool(self.proactive_sync_check.isChecked())
+        )
         self.apply_preview()
         self.changed.emit()
 
@@ -467,6 +741,7 @@ class AiChatPage(SettingsPage):
         self._background_value = str(self._initial.get("chat_background") or "")
         self._rebuild_background_options()
         self._sync_thinking_web()
+        self._sync_proactive()
         self.apply_preview()
         self.changed.emit()
 
@@ -502,6 +777,46 @@ class AiChatPage(SettingsPage):
         self._refresh_web_key_state()
         self._update_thinking_web_visibility()
 
+    def _sync_proactive(self) -> None:
+        """取消后把主动识屏的控件拉回已恢复的配置。"""
+        config = self.config()
+
+        def value(key, fallback):
+            current = config.get(key, fallback)
+            return fallback if current is None else current
+
+        for check, key, fallback in (
+            (self.proactive_check, "ai_proactive_enabled", False),
+            (self.proactive_idle_check, "ai_proactive_require_idle", False),
+            (self.proactive_dry_check, "ai_proactive_dry_run", False),
+            (self.proactive_cue_check, "ai_proactive_pre_cue", True),
+            (self.proactive_sync_check, "ai_proactive_sync_chat", True),
+        ):
+            check.blockSignals(True)
+            check.setChecked(bool(value(key, fallback)))
+            check.blockSignals(False)
+        for spin, key, fallback in (
+            (self.proactive_dwell_spin, "ai_proactive_dwell_seconds", 45),
+            (self.proactive_threshold_spin, "ai_proactive_change_threshold", 8),
+            (self.proactive_cap_spin, "ai_proactive_daily_cap", 15),
+            (self.proactive_cooldown_spin, "ai_proactive_cooldown_seconds", 300),
+            (self.proactive_interval_spin, "ai_proactive_min_interval_seconds", 60),
+            (self.proactive_idle_spin, "ai_proactive_min_idle_seconds", 30),
+        ):
+            try:
+                number = int(value(key, fallback))
+            except (TypeError, ValueError):
+                number = int(fallback)
+            spin.blockSignals(True)
+            spin.setValue(number)
+            spin.blockSignals(False)
+        self.whitelist_edit.blockSignals(True)
+        self.whitelist_edit.setPlainText(
+            "\n".join(str(rule) for rule in (value("ai_proactive_whitelist", []) or []))
+        )
+        self.whitelist_edit.blockSignals(False)
+        self._sync_proactive_visibility()
+
     def keywords(self) -> list[str]:
         return [
             "AI",
@@ -535,5 +850,17 @@ class AiChatPage(SettingsPage):
             "颜色",
             "跟随",
             "置顶",
+            "主动识屏",
+            "识屏",
+            "白名单",
+            "停留",
+            "去重",
+            "画面指纹",
+            "每日上限",
+            "冷却",
+            "最小间隔",
+            "闲置",
+            "演练",
+            "dry-run",
             "chat",
         ]

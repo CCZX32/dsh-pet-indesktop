@@ -15,6 +15,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
+from ..media.images import physical_side, sanitize_dpr, screen_dpr
+
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"})
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
@@ -30,10 +32,15 @@ def _ink() -> QColor:
     return QColor("#3a3a3a")
 
 
-def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
-    pixmap = QPixmap(size, size)
+def _pixmap(size: int, dpr: float = 1.0) -> tuple[QPixmap, QPainter]:
+    """按逻辑尺寸 ``size`` 建图，物理像素 = ``size × dpr``（高分屏不糊）。"""
+    ratio = sanitize_dpr(screen_dpr() if dpr is None else dpr)
+    physical = max(1, int(round(max(1, int(size)) * ratio)))
+    pixmap = QPixmap(physical, physical)
     pixmap.fill(Qt.GlobalColor.transparent)
+    pixmap.setDevicePixelRatio(ratio)
     painter = QPainter(pixmap)
+    painter.scale(ratio, ratio)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     pen = QPen(_ink())
     pen.setWidthF(1.6)
@@ -158,6 +165,14 @@ def _draw(name: str, painter: QPainter) -> None:
         painter.drawLine(QPointF(17, 13), QPointF(10, 22))
         painter.drawLine(QPointF(19, 13), QPointF(26, 22))
         painter.drawLine(QPointF(13, 26), QPointF(23, 26))
+    elif name == "agent":
+        painter.drawRoundedRect(QRectF(9, 11, 18, 14), 4, 4)
+        painter.drawLine(QPointF(18, 11), QPointF(18, 6))
+        painter.drawPoint(QPointF(18, 5))
+        painter.drawLine(QPointF(14, 17), QPointF(14, 19))
+        painter.drawLine(QPointF(22, 17), QPointF(22, 19))
+        painter.drawLine(QPointF(12, 25), QPointF(10, 29))
+        painter.drawLine(QPointF(24, 25), QPointF(26, 29))
     elif name == "weather":
         painter.drawEllipse(QRectF(6, 7, 13, 13))
         painter.drawRoundedRect(QRectF(11, 16, 19, 12), 6, 6)
@@ -165,8 +180,8 @@ def _draw(name: str, painter: QPainter) -> None:
         painter.drawEllipse(QRectF(14, 14, 8, 8))
 
 
-def icon(name: str, size: int = 36) -> QIcon:
-    pixmap, painter = _pixmap(size)
+def icon(name: str, size: int = 36, dpr: float | None = None) -> QIcon:
+    pixmap, painter = _pixmap(size, dpr if dpr is not None else screen_dpr())
     try:
         _draw(name, painter)
     finally:
@@ -191,29 +206,36 @@ def image_error(path: Path | str) -> str:
     return ""
 
 
-def file_icon(path: Path | str, size: int = 36, display: str = "contain") -> QIcon:
+def file_icon(
+    path: Path | str, size: int = 36, display: str = "contain", dpr: float | None = None
+) -> QIcon:
     if image_error(path):
         return QIcon()
+    ratio = sanitize_dpr(screen_dpr() if dpr is None else dpr)
     pixmap = QPixmap(str(Path(path).expanduser()))
     if pixmap.isNull():
         return QIcon()
+    limit = physical_side(size, ratio)
     mode = (
         Qt.AspectRatioMode.KeepAspectRatioByExpanding
         if display == "cover"
         else Qt.AspectRatioMode.KeepAspectRatio
     )
-    scaled = pixmap.scaled(size, size, mode, Qt.TransformationMode.SmoothTransformation)
-    if display == "cover" and (scaled.width() > size or scaled.height() > size):
-        x = max(0, (scaled.width() - size) // 2)
-        y = max(0, (scaled.height() - size) // 2)
-        scaled = scaled.copy(x, y, size, size)
+    scaled = pixmap.scaled(limit, limit, mode, Qt.TransformationMode.SmoothTransformation)
+    if display == "cover" and (scaled.width() > limit or scaled.height() > limit):
+        x = max(0, (scaled.width() - limit) // 2)
+        y = max(0, (scaled.height() - limit) // 2)
+        scaled = scaled.copy(x, y, limit, limit)
+    scaled.setDevicePixelRatio(ratio)
     return QIcon(scaled)
 
 
-def icon_from_spec(spec) -> QIcon:
+def icon_from_spec(spec, dpr: float | None = None) -> QIcon:
     if isinstance(spec, dict) and spec.get("kind") == "file":
         return file_icon(
-            spec.get("path") or "", display="cover" if spec.get("display") == "cover" else "contain"
+            spec.get("path") or "",
+            display="cover" if spec.get("display") == "cover" else "contain",
+            dpr=dpr,
         )
-    return icon(str(spec or ""))
+    return icon(str(spec or ""), dpr=dpr)
 

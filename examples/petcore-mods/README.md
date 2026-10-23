@@ -1,6 +1,6 @@
 # 可导入 petcore mod 样板
 
-这 8 个目录是**可安装的 feature mod 包**，不是 core 内置：
+这 9 个目录是**可安装的 feature mod 包**，不是 core 内置：
 
 - `fun.divination`：抽签
 - `fun.festival`：公历节日提醒
@@ -10,6 +10,7 @@
 - `ai.chat`：AI 对话 + 截图提问（需要先在「设置 → API 与账户」配置服务与密钥）
 - `tool.weather`：天气实况（中国天气网直连 + open-meteo 代理兜底）
 - `tool.file-reader`：拖文件解读（读文本类文件 → AI 摘要，只读不删）
+- `ai.agent`：Agent 联动（读 DSH 桥目录 / `agent-events/*.jsonl`，六态动画 + 进度气泡 + 完成通知）
 
 ## 安装
 
@@ -22,6 +23,7 @@
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/ai.chat
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/tool.weather
 .venv/Scripts/python -m petcore mods install examples/petcore-mods/tool.file-reader
+.venv/Scripts/python -m petcore mods install examples/petcore-mods/ai.agent
 ```
 
 或一键：

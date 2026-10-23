@@ -141,6 +141,11 @@ class _PresentationAdapter:
     def notify(self, title: str, message: str, *, force: bool = False) -> None:
         self.say(f"{title}：{message}" if title else message, force=force)
 
+    def visible(self) -> bool:
+        """桌宠是否可见：隐藏态下不要切联动动画（同主分支的零功耗语义）。"""
+        window = self._window()
+        return bool(window is not None and window.isVisible())
+
     def current_character(self) -> str:
         window = self._window()
         return str(getattr(window, "character_id", "") if window is not None else "")
@@ -172,6 +177,7 @@ class CoreHost:
         self.pets: PetManager | None = None
         self._active_window: PetWindow | None = None
         self.tray: TrayIcon | None = None
+        self.island = None
         self.settings_dialog = None
         self.hotkeys: GlobalHotkeyService | None = None
         self.diagnostics: list[str] = []
@@ -226,6 +232,7 @@ class CoreHost:
         for message in self.diagnostics:
             logger.warning("feature/mod diagnostic: %s", message)
         self._register_feature_menus()
+        self.apply_island_settings()
 
     def _register_feature_menus(self) -> None:
         if self.features is None:
@@ -430,6 +437,7 @@ class CoreHost:
         for window in targets:
             self._apply_live_to(window)
         self._apply_live_fonts()
+        self.apply_island_settings()
         chat = getattr(self, "chat", None)
         apply_appearance = getattr(chat, "apply_appearance", None)
         if callable(apply_appearance):
@@ -460,6 +468,63 @@ class CoreHost:
             dialog.setStyleSheet(stylesheet(is_dark(), size))
         except RuntimeError:
             logger.debug("settings dialog is already gone", exc_info=True)
+
+    # ------------------------------------------------------------ 灵动岛
+
+    def _island_character_name(self) -> str:
+        character_id = str(
+            getattr(self.window, "character_id", "") or self.config.get("character") or ""
+        )
+        spec = self.character_for(character_id) if character_id else None
+        return str(getattr(spec, "name", "") or character_id)
+
+    def ensure_island(self):
+        if self.island is not None:
+            return self.island
+        from .island import DynamicIsland
+
+        self.island = DynamicIsland(
+            self.config, character_name=self._island_character_name()
+        )
+        return self.island
+
+    def apply_island_settings(self) -> None:
+        """按配置显示/刷新/隐藏灵动岛（设置页实时预览与菜单开关共用）。"""
+        enabled = bool(self.config.get("island_enabled"))
+        island = getattr(self, "island", None)
+        if not enabled:
+            if island is not None:
+                island.stop()
+                island.hide()
+            return
+        island = self.ensure_island()
+        logger.debug(
+            "island apply: metrics=%s style=%s character=%s",
+            self.config.get("island_metrics"),
+            self.config.get("island_style"),
+            self._island_character_name(),
+        )
+        try:
+            island.settings = island.settings.__class__.from_config(
+                self.config, character_name=self._island_character_name()
+            )
+            island.refresh_from_config()
+            island.set_visible(True)
+        except Exception:  # noqa: BLE001 - 灵动岛坏了不许拖垮桌宠
+            logger.exception("failed to apply island settings")
+
+    def toggle_dynamic_island(self) -> None:
+        value = not bool(self.config.get("island_enabled"))
+        self.config.set("island_enabled", value)
+        try:
+            self.config.save()
+        except Exception:  # noqa: BLE001
+            logger.debug("island config save failed", exc_info=True)
+        self.apply_island_settings()
+        self._notify(
+            None,
+            "灵动岛已开启（点胶囊展开，拖动能换位置）" if value else "灵动岛已关闭",
+        )
 
     def _apply_live_to(self, window) -> None:
         window_config = getattr(window, "config", None)
@@ -771,6 +836,12 @@ class CoreHost:
 
     def quit_app(self) -> None:
         self.close_dialogs()
+        if self.island is not None:
+            try:
+                self.island.stop()
+                self.island.hide()
+            except Exception:  # noqa: BLE001
+                logger.debug("island shutdown failed", exc_info=True)
         self.worker_host.shutdown_all()
         if self.features is not None:
             self.features.stop()

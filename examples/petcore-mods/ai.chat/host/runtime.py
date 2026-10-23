@@ -20,6 +20,7 @@ import time
 from petcore.contracts.api import WebSearchOptions
 
 from .constants import LOOK_SCREEN_COOLDOWN_S, MAX_HISTORY, OWNER, QUICK_HISTORY
+from .proactive import PRE_CUE_MS, PRE_CUE_TEXT, ProactiveWatcher
 from .prompts import (
     ask_messages,
     chat_messages,
@@ -37,6 +38,7 @@ class AiChatRuntime:
             "open": self.open_chat,
             "look_screen": self.look_screen,
             "screen_capture": self.screen_capture,
+            "proactive_toggle": self.toggle_proactive,
         }
         self._cancels: dict[int, threading.Event] = {}
         self._quick_cancels: dict[int, threading.Event] = {}
@@ -44,6 +46,7 @@ class AiChatRuntime:
         self._unsubs: list = []
         self._look_busy: set[int] = set()
         self._last_look: dict[int, float] = {}
+        self._proactive = ProactiveWatcher(self)
 
     # ---------------------------------------------------------------- 配置
     def _config_value(self, key: str, default=None):
@@ -232,8 +235,12 @@ class AiChatRuntime:
                     app_info = str(getter() or "")
                 except Exception:
                     app_info = ""
-        image = base64.b64encode(capture.png).decode("ascii")
-        messages = look_screen_messages(self._prompt(), image, app_info)
+        def messages():
+            # 图像缩放+base64 都是几十毫秒级，放在 _start_vision 的线程里做，
+            # 不占 GUI 线程（「看看屏幕」的抓图本身已经在 GUI 线程）。
+            image = base64.b64encode(self._vision_bytes(capture.png)).decode("ascii")
+            return look_screen_messages(self._prompt(), image, app_info)
+
         self._start_vision(
             slot, messages, on_done=lambda text: self._look_done(slot, text, app_info)
         )
@@ -339,7 +346,7 @@ class AiChatRuntime:
             raise RuntimeError("还没有可用的 API 服务，请先在「设置 → API 与账户」里填写")
         image_url = (
             "data:image/png;base64,"
-            + base64.b64encode(bytes(image_png or b"")).decode("ascii")
+            + base64.b64encode(self._vision_bytes(image_png)).decode("ascii")
         )
         messages = ask_messages(
             self._prompt(), history, question, image_url, limit=MAX_HISTORY
@@ -367,7 +374,7 @@ class AiChatRuntime:
             raise RuntimeError("还没有可用的 API 服务，请先在「设置 → API 与账户」里填写")
         image_url = (
             "data:image/png;base64,"
-            + base64.b64encode(bytes(png or b"")).decode("ascii")
+            + base64.b64encode(self._vision_bytes(png)).decode("ascii")
         )
         if action == "ocr":
             messages = ocr_messages(self._prompt(), image_url)
@@ -513,10 +520,11 @@ class AiChatRuntime:
         self._threads[slot] = thread
         thread.start()
 
-    def _start_vision(self, slot: int, messages, *, on_done) -> None:
+    def _start_vision(self, slot: int, messages, *, on_done, on_fail=None) -> None:
+        fail = on_fail or (lambda reason: self._look_failed(slot, reason))
         api = self._api()
         if api is None:
-            self._later(lambda: self._look_failed(slot, "no_api"))
+            self._later(lambda: fail("no_api"))
             return
         service_id = self._service_id()
         model = str(self._config_value("ai_model", "") or "")
@@ -524,9 +532,10 @@ class AiChatRuntime:
 
         def run() -> None:
             try:
+                payload = messages() if callable(messages) else messages
                 result = api.stream_chat(
                     service_id,
-                    messages,
+                    payload,
                     model=model,
                     temperature=temperature,
                     thinking=self._thinking(),
@@ -534,33 +543,94 @@ class AiChatRuntime:
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = str(getattr(exc, "reason", "") or exc)
-                self._later(lambda: self._look_failed(slot, reason))
+                self._later(lambda: fail(reason))
                 return
             text = str(getattr(result, "text", "") or "").strip()
             if not text:
-                self._later(lambda: self._look_failed(slot, "empty_reply"))
+                self._later(lambda: fail("empty_reply"))
                 return
             self._later(lambda: on_done(text))
 
         threading.Thread(target=run, name=f"ai-look-{slot}", daemon=True).start()
 
+    def _vision_bytes(self, png: bytes) -> bytes:
+        """模型输入按物理像素封顶（Core 缩放），本地 OCR/复制仍用原图。"""
+        screen = self._screen()
+        shrink = getattr(screen, "shrink_for_vision", None)
+        if not callable(shrink):
+            return bytes(png or b"")
+        try:
+            return bytes(shrink(bytes(png or b"")))
+        except Exception:
+            return bytes(png or b"")
+
+    # ---------------------------------------------------------------- 主动识屏
+    def toggle_proactive(self, slot: int | None = None) -> None:
+        """菜单「主动识屏」：切换开关并立即落盘，气泡回报当前状态。"""
+        port = getattr(self.context.ports, "config", None)
+        setter = getattr(port, "set", None)
+        if not callable(setter):
+            self._say("这个安装不允许扩展改设置，请在「设置 → 扩展管理」里调整。")
+            return
+        value = not bool(self._config_value("ai_proactive_enabled", False))
+        try:
+            setter("ai_proactive_enabled", value)
+        except Exception:
+            self._say("保存设置失败，详情见日志")
+            return
+        if not value:
+            self._say("主动识屏已关闭")
+            return
+        rules = self._config_value("ai_proactive_whitelist", []) or []
+        if not [rule for rule in rules if str(rule).strip()]:
+            self._say("主动识屏已开启；白名单还是空的，先到设置里添加要看的软件。")
+        else:
+            self._say(f"主动识屏已开启（白名单 {len(rules)} 条）")
+
+    def proactive_cue(self) -> None:
+        self._say(PRE_CUE_TEXT, duration_ms=PRE_CUE_MS)
+
+    def proactive_ask(self, capture, app_info: str, *, on_done, on_fail) -> None:
+        """主动识屏的模型调用：图片只在这一刻拼进消息，不落盘。"""
+        def messages():
+            image = base64.b64encode(self._vision_bytes(capture.png)).decode("ascii")
+            return look_screen_messages(self._prompt(), image, app_info)
+
+        self._start_vision(
+            self._active_slot(),
+            messages,
+            on_done=on_done,
+            on_fail=on_fail,
+        )
+
+    def proactive_answer(self, text: str, *, app_info: str, sync_chat: bool) -> None:
+        duration = max(6000, min(20000, 4000 + len(text) * 150))
+        self._say(text, duration_ms=duration)
+        if sync_chat:
+            self._record_look(self._active_slot(), app_info, text)
+
+    def _record_look(self, slot: int, app_info: str, text: str) -> None:
+        """静默写进该宠的会话；不触发开窗（``ChatPort.record`` 的契约）。"""
+        chat = self._chat()
+        record = getattr(chat, "record", None) if chat is not None else None
+        if not callable(record):
+            return
+        try:
+            record(
+                OWNER,
+                "user",
+                f"（看看屏幕）{app_info}" if app_info else "（看看屏幕）",
+                pet_slot=slot,
+            )
+            record(OWNER, "assistant", text, pet_slot=slot)
+        except Exception:
+            pass
+
     # ---------------------------------------------------------------- 看看屏幕收尾
     def _look_done(self, slot: int, text: str, app_info: str) -> None:
         self._look_busy.discard(slot)
         self._say(text, duration_ms=max(4000, min(12000, len(text) * 150)))
-        chat = self._chat()
-        record = getattr(chat, "record", None) if chat is not None else None
-        if callable(record):
-            try:
-                record(
-                    OWNER,
-                    "user",
-                    f"（看看屏幕）{app_info}" if app_info else "（看看屏幕）",
-                    pet_slot=slot,
-                )
-                record(OWNER, "assistant", text, pet_slot=slot)
-            except Exception:
-                pass
+        self._record_look(slot, app_info, text)
         if self._auto_open_after_look():
             self.open_chat(slot)
 
@@ -594,8 +664,10 @@ class AiChatRuntime:
                         actions=("ocr", "translate"),
                     )
                 )
+        self._proactive.start()
 
     def stop(self) -> None:
+        self._proactive.stop()
         for cancel in list(self._cancels.values()):
             cancel.set()
         self._cancels.clear()

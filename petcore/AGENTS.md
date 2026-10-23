@@ -172,6 +172,12 @@
   `scripts/make_dev_signing_cert.ps1` 建本机信任的开发证书，构建时传
   `-SignThumbprint <指纹>`；签名必须发生在 `--check` 冒烟**之前**，setup 在 ISCC
   之后签。开发证书只在本机可信，正式分发要换 CA 证书。
+  **2026-10-23 更新**：SAC 转强制模式后（`VerifiedAndReputablePolicyState=1`），
+  连开发证书签名的新 exe 也会被拦（3077），而更早构建的旧 exe 仍可运行。此时：
+  ① 不要用不可运行的新 dist 覆盖可用安装目录；② 冒烟失败不是代码问题，改用源码树
+  真机验证并在报告里如实登记；③ 需要本机跑新构建只能由用户关闭 SAC（关闭后需重装
+  系统才能再开）。同一条策略也会拦未签名的原生扩展（先例：
+  `shapely/_geos*.pyd` → 本地 OCR 退化为 AI 兜底）。
 - **扩展授信**：安装器投放的官方 feature 包带 `.trusted` 标记（`mods/trust.py`），
   与全局 `allow_feature_mods` 并列；loader 与 `ui/app.py` 只认 `mod.enabled`，
   不许再各自复读全局开关。
@@ -307,6 +313,56 @@
 - **音乐识别范围**：`music_filter_enabled` 默认关；开启后只放行
   `music_player_paths` 的 exe 名 + `music_filter_extra_ids`；否决表仍是第二道闸；
   过滤同时作用于唱歌、歌词与 `transport()`，被挡下时要点名播放器。
+- **窗口抓屏只在 core**：`foreground_window()` / `sample_foreground()` /
+  `capture_foreground()` 与 dHash 都在 `petcore/platform/`；mod 不许 import
+  `petcore.platform`，只拿 `WindowSample`/`ScreenCapture`。**窗口矩形是物理像素**，
+  Windows 上必须用 GDI `BitBlt`/`StretchBlt` 直接抓，不许再乘 DPR 或拿 Qt 的
+  逻辑几何裁剪（150% 缩放下会裁到不足一半）。稳态只 `sample_foreground()`
+  （缩略图指纹、不编码 PNG），画面变了才 `capture_foreground()`；基线固定用
+  采样指纹。抓图前后必须各复核一次前台 `hwnd`，不一致丢帧；画面只存内存，日志
+  只记进程名/句柄/指纹，不记标题正文。
+- **主动识屏（`ai.chat`）**：8 秒心跳 + 四道门（白名单/停留/限额/去重）；
+  白名单为空 = 不工作；答复只 `say()` 冒泡、用 `ChatPort.record()` 静默入会话，
+  不许主动唤出对话窗；默认关闭；状态文件只在 `feature-data/ai.chat/`。
+  `ai_proactive_*` 12 键全部全局作用域，键名与默认值见 SPEC §26。
+- **配置写入端口**：`ConfigPort.set` 只给菜单勾选/命令切换这类显式用户动作
+  （立即落盘）；运行时不许把配置当状态存储反复写，设置页仍走 `host.config`。
+- **系统闲置**：`SystemPort.idle_seconds()` 非 Windows 返回 0（= 不判定闲置），
+  端口缺失按 0 处理；不许在 mod 里自己调 Win32。
+- **系统缩放（DPI）**：布局/钳制/命中一律逻辑像素；只有抓屏、指纹、送模型用物理
+  像素。窗口抓图按 Win32 物理矩形用 GDI 直接抓，不许再乘 DPR。送模型的图必须先过
+  `ScreenPort.shrink_for_vision()`（物理像素封顶 1024），本地 OCR/复制用原图。
+  菜单图标与动画缩略图按 `screen_dpr()` 物理绘制/解码并写回 DPR；读图只走
+  `media/images.py`。改这些链路前先看 SPEC §27。
+- **Agent 联动只在 mod**：`ai.agent` 是 `examples/petcore-mods/` 里的可卸载扩展，
+  Core 不得出现任何 Agent 名、事件名、阈值或动作池。Core 只提供三条接缝：
+  `StoragePort.data_root()`、`PresentationPort.visible()`、`PetHandle.animations()`。
+- **联动只读**：不装桥接插件、不跑 pnpm、不写 `~/.claude` 或任何 Agent 配置；只 tail
+  事件文件。首次见到已存在的文件跳到末尾（不回放历史），监视开始后出现的文件从头读；
+  单次 ≤64KB，半行缓冲 ≤8KB，超限即丢弃。事件正文不落盘、不写日志。
+- **联动线程边界**：文件 IO 只在 `runtime.py` 的轮询线程（1.5 s）；`LinkEngine` 与所有
+  呈现调用只在 GUI 线程（解析结果经 `scheduler.call_later(0, …)` 回队）。`protocol.py` /
+  `tailer.py` / `links.py` / `runtime.py` 不许 import PySide6。
+- **联动完成语义**：按 `(agent, inst)` 分片折叠状态，任一写者忙即忙；完成通知只在
+  `busy → 非busy` 后 800 ms 稳定确认时发，确认窗口内回到忙碌必须静默取消；本轮出现过
+  `error` 报「这轮好像没能跑完」，不许报「干完活啦」。`turn/end` 带
+  `reasonKind ∈ {aborted, blocked, max_tokens, unknown}` 收敛为 idle。
+- **联动动作池**：`写代码`/`吃Token` 严格交替、每第 3 次插播 `轻快记录`/`漂浮踏步`；
+  精确名缺失按关键词回退、再退到任意 act。隐藏态（`PresentationPort.visible()` 为假）
+  不切动画。过程气泡同 Agent ≥10 s、全局 ≥8 s、同文案 ≥60 s，文案 ≤80 字。
+- **灵动岛是 Core 窗口**：胶囊、卡片、绘制都在 `petcore/ui/island.py`；判定在
+  `petcore/island/`（零 Qt），采样在 `petcore/platform/{sysmon,netmon}.py`（零 Qt）。
+  不许把段判定写进窗口，也不许让窗口直接调 psutil。
+- **宽度只由模板驱动**：段盒宽来自声明样本（`max_text`），**读数与告警级不进宽度键**。
+  任何"按当前读数算宽"的写法都会让岛随数字抖；`+N` 的 N 按实际折掉的段数算。
+- **看不清就不采**：岛隐藏、段未启用、段被折进 `+N` 时必须停掉对应采样线程；
+  CPU/内存采样间隔硬上限 1 Hz（更快没有意义且浪费电）。
+- **告警只染数值**：`warn/crit` 只作用于数值与单位盒，label、竖线、段底不沾；
+  无读数的拍沿用上一级（不褪色），`error` 段折叠时 chip 按 `crit` 报。
+- **展开态预算**：卡片宽钳在 340–420；展开时行必须按**卡片宽**重排（放不下折 `+N`），
+  收起时再用屏宽重算——两条路径共用 `layout.plan_info_row()`。
+- **灵动岛默认关闭**：`island_enabled=False`；菜单「桌宠控制 → 灵动岛」与设置页同一开关，
+  改动实时生效，取消回滚。
 
 
 ## 4. 变更纪律
@@ -340,5 +396,6 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest \
 | 角色包与素材 | [`../docs/PETCORE-CHARACTER-PACKS.md`](../docs/PETCORE-CHARACTER-PACKS.md) |
 | 批次与下一步 | [`../docs/PETCORE-ROADMAP.md`](../docs/PETCORE-ROADMAP.md) |
 | 还差主分支什么 | [`../docs/PETCORE-MAIN-PARITY-BACKLOG.md`](../docs/PETCORE-MAIN-PARITY-BACKLOG.md) |
+| Agent 联动的事件协议 | [`../docs/AGENT_LINK_PROTOCOL.md`](../docs/AGENT_LINK_PROTOCOL.md)（实现见 SPEC §28） |
 | 改过什么 | [`../docs/PETCORE-LOG-INDEX.md`](../docs/PETCORE-LOG-INDEX.md) |
 | 上手命令与目录 | [`README.md`](README.md) |

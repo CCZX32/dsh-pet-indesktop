@@ -67,6 +67,7 @@ def test_official_feature_tasks_are_opt_in() -> None:
             ("tool.ocr", "ocr"),
             ("tool.weather", "weather"),
             ("tool.file-reader", "filereader"),
+            ("ai.agent", "agent"),
         )
     }
     assert all("Flags: unchecked" in line for line in task_lines.values())

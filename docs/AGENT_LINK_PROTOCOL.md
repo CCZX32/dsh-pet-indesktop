@@ -175,3 +175,22 @@ printf '{"ts": %s, "state": "idle"}\n' "$(date +%s)" >> ~/.gemini/pet-events.jso
 3. **只存元数据**：事件文件只有状态/事件名/工具名/错误码/身份标识，绝不写截图、代码内容、命令全文、消息正文（DSH 桥接自 2026-10 起连截断后的正文/命令/参数指纹/结果摘要也不再落盘）。有意的例外：错误摘要（`errorMessage`，截断 300 字）与问题正文（`question/requested` 的 `questions`，agent 生成的待选问题）——前者是排障所必需，后者是气泡提示的内容本体。
 4. **写外部配置必须先弹窗**：任何向 Agent 配置（如 `~/.claude/settings.json`、dsh profiles）注入内容的操作，必须先经用户确认，且卸载时只清理带本桌宠标记的条目。
 5. **自定义通道只读**：`custom_agents` 仅监听用户指定的文件，不创建目录、不写任何外部位置。
+
+## 7. 本分支（petcore + `ai.agent`）的实现范围
+
+主分支的实现是 `pet/agent_link.py`（单进程内直连 `AgentLinkManager`）。本分支把它拆成
+**Core 接缝 + 可卸载 mod**：
+
+| 能力 | 主分支 | 本分支 |
+|---|---|---|
+| 事件文件 tail | `ByteOffsetTailer` / `DirGlobTailer` | `examples/petcore-mods/ai.agent/host/tailer.py`（同一套偏移/半行/有界口径） |
+| 六态映射 | `pet/agent_event_normalizer.py` + `dsh_state.py` | `ai.agent/host/protocol.py`（表外事件一律忽略） |
+| 动画/气泡/音效 | `AgentLinkManager` | `ai.agent/host/links.py`（`LinkEngine`） |
+| DSH 桥接插件安装 | 内置 `integrations/dsh-pet-bridge` + pnpm 安装 | **未做**（只读已有的 `dsh-pet-bridge/dsh*.jsonl`） |
+| Claude hooks 注入 | 支持 | **未做**（走统一 `agent-events/claude.jsonl`） |
+| Cursor / OpenCode 直读 | 支持 | **未做**（走统一 JSONL） |
+| 审批/提问常驻卡片、live 成本 | 支持 | **未做** |
+
+行为口径（节流、完成确认、动作池、隐私红线）见
+[`PETCORE-SPEC.md`](PETCORE-SPEC.md) §28。写方接入方式不变：仍然只是往
+`agent-events/<agent>.jsonl` 追加一行 JSON。

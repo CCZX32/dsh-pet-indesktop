@@ -1932,3 +1932,292 @@ Now Playing + 歌词 + 唱跳。两个 mod 仍是可导入包（安装向导默�
 **验证**：`test_settings_dialog_has_minimize_and_maximize` 断言旗标含 MinMax/Close、非模态，并真实走 `showMinimized/showMaximized/showNormal` 状态；真实桌面抓图确认「— / □ / ×」三个原生按钮（`.scratch/settings-minmax.png`）；聚焦 settings 族与全量 1303 passed。
 
 **环境限制**：新 setup 在本机被 Smart App Control 拦截（签名有效、CodeIntegrity 3077/3118），改用 `dist/dsh-pet-core` 覆盖安装目录部署并 `--check` 通过。
+
+## L050 · 2026-10-23 · P4-c1 窗口级抓屏 + ai.chat 主动识屏
+
+**范围**：`petcore/platform/{foreground,screenshot,image_hash}.py`、
+`petcore/contracts/{screen,host}.py`、`petcore/ui/ports.py`、`petcore/config.py`、
+`petcore/menu_templates/petcore-default-v1.json`、`petcore/ui/menu_layout.py`、
+`examples/petcore-mods/ai.chat/host/{proactive,runtime,settings_page,__init__}.py`、
+测试 4 个文件 + 新增 `tests/test_petcore_proactive.py` + 四份文档。
+
+**改了什么**（`git diff --numstat`，含新增文件）：
+
+- `petcore/platform/foreground.py` +98/−4：`foreground_window_info()` 补 `hwnd/rect`
+  （DWM `EXTENDED_FRAME_BOUNDS`，失败回退 `GetWindowRect`）、`DWMWA_CLOAKED` 过滤、
+  `idle_seconds()`。
+- `petcore/platform/image_hash.py`（新增 60 行）：9×8 差分哈希 + Hamming；先缩放
+  再转灰度（1200×800：9.87 ms → 1.58 ms），平滑重采样避免采样抖动造假差异。
+- `petcore/platform/screenshot.py` +150/−1：Windows 上用 GDI `BitBlt` / `StretchBlt`
+  按窗口**物理像素矩形**直接抓（`_grab_desktop_rect`），不再做逻辑/物理换算——
+  150% 缩放下「Qt 逻辑几何 + DPR 裁剪」实测会 100% 失败。两段式：
+  `sample_window()`（192 边缩略图 → 指纹，不编码 PNG）与 `capture_window()`
+  （768 边 + PNG + `dh_hash`）；窗口大半在屏外判 `outside_screen`；`grabber=`
+  只给测试注入。
+- `petcore/contracts/screen.py` +31：`ScreenCapture.hwnd/dh_hash`、`WindowInfo`、
+  `ScreenPort.foreground_window()/capture_foreground()`（docstring 写明双复核与内存语义）。
+- `petcore/contracts/host.py` +11/−1：`SystemPort.idle_seconds()`、`ConfigPort.set()`
+  （只给显式用户动作）。
+- `petcore/ui/ports.py` +65/−1：`QtScreenPort` 两个窗口采样方法（前后各查前台
+  `hwnd`）、新 `SystemAdapter` 并接进 `build_ports(system=...)`、`QtConfigPort.set()`
+  写全局配置并落盘。
+- `petcore/config.py` +64：12 个 `ai_proactive_*` 键（默认值/钳制/白名单 50 条 ×120 字）
+  全部进 `GLOBAL_CONFIG_KEYS`。
+- `petcore/menu_templates/petcore-default-v1.json` +1、`petcore/ui/menu_layout.py` +1：
+  在 `look_screen` 之后加 `ai.chat:proactive` 节点。旧布局不需要单独的迁移函数：
+  `_merge_template_actions()` 已按模板补注册项并写回（诊断
+  `default-action-added:ai.chat:proactive`），幂等。
+- `examples/petcore-mods/ai.chat/host/proactive.py`（新增 470 行）：白名单/停留/
+  `ProactiveLimiter`（状态文件原子写、日上限/间隔/冷却/3 次失败熔断）/
+  `ProactiveWatcher`（8 s 心跳、每 tick 现读配置、代次作废迟到回调、dry-run、
+  请求 180 s 不回调则自愈清忙碌）。
+- `ai.chat/host/runtime.py` +71/−17：命令 `proactive_toggle`、`proactive_cue/ask/answer`、
+  `_start_vision(on_fail=)`、`_record_look()` 复用；`start/stop` 接管看门狗。
+- `ai.chat/host/settings_page.py` +327/−1：「主动识屏」H3 分节（12 键 + 从当前前台
+  窗口添加，按软件/按标题二选一）、`_sync_proactive()` 取消回滚、搜索关键词。
+- `ai.chat/host/__init__.py` +22/−1：菜单贡献 `proactive`（`checked` 读配置）。
+- 测试：`test_petcore_proactive.py`（新增 17 条）、`test_petcore_screenshot.py`
+  （dHash/裁剪/裁剪越界 +6）、`test_petcore_ai_mod.py`（运行时/设置页 +6）、
+  `test_petcore_config_scope.py`（+2）、`test_petcore_menu_layout.py`（+2，并更新
+  模板顺序断言）。
+
+**行为变化**：右键多一个「主动识屏」勾选项（默认关；`ai.chat` 未安装时不存在）；
+设置 →「AI 对话」多一个「主动识屏」分节；开关走 `ConfigPort.set` 立即落盘。默认
+不工作——白名单为空即不触发。答复只冒气泡，`ai_proactive_sync_chat` 为真时静默写
+会话，绝不打开对话窗。
+
+**验证**：
+
+- `ruff check pet/ tests/ petcore/ examples/petcore-mods`：All checks passed。
+- 全量门禁：`pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q` →
+  **1345 passed, 1 skipped**。唯一 skip 是 `tool.ocr` 的真实引擎用例：本机 Smart App
+  Control（`VerifiedAndReputablePolicyState=1`）在 16:49 起以 WinError 4551 拦截
+  `shapely/_geos*.pyd`，测试按「确切的 4551」跳过并在报告里点名，不是放宽断言。
+- `python -m petcore --check` → exit 0，`diagnostics: []`，`menu_template: json`。
+- 性能（本机 150% 缩放，`QT_QPA_PLATFORM=offscreen`）：
+  dHash 1920×1080 中位 3.2 ms / 800×600 0.74 ms（改序前 1200×800 要 9.87 ms）；
+  `sample_window` 1200×800 中位 **33.8 ms**（只缩到 192 边算指纹，不编码 PNG）；
+  确认变化后的 `capture_window`（768 边 + PNG）中位 66 ms；关闭态 tick 配置读
+  0.0002 ms。稳态 = 每 8 s 一次采样 ≈ 34 ms（0.42% 占空）。
+- **真机发现的缺陷**：最初实现是「Qt 抓整屏 + 按 DPR 裁剪」，本机 150% 缩放
+  （逻辑 1280×800 / 物理 1920×1200）下窗口矩形被二次放大，裁剪只剩 24% 直接判
+  `outside_screen`——功能 100% 不工作。改为 GDI `BitBlt`/`StretchBlt` 按物理矩形
+  直接抓之后，真机取到 960×1128 / 239 KB 的窗口 PNG。
+- 安装/真机 dry-run 见 PR 报告 `docs/PR-REPORT-PETCORE-P4C1-2026-10-23.md` §3。
+
+**未验证 / 风险**：
+
+- offscreen 平台 `grabWindow` 返回空图，窗口抓图只用注入的 `FakeScreen` 验证裁剪
+  数学；真实桌面抓图在安装版上人工验证。
+- 混合 DPI / 负坐标副屏：按「交集最大的屏 + 物理像素比例」换算，数学上成立，
+  未在真机双屏复核。
+- 抓图在 GUI 线程执行（Qt `grabWindow` 不保证跨线程安全），单次 ≈18 ms；
+  若后续出现拖动卡顿，考虑移到 core 的专用线程或 printwindow 方案。
+- 主分支的陪伴记忆（`proactive_memory`）、免费视觉 provider、HDR 抓屏未移植，
+  记入 parity backlog §13。
+- **环境 blocker（已解决）**：17:00 前后本机一度以 WinError 4551 拦截未签名的
+  原生扩展（`shapely/_geos*.pyd`）和新构建的 exe。用户关闭火绒相关监测后复测，
+  同一份新构建可直接运行，`shapely` 也恢复正常——拦截来自第三方安全软件的驱动层，
+  不是 SAC 对开发证书的硬性拒绝（`VerifiedAndReputablePolicyState` 仍为 1）。
+  19:40 已用 setup 静默升级安装到 `E:\dsh-pet-core` 并跑通 `--check` 与主动识屏
+  dry-run。
+
+## L051 · 2026-10-23 · 系统缩放（DPI）适配：模型图像封顶 / 图标与缩略图物理绘制
+
+**范围**：`petcore/contracts/screen.py`、`petcore/platform/screenshot.py`、
+`petcore/ui/ports.py`、`petcore/ui/icons.py`、`petcore/ui/menu_actions.py`、
+`examples/petcore-mods/ai.chat/host/runtime.py`、测试 3 个文件、SPEC §27、
+MOD-FORMAT §14、`petcore/AGENTS.md`、PR 报告。
+
+**改了什么**：
+
+- `contracts/screen.py` +22：新常量 `VISION_MAX_EDGE = 1024` 与
+  `ScreenPort.shrink_for_vision(png, max_edge=1024)`；`screenshot.shrink_png()`
+  按物理像素等比缩小并重新编码，空图/坏图/未超限原样返回。
+- `platform/screenshot.py` +26 / `ui/ports.py` +8：`capture_desktop()` 抓虚拟桌面
+  （所有显示器并集），`QtScreenPort.capture()` 改走它——与主分支 `all_screens=True`
+  对齐，多屏/混合 DPI 不再只抓宠物所在屏；`QtScreenPort.shrink_for_vision()`。
+- `ai.chat/runtime.py` +25/−4：新增 `_vision_bytes()`；「看看屏幕」「主动识屏」
+  「截图提问」「提取文字/翻译的 AI 兜底」四处送模型的图统一先过它。本地 OCR 与
+  「复制图像」仍拿原图。
+- `ui/icons.py` +40/−12：`icon()` / `file_icon()` / `icon_from_spec()` 接受 `dpr`，
+  按 `screen_dpr()` 用物理尺寸绘制并写回 DPR（1x/1.5x/2x → 36/54/72 像素）。
+- `ui/menu_actions.py` +18/−5：动画缩略图按 `physical_side(64, screen_dpr(window))`
+  解码，回调里写回 DPR；高分屏菜单不再把 64px 小图放大。
+- 测试：`test_petcore_screenshot.py`（封顶/原样返回/DPR 无关 +3）、
+  `test_petcore_menu.py`（图标物理尺寸 +2）、`test_petcore_ai_mod.py`
+  （视觉载荷走端口封顶 +2）。
+
+**行为变化**：高 DPI 屏上「看看屏幕 / 截图提问」送给模型的图不再随缩放翻倍
+（150% 下 1920×1200 → 1024×640，287 KB → 165 KB）；菜单图标与动画缩略图更清晰；
+其它布局/位置/钳制逻辑未变（本来就是逻辑像素）。
+
+**验证**：
+
+- `ruff check pet/ tests/ petcore/ examples/petcore-mods`：All checks passed。
+- 全量门禁 **1356 passed, 0 skipped**（上一批唯一 skip 的 OCR 真实引擎用例本机已恢复：
+  用户关掉火绒相关监测后，`shapely/_geos*.pyd` 不再被 WinError 4551 拦截）。
+- 真机探针（`.scratch/probe_dpi.py`，本机 150%）：屏幕逻辑 1280×800 / dpr 1.5；
+  整屏 1920×1200（288 KB）→ 模型输入 1024×640（166 KB）；前台窗口 1920×1128 →
+  768×451（111 KB）；框选 400×200 逻辑 → 600×300 物理。
+- 菜单图标尺寸：`dpr 1.0/1.5/2.0 → availableSizes 36/54/72`（真实 Qt 断言）。
+- 打包/安装：19:39 构建（exe SHA-256 `0d3169b2…c1f`、setup `37366e58…f31`，签名
+  Valid），静默升级到 `E:\dsh-pet-core`；安装版隔离 APPDATA `--check` exit 0，
+  dry-run 日志两条（窗口采样在冻结包内可用）。
+
+**未验证 / 风险**：
+
+- 菜单对勾图仍是 14px QSS 资源（Qt 对 QSS `url()` 的 @2x 支持随版本而异，未实机
+  核对），高 DPI 下可能略软；不影响功能。
+- 混合 DPI 多屏只做了逻辑层测试，未在真机双屏复核。
+- 图片封顶是物理像素口径（与主分支一致）；若视觉模型对小字识别不稳，再考虑改成
+  逻辑像素口径（成本随 DPI 上升）。
+
+## L052 · 2026-10-23 · P4-c2：Agent 联动 `ai.agent` 扩展（只读联动）
+
+**范围**：`petcore/contracts/host.py`、`petcore/ui/ports.py`、`petcore/ui/app.py`、
+`petcore/ui/icons.py`、`petcore/config.py`、`petcore/menu_templates/petcore-default-v1.json`、
+`petcore/ui/menu_layout.py`、`packaging/petcore.iss`、新包
+`examples/petcore-mods/ai.agent/`（`mod.json` + `host/{__init__,constants,protocol,tailer,links,runtime,settings_page}.py`）、
+新测试 `tests/test_petcore_agent_mod.py`、`tests/test_petcore_installer.py`、
+`tests/test_petcore_menu_layout.py`、`examples/petcore-mods/README.md`、
+`docs/PETCORE-SPEC.md` §28、`docs/PETCORE-MOD-FORMAT.md` §15、
+`docs/PETCORE-ARCHITECTURE.md` §25、`docs/PETCORE-ROADMAP.md` §27、
+`docs/PETCORE-MAIN-PARITY-BACKLOG.md`、`docs/AGENT_LINK_PROTOCOL.md` §7、
+`petcore/AGENTS.md`、PR 报告 `PR-REPORT-PETCORE-P4C2-2026-10-23.md`。
+
+**改动说明**
+
+1. Core 只加三条通用接缝，不认识任何 Agent：
+   - `StoragePort.data_root()`（`StorageAdapter` 返回数据根）——mod 才能定位
+     `<data>/agent-events/` 与 `<data>.parent/dsh-pet-bridge/`；之前只有
+     `feature-data/<owner>`。
+   - `PresentationPort.visible()`（`_PresentationAdapter` 读 `window.isVisible()`）——
+     隐藏态不切联动动画。
+   - `PetHandle.animations()`（`PetHandleImpl` 走 `catalog.names_for(GraphType.ACT)`）——
+     联动动作池按角色真实动作名挑选。
+   - `ui/icons.py` 新增 `agent` 图标（菜单/设置页共用）。
+2. 13 个 `ai_agent_*` 全局键（`GLOBAL_CONFIG_KEYS` + `DEFAULTS` + `_normalize`）：
+   总开关/两个来源/自定义列表/动画/过程气泡/完成通知/切换间隔/音效四键；
+   自定义条目清洗 `_agent_links()`（key 校验、去重、≤8、保留 `dsh` 键）。
+3. `ai.agent` v1.0.0（host-only）：
+   - `protocol.py`：`state` 优先、`event` 查表（Claude hooks + DSH 事件 + 裸状态名）、
+     `turn/end` 带 `aborted/blocked/max_tokens/unknown` 收敛 idle、BOM/半行/4KB 上限。
+   - `tailer.py`：`ByteTailer`（首次见到已存在文件跳到末尾、监视后新增文件从头读、
+     单次 64KB、半行 ≤8KB、截断/轮转重读一代）、`GlobTailer`（`dsh*.jsonl`，
+     启动快照判历史，≤8 文件按 mtime）。
+   - `links.py`：`LinkEngine`，折叠多写者、去抖+节流、800 ms 完成确认、
+     5 s 完成冷却、错误回合报「这轮好像没能跑完」、动作池 `写代码/吃Token` 交替 +
+     每 3 次插播摸鱼、过程气泡 10/8/60 s、隐藏态不切动画、三档音效带冷却。
+   - `runtime.py`：`Runtime` 协议（start/stop/close），单条轮询线程 1.5 s，
+     配置每轮现读（含来源签名重建），解析结果经 `scheduler.call_later(0, …)` 回 GUI；
+     关闭期间继续推进偏移（重新开启不回放）；`commands={"agent_toggle"}`。
+   - `settings_page.py`：H2 + 5×H3（总开关 / 事件来源 / 动画与气泡 / 音效 / 诊断），
+     控件改动即时写全局配置，`discard_changes()` 从打开时快照回滚，诊断面板列出
+     来源目录与最近一行事件，「发送测试事件」写 demo 事件走完整链路。
+   - 菜单贡献 `ai.agent:enabled`（label「Agent 联动」，`checked` 读 `ai_agent_enabled`）。
+4. 菜单模板在两个副本（JSON + `BUILTIN_DEFAULT_LAYOUT`）都插在 `ai.chat:proactive`
+   之后，旧布局由既有 `_merge_template_actions()` 幂等补入。
+5. 安装器：`mod_agent` 任务 `Flags: unchecked`，勾选才写 `{app}\modsi.agent` + `.trusted`。
+6. 已知取舍：完成态不回「待机」动画（Core 没有 `request_link_idle` 等价 API），只
+   `release_loop()`；一次性动作播完由行为链自然接管。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py tests/test_architecture.py tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q`
+  → **1426 passed**（基线 1356，新增 70）。
+- `.venv/Scripts/ruff check pet/ tests/ petcore/ examples/petcore-mods/` → All checks passed。
+- `.venv/Scripts/python -m petcore --check` → exit 0，`menu_template=json`。
+- 隔离 root 安装冒烟：`--root .scratch/agent-root --portable mods install examples/petcore-mods/ai.agent`
+  → 装好后 `allow_feature_mods=false` 时如实报 `ai.agent: feature mods disabled`；
+  打开 `allow_feature_mods` 后 `mods=[ai.agent 1.0.0 enabled]`、`diagnostics: []`。
+- 源码树端到端（真实 `Config` + 真实 `QtScheduler` + 真实文件 + 真实 mod 包，offscreen，
+  `.scratch/probe_agent_e2e.py`）：三条事件（`UserPromptSubmit` / `PreToolUse(bash)` / `idle`）
+  → `animations=['写代码']`、`bubbles=[('正在跑命令', False), ('干完活啦', True)]`、
+  `states={'demo': 'idle'}`。`thinking→working` 间隔 1 s 被 2 s 节流，只切一次动作（预期）。
+- 开销（`.scratch/probe_agent.py`）：`parse_line` 2.86 µs/行、`LinkEngine.handle` 4.19 µs/事件、
+  追加 10 行的 tail 读取 0.18 ms、loader 导入 95 ms（启动一次性）。
+- 真机 GUI 冒烟（`--root .scratch/agent-root --portable --allow-feature-mods --verbose`，
+  15 秒后 kill）：四条事件全部按 `state=thinking → working → working → idle` 落到日志，
+  无异常、无 `animations() failed`。**这一轮抓到两个只在真机才暴露的问题**：
+  ① `_log(level=…)` 参数不存在（单元测试用替身 ctx 没调这条路径）；
+  ② `PetHandleImpl.animations()` 用了不存在的 `GraphType.ACT`——异常被端口吞掉后
+     mod 拿到空动作池，联动永远不切动作。两处都已修，并补 `test_pet_handle_animations_*
+     use_the_act_graph` 两条回归（用真实 `GraphCatalog`）。
+
+**未验证 / 风险**
+
+- 未在真实 DSH 会话下长时间跑（本机桥接目录是否存在取决于用户是否装过桥接插件）；
+  诊断面板会如实显示「目录缺失」。
+- 未真机验收音效三档（需要勾选音效并触发一次完成/报错）。
+- 未做写方安装（DSH 插件 / Claude hooks / Cursor / OpenCode 直读）、审批卡片、成本统计，
+  见 ROADMAP §27「未做（c2.1）」。
+- 打包/签名未重跑（本批次只改源码树与 iss）。
+
+## L053 · 2026-10-23 · P5-a1：灵动岛 v1（胶囊 + 3 段 + 展开卡片）
+
+**范围**：新增 `petcore/island/{__init__,segments,layout}.py`、
+`petcore/platform/{sysmon,netmon}.py`、`petcore/ui/island.py`；改
+`petcore/config.py`、`petcore/ui/{app,pet_window,menu_actions}.py`、
+`petcore/ui/settings/{pages_core,coverage}.py`、
+`petcore/menu_templates/petcore-default-v1.json`、`petcore/ui/menu_layout.py`；
+新增测试 `tests/test_petcore_island_{segments,layout,sampling,window}.py`；
+文档 SPEC §29、ARCHITECTURE §26、ROADMAP §28、parity、function matrix、
+`petcore/AGENTS.md`、本 log + 索引、PR 报告 `PR-REPORT-PETCORE-ISLAND-2026-10-23.md`。
+
+**改动说明**
+
+1. **零 Qt 契约**（`island/segments.py`）：直接从主分支 `pet/island_segments.py`
+   移植宿主侧那半（状态词表、`SegmentSnapshot`、盒宽自测量 + 字体指纹缓存、
+   字段盒右省略护栏、`split_value_unit`、四态 `render_compact`、两级告警 + 3pt 滞回、
+   `highest_severity`），砍掉第三方注册面（`SegmentDeclaration`/`register_segment`/
+   `seed_thresholds`/`drop_thresholds`）。主分支同名单测 40 条原样移植、全绿。
+2. **零 Qt 布局**（`island/layout.py`）：移植 `_InfoSeg`/`_SegPlacement`/
+   `place_info_segments`（19px 槽位、竖线、双盒单位）、`elide_to_width`、
+   `plan_info_row`（名字省略→隐藏→尾部折 `+N`→保底）、`apply_shrink`（按 id 折、
+   chip 告警取当刻最高级）、`chip_segment`、`anchored_x`（三分区锚点）。
+   差异：`_NETWORK_BOX_SAMPLE` 改成读 `netmon.NETWORK_BOX_SAMPLE`（本批网络段无延迟）；
+   `_InfoSeg` 新增 `detail` 字段（卡片行素材，例如 `error_reason`），布局不看它。
+3. **采样**（`platform/sysmon.py`、`platform/netmon.py`）：`CpuMeter` 首拍只建基线；
+   CPU/内存共用一条 1 Hz 线程（间隔硬上限 1 Hz）；网络用
+   `psutil.net_io_counters()` 差分 + EMA(0.5)，首拍返回 None、计数器回绕按 0，
+   `format_rate` 5 列定宽。**刻意不做 UDP 延迟探测**：那需要 socket，而架构红 line
+   把网络库锁在 `petcore/net/`；`format_network_slot` 只输出 `↓ … ↑ …`。
+4. **窗口**（`ui/island.py`）：44px 高固定胶囊（内缩 6、圆角 = 高/2、宽 = 行自然宽、
+   下限 120），深/浅/玻璃三套配色 + 五档强调色，自绘胶囊与面板（QSS 不参与）；
+   点击展开/收起卡片、拖动即收起并夹回屏幕、松手写 `island_x/island_y`、
+   展开悬停暂停 15s 自动收起；卡片一行一段（段名 / 值 · 详情），错误段写原因标 `crit`，
+   展开态按**卡片宽**重排（放不下折 `+N`，不画到窗外）；隐藏/停用时停掉采样线程。
+5. **配置**（13 个 `island_*`）：总开关、三个显示开关、信息位（时间/自定义）、配色、
+   不透明度（0.4–1.0）、强调色、单击行为、指标白名单（`network/cpu/mem/gpu/fps`，
+   去重保序 ≤8）、坐标（有限值 ±100000，否则自动定位）。
+6. **接线**：`CoreHost.ensure_island()/apply_island_settings()/toggle_dynamic_island()`；
+   `apply_live_settings()` 顺带刷新（设置页实时预览）；`quit_app()` 停线程；
+   `PetWindow.toggle_dynamic_island()` 转发；菜单项 `dynamic_island`（`pet_controls`
+   内、`edge_probe` 之后，默认可见）；设置页「外观与交互 → 灵动岛」（7 行）；
+   `coverage.py` 登记落点。
+7. **真机渲染修正（抓图发现，已修）**：状态点原来按「窗口右边 − 内缩」反推，
+   比内容右缘多退一个间距 → 压到末段上；改成按行计划预留的 trail 槽（`end + STATUS_GAP`）。
+   同时补上展开态整改：面板背景（原来透明）、行按卡片宽重排、卡片文字颜色跟随配色、
+   纯 glyph 段在卡片里显示中文名。
+
+**验证**
+
+- `QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest tests/test_petcore_*.py tests/test_architecture.py tests/test_pr_report_discipline.py tests/test_ci_workflows.py -q`
+  → **1541 passed**（基线 1430，本轮 +111：segments 40、layout 17+2、sampling 33、
+  window 21）。
+- `.venv/Scripts/ruff check pet/ tests/ petcore/ examples/petcore-mods/` → All checks passed。
+- `.venv/Scripts/python -m petcore --check` → exit 0。
+- 真机渲染探针（`.scratch/probe_island_real.py`，真字体 + 150% DPI）：收起 434×44 逻辑
+  （651×66 物理），内容 `深深 | 22:30 | ↓1.2M ↑340K | CPU 87%(warn) | 内存 61% •`；
+  展开 349×205，行 `('primary','network','cpu','chip')`、level 4（末尾折 `+1`）。
+- 整程序冒烟（`--root .scratch/island-app --portable --verbose`，9 秒）：
+  `island apply: metrics=['network','cpu','mem'] style=dark`，0 错误 0 traceback。
+
+**未验证 / 风险**
+
+- 混合 DPI 双屏、真实多屏迁移未复核（只按 `screen.availableGeometry()` 做逻辑像素）。
+- 卡片行未做 tooltip/无障碍描述（主分支有），长错误原因会被截断显示。
+- 网络段没有延迟读数（架构红线），要延迟得先在 `petcore/net/` 加探测端口。
+- 打包未重跑：新增的是纯 Python 模块，PyInstaller 静态分析能收到；`psutil` 早已在构建脚本。

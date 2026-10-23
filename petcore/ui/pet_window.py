@@ -1385,6 +1385,11 @@ class PetWindow(QWidget):
     def open_settings(self, initial_page: str | None = None) -> None:
         self.host.open_settings(initial_page, window=self)
 
+    def toggle_dynamic_island(self) -> None:
+        toggler = getattr(self.host, "toggle_dynamic_island", None)
+        if callable(toggler):
+            toggler()
+
     def reload_mods(self) -> None:
         self.host.reload_mods()
 

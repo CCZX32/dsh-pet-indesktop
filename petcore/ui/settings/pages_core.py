@@ -308,6 +308,171 @@ class AppearancePage(SettingsPage):
             "全局快捷键，至少包含一个修饰键；留空表示不绑定。",
         )
 
+        island_card = self.section("灵动岛")
+        self.island_enabled_check = make_checkbox(self)
+        self.island_enabled_check.setChecked(bool(self.config().get("island_enabled")))
+        self.island_enabled_check.toggled.connect(self._on_island_changed)
+        island_card.add_row(
+            "启用灵动岛",
+            self.island_enabled_check,
+            "顶部一枚胶囊，显示时间与 CPU / 内存 / 网络读数；点开有详细卡片。默认关闭。",
+        )
+
+        toggle_row = QWidget(self)
+        toggle_layout = QHBoxLayout(toggle_row)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.setSpacing(14)
+        self.island_icon_check = make_checkbox(toggle_row)
+        self.island_icon_check.setChecked(bool(self.config().get("island_show_icon")))
+        self.island_icon_check.toggled.connect(self._on_island_changed)
+        self.island_name_check = make_checkbox(toggle_row)
+        self.island_name_check.setChecked(bool(self.config().get("island_show_name")))
+        self.island_name_check.toggled.connect(self._on_island_changed)
+        self.island_status_check = make_checkbox(toggle_row)
+        self.island_status_check.setChecked(bool(self.config().get("island_show_status")))
+        self.island_status_check.toggled.connect(self._on_island_changed)
+        for label, box in (
+            ("显示头标", self.island_icon_check),
+            ("显示角色名", self.island_name_check),
+            ("状态点", self.island_status_check),
+        ):
+            holder = QWidget(toggle_row)
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.setSpacing(6)
+            holder_layout.addWidget(box)
+            holder_layout.addWidget(QLabel(label, holder))
+            toggle_layout.addWidget(holder)
+        toggle_layout.addStretch(1)
+        island_card.add_row(
+            "显示元素",
+            toggle_row,
+            "头标是左侧圆点；状态点按最高告警级变色（正常时用强调色）。",
+            expand=True,
+        )
+
+        info_row = QWidget(self)
+        info_layout = QHBoxLayout(info_row)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(10)
+        self.island_info_combo = QComboBox(info_row)
+        self.island_info_combo.addItem("时间", "time")
+        self.island_info_combo.addItem("自定义文字", "custom")
+        mode = str(self.config().get("island_info_mode") or "time")
+        self.island_info_combo.setCurrentIndex(1 if mode == "custom" else 0)
+        self.island_info_combo.currentIndexChanged.connect(self._on_island_changed)
+        self.island_info_text = QLineEdit(info_row)
+        self.island_info_text.setPlaceholderText("显示在胶囊左侧的文字（≤80 字）")
+        self.island_info_text.setText(str(self.config().get("island_custom_text") or ""))
+        self.island_info_text.setMinimumWidth(200)
+        self.island_info_text.editingFinished.connect(self._on_island_changed)
+        info_layout.addWidget(self.island_info_combo)
+        info_layout.addWidget(self.island_info_text, 1)
+        island_card.add_row(
+            "信息位",
+            info_row,
+            "时间档是 HH:mm 定宽形态（读数不改宽度）；自定义档超出时右省略。",
+            expand=True,
+        )
+
+        metrics_row = QWidget(self)
+        metrics_layout = QHBoxLayout(metrics_row)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setSpacing(14)
+        current_metrics = list(self.config().get("island_metrics") or [])
+        self.island_metric_boxes = {}
+        for metric_id, label in (
+            ("network", "网络速率"),
+            ("cpu", "CPU"),
+            ("mem", "内存"),
+        ):
+            box = make_checkbox(metrics_row)
+            box.setChecked(metric_id in current_metrics)
+            box.toggled.connect(self._on_island_changed)
+            holder = QWidget(metrics_row)
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.setSpacing(6)
+            holder_layout.addWidget(box)
+            holder_layout.addWidget(QLabel(label, holder))
+            metrics_layout.addWidget(holder)
+            self.island_metric_boxes[metric_id] = box
+        metrics_layout.addStretch(1)
+        island_card.add_row(
+            "指标段",
+            metrics_row,
+            "勾选项按此顺序排在信息位之后；屏幕放不下时先折进「+N」，折叠即停采样。",
+            expand=True,
+        )
+
+        style_row = QWidget(self)
+        style_layout = QHBoxLayout(style_row)
+        style_layout.setContentsMargins(0, 0, 0, 0)
+        style_layout.setSpacing(10)
+        self.island_style_combo = QComboBox(style_row)
+        for label, value in (("深色", "dark"), ("浅色", "light"), ("玻璃", "glass")):
+            self.island_style_combo.addItem(label, value)
+        styles = ["dark", "light", "glass"]
+        current_style = str(self.config().get("island_style") or "dark")
+        self.island_style_combo.setCurrentIndex(
+            styles.index(current_style) if current_style in styles else 0
+        )
+        self.island_style_combo.currentIndexChanged.connect(self._on_island_changed)
+        self.island_accent_combo = QComboBox(style_row)
+        for label, value in (
+            ("蓝", "blue"),
+            ("绿", "green"),
+            ("紫", "purple"),
+            ("粉", "pink"),
+            ("橙", "orange"),
+        ):
+            self.island_accent_combo.addItem(label, value)
+        accents = ["blue", "green", "purple", "pink", "orange"]
+        current_accent = str(self.config().get("island_accent") or "blue")
+        self.island_accent_combo.setCurrentIndex(
+            accents.index(current_accent) if current_accent in accents else 0
+        )
+        self.island_accent_combo.currentIndexChanged.connect(self._on_island_changed)
+        style_layout.addWidget(self.island_style_combo)
+        style_layout.addWidget(self.island_accent_combo)
+        style_layout.addStretch(1)
+        island_card.add_row(
+            "配色与强调色",
+            style_row,
+            "胶囊自己决定深浅色，不跟随系统主题；强调色用于头标与正常状态点。",
+            expand=True,
+        )
+
+        self.island_opacity_slider = make_slider(self)
+        self.island_opacity_slider.setRange(40, 100)
+        try:
+            opacity = int(round(float(self.config().get("island_opacity") or 1.0) * 100))
+        except (TypeError, ValueError):
+            opacity = 100
+        self.island_opacity_slider.setValue(max(40, min(100, opacity)))
+        self.island_opacity_slider.valueChanged.connect(self._on_island_changed)
+        island_card.add_row(
+            "不透明度",
+            self.island_opacity_slider,
+            "40%–100%；只影响胶囊底板，文字始终不透明。",
+            expand=True,
+        )
+
+        self.island_click_combo = QComboBox(self)
+        self.island_click_combo.addItem("展开卡片", "expand")
+        self.island_click_combo.addItem("显示/隐藏桌宠", "toggle_pet")
+        actions = ["expand", "toggle_pet"]
+        current_action = str(self.config().get("island_click_action") or "expand")
+        self.island_click_combo.setCurrentIndex(
+            actions.index(current_action) if current_action in actions else 0
+        )
+        self.island_click_combo.currentIndexChanged.connect(self._on_island_changed)
+        island_card.add_row(
+            "单击胶囊",
+            self.island_click_combo,
+            "默认展开详细卡片；选「显示/隐藏桌宠」时点胶囊等同于切换桌宠可见。",
+        )
+
         ai_card = self.section("AI 快捷键")
         self.hotkey_open_chat = self._ai_hotkey_row(
             ai_card, "AI 对话快捷键", "hotkey_open_chat", "open_chat"
@@ -391,6 +556,32 @@ class AppearancePage(SettingsPage):
 
     def _on_scale_percent(self, percent: int) -> None:
         self._apply_scale(percent / 100.0)
+
+    def _island_metrics(self) -> list[str]:
+        order = ["network", "cpu", "mem"]
+        return [
+            metric_id
+            for metric_id in order
+            if metric_id in self.island_metric_boxes
+            and self.island_metric_boxes[metric_id].isChecked()
+        ]
+
+    def _on_island_changed(self, _value=None) -> None:
+        config = self.config()
+        config.set("island_enabled", self.island_enabled_check.isChecked())
+        config.set("island_show_icon", self.island_icon_check.isChecked())
+        config.set("island_show_name", self.island_name_check.isChecked())
+        config.set("island_show_status", self.island_status_check.isChecked())
+        config.set("island_info_mode", self.island_info_combo.currentData() or "time")
+        config.set("island_custom_text", self.island_info_text.text().strip())
+        config.set("island_metrics", self._island_metrics())
+        config.set("island_style", self.island_style_combo.currentData() or "dark")
+        config.set("island_accent", self.island_accent_combo.currentData() or "blue")
+        config.set("island_opacity", round(self.island_opacity_slider.value() / 100.0, 2))
+        config.set(
+            "island_click_action", self.island_click_combo.currentData() or "expand"
+        )
+        self.changed.emit()
 
     def _on_flags_changed(self, _checked: bool = False) -> None:
         config = self.config()

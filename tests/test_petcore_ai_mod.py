@@ -288,6 +288,9 @@ class FakeConfig:
         value = self._config.get(key, default)
         return default if value is None else value
 
+    def set(self, key, value):
+        self._config.set(str(key), value)
+
 
 class FakeScheduler:
     """立即执行版 scheduler；生产实现会排队到 GUI 线程。"""
@@ -361,9 +364,14 @@ def test_manifest_is_a_host_only_feature_with_capabilities() -> None:
 def test_definition_exposes_three_commands_and_a_settings_page(tmp_path: Path) -> None:
     definition = _create_host(_context(tmp_path))
     assert definition.owner == "ai.chat"
-    assert [item.kind for item in definition.contributions] == ["settings_page"]
+    assert [item.kind for item in definition.contributions] == ["settings_page", "menu"]
     instance = definition.runtime_factory(_context(tmp_path))
-    assert set(instance.commands) == {"open", "look_screen", "screen_capture"}
+    assert set(instance.commands) == {
+        "open",
+        "look_screen",
+        "screen_capture",
+        "proactive_toggle",
+    }
 
 
 def test_submit_sends_system_prompt_and_history(runtime) -> None:
@@ -805,3 +813,161 @@ def test_vision_off_still_allows_copy_and_local_ocr(runtime) -> None:
     screen.region_action = "ask"
     runtime.screen_capture(2)
     assert "视觉模型" in presentation.said[-1]
+
+
+# ------------------------------------------------------------------ 主动识屏
+
+
+def test_runtime_proactive_ask_sends_the_window_frame(runtime) -> None:
+    done = threading.Event()
+    captured: list[str] = []
+
+    def on_done(text: str) -> None:
+        captured.append(text)
+        done.set()
+
+    runtime.proactive_ask(
+        ScreenCapture(
+            png=b"window-png",
+            width=64,
+            height=48,
+            app_info="code.exe | main.py",
+            hwnd=7,
+            dh_hash=0x1234,
+        ),
+        "code.exe | main.py",
+        on_done=on_done,
+        on_fail=lambda reason: done.set(),
+    )
+    assert done.wait(5), "视觉请求没有结束"
+    assert captured == ["答案"]
+    request = runtime.context.ports.api.requests[-1]
+    payload = request["messages"]
+    assert payload[0]["role"] == "system"
+    assert "鲸鱼娘" in payload[0]["content"]
+    assert "main.py" in str(payload[-1]["content"])
+
+
+def test_runtime_proactive_answer_records_without_opening_the_window(runtime) -> None:
+    chat = runtime.context.ports.chat
+    presentation = runtime.context.ports.presentation
+    runtime.proactive_answer("看到一份报告", app_info="code.exe | main.py", sync_chat=True)
+    assert presentation.said == ["看到一份报告"]
+    assert [entry[0] for entry in chat.records] == ["user", "assistant"]
+    assert "main.py" in chat.records[0][1]
+    assert not [call for call in chat.calls if call[0] == "open"], "主动识屏不许唤出对话窗"
+
+
+def test_runtime_proactive_answer_can_skip_the_session(runtime) -> None:
+    chat = runtime.context.ports.chat
+    runtime.proactive_answer("只看气泡", app_info="", sync_chat=False)
+    assert chat.records == []
+
+
+def test_runtime_toggle_proactive_writes_the_flag(runtime) -> None:
+    config = runtime.context.host.config
+    assert config.get("ai_proactive_enabled") is False
+    runtime.toggle_proactive()
+    assert config.get("ai_proactive_enabled") is True
+    assert any("白名单" in text for text in runtime.context.ports.presentation.said)
+    runtime.toggle_proactive()
+    assert config.get("ai_proactive_enabled") is False
+    assert runtime.context.ports.presentation.said[-1] == "主动识屏已关闭"
+
+
+def test_runtime_toggle_reports_count_when_whitelist_is_set(runtime) -> None:
+    config = runtime.context.host.config
+    config.set("ai_proactive_whitelist", ["chrome.exe", "title:*报告*"])
+    runtime.toggle_proactive()
+    assert runtime.context.ports.presentation.said[-1] == "主动识屏已开启（白名单 2 条）"
+
+
+def test_settings_page_exposes_the_proactive_section(qt_app, tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+    host = SimpleNamespace(
+        config=Config(tmp_path),
+        features=SimpleNamespace(ports=SimpleNamespace(api=FakeApi(), screen=FakeScreen())),
+        chat=SimpleNamespace(),
+    )
+    page = definition.settings_factory(host)
+    try:
+        page.proactive_check.setChecked(True)
+        assert host.config.get("ai_proactive_enabled") is True
+
+        page.whitelist_edit.setPlainText("chrome.exe\n  title:*报告*  \n\n")
+        assert host.config.get("ai_proactive_whitelist") == ["chrome.exe", "title:*报告*"]
+
+        page.proactive_dwell_spin.setValue(90)
+        assert host.config.get("ai_proactive_dwell_seconds") == 90
+        page.proactive_threshold_spin.setValue(12)
+        assert host.config.get("ai_proactive_change_threshold") == 12
+        page.proactive_cap_spin.setValue(8)
+        assert host.config.get("ai_proactive_daily_cap") == 8
+        page.proactive_cooldown_spin.setValue(600)
+        assert host.config.get("ai_proactive_cooldown_seconds") == 600
+        page.proactive_interval_spin.setValue(120)
+        assert host.config.get("ai_proactive_min_interval_seconds") == 120
+
+        assert not page._proactive_idle_row.isEnabled()
+        page.proactive_idle_check.setChecked(True)
+        assert host.config.get("ai_proactive_require_idle") is True
+        assert page._proactive_idle_row.isEnabled()
+
+        page.proactive_dry_check.setChecked(True)
+        page.proactive_cue_check.setChecked(False)
+        page.proactive_sync_check.setChecked(False)
+        assert host.config.get("ai_proactive_dry_run") is True
+        assert host.config.get("ai_proactive_pre_cue") is False
+        assert host.config.get("ai_proactive_sync_chat") is False
+
+        page._append_rule("chrome.exe")
+        page._append_rule("title:*报告*")
+        page._append_rule("code.exe")
+        lines = [line for line in page.whitelist_edit.toPlainText().splitlines() if line]
+        assert lines.count("chrome.exe") == 1
+        assert "code.exe" in lines
+    finally:
+        page.deleteLater()
+
+
+def test_menu_contribution_checkmark_reads_the_config(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    definition = _create_host(context)
+    menu = [item for item in definition.contributions if item.kind == "menu"]
+    assert [item.id for item in menu] == ["proactive"]
+    contribution = menu[0]
+    assert contribution.data["command"] == "proactive_toggle"
+    assert contribution.data["label"] == "主动识屏"
+    checked = contribution.data["checked"]
+    assert checked() is False
+    context.host.config.set("ai_proactive_enabled", True)
+    assert checked() is True
+
+
+# ------------------------------------------------------------------ DPI 图像封顶
+
+
+def test_vision_payload_is_capped_by_the_screen_port(runtime) -> None:
+    """送模型的图先经 Core 按物理像素封顶；本地 OCR 仍拿原图。"""
+    import base64 as _b64
+
+    screen = runtime.context.ports.screen
+    calls: list[tuple[int, int]] = []
+
+    def shrink(png, *, max_edge=1024):
+        calls.append((len(png), int(max_edge)))
+        return b"vision-png"
+
+    screen.shrink_for_vision = shrink
+    runtime._on_ask("这是什么", b"raw-png-bytes", [], 0)
+    assert calls and calls[0][0] == len(b"raw-png-bytes")
+    request = runtime.context.ports.api.requests[-1]
+    encoded = str(request["messages"][-1]["content"])
+    assert _b64.b64encode(b"vision-png").decode("ascii") in encoded
+    assert _b64.b64encode(b"raw-png-bytes").decode("ascii") not in encoded
+    del screen.shrink_for_vision
+
+
+def test_vision_bytes_falls_back_when_the_port_cannot_shrink(runtime) -> None:
+    assert runtime._vision_bytes(b"raw") == b"raw"

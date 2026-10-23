@@ -42,7 +42,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-; 以下 5 个官方 feature 默认不勾选；勾选才写入安装目录，不勾选完全不落盘。
+; 以下官方 feature 默认不勾选；勾选才写入安装目录，不勾选完全不落盘。
 Name: "mod_divination"; Description: "抽签（fun.divination）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_festival"; Description: "节日提醒（fun.festival）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_todo"; Description: "待办清单（reminder.todo）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
@@ -52,6 +52,7 @@ Name: "mod_aichat"; Description: "AI 对话（ai.chat，需自备 API）"; Group
 Name: "mod_ocr"; Description: "本地 OCR（tool.ocr，离线提取文字）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_weather"; Description: "天气（tool.weather，需联网）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 Name: "mod_filereader"; Description: "文件解读（tool.file-reader，需 API）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
+Name: "mod_agent"; Description: "Agent 联动（ai.agent，需 DSH 桥接或自写事件）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 
 [Files]
 Source: "..\dist\dsh-pet-core\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -76,6 +77,8 @@ Source: "..\examples\petcore-mods\tool.weather\*"; DestDir: "{app}\mods\tool.wea
 Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.weather"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_weather
 Source: "..\examples\petcore-mods\tool.file-reader\*"; DestDir: "{app}\mods\tool.file-reader"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_filereader
 Source: "trust_marker.txt"; DestDir: "{app}\mods\tool.file-reader"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_filereader
+Source: "..\examples\petcore-mods\ai.agent\*"; DestDir: "{app}\mods\ai.agent"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc"; Tasks: mod_agent
+Source: "trust_marker.txt"; DestDir: "{app}\mods\ai.agent"; DestName: ".trusted"; Flags: ignoreversion; Tasks: mod_agent
 
 [Icons]
 Name: "{autoprograms}\dsh-pet core"; Filename: "{app}\dsh-pet-core.exe"

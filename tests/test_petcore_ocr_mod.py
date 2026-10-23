@@ -136,6 +136,30 @@ def test_runtime_returns_local_text_and_swallows_engine_errors(monkeypatch) -> N
 # ---------------------------------------------------------------- 真实引擎
 
 
+def _sac_blocks_native_module() -> bool:
+    """Smart App Control 拦截原生扩展时返回 True（WinError 4551）。
+
+    SAC 是机器级策略，不是产品缺陷：被拦的 pyd 连 ``ctypes.WinDLL`` 都加载不了。
+    只有拿到这个确切错误码才跳过，别的 ImportError 照旧让测试红。
+    """
+    import ctypes
+    import sys
+
+    if sys.platform != "win32":
+        return False
+    spec = importlib.util.find_spec("shapely")
+    if spec is None or not spec.origin:
+        return False
+    for path in Path(spec.origin).parent.glob("_geos*.pyd"):
+        try:
+            ctypes.WinDLL(str(path))
+        except OSError as exc:
+            return getattr(exc, "winerror", None) == 4551
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("rapidocr") is None, reason="rapidocr not installed"
 )
@@ -158,6 +182,11 @@ def test_real_engine_recognizes_generated_text(tmp_path: Path) -> None:
     assert ok
 
     engine.release_engine()
-    text = engine.recognize(encoded.tobytes(), _ports())
+    try:
+        text = engine.recognize(encoded.tobytes(), _ports())
+    except engine.OcrUnavailable as exc:
+        if _sac_blocks_native_module():
+            pytest.skip(f"Smart App Control 拦截了 shapely 原生模块（WinError 4551）：{exc}")
+        raise
     assert "HELLO" in text.upper()
     assert "123" in text

@@ -626,3 +626,195 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
    见 ROADMAP §25.2。
 6. **窗口**：设置窗口保留原生标题栏并提供最小化/最大化（`WindowMinMaxButtonsHint`）；
    非模态、实时预览、X 保存、「取消」/Esc 回滚的语义不变。
+
+## 26. P4-c1：窗口级抓屏与主动识屏（2026-10-23）
+
+1. **抓屏分层**：整屏/框选仍是 `ScreenPort.capture()` / `capture_region()`；新增的
+   窗口采样是 `foreground_window()`（只读元数据：`hwnd/process/title/rect`）、
+   `sample_foreground()`（只算指纹，不编码 PNG）与 `capture_foreground()`（窗口
+   画面 + `dh_hash`）。Windows 上用 GDI `BitBlt`/`StretchBlt` 按**物理像素矩形**
+   直接抓，不再做逻辑/物理换算（150% 缩放实测：先用 Qt 逻辑几何裁剪会 100% 失败）。
+   抓图与哈希只发生在 Core，mod 不 import `petcore.platform`。
+2. **隐私双复核**：`capture_foreground()` 抓图前后各查一次前台 `hwnd`，不一致就丢弃
+   画面并返回 `None`；画面只存在内存里，日志只记进程名/句柄/指纹，不记标题正文。
+3. **dHash 与两段式采样**：`platform/image_hash.py` 的 64 位差分哈希（9×8 灰度、
+   相邻比较）；先缩放再转灰度（`1200×800` 实测 9.87 ms → 1.58 ms），平滑重采样
+   避免采样抖动。稳态心跳只走 `sample_window()`（缩到 192 边、不编码 PNG，
+   实测 ≈34 ms/次）；确认画面变了才 `capture_window()`（768 边 + PNG，≈66 ms/次）。
+   `dh_hash` 为 0 表示「无法比较」；基线一律用缩略图采样的指纹。
+4. **主动识屏（`ai.chat` 的一部分）**：8 秒心跳；门槛依次是「启用 + 白名单非空 →
+   免打扰 → 前台窗口 → 白名单 → 同一窗口停留够久 → 仅闲置（可选）→ 限额 →
+   画面有变化 → 盖戳」，任一不满足就安静跳过。答复只冒气泡（6–20 秒按时长），
+   不同步打开对话窗；`ai_proactive_sync_chat` 为真时用 `ChatPort.record()` 静默入会话。
+5. **限额**：每日上限（默认 15）、最小请求间隔（60 s）、冷却（300 s）、
+   连续 3 次失败当日熔断；状态文件 `feature-data/ai.chat/proactive_state.json`，
+   原子写；dry-run 只写日志、不消耗额度。
+6. **白名单**：大小写不敏感 `fnmatch`；无前缀只匹配进程名，`title:` 前缀只匹配
+   标题；为空 = 功能完全不工作。设置页可「从当前前台窗口添加」按软件或按标题。
+7. **配置键（全部全局作用域）**：`ai_proactive_enabled`、`ai_proactive_whitelist`、
+   `ai_proactive_dwell_seconds`、`ai_proactive_change_threshold`、
+   `ai_proactive_daily_cap`、`ai_proactive_cooldown_seconds`、
+   `ai_proactive_min_interval_seconds`、`ai_proactive_require_idle`、
+   `ai_proactive_min_idle_seconds`、`ai_proactive_dry_run`、
+   `ai_proactive_pre_cue`、`ai_proactive_sync_chat`。
+8. **菜单**：右键「主动识屏」是勾选项（`ai.chat:proactive`），模板位置在
+   「看看屏幕」之后；旧布局由通用模板合并（`default-action-added:ai.chat:proactive`）
+   自动补入，幂等。未安装 `ai.chat` 时该项不存在。
+9. **P4-c 余项**：`ai.agent` 已在 P4-c2 落地（见 §28，只读联动、不含写方安装）；
+   提醒域「转正」只剩市场条目与文档口径，随市场批次收。
+
+## 27. 系统缩放（DPI）口径（2026-10-23）
+
+> 一条总则：**界面、布局、钳制、命中判定一律用 Qt 逻辑像素；只有「抓屏/指纹/
+> 送模型」这条链路用物理像素。** 两侧不许混算——混算的典型症状就是「窗口矩形乘了
+> 一次 DPR，结果裁不到画面」。
+
+1. **抓屏**：`foreground_window_info()` 给的 `rect` 是 Win32 物理像素；窗口抓图用
+   GDI `BitBlt`/`StretchBlt` 按该矩形直接抓，不经过 Qt 几何、不再乘 DPR。
+   `sample_window()`（192 边）与 `capture_window()`（768 边）的上限都是**物理像素**，
+   所以同一份内容在 100%/150%/200% 下送给模型的像素预算一致。
+2. **「看看屏幕」抓虚拟桌面**：Windows 上 `capture_desktop()` 抓所有显示器并集
+   （物理像素，主分支同为 `all_screens=True`），不再只抓宠物所在屏；非 Windows
+   退回主屏。多屏/混合 DPI 下不会漏掉用户正在看的那块屏。
+3. **送模型的图统一封顶**：`ScreenPort.shrink_for_vision(png, max_edge=1024)`
+   （`VISION_MAX_EDGE`）按物理像素封顶；`ai.chat` 的「看看屏幕 / 截图提问 /
+   提取文字兜底 / 翻译」都先过这一步。**本地 OCR 与「复制图像」必须用原图**，
+   否则高 DPI 下小字会先被缩掉。
+4. **屏布局**：`platform/screens.snapshot_from_qt()` 用 `availableGeometry()`（逻辑
+   像素），`dpr` 只记录不参与矩形换算；`_wire_screens()` 监听
+   `logicalDotsPerInchChanged` 与 `geometryChanged`，缩放变化后重排宠物与气泡。
+5. **框选**：`SelectionRect.device_rect(dpr)` 左/上 `floor`、右/下 `ceil`，分数 DPR
+   不会切掉半像素；裁剪在物理像素图上完成。
+6. **图标与缩略图**：`ui/icons.py` 按 `screen_dpr()` 用物理尺寸绘制（1x/1.5x/2x
+   分别 36/54/72）；菜单动画缩略图按 `physical_side(64, dpr)` 解码并写回 DPR，
+   高分屏不糊。
+7. **图片装载**：`media/images.py` 的 `load_pixmap/scale_pixmap/logical_size` 是唯一
+   读图口径（逻辑上限 × DPR 解码、写回 DPR）；不要在别处直接 `QPixmap(path)` 后再
+   按逻辑尺寸贴图。
+8. 已知边界：混合 DPI 多屏下窗口跨屏时视觉大小随屏缩放变化（逻辑尺寸不变），
+   与主分支一致；菜单对勾图（14px QSS 资源）暂未做 @2x。
+
+## 28. P4-c2：Agent 联动 `ai.agent`（2026-10-23）
+
+> 定位：`ai.agent` 是一个**可卸载的 feature mod**，不是 Core 能力。Core 只多出三个
+> 通用接缝（`StoragePort.data_root()`、`PresentationPort.visible()`、
+> `PetHandle.animations()`）与 13 个 `ai_agent_*` 全局键，不认识任何具体 Agent。
+
+1. **事件来源（只读）**
+   - DSH 桥目录：`<数据根父目录>/dsh-pet-bridge/dsh*.jsonl`（多实例各写一份，按
+     mtime 最多同时看 8 个文件）。
+   - 统一通道：`<数据根>/agent-events/<agent>.jsonl`（协议见
+     [`AGENT_LINK_PROTOCOL.md`](AGENT_LINK_PROTOCOL.md) §2）。
+   - 自定义 Agent：`ai_agent_custom_agents` 最多 8 条，`{key,name,path}`，`path`
+     可以是文件也可以是有 `*.jsonl` 的目录。
+   - **没有写权限**：不装桥接插件、不跑 pnpm、不写 `~/.claude`、不写任何 Agent 配置。
+2. **六态与事件映射**：`thinking / working / attention / error / idle / sleeping`。
+   `state` 字段优先；否则按 `event` 查表（Claude hooks 名 + DSH 事件名 + 裸状态名）。
+   表外事件**一律忽略**。`turn/end` 带 `reasonKind ∈ {aborted, blocked, max_tokens,
+   unknown}` 时收敛为 `idle`（不报「干完活」）。
+3. **读取口径**：字节偏移 tail；**首次见到已存在的文件跳到末尾**（不回放历史），
+   监视开始后才出现的文件从头读；单次 ≤64KB；半行缓冲上限 8KB，超过即丢弃该行；
+   文件截断/轮转只重读一代。文件 IO 在一条后台线程（1.5 s 节拍），解析结果经
+   `scheduler.call_later(0, …)` 回 GUI 线程。
+4. **显示口径**
+   - 忙碌（`thinking/working`）：联动动作池轮换 `写代码` / `吃Token`，每第 3 次插播
+     `轻快记录` / `漂浮踏步`；精确名缺失按关键词回退，再退到角色任意 act。
+   - 过程气泡：按工具名报进度（`正在跑命令` 等），同 Agent ≥10 s、全局 ≥8 s、
+     同一文案 ≥60 s，文案截 80 字；无工具名不报。
+   - 完成通知：折叠状态 `busy → 非busy` 后 800 ms 稳定确认才报；确认窗口内又忙起来
+     则静默取消；同 Agent 完成通知冷却 5 s；本轮出现过 `error` 报「这轮好像没能跑完」
+     而不是「干完活啦」。
+   - 多写者：DSH 多实例按 `inst` 分片，**任一写者忙即视为忙**，一个实例回待机不会
+     把另一个实例判成完成。
+   - 隐藏态不切动画（`PresentationPort.visible()`）。
+5. **音效**（默认关）：开工 / 完成 / 报错三个音，`builtin:agent-*` 指向
+   `assets/sounds/agent/*.wav`，也可填绝对路径；同 Agent 同类音效受
+   `ai_agent_sound_cooldown_seconds` 约束。
+6. **配置键**（全部全局作用域，13 个）
+
+   | 键 | 默认 | 范围 |
+   |---|---|---|
+   | `ai_agent_enabled` | `False` | 总开关（菜单勾选项写它） |
+   | `ai_agent_dsh_enabled` | `True` | 监听 DSH 桥目录 |
+   | `ai_agent_events_enabled` | `True` | 监听统一事件目录 |
+   | `ai_agent_custom_agents` | `[]` | ≤8 条 `{key,name,path}`；key `[a-z0-9][a-z0-9_-]{0,31}`，不得占用 `dsh` |
+   | `ai_agent_animation_enabled` | `True` | 联动动作 |
+   | `ai_agent_activity_bubbles` | `True` | 过程气泡 |
+   | `ai_agent_done_notice` | `True` | 完成通知 |
+   | `ai_agent_min_interval_seconds` | `2.0` | 0.5–10 |
+   | `ai_agent_sound_enabled` | `False` | 音效总开关 |
+   | `ai_agent_sound_volume` | `0.65` | 0–1 |
+   | `ai_agent_sound_cooldown_seconds` | `2.0` | 0–10 |
+   | `ai_agent_sound_start/done/error_path` | `builtin:agent-*` | ≤500 字符 |
+
+7. **菜单与设置**：右键「Agent 联动」是勾选项（`ai.agent:enabled`），模板位置在
+   「主动识屏」之后，旧布局由通用合并补入；设置页在「扩展管理」页内标签
+   （顺序 660），一个 H2 + 五个 H3（总开关 / 事件来源 / 动画与气泡 / 音效 / 诊断）。
+   诊断面板列出每个来源的目录状态与最近一行事件，「发送测试事件」写一条 demo
+   事件走完整链路。
+8. **不做（P4-c 余项）**：DSH 桥接插件一键安装（c2.1）、Claude hooks 注入、
+   Cursor transcript / OpenCode sqlite 直读、审批/提问常驻卡片、live 回合成本统计。
+
+## 29. P5-a1：灵动岛 v1（2026-10-23）
+
+> 定位：灵动岛是 **Core 的独立顶层窗口**（不是 mod）：它要读系统指标、要在桌宠隐藏后
+> 仍然存在，而这两件事都不该由扩展承担。主分支 4661 行的 `pet/dynamic_island.py` 在这里
+> 拆成「零 Qt 契约 + 零 Qt 布局 + 平台采样 + 唯一 Qt 窗口」四层，砍掉动效/停靠细条/
+> 第三方段/聊天/碰撞/FPS/GPU（见 §29.6）。
+
+1. **分段结构**（`petcore/island/segments.py`，零 Qt）
+   - `SegmentSnapshot`：`id/label/text/max_text/state/detail`；非法内容（换行）直接拒注，
+     label 超 6 字符截断并告警。
+   - **盒宽自测量**：盒宽 = `horizontalAdvance(label) + 4(有 label) + horizontalAdvance(max_text)`，
+     按 `(id, 字体指纹)` 缓存。**读数永不进宽度**——这是整岛不抖的根。
+   - **运行期护栏**：实测文案超盒宽 → 二分右省略 + warning（一段失控不得推歪整岛）。
+   - **四态**：`ok` 才有真读数；`sampling/unknown/error` 一律同宽 `--`；`unsupported` 不占位。
+   - **告警级**：`cpu (80, 92)`、`mem (85, 95)` 两级 + 3pt 滞回；无读数的拍原样沿用上一级
+     （不褪色）；没阈值的段恒无色。
+2. **布局层**（`petcore/island/layout.py`，零 Qt）
+   - 段间 19px 槽位、竖线居中、数值盒右对齐；有单位时是**双盒**（数值盒 + 1px + 单位盒，
+     单位盒统一取该行最宽单位）。
+   - **收缩流水线**（纯函数、可逆）：名字省略(96→40px) → 名字隐藏 → 尾部整段折 `+N`
+     → custom 主信息省略 → 保底（主信息与状态点永不折，允许溢出）。
+   - `apply_shrink()` 把计划的结构套到**当刻**的段列表：读数每秒在变，计划只决定
+     「折哪几段」；`+N` 的 N 按实际折掉的段数算，chip 告警级取当刻被折段最高级
+     （`error` 一律按 `crit`）。
+   - `anchored_x()`：宽度变化按屏幕三分区定锚点（左 1/3 固定左缘、右 1/3 固定右缘、
+     中间固定中心），避免贴边胶囊"先长出屏再被顶回"。
+3. **采样层**（`petcore/platform/netmon.py`、`sysmon.py`，零 Qt）
+   - 网络：`psutil.net_io_counters()` 差分 + EMA(0.5)，首拍只建基线（返回 None，不伪造 0），
+     计数器回绕按 0；`format_rate` 5 列定宽，`format_network_slot` = `↓ 1.2M ↑ 340K`。
+     **不做 UDP 延迟探测**：那需要 socket，而 core 的红线把网络库锁在 `net/`。
+   - CPU/内存：`CpuMeter` 首拍建基线；间隔硬上限 1 Hz；`MAX_TEXT="888%"` 是盒宽样本。
+   - 两条采样线程只在「岛可见 + 该段启用 + 该段没被折叠」时运行；`stop()` 幂等。
+4. **窗口**（`petcore/ui/island.py`，唯一 Qt 面）
+   - 几何：高固定 44、内缩 6、圆角 = 高/2、宽 = 行自然宽（下限 120）、默认贴屏可用区
+     右上角 16px；拖动松手夹回屏幕并写 `island_x/island_y`。
+   - 交互：点胶囊展开/收起卡片（`island_click_action=toggle_pet` 时改为透传点击）；
+     拖动即收起卡片；展开时悬停暂停 15s 自动收起。
+   - 卡片：一行一段（段名 / 值 · 详情），错误段写原因并标 `crit`；展开态整窗是一块圆角
+     面板，行按**卡片宽**重排（放不下就折 `+N`，绝不画到窗外）。
+   - 绘制：胶囊/面板自绘（深/浅/玻璃三套配色 + 五档强调色），颜色来自常量而不是 QSS；
+     告警色只染数值与单位，label/竖线不沾；`island_show_status` 的画法是行尾一个状态点，
+     颜色取行内最高告警级（无色时用强调色）。
+5. **配置键**（全部全局作用域，13 个）
+
+   | 键 | 默认 | 取值 |
+   |---|---|---|
+   | `island_enabled` | `False` | 总开关（菜单「灵动岛」写它） |
+   | `island_show_icon` / `island_show_name` / `island_show_status` | `True` | 头标 / 角色名 / 状态点 |
+   | `island_info_mode` | `"time"` | `time` / `custom` |
+   | `island_custom_text` | `""` | ≤80 字符 |
+   | `island_style` | `"dark"` | `dark` / `light` / `glass` |
+   | `island_opacity` | `1.0` | 0.4–1.0（只作用底板） |
+   | `island_accent` | `"blue"` | blue/green/purple/pink/orange |
+   | `island_click_action` | `"expand"` | `expand` / `toggle_pet` |
+   | `island_metrics` | `["cpu","mem"]` | `network/cpu/mem/gpu/fps`，去重保序，≤8；`gpu`/`fps` 本批不渲染 |
+   | `island_x` / `island_y` | `None` | 有限值且 \|v\| ≤ 100000，否则自动定位 |
+
+6. **本批不做（P5-a2）**：停靠细条（`edge_dock`）、弹簧动效/声纳/呼吸、卡片里的操作按钮
+   与最近消息、余额主信息（`balance_tier`）、第三方段注册面与组件目录、GPU（PDH）与
+   FPS（PresentMon）、灵动岛聊天与碰撞、"桌宠隐藏后由岛唤起对话"。
+7. **菜单与设置**：右键「桌宠控制 → 灵动岛」是勾选项（`dynamic_island`），模板位置在
+   `edge_probe` 之后；设置落点在「外观与交互 → 灵动岛」（启用/显示元素/信息位/指标段/
+   配色/不透明度/单击行为），改动实时生效、取消回滚。

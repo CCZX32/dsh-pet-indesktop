@@ -191,6 +191,8 @@ def test_default_template_uses_the_p8_top_level_order() -> None:
         "animations_hub",
         "ai_chat",
         "look_screen",
+        "ai.chat:proactive",
+        "ai.agent:enabled",
         "screen_capture",
         "playback_speed",
         "size",
@@ -665,3 +667,41 @@ def test_default_template_no_longer_contains_click_through() -> None:
     assert "click_through" not in _all_ids(raw["nodes"])
     resolved = resolve(raw, registered=CORE_REGISTERED, available=CORE_REGISTERED)
     assert "click_through" not in _all_ids(resolved.nodes)
+
+
+def test_merge_adds_the_proactive_action_to_existing_layouts() -> None:
+    import copy
+
+    raw = copy.deepcopy(OLD_USER_LAYOUT)
+    registered = REGISTERED | {"ai.chat:proactive"}
+    merged, notes = merge_user_layout(raw, registered=registered)
+
+    assert "default-action-added:ai.chat:proactive" in notes
+    ids = _ids(merged["nodes"])
+    assert ids.count("ai.chat:proactive") == 1
+    assert ids.index("ai.chat:proactive") > ids.index("animations_hub")
+    assert ids.index("ai.chat:proactive") < ids.index("pet_controls"), (
+        "没见过 look_screen 的旧布局，应落在播放段（桌宠控制之前）"
+    )
+
+    again, notes_again = merge_user_layout(merged, registered=registered)
+    assert "default-action-added:ai.chat:proactive" not in notes_again
+    assert _ids(again["nodes"]).count("ai.chat:proactive") == 1
+
+
+def test_merge_places_the_proactive_action_right_after_look_screen() -> None:
+    raw = {
+        "schema_version": 1,
+        "layout_id": DEFAULT_LAYOUT_ID,
+        "nodes": [
+            {"type": "action", "id": "easter_egg", "visible": True},
+            {"type": "action", "id": "look_screen", "visible": True},
+            {"type": "action", "id": "screen_capture", "visible": True},
+            {"type": "action", "id": "quit", "visible": True},
+        ],
+    }
+    registered = REGISTERED | {"ai.chat:proactive"}
+    merged, notes = merge_user_layout(raw, registered=registered)
+    ids = _ids(merged["nodes"])
+    assert ids.index("ai.chat:proactive") == ids.index("look_screen") + 1
+    assert "default-action-added:ai.chat:proactive" in notes

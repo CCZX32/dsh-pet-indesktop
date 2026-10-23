@@ -12,7 +12,17 @@ from .settings_page import AiChatPage
 __all__ = ["AiChatPage", "AiChatRuntime", "create_host"]
 
 
-def create_host(_context):
+def create_host(context):
+    def proactive_enabled() -> bool:
+        port = getattr(getattr(context, "ports", None), "config", None)
+        getter = getattr(port, "get", None)
+        if not callable(getter):
+            return False
+        try:
+            return bool(getter("ai_proactive_enabled", False))
+        except Exception:
+            return False
+
     return FeatureDefinition(
         owner=OWNER,
         contributions=(
@@ -20,6 +30,17 @@ def create_host(_context):
                 kind="settings_page",
                 id="chat",
                 data={"title": "AI 对话", "order": 640, "icon": "chat"},
+            ),
+            Contribution(
+                kind="menu",
+                id="proactive",
+                data={
+                    "label": "主动识屏",
+                    "command": "proactive_toggle",
+                    "order": 55,
+                    "icon": "screen",
+                    "checked": proactive_enabled,
+                },
             ),
         ),
         runtime_factory=AiChatRuntime,

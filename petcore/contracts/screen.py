@@ -16,6 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+#: 送给视觉模型前的长边上限（**物理像素**）。按物理像素封顶，保证同一份内容在
+#: 100%/150%/200% 缩放下占用同样的像素预算与费用；本地 OCR 仍用原图。
+VISION_MAX_EDGE = 1024
+
 #: 框选动作条上的四个动作（mod 与 core 共用同一组字符串）。
 ACTION_OCR = "ocr"
 ACTION_TRANSLATE = "translate"
@@ -32,6 +36,34 @@ class ScreenCapture:
     screen_name: str = ""
     #: 抓屏当刻的前台应用「进程名 | 窗口标题」；拿不到时为空串。
     app_info: str = ""
+    #: 窗口采样时的窗口句柄（整屏/框选为 0）。
+    hwnd: int = 0
+    #: 画面指纹（64 位 dHash，由 Core 在抓图时算好）；无法计算时为 0。
+    dh_hash: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class WindowSample:
+    """窗口画面的轻量采样：只有指纹与尺寸，没有 PNG。"""
+
+    hwnd: int = 0
+    dh_hash: int = 0
+    width: int = 0
+    height: int = 0
+    process: str = ""
+    title: str = ""
+    rect: tuple[int, int, int, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WindowInfo:
+    """前台窗口的只读快照；不含窗口内容。"""
+
+    hwnd: int
+    process: str = ""
+    title: str = ""
+    #: 屏幕坐标 ``(x, y, w, h)``；DWM/GetWindowRect 都失败时为 ``None``。
+    rect: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +96,41 @@ class ScreenSelectionCancelled(ScreenError):
 
 class ScreenPort(Protocol):
     def capture(self, *, pet_slot: int | None = None) -> ScreenCapture: ...
+
+    def foreground_window(self) -> WindowInfo | None:
+        """当前前台窗口的句柄/进程/标题/矩形；不可见、最小化或非 Windows 返回
+        ``None``。只读元数据，不抓取窗口内容，也不写日志。"""
+        ...
+
+    def capture_foreground(
+        self, *, expected_hwnd: int = 0
+    ) -> ScreenCapture | None:
+        """抓当前前台窗口那一块画面（内存 PNG + ``dh_hash``）。
+
+        ``expected_hwnd`` 非 0 时在抓图前后各复核一次前台窗口：不一致就返回
+        ``None`` 并丢弃画面，避免把用户刚切走的窗口拍下来。窗口没有可用矩形、
+        被最小化或抓取失败同样返回 ``None``（调用方按「本次跳过」处理）。
+        """
+        ...
+
+    def shrink_for_vision(self, png: bytes, *, max_edge: int = VISION_MAX_EDGE) -> bytes:
+        """把 PNG 按长边（物理像素）缩到 ``max_edge`` 以内，供多模态请求使用。
+
+        图片只在内存里缩放；空数据/解码失败/本来就不超限时原样返回。本地 OCR
+        与「复制图像」必须继续用原图，只有要发给模型的那一步才调这里。
+        """
+        ...
+
+    def sample_foreground(
+        self, *, expected_hwnd: int = 0
+    ) -> WindowSample | None:
+        """只采样窗口画面的指纹与尺寸（不编码 PNG、不做大图读取）。
+
+        用来判断「这次心跳画面变了没有」；确认变化后再调
+        :meth:`capture_foreground` 拿真正要发给模型的画面。
+        同样的双复核与失败返回 ``None`` 语义。
+        """
+        ...
 
     def capture_region(
         self, *, pet_slot: int | None = None, ai_available: bool = True

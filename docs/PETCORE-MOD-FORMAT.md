@@ -367,3 +367,110 @@ ports.presentation.release_loop()                          # 当前这圈播完�
 - 否决表（浏览器/系统提示类）仍然生效；过滤同时作用于唱歌、歌词和传输控制。
 - 过滤命中失败时 `read_playback_with_reason()` 点名被挡下的播放器，不静默为空。
 - 设置页「检测当前播放」显示 `识别名：<app_id>`，方便填额外识别名。
+
+## 14. P4-c1 端口扩展：窗口采样与配置写入（2026-10-23）
+
+### 14.1 `ScreenPort` 的窗口采样
+
+```python
+class ScreenPort(Protocol):
+    def capture(self, *, pet_slot=None) -> ScreenCapture: ...
+    def capture_region(self, *, pet_slot=None, ai_available=True) -> RegionPick: ...
+    def foreground_app(self) -> str: ...
+    def foreground_window(self) -> WindowInfo | None: ...
+    def sample_foreground(self, *, expected_hwnd: int = 0) -> WindowSample | None: ...
+    def capture_foreground(self, *, expected_hwnd: int = 0) -> ScreenCapture | None: ...
+    def shrink_for_vision(self, png: bytes, *, max_edge: int = 1024) -> bytes: ...
+```
+
+- `WindowInfo(hwnd, process, title, rect)`：只读元数据，`rect` 是屏幕物理像素
+  `(x, y, w, h)`，取不到时为 `None`。
+- `WindowSample(hwnd, dh_hash, width, height, process, title, rect)`：只要「画面变了
+  没有」时的轻量采样，**没有 PNG**。实现上缩到 192 边再哈希，实测比整抓省 30 ms。
+- `capture_foreground()`：返回窗口画面（内存 PNG，长边 ≤768）与 `dh_hash`；
+  `expected_hwnd` 非 0 时在抓图前后各复核一次前台窗口，切走了返回 `None`。最小化、
+  cloaked 的 UWP 窗口、无可用矩形、抓图失败同样返回 `None`。**不写磁盘、日志不记
+  标题正文**。
+- Windows 上窗口抓图走 GDI `BitBlt`/`StretchBlt` 按物理矩形直接抓；mod 不需要、
+  也不允许自己做 DPI 换算。`ScreenCapture` 的 `hwnd/dh_hash` 有默认值，旧代码按
+  位置构造不受影响。
+- `shrink_for_vision()`：把要发给多模态模型的 PNG 按**物理像素**长边封顶
+  （默认 `VISION_MAX_EDGE = 1024`），保证同一内容在 100%/150%/200% 缩放下像素预算
+  一致。空数据/解码失败/本来不超限时原样返回。**本地 OCR 与「复制图像」必须用
+  原图**，只有模型输入这一步调它。
+- 能力仍是 `screenshot.capture`（窗口采样不额外要能力）；能力是声明，不是沙箱。
+
+### 14.2 `SystemPort.idle_seconds()`
+
+```python
+class SystemPort(Protocol):
+    def screens(self) -> tuple[Any, ...]: ...
+    def platform_name(self) -> str: ...
+    def idle_seconds(self) -> float: ...
+```
+
+`idle_seconds()` = 距离最后一次键鼠输入的秒数；非 Windows 或读取失败返回 0
+（= 不判定闲置）。`build_ports()` 现在会装配 `SystemAdapter`。
+
+### 14.3 `ConfigPort.set()`
+
+```python
+class ConfigPort(Protocol):
+    def get(self, key, default=None): ...
+    def set(self, key, value) -> None: ...
+```
+
+`set` **只给菜单勾选/命令切换**这类用户刚按下的一次性动作使用（Core 写全局配置
+并立即落盘，与 Core 菜单项语义一致）；运行时不许把它当状态存储反复写，设置页仍走
+Core 托管的 `host.config`（ScopedConfig，支持实时预览与取消回滚）。
+
+### 14.4 参考实现：`ai.chat` 的主动识屏
+
+- `host/proactive.py`：`match_whitelist()` / `dwell_satisfied()` / `ProactiveLimiter`
+  （状态文件 `storage.data_dir("ai.chat")/proactive_state.json`）/ `ProactiveWatcher`
+  （`scheduler.call_every(8000)`，配置每 tick 现读；稳态用 `sample_foreground()`，
+  变化后才 `capture_foreground()`）。
+- 命令：`proactive_toggle`；菜单贡献 `id=proactive`（`checked` 读配置）；
+  模板节点 id 为 `ai.chat:proactive`。
+- 全文行为口径见 SPEC §26。
+
+## 15. 联动类 mod 的接缝（`ai.agent` 参考实现）
+
+联动（“Agent 干活时桌宠跟着动”）不需要 Core 认识任何具体 Agent。Core 只提供三个
+通用端口，剩下全在 mod 里：
+
+| 端口 | 用途 |
+|---|---|
+| `StoragePort.data_root()` | 定位事件目录：`<data_root>/agent-events/`、`<data_root>.parent/dsh-pet-bridge/` |
+| `PresentationPort.visible()` | 隐藏态不切动画（零功耗语义，同主分支） |
+| `PetHandle.animations()` | 取当前角色的 act 名，联动动作池按名字挑、缺名按关键词回退 |
+
+### 15.1 事件文件契约
+
+```
+<data_root>/agent-events/<agent>.jsonl          # 任何 Agent 都能追加
+<data_root>.parent/dsh-pet-bridge/dsh*.jsonl    # DSH 桥接插件（多实例各一份）
+```
+
+每行一个 JSON 对象；字段见 [`AGENT_LINK_PROTOCOL.md`](AGENT_LINK_PROTOCOL.md) §2。
+`state` 优先，`event` 次之，表外事件忽略；`inst` 用于多写者分片。
+
+### 15.2 参考实现：`examples/petcore-mods/ai.agent/host/`
+
+- `protocol.py`：`parse_line()` / `normalize_state()` / `tool_label()` /
+  `activity_text()`，纯解析、无 Qt。
+- `tailer.py`：`ByteTailer`（字节偏移、半行缓冲、轮转重读、单次 64KB）与
+  `GlobTailer`（`dsh*.jsonl` 多文件、按 mtime 最多 8 个）。
+- `links.py`：`LinkEngine`，六态 → 动作/气泡/音效；时钟与延后调用可注入，
+  可脱离事件循环测试。
+- `runtime.py`：`AgentLinkRuntime`（`start/stop/close`），唯一轮询线程 1.5 s，
+  配置每轮现读；解析结果经 `scheduler.call_later(0, …)` 回 GUI 线程。
+- `settings_page.py`：一个 H2 + 五个 H3；控件改动即时写全局配置，`discard_changes()`
+  从打开时快照回滚。
+
+### 15.3 写作者红线
+
+- 只读事件文件，**不写**任何 Agent 配置、不注入 hooks。
+- 单条事件/单行超限即丢弃；坏 JSON、未知事件名静默忽略。
+- 日志只记 agent / 状态 / 文件名，不记事件正文。
+- 运行时（`runtime/links/tailer/protocol`）不 import PySide6；只有设置页可以碰 Qt。

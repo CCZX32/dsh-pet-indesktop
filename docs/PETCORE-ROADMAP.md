@@ -379,15 +379,64 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 **计划变更**：P4-c 不在本轮实施，整体后移为下一批次（见 25.2）。「气泡可滚动」按主分支
 实际口径落为「分页 + 页码点 + 滚轮翻页」，不是滚动条。
 
-### 25.2 P4-c（待办，本轮未做）
+### 25.2 P4-c（c1 已完成，c2/c3 待办）
 
-| 项 | 范围 |
+| 项 | 状态 |
 |---|---|
-| Core 窗口级抓屏 | `foreground_window_info()` 增 `hwnd/rect`；`capture_window()`、`dhash()`；`ScreenPort` 增窗口采样 |
-| `ai.chat` 主动识屏 | 白名单（进程名/`title:`）→ 停留 45s → dhash 去重 → 每日限额；默认关、只进气泡、不落盘 |
-| `ai.agent` 新 mod | DSH JSONL / Claude hooks / 自定义 JSONL；六态动画与气泡节流；来源开关 |
-| 提醒域转正 | `reminder.todo` / `fun.festival` / `fun.divination` 从样板转正式交付 |
-| 菜单模板迁移 | `menu_templates/petcore-default-v1.json` 增音乐、主动识屏、agent 节点；空组不显示 |
+| Core 窗口级抓屏 | **完成（P4-c1）**：`foreground_window_info()` 增 `hwnd/rect`（DWM 扩展边框、cloaked 过滤）；`capture_window()`、`dhash()`、`ScreenPort.foreground_window()` / `capture_foreground()`、`SystemPort.idle_seconds()` |
+| `ai.chat` 主动识屏 | **完成（P4-c1）**：8 s 心跳；白名单（进程名 / `title:`）→ 停留 45 s → dHash 去重（阈值 8）→ 日上限/间隔/冷却/熔断；默认关、只进气泡、不落盘；12 个 `ai_proactive_*` 全局键；菜单勾选项 + 设置分节 |
+| `ai.agent` 新 mod | 待办（c2）：DSH JSONL / 自定义 JSONL；六态动画与气泡节流；来源开关 |
+| 提醒域转正 | 待办（c3）：`reminder.todo` / `fun.festival` / `fun.divination` 从样板转正式交付 |
+| 菜单模板迁移 | 部分完成（c1）：主动识屏节点已进模板并由通用合并补入旧布局；音乐、agent 节点随 c2/c3 一起加 |
+| 验收状态 | c1 源码树真机 dry-run 通过（`process=Notepad.exe hwnd=… dhash=…`）；本机新构建被 Smart App Control 拦截（3077），安装包未在本机安装验证 |
+
 
 **人工验收集中项**：真实双屏/混合 DPI、安装器全流程、真实钥匙串与余额请求、实际声卡、
 角色导入界面、非 Windows 窗口行为。
+
+## 26. P4-c1 补充：DPI 适配（2026-10-23）
+
+| 项 | 状态 |
+|---|---|
+| 送模型图像封顶 | 完成：`VISION_MAX_EDGE=1024` + `ScreenPort.shrink_for_vision()`；AI 四处送图统一走它，本地 OCR/复制用原图；缩放/编码移到请求线程 |
+| 菜单图标 DPR | 完成：`icon()` / `file_icon()` 按 `screen_dpr()` 物理绘制（1x/1.5x/2x → 36/54/72） |
+| 动画缩略图 DPR | 完成：按 `physical_side(64, dpr)` 解码并写回 DPR |
+| 口径文档 | 完成：SPEC §27、MOD-FORMAT §14、`petcore/AGENTS.md` DPI 红线 |
+| 未做 | 菜单对勾图 @2x；混合 DPI 真机双屏复核；模型图是否改逻辑像素口径（取决于实测识别率） |
+
+## 27. P4-c2：Agent 联动 `ai.agent`（2026-10-23）
+
+| 项 | 状态 |
+|---|---|
+| Core 接缝 | 完成：`StoragePort.data_root()`、`PresentationPort.visible()`（`_PresentationAdapter`）、`PetHandle.animations()`（`GraphType.ACT` 名字）、`ai.agent` 图标 |
+| 配置 | 完成：13 个 `ai_agent_*` 全局键 + 归一化（自定义条目 ≤8、key 校验、音量/冷却/间隔夹紧） |
+| mod 本体 | 完成：`examples/petcore-mods/ai.agent` v1.0.0（host-only）：`protocol.py` / `tailer.py` / `links.py` / `runtime.py` / `settings_page.py` |
+| 来源 | 完成：DSH 桥目录（`dsh*.jsonl`，≤8 文件）、统一 `agent-events/*.jsonl`、自定义文件/目录（≤8 条） |
+| 行为 | 完成：六态映射、动作池轮换（每 3 次插播摸鱼）、过程气泡 10/8/60 s 节流、800 ms 完成确认、5 s 完成冷却、错误回合不报成功、多写者折叠、隐藏态不切动画、三档音效 |
+| 菜单/设置 | 完成：`ai.agent:enabled` 勾选项进模板；设置页 H2+5×H3（含诊断与「发送测试事件」） |
+| 安装器 | 完成：`mod_agent` 任务（`Flags: unchecked`）+ `{app}\mods\ai.agent` + `.trusted` |
+| 门禁 | 完成：新增 `tests/test_petcore_agent_mod.py` 70 条；全量 1426 passed；ruff 全绿；`--check` exit 0（隔离 root 安装后 `diagnostics: []`） |
+| 未做（c2.1） | DSH 桥接插件一键安装（不跑 pnpm、不写 DSH profile）；Claude hooks 注入；Cursor transcript / OpenCode sqlite 直读；审批/提问常驻卡片；live 回合成本统计；`ai.agent` 插件市场条目 |
+
+**计划变更**：原 §25.2 把 c2 估成「DSH JSONL + 自定义 JSONL」，实际只做**只读**那半——
+写方安装与直读适配器单独列为 c2.1。c3（提醒域转正）仍未做：`reminder.todo` /
+`fun.festival` / `fun.divination` 已是随包可选扩展并带 `.trusted`，「转正」只剩
+市场条目与文档口径，随市场批次一起收。
+
+## 28. P5-a1：灵动岛 v1（2026-10-23）
+
+| 项 | 状态 |
+|---|---|
+| 零 Qt 契约 | 完成：`petcore/island/segments.py`（状态词表、盒宽自测量、字段盒、两级告警 + 3pt 滞回）；移植主分支同名单测 40 条 |
+| 零 Qt 布局 | 完成：`petcore/island/layout.py`（段落位、双盒单位、收缩流水线、`+N` chip、三分区锚点）；17 条单测 |
+| 采样 | 完成：`petcore/platform/sysmon.py`（CPU/内存 1 Hz）、`netmon.py`（速率差分 + EMA，5 列定宽；**无延迟探测**——socket 只许在 `net/`）；33 条单测 |
+| 窗口 | 完成：`petcore/ui/island.py`（44px 胶囊、三套配色、五档强调色、状态点、展开卡片、拖动换位、15s 自动收起、隐藏即停采样） |
+| 配置 | 完成：13 个 `island_*` 全局键 + 归一化（指标白名单/去重、透明度夹取、坐标校验） |
+| 菜单/设置 | 完成：`dynamic_island` 勾选项（`pet_controls` 内、`edge_probe` 之后）+ 「外观与交互 → 灵动岛」分节（改动实时生效） |
+| 门禁 | 完成：新增 108 条测试；全量 1541 passed；ruff 全绿；`--check` exit 0 |
+| 真机 | 完成：真 DPI(150%) 抓图核对（深色胶囊 434×44 逻辑 / 651×66 物理、展开 349×205），9 秒整程序冒烟 0 错误 |
+| 未做（P5-a2） | 停靠细条、动效/声纳、卡片操作按钮与最近消息、余额主信息、第三方段注册面、GPU/FPS 段、灵动岛聊天与碰撞 |
+
+**计划变更**：原 §20 把 P5 估成「灵动岛 + 性能治理 + 更新 + 安装器 E2E」，实际按价值拆批：
+P5-a1 只交**能天天看见的骨架**（胶囊 + 3 段 + 卡片），动效与扩展面后置；性能治理与安装器
+E2E 仍在 P5-b/P5-c。

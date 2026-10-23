@@ -375,3 +375,70 @@ core 为 AI 背的是「窗口 + 会话 + 传输 + 搜索协议 + 端口」这�
 约 **7 MB / 64 ms**（对话窗包导入），真正的传输层在首次对话时才加载；
 业务提示词、模型策略、OCR 引擎都在 mod。当前没有业务逻辑渗进 core，
 唯一的轻度耦合是配置键白名单与一条截断文案。
+
+## 24. P4-c1 窗口采样与主动识屏（2026-10-23）
+
+- **前台窗口**：`petcore/platform/foreground.py` 的 `foreground_window_info()` 返回
+  `{pid, process, title, hwnd, rect}`；矩形优先 DWM `EXTENDED_FRAME_BOUNDS`，
+  cloaked 窗口视为没有。`idle_seconds()` 用 `GetLastInputInfo`，非 Windows 返回 0。
+- **抓图**：Windows 上 `capture_window()` / `sample_window()` 用 GDI 按窗口的
+  **物理像素矩形**直接抓虚拟桌面（`BitBlt` / `StretchBlt`），不做逻辑/物理换算；
+  非 Windows 退回 Qt「交集最大的屏 + 裁剪」。150% 缩放下「Qt 逻辑几何 + DPR 裁剪」
+  会把窗口裁到不足一半（实测 100% 失败），所以主路径必须是 GDI。
+- **两段式**：稳态心跳只 `sample_foreground()`（192 边缩略图 → 指纹，不编码 PNG）；
+  画面确实变了才 `capture_foreground()`（768 边 + PNG）发请求。
+- **端口**：`ScreenPort.foreground_window()/capture_foreground(expected_hwnd=)`
+  （抓图前后各查一次前台窗口）；`SystemPort.idle_seconds()`；`ConfigPort.set()`
+  （仅菜单命令）；`build_ports()` 现在装配 `SystemAdapter`。
+- **mod 侧**：`examples/petcore-mods/ai.chat/host/proactive.py` 的
+  `ProactiveWatcher` 是 `scheduler.call_every(8000)` 驱动的看门狗，配置每 tick
+  现读；`ProactiveLimiter` 状态落在 `feature-data/ai.chat/proactive_state.json`。
+- **线程**：抓图在 GUI 线程（Qt `grabWindow` 不保证跨线程安全，单次 ≈18 ms/8 s），
+  模型请求复用 `ai.chat` 的 daemon 线程，回调经 `scheduler.call_later()` 回 GUI 线程；
+  停用/关闭用代次号丢弃迟到结果。
+- **菜单**：`ai.chat:proactive` 进模板「看看屏幕」之后；旧布局由
+  `_merge_template_actions()` 补入并写回，无需单独迁移函数。
+
+## 25. P4-c2 Agent 联动数据流（2026-10-23）
+
+```
+Agent 侧（写方）                         桌宠侧（ai.agent mod）
+┌────────────────────────┐   追加写     ┌──────────────────────────────────────┐
+│ DSH 桥接 dsh-<pid>.jsonl│ ────────▶   │ 轮询线程 1.5 s                        │
+│ agent-events/<a>.jsonl  │  JSONL      │  GlobTailer/ByteTailer（偏移/半行/64KB）│
+│ 自定义事件文件/目录      │             │    ↓ parse_line → 六态                │
+└────────────────────────┘             │  scheduler.call_later(0) → GUI 线程    │
+                                        │    ↓ LinkEngine（折叠/节流/完成确认）   │
+                                        │  PresentationPort / AudioPort          │
+                                        └──────────────────────────────────────┘
+```
+
+- **端口边界**：Core 只多 `StoragePort.data_root()`、`PresentationPort.visible()`、
+  `PetHandle.animations()`；`petcore` 里没有任何 Agent 名称、事件名或阈值。
+- **线程**：文件 IO 全在 mod 的轮询线程；`LinkEngine` 与所有呈现调用只在 GUI 线程。
+- **多写者**：`(agent, inst)` 分片保存原始状态，折叠规则「任一忙即忙」，完成确认只在
+  折叠状态 `busy → 非busy` 时排定。
+- **零回放**：首次见到已存在的文件跳到末尾；监视开始后才出现的文件从头读。
+- **菜单**：`ai.agent:enabled` 由 mod 注册（`checked` 读 `ai_agent_enabled`），模板
+  位置在 `ai.chat:proactive` 之后，旧布局由 `_merge_template_actions()` 补入。
+
+## 26. P5-a1 灵动岛数据流（2026-10-23）
+
+```
+采样线程（1 Hz）                     零 Qt 判定层                  Qt 窗口
+┌──────────────────────┐  快照   ┌────────────────────────┐  行计划  ┌──────────────┐
+│ SysMonitor(psutil)   │ ──────▶ │ segments.SegmentSnapshot│ ──────▶ │ DynamicIsland │
+│ NetMonitor(psutil)   │         │ layout.plan_info_row()  │         │ 自绘 + 卡片   │
+└──────────────────────┘         │ layout.apply_shrink()   │         └──────────────┘
+        ▲                        └────────────────────────┘                │
+        │  只在「可见 + 启用 + 未折叠」时运行                                  │ 拖动/点击
+        └─────────────────────────────────────────────────────────────────┘
+```
+
+- **端口边界**：灵动岛是 Core 窗口，不经 `HostPorts`；扩展与它没有耦合（mod 要显示信息
+  仍然走 `PresentationPort` 的气泡）。
+- **线程**：两条采样线程只做 syscall，GUI 每秒读快照；行计划与绘制都在 GUI 线程。
+- **宽度白名单**：宽度键只含字体指纹、显示项、信息模式、指标 id、屏宽；读数与告警级
+  都不进键——所以数字跳变不会让窗口抖动，也不会每次刷新都重建布局。
+- **展开态预算**：卡片被 340–420px 钳住时，行按卡片宽重新收缩（折 `+N`），收起再用
+  屏宽重排；两条路径都走同一个 `plan_info_row()`。

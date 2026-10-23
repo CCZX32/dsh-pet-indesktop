@@ -17,6 +17,7 @@ from ..contracts.api import ApiMetadata, ApiRequest
 from ..contracts.host import HostPorts
 from ..contracts.http import HttpError, HttpRequest, HttpResponse
 from ..contracts.speech import SpeechError, SpeechRequest
+from ..engine.catalog import GraphType
 
 logger = logging.getLogger("petcore.ui.ports")
 
@@ -90,7 +91,11 @@ class QtScheduler:
 
 
 class QtConfigPort:
-    """只读配置端口：读取失败或缺值一律回默认，mod 不会因配置异常中断。"""
+    """配置端口：读取失败或缺值一律回默认，mod 不会因配置异常中断。
+
+    ``set`` 只给菜单命令这类显式用户动作：写全局配置并立刻落盘（与 Core 菜单
+    勾选项同语义）；设置页的实时预览/取消回滚仍由对话框管理。
+    """
 
     def __init__(self, config) -> None:
         self._config = config
@@ -101,6 +106,11 @@ class QtConfigPort:
         except Exception:
             return default
         return default if value is None else value
+
+    def set(self, key: str, value) -> None:
+        target = getattr(self._config, "global_config", self._config)
+        target.set(str(key), value)
+        target.save()
 
 
 class AudioAdapter:
@@ -257,6 +267,9 @@ class StorageAdapter:
     def config_dir(self, owner: str) -> Path:
         return self.data_dir(owner)
 
+    def data_root(self) -> Path:
+        return self.root
+
 
 class QuietMode:
     def __init__(self) -> None:
@@ -327,6 +340,21 @@ class PetHandleImpl:
 
     def play_event(self, group: str, variant: str | int | None = None) -> bool:
         return self.window.play_event(group, variant)
+
+    def animations(self) -> tuple[str, ...]:
+        """当前角色的「动作」名（`GraphType.DEFAULT`，与行为链 `act()` 同池）。
+
+        联动动作池按名字挑选，缺名时按关键词回退；没有动作的角色返回空元组。
+        """
+        catalog = getattr(self.window, "catalog", None)
+        names_for = getattr(catalog, "names_for", None)
+        if not callable(names_for):
+            return ()
+        try:
+            return tuple(names_for(GraphType.DEFAULT))
+        except Exception:
+            logger.debug("animations() failed", exc_info=True)
+            return ()
 
 
 class PetRegistry:
@@ -697,9 +725,11 @@ class QtScreenPort:
         return window or getattr(self.host, "window", None)
 
     def capture(self, *, pet_slot: int | None = None):
-        from ..platform.screenshot import capture_screen
+        from ..platform.screenshot import capture_desktop
 
-        return capture_screen(self._window(pet_slot))
+        # Windows：虚拟桌面（所有显示器并集，物理像素）；其它平台 capture_desktop
+        # 内部退回主屏。
+        return capture_desktop(self._window(pet_slot))
 
     def capture_region(self, *, pet_slot: int | None = None, ai_available: bool = True):
         """框选 + 动作条；能力表由「已注册的动作处理者 + AI 是否可用」决定。
@@ -737,6 +767,79 @@ class QtScreenPort:
 
         return foreground_app_info()
 
+    def foreground_window(self):
+        from ..contracts.screen import WindowInfo
+        from ..platform.foreground import foreground_window_info
+
+        info = foreground_window_info()
+        if not info:
+            return None
+        rect = info.get("rect")
+        return WindowInfo(
+            hwnd=int(info.get("hwnd") or 0),
+            process=str(info.get("process") or ""),
+            title=str(info.get("title") or ""),
+            rect=tuple(int(part) for part in rect) if rect else None,
+        )
+
+    def capture_foreground(self, *, expected_hwnd: int = 0):
+        """抓前台窗口那一块画面；抓图前后各复核一次窗口，切走了就丢弃。"""
+        from ..platform.foreground import foreground_window_info
+        from ..platform.screenshot import ScreenshotError, capture_window
+
+        before = foreground_window_info()
+        if not before or not before.get("rect"):
+            return None
+        hwnd = int(before.get("hwnd") or 0)
+        if expected_hwnd and hwnd != int(expected_hwnd):
+            return None
+        try:
+            capture = capture_window(tuple(before["rect"]), hwnd=hwnd)
+        except ScreenshotError:
+            logger.debug("window capture failed", exc_info=True)
+            return None
+        after = foreground_window_info()
+        if not after or int(after.get("hwnd") or 0) != hwnd:
+            logger.debug("foreground window changed during capture; frame dropped")
+            return None
+        return capture
+
+    def shrink_for_vision(self, png: bytes, *, max_edge: int = 1024) -> bytes:
+        from ..platform.screenshot import shrink_png
+
+        return shrink_png(png, max_edge=int(max_edge))
+
+    def sample_foreground(self, *, expected_hwnd: int = 0):
+        """只算窗口画面的指纹；确认变化后再用 ``capture_foreground`` 拿大图。"""
+        from ..contracts.screen import WindowSample
+        from ..platform.foreground import foreground_window_info
+        from ..platform.screenshot import ScreenshotError, sample_window
+
+        before = foreground_window_info()
+        if not before or not before.get("rect"):
+            return None
+        hwnd = int(before.get("hwnd") or 0)
+        if expected_hwnd and hwnd != int(expected_hwnd):
+            return None
+        try:
+            fingerprint, width, height = sample_window(tuple(before["rect"]))
+        except ScreenshotError:
+            logger.debug("window sample failed", exc_info=True)
+            return None
+        after = foreground_window_info()
+        if not after or int(after.get("hwnd") or 0) != hwnd:
+            logger.debug("foreground window changed during sample; frame dropped")
+            return None
+        return WindowSample(
+            hwnd=hwnd,
+            dh_hash=int(fingerprint),
+            width=int(width),
+            height=int(height),
+            process=str(before.get("process") or ""),
+            title=str(before.get("title") or ""),
+            rect=tuple(int(part) for part in before["rect"]),
+        )
+
 
 class ResourcesAdapter:
     """只读资源目录：冻结包指向 ``_MEIPASS``，源码树指向仓库根。"""
@@ -747,6 +850,23 @@ class ResourcesAdapter:
         else:
             base = paths.repo_root()
         return base.joinpath(*[str(part) for part in parts])
+
+
+class SystemAdapter:
+    """系统信息端口：屏幕枚举、平台名与键鼠闲置时长（只读）。"""
+
+    def screens(self) -> tuple:
+        from PySide6.QtGui import QGuiApplication
+
+        return tuple(QGuiApplication.screens())
+
+    def platform_name(self) -> str:
+        return sys.platform
+
+    def idle_seconds(self) -> float:
+        from ..platform.foreground import idle_seconds
+
+        return float(idle_seconds())
 
 
 def build_ports(host, window) -> HostPorts:
@@ -781,6 +901,7 @@ def build_ports(host, window) -> HostPorts:
         quick_chat=getattr(host, "quick_chat", None),
         screen=QtScreenPort(host),
         screen_ask=getattr(host, "screen_ask", None),
+        system=SystemAdapter(),
         http=CoreHttpPort(),
         speech=(
             CoreSpeechPort(speech_service, audio, scheduler=scheduler)

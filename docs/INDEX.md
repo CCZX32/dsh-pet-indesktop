@@ -163,6 +163,8 @@
 - [petcore P4-b 语音端口·报时·音乐歌词（2026-10-22）](PR-REPORT-PETCORE-P4B-SPEECH-MUSIC-2026-10-22.md)：Core `SpeechPort`（edge/豆包/MiMo/SAPI + 缓存/预检/钥匙串）与 `play_animation(loop=True)`/`release_loop()`；`voice.chime`、`media.music` 重写为 1.1.0（歌词两源、SMTC、唱跳）。排查「报时没声音 / 唱歌动画不断 / 歌词不显示 / mod 里怎么合成语音」时必读。
 - [petcore P4-a 取数端口·天气·文件解读（2026-10-22）](PR-REPORT-PETCORE-P4A-HTTP-WEATHER-FILE-READER-2026-10-22.md)：新增 `HostPorts.http`（单请求路由、共享 deadline、4MB 上限）与 `tool.weather`、`tool.file-reader` 两个可导入 mod；安装器两条 unchecked 任务、`files.read` 能力、七条全局配置键。排查「天气没反应 / 拖文件不解读 / mod 里怎么发 HTTP」时必读。
 - [petcore P4-b2 扩展分组·可卸载·气泡分页·音乐识别（2026-10-23）](PR-REPORT-PETCORE-P4B2-2026-10-23.md)：右键「扩展」按 mod 分组、mod 设置页 H2/H3、`.trusted` 包可卸载（清单删除/保留未知文件与个人数据/草稿保护）、气泡 248→360 分页 + 页码 + 滚轮 + 副标题、音乐只识别已配置播放器与设置页切歌。**第二轮（P4-b2.1）**：修 hub children 绕过分组、旧 layout 把 links/快捷启动等留在扩展里、expand 设置行一字一行、4 字气泡折行/裁切（QLabel wordWrap + setMaximumWidth 陷阱）。排查「扩展菜单太乱 / 链接不在工具与帮助 / 设置提示挤成一条 / 短句气泡折行」时必读。
+- [petcore DPI 适配（2026-10-23）](PR-REPORT-PETCORE-DPI-2026-10-23.md)：送模型的图统一按物理像素封顶（`ScreenPort.shrink_for_vision`，150% 下 288 KB → 166 KB）、菜单图标/动画缩略图按 `screen_dpr()` 物理绘制、SPEC §27 固化「布局用逻辑像素、抓屏/模型用物理像素」口径；排查「高 DPI 下图标糊 / 截图发太大 / 抓窗失败」时必读。
+- [petcore P4-c1 窗口级抓屏·主动识屏（2026-10-23）](PR-REPORT-PETCORE-P4C1-2026-10-23.md)：`foreground_window_info` 补 hwnd/rect（DWM 扩展边框、cloaked 过滤）与 `idle_seconds()`；新 `capture_window()` + 64 位 dHash；`ScreenPort.foreground_window/capture_foreground`（前后双复核、只存内存）、`SystemPort.idle_seconds`、`ConfigPort.set`；`ai.chat` 主动识屏（8 s 心跳、白名单/停留 45 s/dHash 去重/日上限 15/冷却/熔断，只冒气泡不唤窗）、12 个 `ai_proactive_*` 全局键、菜单勾选项与设置分节。排查「主动识屏不触发 / 白名单不生效 / 识屏自己弹窗 / 额度被刷」时必读。
 - [歌词让位于 Agent 状态提示（2026-10-17）](PR-REPORT-LYRIC-AGENT-PRIORITY-2026-10-17.md)：修复歌词持续占用通知槽、吞掉开始/结束提示；涉及歌词和 Agent 气泡优先级时必读。
 - [Hermes Agent Link 桥接（2026-10-17）](PR-REPORT-HERMES-PET-BRIDGE-2026-10-17.md)：把 Hermes 生命周期/审批 hook 接入桌宠既有 Agent Link，并记录 Chat 走 Hermes API Server 的接入方式；维护 Hermes 联动或排查状态气泡时必读。
 
@@ -375,3 +377,5 @@
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [ONLINE-UPDATE.md](ONLINE-UPDATE.md) | Core 安装包在线更新协议：多源 manifest、真实二进制镜像、大小/SHA-256 校验、Windows Inno Setup 自动安装和回滚边界。 | **改自动更新、更新设置页、发布 manifest、下载校验或安装器重启行为前必读**；网络出口问题另读 [NETWORK-PROXY-AND-VPN-2026-09-22.md](NETWORK-PROXY-AND-VPN-2026-09-22.md)。 |
+- [petcore P4-c2 Agent 联动（2026-10-23）](PR-REPORT-PETCORE-P4C2-2026-10-23.md)：把主分支 `pet/agent_link.py` 的**只读联动**重做成可卸载扩展 `ai.agent`——读 DSH 桥目录 / `agent-events/*.jsonl` / 自定义文件，六态 → 联动动作池、过程气泡、800 ms 完成确认、三档音效；Core 只加 `StoragePort.data_root()`、`PresentationPort.visible()`、`PetHandle.animations()` 三条接缝与 13 个 `ai_agent_*` 全局键。排查「Agent 联动不触发 / 完成通知不弹 / 气泡刷屏 / 多实例互相打断」时必读。
+- [petcore P5-a1 灵动岛 v1（2026-10-23）](PR-REPORT-PETCORE-ISLAND-2026-10-23.md)：把主分支 4661 行的灵动岛拆成「零 Qt 契约（`petcore/island/segments.py`）+ 零 Qt 布局（`layout.py`）+ 平台采样（`sysmon/netmon`）+ 唯一 Qt 窗口（`ui/island.py`）」，交胶囊 + CPU/内存/网络段 + 告警色 + 展开卡片 + 13 个 `island_*` 键；排查「岛宽随读数抖 / 段被折叠后还在采样 / 卡片被裁 / 状态点压字」时必读。

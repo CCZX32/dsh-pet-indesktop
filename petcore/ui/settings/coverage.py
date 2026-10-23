@@ -20,6 +20,7 @@ CORE_MENU_SETTINGS_COVERAGE: dict[str, tuple[str, str]] = {
     "size": ("appearance", "大小"),
     "on_top": ("appearance", "窗口置顶"),
     "edge_probe": ("appearance", "边缘探头"),
+    "dynamic_island": ("appearance", "灵动岛"),
     "hide_pet": ("appearance", "显示桌宠"),
     "return_corner": ("appearance", "回到右下角"),
     "move_to_primary": ("appearance", "重置到主屏"),

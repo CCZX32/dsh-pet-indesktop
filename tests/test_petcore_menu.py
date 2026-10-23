@@ -536,3 +536,28 @@ def test_extensions_hub_respects_layout_children_as_visibility(qapp) -> None:
     assert [action.text() for action in hub.actions()[0].menu().actions()] == [
         "播放 / 暂停"
     ]
+
+
+def test_menu_icons_render_at_the_device_pixel_ratio(qapp) -> None:
+    """QIcon 接受 DPR 后会按物理像素给出可用的源图（1x=36，2x=72）。"""
+    from petcore.ui.icons import icon
+
+    sizes = {
+        dpr: icon("quit", size=36, dpr=dpr).availableSizes()[0].width()
+        for dpr in (1.0, 1.5, 2.0)
+    }
+    assert sizes == {1.0: 36, 1.5: 54, 2.0: 72}
+
+
+def test_file_icon_scales_to_physical_pixels(qapp, tmp_path) -> None:
+    from PySide6.QtGui import QImage
+
+    from petcore.ui.icons import file_icon
+
+    path = tmp_path / "icon.png"
+    image = QImage(8, 8, QImage.Format.Format_ARGB32)
+    image.fill(0xFF3366)
+    assert image.save(str(path))
+
+    assert file_icon(path, size=24, dpr=1.5).availableSizes()[0].width() == 36
+    assert file_icon(path, size=24, dpr=2.0).availableSizes()[0].width() == 48

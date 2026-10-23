@@ -74,3 +74,49 @@ def test_legacy_config_and_slot_profiles_migrate_with_backup(tmp_path: Path, mon
     assert child.get("self_talk_enabled") is True
     assert (new_root / "migration-backup" / "old-standalone-config.json").exists()
     assert (old_root / "config.json").exists()
+
+
+def test_proactive_keys_are_global_and_normalized(tmp_path: Path) -> None:
+    global_config = Config(tmp_path)
+    pet_config = Config(tmp_path, {"character": "child"}, filename="config-pet-1.json")
+    scoped = ScopedConfig(global_config, pet_config)
+
+    assert scoped.get("ai_proactive_enabled") is False
+    assert scoped.get("ai_proactive_whitelist") == []
+    assert scoped.get("ai_proactive_dwell_seconds") == 45
+    assert scoped.get("ai_proactive_change_threshold") == 8
+    assert scoped.get("ai_proactive_daily_cap") == 15
+    assert scoped.get("ai_proactive_cooldown_seconds") == 300
+    assert scoped.get("ai_proactive_min_interval_seconds") == 60
+    assert scoped.get("ai_proactive_require_idle") is False
+    assert scoped.get("ai_proactive_min_idle_seconds") == 30
+    assert scoped.get("ai_proactive_dry_run") is False
+    assert scoped.get("ai_proactive_pre_cue") is True
+    assert scoped.get("ai_proactive_sync_chat") is True
+
+    scoped.set("ai_proactive_enabled", True)
+    scoped.set("ai_proactive_whitelist", [" chrome.exe ", "", "title:*报告*", "x" * 300])
+    scoped.set("ai_proactive_dwell_seconds", 1)
+    scoped.set("ai_proactive_change_threshold", 99)
+    scoped.set("ai_proactive_daily_cap", 0)
+    scoped.set("ai_proactive_cooldown_seconds", 5)
+    scoped.set("ai_proactive_min_interval_seconds", 99999)
+
+    assert pet_config.get("ai_proactive_enabled") is False, "全局面不写子宠配置"
+    assert global_config.get("ai_proactive_enabled") is True
+    rules = global_config.get("ai_proactive_whitelist")
+    assert rules[0] == "chrome.exe"
+    assert rules[1] == "title:*报告*"
+    assert len(rules) == 3
+    assert all(len(rule) <= 120 for rule in rules)
+    assert global_config.get("ai_proactive_dwell_seconds") == 15
+    assert global_config.get("ai_proactive_change_threshold") == 32
+    assert global_config.get("ai_proactive_daily_cap") == 1
+    assert global_config.get("ai_proactive_cooldown_seconds") == 30
+    assert global_config.get("ai_proactive_min_interval_seconds") == 3600
+
+
+def test_proactive_whitelist_caps_at_fifty_rules(tmp_path: Path) -> None:
+    config = Config(tmp_path)
+    config.set("ai_proactive_whitelist", [f"app{index}.exe" for index in range(80)])
+    assert len(config.get("ai_proactive_whitelist")) == 50

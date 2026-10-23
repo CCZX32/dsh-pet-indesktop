@@ -16,7 +16,8 @@ $ids = @(
     "voice.chime",
     "media.music",
     "tool.weather",
-    "tool.file-reader"
+    "tool.file-reader",
+    "ai.agent"
 )
 
 foreach ($id in $ids) {

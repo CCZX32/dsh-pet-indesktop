@@ -13,14 +13,14 @@
 | 菜单与设置 | 现代菜单、编排器、搜索、非模态设置 | Core 已实现 | 保持 | 业务域设置页尚未齐全 |
 | 自言自语/点击台词 | 台词、配图、角色档案、朗读 | Core feature 已实现 | P1/P4 | 当前配置读取主宠 |
 | AI 对话 | 会话、流式输出、Markdown、历史、模型路由 | 部分：Core 流式/窗口/会话 + `ai.chat` 扩展 | P3 完成 | `test_petcore_api_chat.py`、`test_petcore_chat_ui.py`、`test_petcore_ai_mod.py` |
-| 识屏/截图提问 | 截图、OCR、翻译、视觉模型、主动识屏 | 部分：截图提问（全屏、仅内存）；OCR/翻译/主动识屏未做 | P4 | `test_petcore_screenshot.py`；无框选/OCR |
-| Agent 联动 | DSH、Claude、Cursor、自定义 Agent、富事件状态 | 未实现 | P4 | 需要 worker/事件聚合 |
+| 识屏/截图提问 | 截图、OCR、翻译、视觉模型、主动识屏 | 截图提问（框选 + 四动作）已完成；**主动识屏 P4-c1 已完成**（窗口采样、白名单/停留/去重/限额、只冒气泡）；OCR 归 `tool.ocr` | P4-c1 完成 / P4-c2 待办 | `test_petcore_screenshot.py`、`test_petcore_proactive.py`、`test_petcore_ai_mod.py` |
+| Agent 联动 | DSH 桥目录、统一 `agent-events/*.jsonl`、自定义事件文件；六态 → 动作/气泡/完成通知/音效（只读） | 已实现（P4-c2，`ai.agent`） | P4 | 写方安装与 Cursor/OpenCode 直读见 ROADMAP §27 c2.1 |
 | API/账户/余额 | 服务规格、钥匙串、余额、缓存、自动刷新 | API 基础已实现，账户未实现 | P3 | `petcore/account/` 不存在 |
 | 音乐 | 播放器入口、SMTC、歌名、歌词、唱歌动画 | 只有系统媒体键样板 | P4 | example 不应视作默认交付 |
 | 语音 | TTS provider、音色、语速、口型、报时 | 只有简单报时样板 | P4 | provider 和缓存未迁移 |
 | 待办/节日/抽签 | 面板、提醒、节日、每日一签、语音 | 仅 example mod | P2/P4 | 可选安装（默认不勾），运行能力待 P4 |
 | 天气/文件识别 | 城市天气、拖文件解读 | 未实现 | P4 | 网络和 worker 域 |
-| 灵动岛 | 胶囊、段化、聊天、指标、碰撞 | 未实现 | P5 | 独立 UI 宿主 |
+| 灵动岛 | 胶囊、段化、指标（CPU/内存/网络）、告警色、展开卡片 | 部分：P5-a1 已实现胶囊 + 3 段 + 卡片 + 设置；聊天/碰撞/动效/第三方段留 P5-a2 | P5-a1 | `test_petcore_island_*.py` |
 | 性能治理 | 隐藏态低功耗、共享解码、预热、FPS/GPU/网络 | 大部分未实现 | P5 | 需要稳定性能预算 |
 | 更新与发布 | 在线更新、回滚、三端构建、安装卸载 | 有基础构建，缺切换/E2E | P5/P6 | 真实安装升级尚未跑通 |
 | VPet 素材 | LPS/PNG 角色包 | 有架构参考，无运行时支持 | 非目标 | 只借鉴 Graph/寻址思想 |
