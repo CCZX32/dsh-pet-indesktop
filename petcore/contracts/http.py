@@ -129,6 +129,8 @@ class TransferSpec:
     这类 `github.com → objects.githubusercontent.com` 必须由调用方显式列出目标主机。
     `allow_loopback_http` 为真时，传输层对 `127.0.0.1` / `::1` / `localhost` 额外放行
     明文 `http`（本地镜像与测试用）；其余主机的协议仍只由 `allowed_schemes` 决定。
+    `file://` 还必须同时显式设置 `allow_local_file=True` 和 `local_root`，且目标解析后
+    必须位于该根目录内；网络索引或重定向不能借此授权本机文件。
     校验（size / sha256）由 market 层负责，传输层只用 `expected_size` 判断续传是否对齐。
     """
 
@@ -139,6 +141,9 @@ class TransferSpec:
     allowed_schemes: tuple[str, ...] = ("https",)
     allowed_hosts: tuple[str, ...] = ()
     allow_loopback_http: bool = True
+    # file:// 只允许在显式本地索引授权且目标位于此根目录时使用。
+    allow_local_file: bool = False
+    local_root: str | None = None
     resume: ResumePolicy = ResumePolicy.RESUME_IF_MATCH
     timeout: float = 15.0
 

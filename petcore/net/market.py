@@ -60,6 +60,7 @@ def fetch_index(
     etag: str = "",
     timeout: float = 8.0,
     opener=None,
+    cancel: CancelCallback | None = None,
 ) -> IndexFetch:
     """读取索引；304 返回 ``not_modified``，任何传输失败抛 ``IndexFetchError``。"""
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -76,9 +77,23 @@ def fetch_index(
         raise IndexFetchError(type(exc).__name__, str(url)) from exc
 
     try:
+        chunks: list[bytes] = []
+        total = 0
         with response:
-            body = response.read(MAX_INDEX_BYTES + 1)
+            while True:
+                if cancel is not None and cancel():
+                    raise TransferCancelled("index fetch cancelled")
+                block = response.read(min(CHUNK_BYTES, MAX_INDEX_BYTES + 1 - total))
+                if not block:
+                    break
+                chunks.append(block)
+                total += len(block)
+                if total > MAX_INDEX_BYTES:
+                    break
+            body = b"".join(chunks)
             new_etag = _header(response, "ETag")
+    except TransferCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise IndexFetchError(f"读取失败：{type(exc).__name__}", str(url)) from exc
     if len(body) > MAX_INDEX_BYTES:
@@ -86,7 +101,7 @@ def fetch_index(
     return IndexFetch(body=_decode_github_contents(body), etag=new_etag)
 
 
-def fetch_index_file(url: str) -> IndexFetch:
+def fetch_index_file(url: str, *, cancel: CancelCallback | None = None) -> IndexFetch:
     """读取本地 `file://` 索引（离线验收/本地镜像）；不联网、不写缓存。"""
     try:
         parts = urllib.parse.urlsplit(str(url))
@@ -100,7 +115,18 @@ def fetch_index_file(url: str) -> IndexFetch:
     if size > MAX_INDEX_BYTES:
         raise IndexFetchError(f"索引超过 {MAX_INDEX_BYTES} 字节上限", str(url))
     try:
-        body = path.read_bytes()
+        chunks: list[bytes] = []
+        with path.open("rb") as stream:
+            while True:
+                if cancel is not None and cancel():
+                    raise TransferCancelled("index fetch cancelled")
+                block = stream.read(CHUNK_BYTES)
+                if not block:
+                    break
+                chunks.append(block)
+        body = b"".join(chunks)
+    except TransferCancelled:
+        raise
     except OSError as exc:
         raise IndexFetchError(f"读取失败：{type(exc).__name__}", str(url)) from exc
     return IndexFetch(body=body, etag=f"file:{size}:{int(path.stat().st_mtime)}")
@@ -504,11 +530,16 @@ class HttpFetcher:
     """把模块函数包成 market 层使用的协议对象（便于测试替换）。"""
 
     def fetch_index(
-        self, url: str, *, etag: str = "", timeout: float = 8.0
+        self,
+        url: str,
+        *,
+        etag: str = "",
+        timeout: float = 8.0,
+        cancel: CancelCallback | None = None,
     ) -> IndexFetch:
         if str(url).lower().startswith("file://"):
-            return fetch_index_file(url)
-        return fetch_index(url, etag=etag, timeout=timeout)
+            return fetch_index_file(url, cancel=cancel)
+        return fetch_index(url, etag=etag, timeout=timeout, cancel=cancel)
 
     def fetch(self, spec, dest_dir, *, limits=None, progress=None, cancel=None):
         """逐跳加固的 artifact 下载（T02）；market 层优先使用这个入口。"""

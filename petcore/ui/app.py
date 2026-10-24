@@ -21,6 +21,7 @@ from ..platform.hotkeys import GlobalHotkeyService
 from ..platform.session import SessionWatcher
 from ..platform.worker import WorkerHost
 from ..mods.feature import CORE_FEATURE_IDS, FeatureManager
+from .market_jobs import MarketJobRegistry
 from .menu import install_core_menu
 from .menu_layout import (
     DEFAULT_LAYOUT_ID,
@@ -214,6 +215,7 @@ class CoreHost:
         self.features: FeatureManager | None = None
         self.quiet = None
         self.worker_host = WorkerHost()
+        self.market_jobs = MarketJobRegistry()
         self.ports = None
         from .ports import QuietMode
 
@@ -878,6 +880,9 @@ class CoreHost:
             except Exception:  # noqa: BLE001
                 logger.debug("island shutdown failed", exc_info=True)
         self.worker_host.shutdown_all()
+        report = self.market_jobs.shutdown_all(2000)
+        if report.timed_out:
+            logger.warning("market jobs still running during quit: %s", report)
         if self.features is not None:
             self.features.stop()
             self.features = None
@@ -964,6 +969,9 @@ def run(config: Config, *, root: Path, mod_dirs, instance: str | None = None) ->
         host.close_dialogs()
         manager.shutdown()
         host.worker_host.shutdown_all()
+        report = host.market_jobs.shutdown_all(2000)
+        if report.timed_out:
+            logger.warning("market jobs still running during aboutToQuit: %s", report)
         if host.features is not None:
             host.features.stop()
         if host.tray is not None:

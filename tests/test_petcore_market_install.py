@@ -315,12 +315,25 @@ class FetchAwareFetcher:
         )
 
 
-def test_market_download_uses_hardened_fetch_with_limits(tmp_path):
-    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
-    package, version = _package(_document("fun.test", "1.0.0", artifact))
+def test_market_download_uses_hardened_fetch_with_limits_for_feature(tmp_path):
+    artifact = _make_zip(
+        tmp_path,
+        "v1.zip",
+        _manifest(
+            "fun.test",
+            "feature",
+            "1.0.0",
+            execution="host-only",
+            entrypoint="host/factory.py:create",
+        ),
+        "one",
+    )
+    package, version = _package(_document("fun.test", "1.0.0", artifact, kind="feature"))
     fetcher = FetchAwareFetcher(artifact)
 
-    outcome = install.install_package(tmp_path, package, version, fetcher=fetcher)
+    outcome = install.install_package(
+        tmp_path, package, version, fetcher=fetcher, allow_feature=True
+    )
 
     assert outcome.ok, outcome.message
     assert len(fetcher.specs) == 1

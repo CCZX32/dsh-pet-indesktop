@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from ..contracts.archive import MARKET_ARCHIVE_LIMITS, ArchiveLimits, BudgetExceeded
+from ..contracts.archive import ArchiveLimits, BudgetExceeded, effective_archive_limits
 from ..contracts.market import PackageOrigin, writes_trusted_marker
 from ..mods import install as mod_install
 from ..mods.manifest import ModManifest, load_manifest
@@ -39,6 +39,15 @@ class InstallOutcome:
     attempts: tuple[str, ...] = ()
     backup: str = ""
 
+
+@dataclass(frozen=True, slots=True)
+class RollbackResult(InstallOutcome):
+    """回滚的结构化结果，区分磁盘恢复、清理和锁文件状态。"""
+
+    state: str = "failed"
+    restored_version: str = ""
+    backup_path: str = ""
+    residual_path: str = ""
 
 def market_root(root: Path) -> Path:
     return Path(root) / "market"
@@ -146,7 +155,7 @@ def _restore(root: Path, mod_id: str, backup: Path | None) -> str:
     if backup is None:
         return "没有可恢复的旧版本"
     ok, message = mod_install.install(backup, Path(root), force=True)
-    return message if ok else f"恢复旧版本失败：{message}"
+    return f"恢复旧版本成功：{message}" if ok else f"恢复旧版本失败：{message}"
 
 
 def _rollback_failed_commit(root: Path, mod_id: str, backup: Path | None) -> str:
@@ -192,15 +201,22 @@ def install_package(
     fetcher: ArtifactFetcher,
     allow_feature: bool = False,
     origin: PackageOrigin = PackageOrigin.MARKET,
-    limits: ArchiveLimits | None = MARKET_ARCHIVE_LIMITS,
+    limits: ArchiveLimits | None = None,
     core_version: str = model.CORE_VERSION,
     platform: str | None = None,
     apply: ApplyCallback | None = None,
     progress=None,
     cancel=None,
+    local_file_root: Path | None = None,
+    index_origin: str = "",
 ) -> InstallOutcome:
     root = Path(root)
     platform = platform or model.normalize_platform(sys.platform)
+    effective_limits = effective_archive_limits(origin.value, package.kind, limits)
+    allow_local_file = (
+        str(index_origin).lower().startswith("file://")
+        and local_file_root is not None
+    )
 
     if package.blocked:
         return InstallOutcome(
@@ -248,12 +264,22 @@ def install_package(
             root,
             package,
             version,
-            limits=limits,
+            limits=effective_limits,
             progress=progress,
             cancel=cancel,
+            local_file_root=local_file_root,
+            allow_local_file=allow_local_file,
         )
     except MarketError as exc:
         return InstallOutcome(False, str(exc), mod_id=package.id, previous_version=previous)
+    if cancel is not None and cancel():
+        return InstallOutcome(
+            False,
+            "安装已取消，未进入备份和替换阶段",
+            mod_id=package.id,
+            previous_version=previous,
+            attempts=downloaded.attempts,
+        )
 
     staging_root = market_root(root) / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -261,7 +287,7 @@ def install_package(
     marker_note = ""
     try:
         with mod_install.open_pack(
-            downloaded.path, work_root=staging_root, limits=limits
+            downloaded.path, work_root=staging_root, limits=effective_limits
         ) as pack:
             if _strip_untrusted_marker(pack, origin):
                 marker_note = "；已移除包内 .trusted（该来源无授信资格）"
@@ -367,60 +393,123 @@ def install_package(
     )
 
 
+def _rollback_failure(
+    *,
+    message: str,
+    mod_id: str,
+    state: str,
+    previous_version: str = "",
+    backup: Path | None = None,
+    restored_version: str = "",
+    residual: Path | None = None,
+    restart_required: bool = False,
+    root: Path | None = None,
+) -> RollbackResult:
+    return RollbackResult(
+        False,
+        message,
+        mod_id=mod_id,
+        version=restored_version,
+        previous_version=previous_version,
+        restart_required=restart_required,
+        backup=_relative(root, backup) if backup is not None and root is not None else (str(backup) if backup is not None else ""),
+        state=state,
+        restored_version=restored_version,
+        backup_path=str(backup) if backup is not None else "",
+        residual_path=str(residual) if residual is not None else "",
+    )
+
+
 def rollback(
     root: Path,
     mod_id: str,
     *,
     apply: ApplyCallback | None = None,
-) -> InstallOutcome:
+) -> RollbackResult:
     root = Path(root)
     lock = load_lock(root)
     entry = (lock.get("packages") or {}).get(mod_id)
     if not isinstance(entry, dict):
-        return InstallOutcome(False, f"{mod_id} 没有市场安装记录", mod_id=mod_id)
+        return _rollback_failure(
+            message=f"{mod_id} 没有市场安装记录",
+            mod_id=mod_id,
+            state="no-record",
+            root=root,
+        )
     backup_rel = str(entry.get("backup") or "")
     if not backup_rel:
-        return InstallOutcome(False, f"{mod_id} 没有可回滚的备份", mod_id=mod_id)
+        return _rollback_failure(
+            message=f"{mod_id} 没有可回滚的备份",
+            mod_id=mod_id,
+            state="no-backup",
+            root=root,
+        )
     backup = root / backup_rel
     if not backup.is_dir():
-        return InstallOutcome(False, f"备份目录不存在：{backup}", mod_id=mod_id)
+        return _rollback_failure(
+            message=f"备份目录不存在：{backup}",
+            mod_id=mod_id,
+            state="backup-missing",
+            backup=backup,
+            root=root,
+        )
 
     current = installed_version(root, mod_id)
+    current_path = root / "mods" / mod_id
     manifest, problems = load_manifest(backup)
     if manifest is None:
-        return InstallOutcome(
-            False,
-            f"备份无效：{'；'.join(problems) or '缺少 mod.json'}",
+        return _rollback_failure(
+            message=f"备份无效：{'；'.join(problems) or '缺少 mod.json'}",
             mod_id=mod_id,
+            state="backup-invalid",
+            previous_version=current,
+            backup=backup,
+            residual=current_path if current_path.exists() else None,
+            root=root,
         )
     target_version = manifest.version
     if manifest.id != mod_id:
-        return InstallOutcome(
-            False,
-            f"备份的 mod id 不匹配：期望 {mod_id}，实际 {manifest.id}",
+        return _rollback_failure(
+            message=f"备份的 mod id 不匹配：期望 {mod_id}，实际 {manifest.id}",
             mod_id=mod_id,
+            state="backup-id-mismatch",
+            previous_version=current,
+            backup=backup,
+            residual=current_path if current_path.exists() else None,
+            root=root,
         )
 
-    # 先把当前版本挪到 staging（安装会覆盖 mods/<id>），装完再放进备份树。
     staging_current: Path | None = None
     if current:
-        staging_current = (
-            market_root(root) / "staging" / f".rollback-{mod_id}-{os.getpid()}"
-        )
+        staging_current = market_root(root) / "staging" / f".rollback-{mod_id}-{os.getpid()}"
         try:
             if staging_current.exists():
                 shutil.rmtree(staging_current)
-            _link_or_copy_tree(root / "mods" / mod_id, staging_current)
+            _link_or_copy_tree(current_path, staging_current)
         except OSError as exc:
-            return InstallOutcome(
-                False, f"无法备份当前版本：{exc}", mod_id=mod_id, previous_version=current
+            return _rollback_failure(
+                message=f"无法备份当前版本：{exc}",
+                mod_id=mod_id,
+                state="current-backup-failed",
+                previous_version=current,
+                backup=backup,
+                residual=current_path,
+                root=root,
             )
 
     ok, message = mod_install.install(backup, root, force=True)
     if not ok:
         if staging_current is not None:
             shutil.rmtree(staging_current, ignore_errors=True)
-        return InstallOutcome(False, f"回滚失败：{message}", mod_id=mod_id)
+        return _rollback_failure(
+            message=f"回滚失败：{message}",
+            mod_id=mod_id,
+            state="restore-failed",
+            previous_version=current,
+            backup=backup,
+            residual=current_path if current_path.exists() else None,
+            root=root,
+        )
 
     current_backup: Path | None = None
     if current and staging_current is not None:
@@ -428,20 +517,34 @@ def rollback(
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
+                shutil.rmtree(target)
             os.replace(staging_current, target)
             _prune_backups(target.parent)
             current_backup = target
-        except OSError:
-            shutil.rmtree(staging_current, ignore_errors=True)
+        except OSError as exc:
+            residual = staging_current if staging_current.exists() else None
+            return _rollback_failure(
+                message=f"已恢复 {mod_id} {target_version}，但旧版本备份清理失败：{exc}",
+                mod_id=mod_id,
+                state="restored-cleanup-failed",
+                previous_version=current,
+                backup=backup,
+                restored_version=target_version,
+                residual=residual,
+                root=root,
+            )
 
     restored = installed_version(root, mod_id)
     if restored != target_version:
-        return InstallOutcome(
-            False,
-            f"回滚后版本校验失败（{restored or '缺失'}）",
+        return _rollback_failure(
+            message=f"回滚后版本校验失败（{restored or '缺失'}）；原安装目录：{current_path}",
             mod_id=mod_id,
+            state="verification-failed",
             previous_version=current,
+            backup=backup,
+            restored_version=restored,
+            residual=current_path if current_path.exists() else None,
+            root=root,
         )
 
     packages = dict(lock.get("packages") or {})
@@ -456,10 +559,19 @@ def rollback(
     lock["packages"] = packages
     try:
         save_lock(root, lock)
-    except OSError:
-        pass
+    except OSError as exc:
+        return _rollback_failure(
+            message=f"已恢复 {mod_id} {restored}，但写入 market-lock.json 失败：{exc}",
+            mod_id=mod_id,
+            state="restored-lock-save-failed",
+            previous_version=current,
+            backup=backup,
+            restored_version=restored,
+            residual=current_path if current_path.exists() else None,
+            root=root,
+        )
 
-    manifest, _problems = load_manifest(root / "mods" / mod_id)
+    manifest, _problems = load_manifest(current_path)
     needs_restart = bool(
         manifest is not None
         and manifest.kind == "feature"
@@ -470,23 +582,33 @@ def rollback(
         try:
             apply()
             applied = True
-        except Exception as exc:  # noqa: BLE001
-            return InstallOutcome(
-                False,
-                f"已回滚到 {restored}，但重新加载失败：{type(exc).__name__}: {exc}",
+        except Exception as exc:  # noqa: BLE001 - 磁盘已恢复，重载失败单独留痕
+            return RollbackResult(
+                True,
+                f"已回滚 {mod_id} {current or '未知'} → {restored}，但重新加载失败：{type(exc).__name__}: {exc}",
                 mod_id=mod_id,
                 version=restored,
                 previous_version=current,
                 restart_required=True,
+                applied=False,
+                backup=_relative(root, current_backup),
+                state="restored-reload-failed",
+                restored_version=restored,
+                backup_path=str(backup),
+                residual_path="",
             )
 
-    return InstallOutcome(
+    return RollbackResult(
         True,
-        f"已回滚 {mod_id} {current} → {restored}",
+        f"已回滚 {mod_id} {current or '未知'} → {restored}",
         mod_id=mod_id,
         version=restored,
         previous_version=current,
         restart_required=needs_restart,
         applied=applied,
         backup=_relative(root, current_backup),
+        state="restored",
+        restored_version=restored,
+        backup_path=str(backup),
+        residual_path="",
     )

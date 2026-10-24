@@ -419,13 +419,22 @@ def _load_verifier():
     return importlib.import_module("verify_petcore_extensions")
 
 
-def build_index(candidate_manifest: Path, *, local: bool = False) -> dict:
+def build_index(
+    candidate_manifest: Path,
+    *,
+    local: bool = False,
+    state: str = "candidate",
+) -> dict:
     """由候选清单生成 schema_version=1 的市场字典。
 
-    ``local=False``：四包 ``blocked=true`` + 拟定 Release URL（待发布）。
-    ``local=True``：``blocked=false`` + 候选 ZIP 的 ``file://`` 绝对地址，仅本机验收用。
+    ``candidate`` 是默认状态：使用拟定 Release URL，但所有包保持 blocked。
+    ``published`` 只在调用方明确确认资产已上传后解除 blocked。
+    ``local=True`` 仅用于本机离线验收，使用候选 ZIP 的 ``file://`` 地址。
     先跑独立校验器，清单/ZIP 不一致直接失败。
     """
+    state = str(state).strip().lower()
+    if state not in {"candidate", "published"}:
+        raise BuildError("index state must be candidate or published")
     candidate_manifest = Path(candidate_manifest).resolve()
     problems, _artifacts = _load_verifier().verify_candidate_manifest(candidate_manifest)
     if problems:
@@ -455,8 +464,10 @@ def build_index(candidate_manifest: Path, *, local: bool = False) -> dict:
                 "capabilities": list(item.get("capabilities", [])),
                 "platforms": [],
                 "certified": False,
-                "blocked": not local,
-                "blocked_reason": "" if local else BLOCKED_REASON,
+                "blocked": not local and state != "published",
+                "blocked_reason": ""
+                if local or state == "published"
+                else BLOCKED_REASON,
                 "screenshots": [],
                 "versions": [
                     {
@@ -509,6 +520,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --write-index: emit file:// candidate URLs instead of release URLs",
     )
+    parser.add_argument(
+        "--index-state",
+        choices=("candidate", "published"),
+        default="candidate",
+        help="index status; candidate is blocked by default, published requires explicit confirmation",
+    )
     return parser
 
 
@@ -530,7 +547,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             strict=args.strict,
         )
         if args.write_index:
-            index = build_index(manifest_path, local=args.local_index)
+            index = build_index(
+                manifest_path, local=args.local_index, state=args.index_state
+            )
             target = Path(args.write_index)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(

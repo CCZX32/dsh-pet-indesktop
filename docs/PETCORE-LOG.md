@@ -2606,3 +2606,15 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **未验证/风险**：真实 HTTPS/CDN/断流未跑；安装器只验静默模式（向导点击、自启、覆盖升级未验）；
 性能探针为 loopback 合成负载；整仓未在 20 负载进程下跑三遍；开发证书不能用于公开分发。
+
+## L072 — 2026-10-25 — petcore 市场生命周期、授权与候选索引修复
+
+**边界**：按当前审查计划关闭市场线程退出、断点续传、远程功能包预算、`file://` 授权、回滚语义和候选/发布索引混用六类阻断；不上传 Release，不改变默认公开源。
+
+**改动**：应用级 `MarketJobRegistry` 持有索引/安装/回滚 `QThread`，页面销毁只取消并断开信号，退出阶段做 2 秒有界等待；下载把 `.part` 与元数据稳定存入市场缓存并保留可恢复状态；`effective_archive_limits()` 只给远程 `feature` 包套 64 MiB/256 MiB/10000 条目上限；`file://` 仅在显式本地索引、授权根目录和同根路径同时满足时可用，网络索引与重定向不能借机访问本机文件；回滚返回结构化 `RollbackResult`，恢复失败不再伪报成功；构建器默认生成 blocked 的 `candidate` 索引，只有显式 `published` 才解除 blocked。同步补充架构红线与故障回归测试。
+
+**逐文件增删**：`git diff --cached --numstat` 实测：实现 `petcore/contracts/archive.py` +41/−0、`contracts/http.py` +5/−0、`market/cli.py` +11/−2、`market/download.py` +90/−6、`market/install.py` +160/−38、`market/source.py` +30/−5、`net/market.py` +37/−6、`net/market_transport.py` +103/−27、`ui/app.py` +8/−0、`ui/market_jobs.py` +82/−0、`ui/settings/page_market.py` +82/−18、`scripts/build_petcore_extensions.py` +25/−6；测试 `tests/test_petcore_extension_build.py` +6/−0、`tests/test_petcore_market_hardening.py` +311/−0、`tests/test_petcore_market_install.py` +17/−4。
+
+**验证**：市场传输/安装/UI/远程预算/索引/构建/本批 hardening 联合 **90 passed / 19.56s**；其中新增市场阻断族 **51 passed / 8.46s**；后续完整门禁仍待本批全部代码与文档稳定后重跑。
+
+**限制**：本批没有真实 HTTPS/CDN、真实 Release、冻结包或外部代理验收；网络、PySide6 与文件源的确定性回归不等同公开分发已完成。`_ORPHAN_JOBS` 仅保留为旧探针兼容符号，实际任务已由应用级 registry 持有。

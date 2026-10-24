@@ -102,3 +102,4 @@
 | L070 | 2026-10-24 | D2/T08 冻结包 | `-OutputRoot`/`-PythonPath` + iss 源目录覆盖（修「打旧包」）、开发证书签名、冻结包自检与四包安装；D1 验收说明 | 打包、签名、Inno、SAC、冻结包、验收说明 |
 
 | L071 | 2026-10-24 | D2/T09 收口 | before/after 无回退、整仓 9941 passed、安装器四组合矩阵、发布手册；未发布 | 性能对照、整仓、安装器、发布准备 |
+| L072 | 2026-10-25 | 市场生命周期与授权修复 | 应用级市场任务 registry、可恢复下载、feature 解包预算、file 授权、结构化回滚、candidate/published 索引状态；90 passed | QThread、resume、archive limits、file://、rollback、candidate |

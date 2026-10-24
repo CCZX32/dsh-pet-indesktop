@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
+from .errors import TransferCancelled
 from .model import MarketIndex, normalize_index_url, parse_index_text
 
 DEFAULT_INDEX_URLS = (
@@ -38,7 +39,14 @@ class IndexFetchError(RuntimeError):
 
 
 class IndexFetcher(Protocol):
-    def fetch_index(self, url: str, *, etag: str = "", timeout: float = INDEX_TIMEOUT_SECONDS) -> IndexFetch:
+    def fetch_index(
+        self,
+        url: str,
+        *,
+        etag: str = "",
+        timeout: float = INDEX_TIMEOUT_SECONDS,
+        cancel: Callable[[], bool] | None = None,
+    ) -> IndexFetch:
         ...
 
 
@@ -105,7 +113,13 @@ class MarketSource:
             return (custom,)
         return tuple(dict.fromkeys((custom, *self.base_urls)))
 
-    def load(self, *, custom_url: str = "", force: bool = False) -> SourceResult:
+    def load(
+        self,
+        *,
+        custom_url: str = "",
+        force: bool = False,
+        cancel: Callable[[], bool] | None = None,
+    ) -> SourceResult:
         problems: list[str] = []
         now = self.clock()
         if not force and self._memory is not None and now - self._memory.fetched_at < self.ttl:
@@ -118,9 +132,20 @@ class MarketSource:
         for url in self.urls(custom_url):
             etag = str(meta.get("etag") or "") if meta.get("url") == url else ""
             try:
-                fetched = self.fetch.fetch_index(
-                    url, etag=etag, timeout=INDEX_TIMEOUT_SECONDS
-                )
+                try:
+                    fetched = self.fetch.fetch_index(
+                        url,
+                        etag=etag,
+                        timeout=INDEX_TIMEOUT_SECONDS,
+                        cancel=cancel,
+                    )
+                except TypeError:
+                    # 保持旧的测试替身/第三方适配器兼容；真实 HttpFetcher 支持取消。
+                    fetched = self.fetch.fetch_index(
+                        url, etag=etag, timeout=INDEX_TIMEOUT_SECONDS
+                    )
+            except TransferCancelled:
+                raise
             except IndexFetchError as exc:
                 problems.append(f"{url}: {exc}")
                 continue

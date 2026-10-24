@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import __version__, paths
 from ..config import Config
 from ..net.market import HttpFetcher
+from ..net.market_transport import local_file_root_for_index
 from . import install, model
 from .errors import MarketError
 from .source import DEFAULT_INDEX_URLS, IndexFetchError, MarketSource
@@ -206,7 +207,9 @@ def _install_one(
     version: model.MarketVersion,
     *,
     allow_feature: bool,
+    index_origin: str = "",
 ) -> install.InstallOutcome:
+    local_file_root = local_file_root_for_index(index_origin)
     return install.install_package(
         root,
         package,
@@ -214,6 +217,8 @@ def _install_one(
         fetcher=HttpFetcher(),
         allow_feature=allow_feature,
         core_version=__version__,
+        index_origin=index_origin,
+        local_file_root=local_file_root,
     )
 
 
@@ -233,7 +238,9 @@ def _install(args: argparse.Namespace) -> int:
 
     allow = bool(args.allow_feature or _allow_feature_mods(root))
     try:
-        outcome = _install_one(root, package, version, allow_feature=allow)
+        outcome = _install_one(
+            root, package, version, allow_feature=allow, index_origin=result.origin
+        )
     except MarketError as exc:
         print(f"install failed: {exc}")
         return 1
@@ -268,7 +275,9 @@ def _update(args: argparse.Namespace) -> int:
     failures = 0
     rows = []
     for package, version in targets:
-        outcome = _install_one(root, package, version, allow_feature=allow)
+        outcome = _install_one(
+            root, package, version, allow_feature=allow, index_origin=result.origin
+        )
         rows.append({"id": package.id, "ok": outcome.ok, "message": outcome.message})
         if not outcome.ok:
             failures += 1

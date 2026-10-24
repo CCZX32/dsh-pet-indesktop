@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 #: 市场 feature 包默认预算：压缩 64 MiB / 展开 256 MiB / 10000 个条目（目录也计数）。
 MARKET_ARCHIVE_LIMITS_BYTES = (64 * 1024 * 1024, 256 * 1024 * 1024, 10_000)
@@ -52,3 +53,43 @@ class BudgetExceeded(RuntimeError):
 
 #: 市场通道的默认预算实例（数值见 :data:`MARKET_ARCHIVE_LIMITS_BYTES`）。
 MARKET_ARCHIVE_LIMITS = ArchiveLimits(*MARKET_ARCHIVE_LIMITS_BYTES)
+
+
+class ArchiveOrigin(str, Enum):
+    """解包来源，用于决定是否自动套用市场功能包预算。"""
+
+    MARKET = "market"
+    LOCAL = "local"
+    BUNDLED = "bundled"
+
+
+def _tighten_limits(explicit: ArchiveLimits, ceiling: ArchiveLimits) -> ArchiveLimits:
+    """只收紧预算，不允许显式参数绕过远程功能包上限。"""
+    return ArchiveLimits(
+        min(explicit.compressed_bytes, ceiling.compressed_bytes),
+        min(explicit.expanded_bytes, ceiling.expanded_bytes),
+        min(explicit.entries, ceiling.entries),
+    )
+
+
+def effective_archive_limits(
+    origin: ArchiveOrigin | str,
+    kind: str,
+    explicit_limits: ArchiveLimits | None = None,
+) -> ArchiveLimits | None:
+    """返回本次解包真正使用的预算。
+
+    市场来源的 ``feature`` 包始终受市场硬上限约束；显式预算只能更严格。
+    其他来源/类型不自动套用市场预算，保留调用方显式传入的测试或策略限制。
+    """
+    try:
+        normalized_origin = ArchiveOrigin(origin)
+    except ValueError:
+        normalized_origin = ArchiveOrigin.LOCAL
+    if normalized_origin is ArchiveOrigin.MARKET and str(kind).strip().lower() == "feature":
+        return (
+            MARKET_ARCHIVE_LIMITS
+            if explicit_limits is None
+            else _tighten_limits(explicit_limits, MARKET_ARCHIVE_LIMITS)
+        )
+    return explicit_limits

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -21,15 +22,30 @@ from ...market import install as market_install
 from ...market import model
 from ...market.source import MarketSource, SourceResult
 from ...net.market import HttpFetcher
+from ...net.market_transport import local_file_root_for_index
+from ..market_jobs import MarketJobRegistry
 from .base import SettingsPage, make_button
 
 FILTER_ALL = ""
 
-#: 设置页销毁后仍在运行的索引线程；由模块持有，直到线程自己 finished。
+#: 旧测试/第三方探针的兼容符号；真实任务由应用级 MarketJobRegistry 持有。
 _ORPHAN_JOBS: set[QThread] = set()
 
 
-class _IndexJob(QThread):
+class _CancellableJob(QThread):
+    def __init__(self) -> None:
+        super().__init__()
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        self.requestInterruption()
+
+    def cancelled(self) -> bool:
+        return self._cancel_event.is_set() or self.isInterruptionRequested()
+
+
+class _IndexJob(_CancellableJob):
     done = Signal(object)
     failed = Signal(str)
 
@@ -41,23 +57,41 @@ class _IndexJob(QThread):
 
     def run(self) -> None:
         try:
-            result = self._source.load(custom_url=self._custom_url, force=self._force)
+            result = self._source.load(
+                custom_url=self._custom_url,
+                force=self._force,
+                cancel=self.cancelled,
+            )
         except Exception as exc:  # noqa: BLE001 - 线程里只许发信号
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            if not self.cancelled():
+                self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
-        self.done.emit(result)
+        if not self.cancelled():
+            self.done.emit(result)
 
 
-class _InstallJob(QThread):
+class _InstallJob(_CancellableJob):
     done = Signal(object)
 
-    def __init__(self, root: Path, package, version, fetcher, allow_feature: bool):
+    def __init__(
+        self,
+        root: Path,
+        package,
+        version,
+        fetcher,
+        allow_feature: bool,
+        *,
+        index_origin: str = "",
+        local_file_root: Path | None = None,
+    ):
         super().__init__()
         self._root = root
         self._package = package
         self._version = version
         self._fetcher = fetcher
         self._allow_feature = allow_feature
+        self._index_origin = index_origin
+        self._local_file_root = local_file_root
 
     def run(self) -> None:
         try:
@@ -67,15 +101,19 @@ class _InstallJob(QThread):
                 self._version,
                 fetcher=self._fetcher,
                 allow_feature=self._allow_feature,
+                index_origin=self._index_origin,
+                local_file_root=self._local_file_root,
+                cancel=self.cancelled,
             )
         except Exception as exc:  # noqa: BLE001
             outcome = market_install.InstallOutcome(
                 False, f"{type(exc).__name__}: {exc}", mod_id=self._package.id
             )
-        self.done.emit(outcome)
+        if not self.cancelled():
+            self.done.emit(outcome)
 
 
-class _RollbackJob(QThread):
+class _RollbackJob(_CancellableJob):
     done = Signal(object)
 
     def __init__(self, root: Path, mod_id: str):
@@ -84,11 +122,16 @@ class _RollbackJob(QThread):
         self._mod_id = mod_id
 
     def run(self) -> None:
+        if self.cancelled():
+            return
         try:
             outcome = market_install.rollback(self._root, self._mod_id)
         except Exception as exc:  # noqa: BLE001
-            outcome = market_install.InstallOutcome(False, f"{type(exc).__name__}: {exc}", mod_id=self._mod_id)
-        self.done.emit(outcome)
+            outcome = market_install.InstallOutcome(
+                False, f"{type(exc).__name__}: {exc}", mod_id=self._mod_id
+            )
+        if not self.cancelled():
+            self.done.emit(outcome)
 
 
 class MarketPage(SettingsPage):
@@ -105,6 +148,7 @@ class MarketPage(SettingsPage):
         self._loaded_once = False
         self._disposed = False
         self._jobs: list[QThread] = []
+        self._job_registry = getattr(host, "market_jobs", None) or MarketJobRegistry()
         self._installed: dict[str, str] = {}
         self._reload_installed()
         self._initial_url = self._config_url()
@@ -195,23 +239,29 @@ class MarketPage(SettingsPage):
         self._disposed = True
         for job in list(self._jobs):
             try:
-                job.done.disconnect()
-                job.failed.disconnect()
+                cancel = getattr(job, "cancel", None)
+                if callable(cancel):
+                    cancel()
+                for signal_name in ("done", "failed"):
+                    signal = getattr(job, signal_name, None)
+                    if signal is not None:
+                        signal.disconnect()
             except (RuntimeError, TypeError):
                 pass
-            # 线程还在跑时不能销毁 QThread 对象：交给模块级集合持有到 finished。
-            _ORPHAN_JOBS.add(job)
         self._jobs.clear()
         super().dispose()
 
     def _track(self, job: QThread) -> None:
         self._jobs.append(job)
+        self._job_registry.submit(job)
 
         def _finished() -> None:
-            _ORPHAN_JOBS.discard(job)
             if job in self._jobs:
                 self._jobs.remove(job)
-            job.deleteLater()
+            try:
+                job.deleteLater()
+            except RuntimeError:
+                pass
 
         job.finished.connect(_finished)
 
@@ -425,6 +475,10 @@ class MarketPage(SettingsPage):
         self.rollback_button.setEnabled(has_backup and not self._busy)
 
     # ------------------------------------------------------------ 安装/回滚
+    def _local_file_root(self) -> Path | None:
+        origin = str(self._result.origin if self._result is not None else "")
+        return local_file_root_for_index(origin)
+
     def install_selected(self, *, blocking: bool = False) -> None:
         package = self.selected_package()
         version = model.latest_version(package) if package is not None else None
@@ -446,10 +500,20 @@ class MarketPage(SettingsPage):
                 version,
                 fetcher=self._fetcher,
                 allow_feature=allow_feature,
+                index_origin=self._result.origin if self._result is not None else "",
+                local_file_root=self._local_file_root(),
             )
             self._apply_install(outcome)
             return
-        job = _InstallJob(self._root, package, version, self._fetcher, allow_feature)
+        job = _InstallJob(
+            self._root,
+            package,
+            version,
+            self._fetcher,
+            allow_feature,
+            index_origin=self._result.origin if self._result is not None else "",
+            local_file_root=self._local_file_root(),
+        )
         self._track(job)
         job.done.connect(self._apply_install)
         job.start()

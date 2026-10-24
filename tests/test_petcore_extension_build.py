@@ -360,6 +360,12 @@ def test_build_index_pending_and_local(tmp_path: Path) -> None:
         assert len(version["sha256"]) == 64
         assert "released_at" not in version
 
+    published = build_index(manifest, state="published")
+    for pkg in published["packages"]:
+        assert pkg["blocked"] is False
+        assert pkg["blocked_reason"] == ""
+        assert pkg["versions"][0]["urls"][0].startswith("https://")
+
     local = build_index(manifest, local=True)
     for pkg in local["packages"]:
         assert pkg["blocked"] is False
