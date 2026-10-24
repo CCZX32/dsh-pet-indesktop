@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterator
 
+from ..contracts.archive import ArchiveLimits, BudgetExceeded
 from .manifest import MOD_FILE, is_valid_id, load_manifest, path_within
 
 INSTALL_FILE = "install.json"
@@ -108,14 +109,30 @@ def _copy_pack(source: Path, target: Path) -> None:
                 shutil.copy2(source_path, dest_path)
 
 
-def _extract_zip(archive: Path, dest: Path) -> None:
+def _check_declared_budget(infos: list[zipfile.ZipInfo], limits: ArchiveLimits) -> None:
+    """解包前按中央目录声明预检：条目数（目录也计）与展开字节。"""
+    entries = len(infos)
+    if entries > limits.entries:
+        raise BudgetExceeded("entries", limits.entries, entries)
+    declared = sum(max(int(info.file_size), 0) for info in infos)
+    if declared > limits.expanded_bytes:
+        raise BudgetExceeded("expanded", limits.expanded_bytes, declared)
+
+
+def _extract_zip(
+    archive: Path, dest: Path, *, limits: ArchiveLimits | None = None
+) -> None:
     try:
         handle = zipfile.ZipFile(archive)
     except (OSError, zipfile.BadZipFile) as exc:
         raise InstallError(f"cannot read archive: {exc}") from exc
     dest_root = dest.resolve()
     with handle:
-        for info in handle.infolist():
+        infos = handle.infolist()
+        if limits is not None:
+            _check_declared_budget(infos, limits)
+        written = 0
+        for info in infos:
             name = info.filename
             if not name:
                 continue
@@ -139,7 +156,17 @@ def _extract_zip(archive: Path, dest: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with handle.open(info) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                    while True:
+                        chunk = source.read(_CHUNK)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        # 不信 ZipInfo.file_size：按实际读到的字节计数，超限立刻中断。
+                        if limits is not None and written > limits.expanded_bytes:
+                            raise BudgetExceeded(
+                                "expanded", limits.expanded_bytes, written
+                            )
+                        output.write(chunk)
             except OSError as exc:
                 raise InstallError(f"cannot extract {name}: {exc}") from exc
 
@@ -161,7 +188,12 @@ def _archive_root(dest: Path) -> Path:
 
 
 @contextmanager
-def _source_pack(source: Path, work_root: Path | None = None) -> Iterator[Path]:
+def _source_pack(
+    source: Path,
+    work_root: Path | None = None,
+    *,
+    limits: ArchiveLimits | None = None,
+) -> Iterator[Path]:
     source = Path(source)
     if source.is_dir():
         yield source
@@ -176,7 +208,7 @@ def _source_pack(source: Path, work_root: Path | None = None) -> Iterator[Path]:
         prefix=".unpack-", dir=str(work_root) if work_root is not None else None
     ) as tmp:
         dest = Path(tmp)
-        _extract_zip(source, dest)
+        _extract_zip(source, dest, limits=limits)
         yield _archive_root(dest)
 
 
@@ -201,20 +233,33 @@ def _install_json(manifest_id: str, version: str, files: dict[str, str]) -> str:
 
 
 def open_pack(
-    source: Path, work_root: Path | None = None
+    source: Path,
+    work_root: Path | None = None,
+    *,
+    limits: ArchiveLimits | None = None,
 ) -> Iterator[Path]:
-    """公开的解包入口：目录原样返回，zip 解到临时目录（调用方负责生命周期）。"""
-    return _source_pack(Path(source), work_root)
+    """公开的解包入口：目录原样返回，zip 解到临时目录（调用方负责生命周期）。
+
+    ``limits`` 是市场通道的展开预算：``None``（本地目录 / ZIP 安装）不做任何
+    计数；越界抛 :class:`BudgetExceeded`，临时解包目录由上下文管理器清理。
+    """
+    return _source_pack(Path(source), work_root, limits=limits)
 
 
-def install(source: Path, root: Path, *, force: bool = False) -> tuple[bool, str]:
+def install(
+    source: Path,
+    root: Path,
+    *,
+    force: bool = False,
+    limits: ArchiveLimits | None = None,
+) -> tuple[bool, str]:
     root = Path(root)
     mods_root = root / "mods"
     staging: Path | None = None
     cleanup_note = ""
     try:
         mods_root.mkdir(parents=True, exist_ok=True)
-        with _source_pack(Path(source), mods_root) as pack:
+        with _source_pack(Path(source), mods_root, limits=limits) as pack:
             manifest, problems = load_manifest(pack)
             if manifest is None:
                 return False, "; ".join(problems) or "invalid manifest"
