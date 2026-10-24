@@ -504,9 +504,9 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 |---|---|---|
 | T00 基线 | 完成 | `.scratch/petcore-p4c3-distribution/baseline-20261024-202323/`（status/numstat/untracked/freeze/source-sha256/env.json，SAC=1）；before 性能 `before-perf.json`（download 32.739 / resume 33.141 / extract 12.993 / install 38.512 / page 13.369 ms，3 轮 15+60 s） |
 | T01 契约冻结 | 完成 | `contracts/archive.py`、`contracts/market.py`、`contracts/http.py`、`net/market_transport.py`、`install_package(origin=)`；契约 11 passed、市场族 63 passed、ruff 全绿；MOD-FORMAT §18 |
-| T02 逐跳传输 | 待 worker | 写集 `net/market.py` + `net/market_transport.py`；206/416/预算/跳转四组回归 |
-| T03 解包预算 | 待 worker | 写集 `mods/install.py`；`open_pack/install(limits=)` 落地 |
-| T05 候选构建器 | 待 worker | 写集 `scripts/build_petcore_extensions.py` 等；可复现 ZIP |
-| T04/T06/T07 | 未开始 | 授权/事务、索引/CLI/UI、真实装卸回滚 |
+| T02 逐跳传输 | 完成（`94d80650`） | 206 对齐/416 两义/读流预算/跳转三重约束；25 条安全回归；新增 `allowed_hosts` 支持 GitHub Release | 
+| T03 解包预算 | 完成（`359446b5`） | `open_pack/install(limits=)`、预检条目与声明展开、计数写入防造假；9 条回归 |
+| T05 候选构建器 | 完成（`34a247cb`） | 白名单可复现 ZIP + 独立校验器；4 包实测 19169/41454/9655/17522 字节，verify 4/4 |
+| T04/T06/T07 | 未开始 | 授权/事务、索引/CLI/UI、真实装卸回滚；**生产仍需 T04 把 `market/download.py` 切到 `fetch_artifact` 并传 limits** |
 
 范围不变：别把 T01 的契约读成「分发可用」；解包预算与逐跳校验尚未生效。

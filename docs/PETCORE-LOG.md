@@ -2454,3 +2454,31 @@ loopback 下载 4096 字节落盘且 `.part` 清理；2048 字节对 1024 上限
 **未验证/风险**：`fetch_artifact` 的体积复核在下载之后，挡不住大文件先落盘（T02 移进读流）；
 `open_pack`/`install` 的 `limits` 尚未落地（T03），**解包预算此刻不生效**；`origin` 只做标记剔除，
 授权与事务仍归 T04。不得据此声称分发已可用。
+
+## L066 — 2026-10-24 — P4-c3-D1/T02+T03+T05（三 worker 并行）
+
+**授权与边界**：主模型串行完成 T00/T01 后，按批准计划派 3 个不重叠写集 worker 并行；主模型复核 diff、
+补契约口径并集成。worker 未提交、未推送、未跑整仓、未改文档。本批不改默认源、不改版本、不改 UI。
+
+**改动**：
+- T02（`94d80650`）：`net/market.py` +378/−48、`net/market_transport.py` +25/−14、新增安全回归 +670、
+  `contracts/http.py` +7/−2。206 按 `Content-Range` 起点对齐才追加、416 需本地长度与总长一致、压缩预算移入读流、
+  跳转受跳数/协议/主机三重约束、所有路径关闭响应、取消保留 `.part`。
+- 契约修正（主模型）：发现「同主机」会拒绝 GitHub Release 的 `github.com → objects.githubusercontent.com`，
+  增加 `TransferSpec.allowed_hosts`（默认空 = 只同主机），并把 `resumed_from` 收窄为「仅区间对齐时非零」；MOD-FORMAT §18.2 同步。
+- T03（`359446b5`）：`mods/install.py` +55/−10、新增 +245。`open_pack/install(limits=)`、解包前预检条目与声明展开、
+  写入按实际字节计数（防声明造假）、失败清 staging、`limits=None` 行为不变。
+- T05（`34a247cb`）：新增 `scripts/build_petcore_extensions.py` +549、`scripts/verify_petcore_extensions.py` +373、
+  测试 +398、`.gitignore` +2。白名单 + 固定元数据 + 排序，两次构建 sha 相同；校验器独立重算并拒绝篡改与 `.trusted`。
+
+**验证**：T02+T03+T05 与关联族 `46 passed / 18.04s`、`62 passed / 8.91s`；`ruff check petcore tests scripts` 全绿；
+真实构建 4 包（19169 / 41454 / 9655 / 17522 字节，`excluded unknown=0`），`verify` **4/4** 独立复跑通过。
+worker 红证据：旧实现 18 failed、缺 `limits` 关键字 8 failed、缺模块 exit 2。
+
+**性能**：无新增线程/定时器/轮询；新增成本仅在市场调用路径（每 206 一次头解析、每 64KiB 一次计数、每次解包一次
+`infolist()`、每次 3xx 一次比较）。T00 before 基线已在 `.scratch/.../before-perf.json`；after 对照按计划留 T09，
+本批不声称更快。
+
+**未验证/风险（关键）**：① `market/download.py` 仍走 `download_to(policy=None)`，**逐跳加固尚未进生产路径**，T04 必须切到
+`fetch_artifact`；② `install_package` 的 `open_pack` 仍未传 limits，**市场解包预算尚未生效**；③ 多 URL 回退未实现；
+④ 无真实 HTTPS/代理/CDN 实机；⑤ `install()` 仍以 `(False, msg)` 代替抛异常，T04 若要分类需在 `open_pack` 层拦。

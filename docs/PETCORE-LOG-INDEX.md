@@ -90,3 +90,5 @@
 | L064 | 2026-10-24 | 分发计划本机环境校正 | 路径/pwsh/venv(3.12.10)/PyInstaller/rapidocr 事实按本机重写，T00/T08 口径同步；文档批，整仓复跑 | 分发计划、环境、3.12、PyInstaller、rapidocr、全仓 |
 
 | L065 | 2026-10-24 | P4-c3-D1/T01 契约冻结 | 预算/传输/来源三契约、fetch_artifact 签名、origin 剔除包内 .trusted；11+63 测试与 ruff 通过，解包预算待 T03 | 分发、ArchiveLimits、TransferSpec、PackageOrigin、trusted、契约 |
+
+| L066 | 2026-10-24 | P4-c3-D1/T02+T03+T05 | 逐跳传输/解包预算/可复现构建器 三 worker 并行；46+62 测试、ruff、4 包构建与 verify 4/4；新增 allowed_hosts | 传输、Content-Range、416、预算、构建器、可复现、allowed_hosts |
