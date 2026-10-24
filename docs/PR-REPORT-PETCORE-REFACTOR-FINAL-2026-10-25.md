@@ -127,4 +127,12 @@ $env:QT_QPA_PLATFORM='offscreen'; $env:PYTHONUTF8='1'
 - 代码提交独立可回滚：先回滚后续文档/验收提交，再按需要 `git revert e371f92c`、`git revert 9e973b53`；不使用 reset/force push。
 - 新下载断点位于市场缓存目录，旧版本不应读取新元数据；保留新文件不删除用户安装。取消中的安装不会进入替换阶段。
 - 如发现远端分支在推送前前进，先重新 fetch，再以 `git merge --ff-only` 集成；不覆盖他人提交。
-- 最终提交 SHA、远端推送结果将在提交/推送后追加；当前代码提交为 `9e973b53`、`e371f92c`。
+- 代码提交为 `9e973b53`、`e371f92c`；证据文档提交为 `5c2ba786`。回滚按提交逆序执行 `git revert`，不使用 reset/force push。
+
+
+## 九、提交与推送
+
+- 远端分支：`origin/feat/petcore-vpet-architecture`。
+- 推送前使用 `ssh://git@ssh.github.com:443/MerZlin/dsh-pet-indesktop.git` 做只读 fetch；远端仍为 `6326e31c410dc86d632caf0e4201a664e6924964`，本地领先 3 个提交。
+- 使用 SSH over 443 推送 `HEAD:refs/heads/feat/petcore-vpet-architecture`，真实输出：`6326e31c..5c2ba786  HEAD -> feat/petcore-vpet-architecture`，返回码 0。
+- 本轮未上传 GitHub Release 资产、未推送 tag、未合并 `main`、未 force push。最终追加的远端结果记录为文档-only 提交，不改变产品代码和门禁结果。

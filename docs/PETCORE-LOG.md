@@ -2639,4 +2639,6 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **证据**：市场聚焦族 90 passed / 19.56s；Worker + renderer 5 passed / 4.20s；联合市场/Worker/renderer/架构族 56 passed / 11.83s；Ruff `All checks passed!`；架构/文档门禁 316 passed / 4.60s；CPU 高负载三遍每次 12 passed（4.98s/4.97s/4.95s）；整仓 9951 passed / 20 skipped / 14 warnings / 1289.12s / exit 0；隔离根 `python -m petcore --check` 返回 0。
 
+**交付**：`9e973b53`、`e371f92c`、`5c2ba786` 已按独立提交推送至 `origin/feat/petcore-vpet-architecture`，推送输出为 `6326e31c..5c2ba786`，返回码 0；未上传 Release、未推送 tag、未合并 main。
+
 **限制**：PyInstaller、双屏/混合 DPI、macOS/Linux、真实外部 TTS、真实 HTTPS/CDN 和公开 Release 未在本机完成；默认 C 盘旧数据迁移的 `os.replace` 探针返回 WinError 17，已记录为环境/迁移缺口；不沿用历史报告冒充本轮通过。
