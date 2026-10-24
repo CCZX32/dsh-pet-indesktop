@@ -511,6 +511,6 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | T06 索引/CLI/UI | 完成 | 根 `extensions-index.json`（四包 blocked，size/sha 已固定）；`file:` 索引与 artifact 可离线用且不回落公网；市场页 dispose 持有运行中线程；22 passed |
 | T07 真实装卸回滚 | 完成 | 真实 ZIP + `file:` 索引：未授权零落盘、四包安装并真实 `FeatureManager` 加载、合成升级/回滚/再升级且数据 SHA 不变；5 passed / 3.20s；30× 装卸 + 30× 页开关无 staging/part 残留、线程恒 4 |
 | T08 冻结包 | 完成 | `-OutputRoot`/`-PythonPath` 隔离构建 + iss 源目录覆盖；exe/setup 均开发证书签名 Valid；冻结包 `--check` 715 ms / diagnostics []，冻结 CLI 装四包全 exit 0；Inno 96.3 s，setup 261.7 MB |
-| T09 发布前门禁 | 未开始 | before/after 性能对照、整仓全量、`RELEASE_REPO/TAG` 确认、公开索引与发布步骤 |
+| T09 发布前门禁 | 完成（未发布） | before/after 无回退（下载 32.74→32.49 ms、p95 38.77→34.23）；整仓 9941 passed / 18 skipped / exit 0；安装器四组合矩阵全通过；发布手册 [PETCORE-EXTENSIONS-RELEASE.md](PETCORE-EXTENSIONS-RELEASE.md) 固化流程与回滚 |
 
 范围不变：别把 T01 的契约读成「分发可用」；解包预算与逐跳校验尚未生效。

@@ -121,3 +121,11 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest -q \
 - `_rollback_failed_commit` 在「无备份 + 删除失败」时只报「回滚失败」——这个降级是否够清楚？
 - `allowed_hosts` 的白名单是否应该由索引声明而不是代码常量？（当前是 `market/download.py::GITHUB_ARTIFACT_HOSTS`）
 - `file:` 不回落默认源，会不会让「用户填错本地路径」表现为长时间无响应？（当前立即报错，符合预期但值得确认）
+
+## 8. D2 收口补充（2026-10-24）
+
+- **整仓**：`pytest -q` 未过滤 **9941 passed / 18 skipped / exit 0**（1220.48 s）；受影响族在 20 个负载进程下三遍全绿。
+- **性能**：before/after 同探针，中位差 < 1.2 ms，下载/解包 p95 改善（38.77→34.23、15.06→13.63）。
+- **安装器**：静默装到 scratch 的四种任务组合全部符合「不勾选不落盘、勾选写 `mods/<id>` + `.trusted`」，卸载干净。
+- **仍未验**：真实 HTTPS/CDN/断流、向导人工点击与覆盖升级、双屏/混合 DPI、非 Windows。
+- **发布**：未执行任何公开动作；流程与回滚见 [发布手册](PETCORE-EXTENSIONS-RELEASE.md)，发布前需你确认 `RELEASE_REPO/TAG` 与同版本摘要。

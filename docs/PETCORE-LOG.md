@@ -2582,3 +2582,27 @@ scratch 探针 `.scratch/petcore-p4c3-distribution/t07/resource_loop.py` 记录 
 
 **未验证/风险**：安装向导只构建未安装（装机会写用户目录/注册表/自启，属 T09）；SAC 结论只对本次签名构建有效；
 根 `dist/` 的 832 MB 旧构建未删；setup 内 `examples/petcore-mods` 勾选/不勾选的落盘差异未实测。
+
+## L071 — 2026-10-24 — D2/T09 性能对照·整仓门禁·安装器验收·发布准备
+
+**边界**：只做验收与发布文档；产品代码零改动；不建 tag、不传资产、不切默认源、不装到真实系统目录。
+
+**改动**：新增 `docs/PETCORE-EXTENSIONS-RELEASE.md`（发布手册：产物摘要/三个先决确认/五步流程/逐步回滚/明确不做）
+与 `docs/PR-REPORT-PETCORE-DISTRIBUTION-T09-2026-10-24.md`；`docs/INDEX.md`、`docs/PETCORE-ROADMAP.md`、
+`docs/PETCORE-D1-ACCEPTANCE-2026-10-24.md` 补 T09 状态。探针（`after_perf.py`、`installer_acceptance.ps1`、
+`task_matrix.ps1`、`stress.py`）只在 `.scratch/petcore-p4c3-distribution/t09/`。
+
+**性能（before/after 同探针，3 轮 15s+60s）**：下载 32.739→32.485 ms、续传 33.141→33.214、解包 12.993→12.689、
+本地安装 38.512→37.328、市场页 13.369→13.865；p95 下载 38.774→34.230、解包 15.060→13.630；CPU 中位 R1/R2 33.3%→33.3%，
+R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退，部分 p95 改善。
+
+**验证**：整仓未过滤 `pytest -q` **9941 passed / 18 skipped / 20 warnings / 1220.48s / exit 0**（JUnit 9959，failure/error 0）；
+安装器隔离矩阵：`/TASKS=` 空 → 0 包、`mod_todo` → 1 包 + `.trusted`、`mod_todo,mod_festival` → 恰好 2 包、
+不传 `/TASKS`（两次）→ 0 包；四种用例卸载 exit 0、目录删除、HKCU 无残留。
+高负载：7 个受影响文件在 20 个自有负载进程、每轮开机 CPU 100% 下三遍 **92 passed**（105.10 / 146.78 / 110.94 s，exit 0）。
+
+**排查留痕**：最早一次手工调用装出 9 个带 `.trusted` 的包；改用 `.ps1` 固定参数后 5 次均为上表结果。
+根因是 Git Bash/MSYS 把 `/TASKS=...` 改写成 `C:/Program Files/Git/TASKS=...`，参数未到 Inno——调用方式问题，非安装器缺陷。
+
+**未验证/风险**：真实 HTTPS/CDN/断流未跑；安装器只验静默模式（向导点击、自启、覆盖升级未验）；
+性能探针为 loopback 合成负载；整仓未在 20 负载进程下跑三遍；开发证书不能用于公开分发。
