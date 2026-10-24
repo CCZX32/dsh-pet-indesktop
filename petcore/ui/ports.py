@@ -6,7 +6,6 @@ import itertools
 import json
 import logging
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -16,8 +15,9 @@ from .. import paths
 from ..contracts.api import ApiMetadata, ApiRequest
 from ..contracts.host import HostPorts
 from ..contracts.http import HttpError, HttpRequest, HttpResponse
-from ..contracts.speech import SpeechError, SpeechRequest
+from ..contracts.speech import SpeechError
 from ..engine.catalog import GraphType
+from .speech_channel import CoreSpeechPort
 
 logger = logging.getLogger("petcore.ui.ports")
 
@@ -122,137 +122,88 @@ class AudioAdapter:
             player = self.window.sound
             if volume is not None:
                 player.set_volume(float(volume))
-            player.play(Path(path))
-            return True
+            return player.play(Path(path)) is not False
         except Exception:
             logger.debug("audio play failed", exc_info=True)
             return False
+
+    def play_tracked(self, path, *, volume=1.0, on_finished, on_error):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+        self.stop()
+        if not hasattr(self, "_player"):
+            self._player = QMediaPlayer()
+            self._output = QAudioOutput()
+            self._player.setAudioOutput(self._output)
+            self._player.mediaStatusChanged.connect(self._media_status)
+            self._player.errorOccurred.connect(self._media_error)
+        self._completion = (on_finished, on_error)
+        self._output.setVolume(max(0.0, min(1.0, float(volume))))
+        url = QUrl.fromLocalFile(str(Path(path).resolve()))
+        same_source = self._player.source() == url
+        if same_source and self._player.mediaStatus() != QMediaPlayer.MediaStatus.InvalidMedia:
+            self._start_loaded()
+        else:
+            if same_source:
+                self._player.setSource(QUrl())
+            self._player.setSource(url)
+        return True
+
+    def _start_loaded(self):
+        # Do not start FFmpeg decoding before LoadedMedia. An immediate stop
+        # during asynchronous loading can otherwise block the Windows backend.
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        completion = self._completion
+        ready = {QMediaPlayer.MediaStatus.LoadedMedia,
+                 QMediaPlayer.MediaStatus.BufferedMedia,
+                 QMediaPlayer.MediaStatus.EndOfMedia}
+
+        def play_if_ready():
+            if (completion is not None and self._completion is completion
+                    and self._player.mediaStatus() in ready):
+                self._player.play()
+
+        QTimer.singleShot(0, play_if_ready)
+
+    def _media_status(self, status):
+        from PySide6.QtMultimedia import QMediaPlayer
+        if status == QMediaPlayer.MediaStatus.LoadedMedia:
+            if self._completion:
+                self._start_loaded()
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            completion, self._completion = self._completion, None
+            if completion:
+                completion[0]()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._media_error()
+
+    def _media_error(self, *_args):
+        completion, self._completion = getattr(self, "_completion", None), None
+        if completion:
+            completion[1](SpeechError("unavailable", "audio playback failed"))
+
+    def stop(self):
+        self._completion = None
+        player = getattr(self, "_player", None)
+        if player is not None:
+            from PySide6.QtMultimedia import QMediaPlayer
+            if player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                player.stop()
+
+    def close(self):
+        self.stop()
+        if hasattr(self, "_player"):
+            self._player.deleteLater()
+            self._output.deleteLater()
+            del self._player, self._output
 
     def set_volume(self, volume: float) -> None:
         try:
             self.window.sound.set_volume(float(volume))
         except Exception:
             pass
-
-
-class CoreSpeechPort:
-    """``SpeechPort`` 的 core 门面：合成在后台线程，播放走唯一共享音频通道。
-
-    分工与线程：
-
-    - :meth:`speak` 立刻返回 token，合成（可能联网、可能秒级）跑在 daemon 线程；
-    - 合成完成后**回到 GUI 线程播放**（``scheduler`` 存在时走 ``call_later(0)``）：
-      ``QSoundEffect`` / ``QMediaPlayer`` 必须在有事件循环的线程上创建；
-    - ``on_done`` / ``on_error`` 在 ``scheduler`` 或直接调用方线程里执行（GUI 线程）；
-    - :meth:`stop` 只拦「还没开始播放」的那一次：合成中的 token 被摘掉后，
-      产物照旧进缓存，但不会再出声、也不会回调。
-
-    ``AudioAdapter.play`` 可能抛异常或返回 ``False``，两者都按
-    :class:`SpeechError`\\ ``("unavailable")`` 处理。
-    """
-
-    def __init__(self, service, audio, *, scheduler=None) -> None:
-        self.service = service
-        self.audio = audio
-        self._scheduler = scheduler
-        self._counter = itertools.count(1)
-        self._lock = threading.Lock()
-        self._inflight: set[str] = set()
-
-    # ------------------------------------------------------------ 转发
-    def providers(self):
-        return self.service.providers()
-
-    def preflight(self, provider: str = "") -> str:
-        return self.service.preflight(provider)
-
-    def synthesize(self, request: SpeechRequest):
-        return self.service.synthesize(request)
-
-    def cache_dir(self) -> Path:
-        return self.service.cache_dir()
-
-    def set_secret(self, provider: str, field: str, value: str) -> None:
-        self.service.set_secret(provider, field, value)
-
-    def secret_status(self, provider: str) -> dict[str, bool]:
-        return self.service.secret_status(provider)
-
-    # ------------------------------------------------------------ 播放
-    def speak(self, request, *, on_done=None, on_error=None) -> str:
-        token = f"speech-{next(self._counter)}"
-        with self._lock:
-            self._inflight.add(token)
-        worker = threading.Thread(
-            target=self._run,
-            args=(token, request, on_done, on_error),
-            name=f"petcore-{token}",
-            daemon=True,
-        )
-        worker.start()
-        return token
-
-    def stop(self, token: str = "") -> None:
-        with self._lock:
-            if token:
-                self._inflight.discard(token)
-            else:
-                self._inflight.clear()
-
-    def playing(self) -> bool:
-        with self._lock:
-            return bool(self._inflight)
-
-    # ------------------------------------------------------------ 线程
-    def _run(self, token: str, request, on_done, on_error) -> None:
-        try:
-            result = self.service.synthesize(request)
-        except SpeechError as exc:
-            self._finish(token, on_error, exc)
-            return
-        except Exception as exc:  # noqa: BLE001 - 统一收敛成 SpeechError
-            self._finish(token, on_error, SpeechError("unavailable", type(exc).__name__))
-            return
-        self._dispatch(lambda: self._play(token, result, on_done, on_error))
-
-    def _dispatch(self, callback) -> None:
-        scheduler = self._scheduler
-        if scheduler is None:
-            callback()
-            return
-        try:
-            scheduler.call_later(0, callback)
-        except Exception:  # noqa: BLE001 - 调度器坏了也别把声音吞掉
-            logger.debug("speech scheduler unavailable", exc_info=True)
-            callback()
-
-    def _play(self, token: str, result, on_done, on_error) -> None:
-        with self._lock:
-            if token not in self._inflight:
-                return  # 播放前被 stop()：不出声、不回调
-        try:
-            played = self.audio.play(result.path)
-        except Exception as exc:  # noqa: BLE001 - 端口实现可能抛
-            self._finish(token, on_error, SpeechError("unavailable", type(exc).__name__))
-            return
-        if played is False:
-            self._finish(
-                token, on_error, SpeechError("unavailable", "音频通道不可用")
-            )
-            return
-        self._finish(token, on_done, result)
-
-    def _finish(self, token: str, callback, payload) -> None:
-        with self._lock:
-            if token not in self._inflight:
-                return
-            self._inflight.discard(token)
-        if callback is None:
-            return
-        try:
-            callback(payload)
-        except Exception:  # noqa: BLE001 - 回调是 mod 的，不能反过来打断 core
-            logger.exception("speech callback failed")
 
 
 class StorageAdapter:
@@ -274,9 +225,16 @@ class StorageAdapter:
 class QuietMode:
     def __init__(self) -> None:
         self._until: float | None = None
+        self._listeners = []
+
+    def subscribe(self, callback):
+        self._listeners.append(callback)
+        return lambda: self._listeners.remove(callback) if callback in self._listeners else None
 
     def set_quiet(self, seconds: float) -> None:
         self._until = time.monotonic() + max(0.0, float(seconds)) if seconds > 0 else None
+        for callback in tuple(self._listeners):
+            callback(seconds > 0)
 
     def quiet_active(self) -> bool:
         if self._until is None:
@@ -876,9 +834,13 @@ def build_ports(host, window) -> HostPorts:
     api = CoreApiPort(host, store, credentials) if store is not None and credentials is not None else None
     scheduler = QtScheduler()
     audio = AudioAdapter(window)
+    from .reminders import ReminderDelivery
+    delivery = ReminderDelivery(getattr(host, "quiet", None), scheduler)
+    host.reminders = delivery
     speech_service = getattr(host, "speech", None)
     return HostPorts(
         presentation=host.presentation_port(),
+        reminders=delivery,
         scheduler=scheduler,
         audio=audio,
         storage=StorageAdapter(host.root),
@@ -904,7 +866,7 @@ def build_ports(host, window) -> HostPorts:
         system=SystemAdapter(),
         http=CoreHttpPort(),
         speech=(
-            CoreSpeechPort(speech_service, audio, scheduler=scheduler)
+            CoreSpeechPort(speech_service, audio, scheduler=scheduler, quiet=getattr(host, "quiet", None))
             if speech_service is not None
             else None
         ),

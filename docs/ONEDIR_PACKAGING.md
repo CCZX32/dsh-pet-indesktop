@@ -442,3 +442,10 @@ macOS / Linux 的真实构建必须在对应 runner 上跑过才算通过——�
 工作流的静态结构、shell 脚本语法与素材供给入口的真实命令行为。
 
 *（内容由AI生成，仅供参考）*
+
+
+## petcore 0.2.0 提醒域历法依赖（2026-10-24）
+
+`fun.festival`从已安装的扩展代码动态导入`lunar_python`，静态分析Core入口不足以发现依赖。`scripts/build_petcore.ps1`显式使用`--collect-submodules lunar_python`；现有requirements继续负责安装lunar-python，未新增网络历法服务。签文/节日表及文案随各扩展的host源文件分发，不读取旧pet业务模块。
+
+本轮有构建参数门禁与源码真实历法用例；隔离`.venv`没有PyInstaller，本阶段没有生成或运行新的冻结候选包。不能把该门禁说成安装包验收通过。扩展ZIP清单/依赖打包后运行、Smart App Control实际探针留到后续分发阶段；不得导入信任证书或关闭安全策略规避运行阻断。见[E报告](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。

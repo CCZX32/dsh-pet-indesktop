@@ -73,6 +73,10 @@ class AgentLinkRuntime:
         self.commands = {"agent_toggle": self.toggle}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._generation = 0
+        self._wanted = False
+        self._closed = False
+        self._restart_handle = None
         self._lock = threading.Lock()
         self._sources: list[_Source] = []
         self._signature: object = None
@@ -87,27 +91,41 @@ class AgentLinkRuntime:
     # ------------------------------------------------------------ 生命周期
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        # Lifecycle calls and retries belong to the GUI thread. Never replace a
+        # cancelled worker until its last filesystem read has actually returned.
+        if self._closed:
             return
-        self._stop.clear()
+        self._wanted = True
+        if self._thread is not None and self._thread.is_alive():
+            if self._stop.is_set() and self._restart_handle is None:
+                scheduler = getattr(self.ports, "scheduler", None)
+                schedule = getattr(scheduler, "call_later", None)
+                if callable(schedule):
+                    self._restart_handle = schedule(100, self._retry_start)
+            return
+        self._generation += 1
+        self._stop = threading.Event()
         self._thread = threading.Thread(
-            target=self._loop, name="ai-agent-link", daemon=True
+            target=self._loop, args=(self._stop,), name="ai-agent-link", daemon=True
         )
         self._thread.start()
 
+    def _retry_start(self) -> None:
+        self._restart_handle = None
+        if self._wanted and not self._closed:
+            self.start()
+
     def stop(self) -> None:
+        self._wanted = False
+        self._generation += 1
         self._stop.set()
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+        self._cancel(self._restart_handle)
+        self._restart_handle = None
+        self.engine.reset()
 
     def close(self) -> None:
+        self._closed = True
         self.stop()
-        try:
-            self.engine.close()
-        except Exception:  # noqa: BLE001 - 关闭路径不许抛
-            pass
 
     # ------------------------------------------------------------ 命令
 
@@ -125,25 +143,28 @@ class AgentLinkRuntime:
             self._say_now("保存设置失败，详情见日志")
             return
         if not value:
+            self._generation += 1
+            self.engine.reset()
             self._say_now("Agent 联动已关闭")
             return
-        files = [path for source in self._current_sources() for path in source.paths()]
-        if files:
-            self._say_now(f"Agent 联动已开启（监听 {len(files)} 个事件文件）")
-        else:
-            self._say_now("Agent 联动已开启；还没发现事件文件，检查设置里的来源。")
+        # Do not discover files (possibly network paths) on the GUI thread.
+        self._say_now("Agent 联动已开启；后台正在检查事件文件，可在设置中查看来源。")
 
     # ------------------------------------------------------------ 轮询
 
-    def _loop(self) -> None:
-        self._drain_once()
-        while not self._stop.wait(POLL_SECONDS):
+    def _loop(self, cancel: threading.Event) -> None:
+        while not cancel.is_set():
             try:
                 self._drain_once()
-            except Exception:  # noqa: BLE001 - 轮询失败不许打死线程
+            except Exception:  # noqa: BLE001 - 包含首次读取，失败不许打死线程
                 self._log("agent link poll failed", exc_info=True)
+            if cancel.wait(POLL_SECONDS):
+                break
 
     def _drain_once(self) -> None:
+        if self._closed or self._stop.is_set():
+            return
+        generation = self._generation
         sources = self._current_sources()
         if not self._enabled():
             # 关闭时也推进偏移：重新开启不该回放关闭期间的旧事件。
@@ -165,9 +186,11 @@ class AgentLinkRuntime:
                     event = replace(event, agent=key)
                 batch.append((event, event.writer or "default"))
         if batch:
-            self._schedule(0, lambda batch=batch: self._apply(batch))
+            self._schedule(0, lambda batch=batch: self._apply(batch), generation=generation)
 
     def _apply(self, batch) -> None:
+        if self._closed or self._stop.is_set() or not self._enabled():
+            return
         for event, writer in batch:
             self._log(
                 f"agent={event.agent} writer={writer} state={event.state} "
@@ -375,13 +398,23 @@ class AgentLinkRuntime:
         except Exception:  # noqa: BLE001
             return default
 
-    def _schedule(self, delay_ms: int, callback) -> object:
+    def _schedule(self, delay_ms: int, callback, *, generation=None) -> object:
+        epoch = self._generation if generation is None else generation
+
+        def guarded():
+            if self._closed or self._stop.is_set() or epoch != self._generation:
+                return
+            if not self._enabled():
+                self.engine.reset()
+                return
+            callback()
+
         scheduler = getattr(self.ports, "scheduler", None)
         schedule = getattr(scheduler, "call_later", None)
         if not callable(schedule):
             return None
         try:
-            return schedule(int(delay_ms), callback)
+            return schedule(int(delay_ms), guarded)
         except Exception:  # noqa: BLE001
             return None
 

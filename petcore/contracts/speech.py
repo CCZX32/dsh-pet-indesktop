@@ -94,15 +94,27 @@ class SpeechPort(Protocol):
         self,
         request: SpeechRequest,
         *,
+        owner: str = "",
+        slot: int | None = None,
+        guard: Callable[[], bool] | None = None,
+        on_finished: Callable[[SpeechResult], None] | None = None,
         on_done: Callable[[SpeechResult], None] | None = None,
         on_error: Callable[[SpeechError], None] | None = None,
     ) -> str:
-        """后台合成后经 core 的共享音频通道播放；返回可传给 :meth:`stop` 的 token。"""
+        """on_done retains synthesis/play-start semantics; on_finished means real audio end.
+
+        Cancellation suppresses both callbacks. Queued jobs share one bounded channel.
+        """
         ...
 
     def stop(self, token: str = "") -> None: ...
 
     def playing(self) -> bool: ...
+
+    def cancel_owner(self, owner: str) -> None: ...
+    def cancel_slot(self, slot: int) -> None: ...
+    def register_yield(self, owner: str, callback: Callable) -> Callable[[], None]: ...
+    def should_yield(self, moment, *, requester: str = "") -> bool: ...
 
     def cache_dir(self) -> Path: ...
 

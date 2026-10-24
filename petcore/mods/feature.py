@@ -297,7 +297,11 @@ class FeatureManager:
                     logger.warning("feature %s pet-removed hook failed", feature.owner, exc_info=True)
 
     def stop_owner(self, owner: str) -> None:
-        """卸载前只停这一个扩展的 runtime，其余扩展继续运行。"""
+        """Stop this extension and revoke its deliveries before unloading."""
+        for service in (self.ports.speech, self.ports.reminders):
+            cancel = getattr(service, "cancel_owner", None)
+            if callable(cancel):
+                cancel(owner)
         feature = self.features.pop(str(owner), None)
         if feature is None or feature.runtime is None:
             return
@@ -307,10 +311,5 @@ class FeatureManager:
             logger.debug("feature stop failed: %s", owner, exc_info=True)
 
     def stop(self) -> None:
-        for feature in self.features.values():
-            if feature.runtime is not None:
-                try:
-                    feature.runtime.stop()
-                except Exception:
-                    logger.debug("feature stop failed: %s", feature.owner, exc_info=True)
-        self.features.clear()
+        for owner in tuple(self.features):
+            self.stop_owner(owner)

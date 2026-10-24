@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+from tests.pillow_helpers import pixels
+
 import time
 
 import pytest
@@ -114,8 +116,8 @@ def test_alpha_is_bit_exact():
 
     rectified = fp.unblend_rgba(source)
 
-    assert list(rectified.split()[3].get_flattened_data()) == \
-        list(source.split()[3].get_flattened_data())
+    assert list(pixels(rectified.split()[3])) == \
+        list(pixels(source.split()[3]))
     assert rectified.getpixel((0, 0)) == source.getpixel((0, 0))     # a=0
 
 
@@ -173,11 +175,11 @@ def test_rejects_non_rgba_input():
 def test_unblend_is_pure_and_does_not_mutate_input():
     """纯函数：入参一帧都不改（阶段二原地覆盖写盘要靠这条才安全）。"""
     source = _column(alphas=[0, 128, 255], character=(200, 100, 40))
-    before = list(source.get_flattened_data())
+    before = list(pixels(source))
 
     fp.unblend_rgba(source)
 
-    assert list(source.get_flattened_data()) == before
+    assert list(pixels(source)) == before
 
 
 def test_frame_throughput_is_within_budget():

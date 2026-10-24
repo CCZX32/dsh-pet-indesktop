@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from petcore import __version__ as CORE_VERSION
 from petcore.mods.manifest import load_manifest, parse_version, version_satisfies
 
 
@@ -212,7 +213,7 @@ def test_core_requires_boundaries(tmp_path):
 
     too_new = write_pack(
         tmp_path / "too_new",
-        feature_payload(core_requires=">0.1.0"),
+        feature_payload(core_requires=f">{CORE_VERSION}"),
         files,
     )
     manifest, diagnostics = load_manifest(too_new)
@@ -221,7 +222,7 @@ def test_core_requires_boundaries(tmp_path):
 
     exact = write_pack(
         tmp_path / "exact",
-        feature_payload(core_requires="<=0.1.0"),
+        feature_payload(core_requires=f"<={CORE_VERSION}"),
         files,
     )
     assert load_manifest(exact)[0] is not None

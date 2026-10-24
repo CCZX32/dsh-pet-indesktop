@@ -42,7 +42,8 @@ def build_sprite_menu(overlay, sprite, *, behavior=None) -> QMenu:
     if behavior is not None:
         poke.triggered.connect(lambda: behavior.on_sprite_clicked(sprite))
 
-    size_menu = menu.addMenu("大小")
+    size_menu = QMenu("大小", menu)
+    menu.addMenu(size_menu)
     group = QActionGroup(size_menu)
     group.setExclusive(True)
     for value in SCALE_PRESETS:

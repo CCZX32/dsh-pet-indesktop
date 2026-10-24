@@ -14,10 +14,11 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from .sampling import SamplingLoop
 
 logger = logging.getLogger(__name__)
 
@@ -134,36 +135,38 @@ class SysMonitor:
         self.interval = clamp_interval(interval)
         self._meter = CpuMeter(cpu_reader)
         self._mem_reader = mem_reader
-        self._lock = threading.Lock()
-        self._latest = SysSample()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._sampling = SamplingLoop(
+            name=THREAD_NAME,
+            interval=self.interval,
+            read=self._read_sample,
+            reset=self._meter.reset,
+            empty=SysSample(),
+            logger=logger,
+        )
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._loop, name=THREAD_NAME, daemon=True
-        )
-        self._thread.start()
+        """Request sampling; retry next owner tick if an old worker is exiting."""
+        self._sampling.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+        """Cancel without waiting; a blocked reader may still be running()."""
+        self._sampling.stop()
 
     def running(self) -> bool:
-        return bool(self._thread is not None and self._thread.is_alive())
+        return self._sampling.running()
+
+    def wait_stopped(self, timeout: float = 2.0) -> bool:
+        """Wait at most timeout seconds off the GUI thread; does not call stop."""
+        return self._sampling.wait_stopped(timeout)
 
     def snapshot(self) -> SysSample:
-        with self._lock:
-            return self._latest
+        return self._sampling.snapshot()
 
     def poll(self) -> SysSample:
-        """同步采一拍（测试与小间隔心跳用）。"""
+        """同步单步采样；后台线程仍存活时只返回缓存，不并发调用 reader。"""
+        return self._sampling.poll()
+
+    def _read_sample(self) -> SysSample:
         cpu = None
         error = ""
         try:
@@ -178,19 +181,9 @@ class SysMonitor:
                 mem = float(self._mem_reader())
             except Exception as exc:  # noqa: BLE001
                 error = f"{type(exc).__name__}: {exc}"
-        sample = SysSample(
+        return SysSample(
             cpu_percent=cpu,
             mem_percent=mem,
             error=error,
             sampled_at=time.time(),
         )
-        with self._lock:
-            self._latest = sample
-        return sample
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            try:
-                self.poll()
-            except Exception:  # noqa: BLE001 - 采样线程不许死
-                logger.debug("sys poll failed", exc_info=True)

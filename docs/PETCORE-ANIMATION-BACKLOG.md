@@ -25,7 +25,7 @@
 | ~~音乐唱歌动画~~ | `media.music` 的 SMTC 检测 | **P4-b 完成**：检测到播放 → `play_animation(loop=True)`；静音 grace 后 `release_loop()` |
 | ~~歌词对齐/多歌手~~ | 同上 | **P4-b 完成**：歌词气泡节流（≥2s/行），`lyric_align` 循环偏移；多歌手仍未做 |
 | ~~语音报时动画/口型~~ | `voice.chime` | **P4-b 完成（口型除外）**：报时走 `SpeechPort`；口型主分支也未实现 |
-| 节日/待办提醒动画 | `fun.festival` / `reminder.todo` | 到期提醒可见、可完成/忽略；跨午夜宽限（P4-c） |
+| 节日/待办提醒动画 | `fun.festival` / `reminder.todo` | **未实现的验收目标**：到期提醒可见、可完成/忽略、跨午夜宽限；当前只有清单 CRUD / 公历查询，不在本轮补功能 |
 
 ## P4（P3 之后）
 
@@ -35,8 +35,8 @@
 | 预测预热 | 依赖行为机与播放链稳定 | 预测 idle/move 首帧；交互让路时取消 |
 | WebM→WebP 全量 | 首跑供给已跑通，全量耗时/磁盘策略未定 | `petcore provision --all`、世代 GC、失败诊断 |
 | VPet PNG 序列后端 | 只留 `Clip` 接口 | `PNGAnimationClip`，按文件名尾数计时；不承诺 LPS |
-| Agent 联动动画 | 依赖 P3 `agent.link` | 六态映射动画名；缺失回退 idle |
-| 动态岛 | 独立 UI 域 | P3 作为 F09 mod；P4 果冻/碰撞/指标段 |
+| Agent 联动动画 | P4-c2 `ai.agent` | 只读六态映射已实现；真实外部写方验收与安装未做 |
+| 灵动岛 | 独立 Core UI 域（ROADMAP §28） | P5-a1 胶囊/系统网络指标/展开卡片已实现；果冻/碰撞等第二阶段未做 |
 | `head_box` 精细探头 | 当前曝光只用 `body_box` 投影 | 用 head_box 算“只露头”锚点，body_box 兜底 |
 
 ## 明确不做

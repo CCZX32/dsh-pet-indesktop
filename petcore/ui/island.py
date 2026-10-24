@@ -226,7 +226,7 @@ class DynamicIsland(QWidget):
 
     def _sync_sampling(self) -> None:
         """看不清就不采：岛隐藏、段没开、段被折叠时都停样本。"""
-        visible = self.isVisible()
+        visible = self.isVisible() and self._clock.isActive() and self.settings.enabled
         folded = set(self._plan.folded) if self._plan is not None else set()
         wants_net = (
             visible
@@ -238,9 +238,11 @@ class DynamicIsland(QWidget):
             for metric in (isl.CPU, isl.MEM)
         )
         for monitor, wanted in ((self.net_monitor, wants_net), (self.sys_monitor, wants_sys)):
-            if wanted and not monitor.running():
+            # Reconcile desired state, not thread liveness: a cancelled OS reader
+            # may still be exiting. Retrying start on the next tick is safe.
+            if wanted:
                 monitor.start()
-            elif not wanted and monitor.running():
+            else:
                 monitor.stop()
 
     # ------------------------------------------------------------ 字体与配色
@@ -439,6 +441,7 @@ class DynamicIsland(QWidget):
             self._rebuild_card()
         else:
             self.update()
+        self._sync_sampling()
 
     # ------------------------------------------------------------ 位置
 
@@ -552,6 +555,7 @@ class DynamicIsland(QWidget):
         self._expanded = True
         self._plan = self._compute_plan(self._card_budget())
         self._rebuild_card()
+        self._sync_sampling()
         self.card.show()
         self.card.move(CAPSULE_INSET, CAPSULE_HEIGHT)
         self._card_timer.start()

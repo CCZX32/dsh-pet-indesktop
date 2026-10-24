@@ -258,7 +258,21 @@ DEFAULTS: dict[str, Any] = {
     "network_info_enabled": True,
     "memory_trim_enabled": True,
     "divination_enabled": True,
+    "divination_speak": False,
+    "divination_hint": True,
     "festival_enabled": True,
+    "festival_reminder_enabled": False,
+    "festival_reminder_cn": True,
+    "festival_reminder_solar_terms": True,
+    "festival_reminder_west": True,
+    "festival_reminder_mode": "times",
+    "festival_reminder_count": 2,
+    "festival_reminder_times": "09:00",
+    "festival_reminder_show_quote": True,
+    "festival_reminder_speak": False,
+    "festival_custom_quotes_cn": "",
+    "festival_custom_quotes_west": "",
+    "festival_birthday": "",
     "weather_enabled": True,
     "weather_city": "",
     "weather_city_list": [],
@@ -267,6 +281,9 @@ DEFAULTS: dict[str, Any] = {
     "file_reader_progress_seconds": 15,
     "file_reader_record": True,
     "todo_items": [],
+    "todo_reminder_enabled": True,
+    "todo_reminder_lead_minutes": 5,
+    "todo_reminder_speak": False,
     "voice_chime_enabled": False,
     "voice_chime_schedule": "hourly",
     "voice_chime_times": [],
@@ -766,8 +783,25 @@ class Config:
         )
         normalized["network_info_enabled"] = _bool(normalized.get("network_info_enabled"), True)
         normalized["memory_trim_enabled"] = _bool(normalized.get("memory_trim_enabled"), True)
+        normalized["divination_speak"] = _bool(normalized.get("divination_speak"), False)
+        normalized["divination_hint"] = _bool(normalized.get("divination_hint"), True)
         normalized["divination_enabled"] = _bool(normalized.get("divination_enabled"), True)
         normalized["festival_enabled"] = _bool(normalized.get("festival_enabled"), True)
+        for key in ("festival_reminder_enabled", "festival_reminder_cn", "festival_reminder_solar_terms",
+                    "festival_reminder_west", "festival_reminder_show_quote", "festival_reminder_speak"):
+            normalized[key] = _bool(normalized.get(key), DEFAULTS[key])
+        normalized["festival_reminder_count"] = int(_number(normalized.get("festival_reminder_count"), 2, 1, 6))
+        if normalized.get("festival_reminder_mode") not in ("times", "custom"):
+            normalized["festival_reminder_mode"] = "times"
+        for key in ("festival_reminder_times", "festival_custom_quotes_cn", "festival_custom_quotes_west"):
+            normalized[key] = str(normalized.get(key) or "")
+        birthday = str(normalized.get("festival_birthday") or "").strip()
+        try:
+            from datetime import date
+            parsed = date.fromisoformat("2000-" + birthday)
+            normalized["festival_birthday"] = birthday if parsed.strftime("%m-%d") == birthday else ""
+        except ValueError:
+            normalized["festival_birthday"] = ""
         normalized["weather_enabled"] = _bool(normalized.get("weather_enabled"), True)
         normalized["weather_city"] = str(normalized.get("weather_city") or "").strip()[:24]
         normalized["weather_city_list"] = _text_list(normalized.get("weather_city_list"))[:12]
@@ -795,6 +829,10 @@ class Config:
             normalized.get("file_reader_record"), True
         )
         normalized["todo_items"] = _text_list(normalized.get("todo_items"))
+        normalized["todo_reminder_enabled"] = _bool(normalized.get("todo_reminder_enabled"), True)
+        normalized["todo_reminder_speak"] = _bool(normalized.get("todo_reminder_speak"), False)
+        normalized["todo_reminder_lead_minutes"] = int(_number(
+            normalized.get("todo_reminder_lead_minutes"), 5, 0, 60))
         normalized["voice_chime_enabled"] = _bool(normalized.get("voice_chime_enabled"), False)
         normalized["music_enabled"] = _bool(normalized.get("music_enabled"), True)
         normalized["voice_chime_schedule"] = _chime_schedule(

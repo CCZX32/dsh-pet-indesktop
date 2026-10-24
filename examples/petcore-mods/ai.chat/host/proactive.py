@@ -277,6 +277,7 @@ class ProactiveWatcher:
             if self._monotonic() - self._busy_since < REQUEST_TIMEOUT_S:
                 return
             LOG.warning("proactive request timed out; clearing the busy flag")
+            self._generation += 1
             self._busy = False
             self._limiter.record_failure()
             return
@@ -343,6 +344,7 @@ class ProactiveWatcher:
         self._baseline = fingerprint or None
         self._busy = True
         self._busy_since = self._monotonic()
+        self._generation += 1
         generation = self._generation
         app_info = (
             str(getattr(capture, "app_info", "") or "")
@@ -365,9 +367,9 @@ class ProactiveWatcher:
 
     # ---------------------------------------------------------------- 回调
     def _done(self, generation: int, text: str, app_info: str) -> None:
-        self._busy = False
         if generation != self._generation:
             return
+        self._busy = False
         config = self.config()
         if not config.get("enabled"):
             return
@@ -376,9 +378,9 @@ class ProactiveWatcher:
         self.runtime.proactive_answer(text, app_info=app_info, sync_chat=sync)
 
     def _failed(self, generation: int, reason: str) -> None:
-        self._busy = False
         if generation != self._generation:
             return
+        self._busy = False
         self._limiter.record_failure()
         LOG.info("proactive request failed: %s", str(reason)[:120])
 

@@ -82,20 +82,27 @@ def classify_http_status(status: int) -> str:
 
 def http_error(exc: urllib.error.HTTPError) -> HttpStatusError:
     """把 ``HTTPError`` 收敛成带分类与 ``Retry-After`` 的异常。"""
-    retry_after = None
+    # Converting consumes the raw HTTPError, which owns an open response body.
     try:
-        raw = exc.headers.get("Retry-After") if exc.headers is not None else None
-        if raw is not None:
-            retry_after = max(0.0, float(str(raw).strip()))
-    except (TypeError, ValueError, AttributeError):
         retry_after = None
-    status = int(getattr(exc, "code", 0) or 0)
-    reason = classify_http_status(status)
-    if reason == AUTH:
-        return AuthError(status, retry_after=retry_after)
-    if reason == RATE_LIMIT:
-        return RateLimitError(status, retry_after=retry_after)
-    return HttpStatusError(status, retry_after=retry_after)
+        try:
+            raw = exc.headers.get("Retry-After") if exc.headers is not None else None
+            if raw is not None:
+                retry_after = max(0.0, float(str(raw).strip()))
+        except (TypeError, ValueError, AttributeError):
+            retry_after = None
+        status = int(getattr(exc, "code", 0) or 0)
+        reason = classify_http_status(status)
+        if reason == AUTH:
+            return AuthError(status, retry_after=retry_after)
+        if reason == RATE_LIMIT:
+            return RateLimitError(status, retry_after=retry_after)
+        return HttpStatusError(status, retry_after=retry_after)
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
 
 
 def classify_exception(exc: BaseException) -> str | None:

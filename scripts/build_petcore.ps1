@@ -61,6 +61,8 @@ $pyiArgs = @(
     # 内置/示例 mod 以数据形式随包分发，PyInstaller 静态分析看不到它们的惰性 import：
     # psutil（网络信息/回收内存）、QtTextToSpeech（voice.chime 旧实现，仍保留以防回退）。
     "--hidden-import", "psutil",
+    # fun.festival 动态加载；农历/24节气依赖不能靠静态分析碰巧收集。
+    "--collect-submodules", "lunar_python",
     "--hidden-import", "PySide6.QtTextToSpeech",
     # P4-b 语音：edge-tts 在 petcore/net/tts.py 里惰性 import；SMTC 走 winrt，
     # 峰值检测走 pycaw（media.music 扩展）。漏收就是「装了扩展但合成/识别不可用」。

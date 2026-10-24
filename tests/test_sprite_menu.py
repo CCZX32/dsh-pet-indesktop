@@ -193,3 +193,22 @@ def test_context_menu_event_hit_execs_menu_miss_ignores(monkeypatch):
     overlay.contextMenuEvent(miss)
     assert len(execs) == 1                        # 未命中：不弹菜单
     assert not miss.isAccepted()
+
+
+def test_scale_submenu_survives_gc_and_follows_parent_lifetime():
+    import gc
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    overlay = OverlayWindow()
+    sprite = _make_sprite()
+    menu = build_sprite_menu(overlay, sprite)
+    gc.collect()
+    app.processEvents()
+    submenu = _find(menu, "大小").menu()
+    assert submenu.parent() is menu
+    submenu.actions()[3].trigger()
+    assert sprite.scale == 1.3
+    menu.deleteLater()
+    QCoreApplication.sendPostedEvents(menu, QEvent.Type.DeferredDelete)
+    assert not shiboken6.isValid(submenu)

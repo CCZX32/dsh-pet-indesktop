@@ -561,3 +561,36 @@ def test_file_icon_scales_to_physical_pixels(qapp, tmp_path) -> None:
 
     assert file_icon(path, size=24, dpr=1.5).availableSizes()[0].width() == 36
     assert file_icon(path, size=24, dpr=2.0).availableSizes()[0].width() == 48
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_submenu_survives_gc_and_is_owned_by_root(qapp, dynamic):
+    import gc
+
+    import shiboken6
+
+    calls = []
+    model = MenuModel()
+    if dynamic:
+        def populate(menu):
+            menu.addAction("Run").triggered.connect(lambda: calls.append("run"))
+
+        model.register(MenuItem("dynamic", "Dynamic", populate=populate))
+        nodes = [{"type": "action", "id": "dynamic"}]
+    else:
+        model.register(MenuItem("run", "Run", callback=lambda: calls.append("run")))
+        nodes = [{"type": "submenu", "id": "group", "label": "Group",
+                  "children": [{"type": "action", "id": "run"}]}]
+    root = model.build_layout(nodes)
+    try:
+        gc.collect()
+        qapp.processEvents()
+        child = root.actions()[0].menu()
+        assert child is not None and shiboken6.isValid(child)
+        assert child.parent() is root
+        child.actions()[0].trigger()
+        assert calls == ["run"]
+    finally:
+        # Delete only this menu; never flush unrelated global DeferredDelete events.
+        shiboken6.delete(root)
+    assert not shiboken6.isValid(child)

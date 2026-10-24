@@ -77,3 +77,11 @@ DEBUG petcore.ui.app: island apply: metrics=['network', 'cpu', 'mem'] style=dark
 
 **未做真机交互验收**：拖拽换位、15s 自动收起、多屏迁移由用户实际使用时确认；
 打包未重跑（新增纯 Python 模块，PyInstaller 静态分析可收集，`psutil` 早已在构建脚本）。
+
+
+## 2026-10-24 补充：测试范围口径
+
+保留上文原始执行记录。上文「全量」应理解为命令中列出的 `test_petcore_*.py`
+及公共门禁文件的选定测试，不是仓库全量 `python -m pytest -q`。不能用这些历史
+数字代表本轮验收；本轮环境、整仓失败/崩溃、实机与限制见
+[已有能力质量审查](PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md)。

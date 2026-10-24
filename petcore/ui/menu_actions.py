@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMenu
 from ..engine.enums import AnimatType, GraphType
 from ..engine.geometry import SCALE_STEPS
 from ..platform import autostart as autostart_mod
-from .menu_model import MenuItem, MenuModel
+from .menu_model import MenuItem, MenuModel, add_submenu
 
 logger = logging.getLogger("petcore.ui.menu_actions")
 
@@ -173,7 +173,7 @@ def _populate_group(submenu: QMenu, window, entries, *, group_by_prefix: bool = 
             if members is None:
                 _add_actions(submenu, window, (label,))
                 continue
-            _add_actions(submenu.addMenu(label), window, members)
+            _add_actions(add_submenu(submenu, label), window, members)
         return
     _add_actions(submenu, window, names)
 
@@ -189,7 +189,7 @@ def _add_lazy_group(
     unique = _unique_names(names)
     if not unique:
         return False
-    submenu = menu.addMenu(label)
+    submenu = add_submenu(menu, label)
     submenu.aboutToShow.connect(
         lambda sub=submenu, entries=tuple(unique), grouped=group_by_prefix: _populate_group(
             sub, window, entries, group_by_prefix=grouped

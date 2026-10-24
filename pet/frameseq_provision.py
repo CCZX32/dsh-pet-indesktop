@@ -1582,7 +1582,7 @@ def _hole_blocks(mask):
     tile = mask.crop(box)
     width, height = tile.size
     live = {(index % width, index // width)
-            for index, value in enumerate(tile.get_flattened_data()) if value}
+            for index, value in enumerate(tile.tobytes()) if value}
     blocks: list[tuple[tuple[int, int], list[tuple[int, int]]]] = []
     while live:
         seed = next(iter(live))

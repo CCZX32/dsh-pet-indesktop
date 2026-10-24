@@ -36,7 +36,7 @@ from petcore.engine.collision import (
 )
 from petcore.ui.bubble import BUBBLE_GAP, SpeechBubble
 from petcore.ui.menu_model import MenuItem, MenuModel
-from petcore.ui.menu_style import check_image_path
+from petcore.ui.menu_style import check_image_path, menu_stylesheet
 from petcore.ui.settings.text_lines import format_lines, parse_lines
 
 
@@ -227,26 +227,30 @@ def test_menu_actions_expose_checked_state(app) -> None:
     assert actions["关着"].isCheckable() and not actions["关着"].isChecked()
 
 
-def test_checked_menu_row_paints_a_mark(app) -> None:
+@pytest.mark.parametrize("dark_theme", [False, True])
+def test_checked_menu_row_paints_a_mark(app, dark_theme: bool) -> None:
     model = MenuModel()
     model.register(MenuItem("a", "第一项", checked=lambda: True))
     model.register(MenuItem("b", "第二项", checked=lambda: False))
     menu = model.build()
+    # Explicit theme: other Qt tests may leave the application palette dark.
+    # Assert foreground contrast in both themes rather than assuming black ink.
+    menu.setStyleSheet(menu_stylesheet(dark=dark_theme))
     menu.show()
     app.processEvents()
     image = menu.grab().toImage()
     row = max(1, image.height() // 2)
 
-    def dark(top: int, bottom: int) -> int:
+    def ink(top: int, bottom: int) -> int:
         return sum(
             1
             for y in range(top, min(bottom, image.height()))
             for x in range(min(24, image.width()))
-            if image.pixelColor(x, y).lightness() < 130
+            if (image.pixelColor(x, y).lightness() >= 130) == dark_theme
         )
 
     try:
-        assert dark(0, row) > dark(row, image.height())
+        assert ink(0, row) > ink(row, image.height())
     finally:
         menu.close()
 
@@ -299,6 +303,7 @@ def test_quiet_suppresses_proactive_bubbles_but_not_forced_ones(app) -> None:
 
     host_said.clear()
     host = _PresentationHost(quiet_active=True)
+    host.window.show()  # Delivery now truthfully refuses a hidden target.
     adapter = _PresentationAdapter(host)
     adapter.say("自动冒泡")
     assert host_said == []

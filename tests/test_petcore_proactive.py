@@ -459,3 +459,26 @@ def test_watcher_recovers_from_a_stuck_request() -> None:
     screen.fingerprint = 0xFFFF
     watcher.tick()
     assert len(runtime.asked) == 2
+
+
+def test_late_timed_out_answer_cannot_clear_new_request():
+    clock = Clock()
+    screen = FakeScreen()
+    watcher, runtime = _watcher(_ports(screen=screen, config=_enabled_config()), clock)
+    watcher.tick()
+    clock.advance(46)
+    watcher.tick()
+    old = runtime.pending
+    clock.advance(proactive.REQUEST_TIMEOUT_S + 10)
+    watcher.tick()
+    clock.advance(400)
+    screen.fingerprint = 0xFFFF
+    watcher.tick()
+    assert len(runtime.asked) == 2 and watcher._busy
+    old[0]("expired")
+    old[1]("expired failure")
+    assert watcher._busy
+    assert runtime.answers == []
+    runtime.pending[0]("current")
+    assert not watcher._busy
+    assert runtime.answers[0][0] == "current"

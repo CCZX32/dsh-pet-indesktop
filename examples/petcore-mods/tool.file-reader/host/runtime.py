@@ -30,17 +30,30 @@ class FileReaderRuntime:
         self.commands = {"read_last": self.read_last}
         self._unsubscribe = None
         self._busy = False
+        self._stopped = False
+        self._generation = 0
+        self._cancel = None
+        self._progress = None
         self._last: list = []
         self._threads: list[threading.Thread] = []
 
     # ---------------------------------------------------------------- 生命周期
 
     def start(self) -> None:
+        self._stopped = False
         interaction = self.context.ports.interaction
         if interaction is not None and self._unsubscribe is None:
             self._unsubscribe = interaction.on_drop(OWNER, self.on_drop)
 
     def stop(self) -> None:
+        self._stopped = True
+        self._generation += 1
+        if self._cancel is not None:
+            self._cancel.set()
+        scheduler = self.context.ports.scheduler
+        if self._progress is not None and scheduler is not None:
+            scheduler.cancel(self._progress)
+        self._progress = None
         if self._unsubscribe is not None:
             try:
                 self._unsubscribe()
@@ -63,7 +76,7 @@ class FileReaderRuntime:
     # ---------------------------------------------------------------- 事件
 
     def on_drop(self, paths) -> None:
-        if not self._enabled():
+        if self._stopped or not self._enabled():
             return
         budget = ScanBudget()
         files = collect_interpretable(paths, budget)
@@ -76,7 +89,10 @@ class FileReaderRuntime:
     # ---------------------------------------------------------------- 请求
 
     def _start(self, files, *, truncated: bool) -> None:
-        if self._busy:
+        if self._stopped or not self._enabled():
+            return
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
+        if self._busy or self._threads:
             self._say("上一批还在解读，稍等一下…")
             return
         api = getattr(self.context.ports, "api", None)
@@ -93,7 +109,9 @@ class FileReaderRuntime:
         message = build_user_text(content, names, skipped, budget_truncated=truncated)
         self._say(f"正在读 {len(files)} 个文件…")
 
+        generation = self._generation
         stop = threading.Event()
+        self._cancel = stop
         interval = max(5.0, self._float("file_reader_progress_seconds", 15.0))
         scheduler = self.context.ports.scheduler
         handle = None
@@ -106,6 +124,7 @@ class FileReaderRuntime:
                 self._say(f"还在读…已用 {int(time.monotonic() - started)} 秒")
 
             handle = scheduler.call_every(int(interval * 1000), heartbeat)
+            self._progress = handle
 
         def work() -> None:
             failure: BaseException | None = None
@@ -115,6 +134,7 @@ class FileReaderRuntime:
                     service_id,
                     [{"role": "user", "content": message}],
                     timeout=REQUEST_TIMEOUT_S,
+                    cancel=stop,
                 )
                 text = getattr(result, "text", "") or ""
             except Exception as exc:  # noqa: BLE001 - 失败必须可见
@@ -124,9 +144,9 @@ class FileReaderRuntime:
                 if handle is not None and scheduler is not None:
                     scheduler.cancel(handle)
             if failure is not None:
-                self._later(lambda: self._fail(failure))
+                self._later(lambda: self._fail(failure), generation)
                 return
-            self._later(lambda: self._finish(text))
+            self._later(lambda: self._finish(text), generation)
 
         thread = threading.Thread(target=work, name="file-reader", daemon=True)
         self._threads.append(thread)
@@ -198,12 +218,21 @@ class FileReaderRuntime:
             return ""
         return str(getattr(services[0], "service_id", "")) if services else ""
 
-    def _later(self, callback) -> None:
+    def _later(self, callback, generation: int) -> None:
+        def deliver():
+            if self._stopped or generation != self._generation:
+                return
+            if not self._enabled():
+                self._busy = False
+                return
+            self._progress = None
+            callback()
+
         scheduler = self.context.ports.scheduler
         if scheduler is None:
-            callback()
+            deliver()
             return
-        scheduler.call_later(0, callback)
+        scheduler.call_later(0, deliver)
 
     def _say(self, text: str) -> None:
         presentation = self.context.ports.presentation

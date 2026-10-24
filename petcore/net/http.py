@@ -167,7 +167,7 @@ def fetch_url(
         except urllib.error.HTTPError as exc:
             status = int(getattr(exc, "code", 0) or 0)
             if index == 0 and status in retry_statuses:
-                last = exc
+                last = http_error(exc)  # consume and close the discarded response
                 logger.info("HTTP %s：换路由重试一次", status)
                 continue
             raise http_error(exc) from None
@@ -176,15 +176,17 @@ def fetch_url(
             if index == 0:
                 continue
             raise _transport_error(exc) from None
-        headers_out = tuple(
-            (str(key), str(value)) for key, value in (response.headers or {}).items()
-        )
-        status = int(getattr(response, "status", 0) or 0)
-        body_bytes = _read_bounded(response, deadline, max_bytes, clock)
         try:
-            response.close()
-        except Exception:  # noqa: BLE001 - 关闭失败不影响结果
-            pass
+            headers_out = tuple(
+                (str(key), str(value)) for key, value in (response.headers or {}).items()
+            )
+            status = int(getattr(response, "status", 0) or 0)
+            body_bytes = _read_bounded(response, deadline, max_bytes, clock)
+        finally:
+            try:
+                response.close()
+            except Exception:  # closing must not mask the original read failure
+                pass
         return status, headers_out, body_bytes
     raise _transport_error(last) from None
 

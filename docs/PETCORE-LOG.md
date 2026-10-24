@@ -2221,3 +2221,169 @@ MOD-FORMAT §14、`petcore/AGENTS.md`、PR 报告。
 - 卡片行未做 tooltip/无障碍描述（主分支有），长错误原因会被截断显示。
 - 网络段没有延迟读数（架构红线），要延迟得先在 `petcore/net/` 加探测端口。
 - 打包未重跑：新增的是纯 Python 模块，PyInstaller 静态分析能收到；`psutil` 早已在构建脚本。
+
+
+## L054 · 2026-10-24 · 已复现问题收口：安装、菜单、采样与 Agent
+
+**范围/理由**：执行既有能力质量计划；Python3.11清理失败不能吞、Qt子菜单不能失主、
+GUI停用不能等阻塞读取也不能丢线程引用。新增世代隔离采样器，布局折叠同步采样需求；
+Agent 同类阻塞/迟到回调已复现后修复，不改变默认开关，不启动 P4-c3。
+
+**文件（相对本轮基线累计 numstat；含后续托盘刷新回归）**
+
+| 文件 | 增/删 |
+|---|---|
+| `petcore/mods/install.py` | +27 / -14 |
+| `petcore/platform/sampling.py` | +135 / -0 |
+| `petcore/platform/sysmon.py` | +25 / -32 |
+| `petcore/platform/netmon.py` | +28 / -33 |
+| `petcore/ui/menu_model.py` | +11 / -4 |
+| `petcore/ui/menu_actions.py` | +3 / -3 |
+| `petcore/ui/app.py` | +8 / -2 |
+| `petcore/ui/island.py` | +7 / -3 |
+| `examples/petcore-mods/ai.agent/host/runtime.py` | +55 / -22 |
+| `tests/test_petcore_install.py` | +92 / -0 |
+| `tests/test_petcore_monitor_lifecycle.py` | +261 / -0 |
+| `tests/test_petcore_island_sampling.py` | +2 / -0 |
+| `tests/test_petcore_island_window.py` | +49 / -4 |
+| `tests/test_petcore_menu.py` | +33 / -0 |
+| `tests/test_petcore_tray.py` | +26 / -0 |
+| `tests/test_petcore_agent_mod.py` | +101 / -0 |
+
+**验证**：menu red11→green32；tray刷新 red1→green33；install red7→green35；
+island red2→UI green88；monitor red12→related140；Agent red5+2→green79。
+准确命令与输出文件见 [质量审查报告](PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md)。
+**限制**：取消不是强杀 OS 读取；永久阻塞只保留旧 daemon，不启动重叠线程；整仓门禁另记 L056。
+
+## L055 · 2026-10-24 · 逐域后台生命周期与资源审查修复
+
+**范围/理由**：HTTP/HTTPError 确保 close；Speech 错误回调回GUI；天气/文件停止后不再发布，
+线程列表剪枝，文件请求传 cancel；音乐停用保留阻塞SMTC线程且旧歌词不得跨代。
+AI 请求按 cancel 身份发布，旧完成不能删新取消句柄；vision 停用可取消；proactive旧结果不清新busy。
+Windows MSG 用真实结构读取，修64位HWND高位误当消息ID。没有添加网络/常驻线程。
+
+**文件（相对本轮基线累计 numstat）**
+
+| 文件 | 增/删 |
+|---|---|
+| `examples/petcore-mods/ai.chat/host/proactive.py` | +4 / -2 |
+| `examples/petcore-mods/ai.chat/host/runtime.py` | +67 / -38 |
+| `examples/petcore-mods/media.music/host/runtime.py` | +41 / -20 |
+| `examples/petcore-mods/tool.file-reader/host/runtime.py` | +36 / -7 |
+| `examples/petcore-mods/tool.weather/host/runtime.py` | +25 / -9 |
+| `petcore/net/errors.py` | +19 / -12 |
+| `petcore/net/http.py` | +11 / -9 |
+| `petcore/platform/session.py` | +6 / -3 |
+| `petcore/ui/ports.py` | +7 / -6 |
+| `tests/test_petcore_ai_mod.py` | +120 / -0 |
+| `tests/test_petcore_file_reader_mod.py` | +84 / -0 |
+| `tests/test_petcore_http_port.py` | +21 / -0 |
+| `tests/test_petcore_music_mod.py` | +62 / -0 |
+| `tests/test_petcore_net.py` | +11 / -0 |
+| `tests/test_petcore_proactive.py` | +23 / -0 |
+| `tests/test_petcore_speech.py` | +70 / -0 |
+| `tests/test_petcore_weather_mod.py` | +42 / -0 |
+| `tests/test_petcore_session.py` | +37 / -0 |
+
+**验证**：HTTP red4→green151；Speech red3→green66；天气/文件 red5→green38，
+随后后台相关176 passed；音乐 red2→green37；AI身份/vision各red2、proactive red1→相关98passed；
+MSG red3→green3，关联59 passed/1 skipped。所有原始输出在 `.scratch/petcore-quality-review/`。
+**限制**：真实网络服务/TTS/SMTC播放器未使用账号验收；没有触发真实系统退出。
+
+## L056 · 2026-10-24 · 五域审查证据、主题测试隔离与阶段口径
+
+**文件**：`tests/test_petcore_p5.py` +9/-5：像素断言原先只适用于亮色，暗色探针red1，
+显式亮/暗两主题后菜单相关63passed；没有改产品QSS。文档更新 `petcore/AGENTS.md`、
+`petcore/README.md`、`examples/petcore-mods/README.md`、`docs/PETCORE-SPEC.md`、
+`PETCORE-ROADMAP.md`、`PETCORE-MAIN-PARITY-BACKLOG.md`、`PETCORE-ANIMATION-BACKLOG.md`、
+`PETCORE-LOG.md`/`PETCORE-LOG-INDEX.md`/`INDEX.md`；两份历史PR报告仅追加范围纠正，保留原文。
+新增 `PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md`；逐文件原因及完整增删行数以该报告为准。
+
+**口径**：P4-c2只读Agent、P5-a1已实现；待办调度/农历/48签/Agent写端/灵动岛二阶段未做。
+设置X保存，取消/Esc恢复；不把选定petcore测试说成仓库全量；不启动下一阶段。
+
+**验证/风险**：15s预热+60s×3采样前后实测；Windows125%单屏隔离源码运行与30轮资源检查；
+Python3.12仅stdlib安装/覆盖/卸载/只读清理冒烟（无Qt/pytest）。CPU高负载三遍与最终测试数字
+见报告；整仓存在旧路径兼容/菜单/编码失败与设置退出顺序相关原生崩溃，尚未全绿。
+不得把本条作为合并/分发验收通过。准确未闭环项和继续断点在 `.scratch/petcore-quality-review/HANDOFF.md`。
+
+## L057 · 2026-10-24 · P4-c3 A：整仓退出阻断与兼容性收口
+
+**边界**：主代理串行，保留上一轮48个未提交文件。开始快照与当前原件校验在
+`.scratch/petcore-p4c3/baseline/` / `preserved-baseline.json`；原48文件均保留，
+其中仅5份阶段/索引文档追加本批内容。无提交、推送、发布或系统配置变更。
+
+**根因与改动**：`pet/app.py`对子窗口直接`deleteLater()`，去除可在父对象销毁后调用
+失效QObject的零延时singleShot；`pet/sprite_menu.py` / `pet/overlay_shell.py`子菜单显式绑定父菜单。
+`pet/frameseq_provision.py`私有L8掩膜用字节读取兼容Pillow11；新增像素测试辅助器，保留5族原断言。
+新增独立进程销毁/真实两测试顺序回归与菜单GC/释放回归。历史品牌门禁仅精确允许旧报告两行真实
+分支引用，新增锁范围测试；没有修改该报告正文、全局Qt补丁、版本降级或新增skip。
+逐文件原因及本批/对HEAD两种增删行数见[本批PR报告](PR-REPORT-PETCORE-P4C3-A-2026-10-24.md)第二节。
+
+**环境**：项目内`.venv`为Python3.11.1，Qt6.11.1/Pillow11.2.1；从原requirements安装，
+约束/freeze/pip-check保存在scratch，未改全局Python或提高最低版本。原环境OCR失败因缺
+omegaconf与OpenCV发行名不匹配，独立环境依赖/OCR族68passed，pip check无冲突。
+
+**验证**：旧失败族25failed→关联Pillow/文档260passed；原退出码0xC0000005，新增回归4failed→
+设置/菜单92passed。完整无路径过滤pytest：**9716passed、20skipped、15warnings，1315.19s、exit0**；
+原始full-a-1.txt/XML/JSON保留，没有用分段结果拼接全量。20skip逐项记录；其中bash/ffmpeg
+仅PATH缺失的5项通过隔离工具补测5passed（27.38s），不改写原全量统计。
+20个自有CPU负载进程下连续三遍各143passed（97.00/100.87/98.81s），负载99.6–99.9%，均exit0。
+15s预热+60s×3菜单前后实测：构造三轮均值0.6277→0.6328ms，销毁0.07942→0.07904ms，
+旧子菜单180/180失效→0/180，遗留菜单均0；不宣称性能更快。最终Ruff通过，
+架构/文档/公共回归门禁387passed（15.58s），包含本轮新增报告，均exit0。
+
+**实机与风险**：Windows原生隔离设置/菜单30轮及100轮均正常退出；petcore源码菜单/托盘、
+设置保存取消、双宠、岛折叠/隐藏停止采样与30轮资源检查通过，退出后Python线程仅MainThread。
+旧设置100轮RSS约145→182MiB，但活QWidget为0、Qtwrapper恒423；tracemalloc追加60轮RSS下降，
+既有构造位置有约342KiB Python留存。没有把“无活窗口增长”说成“已排除内存泄漏”。
+其他平台/真实TTS/安装包/分发仍未验收，详见报告限制。此前质量报告仍保留当时失败记录。
+
+**后续**：A功能退出门已过；B通用接口、C待办、D节日生日、E48签及候选分发尚未实现。
+不得用本条为新功能或候选包验收背书；交接在`.scratch/petcore-p4c3/HANDOFF.md`，后续从B开始，不跳到发布。
+
+
+## L058 — 2026-10-24 — P4-c3 B通用提醒与共享语音端口
+
+- 实现按slot绑定展示、真实气泡/托盘交付、DND有界跨扩展单摘要，以及有界单语音通道、真实结束回调、按token/owner/slot取消和可撤销让位规则。
+- 不将业务日程放Core；保留旧on_done/手动force语义。LoadedMedia门控修复独立进程实际复现的立即播放取消阻塞。
+- 修改文件/增删与证据见[本批报告](PR-REPORT-PETCORE-P4C3-B-2026-10-24.md)；保留baseline-b原62文件差异。
+- 最终重点68passed；整仓9729passed/20skipped/14warnings、pytest exit0；高负载三遍32passed。Windows隔离双宠/隐藏通知/汇总/设置/30轮/退出及15+60秒前后各三遍性能通过。scratch回显编码错误单列说明，不改写测试原始结果。
+- 限制：无真实TTS、物理通知点击、其他Python/平台/双屏/候选包证据。后续C→D→E串行推进，无发布。
+
+
+## L059 — 2026-10-24 — P4-c3 C待办调度与独立持久化
+
+- 实现slot隔离、一次性/每日/提前/到期、10分钟宽限与高水位去重、无损旧清单迁移、非模态CRUD和设置取消不回滚触发状态。
+- Core0.2.0/API1，todo1.1.0；逐文件增删、TDD与后续性能/实机见[C报告](PR-REPORT-PETCORE-P4C3-C-2026-10-24.md)。
+- 模型11passed、功能18passed、关联95passed/13.05s/exit0；Ruff通过。累计全仓、高负载与Windows综合仍待C–E冻结，不沿用B结果。
+- 下一批D历法/生日，随后E48签；无子代理/提交/发布。
+
+
+## L060 — 2026-10-24 — P4-c3 D节日、节气与生日
+
+- 本地tracked纯规则/文案移植，46节日/节气规则、slot版本化调度、默认关闭、独立生日MM-DD与让位规则；不import旧pet业务、不加动画开关。
+- fun.festival1.1.0；逐文件增删/来源/风险与证据见[D报告](PR-REPORT-PETCORE-P4C3-D-2026-10-24.md)。
+- d-red1collectionerror→60passed；关联126passed/14.54s0、Ruff通过。综合性能/Windows/全仓待最终C–E冻结；进入E48签及chime最小适配。
+
+
+## L061 — 2026-10-24 — P4-c3 E：48签、语音联动与C–E联合验收
+
+- 实现稳定48签/档位权重/无放回轮次、全宠同日共享与旧daily迁移；每宠设置与目标展示不全局化。
+- 新增真实播放结束后的2.8秒揭签/6秒等待上限、完整签卡、首次互动提示、最多两条可取消预热；只改chime共享语音/让位与晚回调所需部分。
+- TDD同时关闭同步语音拒绝导致todo回调未绑定token、失效目标让抽签任务卡住、quiet期间继续第二条预热、720px新增页裁切，以及动态历法依赖遗漏。无全局Qt补丁。
+- 关联179passed；追加布局6passed、跨进程与配置回归15passed；Windows隔离源码30/120循环和真实PCM结束时序正常退出。最终整仓9837passed / 20skipped / 15warnings / 1565.27s / exit0，petcore/公共门1662passed，CPU高负载3×86passed、15+60秒前后各三轮性能完成；精确数字见[E报告](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。
+- 逐文件/增删见E报告，C/D原始切片表分别回填其报告。原48文件和各批快照保留，无提交/发布/真实账号/系统设置修改。
+- 交付止于E；分发包/远程清单/下载加固/公开发布不在本轮，缺口不得标成完成。
+
+- E收尾追加：真实FeatureManager卸载/新建runtime复现阻塞预热重复线程，单owner进程级准入修复；红1failed→45passed，随后重新原生/压力/性能/全部最终门禁，未复用修复前结果。
+
+
+## L062 — 2026-10-24 — 分发阶段详细交接与本批提交交付
+
+- 用户要求为较弱继任模型准备下一阶段计划，允许继任使用多智能体，并将A–E及本次交接提交到对应远程分支。本模型仍串行，不启动分发实现。
+- 新增[详细计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)：T00–T09、公共接口、三组不重叠worker写集、真实源码缺口、TDD种子、安装恢复/资源预算/构建与发布边界。更新市场/路线图/文档索引并建立本地scratch任务卡。
+- 本批为文档及一处测试文件末尾空行清理（AST不变）；逐文件增删、复验结果与提交号追踪见[交接报告](PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md)。同一提交包含既有质量及A–E产品改动，其性能与Windows证据仍以各批原报告为准，不能扩大纯文档豁免。
+- 远程核对：origin对应MerZlin/dsh-pet-indesktop，分支feat/petcore-vpet-architecture；fetch后HEAD与FETCH_HEAD无分叉。提交前复跑整仓9837passed / 20skipped / 14warnings / 1215.63s / exit0，高负载三遍各86passed（CPU99.9/100/100%），文档/公共架构300passed与Ruff通过；最终文档另复验。真实输出见报告；不强推、不合并、不上传Release。
+
+- 提交前仅清理新历法测试末尾两行空行（AST一致、52passed）；用户要求取消重复全仓，已停止自有测试/等待进程。沿用本轮已完整运行的全仓/三遍负载，取消运行不计为通过。

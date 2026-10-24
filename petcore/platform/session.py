@@ -33,9 +33,12 @@ class SessionWatcher(QObject, QAbstractNativeEventFilter):
         try:
             import ctypes
 
-            msg = ctypes.cast(int(message), ctypes.POINTER(ctypes.c_void_p))
-            header = ctypes.cast(msg, ctypes.POINTER(ctypes.c_uint * 8)).contents
-            message_id = header[1]
+            from ctypes import wintypes
+
+            # HWND is pointer-sized: indexing uint32 words reads the high half
+            # of HWND, not MSG.message, on 64-bit Windows.
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+            message_id = msg.message
         except Exception:
             return False, 0
         if message_id in (_WM_QUERYENDSESSION, _WM_ENDSESSION):

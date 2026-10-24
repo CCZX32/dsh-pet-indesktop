@@ -474,3 +474,48 @@ Core 托管的 `host.config`（ScopedConfig，支持实时预览与取消回滚�
 - 单条事件/单行超限即丢弃；坏 JSON、未知事件名静默忽略。
 - 日志只记 agent / 状态 / 文件名，不记事件正文。
 - 运行时（`runtime/links/tailer/protocol`）不 import PySide6；只有设置页可以碰 Qt。
+
+## 16. P4-c3 提醒与播放生命周期端口（API 1 增量）
+
+需要这些端口的扩展声明 `core_requires >=0.2.0,<1.0.0`；Core0.2.0随提醒扩展批次启用。
+不要直接导入旧 `pet` 业务或把定时提醒规则写入Core。
+
+- `ports.pets.pets()`枚举存活宠物，`PetHandle.config.get()`读取对应配置；运行状态写入`storage.data_dir(owner)`的版本化数据文件，不写偏好配置。
+- `ports.presentation.for_slot(slot)`在创建时绑定目标；目标关闭后返回未展示，不会转到另一宠物。`say()`/`notify()`返回真实交付是否成功；通知支持`on_click`，桌面系统可能不提供通知逐条ID。
+- 自动提醒用`ports.reminders.deliver(owner, slot, key, target, title, text, guard=..., on_click=...)`；结果为`bubble`、`notification`、`queued`或`unavailable`。静默期间有界暂存、恢复后每宠一份跨扩展摘要，不补播语音。队列是进程内暂存，不保证崩溃重启后的交付。
+- `speech.speak(request, owner=..., slot=..., guard=..., on_done=..., on_finished=..., on_error=...)`返回token。`on_done`保持旧的合成完成/已请求播放语义；`on_finished`只在真实媒体播放结束触发。不能以`on_done`调度揭签等需要播放完成的动作。
+- `speech.stop(token)`、`cancel_owner(owner)`、`cancel_slot(slot)`分别撤销作业；取消阻塞合成不强杀线程，保留其所有权直至真正返回，避免并发替代线程。
+- `speech.register_yield(owner, predicate)`返回撤销函数；`speech.should_yield(moment, requester=owner)`在发声前询问规则。规则必须按当前日程计算，不能依赖其他定时器是否已经执行。
+- `guard`与延迟回调必须绑定本runtime和目标宠物的生命周期；停用扩展/关闭宠物/退出统一取消交付与语音，mod自身仍负责取消自己的调度器句柄和交互订阅。
+
+实现与本批证据见[L058](PETCORE-LOG.md)及[B审查报告](PR-REPORT-PETCORE-P4C3-B-2026-10-24.md)。
+
+
+## 17. 提醒域 v2 数据与设置契约（Core 0.2.0 / API 1）
+
+| 扩展 | 版本 | 设置归属/默认 | 独立运行数据 |
+|---|---|---|---|
+| reminder.todo | 1.1.0 | 此宠物：`todo_reminder_enabled=true`、`todo_reminder_lead_minutes=5`（0–60）、`todo_reminder_speak=false` | `todo-slot-N-v2.json`；首次迁移另留`todo-slot-N-legacy-v1.json` |
+| fun.festival | 1.1.0 | 此宠物：手动`festival_enabled=true`、自动`festival_reminder_enabled=false`、`festival_reminder_speak=false`、`festival_birthday=""` | `festival-slot-N-v2.json`；日高水位/已触发时点 |
+| fun.divination | 1.1.0 | 此宠物：`divination_enabled=true`、`divination_speak=false`、`divination_hint=true` | 进程共享`daily-v2.json`；旧`daily.json`原件与`daily-legacy-v1.json`备份保留 |
+| voice.chime | 1.1.1 | 保持既有报时设置归属/默认 | 仅适配共享语音与节日让位 |
+
+数据在`ports.storage.data_dir(owner)`下，文件内部`schema_version=2`（包清单则为`schema=1`，市场索引为`schema_version=1`），不能把包清单schema与状态文件格式混用。原子写入采用同目录临时文件、flush/fsync/os.replace；失败保留原文件和内存状态，损坏文件不被悄悄覆盖。新数据不覆盖旧格式，回滚程序不删除v2；旧程序看不到新日程/轮次，不能保证新旧版本同时运行时的相互同步。
+
+### 设置准入与交互
+
+三页均属于扩展管理页内导航，不新增侧边栏域。稳定前缀`todo_*` / `festival_*` / `divination_*`，中英文搜索别名由各页`keywords()`和行文案提供，所有新增设置均是本宠物偏好而非一次性状态。Windows/macOS/Linux无不同业务开关，外部语音/系统通知按宿主能力降级；本轮只验证Windows。
+
+节日分类`festival_reminder_cn/solar_terms/west`默认true；模式`festival_reminder_mode=times`，次数`festival_reminder_count=2`（1–6），自定义`festival_reminder_times=09:00`；文案`festival_reminder_show_quote=true`，两类`festival_custom_quotes_cn/west`为空。自动关闭时依赖控件禁用；次数/自定义时点互斥。生日严格MM-DD，只存月日；02-29不在平年挪到其他日期，独立于分类、仍受自动总开关。无未接通的动画项。
+
+修改即时预览，保存/X落盘，取消/Esc恢复打开时偏好；运行数据不在设置快照内。缺失键按安全默认值恢复，旧手动开关不升级为自动授权。界面复用SettingsPage/SettingsCard，窄内容使用纵向行与自动换行，控件有名字/说明/键盘路径。
+
+### 调度与生命周期
+
+待办按slot+ID+occurrence+lead/due高水位去重；每日跨午夜提前、10分钟宽限、重启及回拨均不重放。一次性过宽限归档；过期条目不集中轰炸，旧无时间文本绝不自动推断日期。
+
+节日沿用现有规则：启动已过首点且当天未提示时补一次，正式时点按当前分钟触发；不积压补发整天时点。生日复用此链。让位规则在报时发声前独立计算，不依赖两定时器先后。
+
+48签按稳定ID/档位权重确定性抽取，一轮不重复；同日全宠共享，展示绑定实际触发slot。等待语音真实结束（不是on_done），再等2.8秒揭签；等待最多6秒，超时取消本token后继续文字。停用/关宠/退出取消任务和本owner语音；不撤销其他扩展语音。有界预热最多两请求，语音关闭不联网；已阻塞的provider调用只协作取消，返回前保留原线程、不启动替代线程。预热通过`petcore.mods.workers.try_start_worker`按owner进行进程级准入，实际卸载后创建新runtime也不能绕过活线程约束；取消Event仍属于每轮业务任务。
+
+详见[C](PR-REPORT-PETCORE-P4C3-C-2026-10-24.md)、[D](PR-REPORT-PETCORE-P4C3-D-2026-10-24.md)、[E联合验收](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。

@@ -122,3 +122,11 @@ $ .venv/Scripts/python -m petcore --root .scratch/agent-root --portable     --al
 **未做真机视觉验收**：本批只改源码树与安装器脚本，未重打 PyInstaller/Inno 产物；
 GUI 呈现（气泡位置、动作观感）由用户在实际运行中确认——设置页
 「扩展管理 → Agent 联动 → 诊断 → 发送测试事件」一键即可复现上面这条链路。
+
+
+## 2026-10-24 补充：测试范围口径
+
+保留上文原始执行记录。上文「全量」应理解为命令中列出的 `test_petcore_*.py`
+及公共门禁文件的选定测试，不是仓库全量 `python -m pytest -q`。不能用这些历史
+数字代表本轮验收；本轮环境、整仓失败/崩溃、实机与限制见
+[已有能力质量审查](PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md)。

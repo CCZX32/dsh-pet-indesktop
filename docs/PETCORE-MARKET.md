@@ -205,3 +205,8 @@ README.md
 CONTRIBUTING.md
 .github/workflows/validate.yml
 ```
+
+
+## 2026-10-24 后续分发交接（尚未实施）
+
+A–E 提醒域已完成，下一阶段按[分发准备详细计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)实施。该计划允许继任模型按不重叠写集并行网络、解包与候选构建，公共接口和集成由主模型负责。当前默认源、Range行为、manifest交叉校验和解包预算仍以现有代码为准；不能把计划中的HTTPS逐跳校验、预算、根清单或候选包标成已落地。生产源切换和公开Release需候选验收及用户另行确认。

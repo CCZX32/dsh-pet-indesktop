@@ -35,6 +35,8 @@
 
 ## 构建与发布
 
+- [petcore P4-c3 分发阶段详细实施计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)：T00–T09、精确接口/文件分工、红绿种子与停止门；A–E完成后接手分发、派worker或准备候选包前必读。
+
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [`ANDROID.md`](ANDROID.md) | Android 0.2.1 原生悬浮桌宠的安装、工具链、音效试听、Q 弹留白、碰撞坐标、设置兼容与设备验收入口。 | 修改 Android 客户端、资源导出、SDK/Gradle 构建或准备手机测试包时必读。 |
@@ -141,6 +143,18 @@
 ---
 
 ## PR 报告存档
+
+- [P4-c3 交接与提交交付](PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md)：下一阶段计划、推送前复验与提交范围；接手继任任务或核对本轮远程交付前必读。
+
+- [P4-c3 E与提醒域联合验收](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)：48签、播放时序、历法打包门禁、C–E逐文件/性能/Windows及全仓证据；修改提醒生命周期或进入分发阶段前必读；进入分发另读[执行计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)。
+- [P4-c3 C待办提醒](PR-REPORT-PETCORE-P4C3-C-2026-10-24.md)：调度、迁移、CRUD及验证证据；修改待办数据/生命周期前必读。
+- [P4-c3 D节日与生日](PR-REPORT-PETCORE-P4C3-D-2026-10-24.md)：历法移植、生日、自动授权与调度证据；修改节日规则前必读。
+
+- [P4-c3 B通用提醒与语音端口](PR-REPORT-PETCORE-P4C3-B-2026-10-24.md)：交付/取消/实际播放完成、性能与实机证据；修改提醒端口前必读。
+
+- [petcore P4-c3 A 质量阻断收口（2026-10-24）](PR-REPORT-PETCORE-P4C3-A-2026-10-24.md)：保留48文件基线，Python3.11隔离环境、旧设置退出崩溃/菜单/Pillow根因修复及整仓、性能、原生运行证据；进入提醒域前必读，当前执行状态以报告为准。
+
+- [petcore 已有能力质量审查（2026-10-24）](PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md)：安装清理、菜单所有权、采样与后台请求生命周期修复；五域审查、Python 3.11 回归、性能及 Windows 单屏源码证据与全量门禁缺口。判断 P4/P5 当前实现与验收状态、继续质量收口前必读。
 
 - [petcore 首版 core + mod 宿主（2026-10-20）](PR-REPORT-PETCORE-M0-M6-2026-10-20.md)：新分支 `feat/petcore-vpet-architecture` 的最小 core、mod 加载器、设置宿主与多屏；改 `petcore/` 或评估重构进度时必读。
 - [petcore P1-C 窗口/大小/实时预览（2026-10-20）](PR-REPORT-PETCORE-P1C-2026-10-20.md)：设置/关于非模态、10–300% 大小、设置实时预览与取消回滚、菜单/设置覆盖矩阵、文档体系；改这些行为或复测时必读。
@@ -369,7 +383,7 @@
 | [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |
 | [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md) | 动画/性能 backlog：已完成交互动画、P2-B2/P4 延后项、依赖与验收、明确不做。 | 规划动画批次、回答「这个动画什么时候做」或改播放/解码策略前必读。 |
 | [`../petcore/README.md`](../petcore/README.md) | 开发者上手指南：环境、运行、目录地图、加菜单项/mod/角色包、测试门禁、已知边界。 | 第一次接手 petcore、或需要一条可复制的命令时。 |
-| [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 5 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
+| [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 10 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
 | [`../petcore/AGENTS.md`](../petcore/AGENTS.md) | petcore 的 agent/贡献者约定：每次改动必须写 log + index、架构红线、菜单/设置一致性、非模态与大小上限。 | 在 `petcore/` 下改任何代码或文档之前必读。 |
 
 ## 在线更新与网络发布

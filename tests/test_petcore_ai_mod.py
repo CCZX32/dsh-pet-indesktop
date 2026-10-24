@@ -971,3 +971,123 @@ def test_vision_payload_is_capped_by_the_screen_port(runtime) -> None:
 
 def test_vision_bytes_falls_back_when_the_port_cannot_shrink(runtime) -> None:
     assert runtime._vision_bytes(b"raw") == b"raw"
+
+
+@pytest.mark.parametrize("quick", [False, True])
+def test_superseded_request_cannot_finish_or_uncancel_new_request(tmp_path, qt_app, quick):
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import QtScheduler
+
+    context = _context(tmp_path)
+    context.ports.scheduler = QtScheduler()
+    instance = _create_host(context).runtime_factory(context)
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    workers = []
+
+    def stream(*args, **kwargs):
+        index = len(workers)
+        workers.append(threading.current_thread())
+        entered[index].set()
+        assert release[index].wait(10)
+        kwargs["on_delta"](f"token-{index}")
+        return SimpleNamespace(text=f"answer-{index}", cancelled=False)
+
+    context.ports.api.stream_chat = stream
+    start = instance._start_quick if quick else instance._start
+    cancels = instance._quick_cancels if quick else instance._cancels
+    port = context.ports.quick_chat if quick else context.ports.chat
+
+    def flush():
+        loop = QEventLoop()
+        delivered = []
+        context.ports.scheduler.call_later(0, lambda: (delivered.append(True), loop.quit()))
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        timer.start(10000)
+        loop.exec()
+        timer.stop()
+        assert delivered
+
+    try:
+        start(0, [])
+        assert entered[0].wait(10)
+        start(0, [])
+        assert entered[1].wait(10)
+        current = cancels[0]
+        release[0].set()
+        workers[0].join(10)
+        flush()
+        assert cancels.get(0) is current
+        assert not any("answer-0" in str(call) or "token-0" in str(call) for call in port.calls)
+        instance.stop()
+        assert current.is_set()
+        release[1].set()
+        workers[1].join(10)
+        flush()
+        assert not any("answer-1" in str(call) or "token-1" in str(call) for call in port.calls)
+    finally:
+        instance.stop()
+        for event in release:
+            event.set()
+        for worker in workers:
+            worker.join(10)
+        flush()
+
+
+def test_stopped_vision_request_is_cancelled_without_late_publish(tmp_path, qt_app):
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import QtScheduler
+
+    context = _context(tmp_path)
+    context.ports.scheduler = QtScheduler()
+    instance = _create_host(context).runtime_factory(context)
+    entered, release = threading.Event(), threading.Event()
+    observed, workers, delivered = [], [], []
+
+    def stream(*args, **kwargs):
+        observed.append(kwargs.get("cancel"))
+        workers.append(threading.current_thread())
+        entered.set()
+        assert release.wait(10)
+        return SimpleNamespace(text="late")
+
+    context.ports.api.stream_chat = stream
+    try:
+        instance._start_vision(0, [], on_done=delivered.append)
+        assert entered.wait(10)
+        instance.stop()
+        assert observed[0] is not None and observed[0].is_set()
+    finally:
+        instance.stop()
+        release.set()
+        for worker in workers:
+            worker.join(10)
+        loop = QEventLoop()
+        marker = []
+        context.ports.scheduler.call_later(0, lambda: (marker.append(True), loop.quit()))
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        timer.start(10000)
+        loop.exec()
+        timer.stop()
+        assert marker
+    assert delivered == []
+
+
+def test_failed_scheduler_never_executes_ui_callback_on_worker(tmp_path):
+    context = _context(tmp_path)
+    instance = _create_host(context).runtime_factory(context)
+    called = []
+
+    def fail(*args):
+        raise RuntimeError("scheduler closed")
+
+    context.ports.scheduler.call_later = fail
+    worker = threading.Thread(target=lambda: instance._later(lambda: called.append(True)))
+    worker.start()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert called == []

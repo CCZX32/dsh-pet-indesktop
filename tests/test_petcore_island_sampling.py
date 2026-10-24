@@ -112,6 +112,7 @@ def test_net_monitor_poll_and_lifecycle():
         assert monitor.running() is True
     finally:
         monitor.stop()
+    assert monitor.wait_stopped(15.0) is True
     assert monitor.running() is False
 
 
@@ -181,4 +182,5 @@ def test_sys_monitor_lifecycle_is_idempotent():
     monitor.start()
     monitor.stop()
     monitor.stop()
+    assert monitor.wait_stopped(15.0) is True
     assert monitor.running() is False

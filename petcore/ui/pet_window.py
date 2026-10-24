@@ -1163,15 +1163,16 @@ class PetWindow(QWidget):
         self.set_scale(steps[index])
         event.accept()
 
-    def say(self, text: str, duration_ms: int = 4000, *, subtitle: str = "") -> None:
+    def say(self, text: str, duration_ms: int = 4000, *, subtitle: str = "") -> bool:
         if not self.isVisible():
             # 隐藏的桌宠不该继续冒泡；隐藏时 set_visible(False) 也会收起气泡。
-            return
+            return False
         # 设置页只写配置，这里在每次新气泡前同步一次字号（未变时是空操作）。
         self.bubble.set_text_scale(self._text_scale_factor())
         self.bubble.show_text(
             text, self.bubble_anchor_rect(), duration_ms, subtitle=subtitle
         )
+        return self.bubble.isVisible()
 
     def _on_bubble_clicked(self) -> None:
         """点气泡 = 打开快速对话（主分支同一条入口）。"""

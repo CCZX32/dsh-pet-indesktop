@@ -33,7 +33,7 @@ from .menu_layout import (
     resolve,
 )
 from .chat import ChatController, QuickChatController
-from .menu_model import MenuItem, MenuModel
+from .menu_model import MenuItem, MenuModel, add_submenu
 from .pet_manager import PetManager, SHARED_KEYS
 from .pet_window import PetWindow
 from .tray import TrayIcon
@@ -79,6 +79,11 @@ class _PresentationAdapter:
 
     def _window(self):
         if self._target_window is not None:
+            if not hasattr(self._target_window, "isVisible"):
+                return None
+            pets = getattr(self._host, "pets", None)
+            if pets is not None and self._target_window not in pets.each():
+                return None
             return self._target_window
         active = getattr(self._host, "_active_window", None) or getattr(
             self._host, "window", None
@@ -93,29 +98,28 @@ class _PresentationAdapter:
             return active
         return active
 
+    def for_slot(self, slot):
+        pets = getattr(self._host, "pets", None)
+        windows = pets.each() if pets is not None else [getattr(self._host, "window", None)]
+        window = next((w for w in windows if w is not None and w.slot == slot), None)
+        # A missing identity stays missing; never route to the active pet.
+        return _PresentationAdapter(self._host, window if window is not None else object())
+
     def for_window(self, window):
         """Return a presentation port bound to one pet window."""
         return _PresentationAdapter(self._host, window)
 
-    def say(
-        self,
-        text: str,
-        *,
-        duration_ms: int = 4000,
-        force: bool = False,
-        subtitle: str = "",
-    ) -> None:
-        if not force:
-            quiet = getattr(self._host, "quiet", None)
-            if quiet is not None and quiet.quiet_active():
-                return
+    def say(self, text: str, *, duration_ms: int = 4000, force: bool = False,
+            subtitle: str = "") -> bool:
+        quiet = getattr(self._host, "quiet", None)
+        if not force and quiet is not None and quiet.quiet_active():
+            return False
         window = self._window()
-        if window is not None:
-            subtitle = str(subtitle or "").strip()
-            if subtitle:
-                window.say(text, duration_ms, subtitle=subtitle)
-            else:
-                window.say(text, duration_ms)
+        settings = getattr(self._host, "settings_dialog", None)
+        if window is None or not window.isVisible() or (settings and settings.isVisible()):
+            return False
+        kwargs = {"subtitle": subtitle} if subtitle else {}
+        return window.say(text, duration_ms, **kwargs) is not False
 
     def play_animation(self, name: str, *, loop: bool = False) -> bool:
         window = self._window()
@@ -138,8 +142,33 @@ class _PresentationAdapter:
         window = self._window()
         return bool(window is not None and window.play_event(group, variant))
 
-    def notify(self, title: str, message: str, *, force: bool = False) -> None:
-        self.say(f"{title}：{message}" if title else message, force=force)
+    def notify(self, title: str, message: str, *, force: bool = False, on_click=None) -> bool:
+        # Preserve explicit command feedback; automatic reminders never force.
+        text = f"{title}：{message}" if title else message
+        if self.say(text, force=force):
+            return True
+        from PySide6.QtWidgets import QSystemTrayIcon
+        quiet = getattr(self._host, "quiet", None)
+        window = self._window()
+        tray = getattr(self._host, "tray", None)
+        if window is None or (quiet and quiet.quiet_active()):
+            return False
+        if tray is None or not QSystemTrayIcon.supportsMessages() or not tray.isVisible():
+            logger.warning("system notification unavailable")
+            return False
+        previous = getattr(self._host, "_notification_click", None)
+        if previous:
+            try:
+                tray.messageClicked.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+        def clicked():
+            if self._window() is not None and callable(on_click):
+                on_click()
+        self._host._notification_click = clicked
+        tray.messageClicked.connect(clicked)
+        tray.showMessage(title, message)
+        return True
 
     def visible(self) -> bool:
         """桌宠是否可见：隐藏态下不要切联动动画（同主分支的零功耗语义）。"""
@@ -724,7 +753,13 @@ class CoreHost:
         return menu
 
     def populate_tray_menu(self, menu) -> None:
+        # clear() removes actions, not the QMenus explicitly parented to this
+        # persistent tray menu. Retire only its previous submenu generation.
+        retired = [action.menu() for action in menu.actions() if action.menu() is not None]
         menu.clear()
+        for submenu in retired:
+            if submenu.parent() is menu:
+                submenu.deleteLater()
         pets = getattr(self, "pets", None)
         windows = pets.each() if pets is not None else ([self.window] if self.window else [])
         visible = any(window.isVisible() for window in windows if window is not None)
@@ -755,7 +790,7 @@ class CoreHost:
             menu.addSeparator()
             for slot, window in sorted(pets.windows.items()):
                 label = "主桌宠" if slot == 0 else f"桌宠 {slot}"
-                submenu = menu.addMenu(label)
+                submenu = add_submenu(menu, label)
                 state = submenu.addAction(
                     "隐藏" if window.isVisible() else "显示"
                 )
@@ -846,6 +881,12 @@ class CoreHost:
         if self.features is not None:
             self.features.stop()
             self.features = None
+        ports = self.ports
+        if ports is not None:
+            for service in (ports.reminders, ports.speech, ports.audio):
+                close = getattr(service, "close", None)
+                if callable(close):
+                    close()
         self.app.quit()
 
 

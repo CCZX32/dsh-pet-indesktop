@@ -310,3 +310,24 @@ def test_request_maps_rate_limit_status_and_retry_after():
     assert caught.value.reason == net_errors.RATE_LIMIT
     assert caught.value.status == 429
     assert caught.value.retry_after == 3.0
+
+@pytest.mark.parametrize("failure", [OSError("read failed"), net_errors.NetworkTimeout("timeout")])
+def test_fetch_url_closes_response_when_body_read_fails(failure):
+    class BrokenResponse(_FakeResponse):
+        def read(self, size=-1):
+            raise failure
+
+    response = BrokenResponse()
+    with pytest.raises(type(failure)):
+        fetch_url("https://example.invalid/x", opener=_factory({True: response}, []))
+    assert response.closed
+
+
+def test_fetch_url_closes_http_error_before_retrying():
+    import io
+
+    body = io.BytesIO(b"upstream error")
+    error = urllib.error.HTTPError("https://example.invalid/x", 502, "bad gateway", {}, body)
+    response = _FakeResponse(b"ok")
+    assert fetch_url("https://example.invalid/x", opener=_factory({True: error, False: response}, []))[2] == b"ok"
+    assert body.closed

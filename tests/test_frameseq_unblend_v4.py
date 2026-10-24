@@ -31,6 +31,8 @@
 """
 from __future__ import annotations
 
+from tests.pillow_helpers import pixels
+
 import time
 from pathlib import Path
 
@@ -182,7 +184,7 @@ def _real_frame():
 
 def _alpha_region(im, box):
     """``box`` 内 alpha 的取值分布（用于断言"整块被切"或"一位没动"）。"""
-    return list(im.crop(box).split()[3].get_flattened_data())
+    return list(pixels(im.crop(box).split()[3]))
 
 
 # ---------------------------------------------------------------- 第一层：候选
@@ -263,7 +265,7 @@ def test_white_block_away_from_hair_is_untouched():
 
     out = fp.restore_hair_holes(before)
 
-    assert list(out.get_flattened_data()) == list(before.get_flattened_data())
+    assert list(pixels(out)) == list(pixels(before))
 
 
 # ---------------------------------------------------------------- 切透：残留块
@@ -315,8 +317,8 @@ def test_cut_only_touches_alpha():
 
     out = fp.restore_hair_holes(rectified)
 
-    assert list(out.convert("RGB").get_flattened_data()) == \
-        list(rectified.convert("RGB").get_flattened_data())
+    assert list(pixels(out.convert("RGB"))) == \
+        list(pixels(rectified.convert("RGB")))
     # 确实切了：块内 alpha 归零，块外一个像素没变
     alpha = out.split()[3]
     assert _alpha_region(out, (70, 50, 96, 62)) == [0] * (26 * 12)
@@ -349,7 +351,7 @@ def test_eye_highlight_is_untouched():
 
     out = fp.restore_hair_holes(before)
 
-    assert list(out.get_flattened_data()) == list(before.get_flattened_data())
+    assert list(pixels(out)) == list(pixels(before))
 
 
 def test_lace_band_is_untouched():
@@ -358,7 +360,7 @@ def test_lace_band_is_untouched():
 
     out = fp.restore_hair_holes(before)
 
-    assert list(out.get_flattened_data()) == list(before.get_flattened_data())
+    assert list(pixels(out)) == list(pixels(before))
     # 自证：这网确实是一整块（否则"尺寸上限拦住了"就是空话）
     whole = fp.hole_candidate_mask(before)
     assert whole.histogram()[255] > fp.HOLE_SIZE_MAX
@@ -370,7 +372,7 @@ def test_skin_patch_is_untouched():
 
     out = fp.restore_hair_holes(before)
 
-    assert list(out.get_flattened_data()) == list(before.get_flattened_data())
+    assert list(pixels(out)) == list(pixels(before))
 
 
 def test_protected_shapes_survive_inside_unblend_v3():
@@ -378,8 +380,8 @@ def test_protected_shapes_survive_inside_unblend_v3():
     for source in (_eye_highlight(), _lace_band()):
         out = fp.unblend_v3(source)
         rectified = fp.unblend_rgba(source)
-        assert list(out.get_flattened_data()) == \
-            list(fp.erode_alpha(rectified).get_flattened_data())
+        assert list(pixels(out)) == \
+            list(pixels(fp.erode_alpha(rectified)))
 
 
 def test_throughput_stays_within_budget():
@@ -430,15 +432,15 @@ def test_disabled_by_default_leaves_solid_blocks_and_white_art_alone(
     与同一帧在开关打开时确实会被改动（否则"挂起生效"可能只是"本来就没候选"）。
     """
     for source in (_hair_with_gap(), _white_fin(), _lace_band()):
-        assert list(fp.unblend_v3(source).get_flattened_data()) == \
-            list(_chain_without_holes(source).get_flattened_data())
+        assert list(pixels(fp.unblend_v3(source))) == \
+            list(pixels(_chain_without_holes(source)))
 
     real = _real_frame_rectified()
     if real is None:
         pytest.skip("真素材帧不可用（缺 imageio_ffmpeg 或素材）")
     frame, rectified = real
-    assert list(fp.unblend_v3(frame).get_flattened_data()) == \
-        list(_chain_without_holes(frame).get_flattened_data())
+    assert list(pixels(fp.unblend_v3(frame))) == \
+        list(pixels(_chain_without_holes(frame)))
 
     monkeypatch.setattr(fp, "HOLE_RESTORE_ENABLED", True)
     # 自证：灰白块与**同形的白色鲸鳍**在开关打开时都会被切——后者正是挂起的原因

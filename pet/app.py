@@ -4342,10 +4342,10 @@ class AppShell:
             except Exception:
                 logging.exception("退出这只：关闭子窗失败 (%s)", attr)
             try:
-                # N-4：WA_DeleteOnClose 的对话框 close() 已调度销毁，再排
-                # deleteLater 会对已删 C++ 对象抛 RuntimeError（噪音）。
-                if not dialog.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose):
-                    QTimer.singleShot(0, dialog.deleteLater)
+                # deleteLater 本身已是延迟销毁，不能再用无 context 的 singleShot
+                # 包一层：父窗可能先销毁子窗，留下调用失效 QObject 的 MetaCall。
+                # Qt 会合并重复的 DeferredDelete；已经销毁时由 RuntimeError 兜底。
+                dialog.deleteLater()
             except Exception:
                 pass
             setattr(instance, attr, None)

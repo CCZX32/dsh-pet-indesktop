@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+from tests.pillow_helpers import pixels
+
 import time
 
 import pytest
@@ -263,9 +265,9 @@ def test_pull_replaces_color_and_leaves_alpha_bit_exact():
 
     out = fp.pull_white_contamination(rectified, neighbor, mask)
 
-    assert list(rectified.get_flattened_data()) == list(before.get_flattened_data())
-    assert list(out.split()[3].get_flattened_data()) == \
-        list(rectified.split()[3].get_flattened_data())
+    assert list(pixels(rectified)) == list(pixels(before))
+    assert list(pixels(out.split()[3])) == \
+        list(pixels(rectified.split()[3]))
     assert mask.getbbox() is not None                                 # 确实有像素要收
     assert fp.pull_white_contamination(rectified, neighbor,
                                        Image.new("L", rectified.size, 0)) is rectified
@@ -282,8 +284,8 @@ def test_crop_path_matches_full_frame_reference(size, core):
     """
     source = _frame(core, size=size, ring=2)
 
-    assert list(fp.unblend_v3(source).get_flattened_data()) == \
-        list(_reference_full_frame(source).get_flattened_data())
+    assert list(pixels(fp.unblend_v3(source))) == \
+        list(pixels(_reference_full_frame(source)))
 
 
 def test_fully_opaque_frame_is_untouched():
@@ -292,7 +294,7 @@ def test_fully_opaque_frame_is_untouched():
 
     out = fp.unblend_v3(source)
 
-    assert list(out.get_flattened_data()) == list(source.get_flattened_data())
+    assert list(pixels(out)) == list(pixels(source))
 
 
 def test_throughput_stays_within_budget():

@@ -1,3 +1,3 @@
 """petcore: dsh-pet 的 core 引擎、mod 宿主与桌面壳。"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

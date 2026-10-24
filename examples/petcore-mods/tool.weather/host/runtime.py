@@ -14,11 +14,16 @@ class WeatherRuntime:
         self.commands = {"show": self.show}
         self.client_factory = WeatherClient
         self._busy = False
+        self._stopped = False
+        self._generation = 0
         self._threads: list[threading.Thread] = []
 
     # ---------------------------------------------------------------- 命令
 
     def show(self) -> None:
+        if self._stopped:
+            return
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
         ports = self.context.ports
         presentation = ports.presentation
         if presentation is None:
@@ -29,7 +34,7 @@ class WeatherRuntime:
                 "天气提醒已关闭：设置 → 扩展管理 → 天气", duration_ms=5000, force=True
             )
             return
-        if self._busy:
+        if self._busy or self._threads:
             presentation.say("还在查天气，稍等一下…", duration_ms=3000, force=True)
             return
         city = current_city(config) if config is not None else ""
@@ -44,27 +49,36 @@ class WeatherRuntime:
         self._busy = True
         presentation.say(f"正在查 {city} 的天气…", duration_ms=3000, force=True)
         thread = threading.Thread(
-            target=self._work, args=(http, city, code), name="weather-fetch", daemon=True
+            target=self._work, args=(http, city, code, self._generation), name="weather-fetch", daemon=True
         )
         self._threads.append(thread)
         thread.start()
 
     # ---------------------------------------------------------------- 线程
 
-    def _work(self, http, city: str, code: str) -> None:
+    def _work(self, http, city: str, code: str, generation: int) -> None:
         try:
             reading = self.client_factory(http).fetch(city, code=code)
         except Exception as exc:  # noqa: BLE001 - 失败必须变成可见气泡
-            self._later(lambda exc=exc: self._fail(exc))
+            self._later(lambda exc=exc: self._fail(exc), generation)
             return
-        self._later(lambda reading=reading: self._finish(reading))
+        self._later(lambda reading=reading: self._finish(reading), generation)
 
-    def _later(self, callback) -> None:
+    def _later(self, callback, generation: int) -> None:
+        def deliver():
+            if self._stopped or generation != self._generation:
+                return
+            config = self.context.ports.config
+            if config is not None and not config.get("weather_enabled", True):
+                self._busy = False
+                return
+            callback()
+
         scheduler = self.context.ports.scheduler
         if scheduler is None:
-            callback()
+            deliver()
             return
-        scheduler.call_later(0, callback)
+        scheduler.call_later(0, deliver)
 
     def _finish(self, reading: WeatherReading) -> None:
         self._busy = False
@@ -81,9 +95,11 @@ class WeatherRuntime:
     # ---------------------------------------------------------------- 生命周期
 
     def start(self) -> None:
-        return
+        self._stopped = False
 
     def stop(self) -> None:
+        self._stopped = True
+        self._generation += 1
         self._busy = False
 
     def close(self) -> None:

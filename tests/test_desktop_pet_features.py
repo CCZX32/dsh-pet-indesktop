@@ -2760,6 +2760,31 @@ def test_dock_icon_visibility_defaults_on_and_is_saved_by_modern_settings(tmp_pa
     app.processEvents()
 
 
+def _product_copy_without_historical_branch_reference(path, text):
+    """One exact historical branch citation, not a blanket PR-report exemption."""
+    if path.as_posix() != "docs/PR-REPORT-PETCORE-P4B2-2026-10-23.md":
+        return text
+    branch = "co" + "dex/phase3-worker"
+    allowed_lines = {
+        f"### 参考评估（VPet / {branch}）",
+        f"- **{branch}**（tip `11646bee`）：有完整事务状态机、版本租约与跨进程 IPC。",
+    }
+    return "\n".join(line for line in text.splitlines() if line not in allowed_lines)
+
+
+def test_product_copy_historical_exception_is_exact():
+    brand = "co" + "dex"
+    historical = Path("docs/PR-REPORT-PETCORE-P4B2-2026-10-23.md")
+    citation = f"### 参考评估（VPet / {brand}/phase3-worker）"
+    assert _product_copy_without_historical_branch_reference(historical, citation) == ""
+    assert brand in _product_copy_without_historical_branch_reference(
+        Path("docs/PR-REPORT-NEW.md"), citation)
+    assert brand in _product_copy_without_historical_branch_reference(
+        historical, citation + f"\n用户界面：{brand}")
+    assert brand in _product_copy_without_historical_branch_reference(
+        historical, citation + " changed")
+
+
 def test_product_copy_has_no_external_brand_reference():
     forbidden = ("co" + "dex").lower()
     roots = [Path("pet"), Path("tests"), Path("docs"), Path("README.md")]
@@ -2779,7 +2804,8 @@ def test_product_copy_has_no_external_brand_reference():
                 or path.name.startswith("README-CHANGE-")
             ):
                 continue
-            if forbidden in path.read_text(encoding="utf-8", errors="ignore").lower():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if forbidden in _product_copy_without_historical_branch_reference(path, text).lower():
                 hits.append(str(path))
     assert hits == []
 

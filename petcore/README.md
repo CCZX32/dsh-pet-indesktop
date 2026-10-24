@@ -4,12 +4,22 @@
 > 与 `pet/` 仍然保留，作为迁移期的参照与兼容层；本目录不 import `pet`，只有
 > `petcore/media/` 与 `petcore/content/legacy.py` 两个适配层例外。
 
+## 当前开发状态（2026-10-24，P4-c3 A–E）
+
+当前Core候选为0.2.0/API1。A已关闭整仓/原生退出阻断；B提供slot提醒交付、免打扰汇总与真实播放完成/取消；C待办完整调度、D农历/节气/生日、E48签及语音联动均已实现。新增偏好仍按宠物隔离；自动节日提醒与所有新增语音默认关闭，功能扩展执行授权仍默认关闭。
+
+Windows隔离源码和性能已验证；最终整仓9837passed/20skipped、正常exit0，petcore/公共门1662passed、高负载3×86passed，准确数字及未验证范围见[E联合报告](../docs/PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。当前`.venv`已建立并用于Python3.11.1验证，不代表已构建冻结包。完整数据/回滚契约见[MOD-FORMAT §17](../docs/PETCORE-MOD-FORMAT.md)。
+
+之前“仅清单/8公历节日/6签”的状态保留在[质量审查历史报告](../docs/PR-REPORT-PETCORE-QUALITY-REVIEW-2026-10-24.md)，不再作为当前能力结论。P4-c2只读Agent、P5-a1灵动岛已有；Agent写入、灵动岛二阶段、节日专属动画与角色素材下载/v6仍未做。本轮止于E，分发清单/Release ZIP/下载加固/候选包及远端验收尚未开始。
+
+下方运行/打包命令是开发说明，不代表本轮全部执行。P4-c3验收不创建或信任证书、不降低Smart App Control、不覆盖真实安装；遇安全策略拦截应保留证据并标记候选包验收阻断。
+
 ## 1. 环境
 
 Windows（Git Bash）：
 
 ```bash
-cd E:/Work/dsh-pet-0
+cd E:/AI/DSH/dshpet
 python -m venv .venv
 .venv/Scripts/python -m pip install -U pip
 .venv/Scripts/python -m pip install -r requirements.txt pytest ruff
@@ -196,9 +206,10 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest \
 - 与主分支的完整功能差距（AI/识屏/Agent/账户/音乐/语音/天气/灵动岛/更新等）
   维护在 [`../docs/PETCORE-MAIN-PARITY-BACKLOG.md`](../docs/PETCORE-MAIN-PARITY-BACKLOG.md)，
   不要用“示例 mod 存在”判断某域已交付。
-- PyInstaller 6.22.3 已在 `.venv` 安装；Inno Setup 6.7.3 已便携安装到
-  `tools/InnoSetup`；onedir 与安装包已实际构建（默认窗口化，`Subsystem=2` 无终端）。
-  安装器只验证了构建与包含关系，未做静默安装/卸载的端到端验收。
+- 历史批次曾以 PyInstaller 6.22.3 / Inno Setup 6.7.3 构建 onedir 与安装包
+  （默认窗口化，`Subsystem=2`）；这不是本轮候选证据。2026-10-24 当前 Python 3.11
+  独立 `.venv` 未安装 PyInstaller，A–E 未生成冻结包，也未验收安装/卸载。
+  后续分发必须重新检查工具版本、构建和端到端运行，不能复用历史产物结论。
 - 安装向导的 5 个扩展是 `[Tasks]` 可勾选项，装到 `%APPDATA%\dsh-pet-core\mods\<id>`
   并附 `.trusted` 授信标记；不勾选不写盘。
 - 朝向口径：素材原生朝左，`facing == "right"` 才镜像（`_mirrored()`）；反了就是

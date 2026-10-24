@@ -122,6 +122,11 @@ class PetManager(QObject):
             notify(window)
 
     def _detach_interaction(self, window: PetWindow) -> None:
+        ports = getattr(self.host, "ports", None)
+        for service in (getattr(ports, "speech", None), getattr(ports, "reminders", None)):
+            cancel = getattr(service, "cancel_slot", None)
+            if callable(cancel):
+                cancel(window.slot)
         features = getattr(self.host, "features", None)
         interaction = getattr(getattr(features, "ports", None), "interaction", None)
         detach = getattr(interaction, "detach_window", None)

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import threading
 import time
 
@@ -43,6 +44,7 @@ class AiChatRuntime:
         self._cancels: dict[int, threading.Event] = {}
         self._quick_cancels: dict[int, threading.Event] = {}
         self._threads: dict[int, threading.Thread] = {}
+        self._vision_cancels: dict[threading.Event, threading.Event] = {}
         self._unsubs: list = []
         self._look_busy: set[int] = set()
         self._last_look: dict[int, float] = {}
@@ -153,7 +155,7 @@ class AiChatRuntime:
         try:
             scheduler.call_later(max(0, int(delay_ms)), callback)
         except Exception:
-            callback()
+            logging.getLogger(__name__).warning("GUI callback discarded: scheduler unavailable")
 
     def _active_slot(self) -> int:
         pets = getattr(self.context.ports, "pets", None)
@@ -397,6 +399,19 @@ class AiChatRuntime:
         if cancel is not None:
             cancel.set()
 
+    def _request_callback(self, requests, slot, cancel, callback, *, final=False) -> None:
+        def deliver():
+            if requests.get(slot) is not cancel:
+                return
+            try:
+                if final or not cancel.is_set():
+                    callback()
+            finally:
+                if final and requests.get(slot) is cancel:
+                    requests.pop(slot, None)
+
+        self._later(deliver)
+
     def _start_quick(self, slot: int, messages) -> None:
         quick = self._quick()
         api = self._api()
@@ -416,13 +431,16 @@ class AiChatRuntime:
 
             def delta(value: str) -> None:
                 partial.append(value)
-                quick.token(OWNER, value, pet_slot=slot)
+                self._request_callback(self._quick_cancels, slot, cancel,
+                    lambda: quick.token(OWNER, value, pet_slot=slot))
 
             def reasoning(value: str) -> None:
-                quick.reasoning(OWNER, value, pet_slot=slot)
+                self._request_callback(self._quick_cancels, slot, cancel,
+                    lambda: quick.reasoning(OWNER, value, pet_slot=slot))
 
             def status(line: str) -> None:
-                quick.status(OWNER, line, pet_slot=slot)
+                self._request_callback(self._quick_cancels, slot, cancel,
+                    lambda: quick.status(OWNER, line, pet_slot=slot))
 
             try:
                 result = api.stream_chat(
@@ -440,21 +458,19 @@ class AiChatRuntime:
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = str(getattr(exc, "reason", "") or "network")
-                if cancel.is_set():
-                    quick.done(OWNER, "".join(partial), pet_slot=slot)
-                else:
-                    quick.error(OWNER, reason, str(exc), pet_slot=slot)
+                detail = str(exc)
+
+                def failed():
+                    if cancel.is_set():
+                        quick.done(OWNER, "".join(partial), pet_slot=slot)
+                    else:
+                        quick.error(OWNER, reason, detail, pet_slot=slot)
+
+                self._request_callback(self._quick_cancels, slot, cancel, failed, final=True)
             else:
-                if getattr(result, "cancelled", False):
-                    quick.done(OWNER, "".join(partial), pet_slot=slot)
-                else:
-                    quick.done(
-                        OWNER,
-                        str(getattr(result, "text", "") or "".join(partial)),
-                        pet_slot=slot,
-                    )
-            finally:
-                self._quick_cancels.pop(slot, None)
+                final = "".join(partial) if cancel.is_set() or getattr(result, "cancelled", False) else str(getattr(result, "text", "") or "".join(partial))
+                self._request_callback(self._quick_cancels, slot, cancel,
+                    lambda: quick.done(OWNER, final, pet_slot=slot), final=True)
 
         threading.Thread(target=run, name=f"ai-quick-{slot}", daemon=True).start()
 
@@ -477,13 +493,16 @@ class AiChatRuntime:
 
             def delta(value: str) -> None:
                 partial.append(value)
-                chat.token(OWNER, value, pet_slot=slot)
+                self._request_callback(self._cancels, slot, cancel,
+                    lambda: chat.token(OWNER, value, pet_slot=slot))
 
             def reasoning(value: str) -> None:
-                chat.reasoning(OWNER, value, pet_slot=slot)
+                self._request_callback(self._cancels, slot, cancel,
+                    lambda: chat.reasoning(OWNER, value, pet_slot=slot))
 
             def status(line: str) -> None:
-                chat.status(OWNER, line, pet_slot=slot)
+                self._request_callback(self._cancels, slot, cancel,
+                    lambda: chat.status(OWNER, line, pet_slot=slot))
 
             try:
                 result = api.stream_chat(
@@ -499,22 +518,22 @@ class AiChatRuntime:
                     web_search=self._web_search(),
                     cancel=cancel,
                 )
-            except Exception as exc:  # noqa: BLE001 - 网络/传输错误只认 reason
+            except Exception as exc:  # noqa: BLE001
                 reason = str(getattr(exc, "reason", "") or "network")
-                if cancel.is_set():
-                    chat.done(OWNER, "".join(partial), pet_slot=slot)
-                else:
-                    detail = str(exc)
-                    chat.error(OWNER, reason, detail, pet_slot=slot)
-                    self._say(f"AI 请求失败：{detail}")
+                detail = str(exc)
+
+                def failed():
+                    if cancel.is_set():
+                        chat.done(OWNER, "".join(partial), pet_slot=slot)
+                    else:
+                        chat.error(OWNER, reason, detail, pet_slot=slot)
+                        self._say(f"AI 请求失败：{detail}")
+
+                self._request_callback(self._cancels, slot, cancel, failed, final=True)
             else:
-                if getattr(result, "cancelled", False):
-                    chat.done(OWNER, "".join(partial), pet_slot=slot)
-                else:
-                    final = getattr(result, "text", "") or "".join(partial)
-                    chat.done(OWNER, final, pet_slot=slot)
-            finally:
-                self._cancels.pop(slot, None)
+                final = "".join(partial) if cancel.is_set() or getattr(result, "cancelled", False) else str(getattr(result, "text", "") or "".join(partial))
+                self._request_callback(self._cancels, slot, cancel,
+                    lambda: chat.done(OWNER, final, pet_slot=slot), final=True)
 
         thread = threading.Thread(target=run, name=f"ai-chat-{slot}", daemon=True)
         self._threads[slot] = thread
@@ -530,6 +549,12 @@ class AiChatRuntime:
         model = str(self._config_value("ai_model", "") or "")
         temperature = self._temperature()
 
+        cancel = threading.Event()
+        self._vision_cancels[cancel] = cancel
+
+        def publish(callback):
+            self._request_callback(self._vision_cancels, cancel, cancel, callback, final=True)
+
         def run() -> None:
             try:
                 payload = messages() if callable(messages) else messages
@@ -540,16 +565,17 @@ class AiChatRuntime:
                     temperature=temperature,
                     thinking=self._thinking(),
                     reasoning_effort=self._reasoning_effort(),
+                    cancel=cancel,
                 )
             except Exception as exc:  # noqa: BLE001
                 reason = str(getattr(exc, "reason", "") or exc)
-                self._later(lambda: fail(reason))
+                publish(lambda: fail(reason))
                 return
             text = str(getattr(result, "text", "") or "").strip()
             if not text:
-                self._later(lambda: fail("empty_reply"))
+                publish(lambda: fail("empty_reply"))
                 return
-            self._later(lambda: on_done(text))
+            publish(lambda: on_done(text))
 
         threading.Thread(target=run, name=f"ai-look-{slot}", daemon=True).start()
 
@@ -668,6 +694,9 @@ class AiChatRuntime:
 
     def stop(self) -> None:
         self._proactive.stop()
+        for cancel in self._vision_cancels:
+            cancel.set()
+        self._vision_cancels.clear()
         for cancel in list(self._cancels.values()):
             cancel.set()
         self._cancels.clear()

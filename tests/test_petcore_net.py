@@ -249,3 +249,14 @@ def test_network_error_uses_the_reason_when_message_is_empty() -> None:
     exc = NetworkError("", reason=TIMEOUT)
     assert exc.reason == TIMEOUT
     assert str(exc) == REASON_TEXT[TIMEOUT]
+
+
+def test_normalizing_http_error_closes_its_body():
+    import io
+
+    body = io.BytesIO(b"sensitive upstream response")
+    raw = urllib.error.HTTPError("https://example.invalid/x", 429, "limited", {"Retry-After": "3"}, body)
+    converted = http_error(raw)
+    assert converted.status == 429
+    assert converted.retry_after == 3
+    assert body.closed

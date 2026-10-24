@@ -312,3 +312,87 @@ def test_mod_manifest_and_contributions_load():
     )
     assert diagnostics == []
     assert manager.settings_pages()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_stop_discards_queued_result(app, tmp_path, failure):
+    from dataclasses import replace
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import QtScheduler
+
+    scheduler = QtScheduler()
+    class Api(_Api):
+        def stream_chat(self, *args, **kwargs):
+            if failure:
+                raise RuntimeError("offline")
+            return super().stream_chat(*args, **kwargs)
+
+    chat = _Chat()
+    context, presentation = _context(api=Api(), chat=chat)
+    context.ports = replace(context.ports, scheduler=scheduler)
+    runtime = runtime_mod.FileReaderRuntime(context)
+    path = tmp_path / "input.txt"
+    path.write_text("notes", encoding="utf-8")
+    runtime.on_drop([path])
+    runtime._threads[-1].join(10)
+    assert not runtime._threads[-1].is_alive()
+    before = list(presentation.said)
+    runtime.stop()
+    loop = QEventLoop()
+    delivered = []
+    scheduler.call_later(0, lambda: (delivered.append(True), loop.quit()))
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(10000)
+    loop.exec()
+    timeout.stop()
+    assert delivered
+    assert presentation.said == before
+    assert chat.records == []
+
+
+def test_stop_cancels_request_and_refuses_overlap(tmp_path):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    cancellations = []
+
+    class Api(_Api):
+        def stream_chat(self, *args, **kwargs):
+            cancellations.append(kwargs.get("cancel"))
+            entered.set()
+            assert release.wait(10)
+            return SimpleNamespace(text="late")
+
+    context, presentation = _context(api=Api())
+    runtime = runtime_mod.FileReaderRuntime(context)
+    path = tmp_path / "input.txt"
+    path.write_text("notes", encoding="utf-8")
+    try:
+        runtime.on_drop([path])
+        assert entered.wait(10)
+        runtime.stop()
+        assert cancellations[0] is not None and cancellations[0].is_set()
+        runtime.start()
+        runtime.on_drop([path])
+        assert len(runtime._threads) == 1
+    finally:
+        runtime.stop()
+        release.set()
+        for thread in runtime._threads:
+            thread.join(10)
+    assert "late" not in presentation.said
+
+
+def test_repeated_requests_prune_finished_workers(tmp_path):
+    context, _ = _context(api=_Api())
+    runtime = runtime_mod.FileReaderRuntime(context)
+    path = tmp_path / "input.txt"
+    path.write_text("notes", encoding="utf-8")
+    for _ in range(30):
+        runtime.on_drop([path])
+        assert len(runtime._threads) == 1
+        runtime._threads[0].join(10)
+        assert not runtime._threads[0].is_alive()
+    runtime.stop()

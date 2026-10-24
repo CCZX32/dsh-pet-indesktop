@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+from tests.pillow_helpers import pixels
+
 import shutil
 import subprocess
 from pathlib import Path
@@ -99,11 +101,11 @@ def test_only_alpha_one_is_cleared_and_zeroed_pixels_rgb_is_black():
     for index, alpha in enumerate(alphas):
         payload += bytes((40 + index * 30, 200 - index * 20, 90, alpha))
     source = Image.frombytes("RGBA", (len(alphas), 1), bytes(payload))
-    before = list(source.get_flattened_data())
+    before = list(pixels(source))
 
     out = fp.floor_faint_alpha(source)
 
-    assert list(source.get_flattened_data()) == before          # 纯函数：入参不改
+    assert list(pixels(source)) == before          # 纯函数：入参不改
     assert [out.getpixel((x, 0))[3] for x in range(len(alphas))] == [0, 0, 2, 3, 255]
     assert out.getpixel((1, 0))[:3] == (0, 0, 0)                # 归零像素 RGB = 0（不是 255）
     for x in (0, 2, 3, 4):

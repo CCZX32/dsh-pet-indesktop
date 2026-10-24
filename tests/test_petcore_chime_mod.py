@@ -140,7 +140,7 @@ class FakeSpeech:
             raise self.error
         return self.result
 
-    def speak(self, request, *, on_done=None, on_error=None):
+    def speak(self, request, *, on_done=None, on_error=None, **kwargs):
         self.spoken.append(request)
         if self.error is not None:
             if on_error is not None:
@@ -149,6 +149,12 @@ class FakeSpeech:
         if on_done is not None:
             on_done(self.result)
         return "speech-1"
+
+    def should_yield(self, moment, *, requester=""):
+        return False
+
+    def cancel_owner(self, owner):
+        return None
 
     def stop(self, token=""):
         return None
@@ -460,7 +466,7 @@ def test_manifest_and_feature_load_with_menu_and_settings():
     manifest, problems = load_manifest(MOD_DIR)
     assert problems == []
     assert manifest.id == "voice.chime"
-    assert manifest.version == "1.1.0"
+    assert manifest.version == "1.1.1"
     assert manifest.execution == "host-only"
     assert manifest.entrypoint == "host/__init__.py:create_host"
 

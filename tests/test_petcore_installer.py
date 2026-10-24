@@ -117,3 +117,10 @@ def test_trusted_install_mod_loads_without_the_global_switch(
     mod = next(item for item in result.mods if item.manifest.id == "tool.bundled")
     assert mod.enabled is True
     assert mod.manifest.name_zh == "随包工具"
+
+
+def test_build_collects_dynamic_festival_calendar_dependency():
+    script = (Path(__file__).resolve().parent.parent / 'scripts' / 'build_petcore.ps1').read_text(encoding='utf-8')
+    assert '"--collect-submodules", "lunar_python"' in script
+    from lunar_python import Solar
+    assert Solar.fromYmd(2032, 2, 29).getLunar().getSolar().toYmd() == '2032-02-29'

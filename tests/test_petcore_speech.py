@@ -474,3 +474,73 @@ def test_check_report_lists_speech_providers(tmp_path) -> None:
     assert report["backend"] in {"edge", "sapi", "doubao", "mimo"}
     providers = {item["id"] for item in report["providers"]}
     assert {"edge", "sapi"} <= providers
+
+@pytest.mark.parametrize("failure", [SpeechError("network"), ValueError("backend failure")])
+def test_synthesis_error_callback_runs_on_qt_thread(tmp_path, monkeypatch, failure):
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import CoreSpeechPort, QtScheduler
+
+    monkeypatch.setattr(speech_service, "RETRY_DELAY_S", 0.0)
+    app = _application()
+    main_thread = threading.get_ident()
+
+    def synth(*_args):
+        raise failure
+
+    service = _make_service(tmp_path, synth=synth)
+    scheduler = QtScheduler()
+    port = CoreSpeechPort(service, FakeAudio(), scheduler=scheduler)
+    callbacks = []
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.timeout.connect(lambda: loop.quit() if callbacks else None)
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    port.speak(SpeechRequest(text="error"), on_error=lambda error: callbacks.append(threading.get_ident()))
+    try:
+        poll.start(20)
+        timeout.start(10000)
+        loop.exec()
+        assert callbacks == [main_thread]
+        assert not port.playing()
+    finally:
+        poll.stop()
+        timeout.stop()
+        port.stop()
+        app.processEvents()
+
+
+def test_speech_never_plays_on_worker_when_gui_scheduler_is_unavailable(tmp_path):
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import CoreSpeechPort
+
+    class BrokenScheduler:
+        def call_later(self, _delay, _callback):
+            raise RuntimeError("scheduler closed")
+
+    service = _make_service(tmp_path, synth=RecordingSynth(b"audio"))
+    audio = FakeAudio()
+    port = CoreSpeechPort(service, audio, scheduler=BrokenScheduler())
+    callbacks = []
+    app = _application()
+    # Execute the real public async path; the service completion is observable
+    # through the port's token state, no guessed sleep interval.
+    port.speak(SpeechRequest(text="x"), on_done=lambda _result: callbacks.append("done"))
+    loop = QEventLoop()
+    poll, timeout = QTimer(), QTimer()
+    poll.timeout.connect(lambda: loop.quit() if not port.playing() else None)
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    try:
+        poll.start(20)
+        timeout.start(10000)
+        loop.exec()
+        assert not port.playing()
+    finally:
+        poll.stop()
+        timeout.stop()
+        port.stop()
+        app.processEvents()
+    assert audio.paths == []
+    assert callbacks == []

@@ -911,3 +911,104 @@ def test_pet_handle_animations_tolerate_missing_catalog() -> None:
     window = SimpleNamespace(slot=0, is_primary=True, config=None)
     handle = PetHandleImpl(SimpleNamespace(), window)
     assert handle.animations() == ()
+
+
+@pytest.mark.parametrize("action", ["stop", "close", "disable"])
+def test_runtime_drops_queued_events_after_deactivation(tmp_path, action):
+    runtime, config, presentation, audio, scheduler = _runtime(tmp_path)
+    runtime._drain_once()
+    _append(_events_file(tmp_path), {"event": "PreToolUse", "tool": "Bash", "agent": "demo"})
+    runtime._drain_once()
+    if action == "disable":
+        config.set("ai_agent_enabled", False)
+    else:
+        getattr(runtime, action)()
+    scheduler.run()
+    assert presentation.said == []
+    assert presentation.animations == []
+    assert audio.played == []
+    assert runtime.recent() == []
+
+
+def test_runtime_stop_cancels_done_confirmation_even_when_scheduler_cancel_races(tmp_path):
+    runtime, _config, presentation, audio, scheduler = _runtime(tmp_path)
+    runtime._drain_once()
+    events = _events_file(tmp_path)
+    _append(events, {"event": "PreToolUse", "tool": "Bash", "agent": "demo"})
+    runtime._drain_once()
+    scheduler.run()
+    _append(events, {"event": "Stop", "agent": "demo"})
+    runtime._drain_once()
+    scheduler.run()
+    assert scheduler.pending  # done callback has been enqueued
+    runtime.stop()
+    presentation.said.clear()
+    audio.played.clear()
+    scheduler.run()  # this scheduler deliberately cannot retract dispatched tasks
+    assert presentation.said == []
+    assert audio.played == []
+
+
+def test_runtime_toggle_does_not_read_event_files_on_gui_thread(tmp_path, monkeypatch):
+    runtime, _config, presentation, _audio, _scheduler = _runtime(
+        tmp_path, {"ai_agent_enabled": False})
+
+    def forbidden(_self):
+        raise AssertionError("event-file discovery must stay in the worker")
+
+    monkeypatch.setattr(runtime_mod.GlobTailer, "paths", forbidden)
+    runtime.toggle()
+    assert presentation.said
+
+
+def test_runtime_blocked_reader_stop_and_restart_are_nonblocking_and_single_worker(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    entered, release = threading.Event(), threading.Event()
+    runtime, _config, _presentation, _audio, scheduler = _runtime(tmp_path, {
+        "ai_agent_dsh_enabled": False, "ai_agent_events_enabled": False,
+        "ai_agent_custom_agents": [{"key": "test", "path": str(tmp_path / "events.jsonl")}],
+    })
+    original = runtime_mod.ByteTailer.read_lines
+
+    def blocked(reader):
+        entered.set()
+        assert release.wait(15), "test must release the OS reader"
+        return original(reader)
+
+    monkeypatch.setattr(runtime_mod.ByteTailer, "read_lines", blocked)
+    threads = []
+    try:
+        runtime.start()
+        threads.append(runtime._thread)
+        assert entered.wait(10)
+        began = time.monotonic()
+        runtime.stop()
+        elapsed = time.monotonic() - began
+        runtime.start()
+        threads.append(runtime._thread)
+        assert runtime._thread is threads[0], "live cancelled reader must not be replaced"
+        assert elapsed < 1.0, "GUI stop must not join a blocked reader"
+        release.set()
+        threads[0].join(10)
+        assert not threads[0].is_alive()
+        scheduler.run()
+        assert runtime._thread is not threads[0]
+        threads.append(runtime._thread)
+    finally:
+        runtime.close()
+        release.set()
+        for thread in threads:
+            thread.join(10)
+            assert not thread.is_alive()
+
+
+def test_closed_runtime_cannot_restart(tmp_path):
+    runtime, *_rest = _runtime(tmp_path)
+    runtime.close()
+    try:
+        runtime.start()
+        assert runtime._thread is None or not runtime._thread.is_alive()
+    finally:
+        runtime.stop()

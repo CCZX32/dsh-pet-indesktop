@@ -336,3 +336,45 @@ def test_mod_manifest_and_contributions_load():
     menu_ids = {contribution.id for _, contribution in manager.menu_contributions()}
     assert "show" in menu_ids
     assert manager.settings_pages()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_stop_discards_queued_result(app, tmp_path, failure):
+    from dataclasses import replace
+    from PySide6.QtCore import QEventLoop, QTimer
+    from petcore.ui.ports import QtScheduler
+
+    scheduler = QtScheduler()
+    context, presentation = _context(
+        {"weather_city": "鹿城"},
+        http=FakeHttpPort((lambda request: HttpError("network")) if failure else _cn_source),
+    )
+    context.ports = replace(context.ports, scheduler=scheduler)
+    runtime = runtime_mod.WeatherRuntime(context)
+    runtime.show()
+    runtime._threads[-1].join(10)
+    assert not runtime._threads[-1].is_alive()
+    before = list(presentation.said)
+    runtime.stop()
+    loop = QEventLoop()
+    delivered = []
+    scheduler.call_later(0, lambda: (delivered.append(True), loop.quit()))
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(loop.quit)
+    timeout.start(10000)
+    loop.exec()
+    timeout.stop()
+    assert delivered
+    assert presentation.said == before
+
+
+def test_repeated_requests_prune_finished_workers(tmp_path):
+    context, _ = _context({"weather_city": "鹿城"}, http=FakeHttpPort(_cn_source))
+    runtime = runtime_mod.WeatherRuntime(context)
+    for _ in range(30):
+        runtime.show()
+        assert len(runtime._threads) == 1
+        runtime._threads[0].join(10)
+        assert not runtime._threads[0].is_alive()
+    runtime.stop()

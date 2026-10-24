@@ -60,6 +60,8 @@ def make_island(tmp_path):
     yield factory
     for widget in created:
         widget.stop()
+        assert widget.sys_monitor.wait_stopped(5)
+        assert widget.net_monitor.wait_stopped(5)
         widget.close()
         widget.deleteLater()
 
@@ -88,8 +90,15 @@ def test_unknown_metric_ids_do_not_take_space(make_island):
 def test_readings_never_change_the_planned_width(make_island):
     island = make_island()
     before = island.width()
-    island.sys_monitor._latest = sysmon.SysSample(cpu_percent=99.0, mem_percent=99.0)
-    island.net_monitor._latest = netmon.NetSample(down_bps=1.0, up_bps=1.0, sampled_at=0.0)
+    island.sys_monitor = sysmon.SysMonitor(cpu_reader=lambda: 99.0, mem_reader=lambda: 99.0)
+    island.sys_monitor.poll()
+    island.sys_monitor.poll()
+    counts = iter([(0.0, 0.0), (1.0, 1.0)])
+    ticks = iter([0.0, 1.0])
+    island.net_monitor = netmon.NetMonitor(meter=netmon.NetRateMeter(
+        reader=lambda: next(counts), clock=lambda: next(ticks)))
+    island.net_monitor.poll()
+    island.net_monitor.poll()
     island._tick()
     assert island.width() == before
 
@@ -136,7 +145,11 @@ def test_card_gives_glyph_only_segments_a_readable_name(make_island):
 def test_card_reports_sampling_and_errors(make_island):
     island = make_island({"island_metrics": ["cpu"]})
     assert island._card_rows()[0][1] == "--"          # 还没采到第一拍
-    island.sys_monitor._latest = sysmon.SysSample(error="psutil 不可用")
+    def unavailable():
+        raise sysmon.PsutilUnavailable("psutil 不可用")
+
+    island.sys_monitor = sysmon.SysMonitor(cpu_reader=unavailable)
+    island.sys_monitor.poll()
     island._rebuild_row()
     row = island._card_rows()[0]
     assert row[3] == isl.ALERT_CRIT and "psutil" in row[2]
@@ -219,7 +232,9 @@ def test_hidden_island_stops_sampling(make_island):
     assert island.net_monitor.running() is True
     island.hide()
     app.processEvents()
+    assert island.sys_monitor.wait_stopped(5)
     assert island.sys_monitor.running() is False
+    assert island.net_monitor.wait_stopped(5)
     assert island.net_monitor.running() is False
 
 
@@ -253,7 +268,9 @@ def test_palette_alpha_follows_the_opacity_setting(make_island):
 
 def test_alert_colours_only_touch_the_value(make_island):
     island = make_island({"island_metrics": ["cpu"]})
-    island.sys_monitor._latest = sysmon.SysSample(cpu_percent=95.0)
+    island.sys_monitor = sysmon.SysMonitor(cpu_reader=lambda: 95.0, mem_reader=lambda: 50.0)
+    island.sys_monitor.poll()
+    island.sys_monitor.poll()
     island._alert["cpu"] = isl.alert_severity("cpu", 95.0, "")
     island._rebuild_row()
     row = island._row
@@ -268,4 +285,32 @@ def test_stop_is_idempotent(make_island):
     island.start()
     island.stop()
     island.stop()
+    assert island.sys_monitor.wait_stopped(5)
     assert island.sys_monitor.running() is False
+
+
+def test_expanding_card_stops_folded_network_and_collapse_restarts(make_island):
+    island = make_island({"island_metrics": ["cpu", "mem", "network"]},
+                         character_name="Shenshen")
+    island.show()
+    app.processEvents()
+    assert "network" not in island.plan().folded
+    assert island.net_monitor.running()
+    island.expand_card()
+    assert "network" in island.plan().folded
+    assert island.net_monitor.wait_stopped(5), "folded metric must stop its sampler"
+    assert not island.net_monitor.running()
+    island.collapse_card()
+    assert island.net_monitor.running()
+
+
+def test_disabling_visible_island_stops_samplers(make_island):
+    island = make_island({"island_metrics": ["cpu", "network"]})
+    island.show()
+    app.processEvents()
+    island.config.set("island_enabled", False)
+    island.refresh_from_config()
+    assert island.sys_monitor.wait_stopped(5)
+    assert island.net_monitor.wait_stopped(5)
+    assert not island.sys_monitor.running()
+    assert not island.net_monitor.running()

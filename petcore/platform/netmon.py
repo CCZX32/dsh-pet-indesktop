@@ -10,9 +10,10 @@ core 的架构红线把网络库锁在 ``net/``）：本批网络段只报 ↓/�
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass
+
+from .sampling import SamplingLoop
 
 logger = logging.getLogger(__name__)
 
@@ -162,49 +163,43 @@ class NetMonitor:
     def __init__(self, *, interval=1.0, meter: NetRateMeter | None = None) -> None:
         self.interval = clamp_interval(interval)
         self._meter = meter or NetRateMeter()
-        self._lock = threading.Lock()
-        self._latest: NetSample | None = None
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._sampling = SamplingLoop[NetSample | None](
+            name="island-net",
+            interval=self.interval,
+            read=self._read_sample,
+            # Stateless injected meters used by synchronous callers need not
+            # implement reset; the real NetRateMeter always does.
+            reset=getattr(self._meter, "reset", None),
+            empty=None,
+            logger=logger,
+        )
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._loop, name="island-net", daemon=True
-        )
-        self._thread.start()
+        """Request sampling; retry next owner tick if an old worker is exiting."""
+        self._sampling.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+        """Cancel without waiting; a blocked reader may still be running()."""
+        self._sampling.stop()
 
     def running(self) -> bool:
-        return bool(self._thread is not None and self._thread.is_alive())
+        return self._sampling.running()
+
+    def wait_stopped(self, timeout: float = 2.0) -> bool:
+        """Wait at most timeout seconds off the GUI thread; does not call stop."""
+        return self._sampling.wait_stopped(timeout)
 
     def snapshot(self) -> NetSample | None:
-        with self._lock:
-            return self._latest
+        return self._sampling.snapshot()
 
     def poll(self) -> NetSample | None:
-        """同步采一拍（`start()` 之外也能单步驱动，测试与小间隔心跳用它）。"""
+        """同步单步采样；后台线程仍存活时只返回缓存，不并发调用 reader。"""
+        return self._sampling.poll()
+
+    def _read_sample(self) -> NetSample | None:
         sample = self._meter.sample()
         if sample is None:
-            return self.snapshot()
-        snapshot = NetSample(
+            return None
+        return NetSample(
             down_bps=sample.down_bps, up_bps=sample.up_bps, sampled_at=time.time()
         )
-        with self._lock:
-            self._latest = snapshot
-        return snapshot
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            try:
-                self.poll()
-            except Exception:  # noqa: BLE001 - 采样线程不许死
-                logger.debug("net poll failed", exc_info=True)

@@ -4,11 +4,14 @@
   "id": "voice.chime",
   "name": "Voice time chime",
   "name_zh": "语音报时",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "api_version": "1",
-  "core_requires": ">=0.1.0,<1.0.0",
+  "core_requires": ">=0.2.0,<1.0.0",
   "author": "dsh-pet",
   "execution": "host-only",
   "entrypoint": "host/__init__.py:create_host",
-  "capabilities": ["speech.present", "sound.play"]
+  "capabilities": [
+    "speech.present",
+    "sound.play"
+  ]
 }

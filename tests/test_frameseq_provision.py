@@ -50,6 +50,8 @@ tmp_path 小夹具；线程时序用事件泵 + 宽预算，不用固定 sleep �
 """
 from __future__ import annotations
 
+from tests.pillow_helpers import pixels
+
 import hashlib
 import io
 import json
@@ -2633,7 +2635,7 @@ def _read_frames(out_dir: Path) -> list[tuple[int, int, int, int]]:
     frames = []
     for path in sorted(out_dir.glob("f_*.webp")):
         with Image.open(path) as opened:
-            frames.append(list(opened.convert("RGBA").get_flattened_data()))
+            frames.append(list(pixels(opened.convert("RGBA"))))
     return frames
 
 

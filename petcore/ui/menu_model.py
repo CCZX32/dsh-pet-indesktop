@@ -6,6 +6,13 @@ from typing import Callable
 from PySide6.QtWidgets import QMenu
 
 
+def add_submenu(parent: QMenu, title: str) -> QMenu:
+    """Give each submenu explicit QObject ownership, independent of wrapper GC."""
+    submenu = QMenu(title, parent)
+    parent.addMenu(submenu)
+    return submenu
+
+
 @dataclass
 class MenuItem:
     id: str
@@ -191,7 +198,7 @@ class MenuModel:
             return
         item_id = str(node.get("id") or "")
         if node_type == "submenu":
-            submenu = menu.addMenu(str(node.get("alias") or node.get("label") or item_id))
+            submenu = add_submenu(menu, str(node.get("alias") or node.get("label") or item_id))
             icon = _resolve_icon(node.get("icon"))
             if icon is not None:
                 submenu.setIcon(icon)
@@ -218,7 +225,7 @@ class MenuModel:
         placed.add(item_id)
         if item.populate is not None:
             label = str(node.get("alias") or item.label)
-            submenu = menu.addMenu(label)
+            submenu = add_submenu(menu, label)
             icon = _resolve_icon(node.get("icon") or item.icon)
             if icon is not None:
                 submenu.setIcon(icon)
@@ -280,14 +287,14 @@ class MenuModel:
 
         for owner in sorted(groups, key=group_key):
             items = sorted(groups[owner], key=lambda entry: (entry.order, entry.label))
-            submenu = menu.addMenu(self._owner_labels.get(owner) or owner)
+            submenu = add_submenu(menu, self._owner_labels.get(owner) or owner)
             icon = _resolve_icon(next((item.icon for item in items if item.icon), ""))
             if icon is not None:
                 submenu.setIcon(icon)
             for item in items:
                 placed.add(item.id)
                 if item.populate is not None:
-                    child = submenu.addMenu(item.label)
+                    child = add_submenu(submenu, item.label)
                     item.populate(child)
                 else:
                     self._append_item(submenu, item)

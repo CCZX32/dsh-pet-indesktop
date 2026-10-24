@@ -98,6 +98,9 @@ class MusicRuntime:
         self._worker: threading.Thread | None = None
         self._wake = threading.Event()
         self._closing = threading.Event()
+        self._generation = 0
+        self._started = False
+        self._stopped = False
         self._pending: tuple[bool, str] = (False, "")
         self._inflight = False
         self._app_id = ""
@@ -190,6 +193,8 @@ class MusicRuntime:
         GUI 线程读**：有采样线程时只唤醒它，结果经 ``scheduler.call_later(0)``
         回到 GUI 线程再处理。上一拍还没回来就跳过这一拍（不排队、不堆积）。
         """
+        if self._stopped:
+            return
         if not self._flag("music_enabled", True):
             self._release()
             self._forget_track()
@@ -197,6 +202,10 @@ class MusicRuntime:
         browser = self._flag("music_browser_media_enabled", False)
         tracked = self._app_id or self._preferred_app_id()
         allowed = self._allowed_ids()
+        if self._started:
+            self._start_worker()
+            if self._closing.is_set():
+                return
         worker = self._worker
         if worker is not None and worker.is_alive():
             if self._inflight:
@@ -336,6 +345,7 @@ class MusicRuntime:
         cache = self._cache()
         self._fetch_key = key
         title, artist = playback.title, playback.artist
+        generation = self._generation
 
         def work() -> None:
             try:
@@ -344,22 +354,30 @@ class MusicRuntime:
                 result = exc
             except Exception:
                 result = lyrics_mod.LyricsError("歌词获取失败：未知原因")
-            self._post(lambda: self._apply_lyrics(key, result))
+            self._post(lambda: self._apply_lyrics(key, result), generation)
 
         try:
             self.background(work)
         except Exception:
             return
 
-    def _post(self, callback) -> None:
+    def _post(self, callback, generation: int) -> None:
+        def deliver():
+            if not self._stopped and generation == self._generation:
+                if self._flag("music_enabled", True):
+                    callback()
+                else:
+                    self._inflight = False
+
         scheduler = getattr(self.context.ports, "scheduler", None)
         if scheduler is None:
-            callback()
+            deliver()
             return
         try:
-            scheduler.call_later(0, callback)
+            scheduler.call_later(0, deliver)
         except Exception:
-            callback()
+            # 调度器已关闭时不在 worker 上触碰 GUI。
+            return
 
     def _apply_lyrics(self, key, result) -> None:
         if key != self._track_key:
@@ -474,6 +492,8 @@ class MusicRuntime:
     # ---------------------------------------------------------------- 生命周期
 
     def start(self) -> None:
+        self._started = True
+        self._stopped = False
         self._start_worker()
         scheduler = getattr(self.context.ports, "scheduler", None)
         if scheduler is None or self._timer is not None:
@@ -488,27 +508,35 @@ class MusicRuntime:
         worker = self._worker
         if worker is not None and worker.is_alive():
             return
-        self._closing.clear()
-        worker = threading.Thread(target=self._worker_loop, name="music-smtc", daemon=True)
+        self._closing = threading.Event()
+        self._wake = threading.Event()
+        self._inflight = False
+        worker = threading.Thread(
+            target=self._worker_loop,
+            args=(self._closing, self._wake, self._generation),
+            name="music-smtc", daemon=True,
+        )
         self._worker = worker
         worker.start()
 
-    def _worker_loop(self) -> None:
+    def _worker_loop(self, closing, wake, generation: int) -> None:
         try:
-            while not self._closing.is_set():
-                if not self._wake.wait(1.0):
+            while not closing.is_set():
+                if not wake.wait(1.0):
                     continue
-                self._wake.clear()
-                if self._closing.is_set():
+                wake.clear()
+                if closing.is_set():
                     break
                 browser, tracked, allowed = self._pending
                 playback = self._read(browser, tracked, allowed)
-                self._post(lambda sample=playback: self._on_playback(sample))
+                self._post(lambda sample=playback: self._on_playback(sample), generation)
         finally:
             # 线程退出时关掉本线程的常驻事件循环，别把未关闭的 loop 留给 GC。
             now_playing.close_thread_loop()
 
     def stop(self) -> None:
+        self._stopped = True
+        self._generation += 1
         timer, self._timer = self._timer, None
         self._release()
         self._forget_track()
@@ -520,14 +548,7 @@ class MusicRuntime:
                 pass
         self._closing.set()
         self._wake.set()
-        worker, self._worker = self._worker, None
         self._inflight = False
-        if (
-            worker is not None
-            and worker.is_alive()
-            and worker is not threading.current_thread()
-        ):
-            worker.join(0.5)
 
     def close(self) -> None:
         self.stop()

@@ -218,3 +218,95 @@ def test_remove_clears_disabled_state(tmp_path):
     assert remove_at(root / "mods" / "character.demo", root=root)[0]
 
     assert state.is_enabled(root, "character.demo") is True
+
+
+def test_remove_readonly_trusted_pack(tmp_path):
+    import stat
+
+    target = write_pack(tmp_path / "mods" / "character.demo", content_payload(),
+                        {"media/idle.png": "image"})
+    readonly = target / "media/idle.png"
+    readonly.chmod(stat.S_IREAD)
+    try:
+        ok, message = remove_at(target)
+        assert ok, message
+        assert not target.exists()
+    finally:
+        if readonly.exists():
+            readonly.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_remove_reports_permission_failure_without_clearing_state(tmp_path, monkeypatch):
+    import importlib
+    import sys
+
+    module = importlib.import_module("petcore.mods.install")
+    target = write_pack(tmp_path / "mods" / "character.demo", content_payload())
+    failed = target / "mod.json"
+
+    def denied(_path):
+        raise PermissionError("still in use")
+
+    def rmtree(path, *, onerror=None, onexc=None):
+        try:
+            denied(failed)
+        except PermissionError as exc:
+            if onerror:
+                onerror(denied, str(failed), sys.exc_info())
+            else:
+                onexc(denied, str(failed), exc)
+
+    monkeypatch.setattr(module.shutil, "rmtree", rmtree)
+    ok, message = remove_at(target)
+    assert not ok
+    assert "still in use" in message
+    assert failed.exists()
+
+
+def test_install_failure_keeps_original_when_staging_cleanup_also_fails(tmp_path, monkeypatch):
+    import importlib
+
+    module = importlib.import_module("petcore.mods.install")
+    root = tmp_path / "data"
+    old = write_pack(tmp_path / "old", content_payload(), {"old.txt": "keep"})
+    new = write_pack(tmp_path / "new", content_payload(version="2.0.0"))
+    assert install(old, root)[0]
+    original_copy = module.shutil.copy2
+
+    def deny_copy(source, destination, *args, **kwargs):
+        if Path(source).name == "mod.json":
+            raise PermissionError("copy denied")
+        return original_copy(source, destination, *args, **kwargs)
+
+    def deny_cleanup(path, *args, **kwargs):
+        raise PermissionError("cleanup denied")
+
+    monkeypatch.setattr(module.shutil, "copy2", deny_copy)
+    monkeypatch.setattr(module.shutil, "rmtree", deny_cleanup)
+    ok, message = install(new, root, force=True)
+    assert not ok
+    assert "copy denied" in message and "cleanup denied" in message
+    assert (root / "mods/character.demo/old.txt").read_text() == "keep"
+
+
+def test_successful_replacement_reports_old_pack_cleanup_warning(tmp_path, monkeypatch):
+    import importlib
+
+    module = importlib.import_module("petcore.mods.install")
+    root = tmp_path / "data"
+    old = write_pack(tmp_path / "old", content_payload(), {"old.txt": "keep"})
+    new = write_pack(tmp_path / "new", content_payload(version="2.0.0"))
+    assert install(old, root)[0]
+    original = module.shutil.rmtree
+
+    def deny_trash(path, *args, **kwargs):
+        if Path(path).name.startswith(".trash-"):
+            raise PermissionError("old pack still in use")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.shutil, "rmtree", deny_trash)
+    ok, message = install(new, root, force=True)
+    assert ok, message  # The new pack has committed; callers must not retry as failure.
+    assert "cleanup failed" in message and "old pack still in use" in message
+    assert json.loads((root / "mods/character.demo/mod.json").read_text())["version"] == "2.0.0"
+    assert list((root / "mods").glob(".trash-*/old.txt"))

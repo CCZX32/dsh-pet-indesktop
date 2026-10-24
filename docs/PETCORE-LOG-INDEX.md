@@ -67,3 +67,20 @@
 | L051 | 2026-10-23 | DPI 适配：模型图封顶/图标缩略图 | 新增 `VISION_MAX_EDGE` 与 `ScreenPort.shrink_for_vision()`（物理像素封顶 1024），AI 四处送图统一走它；菜单图标/动画缩略图按 `screen_dpr()` 物理绘制；SPEC §27 固化「逻辑 vs 物理」口径。 | DPI、devicePixelRatio、shrink_for_vision、VISION_MAX_EDGE、physical_side、availableSizes、缩略图、逻辑像素、物理像素 |
 | L052 | 2026-10-23 | P4-c2 Agent 联动 | `ai.agent` 只读联动扩展：DSH 桥目录 + `agent-events/*.jsonl` + 自定义文件，六态 → 动作池/过程气泡/完成确认/音效；Core 加 `data_root()`/`visible()`/`animations()` 三条接缝与 13 个 `ai_agent_*` 键。 | ai.agent、Agent link、ByteTailer、GlobTailer、LinkEngine、六态、data_root、visible、animations、ai_agent_*、mod_agent |
 | L053 | 2026-10-23 | P5-a1 灵动岛 v1 | 顶部胶囊 + CPU/内存/网络段 + 告警色 + 展开卡片 + 13 个 `island_*` 键；契约/布局零 Qt、采样 1 Hz、宽度只由模板驱动。 | 灵动岛、island、segments、layout、plan_info_row、+N chip、sysmon、netmon、island_metrics、dynamic_island、状态点 |
+
+| L054 | 2026-10-24 | 已复现缺陷收口 | Python3.11清理、Qt菜单父子/刷新释放、非阻塞世代采样、折叠采样与Agent停止重启。 | onerror、QMenu、SamplingLoop、cancel、island、Agent |
+| L055 | 2026-10-24 | 后台资源与逐域修复 | HTTP关闭、Speech线程归属、天气/文件/音乐/AI迟到结果和取消、proactive身份、MSG ABI。 | close、scheduler、generation、vision、SMTC、MSG |
+| L056 | 2026-10-24 | 质量证据与阶段校正 | 五域审查、亮暗菜单回归、性能与源码实机、整仓失败归属；不宣布全绿/不进入分发。 | PR报告、性能、125%DPI、全量缺口、6签、8节日 |
+
+| L057 | 2026-10-24 | P4-c3 A质量门禁 | 隔离环境、设置原生退出/菜单/Pillow根因修复；整仓9716passed正常退出、三遍高负载与本批实机证据；B–E尚未实施。 | Python3.11、DeferredDelete、QMenu、全量、性能、原生退出 |
+
+| L058 | 2026-10-24 | P4-c3 B通用端口 | slot交付、DND汇总、单语音队列/实际播放完成及生命周期取消；整仓9729passed、源码Windows与高负载验证通过。 | speech、on_finished、notification、quiet、generation |
+
+| L059 | 2026-10-24 | P4-c3 C | 待办调度、slot持久化与安全迁移，关联95passed，最终联合证据见L061 | todo、宽限、去重、迁移 |
+
+| L060 | 2026-10-24 | P4-c3 D | 节日历法与生日调度、默认关闭和让位规则，关联126passed；联合验收见L061 | festival、生日、农历、去重 |
+
+
+| L061 | 2026-10-24 | P4-c3 E | 48签/真实结束揭签/有界预热、chime让位；整仓9837passed正常退出、三遍高负载与实机/性能通过 | divination、48、on_finished、迁移、生命周期、性能 |
+
+| L062 | 2026-10-24 | 分发详细交接与提交 | T00–T09、三worker写集与安全/验收边界；提交交付与真实复验见交接报告 | handoff、分发、计划、多智能体、提交 |

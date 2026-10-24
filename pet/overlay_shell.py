@@ -4419,7 +4419,8 @@ class OverlayShell(QObject):
                 # 子项与顶层同族（同一批窗面/显隐状态），一律延迟派发。
                 # 关闭观测目标由 ``add_tray_action`` 统一取整棵树（``shared._menu_tree``）：
                 # 子菜单关掉 ≠ 会话结束，根菜单还开着就还在同一次原生跟踪里。
-                sub = menu.addMenu(label)
+                sub = QMenu(label, menu)
+                menu.addMenu(sub)
                 add_tray_action(sub, "回到右下角",
                                 lambda s=sprite: self._go_default_corner(s))
                 if per_pet_visibility:

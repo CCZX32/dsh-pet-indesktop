@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import zipfile
 from contextlib import contextmanager
@@ -43,15 +44,13 @@ def _digest_tree(root: Path) -> dict[str, str]:
     return files
 
 
-def _chmod_retry(func, target, _exc) -> None:
-    try:
-        os.chmod(target, stat.S_IWRITE)
-    except OSError:
-        pass
-    try:
-        func(target)
-    except OSError:
-        pass
+def _chmod_retry(func, target, exc) -> None:
+    # Only retry the Windows read-only case. Preserve other errors and never
+    # report success when the retry also fails (e.g. a locked installed file).
+    if not isinstance(exc, PermissionError):
+        raise exc
+    os.chmod(target, os.stat(target).st_mode | stat.S_IWRITE)
+    func(target)
 
 
 def _remove_path(path: Path) -> None:
@@ -62,7 +61,12 @@ def _remove_path(path: Path) -> None:
             pass
         return
     if path.is_dir():
-        shutil.rmtree(path, onexc=_chmod_retry)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_chmod_retry)
+        else:
+            shutil.rmtree(path, onerror=lambda fn, name, info: _chmod_retry(fn, name, info[1]))
+        if path.exists() or path.is_symlink():
+            raise OSError(f"cleanup incomplete: {path}")
 
 
 def _copy_pack(source: Path, target: Path) -> None:
@@ -207,6 +211,7 @@ def install(source: Path, root: Path, *, force: bool = False) -> tuple[bool, str
     root = Path(root)
     mods_root = root / "mods"
     staging: Path | None = None
+    cleanup_note = ""
     try:
         mods_root.mkdir(parents=True, exist_ok=True)
         with _source_pack(Path(source), mods_root) as pack:
@@ -236,17 +241,25 @@ def install(source: Path, root: Path, *, force: bool = False) -> tuple[bool, str
                     os.replace(trash, target)
                     raise
                 staging = None
-                _remove_path(trash)
+                try:
+                    _remove_path(trash)
+                except OSError as exc:
+                    # Commit already succeeded. Keep the new installation and
+                    # name the residual backup rather than invite a failed retry.
+                    cleanup_note = f"; cleanup failed for {trash}: {exc}"
             else:
                 os.replace(staging, target)
                 staging = None
 
             suffix = f" ({len(problems)} warning(s))" if problems else ""
-            return True, f"installed {manifest.id} {manifest.version} -> {target}{suffix}"
+            return True, f"installed {manifest.id} {manifest.version} -> {target}{suffix}{cleanup_note}"
     except Exception as exc:
         if staging is not None:
-            _remove_path(staging)
-        return False, f"install failed: {exc}"
+            try:
+                _remove_path(staging)
+            except OSError as cleanup_exc:
+                cleanup_note = f"; cleanup failed for {staging}: {cleanup_exc}"
+        return False, f"install failed: {exc}{cleanup_note}"
 
 
 def read_install_files(path: Path) -> dict[str, str] | None:

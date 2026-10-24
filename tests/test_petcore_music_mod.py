@@ -766,3 +766,65 @@ def test_settings_page_detect_result_is_shown(app):
     assert page.detect_button.isEnabled() is True
     assert page.player.findData("netease") >= 0
     assert set(page.path_edits) == set(players_mod.player_keys())
+
+
+def test_blocked_smtc_stop_retains_worker_and_cancel_generation():
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    harness = _Harness({"music_lyric_enabled": False}, playback=_playback())
+    runtime = harness.runtime
+    reads = []
+
+    def read(**kwargs):
+        reads.append(threading.get_ident())
+        entered.set()
+        assert release.wait(10)
+        return _playback()
+
+    runtime.read_playback = read
+    runtime.start()
+    old = runtime._worker
+    cancel = runtime._closing
+    try:
+        runtime.poll()
+        assert entered.wait(10)
+        runtime.stop()
+        assert runtime._worker is old and old.is_alive()
+        runtime.start()
+        runtime.poll()
+        assert runtime._worker is old
+        assert cancel.is_set()
+        assert len(reads) == 1
+    finally:
+        runtime.stop()
+        release.set()
+        old.join(10)
+        current = runtime._worker
+        if current is not None and current is not old:
+            current.join(10)
+    assert not old.is_alive()
+    assert harness.presentation.animations == []
+    runtime.start()
+    try:
+        assert runtime._worker is not old
+        assert runtime._closing is not cancel
+    finally:
+        runtime.stop()
+        runtime._worker.join(10)
+
+
+def test_old_lyrics_cannot_reappear_after_stop_and_restart():
+    harness = _Harness(http=FakeHttpPort(lambda request: (200, b"", ())), playback=_playback())
+    pending = []
+    harness.runtime.background = pending.append
+    harness.runtime.fetch_lyrics = lambda *args, **kwargs: lyrics_mod.Lyrics(
+        lines=(lyrics_mod.LyricLine(0, "old"),), instrumental=False,
+    )
+    harness.poll()
+    assert pending
+    harness.runtime.stop()
+    # 同一首歌重新出现也不能接受前一轮取词结果。
+    harness.runtime._track_key = harness.sample.key()
+    pending[0]()
+    assert harness.runtime._lines == ()

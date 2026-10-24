@@ -157,3 +157,29 @@ def test_context_activation_does_not_replace_the_menu(app, monkeypatch) -> None:
 
     tray._on_activated(tray.ActivationReason.Trigger)
     assert calls == ["toggle"]
+
+def test_repeated_tray_refresh_releases_owned_submenus(app):
+    import gc
+
+    import shiboken6
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QMenu
+
+    host, _windows = _host(visible=True)
+    menu = CoreHost.build_tray_menu(host)
+    try:
+        for _ in range(30):
+            previous = [action.menu() for action in menu.actions() if action.menu()]
+            menu.aboutToShow.emit()
+            for child in previous:
+                # Restrict deferred deletion to this menu's retired children.
+                QCoreApplication.sendPostedEvents(child, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            gc.collect()
+            assert all(not shiboken6.isValid(child) for child in previous)
+            assert len(menu.findChildren(QMenu)) == 2
+        current = [action.menu() for action in menu.actions() if action.menu()]
+        current[1].actions()[0].trigger()
+        assert not _windows[1].isVisible()
+    finally:
+        shiboken6.delete(menu)

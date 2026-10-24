@@ -54,6 +54,7 @@ class ChimeRuntime:
         self._precache_thread: threading.Thread | None = None
         self._precache_lock = threading.Lock()
         self._stopped = False
+        self._generation = 0
 
     # ------------------------------------------------------------ 配置
     def _get(self, key: str, default):
@@ -141,6 +142,8 @@ class ChimeRuntime:
 
     def speak_now(self) -> None:
         """菜单「立即报时」：手动触发不占调度槽位，允许与自动报时同分钟并存。"""
+        if self._stopped:
+            return
         presentation = self._presentation()
         if not self._enabled():
             if presentation is not None:
@@ -153,7 +156,7 @@ class ChimeRuntime:
         self._deliver(datetime.now(), self._schedule(), self._times())
 
     def _deliver(self, moment: datetime, schedule_key: str, times) -> None:
-        if self._quiet():
+        if self._stopped or self._quiet():
             return
         presentation = self._presentation()
         speech = self._speech()
@@ -166,12 +169,19 @@ class ChimeRuntime:
                     force=True,
                 )
             return
+        if speech.should_yield(moment, requester="voice.chime"):
+            return
+        generation = self._generation
+        def valid():
+            return not self._stopped and generation == self._generation and self._enabled() and not self._quiet()
         self._play_animation(presentation)
         try:
             speech.speak(
                 self._request(quotes.spoken_text(moment, quote)),
+                owner="voice.chime",
+                guard=valid,
                 on_done=self._on_done,
-                on_error=self._on_error,
+                on_error=lambda error: self._on_error(error) if valid() else None,
             )
         except Exception as exc:  # noqa: BLE001 - 端口异常同样要变成可见气泡
             self._on_error(SpeechError("unavailable", type(exc).__name__))
@@ -195,6 +205,8 @@ class ChimeRuntime:
         return
 
     def _on_error(self, error) -> None:
+        if self._stopped or self._quiet():
+            return
         presentation = self._presentation()
         if presentation is None:
             return
@@ -220,7 +232,7 @@ class ChimeRuntime:
         if remaining is None or remaining > PRECACHE_WINDOW_S:
             return
         target = schedule.next_due(moment, schedule_key, times)
-        if target is None:
+        if target is None or speech.should_yield(target, requester="voice.chime"):
             return
         quote = schedule.pick_quote(self._pool(), target, schedule_key, times)
         request = self._request(quotes.spoken_text(target, quote))
@@ -247,16 +259,22 @@ class ChimeRuntime:
 
     # ------------------------------------------------------------ 生命周期
     def start(self) -> None:
-        self._stopped = False
         if self._handle is not None:
             return
+        self._stopped = False
+        self._generation += 1
         scheduler = getattr(self.context.ports, "scheduler", None)
         if scheduler is None:
             return
-        self._handle = scheduler.call_every(TICK_INTERVAL_MS, self._tick)
+        generation = self._generation
+        self._handle = scheduler.call_every(TICK_INTERVAL_MS, lambda: self._tick() if generation == self._generation else None)
 
     def stop(self) -> None:
         self._stopped = True
+        self._generation += 1
+        speech = self._speech()
+        if speech is not None:
+            speech.cancel_owner("voice.chime")
         scheduler = getattr(self.context.ports, "scheduler", None)
         if self._handle is not None and scheduler is not None:
             try:
