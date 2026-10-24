@@ -41,7 +41,7 @@
 |---|---|---|
 | [`ANDROID.md`](ANDROID.md) | Android 0.2.1 原生悬浮桌宠的安装、工具链、音效试听、Q 弹留白、碰撞坐标、设置兼容与设备验收入口。 | 修改 Android 客户端、资源导出、SDK/Gradle 构建或准备手机测试包时必读。 |
 | [`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md) | onedir 打包流水线：绿色版 zip + Inno Setup 安装包，目标是运行期零解压、不产生 `_MEI` 缓存；含随包资产三块（`resources/presentmon/` 第三方后端、帧序列素材）各自的构建门与诚实边界，以及帧率采集权限为何不随包任何提权组件、`keyring` 为何四个变体都要带、`LICENSE`/`THIRD_PARTY_NOTICES.md` 怎么随包。 | **改 edge-tts 版本门禁、排查打包后语音失效、改 PyInstaller spec、打包资源、`--exclude-module`/`--collect-all`/`--add-data` 清单、或平台构建脚本（`scripts/build_onedir.ps1` / `build_macos.sh` / `build_linux.sh`）时必读**（AGENTS.md 口径）。**「no-chat 变体到底排掉了什么」以本文第四节为准**（2026-10-17 起只排 `pet.chat`）。 |
-| [`ASSET-PIPELINE.md`](ASSET-PIPELINE.md) | 动画素材流水线：素材在仓库里的位置与几何/清单约定（`body_box`、脚底 `y=330`）、参考项目「三件套」生成链（提示词绿幕规范 → 抠像/归一化 → 640×360 透明 WebM）、GIF 变体重生成、新角色入库流程与素材授权同步要求。 | **做/替换动画素材、跑 `scripts/convert_to_gif.py`、或新增角色入库时必读**；用户侧「换角色/热加载」在 [`../README.md`](../README.md)「动画素材与自定义角色」。 |
+| [`ASSET-PIPELINE.md`](ASSET-PIPELINE.md) | 动画素材流水线：素材在仓库里的位置与几何/清单约定（`body_box`、脚底 `y=330`）、参考项目「三件套」生成链（提示词绿幕规范 → 抠像/归一化 → 640×360 透明 WebM）、GIF 变体重生成、新角色入库流程与素材授权同步要求。 | **做/替换动画素材、跑 `scripts/convert_to_gif.py`、或新增角色入库时必读**；用户侧「换角色/热加载」在 [`../README.md`](../README.md)「动画素材与自定义角色」。 比较同源素材清晰度或 Q70 改档前另读 [petcore 画质评估](PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md)。 |
 | [`STABLE_BUILDS.md`](STABLE_BUILDS.md) | 稳定版构建冻结记录：受保护文件名、构建隔离规则、防止误覆盖稳定版产物。 | **改发布/构建工作流时必读**（AGENTS.md 口径）。注意其冻结对象是 onefile 时代的 `dist/*.exe`，现行发布形态已是 onedir（见文末过时清单）。 |
 | [`BUILD-CI-FAILURE-NOTES-2026-08.md`](BUILD-CI-FAILURE-NOTES-2026-08.md) | 三平台打包/CI 反复踩坑与最终解法汇总（持续更新）：脚本统一入口、资源漏收集、依赖只在叶子模块导入导致整族用例红等。 | CI 连续两轮红、或遇到"本机红 CI 绿"的依赖类假红时；动手重试之前先查这里是否已有同类记录。 |
 | [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) | 验收测试文件清单：设置窗口、DSH Bridge、Qt 生命周期/全量三条验收路径的精确命令与当前实测基线。 | 提 PR 前跑验收、或需要确认"这个改动该跑哪几个测试文件"时；改动测试边界后必须同步更新本文基线数字。 |
@@ -381,7 +381,8 @@
 | [`PETCORE-SPEC.md`](PETCORE-SPEC.md) | petcore 的**最终形态规格**：core/mod 边界、用户能力、菜单/设置契约、素材与角色包供应链、交付门、非目标与退出旧架构的判定。 | 判断「这个功能该不该进 core」「最终要做成什么样」「菜单和设置谁负责」前必读。 |
 | [`PETCORE-LOG.md`](PETCORE-LOG.md) | petcore 追加式变更日志：每条 `LNNN` 记录文件、行为、验证与遗留。 | 只在 log-index 命中后打开对应条目；不要把整份日志读进上下文。 |
 | [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |
-| [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md) | 动画/性能 backlog：已完成交互动画、P2-B2/P4 延后项、依赖与验收、明确不做。 | 规划动画批次、回答「这个动画什么时候做」或改播放/解码策略前必读。 |
+| [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md) | 动画/性能 backlog：已完成交互动画、P2-B2/P4 延后项、依赖与验收、明确不做。 | 规划动画批次、回答「这个动画什么时候做」或改播放/解码策略前必读；DPR/编码画质专项转下行评估计划。 |
+| [`PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md`](PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md) | 小小桌宠与 petcore 动画架构/画质调查，105/106 同源、DPR 与 Q70 证据及 T00–T06 串行任务书；仅计划未实施。 | 改动画缩放/DPR、比较编码档位、评估播放器移植或交给后继模型执行画质改善之前必读。 |
 | [`../petcore/README.md`](../petcore/README.md) | 开发者上手指南：环境、运行、目录地图、加菜单项/mod/角色包、测试门禁、已知边界。 | 第一次接手 petcore、或需要一条可复制的命令时。 |
 | [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 10 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
 | [`../petcore/AGENTS.md`](../petcore/AGENTS.md) | petcore 的 agent/贡献者约定：每次改动必须写 log + index、架构红线、菜单/设置一致性、非模态与大小上限。 | 在 `petcore/` 下改任何代码或文档之前必读。 |

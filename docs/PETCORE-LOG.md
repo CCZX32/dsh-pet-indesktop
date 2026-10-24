@@ -2389,3 +2389,24 @@ omegaconf与OpenCV发行名不匹配，独立环境依赖/OCR族68passed，pip c
 - 提交前仅清理新历法测试末尾两行空行（AST一致、52passed）；用户要求取消重复全仓，已停止自有测试/等待进程。沿用本轮已完整运行的全仓/三遍负载，取消运行不计为通过。
 
 - 主交付提交 `b77d4436ff623594eb4419ae9cbb2e1143657bd9`：130文件，+9423/−801，含原有质量修复、A–E及本批交接；本行与索引/报告为同批提交号回填。精确推送目标仍为origin对应仓库的 `feat/petcore-vpet-architecture`，不创建Release或合并main。
+
+## L063 — 2026-10-24 — 动画画质评估与串行执行任务书
+
+**授权与边界**：用户仅要求记录可交给较弱模型执行的计划；本批不实施 DPR 修复、
+不新增产品测试/性能探针，不改源码、配置或素材，不提交、推送或发布。
+
+**改动**：新增[评估与任务书](PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md)，
+固定本地 `7ab09683` 与对方 `9ce91ec8`；保留前轮会话的 105/106 素材同源、150% DPR、
+Q70 单帧误差与缩放微基准，明确不是本批重测，也未核验对方发行二进制。
+T00–T06 写明文件/函数、前置条件、命令、预期结果、停止条件与交接模板；未来任务全部未开始。
+同步总索引、动画 backlog、素材流水线互链及日志索引；不改变现行生产编码档位或既有规范。
+
+**逐文件增删**：`docs/PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md`（新增）+381/−0；
+`docs/ASSET-PIPELINE.md` +4/−0；`docs/INDEX.md` +3/−2；`docs/PETCORE-ANIMATION-BACKLOG.md` +4/−0；
+`docs/PETCORE-LOG.md` 与 `docs/PETCORE-LOG-INDEX.md` 为本条目自身追加（+17/−0、+2/−0）。
+
+**验证**：同批文档/架构门 `pytest -q tests/test_petcore_docs.py tests/test_pr_report_discipline.py
+tests/test_architecture.py tests/test_petcore_architecture.py tests/test_ci_workflows.py` = **363 passed**；
+`ruff check .` All checks passed。纯文档不改变运行行为，未跑全量 pytest、性能与 GUI；
+整仓复跑见 L064。风险与下一步：任务书尚未执行，继任必须重新核对环境与基线，
+不能以历史数字宣称修复完成；完整原始调查输出仅在会话中，后续须生成自己的文件证据。

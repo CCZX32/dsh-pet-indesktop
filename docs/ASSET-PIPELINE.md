@@ -9,6 +9,10 @@
 > 授权与署名见 [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) 与 [`../LICENSE`](../LICENSE)；
 > 新增/替换素材时请同步维护这两处声明。
 
+> **清晰度排查入口**：[petcore 动画画质评估与计划](PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md)。
+> 讨论“同素材为何显示更糊”、动画 DPR 或 Q70 再编码前先读；该文是调查与待执行计划，
+> 不变更本素材流水线，也不授权替换生产素材或透明修正 v5。
+
 ---
 
 ## 一、素材在仓库里的位置与约定
