@@ -16,6 +16,18 @@ from ..contracts.archive import ArchiveLimits
 from ..contracts.http import ResumePolicy, TransferReport, TransferSpec
 from . import market as _market
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _effective_schemes(spec: TransferSpec, url: str) -> tuple[str, ...]:
+    """本机回环额外放行明文 http（本地镜像/测试）；其余只看 spec 白名单。"""
+    schemes = tuple(spec.allowed_schemes)
+    if spec.allow_loopback_http and "http" not in schemes:
+        host = (urlsplit(url).hostname or "").lower()
+        if host in _LOOPBACK_HOSTS:
+            schemes = schemes + ("http",)
+    return schemes
+
 
 def _artifact_name(spec: TransferSpec) -> str:
     for url in spec.urls:
@@ -54,7 +66,7 @@ def fetch_artifact(
         part.unlink(missing_ok=True)
     policy = _market.TransportPolicy(
         max_redirects=spec.max_redirects,
-        allowed_schemes=tuple(spec.allowed_schemes),
+        allowed_schemes=_effective_schemes(spec, spec.urls[0]),
         allowed_hosts=tuple(spec.allowed_hosts),
     )
     outcome = _market.download_with_outcome(

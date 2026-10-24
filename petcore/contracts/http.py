@@ -127,6 +127,8 @@ class TransferSpec:
     `allowed_schemes` 默认只允许 `https`；loopback 测试必须显式放开 `http`。
     `allowed_hosts` 是**跨主机跳转的白名单**：为空时只允许同主机跳转；GitHub Release
     这类 `github.com → objects.githubusercontent.com` 必须由调用方显式列出目标主机。
+    `allow_loopback_http` 为真时，传输层对 `127.0.0.1` / `::1` / `localhost` 额外放行
+    明文 `http`（本地镜像与测试用）；其余主机的协议仍只由 `allowed_schemes` 决定。
     校验（size / sha256）由 market 层负责，传输层只用 `expected_size` 判断续传是否对齐。
     """
 
@@ -136,6 +138,7 @@ class TransferSpec:
     max_redirects: int = 3
     allowed_schemes: tuple[str, ...] = ("https",)
     allowed_hosts: tuple[str, ...] = ()
+    allow_loopback_http: bool = True
     resume: ResumePolicy = ResumePolicy.RESUME_IF_MATCH
     timeout: float = 15.0
 

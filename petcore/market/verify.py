@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from ..mods.manifest import ModManifest, load_manifest
+from .. import __version__ as CORE_VERSION
+from ..contracts.capabilities import CAPABILITIES
+from ..mods.manifest import ModManifest, load_manifest, version_satisfies
 from .errors import IntegrityError, ManifestMismatch
 from .model import MarketPackage, MarketVersion
 
@@ -46,8 +48,19 @@ def read_pack_manifest(pack_dir: Path) -> ModManifest:
 
 
 def verify_manifest(
-    manifest: ModManifest, package: MarketPackage, version: MarketVersion
+    manifest: ModManifest,
+    package: MarketPackage,
+    version: MarketVersion,
+    *,
+    core_version: str = CORE_VERSION,
 ) -> None:
+    """索引与包内 manifest 的交叉校验（T04）。
+
+    除了 id/kind/version，还核对能力越权、API 版本与 Core 兼容性：
+    - 包内能力必须都是已知能力，且**不得超出**索引为该包声明的集合（防提权）；
+    - 包内 `api_version` 必须与索引声明一致；
+    - `manifest.core_requires` 必须满足当前 Core（索引侧已有一道，这里是纵深防御）。
+    """
     checks = (
         ("id", manifest.id, package.id),
         ("kind", manifest.kind, package.kind),
@@ -58,3 +71,23 @@ def verify_manifest(
             raise ManifestMismatch(
                 f"包内 {field} 与索引不一致：索引为 {expected!r}，包内为 {actual!r}"
             )
+    unknown = [item for item in manifest.capabilities if item not in CAPABILITIES]
+    if unknown:
+        raise ManifestMismatch(f"包内声明了未知能力：{', '.join(sorted(unknown))}")
+    ungranted = [
+        item for item in manifest.capabilities if item not in package.capabilities
+    ]
+    if ungranted:
+        raise ManifestMismatch(
+            f"包内声明了索引未授权的能力：{', '.join(sorted(ungranted))}"
+        )
+    if manifest.api_version != package.api_version:
+        raise ManifestMismatch(
+            f"包内 api_version 与索引不一致：索引为 {package.api_version!r}，包内为 {manifest.api_version!r}"
+        )
+    if manifest.core_requires and not version_satisfies(
+        manifest.core_requires, core_version
+    ):
+        raise ManifestMismatch(
+            f"包内 core_requires {manifest.core_requires} 不满足当前 Core {core_version}"
+        )

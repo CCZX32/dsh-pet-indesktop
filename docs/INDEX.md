@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [P4-c3-D1/T04 授权与安装事务](PR-REPORT-PETCORE-DISTRIBUTION-T04-2026-10-24.md)：市场安装接 `fetch_artifact` 与预算、能力/api/core 四类交叉校验、锁失败回滚与回环 http 口径；改市场安装或授权路径前必读。
+
 - [P4-c3-D1/T02+T03+T05 传输·解包·构建](PR-REPORT-PETCORE-DISTRIBUTION-T020305-2026-10-24.md)：逐跳校验/读流预算/计数写入/可复现 ZIP 与独立校验器，含 25+9+16 回归与 4 包实测；改下载、安装或构建脚本前必读，注意生产路径尚未接线。
 
 - [P4-c3-D1/T01 分发契约冻结](PR-REPORT-PETCORE-DISTRIBUTION-T01-2026-10-24.md)：预算/传输/来源三契约、`fetch_artifact` 与 `install_package(origin=)`、11+63 测试与 ruff 证据；改市场下载/解包/授信前必读，解包预算仍待 T03。

@@ -545,7 +545,7 @@ TransferSpec(urls, expected_size=None, expected_sha256="", max_redirects=3,
 TransferReport(url, bytes_read, path="", resumed_from=0, redirects=0)
 ```
 
-- 默认只允许 `https`；loopback 测试必须显式放开 `http`。
+- 默认只允许 `https`；市场下载器只对本机回环（`127.0.0.1` / `::1` / `localhost`）自动放开 `http`，其余主机降级一律拒绝。
 - `allowed_hosts` 为空时**只允许同主机跳转**；GitHub Release 的 `github.com → objects.githubusercontent.com` 必须由调用方显式列出目标主机（T02 起有回归锁定）。
 - `RESUME_IF_MATCH` 的语义：只有 206 且 `Content-Range` 起点等于本地长度才追加，否则丢弃 `.part` 重下；416 只有在本地长度等于 `expected_size` 或 `bytes */N` 的 N 等于本地长度时才算完成，否则删 `.part` 重下一次（第二次仍 416 即按状态错误失败）。
 - 压缩预算在**读流中**按实际读到的字节累计（含已有 `.part`），超限抛 `BudgetExceeded` 并删除 `.part`，不信 `Content-Length`。
@@ -563,8 +563,8 @@ TransferReport(url, bytes_read, path="", resumed_from=0, redirects=0)
 
 | 位置 | 签名 | 实现批次 |
 |---|---|---|
-| `petcore/net/market_transport.py` | `fetch_artifact(spec, dest_dir, *, limits=None, progress=None, cancel=None) -> TransferReport` | T02 加固内部 |
-| `petcore/mods/install.py` | `open_pack(source, work_root=None, *, limits=None)`、`install(source, root, *, force=False, limits=None)` | T03 落预算 |
-| `petcore/market/install.py` | `install_package(..., allow_feature=False, origin=PackageOrigin.MARKET, ...)` | T04 用 origin 做授权/事务 |
+| `petcore/net/market_transport.py` | `fetch_artifact(spec, dest_dir, *, limits=None, progress=None, cancel=None) -> TransferReport` | T02（已落地：逐跳/读流预算） |
+| `petcore/mods/install.py` | `open_pack(source, work_root=None, *, limits=None)`、`install(source, root, *, force=False, limits=None)` | T03（已落地：预检 + 计数写入） |
+| `petcore/market/install.py` | `install_package(..., allow_feature=False, origin=PackageOrigin.MARKET, limits=MARKET_ARCHIVE_LIMITS, ...)` | T04（已落地：来源授信、交叉校验、锁失败回滚） |
 
 worker 只依赖这些签名，不改契约；主模型改契约必须同批更新本节与测试。

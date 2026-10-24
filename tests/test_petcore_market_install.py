@@ -290,3 +290,183 @@ def test_rollback_without_market_record_is_refused(tmp_path):
 
     assert not outcome.ok
     assert "没有市场安装记录" in outcome.message
+
+
+# --- T04：预算、交叉校验与锁失败回滚 ---------------------------------------
+
+
+class FetchAwareFetcher:
+    """模拟 HttpFetcher 的 `fetch` 入口，记录它拿到的 TransferSpec。"""
+
+    def __init__(self, artifact: Path):
+        self.artifact = artifact
+        self.specs: list = []
+        self.limits: list = []
+
+    def fetch(self, spec, dest_dir, *, limits=None, progress=None, cancel=None):
+        from petcore.contracts.http import TransferReport
+
+        self.specs.append(spec)
+        self.limits.append(limits)
+        path = Path(dest_dir) / "artifact.zip"
+        path.write_bytes(self.artifact.read_bytes())
+        return TransferReport(
+            url=spec.urls[0], bytes_read=path.stat().st_size, path=str(path)
+        )
+
+
+def test_market_download_uses_hardened_fetch_with_limits(tmp_path):
+    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
+    package, version = _package(_document("fun.test", "1.0.0", artifact))
+    fetcher = FetchAwareFetcher(artifact)
+
+    outcome = install.install_package(tmp_path, package, version, fetcher=fetcher)
+
+    assert outcome.ok, outcome.message
+    assert len(fetcher.specs) == 1
+    spec = fetcher.specs[0]
+    assert spec.expected_size == version.size
+    assert "objects.githubusercontent.com" in spec.allowed_hosts
+    assert fetcher.limits[0] is not None
+    assert (tmp_path / "mods" / "fun.test" / "mod.json").is_file()
+
+
+def test_archive_budget_failure_leaves_no_package_behind(tmp_path):
+    from petcore.contracts.archive import ArchiveLimits
+
+    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "x" * 200)
+    package, version = _package(_document("fun.test", "1.0.0", artifact))
+
+    outcome = install.install_package(
+        tmp_path,
+        package,
+        version,
+        fetcher=FakeFetcher({version.urls[0]: artifact}),
+        limits=ArchiveLimits(4 * 1024 * 1024, 64, 100),
+    )
+
+    assert not outcome.ok
+    assert "expanded" in outcome.message
+    assert not (tmp_path / "mods" / "fun.test").exists()
+    assert not list((tmp_path / "market" / "staging").glob("*")) if (tmp_path / "market" / "staging").is_dir() else True
+
+
+def test_capability_not_granted_by_index_is_rejected(tmp_path):
+    artifact = _make_zip(
+        tmp_path,
+        "v1.zip",
+        _manifest(
+            "fun.test", "content", "1.0.0", capabilities=["settings.write"]
+        ),
+        "one",
+    )
+    package, version = _package(_document("fun.test", "1.0.0", artifact))
+
+    outcome = install.install_package(
+        tmp_path, package, version, fetcher=FakeFetcher({version.urls[0]: artifact})
+    )
+
+    assert not outcome.ok
+    assert "未授权的能力" in outcome.message
+    assert not (tmp_path / "mods" / "fun.test").exists()
+
+
+def test_granted_capability_in_index_is_accepted(tmp_path):
+    artifact = _make_zip(
+        tmp_path,
+        "v1.zip",
+        _manifest("fun.test", "content", "1.0.0", capabilities=["settings.read"]),
+        "one",
+    )
+    package, version = _package(
+        _document(
+            "fun.test", "1.0.0", artifact, extra={"capabilities": ["settings.read"]}
+        )
+    )
+
+    outcome = install.install_package(
+        tmp_path, package, version, fetcher=FakeFetcher({version.urls[0]: artifact})
+    )
+
+    assert outcome.ok, outcome.message
+
+
+def test_api_version_mismatch_between_pack_and_index_is_rejected(tmp_path):
+    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
+    package, version = _package(
+        _document("fun.test", "1.0.0", artifact, extra={"api_version": "2"})
+    )
+
+    outcome = install.install_package(
+        tmp_path, package, version, fetcher=FakeFetcher({version.urls[0]: artifact})
+    )
+
+    assert not outcome.ok
+    assert "API" in outcome.message
+    assert not (tmp_path / "mods" / "fun.test").exists()
+
+
+def test_verify_manifest_rejects_api_version_drift_directly(tmp_path):
+    import dataclasses
+
+    import pytest
+
+    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
+    package, version = _package(_document("fun.test", "1.0.0", artifact))
+    pack_dir = tmp_path / "pack"
+    pack_dir.mkdir()
+    with zipfile.ZipFile(artifact) as archive:
+        archive.extractall(pack_dir)
+    manifest = verify.read_pack_manifest(pack_dir)
+    drifted = dataclasses.replace(package, api_version="2")
+
+    with pytest.raises(Exception) as caught:
+        verify.verify_manifest(manifest, drifted, version)
+
+    assert "api_version" in str(caught.value)
+
+
+def test_lock_failure_rolls_back_a_fresh_install(tmp_path, monkeypatch):
+    artifact = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
+    package, version = _package(_document("fun.test", "1.0.0", artifact))
+
+    def boom(root, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install, "save_lock", boom)
+
+    outcome = install.install_package(
+        tmp_path, package, version, fetcher=FakeFetcher({version.urls[0]: artifact})
+    )
+
+    assert not outcome.ok
+    assert "已回滚" in outcome.message
+    assert not (tmp_path / "mods" / "fun.test").exists()
+
+
+def test_lock_failure_restores_the_previous_version(tmp_path, monkeypatch):
+    first = _make_zip(tmp_path, "v1.zip", _manifest("fun.test", "content", "1.0.0"), "one")
+    package1, version1 = _package(_document("fun.test", "1.0.0", first))
+    assert install.install_package(
+        tmp_path, package1, version1, fetcher=FakeFetcher({version1.urls[0]: first})
+    ).ok
+
+    second_dir = Path(tmp_path) / "v2"
+    second_dir.mkdir(exist_ok=True)
+    second = _make_zip(
+        second_dir, "v2.zip", _manifest("fun.test", "content", "2.0.0"), "two"
+    )
+    package2, version2 = _package(_document("fun.test", "2.0.0", second))
+
+    def boom(root, payload):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install, "save_lock", boom)
+
+    outcome = install.install_package(
+        tmp_path, package2, version2, fetcher=FakeFetcher({version2.urls[0]: second})
+    )
+
+    assert not outcome.ok
+    assert "已回滚" in outcome.message
+    assert install.installed_version(tmp_path, "fun.test") == "1.0.0"

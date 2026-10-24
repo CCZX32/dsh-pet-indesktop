@@ -2482,3 +2482,33 @@ worker 红证据：旧实现 18 failed、缺 `limits` 关键字 8 failed、缺�
 **未验证/风险（关键）**：① `market/download.py` 仍走 `download_to(policy=None)`，**逐跳加固尚未进生产路径**，T04 必须切到
 `fetch_artifact`；② `install_package` 的 `open_pack` 仍未传 limits，**市场解包预算尚未生效**；③ 多 URL 回退未实现；
 ④ 无真实 HTTPS/代理/CDN 实机；⑤ `install()` 仍以 `(False, msg)` 代替抛异常，T04 若要分类需在 `open_pack` 层拦。
+
+## L067 — 2026-10-24 — P4-c3-D1/T04 身份·授权·事务
+
+**边界**：只把市场安装接到 T02/T03 的加固上并补齐交叉校验与事务一致性；不改版本、不改默认源、不改 UI。
+
+**改动**：
+- 接线：`market/download.py` 的 `_fetch_one` 在 fetcher 暴露 `fetch` 时走 `HttpFetcher.fetch → fetch_artifact`，
+  构造 `TransferSpec`（size / GitHub CDN 允许列表 / 超时）；只实现 `download` 的替身保持旧路径。
+  `download_artifact` 与 `install_package` 新增 `limits`（默认 `MARKET_ARCHIVE_LIMITS`）并下传到 `open_pack`。
+- 交叉校验：`verify.verify_manifest` 增加「能力在已知表内」「能力 ⊆ 索引声明」「api_version 一致」
+  「manifest.core_requires 满足当前 Core」四项，错误点名不一致字段。
+- 事务：锁写失败由「已安装但写锁失败」改为 `_rollback_failed_commit()`——有备份换回旧版，无备份删除新装目录，
+  消息如实写「已回滚」/「回滚失败」；`BudgetExceeded` 被捕获并转成 `InstallOutcome(False, …)`。
+- 契约：新增 `TransferSpec.allow_loopback_http`（默认真），回环判断放进 `net/market_transport.py`
+  ——`market/` 不能 import `urllib`（架构门），这也顺带修掉了首版实现踩红的那条。
+
+**逐文件增删**：`market/download.py` +60/−3、`net/market.py` +8/−0、`net/market_transport.py` +13/−1、
+`contracts/http.py` +3/−0、`market/install.py` +32/−8、`market/verify.py` +35/−2、
+`tests/test_petcore_market_install.py` +180/−0、`tests/test_petcore_market_transport_security.py` +17/−1、
+`docs/PETCORE-MOD-FORMAT.md` +4/−4。
+
+**验证**：市场族 58 passed / 13.78s；指定四文件 57 passed / 23.70s；全量 petcore + 公共门 **1738 passed / 123.00s**；
+`ruff check petcore tests` 全绿。行为实测：本地 http 索引 + 真实 `HttpFetcher.fetch` 的 CLI `list→install→update→rollback`
+通过；`allow_loopback_http=False` 时同一回环 URL 在连接前被拒且服务端 0 命中。
+
+**性能**：无新增线程/定时器；安装路径多一次 `getattr` 探测与 `TransferSpec` 构造，下载多一次临时 staging
+创建/删除与 `os.replace`；校验为集合差 + 一次版本比较。无旧同工作量可对照，after 留 T09。
+
+**未验证/风险**：真实 HTTPS/CDN/代理下载未跑；设置页与 CLI 尚未暴露 `limits`；`install()` 对本地目录仍返回 `(False, msg)`
+不抛异常；目录来源不套预算；锁失败后的 UI 重载留 T06/T07。

@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from ..contracts.archive import MARKET_ARCHIVE_LIMITS, ArchiveLimits
+from ..contracts.http import TransferSpec
 from . import verify
 from .errors import DownloadError, IntegrityError, TransferCancelled
 from .model import MarketPackage, MarketVersion
 
 ProgressCallback = Callable[[int, int], None]
 CancelCallback = Callable[[], bool]
+
+#: GitHub Release 下载会从 `github.com` 跳到这些 CDN 主机；逐跳校验靠这张显式名单。
+GITHUB_ARTIFACT_HOSTS = (
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+)
 
 
 class ArtifactFetcher(Protocol):
@@ -55,6 +65,7 @@ def download_artifact(
     package: MarketPackage,
     version: MarketVersion,
     *,
+    limits: ArchiveLimits | None = MARKET_ARCHIVE_LIMITS,
     progress: ProgressCallback | None = None,
     cancel: CancelCallback | None = None,
     timeout: float = 15.0,
@@ -78,13 +89,17 @@ def download_artifact(
 
     for url in version.urls:
         try:
-            size = fetcher.download(
+            size = _fetch_one(
+                fetcher,
                 url,
                 part,
-                expected_size=version.size,
-                timeout=timeout,
+                directory,
+                package,
+                version,
+                limits=limits,
                 progress=progress,
                 cancel=cancel,
+                timeout=timeout,
             )
             if size != version.size:
                 raise IntegrityError(f"大小不一致：期望 {version.size}，实际 {size}")
@@ -112,3 +127,45 @@ def download_artifact(
 
     detail = "；".join(attempts) or "没有可用的下载地址"
     raise DownloadError(f"{package.id} {version.version} 下载失败：{detail}")
+
+
+def _fetch_one(
+    fetcher: ArtifactFetcher,
+    url: str,
+    part: Path,
+    directory: Path,
+    package: MarketPackage,
+    version: MarketVersion,
+    *,
+    limits: ArchiveLimits | None,
+    progress: ProgressCallback | None,
+    cancel: CancelCallback | None,
+    timeout: float,
+) -> int:
+    """优先走逐跳加固的 `fetch`（T02）；测试替身只实现 `download` 时保持旧路径。"""
+    fetch = getattr(fetcher, "fetch", None)
+    if callable(fetch):
+        spec = TransferSpec(
+            urls=(url,),
+            expected_size=version.size,
+            allowed_hosts=GITHUB_ARTIFACT_HOSTS,
+            timeout=timeout,
+        )
+        staging = directory / f".fetch-{package.id}-{version.version}"
+        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            report = fetch(
+                spec, staging, limits=limits, progress=progress, cancel=cancel
+            )
+            os.replace(report.path, part)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        return part.stat().st_size
+    return fetcher.download(
+        url,
+        part,
+        expected_size=version.size,
+        timeout=timeout,
+        progress=progress,
+        cancel=cancel,
+    )

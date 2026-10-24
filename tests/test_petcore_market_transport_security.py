@@ -465,7 +465,8 @@ def test_redirect_limit_is_enforced(loopback, tmp_path):
 
 
 def test_http_url_is_rejected_by_default_https_spec(loopback, tmp_path):
-    url = f"{_base(loopback)}/artifact.bin"
+    # 非回环主机：默认 spec 只允许 https，http 在连接前就被拒。
+    url = "http://market.example.invalid/artifact.bin"
 
     with pytest.raises(errors.NetworkError) as caught:
         market_transport.fetch_artifact(TransferSpec(urls=(url,)), tmp_path)
@@ -668,3 +669,18 @@ def test_rate_limit_keeps_retry_after_and_does_not_retry(loopback, tmp_path):
     assert caught.value.status == 429
     assert caught.value.retry_after == 1.0
     assert loopback.count("/rate-limited.bin") == 1
+
+
+def test_loopback_http_is_allowed_by_default_and_can_be_switched_off(tmp_path, loopback):
+    url = f"{_base(loopback)}/artifact.bin"
+
+    relaxed = TransferSpec(urls=(url,))  # 默认 allowed_schemes 只有 https
+    report = market_transport.fetch_artifact(relaxed, tmp_path / "relaxed")
+    assert report.bytes_read == len(PAYLOAD)
+
+    strict = TransferSpec(urls=(url,), allow_loopback_http=False)
+    with pytest.raises(errors.NetworkError) as caught:
+        market_transport.fetch_artifact(strict, tmp_path / "strict")
+
+    assert caught.value.reason == errors.PROTOCOL
+    assert loopback.count("/artifact.bin") == 1

@@ -488,6 +488,14 @@ class HttpFetcher:
     ) -> IndexFetch:
         return fetch_index(url, etag=etag, timeout=timeout)
 
+    def fetch(self, spec, dest_dir, *, limits=None, progress=None, cancel=None):
+        """逐跳加固的 artifact 下载（T02）；market 层优先使用这个入口。"""
+        from .market_transport import fetch_artifact
+
+        return fetch_artifact(
+            spec, dest_dir, limits=limits, progress=progress, cancel=cancel
+        )
+
     def download(
         self,
         url: str,

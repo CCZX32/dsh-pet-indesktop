@@ -507,6 +507,8 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | T02 逐跳传输 | 完成（`94d80650`） | 206 对齐/416 两义/读流预算/跳转三重约束；25 条安全回归；新增 `allowed_hosts` 支持 GitHub Release | 
 | T03 解包预算 | 完成（`359446b5`） | `open_pack/install(limits=)`、预检条目与声明展开、计数写入防造假；9 条回归 |
 | T05 候选构建器 | 完成（`34a247cb`） | 白名单可复现 ZIP + 独立校验器；4 包实测 19169/41454/9655/17522 字节，verify 4/4 |
-| T04/T06/T07 | 未开始 | 授权/事务、索引/CLI/UI、真实装卸回滚；**生产仍需 T04 把 `market/download.py` 切到 `fetch_artifact` 并传 limits** |
+| T04 授权/事务 | 完成 | 市场安装接 `fetch_artifact` 与 `limits`；能力/api/core 四类交叉校验；锁失败回滚；`allow_loopback_http` 契约；全量 1738 passed |
+| T06 索引/CLI/UI | 未开始 | 根 `extensions-index.json`（pending）、CLI 展示与拒绝语义、`MarketPage` dispose/迟到 reload、size/sha 展示 |
+| T07 真实装卸回滚 | 未开始 | 真 ZIP + `file:` 索引的安装/升级/回滚、数据 SHA、30 轮资源 |
 
 范围不变：别把 T01 的契约读成「分发可用」；解包预算与逐跳校验尚未生效。

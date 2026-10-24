@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from ..contracts.archive import MARKET_ARCHIVE_LIMITS, ArchiveLimits, BudgetExceeded
 from ..contracts.market import PackageOrigin, writes_trusted_marker
 from ..mods import install as mod_install
 from ..mods.manifest import ModManifest, load_manifest
@@ -148,13 +149,27 @@ def _restore(root: Path, mod_id: str, backup: Path | None) -> str:
     return message if ok else f"恢复旧版本失败：{message}"
 
 
+def _rollback_failed_commit(root: Path, mod_id: str, backup: Path | None) -> str:
+    """锁写失败时把磁盘恢复到安装前：有备份就换回旧版，没有就删掉新装目录。"""
+    if backup is not None:
+        return f"已回滚：{_restore(root, mod_id, backup)}"
+    ok, message = mod_install.remove_at(Path(root) / "mods" / mod_id, root=Path(root))
+    return "已回滚到安装前状态" if ok else f"回滚失败：{message}"
+
+
 def restart_required(package: model.MarketPackage) -> bool:
     return package.kind == "feature" and package.execution != "host-only"
 
 
-def _stage_manifest(pack: Path, package: model.MarketPackage, version: model.MarketVersion) -> ModManifest:
+def _stage_manifest(
+    pack: Path,
+    package: model.MarketPackage,
+    version: model.MarketVersion,
+    *,
+    core_version: str = model.CORE_VERSION,
+) -> ModManifest:
     manifest = verify.read_pack_manifest(pack)
-    verify.verify_manifest(manifest, package, version)
+    verify.verify_manifest(manifest, package, version, core_version=core_version)
     return manifest
 
 
@@ -177,6 +192,7 @@ def install_package(
     fetcher: ArtifactFetcher,
     allow_feature: bool = False,
     origin: PackageOrigin = PackageOrigin.MARKET,
+    limits: ArchiveLimits | None = MARKET_ARCHIVE_LIMITS,
     core_version: str = model.CORE_VERSION,
     platform: str | None = None,
     apply: ApplyCallback | None = None,
@@ -228,7 +244,13 @@ def install_package(
 
     try:
         downloaded = download_artifact(
-            fetcher, root, package, version, progress=progress, cancel=cancel
+            fetcher,
+            root,
+            package,
+            version,
+            limits=limits,
+            progress=progress,
+            cancel=cancel,
         )
     except MarketError as exc:
         return InstallOutcome(False, str(exc), mod_id=package.id, previous_version=previous)
@@ -238,10 +260,12 @@ def install_package(
     backup: Path | None = None
     marker_note = ""
     try:
-        with mod_install.open_pack(downloaded.path, work_root=staging_root) as pack:
+        with mod_install.open_pack(
+            downloaded.path, work_root=staging_root, limits=limits
+        ) as pack:
             if _strip_untrusted_marker(pack, origin):
                 marker_note = "；已移除包内 .trusted（该来源无授信资格）"
-            _stage_manifest(pack, package, version)
+            _stage_manifest(pack, package, version, core_version=core_version)
             if previous:
                 backup = backup_pack(root, package.id, previous)
                 if backup is None:
@@ -261,7 +285,7 @@ def install_package(
                 previous_version=previous,
                 attempts=downloaded.attempts,
             )
-    except (MarketError, OSError) as exc:
+    except (MarketError, OSError, BudgetExceeded) as exc:
         return InstallOutcome(
             False,
             str(exc),
@@ -297,11 +321,11 @@ def install_package(
     try:
         save_lock(root, lock)
     except OSError as exc:
+        restored = _rollback_failed_commit(root, package.id, backup)
         return InstallOutcome(
             False,
-            f"已安装但写入 market-lock.json 失败：{exc}",
+            f"写入 market-lock.json 失败（{exc}），{restored}",
             mod_id=package.id,
-            version=version.version,
             previous_version=previous,
             attempts=downloaded.attempts,
             backup=_relative(root, backup),
