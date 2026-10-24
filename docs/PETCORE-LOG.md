@@ -2428,3 +2428,29 @@ tests/test_architecture.py tests/test_petcore_architecture.py tests/test_ci_work
 **整仓复跑（本批文档落盘后）**：`PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest -q --tb=short --junitxml=.scratch/petcore-p4c3-rerun/full-rerun-20261024-162458.xml`，实际 **9841 passed / 18 skipped / 20 warnings / 1247.57s / exit 0**，XML 9859 例、failure/error 均 0。相对 E 报告（9837/20/15warnings）：收集 +2 例，skip −2 —— 那两条是 `test_agent_link`/`test_final_cleanup` 之外的「缺 bash」条件项，本机 Git Bash 可用后已实际执行并通过；本机 `rapidocr` 可导入，因此不再出现「rapidocr not installed」跳过。18 条 skip 全部来自旧 `pet/` 与平台/素材条件（符号链接权限 3、缺 ffmpeg 3、GIF 素材未生成 1、需真实前台窗口 2、素材未供给 1、POSIX 2、macOS 2、Windows 无 `tzset` 1、Cocoa 1、headless 截图 1、opt-in 声卡 1），petcore 域无 skip。原始输出与 JUnit 见 `.scratch/petcore-p4c3-rerun/`（gitignored）。
 
 **未验证/风险**：计划里的发布链路、候选 ZIP、SAC 拦截与 3.11 子集仍未执行；本机 SAC 仍会拦未签名新构建。下一步按 T00 基线开始，先复核环境探针再派 worker。
+
+## L065 — 2026-10-24 — P4-c3-D1/T01 分发契约冻结
+
+**授权与边界**：用户批准 D1（T00–T07）。本批只冻结跨模块契约，不改默认市场源、不改 Core/API/mod 版本、
+不改任何业务行为；T02/T03/T05 由 worker 并行、T04/T06/T07 随后。
+
+**改动**：新增 `petcore/contracts/archive.py`（`ArchiveLimits` / `BudgetExceeded` / `MARKET_ARCHIVE_LIMITS` = 64MiB / 256MiB / 10000）、
+`petcore/contracts/market.py`（`PackageOrigin` + `writes_trusted_marker()`）、`petcore/net/market_transport.py`
+（`fetch_artifact` 签名接通既有下载，下载后复核压缩体积）；扩展 `petcore/contracts/http.py`
+（`TransferSpec` / `TransferReport` / `ResumePolicy`，HTTP 默认只允许 https）；`petcore/market/install.py`
+增加 `origin` 参数并在来源无授信资格时剔除包内 `.trusted`（防标记走私）。文档：MOD-FORMAT §18、MARKET D1/T01 节、SPEC 边界表。
+
+**逐文件增删**：`petcore/contracts/archive.py` +54、`contracts/market.py` +28、`contracts/http.py` +52、
+`net/market_transport.py` +66、`market/install.py` +18、`tests/test_petcore_distribution_contracts.py` +211、
+`docs/PETCORE-MOD-FORMAT.md` +47、`docs/PETCORE-MARKET.md` +14、`docs/PETCORE-SPEC.md` +13（均为 +/−0，除文档外无删除）。
+
+**验证**：契约测试 **11 passed / 1.73s**；市场相关 7 个测试文件 **63 passed / 11.09s**；`ruff check petcore tests` 全绿。
+loopback 下载 4096 字节落盘且 `.part` 清理；2048 字节对 1024 上限抛 `BudgetExceeded(kind=compressed)` 且不留文件；
+`market`/`local-zip` 装完无 `.trusted` 且消息含「已移除」，`bundled` 保留。
+
+**性能**：无稳态路径变化（预算对象只在市场调用时构造，`origin` 分支仅一次 `exists()`）；T00 已采
+`before-perf.json`，T01 标「新增路径无旧对应」，after 对照留 T09。
+
+**未验证/风险**：`fetch_artifact` 的体积复核在下载之后，挡不住大文件先落盘（T02 移进读流）；
+`open_pack`/`install` 的 `limits` 尚未落地（T03），**解包预算此刻不生效**；`origin` 只做标记剔除，
+授权与事务仍归 T04。不得据此声称分发已可用。

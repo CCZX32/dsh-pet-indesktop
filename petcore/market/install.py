@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from ..contracts.market import PackageOrigin, writes_trusted_marker
 from ..mods import install as mod_install
 from ..mods.manifest import ModManifest, load_manifest
+from ..mods.trust import TRUST_MARKER
 from . import model, verify
 from .download import ArtifactFetcher, download_artifact
 from .errors import MarketError
@@ -156,6 +158,17 @@ def _stage_manifest(pack: Path, package: model.MarketPackage, version: model.Mar
     return manifest
 
 
+def _strip_untrusted_marker(pack: Path, origin: PackageOrigin) -> bool:
+    """来源没有授信资格时剔除包内自带的 `.trusted`（防标记走私）。"""
+    if writes_trusted_marker(origin):
+        return False
+    marker = Path(pack) / TRUST_MARKER
+    if not marker.exists():
+        return False
+    marker.unlink(missing_ok=True)
+    return True
+
+
 def install_package(
     root: Path,
     package: model.MarketPackage,
@@ -163,6 +176,7 @@ def install_package(
     *,
     fetcher: ArtifactFetcher,
     allow_feature: bool = False,
+    origin: PackageOrigin = PackageOrigin.MARKET,
     core_version: str = model.CORE_VERSION,
     platform: str | None = None,
     apply: ApplyCallback | None = None,
@@ -222,8 +236,11 @@ def install_package(
     staging_root = market_root(root) / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     backup: Path | None = None
+    marker_note = ""
     try:
         with mod_install.open_pack(downloaded.path, work_root=staging_root) as pack:
+            if _strip_untrusted_marker(pack, origin):
+                marker_note = "；已移除包内 .trusted（该来源无授信资格）"
             _stage_manifest(pack, package, version)
             if previous:
                 backup = backup_pack(root, package.id, previous)
@@ -309,6 +326,7 @@ def install_package(
     message = f"已安装 {package.id} {version.version}"
     if previous and previous != version.version:
         message = f"已更新 {package.id} {previous} → {version.version}"
+    message += marker_note
     message += reload_error
     if needs_restart:
         message += "，重启后生效"

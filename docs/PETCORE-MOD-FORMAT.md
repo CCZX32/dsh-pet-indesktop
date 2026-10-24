@@ -519,3 +519,50 @@ Core 托管的 `host.config`（ScopedConfig，支持实时预览与取消回滚�
 48签按稳定ID/档位权重确定性抽取，一轮不重复；同日全宠共享，展示绑定实际触发slot。等待语音真实结束（不是on_done），再等2.8秒揭签；等待最多6秒，超时取消本token后继续文字。停用/关宠/退出取消任务和本owner语音；不撤销其他扩展语音。有界预热最多两请求，语音关闭不联网；已阻塞的provider调用只协作取消，返回前保留原线程、不启动替代线程。预热通过`petcore.mods.workers.try_start_worker`按owner进行进程级准入，实际卸载后创建新runtime也不能绕过活线程约束；取消Event仍属于每轮业务任务。
 
 详见[C](PR-REPORT-PETCORE-P4C3-C-2026-10-24.md)、[D](PR-REPORT-PETCORE-P4C3-D-2026-10-24.md)、[E联合验收](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。
+
+## 18. P4-c3-D1 分发契约（2026-10-24，Core 0.2.0 / API 1）
+
+本节是 T01 冻结的跨模块契约。实现分批落地（T02 传输、T03 解包、T04 授权/事务），
+**契约本身不变**；改动签名必须同步本节、[市场文档](PETCORE-MARKET.md)与测试。
+
+### 18.1 预算（`petcore/contracts/archive.py`）
+
+| 项 | 值 | 作用范围 |
+|---|---|---|
+| `compressed_bytes` | 64 MiB | 市场 feature 包的下载字节，读流中持续计数 |
+| `expanded_bytes` | 256 MiB | 解包后实际写入字节 |
+| `entries` | 10 000 | ZIP 条目（文件与目录都计） |
+
+- `ArchiveLimits` 不可变，三个字段都必须为正整数（`bool` 拒绝）；`allows()` 等于上限算通过。
+- 越界抛 `BudgetExceeded(kind, limit, actual)`，`kind ∈ compressed / expanded / entries`，消息含实测值与上限。
+- 只有市场通道用 `MARKET_ARCHIVE_LIMITS`；`mods.install` 的本地目录/ZIP 与角色/content 包保持零预算（`limits=None`）。
+
+### 18.2 传输描述（`petcore/contracts/http.py`）
+
+```text
+TransferSpec(urls, expected_size=None, expected_sha256="", max_redirects=3,
+             allowed_schemes=("https",), resume=RESUME_IF_MATCH, timeout=15.0)
+TransferReport(url, bytes_read, path="", resumed_from=0, redirects=0)
+```
+
+- 默认只允许 `https`；loopback 测试必须显式放开 `http`。
+- `RESUME_IF_MATCH` 的语义：只有 206 且 `Content-Range` 起点等于本地长度才追加，否则丢弃 `.part` 重下。
+- 大小与 SHA-256 的最终判定属于 `petcore/market/verify.py`；传输层只用 `expected_size` 判断续传是否对齐。
+- `resumed_from` 是**请求续传时**本地已有字节数，不是服务端确认的偏移。
+
+### 18.3 来源与授信（`petcore/contracts/market.py`）
+
+`PackageOrigin ∈ {market, local-dir, local-zip, bundled}`；`writes_trusted_marker()` 只对 `bundled` 为真。
+
+- 市场/本地安装包内自带的 `.trusted` 一律剔除（防标记走私），成功消息点名「已移除包内 .trusted」。
+- `.trusted` 只由安装向导写；`allow_feature_mods` 是独立授权开关，两者不互相替代。
+
+### 18.4 冻结签名
+
+| 位置 | 签名 | 实现批次 |
+|---|---|---|
+| `petcore/net/market_transport.py` | `fetch_artifact(spec, dest_dir, *, limits=None, progress=None, cancel=None) -> TransferReport` | T02 加固内部 |
+| `petcore/mods/install.py` | `open_pack(source, work_root=None, *, limits=None)`、`install(source, root, *, force=False, limits=None)` | T03 落预算 |
+| `petcore/market/install.py` | `install_package(..., allow_feature=False, origin=PackageOrigin.MARKET, ...)` | T04 用 origin 做授权/事务 |
+
+worker 只依赖这些签名，不改契约；主模型改契约必须同批更新本节与测试。

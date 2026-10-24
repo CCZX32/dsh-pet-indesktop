@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [P4-c3-D1/T01 分发契约冻结](PR-REPORT-PETCORE-DISTRIBUTION-T01-2026-10-24.md)：预算/传输/来源三契约、`fetch_artifact` 与 `install_package(origin=)`、11+63 测试与 ruff 证据；改市场下载/解包/授信前必读，解包预算仍待 T03。
+
 - [P4-c3 交接与提交交付](PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md)：下一阶段计划、推送前复验与提交范围；接手继任任务或核对本轮远程交付前必读。
 
 - [P4-c3 E与提醒域联合验收](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)：48签、播放时序、历法打包门禁、C–E逐文件/性能/Windows及全仓证据；修改提醒生命周期或进入分发阶段前必读；进入分发另读[执行计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)。

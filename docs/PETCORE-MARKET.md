@@ -210,3 +210,17 @@ CONTRIBUTING.md
 ## 2026-10-24 后续分发交接（尚未实施）
 
 A–E 提醒域已完成，下一阶段按[分发准备详细计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)实施。该计划允许继任模型按不重叠写集并行网络、解包与候选构建，公共接口和集成由主模型负责。当前默认源、Range行为、manifest交叉校验和解包预算仍以现有代码为准；不能把计划中的HTTPS逐跳校验、预算、根清单或候选包标成已落地。生产源切换和公开Release需候选验收及用户另行确认。
+
+## 2026-10-24 D1/T01：跨模块契约已冻结
+
+T01 只冻结契约，不改变默认源与现有行为：
+
+| 契约 | 位置 | 状态 |
+|---|---|---|
+| 预算 `ArchiveLimits` / `BudgetExceeded` / `MARKET_ARCHIVE_LIMITS`（64MiB / 256MiB / 10000） | `petcore/contracts/archive.py` | 已落地，仅市场通道使用 |
+| 传输 `TransferSpec` / `TransferReport` / `ResumePolicy` | `petcore/contracts/http.py` | 已落地，HTTP 默认只允许 https |
+| 来源 `PackageOrigin` / `writes_trusted_marker()` | `petcore/contracts/market.py` | 已落地；市场与本地包内 `.trusted` 被剔除 |
+| 下载入口 `fetch_artifact(...)` | `petcore/net/market_transport.py` | 签名已生效，逐跳与读流预算由 T02 加固 |
+| 安装入口 `install_package(..., origin=)` | `petcore/market/install.py` | 已生效；授权/事务加固由 T04 完成 |
+
+逐跳校验、Range 语义修正、解包预算、根索引与候选 ZIP 仍属 T02–T09，**不得**按本节声称已实现。默认源切换与公开 Release 未发生。

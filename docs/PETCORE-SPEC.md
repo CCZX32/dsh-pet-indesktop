@@ -867,3 +867,16 @@ D已实现纯历法/节气/浮动节日、slot调度/去重和本地MM-DD生日�
 | 未实现 | 角色素材下载/v6、Agent写端、灵动岛二阶段、Core自更新、节日专属动画；不纳入本轮 |
 
 详细数据契约见[MOD-FORMAT §17](PETCORE-MOD-FORMAT.md)，收口证据及未验证范围见[E报告](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。本轮遵照用户要求执行至E，不越过边界自动发布。
+
+## 2026-10-24 P4-c3-D1 分发契约边界
+
+分发阶段（T00–T07）只加固「市场通道」，不改业务：
+
+| 边界 | 口径 |
+|---|---|
+| 预算 | 仅市场 feature 包：64 MiB 压缩 / 256 MiB 展开 / 10000 条目；本地目录/ZIP 安装与角色/content 包保持零预算 |
+| 来源 | `PackageOrigin` 区分 market / local-dir / local-zip / bundled；只有安装向导投放的包可带 `.trusted`，市场与本地包内自带的 `.trusted` 被剔除 |
+| 传输 | `TransferSpec` 默认只允许 https；`RESUME_IF_MATCH` 要求 206 的 `Content-Range` 起点等于本地长度 |
+| 有效范围 | 契约已冻结（MOD-FORMAT §18）；逐跳、读流预算、根索引、候选 ZIP 与安装包候选仍属后续批次，未实现 |
+
+默认索引源、公开 Release、安装包签名与 SAC 处理均未改变；不得把本表当作「分发已可用」的结论。

@@ -494,3 +494,19 @@ D已实现纯历法/节气/浮动节日、slot调度/去重和本地MM-DD生日�
 ## 2026-10-24 下一阶段详细交接（执行未开始）
 
 A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/2026-10-24-petcore-p4c3-distribution.md)的T00–T09推进；继任模型可使用最多三个互不重叠写集的worker，主模型锁定公共接口、串行集成与最终验收。本次只编写交接并按用户授权提交/推送A–E及文档，不构建候选、不上传Release、不合并main。交付记录见[交接报告](PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md)。
+
+
+## 2026-10-24 P4-c3-D1 执行状态（T00–T07，进行中）
+
+用户批准 D1 = T00–T07；T08 冻结包与 T09 发布门禁留 D2（SAC/签名决策与整仓耗时不与代码冻结混批）。
+
+| 任务 | 状态 | 证据 |
+|---|---|---|
+| T00 基线 | 完成 | `.scratch/petcore-p4c3-distribution/baseline-20261024-202323/`（status/numstat/untracked/freeze/source-sha256/env.json，SAC=1）；before 性能 `before-perf.json`（download 32.739 / resume 33.141 / extract 12.993 / install 38.512 / page 13.369 ms，3 轮 15+60 s） |
+| T01 契约冻结 | 完成 | `contracts/archive.py`、`contracts/market.py`、`contracts/http.py`、`net/market_transport.py`、`install_package(origin=)`；契约 11 passed、市场族 63 passed、ruff 全绿；MOD-FORMAT §18 |
+| T02 逐跳传输 | 待 worker | 写集 `net/market.py` + `net/market_transport.py`；206/416/预算/跳转四组回归 |
+| T03 解包预算 | 待 worker | 写集 `mods/install.py`；`open_pack/install(limits=)` 落地 |
+| T05 候选构建器 | 待 worker | 写集 `scripts/build_petcore_extensions.py` 等；可复现 ZIP |
+| T04/T06/T07 | 未开始 | 授权/事务、索引/CLI/UI、真实装卸回滚 |
+
+范围不变：别把 T01 的契约读成「分发可用」；解包预算与逐跳校验尚未生效。

@@ -11,6 +11,7 @@ Core 里，mod 只描述「要什么」，拿到状态码、头与字节。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 #: 单次请求默认超时（秒）。
@@ -108,3 +109,54 @@ class HttpPort(Protocol):
         params: tuple[tuple[str, str], ...] = (),
         prefer_direct: bool = False,
     ) -> Any: ...
+
+
+class ResumePolicy(str, Enum):
+    """断点续传策略。"""
+
+    #: 只有 206 且 `Content-Range` 起点等于本地长度才追加，否则丢弃 `.part` 重下。
+    RESUME_IF_MATCH = "resume-if-match"
+    #: 永远从 0 开始重下。
+    RESTART = "restart"
+
+
+@dataclass(frozen=True, slots=True)
+class TransferSpec:
+    """一次 artifact 下载的完整描述（市场通道专用）。
+
+    `allowed_schemes` 默认只允许 `https`；loopback 测试必须显式放开 `http`。
+    校验（size / sha256）由 market 层负责，传输层只用 `expected_size` 判断续传是否对齐。
+    """
+
+    urls: tuple[str, ...]
+    expected_size: int | None = None
+    expected_sha256: str = ""
+    max_redirects: int = 3
+    allowed_schemes: tuple[str, ...] = ("https",)
+    resume: ResumePolicy = ResumePolicy.RESUME_IF_MATCH
+    timeout: float = 15.0
+
+    def __post_init__(self) -> None:
+        if not self.urls:
+            raise ValueError("TransferSpec.urls must not be empty")
+        if self.max_redirects < 0:
+            raise ValueError("max_redirects must be >= 0")
+        if self.expected_size is not None and self.expected_size < 0:
+            raise ValueError("expected_size must be >= 0")
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferReport:
+    """一次成功传输的结果。
+
+    `resumed_from` 是**请求续传时**本地已存在的字节数，不是「服务端确认的偏移」；
+    `path` 是落盘的最终文件路径。
+    """
+
+    url: str
+    bytes_read: int
+    path: str = ""
+    resumed_from: int = 0
+    redirects: int = 0
