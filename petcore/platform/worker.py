@@ -27,6 +27,7 @@ class WorkerSession:
         owner: str,
         argv: list[str],
         *,
+        generation: int = 0,
         env: dict[str, str] | None = None,
         cwd: str | Path | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,
@@ -37,6 +38,7 @@ class WorkerSession:
         if not argv:
             raise ValueError("worker argv must not be empty")
         self.owner = str(owner)
+        self.generation = int(generation)
         self.argv = [str(item) for item in argv]
         self.env = dict(env or {})
         self.cwd = str(cwd) if cwd is not None else None
@@ -48,6 +50,8 @@ class WorkerSession:
         self._write_lock = threading.Lock()
         self._stop = threading.Event()
         self._started = threading.Event()
+        self._ready = threading.Event()
+        self._exited = threading.Event()
         self._last_heartbeat = time.monotonic()
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
@@ -63,7 +67,9 @@ class WorkerSession:
         process = self.process
         return process.pid if process is not None else None
 
-    def start(self) -> "WorkerSession":
+    def start(
+        self, *, wait_ready: bool = False, ready_timeout: float = 5.0
+    ) -> "WorkerSession":
         if self.process is not None:
             raise RuntimeError("worker session already started")
         merged_env = os.environ.copy()
@@ -102,7 +108,22 @@ class WorkerSession:
             self._watchdog.start()
         self.send({"type": protocol.HELLO, "owner": self.owner})
         self._started.set()
+        if wait_ready and not self.wait_ready(ready_timeout):
+            self.shutdown(timeout=min(max(float(ready_timeout), 0.05), 1.0))
+            raise TimeoutError(f"worker {self.owner} did not complete handshake")
         return self
+
+    @property
+    def ready(self) -> bool:
+        return self._ready.is_set()
+
+    def wait_ready(self, timeout: float = 5.0) -> bool:
+        """Wait for the worker's ``ready`` handshake without polling or sleeps."""
+        if self._ready.is_set():
+            return True
+        if self._exited.is_set():
+            return False
+        return self._ready.wait(max(0.0, float(timeout)))
 
     def send(self, message: dict[str, Any]) -> None:
         process = self.process
@@ -172,7 +193,10 @@ class WorkerSession:
                 except (TypeError, ValueError) as exc:
                     self._report_error(exc)
                     continue
-                if message.get("type") == protocol.HEARTBEAT:
+                message_type = message.get("type")
+                if message_type == protocol.READY:
+                    self._ready.set()
+                elif message_type == protocol.HEARTBEAT:
                     self._last_heartbeat = time.monotonic()
                 callback = self.on_message
                 if callback is not None:
@@ -181,6 +205,7 @@ class WorkerSession:
                     except Exception as exc:
                         self._report_error(exc)
         finally:
+            self._exited.set()
             code = process.poll()
             if code is None:
                 code = process.wait()
@@ -224,6 +249,7 @@ class WorkerSession:
 class WorkerHost:
     def __init__(self) -> None:
         self._sessions: dict[str, WorkerSession] = {}
+        self._generations: dict[str, int] = {}
         self._lock = threading.RLock()
 
     def start(
@@ -237,26 +263,40 @@ class WorkerHost:
         on_error: Callable[[BaseException | str], None] | None = None,
         on_exit: Callable[[int | None], None] | None = None,
         heartbeat_timeout: float = 30.0,
+        ready_timeout: float = 0.0,
     ) -> WorkerSession:
+        owner = str(owner)
         with self._lock:
-            old = self._sessions.pop(str(owner), None)
-            if old is not None:
-                old.shutdown()
-            session = WorkerSession(
-                str(owner),
-                argv,
-                env=env,
-                cwd=cwd,
-                on_message=on_message,
-                on_error=on_error,
-                on_exit=lambda code, owner=str(owner), callback=on_exit: self._on_exit(
-                    owner, code, callback
-                ),
-                heartbeat_timeout=heartbeat_timeout,
-            )
-            session.start()
-            self._sessions[str(owner)] = session
-            return session
+            old = self._sessions.pop(owner, None)
+            generation = self._generations.get(owner, 0) + 1
+            self._generations[owner] = generation
+        if old is not None:
+            old.shutdown()
+
+        session = WorkerSession(
+            owner,
+            argv,
+            generation=generation,
+            env=env,
+            cwd=cwd,
+            on_message=lambda message, owner=owner, generation=generation, callback=on_message:
+                self._on_message(owner, generation, callback, message),
+            on_error=lambda error, owner=owner, generation=generation, callback=on_error:
+                self._on_error(owner, generation, callback, error),
+            on_exit=lambda code, owner=owner, generation=generation, callback=on_exit:
+                self._on_exit(owner, generation, code, callback),
+            heartbeat_timeout=heartbeat_timeout,
+        )
+        with self._lock:
+            self._sessions[owner] = session
+        try:
+            session.start(wait_ready=ready_timeout > 0, ready_timeout=ready_timeout)
+        except Exception:
+            with self._lock:
+                if self._sessions.get(owner) is session:
+                    self._sessions.pop(owner, None)
+            raise
+        return session
 
     def get(self, owner: str) -> WorkerSession | None:
         with self._lock:
@@ -275,10 +315,26 @@ class WorkerHost:
         for session in sessions:
             session.shutdown(timeout)
 
-    def _on_exit(self, owner: str, code: int | None, callback) -> None:
+    def _is_current(self, owner: str, generation: int) -> bool:
         with self._lock:
             session = self._sessions.get(owner)
-            if session is not None and not session.alive:
+            return session is not None and session.generation == generation
+
+    def _on_message(self, owner: str, generation: int, callback, message) -> None:
+        if callback is not None and self._is_current(owner, generation):
+            callback(message)
+
+    def _on_error(self, owner: str, generation: int, callback, error) -> None:
+        if callback is not None and self._is_current(owner, generation):
+            callback(error)
+
+    def _on_exit(self, owner: str, generation: int, code: int | None, callback) -> None:
+        with self._lock:
+            session = self._sessions.get(owner)
+            current = session is not None and session.generation == generation
+            if current and not session.alive:
                 self._sessions.pop(owner, None)
-        if callback is not None:
+        # An old process can finish after a replacement has started.  Its exit
+        # and error/message callbacks must not affect the new generation.
+        if current and callback is not None:
             callback(code)

@@ -409,6 +409,7 @@ class PetWindow(QWidget):
                 self.width(),
                 self.height(),
                 mirrored=self._mirrored(),
+                dpr=screen_dpr(self),
             )
         self._advance_move_from_frame()
         self.update()

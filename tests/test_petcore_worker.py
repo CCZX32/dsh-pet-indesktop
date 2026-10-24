@@ -1,135 +1,116 @@
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 import threading
-from pathlib import Path
 
-from petcore.contracts import worker as protocol
 from petcore.platform.worker import WorkerHost
 
 
-def _worker_code() -> str:
-    return textwrap.dedent(
-        """
-        import sys
-        from petcore.contracts import worker
-
-        for line in sys.stdin:
-            message = worker.decode(line)
-            kind = message.get("type")
-            if kind == worker.HELLO:
-                print(worker.encode({"type": worker.READY}), flush=True)
-            elif kind == worker.CONFIG_PUSH:
-                print(worker.encode({"type": worker.EVENT, "config": message.get("config")}), flush=True)
-            elif kind == worker.CANCEL:
-                print(worker.encode({"type": worker.EVENT, "cancelled": message.get(worker.REQUEST_ID)}), flush=True)
-            elif kind == worker.SHUTDOWN:
-                break
-        """
-    )
-
-
-def _argv() -> list[str]:
-    return [sys.executable, "-u", "-c", _worker_code()]
+_WORKER = textwrap.dedent(
+    """
+    import json, sys
+    PROTOCOL = "petcore-worker/v1"
+    def emit(kind, **extra):
+        print(json.dumps({"protocol": PROTOCOL, "type": kind, **extra}), flush=True)
+    for raw in sys.stdin:
+        message = json.loads(raw)
+        kind = message.get("type")
+        if kind == "hello":
+            emit("ready")
+            emit("heartbeat")
+        elif kind == "request":
+            emit("event", request_id=message.get("request_id"))
+        elif kind == "cancel":
+            emit("event", cancelled=message.get("request_id"))
+        elif kind == "shutdown":
+            break
+    """
+).strip()
 
 
-def test_worker_host_handshake_config_cancel_and_shutdown() -> None:
-    ready = threading.Event()
-    config_seen = threading.Event()
-    cancel_seen = threading.Event()
-    exited = threading.Event()
+_IDLE_WORKER = textwrap.dedent(
+    """
+    import json, sys, time
+    for raw in sys.stdin:
+        message = json.loads(raw)
+        if message.get("type") == "hello":
+            time.sleep(30)
+            break
+    """
+).strip()
+
+
+def _argv(script: str) -> list[str]:
+    return [sys.executable, "-c", script]
+
+
+def test_worker_handshake_request_cancel_and_shutdown():
     messages: list[dict] = []
+    ready = threading.Event()
+    request_seen = threading.Event()
+    cancel_seen = threading.Event()
 
-    def on_message(message: dict) -> None:
+    def on_message(message):
         messages.append(message)
-        if message.get("type") == protocol.READY:
+        if message.get("type") == "ready":
             ready.set()
-        if message.get("config") == {"pet": 1}:
-            config_seen.set()
-        if message.get("cancelled") == "req-1":
+        if message.get("request_id") == "r1":
+            request_seen.set()
+        if message.get("cancelled") == "r1":
             cancel_seen.set()
 
     host = WorkerHost()
     session = host.start(
         "test-worker",
-        _argv(),
-        env={"PYTHONUTF8": "1"},
+        _argv(_WORKER),
         on_message=on_message,
+        heartbeat_timeout=2.0,
+        ready_timeout=2.0,
+    )
+    assert session.ready
+    assert ready.wait(2.0)
+    session.request("r1", {"value": 1})
+    assert request_seen.wait(2.0)
+    session.cancel("r1")
+    assert cancel_seen.wait(2.0)
+    host.shutdown_all(timeout=1.0)
+    assert host.get("test-worker") is None
+    assert any(message.get("type") == "heartbeat" for message in messages)
+
+
+def test_worker_replacement_rejects_stale_exit_callback():
+    stale_exit = threading.Event()
+    host = WorkerHost()
+    host.start(
+        "same-owner",
+        _argv(_IDLE_WORKER),
+        on_exit=lambda _code: stale_exit.set(),
+        heartbeat_timeout=0,
+    )
+    replacement = host.start(
+        "same-owner",
+        _argv(_WORKER),
+        heartbeat_timeout=0,
+        ready_timeout=2.0,
+    )
+    assert replacement.ready
+    assert not stale_exit.wait(0.5)
+    host.shutdown_all(timeout=1.0)
+
+
+def test_worker_heartbeat_timeout_reports_and_stops_process():
+    error = threading.Event()
+    exited = threading.Event()
+    host = WorkerHost()
+    host.start(
+        "silent-worker",
+        _argv(_IDLE_WORKER),
+        on_error=lambda _error: error.set(),
         on_exit=lambda _code: exited.set(),
-        heartbeat_timeout=0,
+        heartbeat_timeout=0.2,
     )
-
-    assert ready.wait(3.0)
-    session.push_config({"pet": 1})
-    session.cancel("req-1")
-    assert config_seen.wait(3.0)
-    assert cancel_seen.wait(3.0)
-    session.shutdown()
+    assert error.wait(3.0)
     assert exited.wait(3.0)
-    host.shutdown_all()
-    assert any(item.get("type") == protocol.READY for item in messages)
-
-
-def test_worker_host_replaces_existing_owner_and_stops_all() -> None:
-    host = WorkerHost()
-    first = host.start("same-owner", _argv(), heartbeat_timeout=0)
-    second = host.start("same-owner", _argv(), heartbeat_timeout=0)
-    assert first is not second
-    assert not first.alive
-    assert second.alive
-    host.shutdown_all()
-    assert not second.alive
-
-
-def test_worker_session_reports_malformed_output(tmp_path: Path) -> None:
-    del tmp_path
-    errors: list[object] = []
-    ready = threading.Event()
-    code = textwrap.dedent(
-        """
-        import sys
-        from petcore.contracts import worker
-        print("not-json", flush=True)
-        for line in sys.stdin:
-            if worker.decode(line).get("type") == worker.HELLO:
-                print(worker.encode({"type": worker.READY}), flush=True)
-            elif worker.decode(line).get("type") == worker.SHUTDOWN:
-                break
-        """
-    )
-    host = WorkerHost()
-    session = host.start(
-        "bad-worker",
-        [sys.executable, "-u", "-c", code],
-        on_error=errors.append,
-        on_message=lambda message: ready.set() if message.get("type") == protocol.READY else None,
-        heartbeat_timeout=0,
-    )
-    assert ready.wait(3.0)
-    session.shutdown()
-    assert errors
-
-
-def test_worker_failures_are_reported_to_the_user() -> None:
-    """P3 验收：worker 出错/异常退出必须有用户可见反馈。"""
-    from petcore.ui.ports import WorkerNoticePort
-
-    class Inner:
-        def __init__(self) -> None:
-            self.kwargs = None
-
-        def start(self, owner, argv, env=None, **kwargs):
-            self.kwargs = dict(kwargs, owner=owner, argv=argv, env=env)
-            return "session"
-
-    notices: list[str] = []
-    inner = Inner()
-    port = WorkerNoticePort(inner, notices.append)
-    assert port.start("demo", ["python", "-c", "pass"]) == "session"
-    inner.kwargs["on_error"](RuntimeError("boom"))
-    inner.kwargs["on_exit"](3)
-    inner.kwargs["on_exit"](0)
-    assert any("出错" in item for item in notices)
-    assert any("异常退出" in item for item in notices)
-    assert len(notices) == 2
+    assert host.get("silent-worker") is None

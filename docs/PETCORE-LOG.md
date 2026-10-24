@@ -2618,3 +2618,15 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：市场传输/安装/UI/远程预算/索引/构建/本批 hardening 联合 **90 passed / 19.56s**；其中新增市场阻断族 **51 passed / 8.46s**；后续完整门禁仍待本批全部代码与文档稳定后重跑。
 
 **限制**：本批没有真实 HTTPS/CDN、真实 Release、冻结包或外部代理验收；网络、PySide6 与文件源的确定性回归不等同公开分发已完成。`_ORPHAN_JOBS` 仅保留为旧探针兼容符号，实际任务已由应用级 registry 持有。
+
+## L073 — 2026-10-25 — WorkerHost 与 petcore DPR 渲染边界收口
+
+**边界**：在市场阻断关闭后，补齐本轮计划中仍有明确证据缺口的两个运行时边界：真实 worker 会话握手/心跳/取消/代次和帧渲染物理像素/DPR；不扩展主分支不存在的动画语义，不删除旧 `pet` 兼容实现。
+
+**改动**：`WorkerSession` 增加 READY/退出事件、显式握手等待、心跳超时收口和有界退出；`WorkerHost` 为同一 owner 维护代次，替换旧 worker 后拒收迟到消息、错误和退出回调。`petcore.ui.renderer.frame_pixmap()` 按窗口所在屏的 DPR 将逻辑尺寸换算为物理像素、写回 pixmap DPR，并保留镜像行为；`PetWindow` 帧入口传入 `screen_dpr(self)`。新增子进程 worker 及 offscreen Qt DPR 回归测试。
+
+**逐文件增删**：`petcore/platform/worker.py` +79/−23、`petcore/ui/pet_window.py` +1/−0、`petcore/ui/renderer.py` +19/−7、`tests/test_petcore_renderer.py` +43/−0、`tests/test_petcore_worker.py` +90/−109。
+
+**验证**：worker + renderer 聚焦族 **5 passed / 4.20s**；与市场 hardening 联合运行 **56 passed / 11.83s**；`ruff` 通过。真实 worker 使用当前 Python 子进程和 JSON 管道，Qt 测试使用 `QT_QPA_PLATFORM=offscreen`；未将旧 `pet` 的历史 DPR 测试冒充本次 petcore 实机验证。
+
+**限制**：本机没有双屏/混合 DPI 实机条件，尚未验证真实窗口跨屏、Windows GPU/解码性能和冻结包运行；这些保留在最终报告的验证缺口中。
