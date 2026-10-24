@@ -224,3 +224,13 @@ T01 只冻结契约，不改变默认源与现有行为：
 | 安装入口 `install_package(..., origin=)` | `petcore/market/install.py` | 已生效；授权/事务加固由 T04 完成 |
 
 逐跳校验、Range 语义修正、解包预算、根索引与候选 ZIP 仍属 T02–T09，**不得**按本节声称已实现。默认源切换与公开 Release 未发生。
+
+## 2026-10-24 D1/T06：根索引与离线链路
+
+| 项 | 状态 |
+|---|---|
+| 根 `extensions-index.json` | 已提交：四包全部 `blocked=true`（理由「待发布：候选产物尚未公开」），版本带真实 size/sha256 与计划 Release URL |
+| `--index-url file://…` | 可用；读取走 `net/market.py::fetch_index_file`，上限 8 MiB，**不回落**公网源 |
+| `file:` artifact | `fetch_artifact` 直接拷贝并校验压缩预算 |
+| 市场页销毁 | 运行中的索引 `QThread` 由模块级集合持有到 `finished`；销毁后 `refresh()` 不启动、迟到结果丢弃 |
+| 未做 | Release 上传、`RELEASE_REPO/TAG` 确认、公开索引生成（均属 D2） |

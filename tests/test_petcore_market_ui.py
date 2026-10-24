@@ -208,3 +208,44 @@ def test_extensions_nav_lists_the_market_page(app, tmp_path):
     assert "扩展管理" in labels
     assert "插件市场" in labels
     assert labels.index("插件市场") == labels.index("扩展管理") + 1
+
+
+def test_dispose_during_reload_keeps_the_thread_alive_and_drops_the_result(tmp_path, app):
+    """设置页销毁时不销毁仍在跑的 QThread，迟到的索引结果也不能再写回页面。"""
+    import threading
+    import time
+
+    from petcore.market.source import IndexFetch
+    from petcore.ui.settings import page_market
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowFetcher:
+        def fetch_index(self, url, *, etag="", timeout=8.0):
+            started.set()
+            assert release.wait(5.0), "test did not release the fetcher"
+            return IndexFetch(
+                body=b'{"schema_version": 1, "packages": []}', etag="slow-1"
+            )
+
+        def download(self, *_args, **_kwargs):
+            raise AssertionError("dispose test must not download artifacts")
+
+    host = FakeHost(tmp_path)
+    page = MarketPage(host, fetcher=SlowFetcher())
+    page.refresh()
+
+    assert started.wait(5.0)
+    page.dispose()
+    release.set()
+
+    deadline = time.monotonic() + 10.0
+    while page_market._ORPHAN_JOBS and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert not page_market._ORPHAN_JOBS
+    assert page._disposed is True
+    assert page._result is None
+    assert page._packages == []

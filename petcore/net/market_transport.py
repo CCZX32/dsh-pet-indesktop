@@ -9,14 +9,40 @@
 from __future__ import annotations
 
 import os
+import shutil
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..contracts.archive import ArchiveLimits
+from ..contracts.archive import ArchiveLimits, BudgetExceeded
 from ..contracts.http import ResumePolicy, TransferReport, TransferSpec
 from . import market as _market
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _fetch_local_file(
+    spec: TransferSpec,
+    dest_dir: Path,
+    url: str,
+    limits: ArchiveLimits | None,
+) -> TransferReport:
+    """`file://` artifact（本地镜像/离线验收）：直接拷贝，不经过网络栈。"""
+    source = Path(urllib.request.url2pathname(urlsplit(url).path))
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise _market.errors.NetworkError(
+            f"本地文件不可读：{exc}", reason=_market.errors.NETWORK
+        ) from exc
+    if limits is not None and size > limits.compressed_bytes:
+        raise BudgetExceeded("compressed", limits.compressed_bytes, size)
+    name = source.name or "artifact.zip"
+    final = dest_dir / name
+    partial = dest_dir / f"{name}.part"
+    shutil.copyfile(source, partial)
+    os.replace(partial, final)
+    return TransferReport(url=url, bytes_read=size, path=str(final))
 
 
 def _effective_schemes(spec: TransferSpec, url: str) -> tuple[str, ...]:
@@ -59,6 +85,8 @@ def fetch_artifact(
         raise ValueError("TransferSpec.urls must not be empty")
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    if urlsplit(spec.urls[0]).scheme.lower() == "file":
+        return _fetch_local_file(spec, dest_dir, spec.urls[0], limits)
     name = _artifact_name(spec)
     part = dest_dir / f"{name}.part"
     final = dest_dir / name

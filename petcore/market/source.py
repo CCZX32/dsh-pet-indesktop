@@ -100,6 +100,9 @@ class MarketSource:
         custom = normalize_index_url(custom_url)
         if not custom:
             return self.base_urls
+        if custom.lower().startswith("file://"):
+            # 显式本地索引 = 离线选择：失败就报错，不偷偷回落到公网源。
+            return (custom,)
         return tuple(dict.fromkeys((custom, *self.base_urls)))
 
     def load(self, *, custom_url: str = "", force: bool = False) -> SourceResult:

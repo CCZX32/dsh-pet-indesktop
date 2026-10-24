@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "id": "fun.divination",
+      "kind": "feature",
+      "name": "Daily fortune",
+      "name_zh": "抽签",
+      "author": "dsh-pet",
+      "latest": "1.1.0",
+      "api_version": "1",
+      "core_requires": ">=0.2.0,<1.0.0",
+      "execution": "host-only",
+      "capabilities": [
+        "filesystem.user_data",
+        "notification.present",
+        "settings.read",
+        "settings.write",
+        "sound.play",
+        "speech.present"
+      ],
+      "platforms": [],
+      "certified": false,
+      "blocked": true,
+      "blocked_reason": "待发布：候选产物尚未公开",
+      "screenshots": [],
+      "versions": [
+        {
+          "version": "1.1.0",
+          "size": 19169,
+          "sha256": "b6b47112423d5b763d31b8884b8f3ce3f6c4a1cbb21608ef2ba0b4d9b81c6f9c",
+          "urls": [
+            "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/petcore-extensions-v0.2.0-rc1/fun.divination-1.1.0.zip"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fun.festival",
+      "kind": "feature",
+      "name": "Festival reminder",
+      "name_zh": "节日提醒",
+      "author": "dsh-pet",
+      "latest": "1.1.0",
+      "api_version": "1",
+      "core_requires": ">=0.2.0,<1.0.0",
+      "execution": "host-only",
+      "capabilities": [
+        "filesystem.user_data",
+        "notification.present",
+        "settings.read",
+        "settings.write",
+        "sound.play",
+        "speech.present"
+      ],
+      "platforms": [],
+      "certified": false,
+      "blocked": true,
+      "blocked_reason": "待发布：候选产物尚未公开",
+      "screenshots": [],
+      "versions": [
+        {
+          "version": "1.1.0",
+          "size": 41454,
+          "sha256": "e4c5111441fff3545d7f5a6e36bd01ccf7aeb6b78b04e560b681020f15b2e6ac",
+          "urls": [
+            "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/petcore-extensions-v0.2.0-rc1/fun.festival-1.1.0.zip"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reminder.todo",
+      "kind": "feature",
+      "name": "Todo reminder",
+      "name_zh": "待办提醒",
+      "author": "dsh-pet",
+      "latest": "1.1.0",
+      "api_version": "1",
+      "core_requires": ">=0.2.0,<1.0.0",
+      "execution": "host-only",
+      "capabilities": [
+        "filesystem.user_data",
+        "notification.present",
+        "settings.read",
+        "settings.write",
+        "sound.play",
+        "speech.present"
+      ],
+      "platforms": [],
+      "certified": false,
+      "blocked": true,
+      "blocked_reason": "待发布：候选产物尚未公开",
+      "screenshots": [],
+      "versions": [
+        {
+          "version": "1.1.0",
+          "size": 9655,
+          "sha256": "e431ba505cf92037d2cb1fed8ff88cf2b39ea6bfc4ac5d6af92ca47056fee2c0",
+          "urls": [
+            "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/petcore-extensions-v0.2.0-rc1/reminder.todo-1.1.0.zip"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "voice.chime",
+      "kind": "feature",
+      "name": "Voice time chime",
+      "name_zh": "语音报时",
+      "author": "dsh-pet",
+      "latest": "1.1.1",
+      "api_version": "1",
+      "core_requires": ">=0.2.0,<1.0.0",
+      "execution": "host-only",
+      "capabilities": [
+        "sound.play",
+        "speech.present"
+      ],
+      "platforms": [],
+      "certified": false,
+      "blocked": true,
+      "blocked_reason": "待发布：候选产物尚未公开",
+      "screenshots": [],
+      "versions": [
+        {
+          "version": "1.1.1",
+          "size": 17522,
+          "sha256": "dc4094c09625226cb76b2bfaf7d792524553dc47c74a74b8a60451ce84dd5ffb",
+          "urls": [
+            "https://github.com/MerZlin/dsh-pet-indesktop/releases/download/petcore-extensions-v0.2.0-rc1/voice.chime-1.1.1.zip"
+          ]
+        }
+      ]
+    }
+  ]
+}

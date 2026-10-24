@@ -25,6 +25,9 @@ from .base import SettingsPage, make_button
 
 FILTER_ALL = ""
 
+#: 设置页销毁后仍在运行的索引线程；由模块持有，直到线程自己 finished。
+_ORPHAN_JOBS: set[QThread] = set()
+
 
 class _IndexJob(QThread):
     done = Signal(object)
@@ -196,12 +199,16 @@ class MarketPage(SettingsPage):
                 job.failed.disconnect()
             except (RuntimeError, TypeError):
                 pass
+            # 线程还在跑时不能销毁 QThread 对象：交给模块级集合持有到 finished。
+            _ORPHAN_JOBS.add(job)
+        self._jobs.clear()
         super().dispose()
 
     def _track(self, job: QThread) -> None:
         self._jobs.append(job)
 
         def _finished() -> None:
+            _ORPHAN_JOBS.discard(job)
             if job in self._jobs:
                 self._jobs.remove(job)
             job.deleteLater()
@@ -225,7 +232,7 @@ class MarketPage(SettingsPage):
         return model.normalize_index_url(self.index_field.text())
 
     def refresh(self, *, blocking: bool = False, force: bool = True) -> None:
-        if self._busy:
+        if self._disposed or self._busy:
             return
         self._set_busy(True, "正在读取索引…")
         custom = self._effective_url()

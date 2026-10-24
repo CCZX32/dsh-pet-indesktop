@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [P4-c3-D1/T06 根索引与离线链路](PR-REPORT-PETCORE-DISTRIBUTION-T06-2026-10-24.md)：待发布根索引、`file:` 索引/artifact（含不回落公网）、市场页销毁持有线程；改索引读取、离线验收或市场页生命周期前必读。
+
 - [P4-c3-D1/T04 授权与安装事务](PR-REPORT-PETCORE-DISTRIBUTION-T04-2026-10-24.md)：市场安装接 `fetch_artifact` 与预算、能力/api/core 四类交叉校验、锁失败回滚与回环 http 口径；改市场安装或授权路径前必读。
 
 - [P4-c3-D1/T02+T03+T05 传输·解包·构建](PR-REPORT-PETCORE-DISTRIBUTION-T020305-2026-10-24.md)：逐跳校验/读流预算/计数写入/可复现 ZIP 与独立校验器，含 25+9+16 回归与 4 包实测；改下载、安装或构建脚本前必读，注意生产路径尚未接线。

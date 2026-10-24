@@ -94,3 +94,5 @@
 | L066 | 2026-10-24 | P4-c3-D1/T02+T03+T05 | 逐跳传输/解包预算/可复现构建器 三 worker 并行；46+62 测试、ruff、4 包构建与 verify 4/4；新增 allowed_hosts | 传输、Content-Range、416、预算、构建器、可复现、allowed_hosts |
 
 | L067 | 2026-10-24 | P4-c3-D1/T04 | 市场安装接 fetch_artifact + limits、能力/api/core 四类交叉校验、锁失败回滚、回环 http 契约；1738 passed | 授权、verify_manifest、事务、回滚、allow_loopback_http |
+
+| L068 | 2026-10-24 | P4-c3-D1/T06 | 根索引（blocked）+ file: 索引/artifact + 市场页销毁持有线程；22 passed，file: 从 42s 降到 0.67s | 根索引、file://、dispose、QThread、nofallback |

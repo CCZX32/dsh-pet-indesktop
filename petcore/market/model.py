@@ -508,6 +508,6 @@ def normalize_index_url(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    if not text.lower().startswith(("https://", "http://")):
+    if not text.lower().startswith(("https://", "http://", "file://")):
         return ""
     return text

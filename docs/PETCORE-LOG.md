@@ -2512,3 +2512,29 @@ worker 红证据：旧实现 18 failed、缺 `limits` 关键字 8 failed、缺�
 
 **未验证/风险**：真实 HTTPS/CDN/代理下载未跑；设置页与 CLI 尚未暴露 `limits`；`install()` 对本地目录仍返回 `(False, msg)`
 不抛异常；目录来源不套预算；锁失败后的 UI 重载留 T06/T07。
+
+## L068 — 2026-10-24 — P4-c3-D1/T06 根索引·file: 链路·市场页销毁
+
+**边界**：只加待发布根索引与离线读取链路、修设置页销毁时的线程生命周期；不改版本、不建 tag、不上传资产、不改 UI 版式。
+
+**改动**：
+- 新增根 `extensions-index.json`（137 行）：由 T05 `build_index(local=False)` 从真实候选清单生成，
+  四包 `blocked=true`（理由「待发布：候选产物尚未公开」），每个版本带真实 size/sha256 与计划中的 Release URL。
+- `market/model.py`：`normalize_index_url` 接受 `file://`；`market/source.py`：显式 `file:` 源**不回落**公网源。
+- `net/market.py`：`fetch_index_file()`（`url2pathname` 在 net/ 内，守住架构红线）+ `HttpFetcher.fetch_index` 分支。
+- `net/market_transport.py`：`file:` artifact 直接拷贝并按大小校验压缩预算，T07 本地验收由此可行。
+- `ui/settings/page_market.py`：模块级 `_ORPHAN_JOBS` 持有运行中的索引线程到 `finished`；`refresh()` 在 `_disposed` 后短路。
+
+**逐文件增删**：`extensions-index.json` +137、`market/model.py` +1/−1、`market/source.py` +3/−0、
+`net/market.py` +22/−0、`net/market_transport.py` +29/−1、`ui/settings/page_market.py` +8/−1、
+`tests/test_petcore_extension_index.py` +123、`tests/test_petcore_market_ui.py` +41。
+
+**验证**：索引族 **6 passed / 0.67s**；索引+源+UI **22 passed / 1.15s**；UI 7 passed / 0.94s；`ruff check .` 全绿。
+行为实测：`file:` 索引 CLI list 4 包 state=blocked exit 0；`install reminder.todo --allow-feature` exit 1、
+消息含「待发布」且磁盘无 `mods/reminder.todo`；索引读取中被 dispose 后线程自行结束、迟到结果不写回、孤儿集合清空。
+
+**性能**：`file:` 索引从「误走公网回落、约 42s」变为本地解析（测试集 0.67s）；artifact 为一次拷贝，无 socket；
+销毁路径多一次 set 增删；无新增线程/定时器。
+
+**未验证/风险**：索引四包仍 blocked，公开索引要等 Release；`RELEASE_REPO/TAG` 是拟定常量待 T09 确认；
+阻塞式索引读取仍不可取消（8s 上限）；dispose 只保证不销毁运行中线程，不等同取消。

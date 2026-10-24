@@ -86,6 +86,26 @@ def fetch_index(
     return IndexFetch(body=_decode_github_contents(body), etag=new_etag)
 
 
+def fetch_index_file(url: str) -> IndexFetch:
+    """读取本地 `file://` 索引（离线验收/本地镜像）；不联网、不写缓存。"""
+    try:
+        parts = urllib.parse.urlsplit(str(url))
+        path = Path(urllib.request.url2pathname(parts.path))
+    except (ValueError, OSError) as exc:
+        raise IndexFetchError(f"本地索引地址无效：{exc}", str(url)) from exc
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise IndexFetchError(f"读取失败：{type(exc).__name__}", str(url)) from exc
+    if size > MAX_INDEX_BYTES:
+        raise IndexFetchError(f"索引超过 {MAX_INDEX_BYTES} 字节上限", str(url))
+    try:
+        body = path.read_bytes()
+    except OSError as exc:
+        raise IndexFetchError(f"读取失败：{type(exc).__name__}", str(url)) from exc
+    return IndexFetch(body=body, etag=f"file:{size}:{int(path.stat().st_mtime)}")
+
+
 @dataclass(frozen=True, slots=True)
 class TransportPolicy:
     """市场下载的逐跳策略：跳数上限、协议白名单与跨主机白名单（T02）。
@@ -486,6 +506,8 @@ class HttpFetcher:
     def fetch_index(
         self, url: str, *, etag: str = "", timeout: float = 8.0
     ) -> IndexFetch:
+        if str(url).lower().startswith("file://"):
+            return fetch_index_file(url)
         return fetch_index(url, etag=etag, timeout=timeout)
 
     def fetch(self, spec, dest_dir, *, limits=None, progress=None, cancel=None):
