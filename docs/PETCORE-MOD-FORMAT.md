@@ -541,14 +541,16 @@ Core 托管的 `host.config`（ScopedConfig，支持实时预览与取消回滚�
 
 ```text
 TransferSpec(urls, expected_size=None, expected_sha256="", max_redirects=3,
-             allowed_schemes=("https",), resume=RESUME_IF_MATCH, timeout=15.0)
+             allowed_schemes=("https",), allowed_hosts=(), resume=RESUME_IF_MATCH, timeout=15.0)
 TransferReport(url, bytes_read, path="", resumed_from=0, redirects=0)
 ```
 
 - 默认只允许 `https`；loopback 测试必须显式放开 `http`。
-- `RESUME_IF_MATCH` 的语义：只有 206 且 `Content-Range` 起点等于本地长度才追加，否则丢弃 `.part` 重下。
+- `allowed_hosts` 为空时**只允许同主机跳转**；GitHub Release 的 `github.com → objects.githubusercontent.com` 必须由调用方显式列出目标主机（T02 起有回归锁定）。
+- `RESUME_IF_MATCH` 的语义：只有 206 且 `Content-Range` 起点等于本地长度才追加，否则丢弃 `.part` 重下；416 只有在本地长度等于 `expected_size` 或 `bytes */N` 的 N 等于本地长度时才算完成，否则删 `.part` 重下一次（第二次仍 416 即按状态错误失败）。
+- 压缩预算在**读流中**按实际读到的字节累计（含已有 `.part`），超限抛 `BudgetExceeded` 并删除 `.part`，不信 `Content-Length`。
 - 大小与 SHA-256 的最终判定属于 `petcore/market/verify.py`；传输层只用 `expected_size` 判断续传是否对齐。
-- `resumed_from` 是**请求续传时**本地已有字节数，不是服务端确认的偏移。
+- `resumed_from` 只在服务端区间与本地 `.part` 对齐时非零；续传失败后重下为 0。取消时 `.part` **保留**（可续传）。
 
 ### 18.3 来源与授信（`petcore/contracts/market.py`）
 

@@ -125,6 +125,8 @@ class TransferSpec:
     """一次 artifact 下载的完整描述（市场通道专用）。
 
     `allowed_schemes` 默认只允许 `https`；loopback 测试必须显式放开 `http`。
+    `allowed_hosts` 是**跨主机跳转的白名单**：为空时只允许同主机跳转；GitHub Release
+    这类 `github.com → objects.githubusercontent.com` 必须由调用方显式列出目标主机。
     校验（size / sha256）由 market 层负责，传输层只用 `expected_size` 判断续传是否对齐。
     """
 
@@ -133,6 +135,7 @@ class TransferSpec:
     expected_sha256: str = ""
     max_redirects: int = 3
     allowed_schemes: tuple[str, ...] = ("https",)
+    allowed_hosts: tuple[str, ...] = ()
     resume: ResumePolicy = ResumePolicy.RESUME_IF_MATCH
     timeout: float = 15.0
 
@@ -145,14 +148,16 @@ class TransferSpec:
             raise ValueError("expected_size must be >= 0")
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
+        if any(not str(host).strip() for host in self.allowed_hosts):
+            raise ValueError("allowed_hosts must not contain empty entries")
 
 
 @dataclass(frozen=True, slots=True)
 class TransferReport:
     """一次成功传输的结果。
 
-    `resumed_from` 是**请求续传时**本地已存在的字节数，不是「服务端确认的偏移」；
-    `path` 是落盘的最终文件路径。
+    `resumed_from` 只在**服务端区间与本地 `.part` 对齐**时才非零；续传失败后重下
+    时为 0（表示本次没有沿用任何已有字节）。`path` 是落盘的最终文件路径。
     """
 
     url: str
