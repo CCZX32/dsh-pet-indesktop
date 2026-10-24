@@ -6,7 +6,7 @@
 
 **Architecture:** 保留 `net → market 编排 → mods 安装器 → UI` 的既有分层，不新建服务端、不另起插件体系。通用预算放 stdlib contracts；只有远程功能包使用新预算，角色包保持原边界。构建器只打包明确允许的源码，读取实际 ZIP 生成大小与摘要；市场索引继续使用 schema_version 1。
 
-**Tech Stack:** Python 3.11、PySide6、stdlib urllib/zipfile/hashlib、pytest、Ruff、现有 PowerShell/PyInstaller 构建入口、GitHub 仓库文件/CDN/Release。
+**Tech Stack:** Python 3.12（本机 `.venv` 实测；最低支持 3.11，不许抬低版本下限）、PySide6、stdlib urllib/zipfile/hashlib、pytest、Ruff、现有 PowerShell/PyInstaller 构建入口、GitHub 仓库文件/CDN/Release。
 
 **Spec:** [PETCORE-SPEC](../../PETCORE-SPEC.md#2026-10-24-p4-c3-e与提醒域当前状态)、[市场契约](../../PETCORE-MARKET.md)、[MOD-FORMAT](../../PETCORE-MOD-FORMAT.md)、[A–E 最终报告](../../PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。本文实现用户批准的“仓库分发与兼容、验证与验收”部分，不重新实施提醒域。
 
@@ -14,7 +14,10 @@
 
 ## Global Constraints
 
-- 工作区 `E:\AI\DSH\dshpet`；PowerShell；Git 为 `D:\DELL\Git\cmd\git.exe`；用项目 `.venv\Scripts\python.exe`，必验 Python 3.11，不改全局 Python。
+- **环境事实已于 2026-10-24 按本机校正**（原条目写的 `E:\AI\DSH\dshpet` / `D:\DELL\Git` 是他人机器，作废）：工作区 `E:\Work\dsh-pet-0`；Shell 用 PowerShell 7 `pwsh`（`D:\Powershell\7\pwsh.exe`），**不要**用 Windows PowerShell 5.1（按 ANSI 读含中文脚本会解析失败）；`git` 走 PATH（`C:\Program Files\Git\cmd\git.exe`）。
+- 解释器固定项目 `.venv\Scripts\python.exe`，不改全局 Python。本机实测：Python **3.12.10**、PySide6 **6.12.0**、pytest **9.1.1**、psutil 7.2.2。**最低支持版本仍是 3.11，不要抬**；3.11 解释器可用 `py -V:3.11`（uv 管理的 3.11.17），改动触碰 3.11 专有语义（`rmtree` 的 `onerror/onexc`、`wintypes` 等）时在 3.11 下补跑该族。
+- 构建工具本机已就绪，**不要**再按“venv 无 PyInstaller / rapidocr 不可导入”规划 T08（那是他人机器的旧事实）：PyInstaller **6.22.3**、Inno Setup 便携版 `tools\InnoSetup\ISCC.exe`、`rapidocr` **3.10.0** 均可导入。`rapidocr` 可导入后，整仓 skip 清单里「rapidocr not installed」那条不再成立，重跑全仓必须重新登记每个 skip 的真实原因。
+- 本机 Smart App Control 会拦未签名的新构建（`CreateProcess` 返回 4551/3077）。要本机跑新 exe：`scripts\make_dev_signing_cert.ps1` 建开发证书 + 构建传 `-SignThumbprint`，或由用户关闭 SAC；冒烟失败不算代码问题，按 `petcore/AGENTS.md` 如实登记。
 - 按实际执行日期记报告和 LNNN；新文档登记 `docs/INDEX.md`。本计划的 2026-10-24 是编写日期，不强行当作继任模型的执行日期。
 - 已实现版本：Core `0.2.0`，`api_version="1"`；`reminder.todo`、`fun.festival`、`fun.divination` 为 `1.1.0`，`voice.chime` 为 `1.1.1`；四包 `core_requires=">=0.2.0,<1.0.0"`。没有实际已发布同版本证据，不随意加版本；发现远端同版本不同摘要，停止，交用户定新版本，绝不覆盖 Release 内容。
 - `allow_feature_mods` 默认关闭；`certified`、源名称、ZIP 内 `.trusted` 都不是授权。保留安装向导由用户明确选择产生的本地授信语义，不能为消除远程风险把合法本地授权全部删掉。
@@ -31,7 +34,7 @@
 
 | 域 | 2026-10-24 已有证据 | 下一阶段仍要做什么 |
 |---|---|---|
-| A 质量阻断 | Python 3.11；全仓原生退出恢复，历史报告保留原失败 | 新网络/安装/构建代码之后重跑全仓并检查退出码 |
+| A 质量阻断 | 全仓原生退出恢复，历史报告保留原失败（报告记录的是他人机器的 Python 3.11；本机 `.venv` 为 3.12.10，见 Global Constraints） | 新网络/安装/构建代码之后重跑全仓并检查退出码；3.11 专有语义另在 3.11 下补跑 |
 | B 通用接口 | slot 交付、DND、单语音通道、真实播放结束、取消代次 | 只防止分发装卸引入回归，不改 API 语义 |
 | C/D/E | 完整待办、历法/生日、48签、30轮装卸/面板、真实 PCM 时序 | 用新 ZIP 与冻结程序重复验证，不拿目录安装当 ZIP 验收 |
 | A–E 最后全仓 | 9837 passed / 20 skipped / 15 warnings / 1565.27s，exit 0 | 本交接提交前另跑门禁，结果见交付报告；下一阶段自己再跑 |
@@ -60,11 +63,11 @@
 
 ### 0.3 通用命令与准确记录
 
-以下均在仓库根运行；`$P/$G/$S` 只在本 PowerShell 会话有效：
+以下均在仓库根运行；`$P/$G/$S` 只在本 PowerShell 会话有效。用 PowerShell 7（`pwsh`），不要用 5.1：
 
 ```powershell
-Set-Location -LiteralPath 'E:\AI\DSH\dshpet'
-$G = 'D:\DELL\Git\cmd\git.exe'
+Set-Location -LiteralPath 'E:\Work\dsh-pet-0'
+$G = 'C:\Program Files\Git\cmd\git.exe'
 $P = Join-Path $PWD '.venv\Scripts\python.exe'
 $S = Join-Path $PWD '.scratch\petcore-p4c3-distribution'
 New-Item -ItemType Directory -Path $S -Force | Out-Null
@@ -73,7 +76,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 & $G status --short
 & $G branch --show-current
 & $G rev-parse HEAD
-& $P -c "import sys,PySide6,pytest; print(sys.version); print(PySide6.__version__); print(pytest.__version__)"
+& $P -c "import sys,PySide6,pytest,psutil,PyInstaller; print(sys.version); print('PySide6',PySide6.__version__); print('pytest',pytest.__version__); print('psutil',psutil.__version__); print('PyInstaller',PyInstaller.__version__)"
 ```
 
 测试命令不要通过管道丢失退出码。每次执行后立刻保存 `$LASTEXITCODE`；不同运行用不同 label，旧失败文件不覆盖：
@@ -117,7 +120,7 @@ worker 必须在其工作区直接编辑文件，交回：修改路径、测试�
 **文件：**只创建 `.scratch/petcore-p4c3-distribution/{HANDOFF.md,spec.md,issues/,baseline/}`。本交付已经建立初始交接；继任先读再更新，另起带时间戳的 baseline 子目录，不覆盖交付快照。
 
 - [ ] 执行 §0.3；确认所在提交包含 L062/A–E，保存 `status --porcelain=v1`、`diff --binary`、`diff --numstat`、未跟踪清单和文件 SHA256。新的 dirty 不为零时逐项归属，不能清除。
-- [ ] 用 `& $P -m pip freeze` 保存依赖；探针 `importlib.util.find_spec('PyInstaller')`、Python3.11、Qt/lunar，记录可执行路径。只给未来独立构建 venv 安装必要依赖，不能先升级当前已验环境。
+- [ ] 用 `& $P -m pip freeze` 保存依赖；探针 `importlib.util.find_spec('PyInstaller')`、解释器版本（本机 3.12.10，3.11 可用 `py -V:3.11` 复核）、Qt/lunar，记录可执行路径。只给未来独立构建 venv 安装必要依赖，不能先升级当前已验环境。
 - [ ] 运行 §0.3 的市场基线，再跑 `tests/test_petcore_architecture.py`、`tests/test_petcore_docs.py`。预期 exit 0；失败归因并先关闭，不宣称是“旧测试随便跳过”。
 - [ ] 复制当前受影响源文件到 baseline/source（含 net/market、market、mods/install、构建脚本）；T09 性能对照从这份快照取旧实现，禁止在产品目录反复 reset 版本。
 - [ ] 在改产品代码前采集§11.1的三轮before基线。探针放scratch并固定输入：同一4MiB压缩/8MiB展开的合成包、同一loopback服务器、同一源码目录；缓存命中/空闲分别测，下载/解包操作次数固定并记录。未来新增功能没有旧入口就标“新增路径无旧对应”，不能用不同工作量算加速。探针和原始数字归档；没有before不放行T01。
@@ -437,9 +440,9 @@ def repository_index_urls(ref: str) -> tuple[str, str, str]:
 
 ## 10. T08 — Windows 冻结候选包与资源（主模型）
 
-**文件：**必要时修改 `scripts/build_petcore.ps1`、新增 `tests/test_petcore_candidate_packaging.py`；若只补缺失依赖仍需验证冻结包。当前A–E报告已明确当前venv无PyInstaller，不能把早期历史构建当可用产物。
+**文件：**必要时修改 `scripts/build_petcore.ps1`、新增 `tests/test_petcore_candidate_packaging.py`；若只补缺失依赖仍需验证冻结包。**本机 `.venv` 已具备 PyInstaller 6.22.3，不要再按“缺 PyInstaller”降级处理**；仍不能把他人机器/早期的历史构建当本机可用产物。
 
-- [ ] 探针当前Python/PyInstaller/Inno/资源存在性；读 `docs/ONEDIR_PACKAGING.md` 与 `STABLE_BUILDS.md`。对缺项只装到项目新建 `.venv-p4c3-build`，记录版本/安装日志；不得升级全局Python或原已验venv。
+- [ ] 探针当前Python/PyInstaller/Inno/资源存在性；读 `docs/ONEDIR_PACKAGING.md` 与 `STABLE_BUILDS.md`。本机预期直接命中项目 `.venv`（PyInstaller 6.22.3）与 `tools\InnoSetup\ISCC.exe`；只有实测缺件时才新建独立 venv 并记录版本/安装日志，不得升级全局Python或改动已验 `.venv`。
 - [ ] 先为构建脚本新增隔离输出参数写失败测试：`-PythonPath`、`-OutputRoot`，默认旧入口保持；候选参数把dist/work/spec与--check输出全部收束到 `$S\frozen-<timestamp>`。验证参数不接受稳定exe路径或用户安装目录，绝不使用 `-Clean` 去删除未经确认的目录。
 - [ ] 构建包含 `lunar_python`、mod源码/引用资源、Qt插件、声音/菜单资源及第三方许可证。现有构建还包含OCR/语音依赖，不能为变绿删掉依赖或把缺失强行忽略；安装依赖失败保留探针与阻断。
 - [ ] 先构建onedir，不要求本阶段自动安装到系统；`--check --root <isolated>`输出与exit码独立保存。`--check`成功还要实际加载四个候选ZIP和两只宠物。
@@ -492,7 +495,7 @@ $petcoreTests = (Get-ChildItem tests -Filter 'test_petcore*.py').FullName
 | ID/version/API/Core/capabilities、授权 | T04/T06 | manifest错配red-green、flag来源、marker攻击拒绝 |
 | 真实安装/更新失败/回滚、旧数据保留 | T04/T07 | 四包真实ZIP和数据SHA、故障注入 |
 | Core0.2/API1/四包版本固定 | Global/T05 | manifest与ZIP/index逐字一致 |
-| Python3.11、完整pytest正常退出 | T00/T09 | 全仓原始输出/XML/exit0，无新增skip掩盖 |
+| 支持版本下限 3.11、完整pytest正常退出 | T00/T09 | 本机 3.12.10 全仓原始输出/XML/exit0，无新增skip掩盖；触碰 3.11 专有语义时另在 3.11 下补跑该族 |
 | 负载3遍、15+60×3、30循环 | T07/T09 | CPU/IO/线程/timer/网络/耗时实测 |
 | Windows冻结/双宠/日历与语音 | T08 | 实机截图和进程退出；SAC或依赖阻断保留 |
 | 不公开发布/不改真实数据/不扩功能 | Global/T09 | pending状态、明确发布再确认 |

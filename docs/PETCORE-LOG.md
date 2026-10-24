@@ -2410,3 +2410,21 @@ tests/test_architecture.py tests/test_petcore_architecture.py tests/test_ci_work
 `ruff check .` All checks passed。纯文档不改变运行行为，未跑全量 pytest、性能与 GUI；
 整仓复跑见 L064。风险与下一步：任务书尚未执行，继任必须重新核对环境与基线，
 不能以历史数字宣称修复完成；完整原始调查输出仅在会话中，后续须生成自己的文件证据。
+
+## L064 — 2026-10-24 — 分发计划本机环境校正 + 整仓复跑
+
+**授权与边界**：用户指出分发 T00–T09 计划里的环境事实来自另一台电脑，要求按本机适当优化，并重跑一次整仓；同时明确动画任务书（L063）保留但不实施。本批只改文档中的环境事实，不改分发实现、协议、版本、构建脚本或任何产品/测试代码；L063 的「逐文件增删 / 验证」两处占位按同批实际证据补齐（见 L063），动画任务本身仍未启动。
+
+**改动**：
+- `docs/superpowers/plans/2026-10-24-petcore-p4c3-distribution.md`：Global Constraints 换成实测本机事实——工作区 `E:\Work\dsh-pet-0`、Shell `pwsh` 7（禁 5.1）、`git` 走 PATH、`.venv` = Python 3.12.10 / PySide6 6.12.0 / pytest 9.1.1 / psutil 7.2.2；补 PyInstaller 6.22.3、`tools\InnoSetup\ISCC.exe`、rapidocr 3.10.0 已就绪，删除"venv 无 PyInstaller / rapidocr 不可导入"旧前提；§0.3 命令块路径与解释器探针同步；T00 依赖探针、T08 冻结包前提、Tech Stack、§0.1 的 A 行、§12 矩阵统一改成"本机 3.12.10 主跑、最低支持 3.11 不抬、3.11 专有语义另补跑"。
+- 未改 `scripts/build_petcore.ps1`、`packaging/`、`petcore/`、`examples/`、`tests/`。
+
+**为什么不能只改路径**：`rapidocr` 可导入后，整仓 skip 清单里「rapidocr not installed」不再成立；PyInstaller 已在 `.venv` 意味着 T08 不必新建独立构建 venv。这两条会直接改变 T00 基线口径与 T08 的退出门，因此必须写进计划而不是留在会话里。
+
+**逐文件增删**：`docs/superpowers/plans/2026-10-24-petcore-p4c3-distribution.md` +14/−11；`docs/PETCORE-LOG.md` / `docs/PETCORE-LOG-INDEX.md` 为本条目自身追加。
+
+**验证**：纯文档批次。产品/测试零改动，故性能实测与 Windows 实机行为无变化，不重复采集。同机门禁：`ruff check .` 全绿；`python -m petcore --check` exit 0；文档/架构/PR 纪律/CI 门 **363 passed**；`tests/test_petcore*.py` + 架构/PR 门 **1664 passed**（Python 3.12.10 / PySide6 6.12.0）。
+
+**整仓复跑（本批文档落盘后）**：`PYTHONUTF8=1 QT_QPA_PLATFORM=offscreen .venv/Scripts/python -m pytest -q --tb=short --junitxml=.scratch/petcore-p4c3-rerun/full-rerun-20261024-162458.xml`，实际 **9841 passed / 18 skipped / 20 warnings / 1247.57s / exit 0**，XML 9859 例、failure/error 均 0。相对 E 报告（9837/20/15warnings）：收集 +2 例，skip −2 —— 那两条是 `test_agent_link`/`test_final_cleanup` 之外的「缺 bash」条件项，本机 Git Bash 可用后已实际执行并通过；本机 `rapidocr` 可导入，因此不再出现「rapidocr not installed」跳过。18 条 skip 全部来自旧 `pet/` 与平台/素材条件（符号链接权限 3、缺 ffmpeg 3、GIF 素材未生成 1、需真实前台窗口 2、素材未供给 1、POSIX 2、macOS 2、Windows 无 `tzset` 1、Cocoa 1、headless 截图 1、opt-in 声卡 1），petcore 域无 skip。原始输出与 JUnit 见 `.scratch/petcore-p4c3-rerun/`（gitignored）。
+
+**未验证/风险**：计划里的发布链路、候选 ZIP、SAC 拦截与 3.11 子集仍未执行；本机 SAC 仍会拦未签名新构建。下一步按 T00 基线开始，先复核环境探针再派 worker。
