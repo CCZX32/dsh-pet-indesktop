@@ -135,4 +135,4 @@ $env:QT_QPA_PLATFORM='offscreen'; $env:PYTHONUTF8='1'
 - 远端分支：`origin/feat/petcore-vpet-architecture`。
 - 推送前使用 `ssh://git@ssh.github.com:443/MerZlin/dsh-pet-indesktop.git` 做只读 fetch；远端仍为 `6326e31c410dc86d632caf0e4201a664e6924964`，本地领先 3 个提交。
 - 使用 SSH over 443 推送 `HEAD:refs/heads/feat/petcore-vpet-architecture`，真实输出：`6326e31c..5c2ba786  HEAD -> feat/petcore-vpet-architecture`，返回码 0。
-- 本轮未上传 GitHub Release 资产、未推送 tag、未合并 `main`、未 force push。最终追加的远端结果记录为文档-only 提交，不改变产品代码和门禁结果。
+- 本轮未上传 GitHub Release 资产、未推送 tag、未合并 `main`、未 force push。第二次推送将文档-only 提交 `71e528b6` 推到同一分支，真实输出为 `5c2ba786..71e528b6`；该提交包含远端交付结果记录，不改变产品代码和门禁结果。
