@@ -449,3 +449,22 @@ macOS / Linux 的真实构建必须在对应 runner 上跑过才算通过——�
 `fun.festival`从已安装的扩展代码动态导入`lunar_python`，静态分析Core入口不足以发现依赖。`scripts/build_petcore.ps1`显式使用`--collect-submodules lunar_python`；现有requirements继续负责安装lunar-python，未新增网络历法服务。签文/节日表及文案随各扩展的host源文件分发，不读取旧pet业务模块。
 
 本轮有构建参数门禁与源码真实历法用例；隔离`.venv`没有PyInstaller，本阶段没有生成或运行新的冻结候选包。不能把该门禁说成安装包验收通过。扩展ZIP清单/依赖打包后运行、Smart App Control实际探针留到后续分发阶段；不得导入信任证书或关闭安全策略规避运行阻断。见[E报告](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。
+
+## 候选包隔离输出（2026-10-24，T08）
+
+`scripts/build_petcore.ps1` 新增两个参数，用于「不污染根 `dist/`、不覆盖既有安装」的候选包构建：
+
+| 参数 | 作用 |
+|---|---|
+| `-OutputRoot <dir>` | `--distpath/--workpath/--specpath`、`--check` 结果与 Inno 的 `/O` 输出全部收束到该目录；拒绝仓库根目录，拒绝已含 `dsh-pet-core-setup.exe` 的目录（不静默覆盖） |
+| `-PythonPath <exe>` | 指定构建解释器；默认项目 `.venv/Scripts/python.exe` |
+
+`-Clean` 只传 PyInstaller 的 `--clean`，**不删除任何目录**；`tests/test_petcore_candidate_packaging.py` 锁定这两个参数与「无删除语句」的事实。
+
+示例（本机开发证书签名）：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 `
+  -Clean -Installer -SignThumbprint 217337C099EC8624AC481BFC9F3E1664D0A442E1 `
+  -OutputRoot .scratch/petcore-p4c3-distribution/t08/dist
+```

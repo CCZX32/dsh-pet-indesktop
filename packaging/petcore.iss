@@ -8,6 +8,14 @@
 #ifndef MyAppVersion
 #define MyAppVersion "0.1.0"
 #endif
+; 候选包隔离输出：由 scripts/build_petcore.ps1 的 -OutputRoot 传入；
+; 不传时保持旧行为（仓库根 dist）。
+#ifndef MySourceDist
+#define MySourceDist "..\dist\dsh-pet-core"
+#endif
+#ifndef MyOutputDir
+#define MyOutputDir "..\dist"
+#endif
 
 [Setup]
 AppId={{8f0f2d4e-4f6c-4f7a-9b7c-1f0b6a2d9c31}
@@ -22,7 +30,7 @@ DefaultDirName={code:GetDefaultDir}
 DisableDirPage=no
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
-OutputDir=..\dist
+OutputDir={#MyOutputDir}
 OutputBaseFilename=dsh-pet-core-setup
 Compression=lzma2
 SolidCompression=yes
@@ -55,7 +63,7 @@ Name: "mod_filereader"; Description: "文件解读（tool.file-reader，需 API�
 Name: "mod_agent"; Description: "Agent 联动（ai.agent，需 DSH 桥接或自写事件）"; GroupDescription: "随附扩展：不勾选就不会写进安装目录，之后随安装程序卸载"; Flags: unchecked
 
 [Files]
-Source: "..\dist\dsh-pet-core\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDist}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 随附扩展：装到安装目录的 mods\ 下（卸载随安装目录一起删除），`.trusted`
 ; 标记表示「安装器授权的官方包」。用户导入的扩展仍装到用户数据目录。

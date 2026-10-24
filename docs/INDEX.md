@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [D2/T08 冻结候选包与签名](PR-REPORT-PETCORE-DISTRIBUTION-T08-2026-10-24.md)：`-OutputRoot` 隔离构建、iss 源目录覆盖（修「打旧包」）、开发证书签名与冻结包自检/四包安装证据；再打包或验收安装包前必读。
+
 - [P4-c3-D1/T07 真实装卸与回滚](PR-REPORT-PETCORE-DISTRIBUTION-T07-2026-10-24.md)：真实 ZIP + `file:` 索引的授权门、四包加载、合成升级/回滚与数据 SHA，60 循环资源证据；D1 收口验收前必读。
 
 - [P4-c3-D1/T06 根索引与离线链路](PR-REPORT-PETCORE-DISTRIBUTION-T06-2026-10-24.md)：待发布根索引、`file:` 索引/artifact（含不回落公网）、市场页销毁持有线程；改索引读取、离线验收或市场页生命周期前必读。
@@ -393,6 +395,7 @@
 | [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md) | 变更日志索引：`LNNN / 日期 / 批次 / 一句话 / 关键词`。 | **每次恢复 petcore 工作前先读本表**，再按关键词打开 log 条目；改完代码必须同步加行。 |
 | [`PETCORE-ANIMATION-BACKLOG.md`](PETCORE-ANIMATION-BACKLOG.md) | 动画/性能 backlog：已完成交互动画、P2-B2/P4 延后项、依赖与验收、明确不做。 | 规划动画批次、回答「这个动画什么时候做」或改播放/解码策略前必读；DPR/编码画质专项转下行评估计划。 |
 | [`PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md`](PETCORE-ANIMATION-QUALITY-ASSESSMENT-2026-10-24.md) | 小小桌宠与 petcore 动画架构/画质调查，105/106 同源、DPR 与 Q70 证据及 T00–T06 串行任务书；仅计划未实施。 | 改动画缩放/DPR、比较编码档位、评估播放器移植或交给后继模型执行画质改善之前必读。 |
+| [`PETCORE-D1-ACCEPTANCE-2026-10-24.md`](PETCORE-D1-ACCEPTANCE-2026-10-24.md) | 分发能力 D1（T00–T07）对外验收说明：能做什么/不能做什么、15 项验收矩阵、复跑命令、四个设计决定、7 条已知缺口与给审查者的 4 个问题。 | 对外汇报分发进度、交给他人（含 AI）验收、或判断「市场到底能不能用」时先读这份，再按需打开各批 PR 报告。 |
 | [`../petcore/README.md`](../petcore/README.md) | 开发者上手指南：环境、运行、目录地图、加菜单项/mod/角色包、测试门禁、已知边界。 | 第一次接手 petcore、或需要一条可复制的命令时。 |
 | [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 10 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
 | [`../petcore/AGENTS.md`](../petcore/AGENTS.md) | petcore 的 agent/贡献者约定：每次改动必须写 log + index、架构红线、菜单/设置一致性、非模态与大小上限。 | 在 `petcore/` 下改任何代码或文档之前必读。 |

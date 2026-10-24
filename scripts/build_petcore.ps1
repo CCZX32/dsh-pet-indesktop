@@ -11,17 +11,34 @@ param(
     [switch]$Installer,
     [switch]$Console,
     [string]$SignThumbprint = "",
-    [string]$TimestampServer = "http://timestamp.digicert.com"
+    [string]$TimestampServer = "http://timestamp.digicert.com",
+    # 隔离输出：dist/work/spec 与 --check 结果全部落在该目录，便于候选包验收不污染根 dist。
+    [string]$OutputRoot = "",
+    # 构建用解释器；默认项目 .venv，缺依赖时指向独立构建 venv。
+    [string]$PythonPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$python = Join-Path $root ".venv/Scripts/python.exe"
+$python = if ($PythonPath) { (Resolve-Path -LiteralPath $PythonPath).Path } else { Join-Path $root ".venv/Scripts/python.exe" }
 if (-not (Test-Path $python)) {
-    throw "missing .venv/Scripts/python.exe; create the venv first"
+    throw "missing python: $python"
 }
+
+$distRoot = if ($OutputRoot) { [IO.Path]::GetFullPath($OutputRoot) } else { Join-Path $root "dist" }
+if ($OutputRoot) {
+    if ($distRoot -eq [IO.Path]::GetFullPath($root)) {
+        throw "OutputRoot must not be the repository root"
+    }
+    if (Test-Path (Join-Path $distRoot "dsh-pet-core-setup.exe")) {
+        throw "OutputRoot already contains an installer; choose a fresh directory"
+    }
+    New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
+}
+$workRoot = if ($OutputRoot) { Join-Path $distRoot ".work" } else { Join-Path $root "build" }
+$specRoot = if ($OutputRoot) { $distRoot } else { $root }
 
 function Sign-Artifact([string]$Path) {
     if (-not $SignThumbprint) { return }
@@ -46,6 +63,9 @@ $pyiArgs = @(
     "--onedir",
     $(if ($Console) { "--console" } else { "--windowed" }),
     "--name", "dsh-pet-core",
+    "--distpath", $distRoot,
+    "--workpath", $workRoot,
+    "--specpath", $specRoot,
     "--icon", "$root/assets/icon.ico",
     "--paths", $root,
     "--add-data", "$root/assets;assets",
@@ -109,7 +129,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-$exe = Join-Path $root "dist/dsh-pet-core/dsh-pet-core.exe"
+$exe = Join-Path $distRoot "dsh-pet-core/dsh-pet-core.exe"
 if (-not (Test-Path $exe)) {
     throw "missing build output: $exe"
 }
@@ -118,11 +138,12 @@ if (-not (Test-Path $exe)) {
 Sign-Artifact $exe
 
 Write-Host "== smoke --check =="
-& $exe --check --out "$root/dist/check.json"
+$checkOut = Join-Path $distRoot "check.json"
+& $exe --check --out $checkOut
 if ($LASTEXITCODE -ne 0) {
     throw "packaged --check failed with exit code $LASTEXITCODE"
 }
-Write-Host "built: $root/dist/dsh-pet-core"
+Write-Host "built: $(Join-Path $distRoot 'dsh-pet-core')"
 
 if ($Installer) {
     $iscc = Join-Path $root "tools/InnoSetup/ISCC.exe"
@@ -131,11 +152,11 @@ if ($Installer) {
     }
     $version = (& $python -c "import petcore; print(petcore.__version__)").Trim()
     Write-Host "== Inno Setup =="
-    & $iscc "/DMyAppVersion=$version" "packaging/petcore.iss"
+    & $iscc "/DMyAppVersion=$version" "/DMySourceDist=$distRoot\dsh-pet-core" "/DMyOutputDir=$distRoot" "packaging/petcore.iss"
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }
-    $setup = Join-Path $root "dist/dsh-pet-core-setup.exe"
+    $setup = Join-Path $distRoot "dsh-pet-core-setup.exe"
     Sign-Artifact $setup
     Write-Host "installer: $setup"
 }

@@ -2557,3 +2557,28 @@ scratch 探针 `.scratch/petcore-p4c3-distribution/t07/resource_loop.py` 记录 
 `doctor` 不带 `--index-url` 仍回落默认源（既有语义）；原生设置窗手工点击、双屏/混合 DPI、非 Windows 未验。
 
 **D1 状态**：T00–T07 全部完成。下一步 D2 = T08（Windows 冻结包 + 签名/SAC 决策）与 T09（性能 before/after、整仓门禁、发布准备）。
+
+## L070 — 2026-10-24 — D2/T08 冻结候选包与开发证书签名
+
+**授权**：用户选择「开发证书签名」并批准做 T08。本批不装系统、不发布、不改安全策略、不删既有构建产物。
+
+**改动**：
+- `scripts/build_petcore.ps1`：新增 `-OutputRoot` / `-PythonPath`；`--distpath/--workpath/--specpath`、`--check` 输出、
+  exe 路径、Inno 源与输出全部跟随；拒绝仓库根与已含 setup 的目录；`-Clean` 仍只传 `--clean`。
+- `packaging/petcore.iss`：新增 `MySourceDist` / `MyOutputDir` 覆盖变量（默认值保持旧行为）。
+  **修复真实缺陷**：此前只重定向 Inno 输出，源目录仍指向根 `dist/`（本机有 832 MB 旧构建），
+  候选包会打进旧代码；修后日志 3,816 行确认打包的是隔离构建。
+- 新增 `tests/test_petcore_candidate_packaging.py`（6 条文本契约）；`docs/ONEDIR_PACKAGING.md` 补参数小节；
+  `petcore/AGENTS.md` 补打包红线；新增 `docs/PETCORE-D1-ACCEPTANCE-2026-10-24.md`（D1 对外验收说明）。
+
+**逐文件增删**：`scripts/build_petcore.ps1` +29/−8、`packaging/petcore.iss` +10/−2、
+`tests/test_petcore_candidate_packaging.py` +63、`docs/ONEDIR_PACKAGING.md` +19、`petcore/AGENTS.md` +3、
+`docs/PETCORE-D1-ACCEPTANCE-2026-10-24.md` +149、`docs/INDEX.md` +1。
+
+**验证**：构建 exit 0；exe 15,079,368 B sha256 `dc40aa268ceb3f4c…`、setup 261,718,360 B `bc26e800044a2f14…`，
+两者 `Get-AuthenticodeSignature` 均 **Valid**（`CN=DSH Pet Core Dev`）；Inno 编译 96.296 s，onedir 582 MB。
+冻结包 `--check` **exit 0 / 715 ms / diagnostics [] / menu_template json**；冻结 `market` CLI 用 `file:` 索引
+安装四个候选包全部 exit 0，`mods/` 四目录齐全；GUI 启动进程存活（96 MB）后按流程终止。打包契约测试 6 passed。
+
+**未验证/风险**：安装向导只构建未安装（装机会写用户目录/注册表/自启，属 T09）；SAC 结论只对本次签名构建有效；
+根 `dist/` 的 832 MB 旧构建未删；setup 内 `examples/petcore-mods` 勾选/不勾选的落盘差异未实测。

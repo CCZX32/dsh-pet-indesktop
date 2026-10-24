@@ -166,6 +166,9 @@
 - **打包工具**：PyInstaller 安装在 `.venv`；Inno Setup 便携安装在
   `tools/InnoSetup`（不入库）。默认 `--windowed`（不许出现终端窗口），
   `-Console` 只给排障用；`sys.stdout is None` 由 `cli._ensure_streams()` 兜底。
+  候选包必须传 `-OutputRoot` 隔离输出（dist/work/spec、`--check` 与 Inno `/O` 全部收束；
+  拒绝仓库根与已含 `dsh-pet-core-setup.exe` 的目录），`-Clean` 只传 PyInstaller 的
+  `--clean`、不删除任何目录。
 - **构建产物必须签名**：本机 Smart App Control 会拦截未签名的新构建
   （`CreateProcess` 返回 4551「An Application Control policy has blocked this file」），
   PyInstaller exe 与 Inno setup 都会被拦。用
