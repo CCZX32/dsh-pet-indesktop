@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [P4-c3-D1/T07 真实装卸与回滚](PR-REPORT-PETCORE-DISTRIBUTION-T07-2026-10-24.md)：真实 ZIP + `file:` 索引的授权门、四包加载、合成升级/回滚与数据 SHA，60 循环资源证据；D1 收口验收前必读。
+
 - [P4-c3-D1/T06 根索引与离线链路](PR-REPORT-PETCORE-DISTRIBUTION-T06-2026-10-24.md)：待发布根索引、`file:` 索引/artifact（含不回落公网）、市场页销毁持有线程；改索引读取、离线验收或市场页生命周期前必读。
 
 - [P4-c3-D1/T04 授权与安装事务](PR-REPORT-PETCORE-DISTRIBUTION-T04-2026-10-24.md)：市场安装接 `fetch_artifact` 与预算、能力/api/core 四类交叉校验、锁失败回滚与回环 http 口径；改市场安装或授权路径前必读。

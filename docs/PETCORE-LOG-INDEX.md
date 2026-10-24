@@ -96,3 +96,5 @@
 | L067 | 2026-10-24 | P4-c3-D1/T04 | 市场安装接 fetch_artifact + limits、能力/api/core 四类交叉校验、锁失败回滚、回环 http 契约；1738 passed | 授权、verify_manifest、事务、回滚、allow_loopback_http |
 
 | L068 | 2026-10-24 | P4-c3-D1/T06 | 根索引（blocked）+ file: 索引/artifact + 市场页销毁持有线程；22 passed，file: 从 42s 降到 0.67s | 根索引、file://、dispose、QThread、nofallback |
+
+| L069 | 2026-10-24 | P4-c3-D1/T07（D1 收口） | 真实 ZIP + file: 索引的授权/安装/加载/升级/回滚/数据保真；5 passed，60 循环资源无残留 | 端到端、FeatureManager、回滚、SHA、资源循环 |

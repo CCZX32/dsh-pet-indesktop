@@ -509,6 +509,6 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | T05 候选构建器 | 完成（`34a247cb`） | 白名单可复现 ZIP + 独立校验器；4 包实测 19169/41454/9655/17522 字节，verify 4/4 |
 | T04 授权/事务 | 完成 | 市场安装接 `fetch_artifact` 与 `limits`；能力/api/core 四类交叉校验；锁失败回滚；`allow_loopback_http` 契约；全量 1738 passed |
 | T06 索引/CLI/UI | 完成 | 根 `extensions-index.json`（四包 blocked，size/sha 已固定）；`file:` 索引与 artifact 可离线用且不回落公网；市场页 dispose 持有运行中线程；22 passed |
-| T07 真实装卸回滚 | 未开始 | 真 ZIP + `file:` 索引的安装/升级/回滚、数据 SHA、30 轮资源 |
+| T07 真实装卸回滚 | 完成 | 真实 ZIP + `file:` 索引：未授权零落盘、四包安装并真实 `FeatureManager` 加载、合成升级/回滚/再升级且数据 SHA 不变；5 passed / 3.20s；30× 装卸 + 30× 页开关无 staging/part 残留、线程恒 4 |
 
 范围不变：别把 T01 的契约读成「分发可用」；解包预算与逐跳校验尚未生效。

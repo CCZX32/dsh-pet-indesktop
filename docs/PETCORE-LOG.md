@@ -2538,3 +2538,22 @@ worker 红证据：旧实现 18 failed、缺 `limits` 关键字 8 failed、缺�
 
 **未验证/风险**：索引四包仍 blocked，公开索引要等 Release；`RELEASE_REPO/TAG` 是拟定常量待 T09 确认；
 阻塞式索引读取仍不可取消（8s 上限）；dispose 只保证不销毁运行中线程，不等同取消。
+
+## L069 — 2026-10-24 — P4-c3-D1/T07 真实候选装卸·升级回滚·资源循环（D1 收口）
+
+**边界**：验收批次。产品代码零改动；用 T05 真实 ZIP + `file:` 索引跑端到端与 60 次资源循环；不发布、不建 tag。
+
+**改动**：新增 `tests/test_petcore_extension_candidates.py`（201 行，5 条）：本地索引可装、未授权被拒且零落盘、
+四包 ZIP 安装后无 `.trusted` 且真实 `FeatureManager.load` 返回空 diagnostics、合成 `1.1.1` 的
+`update → rollback → install` 三步与用户数据 SHA 不变、`doctor` 与 lock 一致。
+scratch 探针 `.scratch/petcore-p4c3-distribution/t07/resource_loop.py` 记录 30× 装卸 + 30× 市场页开关。
+
+**验证**：用例 **5 passed / 3.20s**（含一次四包构建）。资源循环 **2.54s**：RSS 70,651,904 → 81,752,064
+（install 段 +1.63 MB 且收敛；page 段 +9.68 MB 但每 5 轮增量由 14.5 MB 递减到 1.2 MB），线程恒 4，
+存活 QWidget 恒 0，staging/`.part` 恒 0。
+探针自身曾误判「每页泄漏 69 个 QWidget」——补 `sendPostedEvents(DeferredDelete)` 后归零，属探针缺陷而非产品问题。
+
+**未验证/风险**：全程 `file:`，无真实 HTTPS/CDN/断流；升级是改版本号的合成包，不是真旧版兼容矩阵；
+`doctor` 不带 `--index-url` 仍回落默认源（既有语义）；原生设置窗手工点击、双屏/混合 DPI、非 Windows 未验。
+
+**D1 状态**：T00–T07 全部完成。下一步 D2 = T08（Windows 冻结包 + 签名/SAC 决策）与 T09（性能 before/after、整仓门禁、发布准备）。
