@@ -2387,3 +2387,5 @@ omegaconf与OpenCV发行名不匹配，独立环境依赖/OCR族68passed，pip c
 - 远程核对：origin对应MerZlin/dsh-pet-indesktop，分支feat/petcore-vpet-architecture；fetch后HEAD与FETCH_HEAD无分叉。提交前复跑整仓9837passed / 20skipped / 14warnings / 1215.63s / exit0，高负载三遍各86passed（CPU99.9/100/100%），文档/公共架构300passed与Ruff通过；最终文档另复验。真实输出见报告；不强推、不合并、不上传Release。
 
 - 提交前仅清理新历法测试末尾两行空行（AST一致、52passed）；用户要求取消重复全仓，已停止自有测试/等待进程。沿用本轮已完整运行的全仓/三遍负载，取消运行不计为通过。
+
+- 主交付提交 `b77d4436ff623594eb4419ae9cbb2e1143657bd9`：130文件，+9423/−801，含原有质量修复、A–E及本批交接；本行与索引/报告为同批提交号回填。精确推送目标仍为origin对应仓库的 `feat/petcore-vpet-architecture`，不创建Release或合并main。

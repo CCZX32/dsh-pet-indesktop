@@ -23,10 +23,10 @@
 | `docs/INDEX.md` | +5 / −1 | 修改 | 登记详细计划与交接报告，为E报告补下一阶段入口。 |
 | `docs/PETCORE-MARKET.md` | +5 / −0 | 修改 | 保留现行市场能力，明确后续计划不是已经实现的传输/预算/分发。 |
 | `docs/PETCORE-ROADMAP.md` | +5 / −0 | 修改 | 增加A–E之后的T00–T09与继任多智能体边界，不提前改阶段完成度。 |
-| `docs/PETCORE-LOG.md` | +10 / −0 | 修改 | 追加L062，记录授权、修改、复验及提交交付；历史记录不覆盖。 |
+| `docs/PETCORE-LOG.md` | +12 / −0 | 修改 | 追加L062，记录授权、修改、复验及提交交付；历史记录不覆盖。 |
 | `docs/PETCORE-LOG-INDEX.md` | +2 / −0 | 修改 | 登记L062；主交付提交后回填短SHA供继任定位。 |
 | `docs/superpowers/plans/2026-10-24-petcore-p4c3-distribution.md` | +500 / −0 | 新增 | 新增完整分发交接：接口、写集、TDD种子、命令、预算/授权/恢复/验收与停止条件。 |
-| `docs/PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md` | +70 / −0 | 新增 | 新增交接文档增量及推送前复验记录，区分本批文档豁免与A–E产品证据。 |
+| `docs/PR-REPORT-PETCORE-P4C3-HANDOFF-2026-10-24.md` | +72 / −0 | 新增 | 新增交接文档增量及推送前复验记录，区分本批文档豁免与A–E产品证据。 |
 <!-- /HANDOFF_FILE_TABLE -->
 
 ## 三、性能分析
@@ -63,6 +63,8 @@
 
 <!-- HANDOFF_FINAL_GATES -->
 最终暂存检查发现历法新测试文件末尾两行空行，删除后AST完全相同、聚焦52项通过，未修改运行逻辑。用户明确要求不因空行重复整仓：已定向终止本轮自有补跑进程及后续负载等待器（当时约51%，**不计为通过**），未终止其他Python进程。交付采用上表已经完整执行并正常退出的9837项全仓、三遍86项负载，加AST等价检查、52项历法回归、最终文档/Ruff/暂存检查；不宣称空行整理后重新完成全仓。取消证据见新scratch `final-rerun-cancelled.json`，部分输出 `handoff-final-full.txt` 仅作取消记录。
+
+主交付提交：`b77d4436ff623594eb4419ae9cbb2e1143657bd9`，130文件、+9423/−801（`git show --stat`）；此后仅回填三份文档提交号。最终文档/公共架构门300passed / 3.93s、Ruff通过，原始输出为 `handoff-delivery-docs` / `handoff-delivery-ruff`。推送目标为同一仓库分支，交付后以远程SHA复核；本地交付回执保存新scratch `remote-delivery.json`，不把尚未执行的推送写为成功。
 <!-- /HANDOFF_FINAL_GATES -->
 
 ## 六、限制与后续动作
