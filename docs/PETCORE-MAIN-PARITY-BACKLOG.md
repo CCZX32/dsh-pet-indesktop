@@ -244,3 +244,17 @@
 | 跨平台/真实服务 | 未验收 | Windows源码已测；真实外部TTS/其他Python/双屏/macOS/Linux/冻结包缺口见报告 |
 
 总证据：[E联合验收](PR-REPORT-PETCORE-P4C3-E-2026-10-24.md)。主分支对齐依据当前仓库tracked纯逻辑，而非过时origin/main引用或未接通的动画开关；原历史报告不改写。
+
+## 2026-10-25 重构收尾审查快照
+
+本轮已实际收口的范围不是“全部主分支能力迁移”，而是两个可独立回滚的阻断批次：
+
+| 功能域 | 当前状态 | 证据 |
+|---|---|---|
+| 市场任务生命周期 | **已对齐（本轮修复）**：应用级 `MarketJobRegistry` 持有索引/安装/回滚线程，页面销毁只取消并移交，退出做有界等待 | `petcore/ui/market_jobs.py`、`petcore/ui/settings/page_market.py`、`tests/test_petcore_market_hardening.py` |
+| 市场下载续传与授权 | **已对齐（本轮修复）**：稳定 `.part`/元数据、Range 分支、远程 feature 解包预算、`file://` 根目录授权及回滚结构化状态 | `petcore/market/download.py`、`petcore/net/market_transport.py`、`petcore/market/install.py`、市场 hardening tests |
+| WorkerHost | **基础已对齐（本轮收口）**：真实握手等待、代次拒收、取消/退出事件和异常路径有回归覆盖；业务 mod 接入仍按功能域验收 | `petcore/platform/worker.py`、`tests/test_petcore_worker.py` |
+| 媒体 DPR | **基础已对齐（本轮收口）**：帧 pixmap 按物理尺寸缩放并写回 DPR，窗口帧入口传入屏幕 DPR；换屏/混合 DPI 实机仍缺 | `petcore/ui/renderer.py`、`tests/test_petcore_renderer.py` |
+| 候选索引状态 | **已对齐（本轮修复）**：构建器默认 `candidate` 并保持 blocked，只有显式 `published` 才解除 | `scripts/build_petcore_extensions.py`、`tests/test_petcore_extension_build.py` |
+
+仍为 **部分/未做** 的条目保持原状态，不因本轮测试通过而改成已对齐：设置内角色导入、多屏实机、GraphType 全映射、点击音效按下/释放配对、会话/待办/API 全量迁移、旧 `pet` 媒体适配层清理、公开 Release 与默认入口切换。

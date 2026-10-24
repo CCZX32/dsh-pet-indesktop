@@ -31,6 +31,7 @@
 
 ```bash
 python scripts/build_petcore_extensions.py --output dist-extensions
+# 默认输出 candidate-manifest.json；候选索引保持 blocked，不可直接作为公开下载索引。
 python scripts/verify_petcore_extensions.py --candidate-manifest dist-extensions/candidate-manifest.json
 ```
 预期：`verified 4/4`；四个 sha256 与 §1 一致。**不一致不要继续。**
@@ -49,13 +50,17 @@ python - <<'PY'
 import json, sys
 sys.path.insert(0, "scripts")
 from build_petcore_extensions import build_index
-index = build_index("dist-extensions/candidate-manifest.json", local=False)
+index = build_index(
+    "dist-extensions/candidate-manifest.json",
+    local=False,
+    state="published",
+)
 open("extensions-index.json", "w", encoding="utf-8", newline="\n").write(
     json.dumps(index, ensure_ascii=False, indent=2) + "\n"
 )
 PY
 ```
-`schema_version` 必须仍是 1；四包 `blocked` 由 `true` 改由发布流程显式改为 `false`（本手册不做）。
+`schema_version` 必须仍是 1。候选构建默认使用 `state="candidate"`，四包保持 `blocked: true`；只有 Release 资产已上传、摘要/大小/地址逐项核对后，才允许显式使用 `state="published"` 生成可下载索引。本手册默认不执行该状态转换。
 提交前跑 `pytest -q tests/test_petcore_extension_index.py`。
 
 回滚：`git checkout -- extensions-index.json`。
@@ -82,5 +87,5 @@ python -m petcore market --root .scratch/https-accept --index-url <同上> insta
 
 - 不由 agent 执行 `gh release create/upload`、`git tag`、`git push --tags`。
 - 不覆盖已存在资产、不强推、不合并 `main`。
-- 不在未确认的情况下把 `blocked` 改成 `false`。
+- 不在未确认的情况下把 `blocked` 改成 `false`；发布索引必须显式传入 `state="published"`。
 - 不把开发证书用于公开分发。

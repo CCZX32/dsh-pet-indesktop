@@ -2630,3 +2630,13 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：worker + renderer 聚焦族 **5 passed / 4.20s**；与市场 hardening 联合运行 **56 passed / 11.83s**；`ruff` 通过。真实 worker 使用当前 Python 子进程和 JSON 管道，Qt 测试使用 `QT_QPA_PLATFORM=offscreen`；未将旧 `pet` 的历史 DPR 测试冒充本次 petcore 实机验证。
 
 **限制**：本机没有双屏/混合 DPI 实机条件，尚未验证真实窗口跨屏、Windows GPU/解码性能和冻结包运行；这些保留在最终报告的验证缺口中。
+
+## L074 — 2026-10-25 — 重构收尾状态与最终交付证据
+
+**边界**：记录本轮两个可独立回滚提交的实际收口范围，不把市场/Worker/DPR 的自动化测试误报为完整主分支 parity、双屏实机、候选安装器或公开 Release 验收。
+
+**改动**：补充 `PETCORE-EXTENSIONS-RELEASE.md` 的 candidate/published 显式状态转换；更新 `PETCORE-MAIN-PARITY-BACKLOG.md`、`PETCORE-ROADMAP.md`、`PETCORE-SPEC.md` 的当前状态快照；新增 `PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md`，并登记 `docs/INDEX.md` 与 `.scratch/petcore-refactor-final/HANDOFF.md`。产品代码对应提交为 `9e973b53` 与 `e371f92c`。
+
+**证据**：市场聚焦族 90 passed / 19.56s；Worker + renderer 5 passed / 4.20s；联合市场/Worker/renderer/架构族 56 passed / 11.83s；Ruff `All checks passed!`；架构/文档门禁 316 passed / 4.60s；CPU 高负载三遍每次 12 passed（4.98s/4.97s/4.95s）；整仓 9951 passed / 20 skipped / 14 warnings / 1289.12s / exit 0；隔离根 `python -m petcore --check` 返回 0。
+
+**限制**：PyInstaller、双屏/混合 DPI、macOS/Linux、真实外部 TTS、真实 HTTPS/CDN 和公开 Release 未在本机完成；默认 C 盘旧数据迁移的 `os.replace` 探针返回 WinError 17，已记录为环境/迁移缺口；不沿用历史报告冒充本轮通过。
