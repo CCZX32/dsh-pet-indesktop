@@ -107,3 +107,4 @@
 | L074 | 2026-10-25 | 重构收尾状态与交付证据 | candidate/published 文档边界、市场/Worker/DPR 收口范围、最终门禁待补原始输出 | 交付、parity、handoff、验收边界 |
 
 | L075 | 2026-10-25 | 运行时迁移与 Worker 收口 | 迁移状态/诊断、session/todo schema、Worker 有界退出和非法消息拒收；新增 156 行回归 | migration、schema、Worker、shutdown |
+| L076 | 2026-10-25 | 角色导入与媒体生命周期 | ZIP 安全导入、点击按下/释放 token、彩蛋头像/提示、关闭音频取消 | character、ZIP、click sound、easter egg |

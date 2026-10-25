@@ -2654,3 +2654,16 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：Ruff 全目录通过；编译通过；新增回归 6 passed / 1.00s；本轮受影响 petcore 联合族 136 passed / 23.24s；整仓本次门禁 9957 passed、20 skipped、15 warnings、3048.17s、exit 0。高负载三遍联合族均 136 passed，pytest 分别 29.44s、24.65s、27.28s；驱动脚本总耗时分别 31.15s、38.63s、28.45s。
 
 **限制**：默认用户数据根的旧迁移仍需独立处理 `WinError 17` 环境探针；隔离数据根 `python -m petcore --check` 可通过。没有把旧 `pet` 测试结果当作 petcore 迁移验收。
+
+## L076 — 2026-10-25 — 角色导入、媒体边界与点击生命周期收口
+
+**边界**：补齐已有角色目录/ZIP 导入、媒体点击按下/释放 token、彩蛋头像/提示配置和关闭时音频取消；不引入新媒体格式、不删除旧 `pet` 兼容层、不新增 VPet LPS/PNG。
+
+**改动**：`petcore/content/importer.py` 使用临时目录、有界 ZIP 解压、路径/符号链接拒绝、单根目录规范化和 no-force 原子安装；`petcore/media/click_sound.py` 增加 `ClickSoundPair` token 状态；`petcore/ui/pet_window.py` 将点击/拖拽/探头/关闭接入 token 生命周期；`petcore/ui/easter_egg.py` 使用配置头像并回退首图；新增回归覆盖 ZIP 路径穿越、重复导入和点击 token 幂等。
+
+**逐文件增删**：`petcore/content/importer.py` +71/−9、`petcore/media/click_sound.py` +46/−0、`petcore/ui/easter_egg.py` +25/−3、`petcore/ui/pet_window.py` +36/−7。
+
+**验证**：角色、彩蛋、点击音效、设置和新增 refactor 测试均纳入联合 petcore 族；联合结果 136 passed / 23.24s；Ruff 与 compileall 通过。ZIP 导入在真实本机文件系统执行，重复 ID 不覆盖原角色，恶意 `../` 条目不落盘。
+
+**限制**：没有真实双屏/混合 DPI、冻结候选包或外部媒体服务条件；本批不声称媒体跨屏实机通过。
+

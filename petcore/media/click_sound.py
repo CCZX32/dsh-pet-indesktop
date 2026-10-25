@@ -41,6 +41,52 @@ def _duck_candidates(duck_dir: Path) -> list[Path]:
     return wavs + mp3s
 
 
+
+class ClickSoundPair:
+    """按下/释放音效的 token 配对器。
+
+    目前内置音效包只有 release 音；因此 ``begin`` 在没有按下候选时只
+    登记 token，释放时仍播放原有 click 音。自定义包可传入 press 候选，
+    失焦、拖拽和关闭则通过 ``cancel`` 丢弃 token，重复释放不会重播。
+    """
+
+    def __init__(self, play, *, rng: random.Random | None = None):
+        self._play = play
+        self._rng = rng
+        self._next = 0
+        self._active: set[int] = set()
+
+    @property
+    def active_count(self) -> int:
+        return len(self._active)
+
+    def begin(self, press_candidates: Sequence[Path] = ()) -> int:
+        self._next += 1
+        token = self._next
+        self._active.add(token)
+        chosen = choose_click_sound(press_candidates, rng=self._rng)
+        if chosen is not None:
+            self._play(chosen)
+        return token
+
+    def release(self, token: int | None, release_candidates: Sequence[Path] = ()) -> bool:
+        if token is None or token not in self._active:
+            return False
+        self._active.remove(token)
+        chosen = choose_click_sound(release_candidates, rng=self._rng)
+        if chosen is None:
+            return False
+        return bool(self._play(chosen))
+
+    def cancel(self, token: int | None) -> bool:
+        if token is None or token not in self._active:
+            return False
+        self._active.remove(token)
+        return True
+
+    def cancel_all(self) -> None:
+        self._active.clear()
+
 def resolve_click_sound_candidates(pack, asset_root: Path) -> list[Path]:
     """按音效包配置解析候选音频文件（不存在/不支持一律返回空表）。"""
     kind, pack_id, path_text = _pack_fields(pack)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +41,7 @@ from ..engine.motion import (
     stride_for,
 )
 from ..engine.pet_state import PetState
-from ..media.click_sound import choose_click_sound, resolve_click_sound_candidates
+from ..media.click_sound import ClickSoundPair, choose_click_sound, resolve_click_sound_candidates
 from ..media.images import screen_dpr
 from ..media.library import ClipLibrary
 from ..media.sound import SoundPlayer
@@ -107,6 +106,8 @@ class PetWindow(QWidget):
         self.feeding = FeedingController(self)
         self.library = ClipLibrary(str(config.get("frameseq") or "auto"))
         self.sound = SoundPlayer(float(config.get("volume") or 0.8))
+        self._click_sound_pair = ClickSoundPair(self.sound.play)
+        self._click_sound_token: int | None = None
         self.bubble = SpeechBubble()
         self.bubble.clicked.connect(self._on_bubble_clicked)
         self.bubble.set_text_scale(self._text_scale_factor())
@@ -919,6 +920,8 @@ class PetWindow(QWidget):
     def mousePressEvent(self, event) -> None:
         self._last_cursor_local = event.position()
         if event.button() == Qt.MouseButton.RightButton:
+            self._click_sound_pair.cancel(self._click_sound_token)
+            self._click_sound_token = None
             if self.slingshot.maybe_enter(event.position(), event.position()):
                 self._suppress_context_menu = True
                 self._press_global = None
@@ -932,6 +935,12 @@ class PetWindow(QWidget):
             self._press_global = event.globalPosition().toPoint()
             self._press_pos = self.pos()
             self.dragging = False
+            self._click_sound_pair.cancel(self._click_sound_token)
+            self._click_sound_token = (
+                self._click_sound_pair.begin()
+                if bool(self.config.get("click_sound"))
+                else None
+            )
 
     def mouseMoveEvent(self, event) -> None:
         self._last_cursor_local = event.position()
@@ -977,6 +986,8 @@ class PetWindow(QWidget):
             self._press_pos = None
             self._remember_geometry()
             self._edge_probe.on_release(True)
+            self._click_sound_pair.cancel(self._click_sound_token)
+            self._click_sound_token = None
             if launched:
                 if probe_throw:
                     self.effects.arm_throw_egg()
@@ -990,6 +1001,8 @@ class PetWindow(QWidget):
         self._press_global = None
         self._press_pos = None
         if dragged:
+            self._click_sound_pair.cancel(self._click_sound_token)
+            self._click_sound_token = None
             self.motion.release()
             if self.motion.thrown:
                 if probe_throw:
@@ -1000,9 +1013,15 @@ class PetWindow(QWidget):
             self._remember_geometry()
             self._edge_probe.on_release(True)
         elif self._edge_probe.on_clicked():
+            self._click_sound_pair.cancel(self._click_sound_token)
+            self._click_sound_token = None
             return
         else:
-            self._on_click()
+            played = self._click_sound_pair.release(
+                self._click_sound_token, self._click_sound_candidates()
+            )
+            self._click_sound_token = None
+            self._on_click(sound_already_played=played)
 
     def _play_throw_animation(self) -> None:
         spec = self.catalog.find_for(GraphType.RAISED_DYNAMIC, AnimatType.B_LOOP)
@@ -1022,7 +1041,7 @@ class PetWindow(QWidget):
         self._cancel_move_plan()
         self._play_throw_animation()
 
-    def _on_click(self) -> None:
+    def _on_click(self, *, sound_already_played: bool = False) -> None:
         if self.motion.thrown or self.effects.throw_egg_active:
             # 主分支 on_sprite_clicked：非 normal 状态不消费点击。飞行中换素材
             # 会与 16ms 位移叠加成「两个位置的桌宠在闪」。
@@ -1040,7 +1059,7 @@ class PetWindow(QWidget):
             self._play_spec(spec, "click")
         # 点击素材可能同步解码；Q 弹在切换之后再起表，保证 220ms 真的可见。
         self.effects.start_squash(int(self.config.get("click_squash_ms") or 220))
-        if bool(self.config.get("click_sound")):
+        if bool(self.config.get("click_sound")) and not sound_already_played:
             QTimer.singleShot(0, self._play_click_sound)
         self._notify_click()
 
@@ -1069,11 +1088,15 @@ class PetWindow(QWidget):
         images = self.easter.images()
         if not images:
             return False
-        image_path = random.choice(images)
+        image_path = self.easter.selected_image(images)
+        if image_path is None:
+            return False
         title = str(self.config.get("easter_egg_title") or DEFAULT_EASTER_EGG_TITLE)
+        # 气泡已有点击关闭行为；hint 只用于独立彩蛋窗口，保持旧气泡文案契约。
+        caption = title
         return self.show_image(
             image_path,
-            title,
+            caption,
             image_scale=self._image_scale_factor("easter_egg_image_scale"),
         )
 
@@ -1430,6 +1453,9 @@ class PetWindow(QWidget):
             QTimer.singleShot(0, refresh)
 
     def closeEvent(self, event) -> None:
+        self._click_sound_pair.cancel_all()
+        self._click_sound_token = None
+        self.sound.stop_all()
         self._stop_clip()
         self.library.close_all()
         if self._input_controller is not None:
@@ -1443,6 +1469,9 @@ class PetWindow(QWidget):
         self._play_idle()
 
     def shutdown(self) -> None:
+        self._click_sound_pair.cancel_all()
+        self._click_sound_token = None
+        self.sound.stop_all()
         self._edge_probe.shutdown()
         self.motion.shutdown()
         self.effects.shutdown()

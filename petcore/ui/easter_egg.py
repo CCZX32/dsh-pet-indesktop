@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, Qt
@@ -85,6 +84,7 @@ class EasterEggPopup(QWidget):
         image_path: Path,
         title: str = "",
         *,
+        hint: str = _HINT_TEXT,
         offset: int = 0,
         image_scale: float = 1.0,
         dpr: float | None = None,
@@ -141,7 +141,7 @@ class EasterEggPopup(QWidget):
         else:
             self.title_label.hide()
 
-        self.hint_label = QLabel(_HINT_TEXT, self)
+        self.hint_label = QLabel(str(hint or _HINT_TEXT).strip() or _HINT_TEXT, self)
         self.hint_label.setObjectName("easterEggHint")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint_label.setFixedHeight(18)
@@ -217,6 +217,22 @@ class EasterEggController(QObject):
                 readable.append(path)
         return readable
 
+    def selected_image(self, images: list[Path] | None = None) -> Path | None:
+        candidates = list(images if images is not None else self.images())
+        if not candidates:
+            return None
+        config = self._config()
+        raw = "" if config is None else str(config.get("easter_egg_avatar") or "").strip()
+        if raw:
+            avatar = Path(raw).expanduser()
+            if avatar.is_file() and avatar.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES:
+                try:
+                    if QImageReader(str(avatar)).canRead():
+                        return avatar
+                except OSError:
+                    pass
+        return candidates[0]
+
     def live_popups(self) -> list[EasterEggPopup]:
         self._prune()
         return list(self._popups)
@@ -257,16 +273,22 @@ class EasterEggController(QObject):
         if not images:
             self._say("彩蛋图片目录里没有可读取的图片")
             return False
-        image_path = random.choice(images)
+        image_path = self.selected_image(images)
+        if image_path is None:
+            self._say("彩蛋图片无法读取")
+            return False
         title = ""
+        hint = _HINT_TEXT
         image_scale = 1.0
         if config is not None:
             title = str(config.get("easter_egg_title") or "")
+            hint = str(config.get("easter_egg_hint") or _HINT_TEXT)
             image_scale = _image_scale(config)
         try:
             popup = EasterEggPopup(
                 image_path,
                 title,
+                hint=hint,
                 offset=(self._open_count % CASCADE_CYCLE) * CASCADE_STEP,
                 image_scale=image_scale,
                 dpr=screen_dpr(getattr(self, "_window", None)),
