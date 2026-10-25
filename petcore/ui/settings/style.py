@@ -208,6 +208,21 @@ QSlider::handle:horizontal {
 QSlider::handle:horizontal:hover {
     background: %(accent_hover)s;
 }
+QComboBox {
+    padding-left: 10px;
+    padding-right: 30px;
+}
+QComboBox::drop-down {
+    width: 26px;
+}
+QComboBox QAbstractItemView {
+    padding: 4px 0;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 30px;
+    padding: 6px 10px;
+}
+
 QComboBox:focus {
     border: 1px solid %(accent)s;
 }

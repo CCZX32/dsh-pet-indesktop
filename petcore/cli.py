@@ -113,6 +113,7 @@ def _speech_report(root: Path, config: Config) -> dict:
 def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | None = None) -> int:
     from .content.collect import collect_characters
     from .ui import menu_layout
+    from .update import UpdateService
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -191,6 +192,7 @@ def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | N
             "builtin_readable": len(talk_images.readable_images(builtin_dir)),
         },
         "speech": _speech_report(root, config),
+        "update": UpdateService(root).diagnose(),
     }
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     print(payload)
@@ -246,6 +248,49 @@ def main(argv: list[str] | None = None) -> int:
             tokens.extend(["--root", str(root)])
         tokens.extend(str(item) for item in _extra_args)
         return market_main(tokens + raw[market_index + 1 :])
+
+    update_index = _subcommand_index(raw, ("update",))
+    if update_index is not None:
+        from .update import UpdateService
+
+        global_args, _extra_args = _parser().parse_known_args(raw[:update_index])
+        try:
+            root = _resolve_root(global_args)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        parser = argparse.ArgumentParser(prog="petcore update")
+        parser.add_argument("action", choices=("check", "download", "status"))
+        parser.add_argument("--manifest-url", default=None)
+        update_args = parser.parse_args(raw[update_index + 1 :])
+        service = UpdateService(root, manifest_url=update_args.manifest_url)
+        if update_args.action == "status":
+            payload = dict(service.diagnose())
+            status = service.status()
+            payload.update({"state": status.state, "message": status.message, "version": status.version})
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        result = service.check(force=update_args.action == "check")
+        if update_args.action == "download":
+            asset = service.select_asset(result.manifest)
+            if not result.ok or asset is None:
+                print(result.message or "没有可用更新资产")
+                return 1
+            try:
+                path = service.download(asset)
+            except Exception as exc:  # noqa: BLE001 - CLI boundary
+                print(f"下载失败：{type(exc).__name__}")
+                return 1
+            print(str(path))
+            return 0
+        print(json.dumps({
+            "ok": result.ok,
+            "state": result.state,
+            "message": result.message,
+            "version": result.version,
+            "asset_available": service.select_asset(result.manifest) is not None,
+        }, ensure_ascii=False, indent=2))
+        return 0 if result.ok else 1
 
     if raw[:1] == ["pack-character"]:
         parser = argparse.ArgumentParser(prog="petcore pack-character")

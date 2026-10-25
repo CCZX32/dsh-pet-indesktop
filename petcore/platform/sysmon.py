@@ -1,7 +1,7 @@
 """CPU / 内存采样（零 Qt）：psutil 差分 + 定宽文案 + 后台采样线程。
 
-移植自主分支 ``pet/sys_monitor.py``，**砍掉 GPU 分支**（PDH 读数器与订阅账本留给
-后续批次）：本批设备槽只有 CPU 与内存两段。
+移植自主分支 ``pet/sys_monitor.py``。本模块只提供无依赖的 CPU/内存采样；GPU/FPS
+属于可选平台探针，由上层能力接入。探针不可用时必须明确返回 unavailable，不能伪造 0。
 
 纪律：
 
@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..performance import runtime_metrics
 from .sampling import SamplingLoop
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,7 @@ class SysMonitor:
         return self._sampling.poll()
 
     def _read_sample(self) -> SysSample:
+        runtime_metrics.inc("cpu_samples")
         cpu = None
         error = ""
         try:

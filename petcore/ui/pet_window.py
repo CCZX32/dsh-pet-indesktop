@@ -1138,6 +1138,7 @@ class PetWindow(QWidget):
             if bool(self.config.get("golden_spin_direct")):
                 self.effects.start_spin(direct=True)
                 self._notify_click()
+                self._maybe_request_click_balance()
                 return
             self.effects.arm_spin_after_click()
         spec = self.catalog.find_for(GraphType.TOUCH_BODY, AnimatType.SINGLE)
@@ -1148,6 +1149,18 @@ class PetWindow(QWidget):
         if bool(self.config.get("click_sound")) and not sound_already_played:
             QTimer.singleShot(0, self._play_click_sound)
         self._notify_click()
+        self._maybe_request_click_balance()
+
+    def _maybe_request_click_balance(self) -> None:
+        """按宠物配置异步请求余额；点击线程只提交请求，不执行网络 I/O。"""
+        if not bool(self.config.get("click_show_balance")):
+            return
+        request = getattr(self.host, "request_balance", None)
+        if callable(request):
+            try:
+                request(self.slot, force=True)
+            except Exception:  # noqa: BLE001 - 余额提示不能破坏点击动画
+                logger.debug("click balance request failed", exc_info=True)
 
     def _play_click_sound(self) -> None:
         candidates = self._click_sound_candidates()

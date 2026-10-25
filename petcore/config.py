@@ -244,6 +244,7 @@ DEFAULTS: dict[str, Any] = {
     "island_metrics": ["cpu", "mem"],
     "island_x": None,
     "island_y": None,
+    "click_show_balance": False,
     "chat_always_on_top": False,
     "chat_follow_pet": False,
     "chat_background": "",
@@ -481,7 +482,7 @@ def _head_pat_names(value: Any) -> list[str]:
     return result
 
 
-#: 灵动岛指标段的合法 id（``gpu`` / ``fps`` 是保留字：本批未实现，配置里留了也不渲染）。
+#: 灵动岛指标段的合法 id；GPU/FPS 由可选平台探针提供，能力不可用时显示原因。
 ISLAND_METRIC_IDS = ("network", "cpu", "mem", "gpu", "fps")
 ISLAND_METRIC_LIMIT = 8
 #: 灵动岛的强调色词表。
@@ -1245,6 +1246,9 @@ class Config:
             action if action in {"expand", "toggle_pet"} else "expand"
         )
         normalized["island_metrics"] = _island_metrics(normalized.get("island_metrics"))
+        normalized["click_show_balance"] = _bool(
+            normalized.get("click_show_balance"), False
+        )
         for _axis in ("island_x", "island_y"):
             coordinate = _optional_number(normalized.get(_axis))
             normalized[_axis] = (

@@ -25,6 +25,8 @@ CORE_MENU_SETTINGS_COVERAGE: dict[str, tuple[str, str]] = {
     "return_corner": ("appearance", "回到右下角"),
     "move_to_primary": ("appearance", "重置到主屏"),
     "reload_mods": ("about", "重新加载扩展"),
+    "show_balance": ("api", "点击显示余额"),
+    "check_update": ("about", "检查更新"),
     "api_settings": ("api", "服务与密钥"),
     "easter_egg": ("interaction", "彩蛋图片"),
     "extensions_hub": ("mods", "扩展管理"),

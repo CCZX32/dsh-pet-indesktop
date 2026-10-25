@@ -291,7 +291,7 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 | P2 | WorkerHost、完整 Graph、GUI 角色导入、5 个离线扩展可选安装 | 已完成（基础） | 待办/报时/节日/抽签/音乐需在安装向导勾选（默认不勾）；业务运行和媒体解耦仍待 P4/P5 |
 | P3 | Core 账户/余额、AI 对话、识屏、截图提问、三个全局热键 | 已完成（基础 + 本轮效果对齐） | 主分支同款双栏对话窗、看看屏幕气泡+静默入历史、框选截图问答窗与 10% 鲸蛙彩蛋、按宠 slot 派发；OCR/翻译/主动识屏留给 P4 |
 | P4 | Agent、TTS、音乐歌词、天气、文件识别和提醒业务域 | 部分已实现 | a/b/c1/c2 只读联动已有代码；提醒调度、农历、48 签和写方未做；实机/外部服务验收不等同自动化 |
-| P5 | 灵动岛、性能治理、更新、安装器 E2E 和系统生命周期 | a1 已实现，其余未完成 | 灵动岛 v1 已有代码与单屏源码实机记录；第二阶段、安装器 E2E 等仍待办 |
+| P5 | 灵动岛、性能治理、更新、安装器 E2E 和系统生命周期 | 代码域已实现 / petcore 自动化通过 | P5-a2、余额、UI 几何、性能计数和更新服务已落地；真实桌面、GPU/FPS、冻结安装器和 Release 仍按报告标记为环境缺口 |
 | P6 | 真双屏、混合 DPI、跨平台冒烟、发布入口切换和旧壳收敛 | 计划 | 新架构成为可回滚的正式发布入口 |
 
 执行纪律：每阶段先写红测试，完成代码/验证/报告后更新四份必同步文档并创建一个
@@ -548,3 +548,17 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | petcore 自动化测试通过 | `test_petcore_*.py` 全部 **1490 passed**；Ruff **All checks passed**；`python -m petcore --check` 返回 0 | `tests/test_petcore_head_pat.py`、交互/设置回归；本机命令输出见 PR 报告 |
 | Windows 实机通过 | 尚未执行真实桌面鼠标摸头交互；offscreen Qt 仅验证事件与状态接缝，不等同实机通过 | 需要在隔离配置目录执行真实窗口探针 |
 | 明确未做 | 不改旧 `pet` 实现，不新增线程、定时器、网络请求或菜单入口 | 本轮范围约束 |
+## 2026-10-25 P5 收口状态
+
+本阶段实现了 petcore P5 的五个代码域：灵动岛 P5-a2、按宠物点击显示余额、菜单/设置图标与下拉框几何修复、运行时性能计数与采样治理、检查更新及冻结 Windows 安装版自更新边界。
+
+| 状态 | 范围 | 证据与限制 |
+|---|---|---|
+| 已实现 | 灵动岛停靠/展开卡片、消息队列、余额刷新、第三方段注册、折叠停采样、避让、GPU/FPS unavailable 明确降级 | `petcore/ui/island.py`、`petcore/island/segments.py`；GPU/FPS 本机无探针时不显示伪造 0 |
+| 已实现 | 左键/右键/灵动岛共用 `BalancePresenter`，按 slot 单飞、缓存、迟到结果拒收 | `petcore/account/presenter.py`、`petcore/ui/app.py`、`petcore/ui/pet_window.py` |
+| 已实现 | 菜单/托盘/设置导航显式图标尺寸、QSS 图标列宽、QComboBox 字体度量安全边距 | `petcore/ui/menu_model.py`、`petcore/ui/menu_style.py`、`petcore/ui/settings/dialog.py`、`style.py` |
+| 已实现 | 1 Hz 指标采样、隐藏/关闭停采样、UI 合并计数、缓存/网络/磁盘/worker 计数及 15s+60s×3 探针 | `.scratch/petcore-p5-complete/performance-2026-10-25.json`；当前机器为单屏 offscreen |
+| 已实现 | HTTPS manifest、ETag/缓存、镜像回退、Range/断点、大小/摘要校验、取消；源码/非 Windows 禁止原地替换，冻结 Windows 仅启动独立安装器 | `petcore/update/`、`petcore/cli.py`；未上传 Release，当前 venv 未安装 PyInstaller 模块 |
+| petcore 自动化通过 | Ruff、全部 `tests/test_petcore_*.py`、P5 聚焦族、高负载 3 遍、`python -m petcore --check` | 本次报告 `PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md` |
+| Windows 实机可见 UI | 未执行本轮真实桌面窗口/安装器交互 | 只执行了 Windows 进程级 `--check` 与 offscreen Qt；不可把它写成实机 UI 通过 |
+| 环境缺口 | GPU/FPS 原生探针、冻结安装器、双屏混合 DPI、真实余额服务、公开 CDN/Release | 已实现降级和安全拒绝路径，待具备条件时单独验收 |

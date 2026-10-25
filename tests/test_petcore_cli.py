@@ -89,3 +89,13 @@ def test_mods_subcommand_accepts_global_root(tmp_path) -> None:
     result = _run(["--root", str(data_root), "mods", "doctor"], tmp_path)
     assert result.returncode == 0, result.stderr
     assert f"root: {data_root}" in result.stdout
+
+
+def test_update_status_is_headless_and_does_not_download(tmp_path) -> None:
+    result = _run(["update", "status"], tmp_path)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["state"] == "idle"
+    assert report["current_version"] == report["version"]
+    assert report["asset_available"] is False
+    assert not (tmp_path / "updates" / "manifest.json").exists()

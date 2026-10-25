@@ -15,6 +15,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from typing import Any, Callable
 
 from .errors import (
@@ -33,6 +34,18 @@ DEFAULT_TIMEOUT = 10.0
 DEFAULT_MAX_BYTES = 4_000_000
 DEFAULT_FALLBACK_STATUSES = (500, 502, 504)
 _READ_CHUNK = 65_536
+
+
+def is_https_url(url: str) -> bool:
+    parts = urlsplit(str(url))
+    return parts.scheme.lower() == "https" and bool(parts.hostname)
+
+
+def is_allowed_https_url(url: str, hosts) -> bool:
+    parts = urlsplit(str(url))
+    return parts.scheme.lower() == "https" and (parts.hostname or "").lower() in {
+        str(host).lower() for host in hosts
+    }
 
 _force_direct = False
 _direct_opener: urllib.request.OpenerDirector | None = None

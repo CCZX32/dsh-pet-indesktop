@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from petcore.config import Config
 from petcore.contracts.content import CharacterSpec
 from petcore.ui.app import CoreHost
+from petcore.update import UpdateResult
 from petcore.ui.menu_actions import core_items
 from petcore.ui.settings.page_about import AboutPage
 
@@ -95,3 +96,17 @@ def test_about_menu_item_is_gone() -> None:
 
     items = core_items(StubWindow())
     assert "about" not in items
+
+
+def test_about_update_download_can_be_cancelled(app, tmp_path: Path) -> None:
+    host = FakeHost(tmp_path)
+    host.cancelled = False
+    host.update_status = lambda: UpdateResult(False, "downloading", "正在下载更新…")
+    host.cancel_update = lambda: setattr(host, "cancelled", True)
+    page = AboutPage(host)
+    try:
+        assert page.cancel_update_button.isEnabled() is True
+        page.cancel_update_button.click()
+        assert host.cancelled is True
+    finally:
+        page.deleteLater()

@@ -2718,3 +2718,24 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **实机与限制**：本机本轮只执行 offscreen Qt 和 Core 检查，未执行真实 Windows 桌面鼠标摸头、click-through、拖拽/投掷和双 slot 可视化验证；因此“Windows 实机通过”仍为未验证，不能用自动化结果替代。动画资源缺失时由现有 catalog 结果决定不触发并节流记录诊断。
 
 **提交**：实现与测试提交为 `2a5f80e9`；候选构建、安装器、Release 和 CDN 交由另一台电脑继续。
+
+## L081 — 2026-10-25 — P5 灵动岛、余额、UI、性能与 Core 更新收口
+
+**范围与设计**：本批只修改 `petcore`、`tests/test_petcore_*.py` 和必要文档，不运行旧 `pet` 整仓测试。实现 Dynamic Island P5-a2（停靠/展开/消息/余额/第三方段/折叠停采样/避让）、按 slot 的 `BalancePresenter` 与左键/右键/灵动岛共用余额入口、菜单/设置图标与 QComboBox 字体度量安全边距、1 Hz 采样与聚合性能计数、HTTPS 更新 manifest/ETag/镜像/Range/断点/校验，以及仅 frozen Windows 启动独立安装器的 Core 自更新边界。传输失败保留可复用 `.part` 状态，协议/大小/摘要失败清除断点；源码运行和非 Windows 不原地替换。
+
+**逐文件增删口径**：实现文件包括 `petcore/account/__init__.py`、新增 `account/presenter.py`、新增 `performance.py`、新增 `update/{__init__,model,service}.py`、`cli.py`、`config.py`、`island/segments.py`、`net/http.py`、`platform/{netmon,sysmon}.py`、`ui/{app,island,menu_actions,menu_model,menu_style,pet_window}.py`、`ui/settings/{coverage,dialog,page_about,page_api,style}.py`；测试包括新增 `test_petcore_{balance,island_p5,menu_icons,performance,update}.py` 及 CLI/岛/设置相关扩展；文档同步 `PETCORE-ROADMAP.md`、`PETCORE-SPEC.md`、`PETCORE-MAIN-PARITY-BACKLOG.md`、`ONLINE-UPDATE.md`、`ONEDIR_PACKAGING.md`、`STABLE_BUILDS.md`、`INDEX.md`、本报告和 `.scratch/petcore-p5-complete/HANDOFF.md`。完整 `git diff --numstat` 见 `docs/PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md`。
+
+**验证**：`ruff check petcore tests scripts` 输出 `All checks passed!`；P5 聚焦族 `111 passed`，CPU 压力进程下连续三遍分别 `8.22s/7.29s/6.73s`；全部 `tests/test_petcore_*.py` 为 `1511 passed in 124.28s (0:02:04)`、exit 0；`python -m petcore --check` exit 0，报告 `frozen=false/can_auto_install=false` 且 HTTPS trusted host 检查通过。性能探针按 15 秒预热、60 秒采集、active/hidden/off 各 3 次执行，原始 JSON 为 `.scratch/petcore-p5-complete/performance-2026-10-25.json`。
+
+**状态与限制**：本机只做 Windows 进程级 `--check` 和 offscreen Qt；PySide6 6.11.1、Python 3.11.1、psutil 7.2.2 可用，项目 venv 无 PyInstaller 模块，未启动真实安装器。GPU/FPS 无原生探针时显示具体 unavailable 原因，不伪造 0。真实桌面菜单/高 DPI/双屏、冻结候选包、真实余额服务、macOS/Linux、CDN/Release 仍是环境缺口；本轮不上传、不覆盖安装、不切换默认入口。
+
+
+## L082 — 2026-10-25 — P5 更新取消与可选探针收尾
+
+**改动**：在 P5 初始实现基础上收口 `petcore/ui/settings/page_about.py` 的下载中状态和取消按钮、`petcore/ui/app.py` 的取消结果与 generation 拒收；`petcore/ui/island.py` 增加 `set_probe_snapshot()` / `clear_probe_snapshot()` 作为可选 GPU/FPS 平台探针接缝；`petcore/config.py` 与 `petcore/platform/sysmon.py` 修正不可用能力口径；新增取消和真实 probe snapshot 回归。当前工作区相对基线的相关增删为：`petcore/ui/island.py` +258/−10、`petcore/config.py` +5/−1、`petcore/ui/settings/page_about.py` +68/−0、`petcore/ui/app.py` +213/−2、`petcore/platform/sysmon.py` +4/−2、`tests/test_petcore_island_p5.py` +97/−0（新增）、`tests/test_petcore_about_page.py` +15/−0。
+
+**行为**：更新下载现在先进入 `downloading` 状态，设置页可取消；取消会使本代回调失效，不会在取消后更新 UI、启动安装或写入完成状态。GPU/FPS 有真实平台快照时显示注入的值和单位，无探针时继续显示明确 unavailable 原因，不创建第二采样线程、不伪造 0。
+
+**验证**：`ruff check petcore tests scripts` 输出 `All checks passed!`；P5 聚焦族 `121 passed in 13.08s`，CPU 压力下 3 次分别 `13.08s / 13.29s / 12.96s`；`tests/test_petcore_*.py` 全部 `1513 passed in 126.19s (0:02:06)`、exit 0；`python -m petcore --check` exit 0；`git diff --check` 无空白错误（仅报告 LF/CRLF 转换提示）。
+
+**限制**：本机无真实桌面、冻结安装器或原生 GPU/FPS 探针；未使用真实余额服务、CDN/Release、真实 API key，也未修改旧 `pet`。

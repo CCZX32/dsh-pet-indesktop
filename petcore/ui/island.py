@@ -14,15 +14,26 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..island import layout, segments as isl
 from ..platform import netmon, sysmon
+from ..performance import runtime_metrics
+
+logger = logging.getLogger("petcore.ui.island")
 
 #: 胶囊窗口高（固定，永不随内容变）。
 CAPSULE_HEIGHT = 44
@@ -144,6 +155,8 @@ class DynamicIsland(QWidget):
 
     clicked = Signal()
     settings_requested = Signal()
+    balance_requested = Signal()
+    messages_cleared = Signal()
     card_expanded = Signal(bool)
 
     def __init__(self, config, *, character_name: str = "", parent=None) -> None:
@@ -165,6 +178,14 @@ class DynamicIsland(QWidget):
         self._font_key_cache: tuple | None = None
         self._alert: dict[str, str] = {}
         self._row: tuple = ()
+        self._recent_messages = deque(maxlen=8)
+        self._balance_text = ""
+        self._balance_detail = ""
+        self._balance_severity = ""
+        self._registry = isl.SegmentRegistry()
+        # GPU/FPS are optional platform probes.  The island consumes their
+        # snapshots through this seam; it never starts a second sampler.
+        self._probe_segments: dict[str, isl.SegmentSnapshot] = {}
         self._plan: layout.ShrinkPlan | None = None
         self._width_key: tuple | None = None
         self._expanded = False
@@ -172,6 +193,8 @@ class DynamicIsland(QWidget):
         self._press_global: QPoint | None = None
         self._drag_offset: QPoint | None = None
         self._ticks = 0
+        self._avoidance_callback = None
+        self._feedback_until = 0.0
 
         self.net_monitor = netmon.NetMonitor(interval=1.0)
         self.sys_monitor = sysmon.SysMonitor(interval=1.0)
@@ -186,11 +209,107 @@ class DynamicIsland(QWidget):
         self._card_timer.timeout.connect(self.collapse_card)
 
         self.card = _IslandCard(self)
+        self.card.balance_requested.connect(self.balance_requested.emit)
+        self.card.settings_requested.connect(self.settings_requested.emit)
+        self.card.messages_cleared.connect(self.clear_messages)
         self.card.hide()
 
         self._rebuild_row()
         self._apply_position(initial=True)
         self._update_size()
+
+    def register_segment(self, snapshot: isl.SegmentSnapshot, *, release=None) -> None:
+        """注册扩展快照，并保留可撤销的资源释放回调。"""
+        self._registry.register(snapshot, release=release)
+        if self._expanded:
+            self._rebuild_card()
+
+    def unregister_segment(self, segment_id: str) -> bool:
+        removed = self._registry.unregister(segment_id)
+        if removed and self._expanded:
+            self._rebuild_card()
+        return removed
+
+    def clear_segments(self) -> None:
+        self._registry.clear()
+        if self._expanded:
+            self._rebuild_card()
+
+    def set_probe_snapshot(self, snapshot: isl.SegmentSnapshot) -> None:
+        """接收可选 GPU/FPS 探针快照，不在岛内创建采样线程。
+
+        平台探针由宿主按自己的权限和生命周期负责；岛只接受稳定的
+        ``SegmentSnapshot``，并在 ``unsupported``/错误状态下保留明确原因，
+        不把不可用能力伪造成 0。
+        """
+        if snapshot.id not in (isl.GPU, isl.FPS):
+            raise ValueError("only GPU/FPS snapshots are accepted")
+        state = snapshot.state if snapshot.state in isl.STATES else isl.STATE_UNKNOWN
+        if state == isl.STATE_UNSUPPORTED:
+            self._probe_segments.pop(snapshot.id, None)
+        else:
+            if state != snapshot.state:
+                snapshot = isl.SegmentSnapshot(
+                    snapshot.id,
+                    label=snapshot.label,
+                    text=snapshot.text,
+                    max_text=snapshot.max_text,
+                    state=state,
+                    detail=dict(snapshot.detail),
+                )
+            self._probe_segments[snapshot.id] = snapshot
+        self._rebuild_row()
+        self._update_size()
+        if self._expanded:
+            self._rebuild_card()
+
+    def clear_probe_snapshot(self, metric_id: str | None = None) -> None:
+        """清除一个或全部可选探针快照并回到明确的不可用状态。"""
+        if metric_id is None:
+            self._probe_segments.clear()
+        elif metric_id in (isl.GPU, isl.FPS):
+            self._probe_segments.pop(metric_id, None)
+        else:
+            return
+        self._rebuild_row()
+        self._update_size()
+        if self._expanded:
+            self._rebuild_card()
+
+    def _feedback(self) -> None:
+        self._feedback_until = time.monotonic() + 0.48
+        if self.isVisible():
+            self.update()
+            QTimer.singleShot(520, self, self.update)
+
+    def show_balance(self, result=None, error: str | None = None) -> None:
+        if error:
+            self._balance_text = "余额不可用"
+            self._balance_detail = str(error)[:120]
+            self._balance_severity = isl.ALERT_CRIT
+        elif result is not None:
+            formatter = getattr(result, "format_text", None)
+            self._balance_text = str(formatter() if callable(formatter) else result)[:160]
+            self._balance_detail = "已更新"
+            self._balance_severity = ""
+        self._feedback()
+        if self._expanded:
+            self._rebuild_card()
+
+    def add_message(self, text: str) -> None:
+        message = " ".join(str(text or "").split())[:240]
+        if not message:
+            return
+        self._recent_messages.append(message)
+        self._feedback()
+        if self._expanded:
+            self._rebuild_card()
+
+    def clear_messages(self) -> None:
+        self._recent_messages.clear()
+        if self._expanded:
+            self._rebuild_card()
+        self.messages_cleared.emit()
 
     # ------------------------------------------------------------ 生命周期
 
@@ -200,6 +319,7 @@ class DynamicIsland(QWidget):
         self._sync_sampling()
 
     def stop(self) -> None:
+        self._feedback_until = 0.0
         self._clock.stop()
         self._card_timer.stop()
         self.net_monitor.stop()
@@ -359,7 +479,41 @@ class DynamicIsland(QWidget):
                 row.append(self._percent_segment(metric_id))
             elif metric_id == isl.NETWORK:
                 row.append(self._network_segment())
-            # 未知 id / 本批未实现的 gpu、fps：不占位（与 unsupported 同口径）
+            elif metric_id in (isl.GPU, isl.FPS):
+                snapshot = self._probe_segments.get(metric_id)
+                if snapshot is None:
+                    label = CARD_NAMES.get(metric_id, metric_id)
+                    row.append(
+                        layout._InfoSeg(
+                            kind=layout.KIND_METRIC,
+                            seg_id=metric_id,
+                            label=label,
+                            text="--",
+                            box_text="--",
+                            state=isl.STATE_ERROR,
+                            detail={"error_reason": "当前环境未接入可用 GPU/FPS 探针"},
+                            severity=isl.ALERT_CRIT,
+                        )
+                    )
+                else:
+                    state = snapshot.state if snapshot.state in isl.STATES else isl.STATE_UNKNOWN
+                    detail = dict(snapshot.detail)
+                    if state != isl.STATE_OK:
+                        detail.setdefault("error_reason", "GPU/FPS 探针暂不可用")
+                    row.append(
+                        layout._InfoSeg(
+                            kind=layout.KIND_METRIC,
+                            seg_id=metric_id,
+                            label=snapshot.label or CARD_NAMES.get(metric_id, metric_id),
+                            text=snapshot.text if state == isl.STATE_OK else "--",
+                            box_text=snapshot.max_text or ("100" if metric_id == isl.GPU else "9999"),
+                            state=state,
+                            unit=str(detail.get("unit") or ""),
+                            detail=detail,
+                            severity=str(detail.get("severity") or ""),
+                        )
+                    )
+            # 未知 id 不占位；已知但暂不可用的 GPU/FPS 明确呈现原因。
         return tuple(row)
 
     def _lead_trail(self, name_text: str) -> tuple[float, float]:
@@ -432,16 +586,61 @@ class DynamicIsland(QWidget):
 
     def _tick(self) -> None:
         self._ticks += 1
+        runtime_metrics.inc("ui_updates")
         previous_key = self._width_key
         self._rebuild_row()
         self._plan = self._compute_plan(self._card_budget() if self._expanded else None)
         if self._width_key_now() != previous_key:
             self._update_size()
         elif self._expanded:
+            runtime_metrics.inc("coalesced_updates")
             self._rebuild_card()
         else:
+            runtime_metrics.inc("coalesced_updates")
             self.update()
         self._sync_sampling()
+        callback = self._avoidance_callback
+        if callable(callback):
+            try:
+                callback(self)
+            except Exception:  # noqa: BLE001 - 避让失败不得影响采样和绘制
+                logger.debug("island avoidance failed", exc_info=True)
+
+    def set_avoidance_callback(self, callback) -> None:
+        """设置轻量的宿主避让回调；回调只应读取窗口几何并调用 :meth:`avoid_overlaps`."""
+        self._avoidance_callback = callback
+
+    def avoid_overlaps(self, obstacles) -> bool:
+        """在不移动桌宠的前提下把灵动岛移到不重叠的位置。
+
+        候选点只来自当前屏幕四角；没有安全候选时保持原位置并返回 ``False``。
+        这是几何避让，不进入桌宠碰撞/物理模型。
+        """
+        if not self.isVisible():
+            return True
+        obstacles = tuple(rect for rect in obstacles if rect is not None and not rect.isNull())
+        current = self.geometry()
+        if not any(current.intersects(rect) for rect in obstacles):
+            return True
+        screen = self._screen()
+        if screen is None:
+            return False
+        area = screen.availableGeometry()
+        candidates = (
+            QPoint(area.left(), area.top()),
+            QPoint(area.right() - self.width() + 1, area.top()),
+            QPoint(area.left(), area.bottom() - self.height() + 1),
+            QPoint(area.right() - self.width() + 1, area.bottom() - self.height() + 1),
+        )
+        for point in candidates:
+            candidate = QRect(point, self.size())
+            if not area.contains(candidate) or any(candidate.intersects(rect) for rect in obstacles):
+                continue
+            if candidate.topLeft() != current.topLeft():
+                self.move(candidate.topLeft())
+                self._save_position()
+            return True
+        return False
 
     # ------------------------------------------------------------ 位置
 
@@ -490,7 +689,21 @@ class DynamicIsland(QWidget):
             return None
 
     def _save_position(self) -> None:
-        for key, value in (("island_x", self.x()), ("island_y", self.y())):
+        screen = self._screen()
+        x, y = self.x(), self.y()
+        if screen is not None:
+            area = screen.availableGeometry()
+            if abs(x - area.x()) <= 12:
+                x = area.x()
+            elif abs((x + self.width()) - (area.x() + area.width())) <= 12:
+                x = area.x() + area.width() - self.width()
+            if abs(y - area.y()) <= 12:
+                y = area.y()
+            elif abs((y + self.height()) - (area.y() + area.height())) <= 12:
+                y = area.y() + area.height() - self.height()
+            if (x, y) != (self.x(), self.y()):
+                self.move(x, y)
+        for key, value in (("island_x", x), ("island_y", y)):
             try:
                 self.config.set(key, int(value))
             except Exception:  # noqa: BLE001 - 位置保存失败不该影响岛
@@ -534,6 +747,16 @@ class DynamicIsland(QWidget):
     def _card_rows(self) -> list[tuple[str, str, str, str]]:
         """卡片 B 区：每段一行 ``(段名, 值, 详情, 告警级)``。"""
         rows: list[tuple[str, str, str, str]] = []
+        if self._balance_text:
+            rows.append(("余额", self._balance_text, self._balance_detail, self._balance_severity))
+        for snapshot in self._registry.snapshots():
+            detail = str(snapshot.detail.get("source") or snapshot.detail.get("updated_at") or "")
+            severity = str(snapshot.detail.get("severity") or "")
+            if snapshot.state == isl.STATE_ERROR:
+                detail = str(snapshot.detail.get("error_reason") or detail or "读取失败")
+            rows.append((snapshot.label or snapshot.id, snapshot.text or "--", detail, severity))
+        for message in reversed(tuple(self._recent_messages)):
+            rows.append(("最近消息", message, "", ""))
         for seg in self._row:
             if seg.kind == layout.KIND_PRIMARY:
                 continue
@@ -688,6 +911,11 @@ class DynamicIsland(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(keyline, 1.0))
         painter.drawPath(path)
+        if self._feedback_until > time.monotonic():
+            accent = self.accent_color()
+            accent.setAlpha(150)
+            painter.setPen(QPen(accent, 2.0))
+            painter.drawPath(path)
 
         if self._plan is None:
             return
@@ -796,11 +1024,11 @@ class DynamicIsland(QWidget):
 
 
 class _IslandCard(QWidget):
-    """展开卡片：每段一行（段名 / 值 · 详情），底部一行操作提示。
+    """展开卡片：指标/余额/消息行与可访问操作按钮。"""
 
-    卡片自己只排字，背景与圆角由父窗口的 ``paintEvent`` 画（同一块面板），
-    这样胶囊与卡片之间不会有接缝。
-    """
+    balance_requested = Signal()
+    settings_requested = Signal()
+    messages_cleared = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -810,9 +1038,24 @@ class _IslandCard(QWidget):
         self._layout.setContentsMargins(14, 6, 14, 12)
         self._layout.setSpacing(7)
         self._rows: list[tuple[QLabel, QLabel]] = []
+        self._actions = QWidget(self)
+        actions_layout = QHBoxLayout(self._actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(6)
+        self._refresh_button = QPushButton("刷新余额", self._actions)
+        self._settings_button = QPushButton("设置", self._actions)
+        self._clear_button = QPushButton("清除消息", self._actions)
+        for button in (self._refresh_button, self._settings_button, self._clear_button):
+            button.setAutoDefault(False)
+            button.setMinimumHeight(26)
+            actions_layout.addWidget(button)
+        self._layout.addWidget(self._actions)
         self._hint = QLabel("点胶囊收起 · 拖动换位置", self)
         self._hint.setObjectName("islandCardHint")
         self._layout.addWidget(self._hint)
+        self._refresh_button.clicked.connect(self.balance_requested.emit)
+        self._settings_button.clicked.connect(self.settings_requested.emit)
+        self._clear_button.clicked.connect(self.messages_cleared.emit)
         self._text_color = "rgb(235, 238, 245)"
         self._muted_color = "rgb(160, 170, 190)"
         self._accent_color = "#40b8ff"
@@ -824,6 +1067,11 @@ class _IslandCard(QWidget):
         self._hint.setStyleSheet(
             f"color: {self._muted_color}; font-size: 11px; background: transparent;"
         )
+        for button in (self._refresh_button, self._settings_button, self._clear_button):
+            button.setStyleSheet(
+                f"QPushButton {{ color: {self._text_color}; padding: 3px 8px; }}"
+                f"QPushButton:hover {{ border: 1px solid {self._accent_color}; }}"
+            )
 
     def setWidth_and_rows(self, width: int, rows: list[tuple[str, str, str, str]]) -> None:
         while len(self._rows) < len(rows):
@@ -839,7 +1087,8 @@ class _IslandCard(QWidget):
             value.setWordWrap(False)
             line.addWidget(name)
             line.addWidget(value)
-            self._layout.insertWidget(max(0, self._layout.count() - 1), container)
+            # rows must stay above action row and hint.
+            self._layout.insertWidget(max(0, self._layout.count() - 2), container)
             self._rows.append((name, value))
         for index, (name_label, value_label) in enumerate(self._rows):
             container = name_label.parentWidget()
@@ -871,4 +1120,3 @@ __all__ = [
     "ACCENTS",
     "STYLE_PALETTES",
 ]
-

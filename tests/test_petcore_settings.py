@@ -7,10 +7,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QMessageBox,
@@ -763,3 +764,36 @@ def test_head_pat_settings_are_scoped_live_and_cancelable(app, tmp_path):
     assert interaction.head_pat_enabled.isChecked() is True
     assert interaction.head_pat_mode.currentData() == "default_click"
     dialog.close()
+
+
+def test_p5_settings_icons_and_combos_keep_safe_geometry(app, tmp_path):
+    dialog = SettingsDialog(_host(tmp_path))
+    assert dialog.nav.iconSize() == QSize(24, 24)
+    assert all(dialog.nav.item(row).sizeHint().height() >= 42 for row in range(dialog.nav.count()))
+    combos = dialog.findChildren(QComboBox)
+    assert combos
+    for combo in combos:
+        widest = max(
+            (combo.fontMetrics().horizontalAdvance(combo.itemText(index)) for index in range(combo.count())),
+            default=0,
+        )
+        assert combo.minimumWidth() >= widest + 58
+    dialog.close()
+
+
+def test_click_show_balance_is_per_slot_and_cancelable(app, tmp_path):
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host, initial_page="api")
+    page = _page(dialog, "API 与账户")
+    assert page.click_balance_check.isChecked() is False
+    page.click_balance_check.setChecked(True)
+    app.processEvents()
+    assert host.config.get("click_show_balance") is True
+    dialog.cancel_button.click()
+    assert host.config.get("click_show_balance") is False
+
+    child = Config(tmp_path, filename="config-pet-1.json")
+    child.set("click_show_balance", True)
+    child.save()
+    assert Config.load(tmp_path).get("click_show_balance") is False
+    assert Config.load(tmp_path, filename="config-pet-1.json").get("click_show_balance") is True

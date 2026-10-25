@@ -113,3 +113,6 @@
 
 | L079 | 2026-10-25 | 候选包构建交接与弱模型任务说明 | PyInstaller/Inno Setup、隔离验收、SHA 证据、停止条件与 petcore-only 门禁；不上传 Release | 候选包、安装器、交接、证据 |
 | L080 | 2026-10-25 | petcore 摸头互动 | 头部命中、连续往返判定、可配置单次动画池、设置契约与回归证据；1490 passed；实现提交 `2a5f80e9` | head_pat、head_box、InteractionPage、动画池、生命周期 |
+| L081 | 2026-10-25 | P5 收口 | 灵动岛、余额、菜单/设置几何、性能治理和 Core 更新服务已实现，petcore-only 门禁通过，冻结包与 GPU/FPS 实机留缺口。 | island、balance、UI、performance、update、petcore-only |
+
+| L082 | 2026-10-25 | P5 更新取消与可选探针收尾 | 更新下载中/取消状态和 generation 拒收，GPU/FPS 可选 snapshot 接入；Ruff、聚焦 121、CPU 压力 3×121、petcore 1513 通过；实机/冻结包仍留缺口。 | update、cancel、GPU、FPS、island、petcore-only |

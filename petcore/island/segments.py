@@ -1,7 +1,7 @@
 """灵动岛「段」契约层：状态词表 + 盒宽自测量 + 字段盒 + 告警判定（零 Qt）。
 
-移植自主分支 ``pet/island_segments.py``（只取宿主侧那半：第三方段注册面留给
-后续批次），口径见 ``docs/PETCORE-SPEC.md`` §29。三条不变量：
+移植自主分支 ``pet/island_segments.py`` 的宿主侧契约，第三方段通过快照和可撤销
+释放回调注册，口径见 ``docs/PETCORE-SPEC.md`` §29。三条不变量：
 
 - **盒宽自测量**：段声明最坏宽度样本 ``max_text``，盒宽 = 度量结果，按
   ``(id, 字体指纹)`` 缓存；读数**永不进宽度**，否则岛宽会跟着数字跳。
@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -152,21 +153,57 @@ class SegmentRegistry:
     def __init__(self, segments=None):
         self._segments: list[SegmentSnapshot] = []
         self._by_id: dict[str, SegmentSnapshot] = {}
+        self._releases: dict[str, Callable[[], object]] = {}
         for segment in segments or ():
             self.register(segment)
 
-    def register(self, segment: SegmentSnapshot) -> SegmentSnapshot:
+    def register(
+        self,
+        segment: SegmentSnapshot,
+        *,
+        release: Callable[[], object] | None = None,
+    ) -> SegmentSnapshot:
         if not isinstance(segment, SegmentSnapshot):
             raise TypeError(f"段注册表只接受 SegmentSnapshot，收到 {type(segment).__name__}")
         if segment.id in self._by_id:
             raise ValueError(f"段 id 重复注册：{segment.id!r}（同一 id 只允许一段）")
         self._segments.append(segment)
         self._by_id[segment.id] = segment
+        if release is not None:
+            if not callable(release):
+                raise TypeError("段释放回调必须可调用")
+            self._releases[segment.id] = release
         return segment
 
     def get(self, segment_id) -> SegmentSnapshot | None:
         """按 id 取段；未注册返回 None（不抛）。"""
         return self._by_id.get(segment_id)
+
+    def unregister(self, segment_id) -> bool:
+        """撤销一个第三方段；未知 id 安全返回 False。"""
+        segment = self._by_id.pop(str(segment_id), None)
+        if segment is None:
+            return False
+        self._segments = [item for item in self._segments if item.id != segment.id]
+        release = self._releases.pop(segment.id, None)
+        if release is not None:
+            try:
+                release()
+            except Exception:  # noqa: BLE001 - 扩展清理不能炸掉灵动岛
+                logger.debug("segment release failed: %s", segment.id, exc_info=True)
+        return True
+
+    def clear(self) -> None:
+        """清空注册段，并调用每段可选的释放回调。"""
+        releases = list(self._releases.items())
+        self._segments.clear()
+        self._by_id.clear()
+        self._releases.clear()
+        for segment_id, release in releases:
+            try:
+                release()
+            except Exception:  # noqa: BLE001 - 扩展清理不能炸掉灵动岛
+                logger.debug("segment release failed: %s", segment_id, exc_info=True)
 
     def snapshots(self) -> list[SegmentSnapshot]:
         """当前全部段（注册序的副本：调用方排序不会改到注册表）。"""

@@ -468,3 +468,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 `
   -Clean -Installer -SignThumbprint 217337C099EC8624AC481BFC9F3E1664D0A442E1 `
   -OutputRoot .scratch/petcore-p4c3-distribution/t08/dist
 ```
+## petcore P5 更新安装器边界（2026-10-25）
+
+P5 的 Core 更新服务只消费已发布的 Windows 安装器资产，不改变现有 onedir 资源收集规则。构建机必须在项目专用环境生成安装器，并把实际文件名、大小和 SHA-256 写入 manifest；客户端不接受手填摘要或未声明大小的资产。
+
+当前开发机只验证了源码 `--check`、更新模型/下载器和冻结条件测试；`.venv` 中没有 `PyInstaller` 模块，未生成候选安装器。冻结 Windows 安装器的关闭旧进程、替换、重启、回滚由候选包验收任务在另一台机器完成；本轮不覆盖现有安装和不上传 Release。

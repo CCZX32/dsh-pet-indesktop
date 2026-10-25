@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -132,6 +133,7 @@ class SettingsDialog(QDialog):
         self.setPalette(palette)
         self._build_ui()
         self._load_pages()
+        self._fit_combo_widths()
         self._connect_live_preview()
         self._apply_filter("")
         if initial_page:
@@ -177,6 +179,8 @@ class SettingsDialog(QDialog):
         self.nav.setAccessibleName("设置页面")
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.nav.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.nav.setIconSize(QSize(24, 24))
+        self.nav.setUniformItemSizes(True)
         self.nav.currentRowChanged.connect(self._select_row)
         sidebar_layout.addWidget(self.nav, 1)
 
@@ -234,10 +238,20 @@ class SettingsDialog(QDialog):
         for title, page, keywords, key in pages:
             item = QListWidgetItem(title, self.nav)
             item.setData(Qt.ItemDataRole.UserRole, len(self._pages))
-            item.setSizeHint(QSize(0, 34))
+            item.setSizeHint(QSize(0, 42))
             item.setIcon(menu_icon(_page_icon(title)))
             self.stack.addWidget(page)
             self._pages.append(_PageEntry(title, page, keywords, key))
+
+    def _fit_combo_widths(self) -> None:
+        """按实际字体度量给下拉框留出箭头与左右安全区，避免末字被裁切。"""
+        for combo in self.findChildren(QComboBox):
+            metrics = combo.fontMetrics()
+            widest = 0
+            for index in range(combo.count()):
+                widest = max(widest, metrics.horizontalAdvance(combo.itemText(index)))
+            # 箭头槽、边框和两侧 padding 均独立计入；不依赖平台默认 style。
+            combo.setMinimumWidth(max(combo.minimumWidth(), widest + 58))
 
     def _page_keywords(self, page: QWidget) -> tuple[str, ...]:
         values: list[str] = []
@@ -304,6 +318,14 @@ class SettingsDialog(QDialog):
             if needle in entry.key.lower() or needle in entry.title.lower():
                 self.nav.setCurrentRow(index)
                 return
+
+    def page_for_key(self, key: str):
+        """Return a loaded page by its stable settings key for host callbacks."""
+        needle = str(key or "").strip().lower()
+        for entry in self._pages:
+            if entry.key.lower() == needle:
+                return entry.page
+        return None
 
     def _connect_live_preview(self) -> None:
         for entry in self._pages:

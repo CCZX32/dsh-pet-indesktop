@@ -13,6 +13,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from ..performance import runtime_metrics
 from .sampling import SamplingLoop
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ class NetMonitor:
         return self._sampling.poll()
 
     def _read_sample(self) -> NetSample | None:
+        runtime_metrics.inc("network_samples")
         sample = self._meter.sample()
         if sample is None:
             return None

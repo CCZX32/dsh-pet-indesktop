@@ -898,3 +898,14 @@ D已实现纯历法/节气/浮动节日、slot调度/去重和本地MM-DD生日�
 - 余额入口使用异步任务与分类失败反馈；GraphType 菜单只对已有资源懒加载，不新增动画引擎。
 
 验收口径仍需区分：实现、petcore 自动化通过、Windows 源码检查通过、候选包/跨平台待验证。当前不满足候选包和双屏实机前置条件，因此不切换默认入口、不宣称公开分发完成；`petcore/media` 与 `petcore/content/legacy.py` 的旧实现兼容边界继续保留。
+## 2026-10-25 P5 运行时能力
+
+P5 的 petcore 运行时能力已按以下契约实现：
+
+- Dynamic Island 复用现有窗口、布局和 SegmentRegistry；固定模板宽度，展开卡片 340–420 像素范围内布局；隐藏、折叠、停用和退出时停止相关采样与反馈；消息队列有界，余额不轮询，仅由点击/右键/卡片刷新触发。
+- 余额入口统一到 `BalancePresenter`，以 `slot` 为隔离键进行缓存、单飞和代次拒收；API key 不进入配置、日志或岛面文本。
+- 菜单和设置使用显式 icon size、图标列宽和字体度量安全边距；QComboBox 箭头槽、文字和下拉项独立留出空间，不依赖全局 Qt 补丁。
+- 性能计数器只保存聚合数字；默认系统指标采样不快于 1 Hz；关闭/隐藏时不启动无效采样线程。GPU/FPS 无探针时返回具体 unavailable 状态而非 0。
+- `petcore.update` 只信任 HTTPS manifest/asset host，支持 ETag、缓存、镜像、断点、Range、大小和 SHA-256；源码运行及非 Windows `install()` 固定返回 `unsupported_runtime`，只有冻结 Windows 进程可启动独立安装器。
+
+本节“已实现”不等同于“Windows 实机/候选安装包/公开 Release 已通过”；本轮证据见 `PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md`。

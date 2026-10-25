@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QTimer, QUrl
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from .. import paths
 from ..api.credentials import KeyringCredentials
 from ..api.store import ApiStore
+from ..account.presenter import BalancePresenter
 from ..account.service import AccountService
 from ..config import Config
 from ..content.collect import collect_characters as _collect
@@ -20,6 +22,8 @@ from ..platform import hotkey_spec
 from ..platform.hotkeys import GlobalHotkeyService
 from ..platform.session import SessionWatcher
 from ..platform.worker import WorkerHost
+from ..update import UpdateResult, UpdateService
+from .. import __version__
 from ..mods.feature import CORE_FEATURE_IDS, FeatureManager
 from .market_jobs import MarketJobRegistry
 from .menu import install_core_menu
@@ -120,7 +124,11 @@ class _PresentationAdapter:
         if window is None or not window.isVisible() or (settings and settings.isVisible()):
             return False
         kwargs = {"subtitle": subtitle} if subtitle else {}
-        return window.say(text, duration_ms, **kwargs) is not False
+        shown = window.say(text, duration_ms, **kwargs) is not False
+        island = getattr(self._host, "island", None)
+        if shown and island is not None:
+            island.add_message(text)
+        return shown
 
     def play_animation(self, name: str, *, loop: bool = False) -> bool:
         window = self._window()
@@ -190,6 +198,17 @@ class CoreHost:
         self.api_store = ApiStore(self.root)
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
+        self.balance_presenter = BalancePresenter(
+            self.account,
+            service_id_provider=self._balance_service_id,
+            on_result=self._on_balance_result,
+            dispatch=lambda callback: QTimer.singleShot(0, callback),
+        )
+        self.update_service: UpdateService | None = None
+        self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="petcore-update")
+        self._update_future = None
+        self._update_generation = 0
+        self._closing = False
         from ..speech import SpeechService
 
         self.speech = SpeechService(
@@ -221,6 +240,167 @@ class CoreHost:
 
         self.quiet = QuietMode()
         self.load_content()
+
+    def _balance_service_id(self, slot: int) -> str | None:
+        window = self.pets.window_for_slot(int(slot)) if self.pets is not None else None
+        config = getattr(window, "config", None) or self.config
+        preferred = str(config.get("api_service_id") or "").strip()
+        if preferred and self.api_store.get(preferred) is not None:
+            return preferred
+        for service in self.api_store.services():
+            if getattr(service, "balance_protocol", "none") != "none":
+                return service.service_id
+        return None
+
+    def _on_balance_result(self, slot: int, result, error) -> None:
+        window = self.pets.window_for_slot(int(slot)) if self.pets is not None else self.window
+        if window is None or getattr(window, "host", self) is not self:
+            return
+        island = getattr(self, "island", None)
+        if result is not None:
+            message = result.format_text()
+            if island is not None:
+                island.show_balance(result=result)
+            self._notify(slot, message)
+            return
+        reason = str(getattr(error, "reason", "network") or "network")
+        message = f"余额查询失败：{reason}"
+        if island is not None:
+            island.show_balance(error=message)
+        self._notify(slot, message)
+
+    def _ensure_update_service(self) -> UpdateService:
+        if self.update_service is None:
+            self.update_service = UpdateService(
+                self.root,
+                current_version=__version__,
+                frozen=bool(getattr(sys, "frozen", False)),
+            )
+        return self.update_service
+
+    def request_balance(self, slot: int | None = None, *, force: bool = True) -> None:
+        target = self._active_window or self.window
+        resolved = int(slot if slot is not None else getattr(target, "slot", 0) or 0)
+        cached = self.balance_presenter.cached(resolved)
+        if cached is not None and self.island is not None:
+            self.island.show_balance(result=cached)
+        self.balance_presenter.request(resolved, force=force)
+
+    def check_for_updates(self) -> None:
+        if self._closing:
+            return
+        if self._update_future is not None and not self._update_future.done():
+            self._notify(None, "正在检查更新，请稍候")
+            return
+        service = self._ensure_update_service()
+        self._update_generation += 1
+        generation = self._update_generation
+        self._notify(None, "正在检查更新…")
+        self._update_future = self._update_executor.submit(service.check, force=True)
+        self._update_future.add_done_callback(
+            lambda future, token=generation: QTimer.singleShot(
+                0, self.app, lambda: self._finish_update_check(token, future)
+            )
+        )
+        self.open_settings("about")
+
+    def _finish_update_check(self, generation: int, future) -> None:
+        if self._closing or generation != self._update_generation:
+            return
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001 - worker boundary
+            result = UpdateResult(False, "check_failed", f"更新检查失败：{type(exc).__name__}")
+        if not isinstance(result, UpdateResult):
+            result = UpdateResult(False, "check_failed", "更新检查返回了无效结果")
+        self._publish_update_result(result)
+
+    def _publish_update_result(self, result: UpdateResult) -> None:
+        dialog = getattr(self, "settings_dialog", None)
+        page = getattr(dialog, "page_for_key", lambda _key: None)("about") if dialog else None
+        setter = getattr(page, "set_update_status", None)
+        if callable(setter):
+            setter(result)
+        self._notify(None, result.message or "更新检查完成")
+        if self.island is not None:
+            self.island.add_message(result.message or "更新检查完成")
+
+    def update_status(self) -> UpdateResult:
+        return self._ensure_update_service().status()
+
+    def download_update(self) -> None:
+        service = self._ensure_update_service()
+        asset = service.select_asset()
+        if asset is None:
+            self._notify(None, "没有可用的更新安装包")
+            return
+        if self._update_future is not None and not self._update_future.done():
+            self._notify(None, "已有更新任务正在进行")
+            return
+        self._update_generation += 1
+        generation = self._update_generation
+        manifest = service.manifest
+        self._publish_update_result(
+            UpdateResult(
+                False,
+                "downloading",
+                "正在下载更新…",
+                version=manifest.version if manifest is not None else "",
+                manifest=manifest,
+            )
+        )
+        self._update_future = self._update_executor.submit(service.download, asset)
+        self._update_future.add_done_callback(
+            lambda future, token=generation: QTimer.singleShot(
+                0, self.app, lambda: self._finish_update_download(token, future)
+            )
+        )
+
+    def _finish_update_download(self, generation: int, future) -> None:
+        if self._closing or generation != self._update_generation:
+            return
+        try:
+            path = future.result()
+            result = self._ensure_update_service().status()
+            if result.state != "downloaded" or result.path is None:
+                result = UpdateResult(
+                    True,
+                    "downloaded",
+                    "更新包下载完成",
+                    path=path,
+                    manifest=self._ensure_update_service().manifest,
+                )
+        except Exception as exc:  # noqa: BLE001 - worker boundary
+            result = UpdateResult(False, "download_failed", f"更新下载失败：{type(exc).__name__}")
+        self._publish_update_result(result)
+
+    def install_update(self, package_path=None) -> None:
+        service = self._ensure_update_service()
+        path = package_path or service.status().path
+        if path is None:
+            self._notify(None, "请先下载更新包")
+            return
+        result = service.install(Path(path))
+        self._publish_update_result(result)
+        if result.ok:
+            self.quit_app()
+
+    def cancel_update(self) -> None:
+        service = self.update_service
+        if service is None:
+            return
+        service.cancel()
+        self._update_generation += 1
+        manifest = service.manifest
+        self._publish_update_result(
+            UpdateResult(
+                False,
+                "cancelled",
+                "已取消更新下载",
+                version=manifest.version if manifest is not None else "",
+                manifest=manifest,
+            )
+        )
 
     def presentation_port(self):
         return _PresentationAdapter(self)
@@ -373,6 +553,9 @@ class CoreHost:
                 say(message, 6000)
             except Exception:
                 logger.debug("notify failed", exc_info=True)
+        island = getattr(self, "island", None)
+        if island is not None:
+            island.add_message(message)
 
     def settings_pages(self):
         return self.features.settings_pages() if self.features is not None else []
@@ -517,7 +700,21 @@ class CoreHost:
         self.island = DynamicIsland(
             self.config, character_name=self._island_character_name()
         )
+        self.island.balance_requested.connect(self.request_balance)
+        self.island.settings_requested.connect(lambda: self.open_settings("api"))
+        self.island.set_avoidance_callback(self._avoid_island_overlap)
         return self.island
+
+    def _avoid_island_overlap(self, island) -> None:
+        """避开当前可见桌宠窗口；避让失败时保持桌宠位置不变。"""
+        manager = self.pets
+        windows = manager.each() if manager is not None else [self.window]
+        obstacles = [
+            window.frameGeometry()
+            for window in windows
+            if window is not None and window.isVisible()
+        ]
+        island.avoid_overlaps(obstacles)
 
     def apply_island_settings(self) -> None:
         """按配置显示/刷新/隐藏灵动岛（设置页实时预览与菜单开关共用）。"""
@@ -747,7 +944,9 @@ class CoreHost:
         """托盘右键菜单：隐藏后只靠鼠标也能把桌宠叫回来。"""
         from PySide6.QtWidgets import QMenu
 
-        menu = QMenu()
+        menu = QMenu(_parent)
+        from .menu_style import menu_stylesheet
+        menu.setStyleSheet(menu_stylesheet())
         self.populate_tray_menu(menu)
         # 每次弹出前原地重建动作（不替换 QMenu 对象，避免 Qt 正要显示时菜单被销毁）。
         menu._petcore_refresh = lambda: self.populate_tray_menu(menu)
@@ -781,6 +980,10 @@ class CoreHost:
             all_hidden.triggered.connect(lambda _checked=False: self.set_all_visible(False))
 
         menu.addSeparator()
+        balance = menu.addAction("显示余额")
+        balance.triggered.connect(lambda _checked=False: self.request_balance(force=True))
+        update = menu.addAction("检查更新")
+        update.triggered.connect(lambda _checked=False: self.check_for_updates())
         settings = menu.addAction("桌宠设置")
         settings.triggered.connect(lambda _checked=False: self.open_settings())
         data = menu.addAction("打开数据目录")
@@ -872,6 +1075,8 @@ class CoreHost:
                 setattr(self, attribute, None)
 
     def quit_app(self) -> None:
+        self._closing = True
+        self.cancel_update()
         self.close_dialogs()
         if self.island is not None:
             try:
@@ -879,6 +1084,8 @@ class CoreHost:
                 self.island.hide()
             except Exception:  # noqa: BLE001
                 logger.debug("island shutdown failed", exc_info=True)
+        self.balance_presenter.shutdown()
+        self._update_executor.shutdown(wait=False, cancel_futures=True)
         self.worker_host.shutdown_all()
         report = self.market_jobs.shutdown_all(2000)
         if report.timed_out:
@@ -964,11 +1171,15 @@ def run(config: Config, *, root: Path, mod_dirs, instance: str | None = None) ->
     _wire_screens(app, manager)
 
     def finish() -> None:
+        host._closing = True
+        host.cancel_update()
         if host.hotkeys is not None:
             host.hotkeys.uninstall()
         host.close_dialogs()
         manager.shutdown()
         host.worker_host.shutdown_all()
+        host.balance_presenter.shutdown()
+        host._update_executor.shutdown(wait=False, cancel_futures=True)
         report = host.market_jobs.shutdown_all(2000)
         if report.timed_out:
             logger.warning("market jobs still running during aboutToQuit: %s", report)

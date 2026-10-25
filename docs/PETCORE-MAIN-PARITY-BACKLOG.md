@@ -276,3 +276,14 @@
 | 多屏/混合 DPI 实机 | **待验证** | 代码保留已有 DPR/屏幕边界；本机只有 1 个屏幕、DPR 1.0，未做双屏拔出与混合 DPI 实机动作。 |
 | PyInstaller/候选包/default entrypoint | **未完成/待环境** | 本 `.venv` 未安装 PyInstaller；不切换默认入口，不生成“可发布”结论。 |
 | macOS/Linux、真实 TTS/CDN、公开 Release | **未验证/不在本轮** | 当前 Windows 环境无对应条件；未使用历史报告冒充本次通过，也未上传 Release。 |
+## 2026-10-25 P5 parity snapshot
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| 灵动岛 P5-a2 | 已实现 / petcore 自动化通过 | 停靠、展开、消息、余额、第三方段、折叠停采样和避让已接入；GPU/FPS 以探针可用性为准 |
+| 点击显示余额 | 已实现 / petcore 自动化通过 | 左键、右键、灵动岛共用 BalancePresenter，配置按 slot 隔离 |
+| 菜单与设置几何 | 已实现 / petcore 自动化通过 | 图标列宽、导航 icon size、下拉框文字与箭头槽已明确度量 |
+| 性能治理 | 已实现 / 有本机实测 | 1 Hz 采样约束、隐藏停采样、聚合计数；实测数据在 P5 报告与 scratch JSON |
+| 检查更新/Core 自更新 | 已实现 / petcore 自动化通过 | HTTPS/ETag/断点/摘要/镜像与源码安全降级；冻结包安装器和公开 Release 待另一台 Windows 机器验收 |
+
+不要把“自动化通过”改写为“Windows 安装器通过”或“远端发布完成”。

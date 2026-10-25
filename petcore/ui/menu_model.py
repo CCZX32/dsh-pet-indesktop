@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QMenu
+
+MENU_ICON_SIZE = QSize(24, 24)
 
 
 def add_submenu(parent: QMenu, title: str) -> QMenu:

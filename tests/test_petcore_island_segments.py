@@ -349,3 +349,23 @@ def test_render_unsupported_returns_none():
 def test_render_unrecognized_state_falls_back_to_dash():
     """未识别状态按 unknown 兜底：不抛，也不把原始 text 当读数显示。"""
     assert isl.render_compact(_seg(state="wat")) == f"CPU{isl.UNKNOWN_TEXT}"
+
+
+def test_registry_release_callback_runs_on_unregister_and_clear():
+    released: list[str] = []
+    registry = isl.SegmentRegistry()
+    registry.register(_seg(isl.CPU), release=lambda: released.append("cpu"))
+    registry.register(_seg(isl.MEM), release=lambda: released.append("mem"))
+    assert registry.unregister(isl.CPU) is True
+    assert released == ["cpu"]
+    registry.clear()
+    assert released == ["cpu", "mem"]
+
+
+def test_registry_release_failure_isolated(caplog):
+    caplog.set_level("DEBUG", logger="petcore.island.segments")
+    registry = isl.SegmentRegistry()
+    registry.register(_seg(isl.CPU), release=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    registry.register(_seg(isl.MEM), release=lambda: None)
+    registry.clear()
+    assert "segment release failed" in caplog.text

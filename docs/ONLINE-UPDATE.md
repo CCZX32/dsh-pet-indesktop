@@ -66,3 +66,12 @@
 - 网络代理/VPN 排查：[`NETWORK-PROXY-AND-VPN-2026-09-22.md`](NETWORK-PROXY-AND-VPN-2026-09-22.md)
 - onedir 与安装包构建：[`ONEDIR_PACKAGING.md`](ONEDIR_PACKAGING.md)
 - 若未来更新 DLC/插件目录，另读 [`PLUGIN-UPDATE-PROTOCOL.md`](plugin-phase-04-updates/PLUGIN-UPDATE-PROTOCOL.md)；该协议的原子激活/回滚模型不替代当前 Core 安装包更新。
+## petcore 0.2.0 Core 更新（2026-10-25）
+
+`petcore.update` 是 Core 的增量更新服务，与旧 `pet` 更新实现并行保留，不修改旧实现。它支持 GitHub Release API/静态 JSON manifest、ETag 缓存、可信 CDN 镜像回退、版本与平台/架构/variant 匹配、有限大小、SHA-256、取消及断点续传。
+
+安全边界：manifest、asset 和重定向只能是允许 host 下的 HTTPS；拒绝 HTTP、`file://`、不可信重定向、缺少大小/摘要的资产；`.part` 和元数据只写配置目录 `updates/`。取消或传输中断保留可验证的断点；协议、大小或摘要失败清除断点；所有响应在读取后关闭。
+
+`UpdateService.install()` 仅在 `sys.frozen` 的 Windows 进程中接受已校验的 `.exe/.msi`，使用独立安装器的 `/CLOSEAPPLICATIONS /NORESTART` 参数；源码运行和非 Windows 返回 `unsupported_runtime`，不替换源码、不覆盖开发工作区。CLI 提供 `python -m petcore update check|download|status`，`--check` 输出可信 host、版本、平台、冻结状态和自动安装能力。
+
+本轮未上传 Release、未启动真实安装器、未修改现有安装；候选资产地址仍应在发布前由另一台具备 PyInstaller/安装器环境的 Windows 机器生成并验收。

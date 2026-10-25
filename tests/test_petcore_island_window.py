@@ -81,7 +81,7 @@ def test_metrics_come_from_config_in_order(make_island):
 
 
 def test_unknown_metric_ids_do_not_take_space(make_island):
-    island = make_island({"island_metrics": ["cpu", "gpu", "fps"]})
+    island = make_island({"island_metrics": ["cpu", "unknown"]})
     plan = island.plan()
     assert plan is not None
     assert plan.visible == ("primary", "cpu")

@@ -71,7 +71,7 @@ QMenu {
 }
 QMenu::item {
     min-height: %(min_height)dpx;
-    padding: 2px 24px 2px 10px;
+    padding: 3px 30px 3px 38px;
     border-radius: 6px;
 }
 QMenu::item:selected { background: #edf2f7; }
@@ -82,7 +82,7 @@ QMenu::separator {
     margin: 4px 8px;
 }
 QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { padding-left: 4px; }
+QMenu::icon { width: 24px; height: 24px; padding-left: 4px; }
 """
 
 _DARK = """
@@ -96,7 +96,7 @@ QMenu {
 }
 QMenu::item {
     min-height: %(min_height)dpx;
-    padding: 2px 24px 2px 10px;
+    padding: 3px 30px 3px 38px;
     border-radius: 6px;
 }
 QMenu::item:selected { background: #3a3a46; }
@@ -107,7 +107,7 @@ QMenu::separator {
     margin: 4px 8px;
 }
 QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { padding-left: 4px; }
+QMenu::icon { width: 24px; height: 24px; padding-left: 4px; }
 """
 
 

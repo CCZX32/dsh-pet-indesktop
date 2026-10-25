@@ -8,6 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit
 
 from ... import __version__
+from ...update import UpdateResult
 from .base import (
     SettingsPage,
     build_embedded_page,
@@ -66,6 +67,30 @@ class AboutPage(SettingsPage):
         self.pets_label = QLabel("", self)
         info_card.add_row("桌宠数", self.pets_label)
 
+        update_card = self.section("Core 更新")
+        self.update_status_label = QLabel("尚未检查", self)
+        self.update_status_label.setWordWrap(True)
+        update_card.add_row("状态", self.update_status_label)
+        check_update_button = make_button("检查更新", self)
+        check_update_button.clicked.connect(self._check_update)
+        self.download_update_button = make_button("下载更新", self)
+        self.download_update_button.setEnabled(False)
+        self.download_update_button.clicked.connect(self._download_update)
+        self.install_update_button = make_button("安装更新", self)
+        self.install_update_button.setEnabled(False)
+        self.install_update_button.clicked.connect(self._install_update)
+        self.cancel_update_button = make_button("取消下载", self)
+        self.cancel_update_button.setEnabled(False)
+        self.cancel_update_button.clicked.connect(self._cancel_update)
+        update_card.add_buttons(
+            [
+                check_update_button,
+                self.download_update_button,
+                self.install_update_button,
+                self.cancel_update_button,
+            ]
+        )
+
         open_button = make_button("打开数据目录", self)
         open_button.clicked.connect(self._open_data_dir)
         reload_button = make_button("重新加载扩展", self)
@@ -83,6 +108,7 @@ class AboutPage(SettingsPage):
         self.snapshot_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.snapshot_view.setMinimumHeight(220)
         snapshot_card.add_widget(self.snapshot_view)
+        self.set_update_status(getattr(self.host, "update_status", lambda: None)())
 
     def _mods(self) -> tuple:
         result = getattr(self.host, "load_result", None)
@@ -137,6 +163,42 @@ class AboutPage(SettingsPage):
         self.mods_label.setText(str(len(report["mods"])))
         self.pets_label.setText(str(len(report["pets"])))
         self.snapshot_view.setPlainText(json.dumps(report, ensure_ascii=False, indent=2))
+        self.set_update_status(getattr(self.host, "update_status", lambda: None)())
+
+    def set_update_status(self, result: UpdateResult | None) -> None:
+        if not hasattr(self, "update_status_label") or result is None:
+            return
+        message = str(result.message or result.state or "尚未检查")
+        if result.version:
+            message = f"{message}（{result.version}）"
+        if result.path:
+            message = f"{message}\n文件：{result.path}"
+        self.update_status_label.setText(message)
+        self.download_update_button.setEnabled(result.state == "available")
+        self.install_update_button.setEnabled(
+            result.state == "downloaded" and result.path is not None
+        )
+        self.cancel_update_button.setEnabled(result.state == "downloading")
+
+    def _check_update(self) -> None:
+        callback = getattr(self.host, "check_for_updates", None)
+        if callable(callback):
+            callback()
+
+    def _download_update(self) -> None:
+        callback = getattr(self.host, "download_update", None)
+        if callable(callback):
+            callback()
+
+    def _install_update(self) -> None:
+        callback = getattr(self.host, "install_update", None)
+        if callable(callback):
+            callback()
+
+    def _cancel_update(self) -> None:
+        callback = getattr(self.host, "cancel_update", None)
+        if callable(callback):
+            callback()
 
     def _copy_report(self) -> None:
         QApplication.clipboard().setText(self.snapshot_view.toPlainText())
@@ -188,5 +250,11 @@ class AboutPage(SettingsPage):
             "links",
             "network",
             "memory",
+            "更新",
+            "检查更新",
+            "下载更新",
+            "安装更新",
+            "取消下载",
+            "update",
             *self._embedded_keywords(),
         ]

@@ -456,6 +456,20 @@ def core_items(window) -> dict[str, MenuItem]:
             icon="network",
             order=95,
         ),
+        "show_balance": MenuItem(
+            "show_balance",
+            "显示余额",
+            callback=lambda: getattr(getattr(window, "host", None), "request_balance", lambda *_args, **_kwargs: None)(getattr(window, "slot", 0), force=True),
+            icon="network",
+            order=97,
+        ),
+        "check_update": MenuItem(
+            "check_update",
+            "检查更新",
+            callback=lambda: getattr(getattr(window, "host", None), "check_for_updates", lambda: None)(),
+            icon="refresh",
+            order=98,
+        ),
         "easter_egg": MenuItem(
             "easter_egg",
             "彩蛋图片",
