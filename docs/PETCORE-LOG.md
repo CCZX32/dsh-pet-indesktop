@@ -2690,3 +2690,15 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：`tests/test_petcore_*.py` 由 PowerShell 显式展开后 **1479 passed in 132.94s (0:02:12)**；`tests/test_petcore_architecture.py tests/test_petcore_docs.py tests/test_petcore_settings_coverage.py tests/test_pr_report_discipline.py` **302 passed in 4.03s**；`.venv\Scripts\python.exe -m ruff check petcore tests scripts` → `All checks passed!`；`git diff --check` 在清理报告 Markdown 尾随空格后通过。此前已完成的一次整仓 **9957 passed / 20 skipped / 15 warnings / 3048.17s / exit 0** 仅保留为历史证据，不再重复。
 
 **限制与下一断点**：本机探针为单屏/DPR 1.0，PyInstaller 未安装；双屏混合 DPI、候选包、macOS/Linux、真实 TTS/CDN/余额服务和公开 Release 仍未验收。下一步只做最终文档提交、SSH over 443 `fetch` + `merge --ff-only`，若远端无新提交则推送 `origin/feat/petcore-vpet-architecture`。
+
+## L079 — 2026-10-25 — 候选包构建交接与弱模型执行说明
+
+**边界**：将 PyInstaller/Inno Setup、Windows 候选包构建、隔离数据目录验收和证据留存交给另一台电脑执行；本机不安装打包工具、不构建冻结包、不上传 Release。后续测试范围继续按用户要求限定为 `petcore` 与必要的 petcore 专项门禁，不重复旧 `pet` 实现整仓测试。
+
+**改动**：新增 `docs/PETCORE-CANDIDATE-PACKAGING-TASK-2026-10-25.md`（详细任务说明）和 `docs/PETCORE-CANDIDATE-PACKAGING-HANDOFF-2026-10-25.md`（可推送交接文档），按环境探针、独立 venv、petcore-only 门禁、onedir、候选 `--check`、Inno 安装器、实机冒烟、SHA/文件清单、停止条件和最终回传格式编排；另在 `.scratch/petcore-packaging-candidate/HANDOFF.md` 保留本地交接副本；更新 `docs/INDEX.md` 登记两份文档。
+
+**逐文件增删**：本次提交前以 `git diff --numstat` 为准；产品代码、构建脚本和依赖声明均未修改。构建二进制、个人配置和探针输出只允许留在被忽略的 `.scratch` 路径。
+
+**验证**：本次仅做文档/交接改动；提交前执行 `git diff --check`、`tests/test_petcore_docs.py`、`tests/test_petcore_architecture.py`、`tests/test_petcore_settings_coverage.py`、`tests/test_pr_report_discipline.py` 及 Ruff。既有 petcore 终态证据为 1479 passed、专项门禁 302 passed、Ruff 通过；PyInstaller、候选包、安装器、双屏和跨平台验证由继任电脑按任务说明实际执行。
+
+**下一断点**：继任模型完成或阻断候选包构建后，回填真实工具版本、退出码、SHA、安装/卸载结果和验证缺口；候选验收不等于公开 Release。

@@ -110,3 +110,5 @@
 | L076 | 2026-10-25 | 角色导入与媒体生命周期 | ZIP 安全导入、点击按下/释放 token、彩蛋头像/提示、关闭音频取消 | character、ZIP、click sound、easter egg |
 | L077 | 2026-10-25 | parity 设置与动画入口 | ZIP 设置入口、余额异步查询、彩蛋设置契约、GraphType 懒加载菜单 | settings、balance、GraphType、menu |
 | L078 | 2026-10-25 | 重构收尾文档与 petcore-only 最终门禁 | 运行时/媒体/parity 状态、最终报告、交接断点；petcore 1479 passed，专项门禁 302 passed，Ruff 通过 | 交付、petcore-only、报告、handoff、缺口 |
+
+| L079 | 2026-10-25 | 候选包构建交接与弱模型任务说明 | PyInstaller/Inno Setup、隔离验收、SHA 证据、停止条件与 petcore-only 门禁；不上传 Release | 候选包、安装器、交接、证据 |

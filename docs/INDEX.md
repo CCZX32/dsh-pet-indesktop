@@ -146,6 +146,9 @@
 
 - [petcore 修复、重构收尾与分支交付（2026-10-25）](PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md)：运行时迁移/Worker、媒体与角色导入、点击音效、彩蛋/余额设置、GraphType 入口、petcore-only 门禁与环境缺口；接手本轮提交或核对推送结果前必读。
 
+- [petcore 候选包构建与隔离验收任务（2026-10-25）](PETCORE-CANDIDATE-PACKAGING-TASK-2026-10-25.md)：交给另一台 Windows 电脑执行的 PyInstaller/Inno Setup 构建、候选包 `--check`、隔离安装验收、SHA 证据和阻断条件；不包含公开 Release。
+- [petcore 候选包构建交接（2026-10-25）](PETCORE-CANDIDATE-PACKAGING-HANDOFF-2026-10-25.md)：交给另一台 Windows 电脑的基线、已验证证据、执行顺序、停止条件和回传格式；详细步骤见候选包任务说明。
+
 - [D2/T09 收口：性能·整仓·安装器·发布准备](PR-REPORT-PETCORE-DISTRIBUTION-T09-2026-10-24.md)：before/after 无回退、整仓 9941 passed、安装器四组合矩阵与 MSYS 参数排查留痕；判断「能不能发」或接手发布前必读，配套 [发布手册](PETCORE-EXTENSIONS-RELEASE.md)。
 
 - [D2/T08 冻结候选包与签名](PR-REPORT-PETCORE-DISTRIBUTION-T08-2026-10-24.md)：`-OutputRoot` 隔离构建、iss 源目录覆盖（修「打旧包」）、开发证书签名与冻结包自检/四包安装证据；再打包或验收安装包前必读。
