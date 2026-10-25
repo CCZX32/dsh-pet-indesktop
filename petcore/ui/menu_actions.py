@@ -225,6 +225,17 @@ def _populate_animations(window, menu: QMenu) -> None:
         ],
     )
     added |= _add_lazy_group(menu, "点击回应", window, catalog.names_for(GraphType.TOUCH_BODY))
+    # Keep menu discovery aligned with PetWindow's GraphType lookup.  These
+    # groups are optional per character; missing resources simply stay hidden.
+    for graph, label in (
+        (GraphType.TOUCH_HEAD, "摸头"),
+        (GraphType.SAY, "说话"),
+        (GraphType.SLEEP, "睡觉"),
+        (GraphType.STARTUP, "启动"),
+        (GraphType.WORK, "工作"),
+        (GraphType.RAISED_DYNAMIC, "悬空/抛掷"),
+    ):
+        added |= _add_lazy_group(menu, label, window, catalog.names_for(graph))
     added |= _add_lazy_group(
         menu,
         "随机动作",

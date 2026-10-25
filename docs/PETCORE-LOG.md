@@ -2667,3 +2667,15 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **限制**：没有真实双屏/混合 DPI、冻结候选包或外部媒体服务条件；本批不声称媒体跨屏实机通过。
 
+## L077 — 2026-10-25 — 已有 parity 设置、余额入口与 GraphType 菜单收口
+
+**边界**：只补已有 Core 账户、设置和动画入口，不新增 provider、不扩展 Agent 写端、不改变默认开关和设置作用域。
+
+**改动**：`petcore/ui/settings/pages_core.py` 增加 ZIP 导入入口；`page_interaction.py` 增加 `easter_egg_hint`/`easter_egg_avatar` 的实时预览、保存、取消和搜索；`page_api.py` 增加异步余额查询按钮、稳定错误反馈和 disposed 后迟到结果抑制；`menu_actions.py` 使用同一 `GraphType` 枚举增加摸头、说话、睡觉、启动、工作、悬空/抛掷的可选懒加载分组。
+
+**逐文件增删**：`petcore/ui/menu_actions.py` +11/−0、`petcore/ui/settings/page_api.py` +73/−1、`petcore/ui/settings/page_interaction.py` +64/−0、`petcore/ui/settings/pages_core.py` +28/−8。
+
+**验证**：API/账户/设置/覆盖 petcore 族 95 passed / 52.08s；与运行时、媒体和角色回归合计 136 passed / 23.24s；架构、文档和设置覆盖门禁 318 passed / 4.46s；Ruff 通过。余额失败只显示分类原因，不将失败伪装成 0；真实外部服务未调用。
+
+**限制**：GraphType 分组按角色资源懒加载，缺资源时保持隐藏并回退已有动作；未把“所有角色都具备全部动画资源”写成通过。候选包、双屏、多平台和公开发布仍未验收。
+

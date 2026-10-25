@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import paths
+from ...account.service import AccountError
 from ...api.credentials import KeyringCredentials
 from ...api.probe import ProbeResult, probe_text
 from ...api.spec import ApiService
@@ -48,6 +49,32 @@ _ERROR_TEXT = {
 
 class _ProbeSignals(QObject):
     finished = Signal(object)
+
+
+class _BalanceSignals(QObject):
+    finished = Signal(object)
+
+
+class _BalanceWorker(QRunnable):
+    def __init__(self, account, service_id: str, signals: _BalanceSignals):
+        super().__init__()
+        self._account = account
+        self._service_id = service_id
+        self.signals = signals
+
+    def run(self) -> None:
+        try:
+            result = self._account.fetch_balance(self._service_id, force=True)
+            payload = (True, result)
+        except AccountError as exc:
+            payload = (False, exc)
+        except Exception as exc:  # noqa: BLE001 - UI must receive a stable result
+            logger.warning("余额查询异常：%s", type(exc).__name__)
+            payload = (False, AccountError("network"))
+        try:
+            self.signals.finished.emit(payload)
+        except RuntimeError:
+            pass
 
 
 class _ProbeWorker(QRunnable):
@@ -85,6 +112,8 @@ class ApiSettingsPage(SettingsPage):
         self._baseline: ApiService | None = None
         self._probe_running = False
         self._probe_signals: _ProbeSignals | None = None
+        self._balance_running = False
+        self._balance_signals: _BalanceSignals | None = None
         self._disposed = False
         self._refreshing = False
 
@@ -163,9 +192,12 @@ class ApiSettingsPage(SettingsPage):
         status_row.addWidget(self.status_label, 1)
         self.test_button = make_button("测试连接", panel)
         self.test_button.clicked.connect(self.test_connection)
+        self.balance_button = make_button("查询余额", panel)
+        self.balance_button.clicked.connect(self.query_balance)
         self.save_button = make_button("保存服务", panel, primary=True)
         self.save_button.clicked.connect(self.save_service)
         status_row.addWidget(self.test_button)
+        status_row.addWidget(self.balance_button)
         status_row.addWidget(self.save_button)
         right.addLayout(status_row)
         right.addStretch(1)
@@ -316,7 +348,14 @@ class ApiSettingsPage(SettingsPage):
 
     def _sync_buttons(self) -> None:
         self.remove_button.setEnabled(self._selected_id() is not None)
-        self.test_button.setEnabled(not self._probe_running)
+        busy = self._probe_running or self._balance_running
+        self.test_button.setEnabled(not busy)
+        service = self.store.get(self._selected_id() or "")
+        self.balance_button.setEnabled(
+            not busy
+            and service is not None
+            and service.balance_protocol != "none"
+        )
 
     def _on_store_changed(self) -> None:
         if self._disposed or self._refreshing:
@@ -408,6 +447,39 @@ class ApiSettingsPage(SettingsPage):
         signals.finished.connect(self._on_probe_done)
         self._probe_signals = signals
         QThreadPool.globalInstance().start(_ProbeWorker(service, key, signals))
+
+    def query_balance(self, *_args) -> None:
+        if self._probe_running or self._balance_running:
+            return
+        service_id = self._selected_id()
+        account = getattr(self.host, "account", None)
+        if not service_id or account is None:
+            self.status_label.setText("无法查询余额：请先选择已保存的服务。")
+            return
+        service = self.store.get(service_id)
+        if service is None or service.balance_protocol == "none":
+            self.status_label.setText("无法查询余额：当前服务未配置余额协议。")
+            return
+        self._balance_running = True
+        self._sync_buttons()
+        self.status_label.setText("正在查询余额…")
+        signals = _BalanceSignals()
+        signals.finished.connect(self._on_balance_done)
+        self._balance_signals = signals
+        QThreadPool.globalInstance().start(_BalanceWorker(account, service_id, signals))
+
+    def _on_balance_done(self, payload) -> None:
+        if self._disposed:
+            return
+        self._balance_running = False
+        self._balance_signals = None
+        self._sync_buttons()
+        ok, value = payload if isinstance(payload, tuple) and len(payload) == 2 else (False, None)
+        if ok:
+            self.status_label.setText(value.format_text())
+            return
+        reason = getattr(value, "reason", "network")
+        self.status_label.setText(f"余额查询失败：{describe(reason)}")
 
     def _on_probe_done(self, result) -> None:
         if self._disposed:

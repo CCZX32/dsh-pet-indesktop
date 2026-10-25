@@ -74,13 +74,21 @@ class GeneralPage(SettingsPage):
 
         import_button = make_button("导入角色目录", self)
         import_button.clicked.connect(self._import_character)
-        self.import_status = QLabel("支持包含 videos/ 和 manifest.json 的角色目录。", self)
+        import_zip_button = make_button("导入角色 ZIP", self)
+        import_zip_button.clicked.connect(self._import_character_zip)
+        import_row = QWidget(self)
+        import_layout = QHBoxLayout(import_row)
+        import_layout.setContentsMargins(0, 0, 0, 0)
+        import_layout.setSpacing(8)
+        import_layout.addWidget(import_button)
+        import_layout.addWidget(import_zip_button)
+        self.import_status = QLabel("支持包含 videos/ 和 manifest.json 的角色目录或 ZIP。", self)
         self.import_status.setObjectName("settingHint")
         self.import_status.setWordWrap(True)
         data_card.add_row(
             "角色资源包",
-            import_button,
-            "选择角色目录后生成并安装 content mod；导入成功后可在角色下拉框切换。",
+            import_row,
+            "选择角色目录或 ZIP 后生成并安装 content mod；不会覆盖已有角色。",
         )
         data_card.add_widget(self.import_status)
 
@@ -113,14 +121,24 @@ class GeneralPage(SettingsPage):
         source = QFileDialog.getExistingDirectory(
             self, "选择角色资源目录", str(getattr(self.host, "root", ""))
         )
-        if not source:
-            return
+        if source:
+            self._import_character_source(Path(source))
+
+    def _import_character_zip(self) -> None:
+        source, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择角色 ZIP",
+            str(getattr(self.host, "root", "")),
+            "角色包 (*.zip)",
+        )
+        if source:
+            self._import_character_source(Path(source))
+
+    def _import_character_source(self, source: Path) -> None:
         try:
             from ...content.importer import install_character_source
 
-            ok, message, character_id = install_character_source(
-                Path(source), self.host.root
-            )
+            ok, message, character_id = install_character_source(source, self.host.root)
         except Exception as exc:
             ok, message, character_id = False, f"导入失败：{type(exc).__name__}: {exc}", None
         if not ok or not character_id:
@@ -197,6 +215,8 @@ class GeneralPage(SettingsPage):
             "启动",
             "自启",
             "数据目录",
+            "角色资源包",
+            "ZIP",
             "退出",
             "general",
             "character",

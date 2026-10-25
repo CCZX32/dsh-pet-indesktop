@@ -288,6 +288,41 @@ class InteractionPage(SettingsPage):
             self.easter_title.textChanged.connect(self._on_changed)
             egg_card.add_row("标题", self.easter_title, "弹窗里显示的标题，留空则不显示。")
 
+            self.easter_hint = QLineEdit(self)
+            self.easter_hint.setMaxLength(80)
+            self.easter_hint.setText(str(self.config().get("easter_egg_hint") or ""))
+            self.easter_hint.setMinimumWidth(220)
+            self.easter_hint.textChanged.connect(self._on_changed)
+            egg_card.add_row(
+                "操作提示",
+                self.easter_hint,
+                "独立彩蛋窗口底部的提示文案；留空使用默认提示。",
+            )
+
+            avatar_row = QWidget(self)
+            avatar_layout = QHBoxLayout(avatar_row)
+            avatar_layout.setContentsMargins(0, 0, 0, 0)
+            avatar_layout.setSpacing(8)
+            self.easter_avatar_edit = value_field("", avatar_row)
+            self.easter_avatar_edit.setMinimumWidth(220)
+            self.easter_avatar_edit.setText(
+                str(self.config().get("easter_egg_avatar") or "")
+            )
+            self.easter_avatar_edit.textChanged.connect(self._on_changed)
+            avatar_layout.addWidget(self.easter_avatar_edit, 1)
+            choose_avatar = make_button("选择图片…", avatar_row)
+            choose_avatar.clicked.connect(self._choose_easter_avatar)
+            avatar_layout.addWidget(choose_avatar)
+            clear_avatar = make_button("清空（随机）", avatar_row)
+            clear_avatar.clicked.connect(self._clear_easter_avatar)
+            avatar_layout.addWidget(clear_avatar)
+            egg_card.add_row(
+                "指定头像",
+                avatar_row,
+                "无效或留空时回退到图片目录中的首张可读图片。",
+                expand=True,
+            )
+
             egg_dir_row = QWidget(self)
             egg_dir_layout = QHBoxLayout(egg_dir_row)
             egg_dir_layout.setContentsMargins(0, 0, 0, 0)
@@ -487,6 +522,19 @@ class InteractionPage(SettingsPage):
         self.easter_dir_edit.setPlaceholderText("留空使用内置图片目录")
         self.easter_dir_edit.setToolTip(text or "留空使用内置图片目录")
 
+    def _choose_easter_avatar(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择彩蛋头像",
+            str(self.config().get("easter_egg_image_dir") or ""),
+            "图片 (*.png *.jpg *.jpeg *.webp *.gif)",
+        )
+        if path:
+            self.easter_avatar_edit.setText(path)
+
+    def _clear_easter_avatar(self) -> None:
+        self.easter_avatar_edit.clear()
+
     def _choose_easter_dir(self) -> None:
         config = self.config()
         folder = QFileDialog.getExistingDirectory(
@@ -594,6 +642,8 @@ class InteractionPage(SettingsPage):
         values["easter_egg_enabled"] = bool(config.get("easter_egg_enabled"))
         values["easter_egg_display"] = self._easter_display_value()
         values["easter_egg_title"] = str(config.get("easter_egg_title") or "")
+        values["easter_egg_hint"] = str(config.get("easter_egg_hint") or "")
+        values["easter_egg_avatar"] = str(config.get("easter_egg_avatar") or "")
         values["easter_egg_image_dir"] = str(config.get("easter_egg_image_dir") or "")
         values["easter_egg_image_scale"] = int(
             config.get("easter_egg_image_scale") or 100
@@ -618,6 +668,8 @@ class InteractionPage(SettingsPage):
             self.easter_display.currentData() or EASTER_DISPLAY_DEFAULT
         )
         values["easter_egg_title"] = self.easter_title.text().strip()
+        values["easter_egg_hint"] = self.easter_hint.text().strip()
+        values["easter_egg_avatar"] = self.easter_avatar_edit.text().strip()
         values["easter_egg_image_dir"] = self.easter_dir_edit.text().strip()
         values["easter_egg_image_scale"] = int(self.easter_image_scale.value())
         values["self_talk_image_dir"] = self.self_talk_dir_edit.text().strip()
@@ -639,6 +691,8 @@ class InteractionPage(SettingsPage):
         config.set("easter_egg_enabled", values["easter_egg_enabled"])
         config.set(EASTER_DISPLAY_KEY, values["easter_egg_display"])
         config.set("easter_egg_title", values["easter_egg_title"])
+        config.set("easter_egg_hint", values["easter_egg_hint"])
+        config.set("easter_egg_avatar", values["easter_egg_avatar"])
         config.set("easter_egg_image_dir", values["easter_egg_image_dir"])
         config.set("easter_egg_image_scale", values["easter_egg_image_scale"])
         config.set("self_talk_image_dir", values["self_talk_image_dir"])
@@ -667,6 +721,8 @@ class InteractionPage(SettingsPage):
         config.set("easter_egg_enabled", self._initial["easter_egg_enabled"])
         config.set(EASTER_DISPLAY_KEY, self._initial["easter_egg_display"])
         config.set("easter_egg_title", self._initial["easter_egg_title"])
+        config.set("easter_egg_hint", self._initial["easter_egg_hint"])
+        config.set("easter_egg_avatar", self._initial["easter_egg_avatar"])
         config.set("easter_egg_image_dir", self._initial["easter_egg_image_dir"])
         config.set("easter_egg_image_scale", self._initial["easter_egg_image_scale"])
         config.set("self_talk_image_dir", self._initial["self_talk_image_dir"])
@@ -697,6 +753,12 @@ class InteractionPage(SettingsPage):
         self.easter_title.blockSignals(True)
         self.easter_title.setText(str(self._initial["easter_egg_title"]))
         self.easter_title.blockSignals(False)
+        self.easter_hint.blockSignals(True)
+        self.easter_hint.setText(str(self._initial["easter_egg_hint"]))
+        self.easter_hint.blockSignals(False)
+        self.easter_avatar_edit.blockSignals(True)
+        self.easter_avatar_edit.setText(str(self._initial["easter_egg_avatar"]))
+        self.easter_avatar_edit.blockSignals(False)
         self.easter_display.blockSignals(True)
         self.easter_display.setCurrentIndex(
             max(0, self.easter_display.findData(str(self._initial["easter_egg_display"])))
@@ -739,6 +801,8 @@ class InteractionPage(SettingsPage):
             "彩蛋图片",
             "显示方式",
             "图片大小",
+            "指定头像",
+            "操作提示",
             "独立窗口",
             "easter egg",
             "拖拽",

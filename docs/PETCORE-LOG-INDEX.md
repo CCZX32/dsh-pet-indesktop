@@ -108,3 +108,4 @@
 
 | L075 | 2026-10-25 | 运行时迁移与 Worker 收口 | 迁移状态/诊断、session/todo schema、Worker 有界退出和非法消息拒收；新增 156 行回归 | migration、schema、Worker、shutdown |
 | L076 | 2026-10-25 | 角色导入与媒体生命周期 | ZIP 安全导入、点击按下/释放 token、彩蛋头像/提示、关闭音频取消 | character、ZIP、click sound、easter egg |
+| L077 | 2026-10-25 | parity 设置与动画入口 | ZIP 设置入口、余额异步查询、彩蛋设置契约、GraphType 懒加载菜单 | settings、balance、GraphType、menu |
