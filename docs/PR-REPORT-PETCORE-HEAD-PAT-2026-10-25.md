@@ -12,13 +12,13 @@
 
 ## 二、修改文件说明
 
-以下增删来自本轮代码/测试/文档修改的 `git diff --numstat`；两个新文件在报告生成时仍为未跟踪文件，因此同时列出实际行数。
+以下增删来自本轮代码/测试/文档修改的 `git diff --numstat`；两个新文件的行数按本轮新增文件实际行数列出。
 
 ### 实现
 
 | 文件 | 增删 | 改动意图 |
 |---|---:|---|
-| `petcore/engine/head_pat.py` | +167 / −0（新文件，未跟踪） | 提供无 Qt 的 `HeadPatTracker`、候选动画过滤、三种动画池和避免连续重复的选择器。 |
+| `petcore/engine/head_pat.py` | +167 / −0（新文件） | 提供无 Qt 的 `HeadPatTracker`、候选动画过滤、三种动画池和避免连续重复的选择器。 |
 | `petcore/config.py` | +31 / −0 | 增加 `head_pat_enabled`、动画模式和名称列表默认值、归一化、数量/长度限制。 |
 | `petcore/ui/pet_window.py` | +89 / −1 | 启用鼠标跟踪，使用逻辑坐标和 `head_box` 命中，接入忙碌状态/lifecycle 清理和 `head_pat` 播放入口。 |
 | `petcore/ui/settings/page_interaction.py` | +202 / −0 | 在现有互动/动画设置页增加开关、模式、多选列表、全选/恢复点击/清空，并实现实时应用与取消恢复。 |
@@ -29,7 +29,7 @@
 
 | 文件 | 增删 | 覆盖 |
 |---|---:|---|
-| `tests/test_petcore_head_pat.py` | +137 / −0（新文件，未跟踪） | 轨迹阈值、反向移动、离开/冷却/超时、三种动画选择、非法名称和不连续重复、配置归一化。 |
+| `tests/test_petcore_head_pat.py` | +137 / −0（新文件） | 轨迹阈值、反向移动、离开/冷却/超时、三种动画选择、非法名称和不连续重复、配置归一化。 |
 | `tests/test_petcore_interaction.py` | +71 / −1 | `head_box` 命中、鼠标跟踪、透明/忙碌/click-through 抑制和 `head_pat` 动作入口。 |
 | `tests/test_petcore_settings.py` | +43 / −1 | 设置默认值、实时修改、slot 配置快照和 Cancel 恢复。 |
 
@@ -96,6 +96,7 @@
 - 本轮没有安装 PyInstaller，也不涉及冻结包、安装器、Release 或 CDN。
 - 本轮没有新增“节奏/灵敏度”设置；判定阈值固定在计划确定值，后续若要开放调节应先补配置迁移和设置契约评审。
 - 角色若没有合格单次动画，摸头不触发并通过既有诊断节流记录，不伪造可播放状态。
+- 本轮实现提交为 2a5f80e9；候选构建、安装器、Release 和 CDN 仍交由另一台电脑按交接任务执行。
 
 ## 八、风险与回滚
 

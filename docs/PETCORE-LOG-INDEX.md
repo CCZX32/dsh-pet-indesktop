@@ -112,4 +112,4 @@
 | L078 | 2026-10-25 | 重构收尾文档与 petcore-only 最终门禁 | 运行时/媒体/parity 状态、最终报告、交接断点；petcore 1479 passed，专项门禁 302 passed，Ruff 通过 | 交付、petcore-only、报告、handoff、缺口 |
 
 | L079 | 2026-10-25 | 候选包构建交接与弱模型任务说明 | PyInstaller/Inno Setup、隔离验收、SHA 证据、停止条件与 petcore-only 门禁；不上传 Release | 候选包、安装器、交接、证据 |
-| L080 | 2026-10-25 | petcore 摸头互动 | 头部命中、连续往返判定、可配置单次动画池、设置契约与回归证据；1490 passed | head_pat、head_box、InteractionPage、动画池、生命周期 |
+| L080 | 2026-10-25 | petcore 摸头互动 | 头部命中、连续往返判定、可配置单次动画池、设置契约与回归证据；1490 passed；实现提交 `2a5f80e9` | head_pat、head_box、InteractionPage、动画池、生命周期 |
