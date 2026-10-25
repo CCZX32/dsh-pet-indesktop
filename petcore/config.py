@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,32 @@ from .engine.geometry import SCALE_MAX, SCALE_MIN
 from .platform import hotkey_spec
 
 SCHEMA_VERSION = 1
+
+MIGRATION_STATUSES = frozenset({
+    "not_needed",
+    "migrated",
+    "already_migrated",
+    "skipped_invalid",
+    "failed_backup",
+    "failed_write",
+    "failed_validation",
+})
+
+
+@dataclass(frozen=True)
+class MigrationRecord:
+    """诊断一次迁移尝试；不包含配置值，避免把凭据写入日志。"""
+
+    status: str
+    source: str | None = None
+    target: str | None = None
+    backup: str | None = None
+    stage: str = ""
+    error: str = ""
+    retryable: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 # Settings which belong to the process rather than the pet selected in the
 # settings window.  Unknown keys deliberately stay per-pet so new pet-local
@@ -153,6 +180,8 @@ DEFAULTS: dict[str, Any] = {
     "stream_capture_mode": False,
     "easter_egg_enabled": True,
     "easter_egg_title": "鲸鱼娘彩蛋",
+    "easter_egg_hint": "点击任意处关闭",
+    "easter_egg_avatar": "",
     "easter_egg_image_dir": "",
     "easter_egg_image_scale": 100,
     "easter_egg_display": "bubble",
@@ -345,6 +374,9 @@ _LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "self_talk_image_dir": ("self_talk_image_dir",),
     "self_talk_image_scale": ("self_talk_image_scale",),
     "self_talk_image_chance": ("self_talk_image_chance",),
+    "easter_egg_title": ("easter_egg_title",),
+    "easter_egg_hint": ("easter_egg_hint",),
+    "easter_egg_avatar": ("easter_egg_avatar",),
     "bubble_text_scale": ("bubble_text_scale",),
     "drag_physics_enabled": ("drag_physics_enabled", "drag_physics"),
     "drop_gravity_enabled": ("drop_gravity_enabled", "drop_gravity"),
@@ -592,7 +624,14 @@ class Config:
     def __init__(self, root: Path, data: dict[str, Any] | None = None, *, filename: str | None = None):
         self.root = Path(root)
         self.path = self.root / filename if filename else paths.config_path(self.root)
+        self.migration_records: list[MigrationRecord] = []
+        self._legacy_source: Path | None = None
         self.data = self._normalize(data if data is not None else dict(DEFAULTS))
+
+    def _record_migration(self, status: str, **kwargs: object) -> None:
+        if status not in MIGRATION_STATUSES:
+            raise ValueError(f"unknown migration status: {status}")
+        self.migration_records.append(MigrationRecord(status=status, **kwargs))
 
     @classmethod
     def load(cls, root: Path, *, portable: bool = False, filename: str | None = None) -> "Config":
@@ -601,79 +640,180 @@ class Config:
         if config.path.exists():
             try:
                 raw = json.loads(config.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                config._record_migration(
+                    "skipped_invalid",
+                    source=str(config.path),
+                    target=str(config.path),
+                    stage="read-current",
+                    error=type(exc).__name__,
+                    retryable=True,
+                )
                 raw = None
             if isinstance(raw, dict):
                 config.data = config._normalize({**DEFAULTS, **raw})
+                config._record_migration(
+                    "not_needed", source=str(config.path), target=str(config.path), stage="load"
+                )
                 return config
         if filename is not None:
+            config._record_migration("not_needed", target=str(config.path), stage="variant-load")
             return config
         legacy = config._read_legacy()
         if legacy:
+            # The legacy source is backed up before either global or slot data is
+            # written.  A backup failure leaves the old source untouched and is
+            # explicitly retryable on the next startup.
+            if not config._ensure_legacy_backup():
+                return config
             config.data.update(legacy)
-            config.save()
+            try:
+                config.save()
+            except OSError as exc:
+                config._record_migration(
+                    "failed_write",
+                    source=str(config._legacy_source) if config._legacy_source else None,
+                    target=str(config.path),
+                    stage="write-global",
+                    error=type(exc).__name__,
+                    retryable=True,
+                )
+                return config
+            config._record_migration(
+                "migrated",
+                source=str(config._legacy_source) if config._legacy_source else None,
+                target=str(config.path),
+                backup=str(config.root / "migration-backup"),
+                stage="write-global",
+            )
             config._migrate_legacy_slots()
+        elif not config.migration_records:
+            config._record_migration("not_needed", target=str(config.path), stage="load")
         return config
 
     def _read_legacy(self) -> dict[str, Any]:
         for root in paths.legacy_data_roots():
             path = root / "config.json"
+            if not path.is_file():
+                continue
+            self._legacy_source = root
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                self._record_migration(
+                    "skipped_invalid", source=str(path), stage="read-legacy", error=type(exc).__name__, retryable=True
+                )
                 continue
             if not isinstance(raw, dict):
+                self._record_migration(
+                    "skipped_invalid", source=str(path), stage="validate-legacy", error="not-object", retryable=False
+                )
                 continue
             imported = _map_legacy_data(raw)
             if imported:
                 return self._normalize({**DEFAULTS, **imported})
+            self._record_migration(
+                "failed_validation", source=str(path), stage="map-legacy", error="no-supported-keys", retryable=False
+            )
         return {}
 
-    def _migrate_legacy_slots(self) -> list[str]:
-        """Copy old slot profiles into petcore files without touching the source."""
-        migrated: list[str] = []
-        source_root = None
-        for root in paths.legacy_data_roots():
-            if (root / "config.json").is_file():
-                source_root = root
-                break
+    def _ensure_legacy_backup(self) -> bool:
+        source_root = self._legacy_source
         if source_root is None:
-            return migrated
+            return True
         backup_root = self.root / "migration-backup"
+        backup = backup_root / f"{source_root.name}-config.json"
         try:
             backup_root.mkdir(parents=True, exist_ok=True)
-            backup = backup_root / f"{source_root.name}-config.json"
             if not backup.exists():
                 shutil.copy2(source_root / "config.json", backup)
-        except OSError:
-            # A backup failure must not alter the old source or prevent normal
-            # startup; the migration report is represented by diagnostics.
+        except OSError as exc:
+            self._record_migration(
+                "failed_backup",
+                source=str(source_root / "config.json"),
+                target=str(self.path),
+                backup=str(backup),
+                stage="backup-global",
+                error=type(exc).__name__,
+                retryable=True,
+            )
+            return False
+        return True
+
+    def _migrate_legacy_slots(self) -> list[str]:
+        """Copy old slot profiles with backup-first, atomic and diagnosable writes."""
+        migrated: list[str] = []
+        source_root = self._legacy_source
+        if source_root is None:
+            for root in paths.legacy_data_roots():
+                if (root / "config.json").is_file():
+                    source_root = root
+                    self._legacy_source = root
+                    break
+        if source_root is None:
             return migrated
+        if not self._ensure_legacy_backup():
+            return migrated
+        backup_root = self.root / "migration-backup"
         for candidate in sorted(source_root.glob("config-slot-*.json")) + sorted(
             source_root.glob("config-pet-*.json")
         ):
             stem = candidate.stem
             suffix = stem.removeprefix("config-slot-").removeprefix("config-pet-")
             if not suffix.isdigit() or not 0 < int(suffix) < 16:
+                self._record_migration(
+                    "skipped_invalid", source=str(candidate), stage="validate-slot-name", error="invalid-slot"
+                )
                 continue
             target = self.root / f"config-pet-{int(suffix)}.json"
             if target.exists():
+                self._record_migration(
+                    "already_migrated", source=str(candidate), target=str(target), stage="slot-exists"
+                )
                 continue
             try:
                 raw = json.loads(candidate.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                self._record_migration(
+                    "skipped_invalid", source=str(candidate), target=str(target), stage="read-slot",
+                    error=type(exc).__name__, retryable=True,
+                )
                 continue
             if not isinstance(raw, dict):
+                self._record_migration(
+                    "skipped_invalid", source=str(candidate), target=str(target), stage="validate-slot",
+                    error="not-object",
+                )
                 continue
             mapped = _map_legacy_data(raw)
             if not mapped:
+                self._record_migration(
+                    "failed_validation", source=str(candidate), target=str(target), stage="map-slot",
+                    error="no-supported-keys",
+                )
                 continue
-            Config(self.root, mapped, filename=target.name).save()
-            migrated.append(target.name)
+            slot_backup = backup_root / f"{source_root.name}-{candidate.name}"
             try:
-                shutil.copy2(candidate, backup_root / f"{source_root.name}-{candidate.name}")
-            except OSError:
-                pass
+                if not slot_backup.exists():
+                    shutil.copy2(candidate, slot_backup)
+            except OSError as exc:
+                self._record_migration(
+                    "failed_backup", source=str(candidate), target=str(target), backup=str(slot_backup),
+                    stage="backup-slot", error=type(exc).__name__, retryable=True,
+                )
+                continue
+            try:
+                Config(self.root, mapped, filename=target.name).save()
+            except OSError as exc:
+                self._record_migration(
+                    "failed_write", source=str(candidate), target=str(target), backup=str(slot_backup),
+                    stage="write-slot", error=type(exc).__name__, retryable=True,
+                )
+                continue
+            migrated.append(target.name)
+            self._record_migration(
+                "migrated", source=str(candidate), target=str(target), backup=str(slot_backup), stage="write-slot"
+            )
         return migrated
 
     def _normalize(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -714,6 +854,13 @@ class Config:
         normalized["easter_egg_title"] = (
             DEFAULTS["easter_egg_title"] if title is None else str(title)
         ).strip()[:40]
+        hint = normalized.get("easter_egg_hint")
+        normalized["easter_egg_hint"] = (
+            DEFAULTS["easter_egg_hint"] if hint is None else str(hint)
+        ).strip()[:80]
+        normalized["easter_egg_avatar"] = str(
+            normalized.get("easter_egg_avatar") or ""
+        ).strip()[:500]
         normalized["easter_egg_image_dir"] = str(
             normalized.get("easter_egg_image_dir") or ""
         ).strip()

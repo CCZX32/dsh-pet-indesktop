@@ -105,3 +105,5 @@
 | L072 | 2026-10-25 | 市场生命周期与授权修复 | 应用级市场任务 registry、可恢复下载、feature 解包预算、file 授权、结构化回滚、candidate/published 索引状态；90 passed | QThread、resume、archive limits、file://、rollback、candidate |
 | L073 | 2026-10-25 | WorkerHost 与 DPR 渲染收口 | worker 握手/心跳/取消/代次拒收，帧按屏 DPR 使用物理像素并保留镜像；5 passed | worker、generation、heartbeat、DPR、frame_pixmap |
 | L074 | 2026-10-25 | 重构收尾状态与交付证据 | candidate/published 文档边界、市场/Worker/DPR 收口范围、最终门禁待补原始输出 | 交付、parity、handoff、验收边界 |
+
+| L075 | 2026-10-25 | 运行时迁移与 Worker 收口 | 迁移状态/诊断、session/todo schema、Worker 有界退出和非法消息拒收；新增 156 行回归 | migration、schema、Worker、shutdown |

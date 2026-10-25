@@ -2642,3 +2642,15 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **交付**：`9e973b53`、`e371f92c`、`5c2ba786` 已按独立提交推送至 `origin/feat/petcore-vpet-architecture`，推送输出为 `6326e31c..5c2ba786`，返回码 0；未上传 Release、未推送 tag、未合并 main。
 
 **限制**：PyInstaller、双屏/混合 DPI、macOS/Linux、真实外部 TTS、真实 HTTPS/CDN 和公开 Release 未在本机完成；默认 C 盘旧数据迁移的 `os.replace` 探针返回 WinError 17，已记录为环境/迁移缺口；不沿用历史报告冒充本轮通过。
+
+## L075 — 2026-10-25 — 运行时迁移诊断与 Worker 生命周期收口
+
+**边界**：只改 petcore/Core 与 reminder.todo 的已存在运行时接缝；补齐迁移结果诊断、schema 识别、原子写入失败留痕和 Worker 子进程的有界退出/非法消息拒收。不新增业务 worker，不改变旧 `pet` 实现。
+
+**改动**：`petcore/config.py` 增加 `MigrationRecord`、状态集合、备份优先迁移和失败阶段诊断；`petcore/chat/session_store.py` 增加 schema/version 校验与诊断；`examples/petcore-mods/reminder.todo/host/store.py` 保留旧待办源并区分迁移/备份/写入/校验失败；`petcore/platform/worker.py` 增加 shutdown 锁、退出码、读管道线程有界收口和未知消息拒收；新增 `tests/test_petcore_refactor_final.py` 的迁移与 Worker 回归。
+
+**逐文件增删**：`examples/petcore-mods/reminder.todo/host/store.py` +57/−13、`petcore/chat/session_store.py` +26/−4、`petcore/config.py` +169/−22、`petcore/platform/worker.py` +66/−21、`tests/test_petcore_refactor_final.py` +156/−0（新文件）。
+
+**验证**：Ruff 全目录通过；编译通过；新增回归 6 passed / 1.00s；本轮受影响 petcore 联合族 136 passed / 23.24s；整仓本次门禁 9957 passed、20 skipped、15 warnings、3048.17s、exit 0。高负载三遍联合族均 136 passed，pytest 分别 29.44s、24.65s、27.28s；驱动脚本总耗时分别 31.15s、38.63s、28.45s。
+
+**限制**：默认用户数据根的旧迁移仍需独立处理 `WinError 17` 环境探针；隔离数据根 `python -m petcore --check` 可通过。没有把旧 `pet` 测试结果当作 petcore 迁移验收。

@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,17 @@ from typing import Any
 MAX_MESSAGES = 200
 MAX_MESSAGE_CHARS = 24_000
 MAX_TITLE_CHARS = 120
+SESSION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class SessionDiagnostic:
+    status: str
+    path: str
+    error: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return asdict(self)
 
 
 @dataclass
@@ -38,7 +49,7 @@ class ChatSession:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "schema": 1,
+            "schema": SESSION_SCHEMA_VERSION,
             "session_id": self.session_id,
             "title": self.title[:MAX_TITLE_CHARS],
             "messages": list(self.messages[-MAX_MESSAGES:]),
@@ -49,6 +60,9 @@ class ChatSession:
     def from_dict(cls, raw: Any, fallback_id: str = "") -> "ChatSession":
         if not isinstance(raw, dict):
             raise ValueError("session must be an object")
+        schema = raw.get("schema", SESSION_SCHEMA_VERSION)
+        if schema != SESSION_SCHEMA_VERSION:
+            raise ValueError(f"unsupported session schema: {schema!r}")
         session_id = str(raw.get("session_id") or fallback_id).strip()
         if not session_id:
             raise ValueError("session id is empty")
@@ -87,6 +101,12 @@ class SessionStore:
         self.directory = self.root / (
             "sessions" if self.slot == 0 else f"sessions-slot-{self.slot}"
         ) / self.character_id
+        self.diagnostics: list[SessionDiagnostic] = []
+
+    def _diagnose(self, path: Path, error: BaseException | str) -> None:
+        self.diagnostics.append(
+            SessionDiagnostic("skipped_invalid", str(path), error if isinstance(error, str) else type(error).__name__)
+        )
 
     def new_session(self, title: str = "新会话", session_id: str | None = None) -> ChatSession:
         session = ChatSession(
@@ -105,7 +125,8 @@ class SessionStore:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 sessions.append(ChatSession.from_dict(raw, path.stem))
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError) as exc:
+                self._diagnose(path, exc)
                 continue
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return sessions
@@ -115,7 +136,8 @@ class SessionStore:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             return ChatSession.from_dict(raw, path.stem)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError) as exc:
+            self._diagnose(path, exc)
             return None
 
     def save(self, session: ChatSession) -> None:

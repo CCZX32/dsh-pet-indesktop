@@ -56,6 +56,9 @@ class WorkerSession:
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
         self._watchdog: threading.Thread | None = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = threading.Event()
+        self._exit_code: int | None = None
 
     @property
     def alive(self) -> bool:
@@ -153,32 +156,61 @@ class WorkerSession:
             }
         )
 
-    def shutdown(self, timeout: float = 2.0) -> None:
+    def shutdown(self, timeout: float = 2.0) -> bool:
+        """Stop the worker and join its pipe threads within a bounded budget.
+
+        ``False`` means the process needed a hard kill or a reader thread did not
+        finish before the budget.  The session remains the owner of those thread
+        objects, so callers never lose the diagnostic handle on a slow worker.
+        """
         process = self.process
         if process is None:
-            return
-        self._stop.set()
-        if process.poll() is None:
-            try:
-                self.send({"type": protocol.SHUTDOWN})
-            except RuntimeError:
-                pass
-            try:
-                process.wait(timeout=max(0.05, float(timeout)))
-            except subprocess.TimeoutExpired:
-                process.terminate()
+            return True
+        budget = max(0.05, float(timeout))
+        deadline = time.monotonic() + budget
+        with self._shutdown_lock:
+            self._stop.set()
+            if process.poll() is None:
                 try:
-                    process.wait(timeout=max(0.05, float(timeout)))
+                    self.send({"type": protocol.SHUTDOWN})
+                except RuntimeError:
+                    pass
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=1.0)
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is None:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        finally:
+                            # A killed process must still be reaped.  Use a small
+                            # bounded tail rather than leaking a child process.
+                            try:
+                                process.wait(timeout=1.0)
+                            except subprocess.TimeoutExpired:
+                                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        # Reader threads are daemon threads as a last-resort safety net, but a
+        # normal shutdown joins them so no pipe reader survives app exit.
+        remaining = max(0.0, deadline - time.monotonic())
+        for thread in (self._reader, self._stderr_reader, self._watchdog):
+            if thread is None or thread is threading.current_thread():
                 continue
-            try:
-                stream.close()
-            except OSError:
-                pass
+            thread.join(remaining)
+            remaining = max(0.0, deadline - time.monotonic())
+        return process.poll() is not None and all(
+            thread is None or not thread.is_alive()
+            for thread in (self._reader, self._stderr_reader, self._watchdog)
+        )
 
     def _read_stdout(self) -> None:
         process = self.process
@@ -194,6 +226,17 @@ class WorkerSession:
                     self._report_error(exc)
                     continue
                 message_type = message.get("type")
+                if message_type not in {
+                    protocol.READY,
+                    protocol.EVENT,
+                    protocol.HEARTBEAT,
+                    protocol.ERROR,
+                    protocol.RESULT,
+                    protocol.DONE,
+                    protocol.DELTA,
+                }:
+                    self._report_error(f"unsupported worker message type: {message_type!r}")
+                    continue
                 if message_type == protocol.READY:
                     self._ready.set()
                 elif message_type == protocol.HEARTBEAT:
@@ -209,6 +252,8 @@ class WorkerSession:
             code = process.poll()
             if code is None:
                 code = process.wait()
+            self._exit_code = code
+            self._shutdown_complete.set()
             callback = self.on_exit
             if callback is not None:
                 try:
