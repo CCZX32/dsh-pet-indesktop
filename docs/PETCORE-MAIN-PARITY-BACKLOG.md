@@ -258,3 +258,21 @@
 | 候选索引状态 | **已对齐（本轮修复）**：构建器默认 `candidate` 并保持 blocked，只有显式 `published` 才解除 | `scripts/build_petcore_extensions.py`、`tests/test_petcore_extension_build.py` |
 
 仍为 **部分/未做** 的条目保持原状态，不因本轮测试通过而改成已对齐：设置内角色导入、多屏实机、GraphType 全映射、点击音效按下/释放配对、会话/待办/API 全量迁移、旧 `pet` 媒体适配层清理、公开 Release 与默认入口切换。
+
+## 2026-10-25 重构收尾全量实施快照
+
+本快照只描述本轮实际代码与证据，不把“计划项”写成“已完成”。相对基线 `e79e2a5f`，本轮代码提交为 `da107abe`、`c456ff56`、`42856889`；最终证据和交接由发布收口提交补齐。
+
+| 领域 | 当前结论 | 证据与边界 |
+|---|---|---|
+| 配置/会话/待办迁移 | **已实现，自动化通过** | `MigrationRecord`、备份优先、原子写入、诊断状态；`SessionStore` 与 reminder store 增加 schema/失败保真；损坏文件不删除。默认目录 `python -m petcore --check` 本次 exit 0。 |
+| WorkerHost | **已实现，自动化通过** | `petcore/platform/worker.py` 覆盖 READY、非法消息、取消、有界 shutdown、迟到回调边界；未新增虚构业务调用方。 |
+| 角色设置内导入 | **已实现，自动化通过** | `petcore/content/importer.py` 复用包校验边界，拒绝路径穿越/重复覆盖/恶意 ZIP；设置页提供入口；未实现远程角色素材下载。 |
+| GraphType 入口 | **已实现，自动化通过** | `menu_actions.py` 对已有 `GraphType` 提供懒加载分组；资源缺失时保持隐藏并回退现有动作，不宣称每个角色资源齐全。 |
+| 点击音效 | **已实现，自动化通过** | `ClickSoundPair` 以 token 配对按下/释放，失焦、拖拽、关闭时取消，重复释放不重播。 |
+| 彩蛋配置 | **已实现，自动化通过** | `easter_egg_avatar/title/hint` 的默认、预览、保存、取消、重置与回退；不新增第二套窗口。 |
+| 账户/余额设置入口 | **已实现，自动化通过** | 设置页异步余额查询、disposed 迟到信号抑制和分类错误反馈；没有真实外部服务调用，不把失败显示成 0。 |
+| 旧 `pet` 媒体边界 | **部分收口** | 架构守卫继续限制直接导入只在 `petcore/media/` 与 `petcore/content/legacy.py`；兼容层仍保留，未声称旧实现已删除。 |
+| 多屏/混合 DPI 实机 | **待验证** | 代码保留已有 DPR/屏幕边界；本机只有 1 个屏幕、DPR 1.0，未做双屏拔出与混合 DPI 实机动作。 |
+| PyInstaller/候选包/default entrypoint | **未完成/待环境** | 本 `.venv` 未安装 PyInstaller；不切换默认入口，不生成“可发布”结论。 |
+| macOS/Linux、真实 TTS/CDN、公开 Release | **未验证/不在本轮** | 当前 Windows 环境无对应条件；未使用历史报告冒充本次通过，也未上传 Release。 |

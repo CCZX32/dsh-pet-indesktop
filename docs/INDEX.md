@@ -144,7 +144,7 @@
 
 ## PR 报告存档
 
-- [petcore 修复、重构收尾与分支交付（2026-10-25）](PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md)：市场生命周期/授权、WorkerHost、DPR、候选索引状态的逐文件变更、实测门禁与未验证边界；接手本轮提交或核对推送结果前必读。
+- [petcore 修复、重构收尾与分支交付（2026-10-25）](PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md)：运行时迁移/Worker、媒体与角色导入、点击音效、彩蛋/余额设置、GraphType 入口、petcore-only 门禁与环境缺口；接手本轮提交或核对推送结果前必读。
 
 - [D2/T09 收口：性能·整仓·安装器·发布准备](PR-REPORT-PETCORE-DISTRIBUTION-T09-2026-10-24.md)：before/after 无回退、整仓 9941 passed、安装器四组合矩阵与 MSYS 参数排查留痕；判断「能不能发」或接手发布前必读，配套 [发布手册](PETCORE-EXTENSIONS-RELEASE.md)。
 

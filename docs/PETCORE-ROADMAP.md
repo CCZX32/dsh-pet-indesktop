@@ -526,3 +526,16 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | 明确不在本轮 | GitHub Release 上传、真实账号、Agent 写端、灵动岛二阶段、角色 v6 | 保持既有边界 |
 
 最终入口切换的前置条件仍是全量 pytest 正常退出、候选包可在隔离目录安装/更新/回滚、Windows 实机证据齐全；本轮不满足时不切换默认入口。
+
+## 2026-10-25 重构收尾实现状态
+
+本轮按“运行时与迁移 → 媒体/角色边界 → 已有 parity 设置与入口 → 证据收口”分批提交。验证策略按最新交接要求收窄为 `petcore`：不再重复运行旧 `pet` 实现的整仓门禁；此前在范围收窄前已经完成的一次整仓结果只作为历史证据保留。
+
+| 状态 | 范围 | 证据 |
+|---|---|---|
+| 已实现 / 自动化通过 | 迁移诊断、session/todo schema、WorkerHost 有界退出、角色 ZIP 导入、点击音效 token、彩蛋设置、余额异步入口、GraphType 懒加载菜单 | `da107abe`、`c456ff56`、`42856889`；`tests/test_petcore_refactor_final.py` 及关联 petcore 测试 |
+| Windows 源码检查通过 | `python -m petcore --check`，隔离数据目录和默认检查均 exit 0，diagnostics 为空；Qt 探针为 1 屏/DPR 1.0 | `.scratch/petcore-refactor-final/`；不等价于双屏或候选包验收 |
+| 已有但仍需真实环境验证 | 混合 DPI/双屏、媒体跨屏、外部余额/TTS、安装器候选包 | 当前机器缺少双屏、PyInstaller 和真实服务条件 |
+| 明确未做/不在本轮 | Agent 写端、灵动岛第二阶段、角色远程下载、VPet PNG/LPS、Core 自更新、公开 Release/CDN | 继续保留原有边界 |
+
+本轮不切换 `python -m petcore` 默认入口，不将兼容层删除，也不把“自动化通过”改写成“跨平台/候选包已通过”。

@@ -2679,3 +2679,14 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **限制**：GraphType 分组按角色资源懒加载，缺资源时保持隐藏并回退已有动作；未把“所有角色都具备全部动画资源”写成通过。候选包、双屏、多平台和公开发布仍未验收。
 
+## L078 — 2026-10-25 — 重构收尾文档、petcore-only 最终门禁与交接
+
+**边界**：按用户最新要求，最终验证不再重复旧 `pet` 实现整仓门禁，只运行 `petcore` 测试、Ruff 和 petcore 专项文档/架构/设置覆盖/交付纪律门禁；不切换默认入口、不构建候选包、不上传 Release。
+
+**改动**：更新 `PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md`、`PETCORE-MAIN-PARITY-BACKLOG.md`、`PETCORE-ROADMAP.md`、`PETCORE-SPEC.md`、`docs/INDEX.md`，补齐实现/自动化/Windows 源码/待验证状态；新增 `.scratch/petcore-refactor-final/HANDOFF.md` 精确记录提交、命令、缺口和 SSH over 443 推送断点。
+
+**逐文件增删（相对代码提交 `42856889` 的当前工作区实测）**：`docs/INDEX.md` +1/−1、`docs/PETCORE-LOG-INDEX.md` +1/−0、`docs/PETCORE-LOG.md` +11/−0、`docs/PETCORE-MAIN-PARITY-BACKLOG.md` +18/−0、`docs/PETCORE-ROADMAP.md` +13/−0、`docs/PETCORE-SPEC.md` +11/−0、`docs/PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md` +89/−108；最终提交前再次核对 `git diff --numstat`。
+
+**验证**：`tests/test_petcore_*.py` 由 PowerShell 显式展开后 **1479 passed in 132.94s (0:02:12)**；`tests/test_petcore_architecture.py tests/test_petcore_docs.py tests/test_petcore_settings_coverage.py tests/test_pr_report_discipline.py` **302 passed in 4.03s**；`.venv\Scripts\python.exe -m ruff check petcore tests scripts` → `All checks passed!`；`git diff --check` 在清理报告 Markdown 尾随空格后通过。此前已完成的一次整仓 **9957 passed / 20 skipped / 15 warnings / 3048.17s / exit 0** 仅保留为历史证据，不再重复。
+
+**限制与下一断点**：本机探针为单屏/DPR 1.0，PyInstaller 未安装；双屏混合 DPI、候选包、macOS/Linux、真实 TTS/CDN/余额服务和公开 Release 仍未验收。下一步只做最终文档提交、SSH over 443 `fetch` + `merge --ff-only`，若远端无新提交则推送 `origin/feat/petcore-vpet-architecture`。
