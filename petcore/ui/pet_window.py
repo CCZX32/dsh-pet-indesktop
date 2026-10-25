@@ -21,6 +21,12 @@ from ..engine.behavior import (
 )
 from ..engine.catalog import GraphCatalog
 from ..engine.enums import AnimatType, GraphType
+from ..engine.head_pat import (
+    HEAD_PAT_DEFAULT_MODE,
+    HeadPatTracker,
+    choose_head_pat_spec,
+    head_pat_specs,
+)
 from ..engine.geometry import (
     CORNER_MARGIN,
     DRAG_THRESHOLD,
@@ -125,6 +131,9 @@ class PetWindow(QWidget):
         self._press_global: QPoint | None = None
         self._press_pos: QPoint | None = None
         self._last_cursor_local: QPointF | None = None
+        self._head_pat_tracker = HeadPatTracker()
+        self._head_pat_last_name: str | None = None
+        self._head_pat_no_spec_logged = False
         self._click_listeners: list = []
         self._drop_listeners: list = []
         self._bubble_follow_pending = False
@@ -138,6 +147,7 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAcceptDrops(True)
+        self.setMouseTracking(True)
 
     def available_characters(self) -> list[CharacterSpec]:
         return list(self.host.characters())
@@ -232,6 +242,7 @@ class PetWindow(QWidget):
         if click_spec is not None:
             QTimer.singleShot(800, lambda spec=click_spec: self.library.warm_first_frame(spec))
         QTimer.singleShot(200, self._warm_interaction_assets)
+        self._head_pat_tracker.reset()
         if self.click_through:
             self._apply_click_through()
         else:
@@ -292,6 +303,9 @@ class PetWindow(QWidget):
         width, height = content_size(self.state.scale)
         self.setFixedSize(width, height)
         self._update_body_local()
+        self._head_pat_tracker.reset()
+        self._head_pat_last_name = None
+        self._head_pat_no_spec_logged = False
 
     def set_character(self, character_id: str, *, persist: bool = True) -> None:
         self._edge_probe.cancel("character", restore=True)
@@ -485,7 +499,7 @@ class PetWindow(QWidget):
     def _finish_action(self, kind: str | None) -> None:
         """动作播完：先播 gap 氛围步（待机），到点再掷骰。"""
         gap = float(self.config.get("animation_gap_seconds") or 0.0)
-        if gap > 0.0 and kind not in ("click", "drag", "throw", "idle"):
+        if gap > 0.0 and kind not in ("click", "drag", "throw", "idle", "head_pat"):
             self._gap_until = time.monotonic() + gap
             self._play_idle()
             return
@@ -786,6 +800,7 @@ class PetWindow(QWidget):
             self.bubble.reposition(self.bubble_anchor_rect())
 
     def set_click_through(self, value: bool, *, persist: bool = True) -> None:
+        self._head_pat_tracker.reset()
         self.click_through = bool(value)
         self.config.set("click_through", self.click_through)
         if persist:
@@ -838,6 +853,7 @@ class PetWindow(QWidget):
         if bool(visible) == self.isVisible():
             return
         if not visible:
+            self._head_pat_tracker.reset()
             self._edge_probe.pause()
             self._stop_clip()
             self.bubble.hide()
@@ -917,7 +933,73 @@ class PetWindow(QWidget):
         self.slingshot.paint(painter)
         painter.end()
 
+    def _head_pat_is_busy(self) -> bool:
+        return bool(
+            not self.isVisible()
+            or self.click_through
+            or self.dragging
+            or self.slingshot.aiming
+            or self.motion.thrown
+            or self._effects_lock_active()
+            or self._action_kind not in (None, "idle")
+        )
+
+    def _head_pat_hit(self, local: QPoint) -> tuple[float, float, bool]:
+        unsquashed = self._unsquash_point(local)
+        if unsquashed is None:
+            return float(local.x()), float(local.y()), False
+        logical = self._unrotated_point(unsquashed)
+        x, y, width, height = self._head_local or self._body_local
+        inside = x <= logical.x() < x + width and y <= logical.y() < y + height
+        if inside and self._image is not None and self.is_transparent_at(local):
+            inside = False
+        return float(logical.x()), float(logical.y()), inside
+
+    def _head_pat_candidates(self):
+        mode = str(self.config.get("head_pat_animation_mode") or HEAD_PAT_DEFAULT_MODE)
+        names = self.config.get("head_pat_animation_names") or ()
+        return head_pat_specs(
+            getattr(self, "catalog", None), mode=mode, names=names
+        )
+
+    def _maybe_head_pat(self, position: QPointF) -> None:
+        local = position.toPoint()
+        x, y, inside = self._head_pat_hit(local)
+        busy = self._head_pat_is_busy()
+        candidates = () if busy else self._head_pat_candidates()
+        if not candidates and not busy:
+            self._head_pat_tracker.reset()
+            if not self._head_pat_no_spec_logged:
+                logger.debug("head pat has no eligible animation for character %s", self.character_id)
+                self._head_pat_no_spec_logged = True
+            return
+        self._head_pat_no_spec_logged = False
+        triggered = self._head_pat_tracker.update(
+            (x, y),
+            inside_head=inside,
+            now=time.monotonic(),
+            eligible=bool(self.config.get("head_pat_enabled", True)) and not busy,
+        )
+        if not triggered:
+            return
+        chosen = choose_head_pat_spec(
+            candidates,
+            rng=self.director.rng,
+            previous_name=self._head_pat_last_name,
+        )
+        if chosen is None:
+            return
+        self._head_pat_last_name = chosen.name
+        self._cancel_animation_gap()
+        self._cancel_move_plan()
+        self._play_spec(chosen, "head_pat")
+
+    def leaveEvent(self, event) -> None:
+        self._head_pat_tracker.reset()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event) -> None:
+        self._head_pat_tracker.reset()
         self._last_cursor_local = event.position()
         if event.button() == Qt.MouseButton.RightButton:
             self._click_sound_pair.cancel(self._click_sound_token)
@@ -945,8 +1027,10 @@ class PetWindow(QWidget):
     def mouseMoveEvent(self, event) -> None:
         self._last_cursor_local = event.position()
         if self.slingshot.aiming:
+            self._head_pat_tracker.reset()
             self.slingshot.update(event.position())
             return
+        self._maybe_head_pat(event.position())
         if self._press_global is None or self._press_pos is None:
             return
         delta = event.globalPosition().toPoint() - self._press_global
@@ -959,6 +1043,7 @@ class PetWindow(QWidget):
                 event.modifiers() & Qt.KeyboardModifier.ShiftModifier
             ):
                 return
+            self._head_pat_tracker.reset()
             self.dragging = True
             self.state.dragging = True
             self._probe_drag_throw = self._edge_probe.on_drag_started()
@@ -974,6 +1059,7 @@ class PetWindow(QWidget):
         self.motion.drag_to(x, y)
 
     def mouseReleaseEvent(self, event) -> None:
+        self._head_pat_tracker.reset()
         if event.button() != Qt.MouseButton.LeftButton:
             return
         probe_throw = self._probe_drag_throw
@@ -1453,6 +1539,7 @@ class PetWindow(QWidget):
             QTimer.singleShot(0, refresh)
 
     def closeEvent(self, event) -> None:
+        self._head_pat_tracker.reset()
         self._click_sound_pair.cancel_all()
         self._click_sound_token = None
         self.sound.stop_all()
@@ -1469,6 +1556,7 @@ class PetWindow(QWidget):
         self._play_idle()
 
     def shutdown(self) -> None:
+        self._head_pat_tracker.reset()
         self._click_sound_pair.cancel_all()
         self._click_sound_token = None
         self.sound.stop_all()

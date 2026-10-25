@@ -19,9 +19,11 @@ from PySide6.QtWidgets import (
 )
 
 from petcore.config import Config
-from petcore.contracts.content import CharacterSpec
+from petcore.contracts.content import AnimationSpec, CharacterSpec
 from petcore.contracts.contributions import SettingsPageSpec
 from petcore.contracts.host import HostPorts
+from petcore.engine.catalog import GraphCatalog
+from petcore.engine.enums import AnimatType, GraphType
 from petcore.mods.feature import FeatureManager
 from petcore.ui.menu_model import MenuItem, MenuModel
 from petcore.ui.settings.base import SettingsPage
@@ -721,3 +723,43 @@ def test_settings_dialog_has_minimize_and_maximize(app, tmp_path: Path) -> None:
         assert dialog.isMinimized() is False
     finally:
         dialog.close()
+
+
+def test_head_pat_settings_are_scoped_live_and_cancelable(app, tmp_path):
+    host = _host(tmp_path)
+    host.window.character = CharacterSpec(
+        id="fallback",
+        name="可测试角色",
+        root=tmp_path,
+        media_kind="none",
+        animations=(
+            AnimationSpec("点击", GraphType.TOUCH_BODY, AnimatType.SINGLE),
+            AnimationSpec("摸头", GraphType.TOUCH_HEAD, AnimatType.SINGLE),
+        ),
+    )
+    host.window.catalog = GraphCatalog(host.window.character.animations)
+    dialog = SettingsDialog(host)
+    interaction = _page(dialog, "互动与物理")
+
+    assert interaction.head_pat_enabled.isChecked() is True
+    assert interaction.head_pat_mode.currentData() == "default_click"
+    assert interaction.head_pat_names.count() == 2
+    assert "摸头" in " ".join(interaction.keywords())
+
+    interaction.head_pat_enabled.setChecked(False)
+    interaction.head_pat_mode.setCurrentIndex(
+        interaction.head_pat_mode.findData("custom")
+    )
+    interaction.head_pat_names.item(1).setCheckState(Qt.CheckState.Checked)
+    app.processEvents()
+    assert host.config.get("head_pat_enabled") is False
+    assert host.config.get("head_pat_animation_mode") == "custom"
+    assert host.config.get("head_pat_animation_names") == ["摸头"]
+
+    interaction.discard_changes()
+    assert host.config.get("head_pat_enabled") is True
+    assert host.config.get("head_pat_animation_mode") == "default_click"
+    assert host.config.get("head_pat_animation_names") == []
+    assert interaction.head_pat_enabled.isChecked() is True
+    assert interaction.head_pat_mode.currentData() == "default_click"
+    dialog.close()

@@ -539,3 +539,12 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | 明确未做/不在本轮 | Agent 写端、灵动岛第二阶段、角色远程下载、VPet PNG/LPS、Core 自更新、公开 Release/CDN | 继续保留原有边界 |
 
 本轮不切换 `python -m petcore` 默认入口，不将兼容层删除，也不把“自动化通过”改写成“跨平台/候选包已通过”。
+
+## 2026-10-25 摸头互动（petcore）
+
+| 状态 | 结论 | 证据 |
+|---|---|---|
+| 已实现 | `HeadPatTracker`、头部命中/透明像素过滤、连续往返判定、默认/自定义/全部单次动画池、动作接管与生命周期清理 | `petcore/engine/head_pat.py`、`petcore/ui/pet_window.py` |
+| petcore 自动化测试通过 | `test_petcore_*.py` 全部 **1490 passed**；Ruff **All checks passed**；`python -m petcore --check` 返回 0 | `tests/test_petcore_head_pat.py`、交互/设置回归；本机命令输出见 PR 报告 |
+| Windows 实机通过 | 尚未执行真实桌面鼠标摸头交互；offscreen Qt 仅验证事件与状态接缝，不等同实机通过 | 需要在隔离配置目录执行真实窗口探针 |
+| 明确未做 | 不改旧 `pet` 实现，不新增线程、定时器、网络请求或菜单入口 | 本轮范围约束 |

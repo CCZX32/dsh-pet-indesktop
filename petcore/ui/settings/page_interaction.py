@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -9,6 +10,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QSpinBox,
     QWidget,
 )
@@ -17,6 +20,13 @@ from ... import paths
 from ...media import talk_images
 from ...media.click_sound import choose_click_sound, resolve_click_sound_candidates
 from ...media.sound import SoundPlayer
+from ...engine.head_pat import (
+    HEAD_PAT_ALL_MODE,
+    HEAD_PAT_CUSTOM_MODE,
+    HEAD_PAT_DEFAULT_MODE,
+    eligible_head_pat_specs,
+    head_pat_specs,
+)
 from .base import (
     SettingsPage,
     build_embedded_page,
@@ -221,6 +231,68 @@ class InteractionPage(SettingsPage):
                 self.animation_gap,
                 "非待机动作之间的休息时间；0 表示连续播放。",
             )
+
+            head_pat_card = self.section("摸头互动")
+            self.head_pat_enabled = make_checkbox(self)
+            self.head_pat_enabled.setChecked(
+                bool(self.config().get("head_pat_enabled", True))
+            )
+            self.head_pat_enabled.toggled.connect(self._on_head_pat_enabled_changed)
+            head_pat_card.add_row(
+                "启用摸头互动",
+                self.head_pat_enabled,
+                "鼠标在角色头部区域连续往返晃动时播放一次动画。",
+            )
+
+            self.head_pat_mode = QComboBox(self)
+            for key, label in (
+                (HEAD_PAT_DEFAULT_MODE, "默认点击动画"),
+                (HEAD_PAT_CUSTOM_MODE, "自定义动画"),
+                (HEAD_PAT_ALL_MODE, "全部单次动画"),
+            ):
+                self.head_pat_mode.addItem(label, key)
+            mode = str(
+                self.config().get("head_pat_animation_mode") or HEAD_PAT_DEFAULT_MODE
+            )
+            index = self.head_pat_mode.findData(mode)
+            self.head_pat_mode.setCurrentIndex(max(0, index))
+            self.head_pat_mode.currentIndexChanged.connect(self._on_head_pat_mode_changed)
+            head_pat_card.add_row(
+                "动画范围",
+                self.head_pat_mode,
+                "只会选择当前角色存在的合格单次动画；拖拽、投掷和循环动画会排除。",
+            )
+
+            self.head_pat_info = QLabel(self)
+            self.head_pat_info.setWordWrap(True)
+            head_pat_card.add_row(
+                "当前角色",
+                self.head_pat_info,
+                "自定义动画按当前宠物 slot 保存，切换角色后会重新过滤。",
+            )
+
+            self.head_pat_names = QListWidget(self)
+            self.head_pat_names.setSelectionMode(
+                QListWidget.SelectionMode.NoSelection
+            )
+            self.head_pat_names.setMinimumHeight(100)
+            self.head_pat_names.itemChanged.connect(self._on_head_pat_names_changed)
+            head_pat_card.add_row(
+                "自定义清单",
+                self.head_pat_names,
+                "自定义模式下勾选希望播放的动画。",
+                expand=True,
+            )
+            head_pat_buttons = [
+                make_button("全选", self),
+                make_button("恢复点击动画", self),
+                make_button("清空", self),
+            ]
+            head_pat_buttons[0].clicked.connect(self._select_all_head_pat)
+            head_pat_buttons[1].clicked.connect(self._restore_click_head_pat)
+            head_pat_buttons[2].clicked.connect(self._clear_head_pat)
+            head_pat_card.add_buttons(head_pat_buttons)
+            self._refresh_head_pat_options()
 
             weight_card = self.section("自主行为概率")
             self._weights: dict[str, QSpinBox] = {}
@@ -625,12 +697,117 @@ class InteractionPage(SettingsPage):
         enabled = self._checks["golden_spin_on_click"].isChecked()
         self._spin_direct_row.setVisible(enabled)
 
+    # ------------------------------------------------------------ 摸头互动
+    def _head_pat_window(self):
+        return getattr(self.host, "window", None)
+
+    def _head_pat_catalog(self):
+        return getattr(self._head_pat_window(), "catalog", None)
+
+    def _head_pat_available(self):
+        catalog = self._head_pat_catalog()
+        return eligible_head_pat_specs(getattr(catalog, "animations", ()))
+
+    def _refresh_head_pat_options(self) -> None:
+        available = self._head_pat_available()
+        configured = {
+            str(name).strip()
+            for name in (self.config().get("head_pat_animation_names") or ())
+            if str(name).strip()
+        }
+        self.head_pat_names.blockSignals(True)
+        self.head_pat_names.clear()
+        for spec in available:
+            item = QListWidgetItem(spec.name, self.head_pat_names)
+            item.setData(Qt.ItemDataRole.UserRole, spec.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if spec.name in configured
+                else Qt.CheckState.Unchecked
+            )
+        self.head_pat_names.blockSignals(False)
+        window = self._head_pat_window()
+        character = getattr(window, "character", None)
+        character_name = getattr(character, "name", None) or getattr(
+            window, "character_id", None
+        ) or "未加载角色"
+        self.head_pat_info.setText(f"{character_name} · {len(available)} 个合格动画")
+        self._sync_head_pat_list_enabled()
+
+    def _sync_head_pat_list_enabled(self) -> None:
+        enabled = (
+            self.head_pat_enabled.isChecked()
+            and self.head_pat_mode.currentData() == HEAD_PAT_CUSTOM_MODE
+        )
+        self.head_pat_names.setEnabled(enabled)
+
+    def _head_pat_checked_names(self) -> list[str]:
+        names: list[str] = []
+        for index in range(self.head_pat_names.count()):
+            item = self.head_pat_names.item(index)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            name = str(item.data(Qt.ItemDataRole.UserRole) or item.text()).strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _on_head_pat_enabled_changed(self, *_args) -> None:
+        self._sync_head_pat_list_enabled()
+        self._on_changed()
+
+    def _on_head_pat_mode_changed(self, *_args) -> None:
+        self._sync_head_pat_list_enabled()
+        self._on_changed()
+
+    def _on_head_pat_names_changed(self, *_args) -> None:
+        self._on_changed()
+
+    def _set_all_head_pat_checks(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.head_pat_names.blockSignals(True)
+        for index in range(self.head_pat_names.count()):
+            self.head_pat_names.item(index).setCheckState(state)
+        self.head_pat_names.blockSignals(False)
+        self._on_changed()
+
+    def _select_all_head_pat(self) -> None:
+        self._set_all_head_pat_checks(True)
+
+    def _restore_click_head_pat(self) -> None:
+        catalog = self._head_pat_catalog()
+        names = {
+            spec.name
+            for spec in head_pat_specs(catalog, mode=HEAD_PAT_DEFAULT_MODE)
+        }
+        self.head_pat_names.blockSignals(True)
+        for index in range(self.head_pat_names.count()):
+            item = self.head_pat_names.item(index)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if item.text() in names
+                else Qt.CheckState.Unchecked
+            )
+        self.head_pat_names.blockSignals(False)
+        self._on_changed()
+
+    def _clear_head_pat(self) -> None:
+        self._set_all_head_pat_checks(False)
+
     def _snapshot(self) -> dict:
         config = self.config()
         values = {key: bool(config.get(key)) for key in self._CHECK_KEYS}
         values["throw_strength"] = str(config.get("throw_strength") or "standard")
         values["playback_speed"] = float(config.get("playback_speed") or 1.0)
         values["animation_gap_seconds"] = int(float(config.get("animation_gap_seconds") or 0.0))
+        values["head_pat_enabled"] = bool(config.get("head_pat_enabled", True))
+        values["head_pat_animation_mode"] = str(
+            config.get("head_pat_animation_mode") or HEAD_PAT_DEFAULT_MODE
+        )
+        values["head_pat_animation_names"] = list(
+            config.get("head_pat_animation_names") or ()
+        )
         for key in (
             "anim_weight_idle",
             "anim_weight_turn",
@@ -660,6 +837,11 @@ class InteractionPage(SettingsPage):
         values["throw_strength"] = str(self.throw_strength.currentData() or "standard")
         values["playback_speed"] = float(self.playback_speed.value())
         values["animation_gap_seconds"] = int(self.animation_gap.value())
+        values["head_pat_enabled"] = bool(self.head_pat_enabled.isChecked())
+        values["head_pat_animation_mode"] = str(
+            self.head_pat_mode.currentData() or HEAD_PAT_DEFAULT_MODE
+        )
+        values["head_pat_animation_names"] = self._head_pat_checked_names()
         for key, spin in self._weights.items():
             values[key] = int(spin.value())
         values["click_sound_pack"] = dict(self._sound_pack)
@@ -685,6 +867,9 @@ class InteractionPage(SettingsPage):
         config.set("throw_strength", values["throw_strength"])
         config.set("playback_speed", values["playback_speed"])
         config.set("animation_gap_seconds", values["animation_gap_seconds"])
+        config.set("head_pat_enabled", values["head_pat_enabled"])
+        config.set("head_pat_animation_mode", values["head_pat_animation_mode"])
+        config.set("head_pat_animation_names", values["head_pat_animation_names"])
         for key in self._weights:
             config.set(key, values[key])
         config.set("click_sound_pack", dict(self._sound_pack))
@@ -715,6 +900,9 @@ class InteractionPage(SettingsPage):
         config.set("throw_strength", self._initial["throw_strength"])
         config.set("playback_speed", self._initial["playback_speed"])
         config.set("animation_gap_seconds", self._initial["animation_gap_seconds"])
+        config.set("head_pat_enabled", self._initial["head_pat_enabled"])
+        config.set("head_pat_animation_mode", self._initial["head_pat_animation_mode"])
+        config.set("head_pat_animation_names", list(self._initial["head_pat_animation_names"]))
         for key in self._weights:
             config.set(key, self._initial[key])
         config.set("click_sound_pack", dict(self._initial["click_sound_pack"]))
@@ -741,6 +929,15 @@ class InteractionPage(SettingsPage):
         self.animation_gap.blockSignals(True)
         self.animation_gap.setValue(self._initial["animation_gap_seconds"])
         self.animation_gap.blockSignals(False)
+        self.head_pat_enabled.blockSignals(True)
+        self.head_pat_enabled.setChecked(bool(self._initial["head_pat_enabled"]))
+        self.head_pat_enabled.blockSignals(False)
+        self.head_pat_mode.blockSignals(True)
+        self.head_pat_mode.setCurrentIndex(
+            max(0, self.head_pat_mode.findData(self._initial["head_pat_animation_mode"]))
+        )
+        self.head_pat_mode.blockSignals(False)
+        self._refresh_head_pat_options()
         for key, spin in self._weights.items():
             spin.blockSignals(True)
             spin.setValue(int(self._initial[key]))
@@ -815,6 +1012,11 @@ class InteractionPage(SettingsPage):
             "黄金回旋",
             "探头",
             "动画",
+            "摸头",
+            "被摸头",
+            "头部",
+            "Touch_Head",
+            "head pat",
             "播放速率",
             "等待间隔",
             "概率",

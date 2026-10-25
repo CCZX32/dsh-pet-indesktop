@@ -265,6 +265,9 @@ DEFAULTS: dict[str, Any] = {
     "shift_drag": False,
     "playback_speed": 1.0,
     "animation_gap_seconds": 0.0,
+    "head_pat_enabled": True,
+    "head_pat_animation_mode": "default_click",
+    "head_pat_animation_names": [],
     "anim_weight_idle": 30,
     "anim_weight_turn": 10,
     "anim_weight_act": 40,
@@ -459,6 +462,23 @@ def _text_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if isinstance(item, str)]
+
+
+def _head_pat_names(value: Any) -> list[str]:
+    """Normalize configured head-pat animation names without storing paths."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()[:160]
+        if not name or name in result:
+            continue
+        result.append(name)
+        if len(result) >= 64:
+            break
+    return result
 
 
 #: 灵动岛指标段的合法 id（``gpu`` / ``fps`` 是保留字：本批未实现，配置里留了也不渲染）。
@@ -890,6 +910,17 @@ class Config:
         normalized["playback_speed"] = _number(normalized.get("playback_speed"), 1.0, 0.5, 2.0)
         normalized["animation_gap_seconds"] = _number(
             normalized.get("animation_gap_seconds"), 0.0, 0.0, 3600.0
+        )
+        normalized["head_pat_enabled"] = _bool(
+            normalized.get("head_pat_enabled"), True
+        )
+        head_pat_mode = str(normalized.get("head_pat_animation_mode") or "default_click").strip().lower()
+        normalized["head_pat_animation_mode"] = (
+            head_pat_mode if head_pat_mode in {"default_click", "custom", "all_single"}
+            else "default_click"
+        )
+        normalized["head_pat_animation_names"] = _head_pat_names(
+            normalized.get("head_pat_animation_names")
         )
         for key in (
             "anim_weight_idle",

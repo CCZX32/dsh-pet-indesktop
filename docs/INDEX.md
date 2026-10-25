@@ -148,6 +148,7 @@
 
 - [petcore 候选包构建与隔离验收任务（2026-10-25）](PETCORE-CANDIDATE-PACKAGING-TASK-2026-10-25.md)：交给另一台 Windows 电脑执行的 PyInstaller/Inno Setup 构建、候选包 `--check`、隔离安装验收、SHA 证据和阻断条件；不包含公开 Release。
 - [petcore 候选包构建交接（2026-10-25）](PETCORE-CANDIDATE-PACKAGING-HANDOFF-2026-10-25.md)：交给另一台 Windows 电脑的基线、已验证证据、执行顺序、停止条件和回传格式；详细步骤见候选包任务说明。
+- [petcore 摸头互动（2026-10-25）](PR-REPORT-PETCORE-HEAD-PAT-2026-10-25.md)：头部命中、连续往返判定、默认/自定义/全部单次动画池、按宠物设置与 petcore-only 自动化证据；Windows 实机交互仍待验证。
 
 - [D2/T09 收口：性能·整仓·安装器·发布准备](PR-REPORT-PETCORE-DISTRIBUTION-T09-2026-10-24.md)：before/after 无回退、整仓 9941 passed、安装器四组合矩阵与 MSYS 参数排查留痕；判断「能不能发」或接手发布前必读，配套 [发布手册](PETCORE-EXTENSIONS-RELEASE.md)。
 

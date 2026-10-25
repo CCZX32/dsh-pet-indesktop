@@ -2702,3 +2702,17 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：本次仅做文档/交接改动；提交前执行 `git diff --check`、`tests/test_petcore_docs.py`、`tests/test_petcore_architecture.py`、`tests/test_petcore_settings_coverage.py`、`tests/test_pr_report_discipline.py` 及 Ruff。既有 petcore 终态证据为 1479 passed、专项门禁 302 passed、Ruff 通过；PyInstaller、候选包、安装器、双屏和跨平台验证由继任电脑按任务说明实际执行。
 
 **下一断点**：继任模型完成或阻断候选包构建后，回填真实工具版本、退出码、SHA、安装/卸载结果和验证缺口；候选验收不等于公开 Release。
+
+## L080 — 2026-10-25 — petcore 摸头互动
+
+**边界**：新增 petcore 桌宠的鼠标摸头互动，不修改旧 `pet` 实现，不新增动画引擎、线程、定时器、网络请求或菜单入口。仅在窗口可见、可交互且动作空闲时，使用角色 `head_box`（缺失时回退 `body_box`）检测头部内连续往返移动。
+
+**改动**：新增纯逻辑 `HeadPatTracker`，按 4 px 单段、14 px 累计、反向向量点积 `<= -0.25`、1.2 秒轨迹窗口和 0.65 秒冷却判定；新增默认点击、自定义名称、全部合格单次动画三种选择及连续不重复选择。`PetWindow` 接入鼠标跟踪、逻辑坐标还原、透明像素过滤、忙碌/拖拽/投掷/click-through/隐藏/关闭/换角清理；`InteractionPage` 增加启用开关、模式、多选动画列表、全选/恢复点击/清空操作，配置按宠物 slot 保存并遵守 Save/Cancel/Esc 契约。
+
+**逐文件增删**：`petcore/engine/head_pat.py` +167/−0（新文件）；`petcore/config.py` +31/−0；`petcore/ui/pet_window.py` +89/−1；`petcore/ui/settings/page_interaction.py` +202/−0；`tests/test_petcore_head_pat.py` +137/−0（新文件）；`tests/test_petcore_interaction.py` +71/−1；`tests/test_petcore_settings.py` +43/−1。以上为本轮代码/测试变更的 `git diff --numstat` 加未跟踪新文件实际行数；最终文档与报告增删以提交前 `git diff --numstat` 为准。
+
+**验证**：摸头/交互聚焦族 **24 passed / 1.10s**；设置聚焦族 **34 passed / 6.37s**；petcore 全部 `test_petcore_*.py` **1490 passed / 130.18s / exit 0**；`ruff check petcore tests scripts` 输出 **All checks passed!**；`python -m petcore --check` 返回 **0**。100,000 次纯逻辑更新耗时 **0.042175s**（约 **2,371,062 events/s，0.422 µs/event**）；设置开关/模式循环 30 次耗时 **0.235223s**（约 **7.841 ms/cycle**）。
+
+**性能与资源**：实现只在已有 `mouseMoveEvent` 中执行轻量计算；不新增后台线程、Qt 定时器、网络或磁盘写入。设置列表只在页面刷新/角色变化时重建，不为每次鼠标移动分配持久任务。未进行旧 `pet` 测试。
+
+**实机与限制**：本机本轮只执行 offscreen Qt 和 Core 检查，未执行真实 Windows 桌面鼠标摸头、click-through、拖拽/投掷和双 slot 可视化验证；因此“Windows 实机通过”仍为未验证，不能用自动化结果替代。动画资源缺失时由现有 catalog 结果决定不触发并节流记录诊断。

@@ -12,8 +12,9 @@ from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import QApplication
 
 from petcore.config import Config
-from petcore.contracts.content import CharacterSpec
+from petcore.contracts.content import AnimationSpec, CharacterSpec
 from petcore.engine import physics
+from petcore.engine.enums import AnimatType, GraphType
 from petcore.engine.collision import CollisionBody, collide
 from petcore.engine.feeding import ScanBudget, format_bytes, measure_paths, pick_eating_animation
 from petcore.engine.spin import eased_progress, spin_angle
@@ -218,3 +219,72 @@ def test_play_spec_clears_the_loop(window) -> None:
     window._play_spec(AnimationSpec(name="missing", graph=None, animat=AnimatType.SINGLE), "act")
 
     assert window._loop_active is False
+
+
+def test_head_pat_uses_head_box_and_starts_head_pat_action(app, tmp_path, monkeypatch):
+    character = CharacterSpec(
+        id="pat",
+        name="Pat",
+        root=tmp_path,
+        media_kind="none",
+        animations=(
+            AnimationSpec("点击", GraphType.TOUCH_BODY, AnimatType.SINGLE),
+            AnimationSpec("摸头", GraphType.TOUCH_HEAD, AnimatType.SINGLE),
+        ),
+        canvas=(100, 100),
+        body_box=(0, 0, 100, 100),
+        head_box=(0, 0, 100, 60),
+    )
+    config = Config(tmp_path / "pat-config")
+    instance = PetWindow(config, tmp_path, FakeHost([character]))
+    instance.start(character)
+    instance._image = None
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        instance,
+        "_play_spec",
+        lambda spec, kind: calls.append((spec.name, kind)),
+    )
+    times = iter((0.0, 0.1, 0.2, 0.3))
+    monkeypatch.setattr("petcore.ui.pet_window.time.monotonic", lambda: next(times))
+
+    assert instance.hasMouseTracking() is True
+    assert instance._head_pat_hit(QPointF(10, 10).toPoint())[2] is True
+    assert instance._head_pat_hit(QPointF(10, 90).toPoint())[2] is False
+    for point in (QPointF(10, 10), QPointF(20, 10), QPointF(10, 10), QPointF(20, 10)):
+        instance._maybe_head_pat(point)
+
+    assert calls == [("点击", "head_pat")]
+    instance.shutdown()
+
+
+def test_head_pat_is_suppressed_when_disabled_or_busy(window, monkeypatch):
+    from petcore.contracts.content import AnimationSpec
+    from petcore.engine.enums import AnimatType, GraphType
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(window, "_play_spec", lambda spec, kind: calls.append((spec.name, kind)))
+    monkeypatch.setattr(
+        window,
+        "_head_pat_candidates",
+        lambda: (AnimationSpec("点击", GraphType.TOUCH_BODY, AnimatType.SINGLE),),
+    )
+    window._head_local = (0, 0, 100, 100)
+    window._body_local = (0, 0, 100, 100)
+    clock = iter((0.0, 0.1, 0.2, 0.3, 0.4, 0.5))
+    monkeypatch.setattr("petcore.ui.pet_window.time.monotonic", lambda: next(clock))
+
+    window.config.set("head_pat_enabled", False)
+    window._maybe_head_pat(QPointF(10, 10))
+    assert calls == []
+
+    window.config.set("head_pat_enabled", True)
+    window._action_kind = "click"
+    for point in (QPointF(10, 10), QPointF(20, 10), QPointF(10, 10), QPointF(20, 10)):
+        window._maybe_head_pat(point)
+    assert calls == []
+
+    window._action_kind = None
+    window.click_through = True
+    window._maybe_head_pat(QPointF(10, 10))
+    assert calls == []
