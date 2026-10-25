@@ -146,3 +146,11 @@ GPU/FPS 本机没有可用原生探针；代码提供 `DynamicIsland.set_probe_s
 ## 九、最终状态
 
 本轮代码在 petcore 范围内已完成并通过自动化门禁；“Windows 实机可见 UI”“冻结安装器验收”“GPU/FPS 真读数”“公开发布”保持未验证/未执行。详细交接见 `.scratch/petcore-p5-complete/HANDOFF.md`。
+
+## 十、远端交付复验（2026-10-26）
+
+- 实现提交：`ce8c67fb1e626686c8e5553bcb5957289f798b55`，43 文件、+2351/−28。精确文件清单可复核 `git show --numstat ce8c67fb`；报告内历史测试和性能数据仍为 2026-10-25 的原记录。
+- 本次提交前复验：Ruff `All checks passed!`；petcore 全量 `1513 passed in 122.25s (0:02:02)`、exit 0；架构/文档/设置覆盖/PR 报告门禁 `306 passed in 3.88s`；暂存区 `git diff --cached --check` 通过。
+- 暂存检查清理 3 处空白问题；`tests/test_petcore_island_p5.py` 最终为 +96/−0。没有更改运行行为，未追加旧实现测试或重复性能实测。
+- SSH 443 普通推送已成功：`3f2155fd..ce8c67fb HEAD -> feat/petcore-vpet-architecture`；随后 `ls-remote` 核验远端为上述完整 SHA。
+- 本节和 L083 是实现提交之后的独立文档回填；未推送 Release 资产、未合并 main、未覆盖安装。已知实机及环境缺口仍见第五、七节。

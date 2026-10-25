@@ -2739,3 +2739,14 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **验证**：`ruff check petcore tests scripts` 输出 `All checks passed!`；P5 聚焦族 `121 passed in 13.08s`，CPU 压力下 3 次分别 `13.08s / 13.29s / 12.96s`；`tests/test_petcore_*.py` 全部 `1513 passed in 126.19s (0:02:06)`、exit 0；`python -m petcore --check` exit 0；`git diff --check` 无空白错误（仅报告 LF/CRLF 转换提示）。
 
 **限制**：本机无真实桌面、冻结安装器或原生 GPU/FPS 探针；未使用真实余额服务、CDN/Release、真实 API key，也未修改旧 `pet`。
+
+
+## L083 — 2026-10-26 — P5 提交前复验与远端交付
+
+**范围**：提交已有 P5 工作，不扩大功能范围。实现提交 `ce8c67fb` 共 43 文件、+2351/−28；未修改旧 `pet/`，未纳入 `.scratch`、配置、凭据或构建产物。暂存检查清理报告两处 Markdown 行尾空白及岛测试末尾空行，不改运行行为；校正报告两项文件行数与测试命令排版。
+
+**验证**：本次重新执行 `.venv\Scripts\python.exe -m ruff check petcore tests scripts`，`All checks passed!`；枚举全部 `tests/test_petcore_*.py` 后执行 pytest，`1513 passed in 122.25s (0:02:02)`、exit 0；架构/文档/设置覆盖/PR 报告门禁 `306 passed in 3.88s`；`git diff --cached --check` 通过。未运行旧实现测试。上一批高负载三遍及性能实测保留原始日期和数据，本次未重复测量；仅文档回填不改变这些路径。
+
+**交付**：先经 SSH 443 fetch 核对远端无新增提交，再普通 push 到 `origin/feat/petcore-vpet-architecture`；`ls-remote` 实际返回 `ce8c67fb1e626686c8e5553bcb5957289f798b55`。本条与索引/报告为独立文档回填，不 force push、不合并 main、不上传 Release。可使用 `git revert ce8c67fb` 回滚实现，不删除新格式缓存或用户配置。
+
+**回填文件与增删**：`docs/PETCORE-LOG-INDEX.md` +3/−2；`docs/PETCORE-LOG.md` +11/−0；`docs/PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md` +8/−0。行为未变化，文档交付免新增性能/实机测量；Windows 可见 UI、GPU/FPS 真读数、冻结安装器和真实服务验证缺口继续保留，不以推送成功替代验收。
