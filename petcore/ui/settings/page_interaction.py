@@ -51,6 +51,8 @@ class InteractionPage(SettingsPage):
     _CHECK_KEYS = (
         "click_squash_enabled",
         "click_sound",
+        "click_show_balance",
+        "balance_tier_color_enabled",
         "drag_physics_enabled",
         "drop_gravity_enabled",
         "slingshot_enabled",
@@ -141,6 +143,56 @@ class InteractionPage(SettingsPage):
             )
             self._sync_spin_direct_row()
             self._checks["golden_spin_on_click"].toggled.connect(self._sync_spin_direct_row)
+
+            balance_card = self.section("余额提示")
+            balance_card.add_row(
+                "点击查看余额",
+                self._checks["click_show_balance"],
+                "左键点击桌宠时异步查询余额并用气泡展示；按当前宠物保存，不阻塞点击动画。",
+            )
+            balance_card.add_row(
+                "峰谷提示颜色",
+                self._checks["balance_tier_color_enabled"],
+                "余额气泡下方显示 DeepSeek 高峰/空闲与下次切换时间；开启后高峰红、低谷绿。",
+            )
+            self.balance_tier_mode = QComboBox(self)
+            for key, label in (
+                ("default", "高峰 / 空闲"),
+                ("liangwen", "梁文峰 / 梁文谷"),
+                ("custom", "自定义"),
+            ):
+                self.balance_tier_mode.addItem(label, key)
+            mode_index = self.balance_tier_mode.findData(
+                str(self.config().get("balance_tier_labels_mode") or "default")
+            )
+            self.balance_tier_mode.setCurrentIndex(max(0, mode_index))
+            self.balance_tier_mode.currentIndexChanged.connect(self._on_balance_tier_changed)
+            balance_card.add_row(
+                "峰谷文案",
+                self.balance_tier_mode,
+                "「梁文峰 / 梁文谷」是主分支的彩蛋叫法；自定义留空回退默认文案。",
+            )
+            self.balance_tier_peak = value_field("高峰", self)
+            self.balance_tier_peak.setText(str(self.config().get("balance_tier_label_peak") or ""))
+            self.balance_tier_peak.setMaximumWidth(160)
+            self.balance_tier_peak.editingFinished.connect(self._on_changed)
+            self._tier_peak_row = balance_card.add_row(
+                "高峰自定义文本",
+                self.balance_tier_peak,
+                "仅「自定义」模式生效；留空回退「高峰」。",
+                sub=True,
+            )
+            self.balance_tier_idle = value_field("空闲", self)
+            self.balance_tier_idle.setText(str(self.config().get("balance_tier_label_idle") or ""))
+            self.balance_tier_idle.setMaximumWidth(160)
+            self.balance_tier_idle.editingFinished.connect(self._on_changed)
+            self._tier_idle_row = balance_card.add_row(
+                "空闲自定义文本",
+                self.balance_tier_idle,
+                "仅「自定义」模式生效；留空回退「空闲」。",
+                sub=True,
+            )
+            self._sync_tier_custom_rows()
 
         self._embed_owner(embedded, "fun.click-talk", "click_talk", "点击台词")
         self._embed_owner(embedded, "fun.self-talk", "self_talk", "自言自语")
@@ -699,6 +751,16 @@ class InteractionPage(SettingsPage):
         enabled = self._checks["golden_spin_on_click"].isChecked()
         self._spin_direct_row.setVisible(enabled)
 
+    def _on_balance_tier_changed(self, *_args) -> None:
+        self._sync_tier_custom_rows()
+        self._on_changed()
+
+    def _sync_tier_custom_rows(self, *_args) -> None:
+        """自定义文本两行只在「自定义」模式出现（其余模式写进去也不生效）。"""
+        custom = str(self.balance_tier_mode.currentData() or "default") == "custom"
+        self._tier_peak_row.setVisible(custom)
+        self._tier_idle_row.setVisible(custom)
+
     # ------------------------------------------------------------ 摸头互动
     def _head_pat_window(self):
         return getattr(self.host, "window", None)
@@ -818,6 +880,15 @@ class InteractionPage(SettingsPage):
         ):
             values[key] = int(float(config.get(key) or 0))
         values["click_sound_pack"] = self._read_sound_pack()
+        values["balance_tier_labels_mode"] = str(
+            config.get("balance_tier_labels_mode") or "default"
+        )
+        values["balance_tier_label_peak"] = str(
+            config.get("balance_tier_label_peak") or ""
+        )
+        values["balance_tier_label_idle"] = str(
+            config.get("balance_tier_label_idle") or ""
+        )
         values["easter_egg_enabled"] = bool(config.get("easter_egg_enabled"))
         values["easter_egg_display"] = self._easter_display_value()
         values["easter_egg_title"] = str(config.get("easter_egg_title") or "")
@@ -847,6 +918,11 @@ class InteractionPage(SettingsPage):
         for key, spin in self._weights.items():
             values[key] = int(spin.value())
         values["click_sound_pack"] = dict(self._sound_pack)
+        values["balance_tier_labels_mode"] = str(
+            self.balance_tier_mode.currentData() or "default"
+        )
+        values["balance_tier_label_peak"] = self.balance_tier_peak.text().strip()
+        values["balance_tier_label_idle"] = self.balance_tier_idle.text().strip()
         values["easter_egg_enabled"] = bool(self.easter_enabled.isChecked())
         values["easter_egg_display"] = str(
             self.easter_display.currentData() or EASTER_DISPLAY_DEFAULT
@@ -900,6 +976,11 @@ class InteractionPage(SettingsPage):
         for key in self._weights:
             config.set(key, self._initial[key])
         config.set("click_sound_pack", dict(self._initial["click_sound_pack"]))
+        config.set(
+            "balance_tier_labels_mode", self._initial["balance_tier_labels_mode"]
+        )
+        config.set("balance_tier_label_peak", self._initial["balance_tier_label_peak"])
+        config.set("balance_tier_label_idle", self._initial["balance_tier_label_idle"])
         config.set("easter_egg_enabled", self._initial["easter_egg_enabled"])
         config.set(EASTER_DISPLAY_KEY, self._initial["easter_egg_display"])
         config.set("easter_egg_title", self._initial["easter_egg_title"])
@@ -938,6 +1019,24 @@ class InteractionPage(SettingsPage):
             spin.blockSignals(False)
         self._sound_pack = dict(self._initial["click_sound_pack"])
         self._sync_sound_pack_widgets()
+        self.balance_tier_mode.blockSignals(True)
+        self.balance_tier_mode.setCurrentIndex(
+            max(
+                0,
+                self.balance_tier_mode.findData(
+                    self._initial["balance_tier_labels_mode"]
+                ),
+            )
+        )
+        self.balance_tier_mode.blockSignals(False)
+        for widget, key in (
+            (self.balance_tier_peak, "balance_tier_label_peak"),
+            (self.balance_tier_idle, "balance_tier_label_idle"),
+        ):
+            widget.blockSignals(True)
+            widget.setText(str(self._initial[key]))
+            widget.blockSignals(False)
+        self._sync_tier_custom_rows()
         self.easter_enabled.blockSignals(True)
         self.easter_enabled.setChecked(bool(self._initial["easter_egg_enabled"]))
         self.easter_enabled.blockSignals(False)
@@ -985,6 +1084,16 @@ class InteractionPage(SettingsPage):
             "duck",
             "click sound",
             "sound pack",
+            "余额",
+            "点击查看余额",
+            "点击显示余额",
+            "峰谷",
+            "高峰",
+            "空闲",
+            "梁文峰",
+            "梁文谷",
+            "balance",
+            "tier",
             "点击台词",
             "自言自语",
             "免打扰",

@@ -143,13 +143,37 @@ def test_menu_style_and_icons_are_applied(qapp) -> None:
 
     stylesheet = menu_stylesheet()
     assert "QMenu::item" in stylesheet
-    assert "min-height: 26px" in stylesheet
+    # 主分支 modern 菜单口径：13px 字 → min-height 18（+ 上下各 3px padding = 24px 行）。
+    assert "min-height: 18px" in stylesheet
     assert "font-size: 13px" in stylesheet
-    assert "min-height: 31px" in menu_stylesheet(font_size=18)
+    assert "min-height: 23px" in menu_stylesheet(font_size=18)
     assert "font-size: 18px" in menu_stylesheet(font_size=18)
     assert "font-size: 13px" in menu_stylesheet(dark=True)
     assert not icon("character").isNull()
     assert not icon("quit").isNull()
+
+
+def test_menu_rows_use_the_main_branch_height(qapp) -> None:
+    """行高 24px、菜单高 86px（主分支 modern 实测值）。
+
+    32px 行 + 18px 图标时图标只占行的 56%，比主分支（75%）矮一截，菜单整体也厚一档。
+    """
+    from PySide6.QtWidgets import QMenu
+
+    from petcore.ui.icons import icon
+    from petcore.ui.menu_style import menu_stylesheet
+
+    menu = QMenu()
+    menu.setStyleSheet(menu_stylesheet(False))
+    for name in ("settings", "chat", "play"):
+        menu.addAction(icon(name), "待机呼吸休闲")
+    menu.adjustSize()
+    heights = [menu.actionGeometry(action).height() for action in menu.actions()]
+    assert heights == [24, 24, 24]
+    assert 80 <= menu.size().height() <= 92
+    # 图标槽位贴左缘 9px（menu padding 6 + QMenu::icon left 9），比旧的 30px 缩进更紧凑。
+    first = menu.actionGeometry(menu.actions()[0])
+    assert first.x() <= 8
 
 
 def test_file_icon_spec_is_used_by_the_menu(qapp, tmp_path) -> None:
@@ -441,7 +465,8 @@ def test_animation_icon_toggle_reads_the_config_flag(qapp, tmp_path: Path) -> No
     idle = menu.actions()[0].menu()
     idle.aboutToShow.emit()
     action = idle.actions()[0]
-    assert [size.width() for size in action.icon().availableSizes()] == [36]
+    # 关掉缩略图时保留占位「播放」图标；槽位与菜单一致是 18px。
+    assert [size.width() for size in action.icon().availableSizes()] == [18]
 
 
 def test_animation_actions_get_a_decoded_thumbnail(qapp, tmp_path: Path) -> None:
@@ -474,14 +499,18 @@ def test_animation_actions_get_a_decoded_thumbnail(qapp, tmp_path: Path) -> None
     idle.aboutToShow.emit()
     action = idle.actions()[0]
 
+    placeholder_key = action.icon().cacheKey()
     cache = ThumbnailCache.instance()
     assert cache.pool.waitForDone(5000)
     for _ in range(100):
         qapp.processEvents()
-        if QSize(64, 51) in action.icon().availableSizes():
+        if action.icon().cacheKey() != placeholder_key:
             break
         QTest.qWait(5)
-    assert QSize(64, 51) in action.icon().availableSizes()
+    # 图标被换成缩略图（cacheKey 变化），且尺寸是菜单槽位而不是整帧画布：
+    # 裁剪适配后角色才在 18px 里看得见（旧实现塞 64×51 原图，角色只有几个像素）。
+    assert action.icon().cacheKey() != placeholder_key
+    assert QSize(18, 18) in action.icon().availableSizes()
 
 
 

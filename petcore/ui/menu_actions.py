@@ -116,11 +116,11 @@ def _spec_for(window, name: str):
     return None
 
 
-def _apply_thumbnail(action, pixmap) -> None:
-    if pixmap is None or pixmap.isNull():
+def _apply_thumbnail(action, icon: QIcon) -> None:
+    if icon is None or icon.isNull():
         return
     try:
-        action.setIcon(QIcon(pixmap))
+        action.setIcon(icon)
     except RuntimeError:  # 菜单已销毁
         pass
 
@@ -134,6 +134,7 @@ def _request_thumbnail(window, action, name: str) -> None:
     try:
         from ..media.images import physical_side, sanitize_dpr, screen_dpr
         from ..media.thumbnails import THUMBNAIL_MAX_SIDE, ThumbnailCache
+        from .icons import MENU_ICON_SIZE, fitted_icon
 
         ratio = sanitize_dpr(screen_dpr(window))
         # 按物理像素解码：菜单里显示的是 THUMBNAIL_MAX_SIDE 逻辑像素的小图，
@@ -141,11 +142,9 @@ def _request_thumbnail(window, action, name: str) -> None:
         limit = physical_side(THUMBNAIL_MAX_SIDE, ratio)
 
         def apply(pixmap, target=action, dpr=ratio):
-            try:
-                pixmap.setDevicePixelRatio(dpr)
-            except RuntimeError:
-                return
-            _apply_thumbnail(target, pixmap)
+            # 动画帧是整块视频画布，直接当图标用会让角色在 18px 槽位里只剩几个
+            # 像素（主分支同款问题）；必须裁透明留白后再适配槽位。
+            _apply_thumbnail(target, fitted_icon(pixmap, MENU_ICON_SIZE, dpr=dpr))
 
         ThumbnailCache.instance().request(spec, apply, max_side=limit)
     except Exception:

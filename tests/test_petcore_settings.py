@@ -28,6 +28,7 @@ from petcore.engine.enums import AnimatType, GraphType
 from petcore.mods.feature import FeatureManager
 from petcore.ui.menu_model import MenuItem, MenuModel
 from petcore.ui.settings.base import SettingsPage
+from petcore.ui.icons import MENU_ICON_SIZE
 from petcore.ui.settings.dialog import SettingsDialog
 
 CORE_TITLES = [
@@ -550,6 +551,54 @@ def test_interaction_page_splits_into_inner_tabs(app, tmp_path):
     dialog.close()
 
 
+def test_appearance_page_splits_into_inner_tabs(app, tmp_path):
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host)
+    appearance = _page(dialog, "外观与交互")
+    tabs = appearance.tab_container
+    assert tabs is not None
+    assert tabs.keys() == ("size", "island", "text", "screen")
+    assert tabs.labels() == ("大小与外观", "灵动岛", "文字与快捷键", "屏幕与位置")
+    dialog.close()
+
+
+def test_appearance_search_switches_to_the_owning_inner_tab(app, tmp_path):
+    """搜索要能落到非默认分页里：搜「边缘探头」应切到「大小与外观」并滚到那一行。"""
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host)
+    appearance = _page(dialog, "外观与交互")
+    dialog.select_page("appearance")
+    assert appearance.tab_container.currentKey() == "size"
+    dialog.search.setText("边缘探头")
+    app.processEvents()
+    assert appearance.tab_container.currentKey() == "size"
+    dialog.search.setText("不透明度")
+    app.processEvents()
+    assert appearance.tab_container.currentKey() == "island"
+    dialog.close()
+
+
+def test_interaction_page_hosts_balance_rows(app, tmp_path):
+    """「点击查看余额」与峰谷提示都在「点击与音效」分页里（主分支同页）。"""
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host)
+    interaction = _page(dialog, "互动与物理")
+    assert "click_show_balance" in interaction._checks
+    assert "balance_tier_color_enabled" in interaction._checks
+    assert interaction.tab_container.key_for_label("点击与音效") == "click"
+    assert interaction.balance_tier_mode.findData("liangwen") >= 0
+    # 默认模式不是 custom：两行自定义文本隐藏（对话框未显示，用 isHidden 判）。
+    assert interaction.balance_tier_mode.currentData() == "default"
+    assert interaction._tier_peak_row.isHidden()
+    assert interaction._tier_idle_row.isHidden()
+    interaction.balance_tier_mode.setCurrentIndex(
+        interaction.balance_tier_mode.findData("custom")
+    )
+    app.processEvents()
+    assert not interaction._tier_peak_row.isHidden()
+    dialog.close()
+
+
 def test_embedded_page_changes_flow_through_save(app, tmp_path):
     host = _host(tmp_path)
     dialog = SettingsDialog(host)
@@ -768,8 +817,9 @@ def test_head_pat_settings_are_scoped_live_and_cancelable(app, tmp_path):
 
 def test_p5_settings_icons_and_combos_keep_safe_geometry(app, tmp_path):
     dialog = SettingsDialog(_host(tmp_path))
-    assert dialog.nav.iconSize() == QSize(24, 24)
-    assert all(dialog.nav.item(row).sizeHint().height() >= 42 for row in range(dialog.nav.count()))
+    assert dialog.nav.iconSize() == QSize(MENU_ICON_SIZE, MENU_ICON_SIZE)
+    # 侧栏行高 34px（主分支 `SIDEBAR_ROW_HEIGHT`）；旧的 42px 会让 18px 图标显得过大。
+    assert all(dialog.nav.item(row).sizeHint().height() == 34 for row in range(dialog.nav.count()))
     combos = dialog.findChildren(QComboBox)
     assert combos
     for combo in combos:
@@ -783,17 +833,75 @@ def test_p5_settings_icons_and_combos_keep_safe_geometry(app, tmp_path):
 
 def test_click_show_balance_is_per_slot_and_cancelable(app, tmp_path):
     host = _host(tmp_path)
-    dialog = SettingsDialog(host, initial_page="api")
-    page = _page(dialog, "API 与账户")
-    assert page.click_balance_check.isChecked() is False
-    page.click_balance_check.setChecked(True)
+    dialog = SettingsDialog(host, initial_page="interaction")
+    page = _page(dialog, "互动与物理")
+    box = page._checks["click_show_balance"]
+    assert box.isChecked() is False
+    box.setChecked(True)
     app.processEvents()
     assert host.config.get("click_show_balance") is True
     dialog.cancel_button.click()
     assert host.config.get("click_show_balance") is False
+    assert box.isChecked() is False
 
     child = Config(tmp_path, filename="config-pet-1.json")
     child.set("click_show_balance", True)
     child.save()
     assert Config.load(tmp_path).get("click_show_balance") is False
     assert Config.load(tmp_path, filename="config-pet-1.json").get("click_show_balance") is True
+
+
+def test_api_page_stays_reachable_at_the_minimum_window_size(app, tmp_path) -> None:
+    """720×500 下「保存服务」必须可达：内容不裁或横向滚动条可用（AUD-26）。"""
+    from PySide6.QtWidgets import QScrollArea
+
+    dialog = SettingsDialog(_host(Path(tmp_path)))
+    try:
+        api = next(entry.page for entry in dialog._pages if entry.key == "api")  # noqa: SLF001
+        dialog.resize(720, 500)
+        dialog.show()
+        app.processEvents()
+        dialog._select_row([e.key for e in dialog._pages].index("api"))  # noqa: SLF001
+        app.processEvents()
+        scroll = api.findChild(QScrollArea)
+        assert scroll is not None
+        if api.content.width() > scroll.viewport().width():
+            bar = scroll.horizontalScrollBar()
+            assert bar.maximum() > 0
+            assert bar.isVisible() or scroll.horizontalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        else:
+            assert api.content.width() <= scroll.viewport().width()
+    finally:
+        dialog.close()
+
+
+def test_menu_editor_is_clean_right_after_construction(app, tmp_path) -> None:
+    """没碰过的菜单不算 dirty：否则每次保存都会重写 menu_layout（AUD-28）。"""
+    from petcore.ui.menu_model import MenuModel
+    from petcore.ui.settings.menu_editor import MenuEditor
+
+    host = _host(Path(tmp_path))
+    host.menu_model = MenuModel()
+    editor = MenuEditor(host, host.menu_model)
+    try:
+        assert editor.is_dirty() is False
+        editor.confirm_save()
+        assert editor.is_dirty() is False, "保存之后仍应是干净的"
+    finally:
+        editor.deleteLater()
+
+
+def test_interaction_page_does_not_revert_external_menu_changes(app, tmp_path) -> None:
+    """菜单里刚改的勾选项，不许被互动页的整组回写翻回去（AUD-27）。"""
+    host = _host(Path(tmp_path))
+    dialog = SettingsDialog(host)
+    try:
+        page = next(entry.page for entry in dialog._pages if entry.key == "interaction")  # noqa: SLF001
+        # 模拟用户从右键菜单勾上「黄金回旋」。
+        host.config.set("golden_spin_on_click", True)
+        assert host.config.get("golden_spin_on_click") is True
+        # 然后在设置页里改**另一个**勾选项。
+        page._checks["click_sound"].setChecked(not page._checks["click_sound"].isChecked())  # noqa: SLF001
+        assert host.config.get("golden_spin_on_click") is True, "未触碰的键被旧控件值覆盖了"
+    finally:
+        dialog.close()

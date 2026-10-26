@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from contextlib import ExitStack
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -245,6 +246,11 @@ class AppearancePage(SettingsPage):
         self._initial_stream_capture = bool(self.config().get("stream_capture_mode"))
         self._initial_visible = self._window_visible()
 
+        # 这一页的内容已经长到四屏：按主分支的设置页内分页切成四块。
+        # 用 ExitStack 而不是缩进整个构造体——分页边界一眼可见，也不用重排
+        # 200 行控件代码。搜索跨分页仍可命中（`base.reveal_text` 会自动切页）。
+        tabs = ExitStack()
+        tabs.enter_context(self.tab("size", "大小与外观"))
         scale_card = self.section("大小")
         scale_row = QWidget(self)
         scale_layout = QHBoxLayout(scale_row)
@@ -329,6 +335,8 @@ class AppearancePage(SettingsPage):
             "全局快捷键，至少包含一个修饰键；留空表示不绑定。",
         )
 
+        tabs.close()
+        tabs.enter_context(self.tab("island", "灵动岛"))
         island_card = self.section("灵动岛")
         self.island_enabled_check = make_checkbox(self)
         self.island_enabled_check.setChecked(bool(self.config().get("island_enabled")))
@@ -528,6 +536,8 @@ class AppearancePage(SettingsPage):
             "默认展开详细卡片；选「显示/隐藏桌宠」时点胶囊等同于切换桌宠可见。",
         )
 
+        tabs.close()
+        tabs.enter_context(self.tab("text", "文字与快捷键"))
         ai_card = self.section("AI 快捷键")
         self.hotkey_open_chat = self._ai_hotkey_row(
             ai_card, "AI 对话快捷键", "hotkey_open_chat", "open_chat"
@@ -567,6 +577,8 @@ class AppearancePage(SettingsPage):
             "气泡与文字一起等比放大。",
         )
 
+        tabs.close()
+        tabs.enter_context(self.tab("screen", "屏幕与位置"))
         screen_card = self.section("屏幕与位置")
         self.multi_screen_check = make_checkbox(self)
         self.multi_screen_check.setChecked(self._initial_multi_screen)
@@ -584,6 +596,7 @@ class AppearancePage(SettingsPage):
         reset_button = make_button("重置位置", self)
         reset_button.clicked.connect(self._reset_position)
         screen_card.add_buttons([primary_button, corner_button, reset_button])
+        tabs.close()
 
     def config(self):
         return self.host.config

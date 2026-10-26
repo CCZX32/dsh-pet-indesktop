@@ -172,10 +172,6 @@ class ApiSettingsPage(SettingsPage):
         self.balance_combo = QComboBox(panel)
         for value, label in _BALANCE_CHOICES:
             self.balance_combo.addItem(label, value)
-        self.click_balance_check = make_checkbox(panel)
-        self.click_balance_check.toggled.connect(
-            lambda checked: self.host.config.set("click_show_balance", bool(checked))
-        )
         self.balance_service_combo = QComboBox(panel)
         self.balance_service_combo.setMinimumWidth(240)
         self.balance_service_combo.currentIndexChanged.connect(self._on_balance_service_changed)
@@ -192,8 +188,8 @@ class ApiSettingsPage(SettingsPage):
         self._form_row(
             form,
             "点击显示余额",
-            self.click_balance_check,
-            "开启后左键点击桌宠会异步显示余额；按当前宠物保存，不阻塞点击动画。",
+            QLabel("在「互动与物理 → 点击与音效 → 余额提示」里设置", panel),
+            "按宠物保存；峰谷提示的文案与颜色也在那一页。",
         )
         self._form_row(form, "名称", self.name_edit)
         self._form_row(form, "Base URL", self.base_url_edit, "远程地址只允许 https；本机可用 http://localhost。")
@@ -229,9 +225,6 @@ class ApiSettingsPage(SettingsPage):
 
         self._refresh_list()
         self._refresh_keyring_note()
-        self.click_balance_check.blockSignals(True)
-        self.click_balance_check.setChecked(bool(self.host.config.get("click_show_balance", False)))
-        self.click_balance_check.blockSignals(False)
 
     def _line(self, placeholder: str, *, password: bool = False) -> QLineEdit:
         field = QLineEdit(self)

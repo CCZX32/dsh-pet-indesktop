@@ -20,6 +20,21 @@ from ..media.images import physical_side, sanitize_dpr, screen_dpr
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"})
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
+# `_draw()` 里所有坐标都写在这个设计坐标系里（字形大致落在 6..30）。
+_GLYPH_UNITS = 36.0
+#: 笔画宽度（**设计单位**，随画布等比缩放）。18px 槽位下 ≈0.8px 逻辑像素——与首个
+#: 重写版的实际重量一致，也正是用户认作「正常」的那一档。上一版把笔画钉成恒 1.6
+#: 逻辑像素（`1.6 / scale` 反向补偿），18px 下墨量是初版的 1.8–6 倍，观感就是
+#: 「图标又粗又大」（实测 settings 120 vs 初版 68 个不透明像素）。
+_STROKE_UNITS = 1.6
+#: 笔画逻辑像素地板：14–16px（侧栏、控件）不再继续变细，否则笔画会糊掉/消失。
+_MIN_STROKE_PX = 0.75
+# 菜单图标槽位：主分支 `small_icon_size(menu)=18`。
+MENU_ICON_SIZE = 18
+#: 设置侧栏的**绘制**尺寸（主分支 `settings_widgets.SIDEBAR_ICON_SIZE = 16`）：
+#: 位图按 16 画、视图槽位仍按 18 —— 侧栏行高 34px 下这一档最稳。
+SIDEBAR_ICON_SIZE = 16
+
 
 
 def _ink() -> QColor:
@@ -33,17 +48,26 @@ def _ink() -> QColor:
 
 
 def _pixmap(size: int, dpr: float = 1.0) -> tuple[QPixmap, QPainter]:
-    """按逻辑尺寸 ``size`` 建图，物理像素 = ``size × dpr``（高分屏不糊）。"""
+    """按逻辑尺寸 ``size`` 建图；字形仍按 36 单位设计稿绘制。
+
+    两个尺寸口径必须分开：``size`` 是**显示槽位**（菜单 18px、侧栏 16px），
+    ``_GLYPH_UNITS`` 是 ``_draw()`` 里写死的设计坐标系。设计稿整体缩放到槽位，
+    笔画也按设计单位一起缩放（不是钉死在逻辑像素上）——这样小槽位下笔画自然变细，
+    与初版观感一致。
+    """
+    logical = max(8, int(size))
     ratio = sanitize_dpr(screen_dpr() if dpr is None else dpr)
-    physical = max(1, int(round(max(1, int(size)) * ratio)))
+    physical = max(1, int(round(logical * ratio)))
     pixmap = QPixmap(physical, physical)
     pixmap.fill(Qt.GlobalColor.transparent)
     pixmap.setDevicePixelRatio(ratio)
     painter = QPainter(pixmap)
-    painter.scale(ratio, ratio)
+    # 设计单位 → 设备像素；``scale`` 是设计单位 → 逻辑像素。
+    scale = logical / _GLYPH_UNITS
+    painter.scale(ratio * scale, ratio * scale)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     pen = QPen(_ink())
-    pen.setWidthF(1.6)
+    pen.setWidthF(max(_STROKE_UNITS, _MIN_STROKE_PX / scale) if scale > 0 else _STROKE_UNITS)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
@@ -180,13 +204,75 @@ def _draw(name: str, painter: QPainter) -> None:
         painter.drawEllipse(QRectF(14, 14, 8, 8))
 
 
-def icon(name: str, size: int = 36, dpr: float | None = None) -> QIcon:
+def icon(name: str, size: int = MENU_ICON_SIZE, dpr: float | None = None) -> QIcon:
     pixmap, painter = _pixmap(size, dpr if dpr is not None else screen_dpr())
     try:
         _draw(name, painter)
     finally:
         painter.end()
     return QIcon(pixmap)
+
+
+def fitted_icon(
+    source, size: int = MENU_ICON_SIZE, dpr: float | None = None
+) -> QIcon:
+    """把整帧素材裁到不透明范围，再按短边适配进 ``size`` 方形槽位。
+
+    主分支同款两道处理（`pet/context_menus/icons.py:520` 的
+    `fitted_pet_pixmap_icon`）：动画帧是整块视频画布（640×390 里角色只占中间
+    一小块），直接缩到 18px 菜单槽位会让角色只剩几个像素；另外帧 pixmap 若
+    带着 DPR 交给 ``QIcon``，Qt 会按物理像素当逻辑像素算，图标再小一半。
+    这里统一 ``setDevicePixelRatio(1.0)`` 后用 alpha 包围盒裁剪，最后画进
+    带正确 DPR 的方形画布。
+
+    填充率按主分支口径 ``1.04``（**略微超出**槽位 4%，不是缩小留白）：
+    预览图是角色本体，留白会让 18px 槽位里的角色显得比矢量图标小一圈。
+    """
+    from PySide6.QtGui import QBitmap, QImage, QRegion
+
+    if source is None:
+        return QIcon()
+    image = source.toImage() if isinstance(source, QPixmap) else source
+    if not isinstance(image, QImage) or image.isNull():
+        return QIcon()
+    # 帧 pixmap 可能保留 DPR=2：先抹平，否则下面按物理像素算尺寸会小一半。
+    # 没有 alpha 通道的帧（JPEG / 无透明 PNG）解出来是 RGB32，`createAlphaMask()`
+    # 对它返回**空图**——直接当「全透明」会把整帧丢掉，菜单只剩占位图标。
+    if not image.hasAlphaChannel():
+        bounds_rect = image.rect()
+    else:
+        if image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+            image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        bounds = QRegion(QBitmap.fromImage(image.createAlphaMask())).boundingRect()
+        if not bounds.isValid() or bounds.isEmpty():
+            # 整帧全透明 = 没有可预览的内容；返回空图标让调用方保留占位图标，
+            # 而不是给一个「看得见槽位、看不见内容」的空白图标。
+            return QIcon()
+        bounds_rect = bounds
+    image = image.copy(bounds_rect)
+    if image.isNull() or image.width() <= 0 or image.height() <= 0:
+        return QIcon()
+
+    logical = max(8, int(size))
+    ratio = sanitize_dpr(screen_dpr() if dpr is None else dpr)
+    physical = max(1, int(round(logical * ratio)))
+    canvas = QPixmap(physical, physical)
+    canvas.fill(Qt.GlobalColor.transparent)
+    canvas.setDevicePixelRatio(ratio)
+    painter = QPainter(canvas)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        extent = logical * 1.04
+        scale = min(extent / image.width(), extent / image.height())
+        width = image.width() * scale
+        height = image.height() * scale
+        target = QRectF(
+            (logical - width) / 2.0, (logical - height) / 2.0 - 0.2, width, height
+        )
+        painter.drawImage(target, image)
+    finally:
+        painter.end()
+    return QIcon(canvas)
 
 
 def image_error(path: Path | str) -> str:
@@ -207,7 +293,7 @@ def image_error(path: Path | str) -> str:
 
 
 def file_icon(
-    path: Path | str, size: int = 36, display: str = "contain", dpr: float | None = None
+    path: Path | str, size: int = MENU_ICON_SIZE, display: str = "contain", dpr: float | None = None
 ) -> QIcon:
     if image_error(path):
         return QIcon()
@@ -230,12 +316,13 @@ def file_icon(
     return QIcon(scaled)
 
 
-def icon_from_spec(spec, dpr: float | None = None) -> QIcon:
+def icon_from_spec(spec, dpr: float | None = None, size: int = MENU_ICON_SIZE) -> QIcon:
     if isinstance(spec, dict) and spec.get("kind") == "file":
         return file_icon(
             spec.get("path") or "",
+            size=size,
             display="cover" if spec.get("display") == "cover" else "contain",
             dpr=dpr,
         )
-    return icon(str(spec or ""), dpr=dpr)
+    return icon(str(spec or ""), size=size, dpr=dpr)
 

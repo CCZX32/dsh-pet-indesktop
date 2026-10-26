@@ -23,9 +23,9 @@ from PySide6.QtWidgets import (
 
 from ... import __version__
 from ...config import ScopedConfig
-from ..icons import icon as menu_icon
+from ..icons import MENU_ICON_SIZE, SIDEBAR_ICON_SIZE, icon as menu_icon
 from ..placement import place_beside_pet
-from .base import make_button, page_label_texts, reveal_text
+from .base import make_button, page_search_texts, reveal_text
 from .page_about import AboutPage
 from .page_api import ApiSettingsPage
 from .page_extensions import ExtensionsPage
@@ -179,7 +179,9 @@ class SettingsDialog(QDialog):
         self.nav.setAccessibleName("设置页面")
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.nav.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self.nav.setIconSize(QSize(24, 24))
+        # 18px 与主分支桌面版设置侧栏（`modern_settings_dialog.py:342`）一致；
+        # 24px 在 42px 行高里会让图标比 16px 标签高出一截。
+        self.nav.setIconSize(QSize(MENU_ICON_SIZE, MENU_ICON_SIZE))
         self.nav.setUniformItemSizes(True)
         self.nav.currentRowChanged.connect(self._select_row)
         sidebar_layout.addWidget(self.nav, 1)
@@ -238,8 +240,10 @@ class SettingsDialog(QDialog):
         for title, page, keywords, key in pages:
             item = QListWidgetItem(title, self.nav)
             item.setData(Qt.ItemDataRole.UserRole, len(self._pages))
-            item.setSizeHint(QSize(0, 42))
-            item.setIcon(menu_icon(_page_icon(title)))
+            # 行高 34、图标按 16 绘制（主分支 `SIDEBAR_ROW_HEIGHT=34` / `SIDEBAR_ICON_SIZE=16`）。
+            # 旧的 42px 行 + 18px 图标会让图标比 13px 标签高出一大截，看着「过大」。
+            item.setSizeHint(QSize(0, 34))
+            item.setIcon(menu_icon(_page_icon(title), SIDEBAR_ICON_SIZE))
             self.stack.addWidget(page)
             self._pages.append(_PageEntry(title, page, keywords, key))
 
@@ -262,7 +266,7 @@ class SettingsDialog(QDialog):
             except Exception:
                 values = []
         # 行级文案（选项标题 + 说明）也进搜索口径：只搜页面标题等于搜不到功能。
-        values.extend(page_label_texts(page))
+        values.extend(page_search_texts(page))
         return tuple(dict.fromkeys(value for value in values if value))
 
     def _apply_filter(self, text: str) -> None:
@@ -271,7 +275,10 @@ class SettingsDialog(QDialog):
         visible = 0
         for index, entry in enumerate(self._pages):
             item = self.nav.item(index)
-            haystack = " ".join((entry.title, *entry.keywords)).lower()
+            # 每次输入都重算：页面里的提示文案会随状态改写，构造期快照会过期。
+            haystack = " ".join(
+                (entry.title, *entry.keywords, *page_search_texts(entry.page))
+            ).lower()
             matched = not needle or needle in haystack
             item.setHidden(not matched)
             if matched:

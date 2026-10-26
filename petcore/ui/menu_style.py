@@ -7,6 +7,9 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication
 
+# 菜单图标槽位：与主分支 `small_icon_size(menu)`（modern 主题 18）一致。
+# 24px 的旧值让菜单图标比 13px 文字大近一倍，视觉上「图标压字」。
+MENU_ICON_SIZE = 18
 _CHECK_SIZE = 14
 _CHECK_CACHE: dict[bool, str] = {}
 
@@ -60,29 +63,35 @@ def check_image_path(dark: bool | None = None) -> str:
     return value
 
 
+# 几何数值对齐主分支 modern 菜单（`pet/context_menus/menu_styles/modern.py`）：
+# 行 24px（min-height 18 + 上下各 3）、图标槽 18px、图标左缘 9px、文字缩进 13px。
+# 旧的 32px 行 + 30px 缩进让 18px 图标在行里只占 56%，菜单整体也比主分支厚一档。
+# 注意：QSS 里不能写 `#` 注释（会被当成 ID 选择器，整条规则失效）。
 _LIGHT = """
 QMenu {
     background: #ffffff;
     color: #252525;
     border: 1px solid #d8dbe0;
-    border-radius: 10px;
-    padding: 4px;
+    border-radius: 12px;
+    padding: 6px;
     font-size: %(font_size)dpx;
+    icon-size: %(icon_size)dpx;
 }
 QMenu::item {
     min-height: %(min_height)dpx;
-    padding: 3px 30px 3px 38px;
-    border-radius: 6px;
+    padding: 3px 29px 3px 13px;
+    border-radius: 9px;
 }
 QMenu::item:selected { background: #edf2f7; }
 QMenu::item:disabled { color: #a6a8ac; }
 QMenu::separator {
     height: 1px;
     background: #eceef1;
-    margin: 4px 8px;
+    margin: 4px 4px;
 }
 QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { width: 24px; height: 24px; padding-left: 4px; }
+QMenu::icon { left: 9px; }
+QMenu::right-arrow { width: 7px; height: 11px; margin-right: 10px; }
 """
 
 _DARK = """
@@ -90,24 +99,26 @@ QMenu {
     background: #2a2a30;
     color: #e4e4e9;
     border: 1px solid #45454f;
-    border-radius: 10px;
-    padding: 4px;
+    border-radius: 12px;
+    padding: 6px;
     font-size: %(font_size)dpx;
+    icon-size: %(icon_size)dpx;
 }
 QMenu::item {
     min-height: %(min_height)dpx;
-    padding: 3px 30px 3px 38px;
-    border-radius: 6px;
+    padding: 3px 29px 3px 13px;
+    border-radius: 9px;
 }
 QMenu::item:selected { background: #3a3a46; }
 QMenu::item:disabled { color: #7e7e82; }
 QMenu::separator {
     height: 1px;
     background: #3a3a42;
-    margin: 4px 8px;
+    margin: 4px 4px;
 }
 QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { width: 24px; height: 24px; padding-left: 4px; }
+QMenu::icon { left: 9px; }
+QMenu::right-arrow { width: 7px; height: 11px; margin-right: 10px; }
 """
 
 
@@ -125,7 +136,12 @@ def menu_stylesheet(dark: bool | None = None, font_size: int = 13) -> str:
         size = max(9, min(32, int(font_size)))
     except (TypeError, ValueError):
         size = 13
-    qss = (_DARK if dark else _LIGHT) % {"font_size": size, "min_height": size + 13}
+    qss = (_DARK if dark else _LIGHT) % {
+        "font_size": size,
+        # 主分支口径：13px 字 → 18px 行。大字号时跟着长，避免文字被 min-height 切掉。
+        "min_height": max(18, size + 5),
+        "icon_size": MENU_ICON_SIZE,
+    }
     image = check_image_path(dark)
     marker = "QMenu::indicator { width: 14px; height: 14px; }"
     if not image or marker not in qss:

@@ -14,6 +14,7 @@ from .. import paths
 from ..api.credentials import KeyringCredentials
 from ..api.store import ApiStore
 from ..account.presenter import BalancePresenter
+from ..account import pricing
 from ..account.service import AccountService
 from ..config import Config
 from ..content.collect import collect_characters as _collect
@@ -274,7 +275,7 @@ class CoreHost:
             message = result.format_text()
             if island is not None:
                 island.show_balance(result=result)
-            self._notify(slot, message)
+            self._notify(slot, message, subtitle=self._balance_subtitle(window))
             return
         reason = str(getattr(error, "reason", "network") or "network")
         detail = str(error) if str(error) and str(error) != reason else ""
@@ -284,6 +285,19 @@ class CoreHost:
         if island is not None:
             island.show_balance(error=message)
         self._notify(slot, message)
+
+    def _balance_subtitle(self, window=None) -> str:
+        """余额气泡副标题：DeepSeek 峰谷提示（高峰红/空闲绿，文案可自定义）。
+
+        峰谷是服务商计价事实，键在全局配置里；`window.config` 是 ScopedConfig，
+        读全局键会直通主配置，所以这里用窗口配置也能读到。
+        """
+        config = getattr(window, "config", None) or self.config
+        try:
+            return pricing.subtitle_for(config)
+        except Exception:  # noqa: BLE001 - 副标题坏了不许吞掉余额本体
+            logger.debug("balance tier subtitle failed", exc_info=True)
+            return ""
 
     def _ensure_update_service(self) -> UpdateService:
         if self.update_service is None:
@@ -574,7 +588,7 @@ class CoreHost:
         label = "AI 扩展" if owner == "ai.chat" else f"扩展 {owner}"
         self._notify(None, f"{label}未安装：可在「扩展管理 → 插件市场」安装")
 
-    def _notify(self, slot: int | None, message: str) -> None:
+    def _notify(self, slot: int | None, message: str, *, subtitle: str = "") -> None:
         window = self.window
         if slot is not None and self.pets is not None:
             window = self.pets.window_for_slot(int(slot)) or window
@@ -582,8 +596,14 @@ class CoreHost:
         say = getattr(window, "say", None)
         if callable(say):
             try:
-                say(message, 6000)
-            except Exception:
+                say(message, 6000, subtitle=subtitle)
+            except TypeError:
+                # 老签名（无 subtitle）：副标题丢失也不该让提示消失。
+                try:
+                    say(message, 6000)
+                except Exception:  # noqa: BLE001
+                    logger.debug("notify failed", exc_info=True)
+            except Exception:  # noqa: BLE001
                 logger.debug("notify failed", exc_info=True)
         island = getattr(self, "island", None)
         if island is not None:

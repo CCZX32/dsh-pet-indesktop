@@ -54,6 +54,12 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "allow_feature_mods",
         "market_index_url",
         "click_through",
+        # 余额峰谷提示：服务商计价是进程级事实（一只宠改了两只都该变），
+        # 与「点击显示余额」（按宠保存）区分开。
+        "balance_tier_labels_mode",
+        "balance_tier_label_peak",
+        "balance_tier_label_idle",
+        "balance_tier_color_enabled",
         # 这三个由**共享**的 feature 运行时读取（每个 owner 只有一个 runtime，
         # 不按宠物实例化），所以必须是全局键，否则子宠设置页写入永远不生效。
         "network_info_enabled",
@@ -260,6 +266,11 @@ DEFAULTS: dict[str, Any] = {
     "island_edge_dock": True,
     "island_dock_edge": "none",
     "click_show_balance": False,
+    # DeepSeek 峰谷提示：文案模式、自定义文本（custom 模式生效）、颜色开关（高峰红/空闲绿）。
+    "balance_tier_labels_mode": "default",
+    "balance_tier_label_peak": "",
+    "balance_tier_label_idle": "",
+    "balance_tier_color_enabled": True,
     "chat_always_on_top": False,
     "chat_follow_pet": False,
     "chat_background": "",
@@ -608,6 +619,10 @@ ISLAND_METRIC_LIMIT = 8
 #: 灵动岛的强调色词表。
 ISLAND_DOCK_EDGES = frozenset({"none", "top", "bottom", "left", "right"})
 ISLAND_ACCENTS = ("blue", "green", "purple", "pink", "orange")
+#: 余额峰谷提示的文案模式（default=高峰/空闲、liangwen=梁文峰/梁文谷、custom=自定义）。
+BALANCE_TIER_MODES = frozenset({"default", "liangwen", "custom"})
+#: 自定义峰谷文本的长度上限（气泡副标题只有一行，超过会被气泡截断）。
+BALANCE_TIER_LABEL_MAX = 12
 
 
 def _island_metrics(value: Any) -> list[str]:
@@ -1408,6 +1423,17 @@ class Config:
         normalized["island_metrics"] = _island_metrics(normalized.get("island_metrics"))
         normalized["click_show_balance"] = _bool(
             normalized.get("click_show_balance"), False
+        )
+        tier_mode = str(normalized.get("balance_tier_labels_mode") or "default").strip().lower()
+        normalized["balance_tier_labels_mode"] = (
+            tier_mode if tier_mode in BALANCE_TIER_MODES else "default"
+        )
+        for _label_key in ("balance_tier_label_peak", "balance_tier_label_idle"):
+            normalized[_label_key] = str(normalized.get(_label_key) or "").strip()[
+                :BALANCE_TIER_LABEL_MAX
+            ]
+        normalized["balance_tier_color_enabled"] = _bool(
+            normalized.get("balance_tier_color_enabled"), True
         )
         normalized["island_edge_dock"] = _bool(
             normalized.get("island_edge_dock"), True
