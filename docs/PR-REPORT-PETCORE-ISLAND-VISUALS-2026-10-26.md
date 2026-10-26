@@ -28,6 +28,7 @@
 | `petcore/ui/screen/ask_window.py` | 新增 `waiting_changed` 信号，`begin_waiting/end_waiting` 各发一次 | 截图识别期间也要「工作中」声纳 | +4 |
 | `petcore/ui/screen/controller.py` | 连接 `waiting_changed` → `host.notify_agent_state("working"/"idle")` | 同上 | +11 |
 | `petcore/ui/app.py` | 新增 `notify_agent_state()`；`set_all_visible()` 同步 `island.set_pet_visible()`；`ensure_island()` 初始可见性；新增 `_any_pet_visible()` | 「隐藏」态由宠物可见性派生 | +23 |
+| `tests/test_petcore_agent_state_wiring.py`（新增） | 4 例：宿主把 `source` 转发给岛、旧签名岛降级不抛、无岛静默、截图窗 `waiting_changed` 起落 | 状态来源是「点会动」的前提 | +73 |
 | `tests/test_petcore_island_visuals.py`（新增） | 30 例：优先级/形状映射/声纳曲线/呼吸整数量化与 5s 截断/淡化线性/常量对照；完成瞬态与定时器、隐藏派生、声纳起停与「状态点关掉就不播」、错误红感叹色；空心中心透明 vs 实心中心不透明 vs 感叹白笔画；缓存命中不重建、读数换字不淡化、结构变化播淡化并收表；三层投影像素、sheen 顶部更亮且 light 跳过、glass 竖直渐变、bevel 两半都有墨、头标不是黑洞 | 把「观感」变成可回归断言 | +400 |
 
 ## 2 性能分析
@@ -51,11 +52,15 @@
 ## 3 实机运行记录
 
 - `pytest -q tests/test_petcore_island_visuals.py` → **30 passed**。
-- 全量 `pytest -q $(ls tests/test_petcore*.py)` → **1784 项（1783 passed）**；
-  唯一失败 `test_petcore_websearch.py::test_fetch_page_text_is_truncated` 是**环境问题**：
+- 全量 `pytest -q $(ls tests/test_petcore*.py)` → **1795 passed in 132.02s**。
+  过程中先遇到 `test_petcore_websearch.py::test_fetch_page_text_is_truncated` 的**环境失败**：
   本机 fake-ip DNS 把 `e.test` 解析到 `198.18.0.0/15`（RFC 2544 保留段），
   `is_private_host` 依法拒绝，截断断言跑不到。已把该用例的目标校验收口到放行
-  （截断与目标校验各管各的），复跑 **11 passed**。
+  （截断与目标校验各管各的，单独一个提交），此后全量稳定全绿。
+- 打包冒烟：`rel-visual-2026-10-26/dsh-pet-core-setup.exe`，268,556,584 B，
+  sha256 `d9a43c575ddc22629e970cbdc331302736a16b4989b80dd240d8a79bc8011ca1`，
+  `Get-AuthenticodeSignature` = **Valid**（CN=DSH Pet Core Dev）；打包内
+  `--check --strict` 的 `check.json` 为 `strict.enabled=true, problems=[]`。
 - `ruff check petcore tests examples scripts` → 通过。
 - 离屏渲染核对：`.scratch/island-visuals.png`（五态点 + dark/glass/light + 淡化半程）、
   `.scratch/island-{dark,glass,light,fade}.png`。目视确认：dark 有外投影与顶部 sheen、

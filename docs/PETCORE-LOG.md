@@ -3189,6 +3189,15 @@ QSS 用 `icon-size`）；`test_petcore_menu.py` 增「行高 24 / 菜单高 86 /
   内容缓存键与结构键分离、声纳只在 working、呼吸 5s 整数像素。
 - PARITY-BACKLOG：五态/声纳/呼吸/淡化/投影-sheen 从「未做」改「已做」，余项列明。
 
-**验证**：全量 petcore pytest + ruff + `python -m petcore --check`；构建
-`rel-visual-2026-10-26/dsh-pet-core-setup.exe`（开发证书签名 + 冒烟启动）；
-提交并推送 `feat/petcore-vpet-architecture`。
+**验证**
+- `pytest -q $(ls tests/test_petcore*.py)` → **1795 passed in 132.02s**（新增 34 例：
+  岛视觉 30 + 状态来源接线 4）；
+- `ruff check petcore tests examples scripts` → 通过；`python -m petcore --check` → 退出码 0；
+- 构建：`pwsh -File scripts/build_petcore.ps1 -Clean -Installer -SignThumbprint
+  217337C099EC8624AC481BFC9F3E1664D0A442E1 -OutputRoot rel-visual-2026-10-26`
+  → 安装器 **268,556,584 B**、sha256 `d9a43c575ddc22629e970cbdc331302736a16b4989b80dd240d8a79bc8011ca1`、
+  `Get-AuthenticodeSignature` = Valid（CN=DSH Pet Core Dev）；打包内 `--check --strict`
+  的 `check.json` 为 `strict.enabled=true, problems=[]`（冒烟用 `Start-Process -Wait` 取真实退出码）；
+- 离屏证据：`.scratch/icons-compare.png`、`.scratch/menu-now.png`、`.scratch/sidebar.png`、
+  `.scratch/page-{appearance,interaction}.png`、`.scratch/island-visuals.png`；
+- 提交并推送 `feat/petcore-vpet-architecture`。
