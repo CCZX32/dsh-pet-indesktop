@@ -3055,3 +3055,140 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 - 停靠边切换的观感只在离屏环境验证，真实多屏（跨屏拖动落点、混合 DPI）需人工验收。
 - 设置侧栏图标 18px 与行高 42px 的观感需真机确认；若嫌小可只调
   `nav.setIconSize`（图标本身按槽位缩放，不会再被裁）。
+
+## L097 — 2026-10-26 — 图标重量与菜单/侧栏几何对齐
+
+**范围**：`petcore/ui/icons.py`、`petcore/ui/menu_style.py`、`petcore/ui/menu_actions.py`、
+`petcore/ui/settings/dialog.py`、`tests/test_petcore_icons.py`（新增）、
+`tests/test_petcore_menu.py`、`tests/test_petcore_settings.py`。
+
+**背景（先量后改）**：用户第二次反馈「设置和右键菜单的图标还是过大、动画预览还是过小」，
+并提示「这个重写任务刚开始的时候图标是正常的」。用同一块 18px 画布量不透明像素（alpha>40）：
+`settings` 初版 `0922b13a` **68** / 上一版 **120** / 主分支 **121**；`chat` 初版 20（被裁）
+/ 上一版 131；`network` 70 / 104 / 84。结论：L096 把笔宽钉成**恒 1.6 逻辑像素**
+（`_STROKE_PX / scale` 反向补偿），18px 下墨量是初版的 1.8–6 倍——「过大」与槽位无关，
+是笔画重量。初版「正常」的机制是：36 单位设计稿不缩放，笔画随画布缩到 ≈0.8px。
+
+菜单几何也量了：上一版行高 **32px**、图标墨迹 12×12 起于 **x=9**、菜单高 106；
+主分支 modern **24px** / 14×14 / x=17 / 高 86。
+
+**改了什么**
+- **笔画口径**：`_pixmap()` 改成 `pen = max(1.6 设计单位, 0.75px / scale)` ——
+  小槽位下笔画自然变细，14px 以下有 0.75px 地板不糊。
+- **侧栏**：新增 `SIDEBAR_ICON_SIZE = 16`；行高 42→**34**、图标按 16 绘制、视图槽位仍 18
+  （主分支 `SIDEBAR_ROW_HEIGHT` / `SIDEBAR_ICON_SIZE`）。
+- **菜单 QSS**：对齐主分支 modern —— `padding 6`(+1px 边框=7)、圆角 12、
+  **`icon-size: 18px`**（删掉被 Qt 忽略的 `QMenu::icon { width/height }`）、
+  `QMenu::icon { left: 9px }`、item `3px 29px 3px 13px` + 圆角 9、分隔线 `4px 4px`、
+  右箭头 `7×11 margin-right 10`、`min-height = max(18, 字号+5)`。
+- **动画缩略图**：`fitted_icon()` 填充率 0.96→**1.04**、y −0.2（主分支
+  `fitted_pet_pixmap_icon`），配合 24px 行高，18px 缩略图占行比 56%→75%。
+
+**验证**：新增 6 例图标回归（墨量上限、不裁边、14/16px 档仍有笔画、24 字形不出界、
+QSS 用 `icon-size`）；`test_petcore_menu.py` 增「行高 24 / 菜单高 86 / 图标贴左缘」。
+`pytest tests/test_petcore_{icons,menu,settings}.py -q` → **68 passed**；
+离屏对照图 `.scratch/icons-compare.png`（now / 初版 / 主分支 三行）。
+
+## L098 — 2026-10-26 — 外观页内分页、点击查看余额与峰谷提示
+
+**范围**：`petcore/account/pricing.py`（新增）、`petcore/config.py`、`petcore/ui/app.py`、
+`petcore/ui/settings/{pages_core,page_interaction,page_api,coverage}.py`、
+`tests/test_petcore_pricing.py`（新增）、`tests/test_petcore_balance_subtitle.py`（新增）、
+`tests/test_petcore_settings.py`。
+
+**改了什么**
+- **外观页内分页**：`AppearancePage` 用 `ExitStack` 包出四个 `SettingsPage.tab()`：
+  `size` 大小与外观 / `island` 灵动岛 / `text` 文字与快捷键 / `screen` 屏幕与位置
+  （不缩进 200 行控件代码；`section()` 自动落进当前分页；搜索仍跨页命中，
+  `reveal_text` 会自动切页）。
+- **点击查看余额换位置**：从「API 与账户」搬到「互动与物理 → 点击与音效 → 余额提示」
+  （与主分支同页），API 页留一行说明；`coverage.show_balance` 落点同步改
+  `("interaction", "点击查看余额")`。
+- **峰谷提示**：新模块 `petcore/account/pricing.py` 按主分支逐字移植 —— 北京时间、
+  周末/法定节假日空闲、工作日 09–12/14–18 高峰、40 天扫描下一档位、今天/明天/ISO 周
+  三种措辞、`default/liangwen/custom` 文案模式、HTML 转义、颜色 `#e5484d`/`#30a46c`。
+  节假日由调用方注入（core 不反向依赖 `fun.festival`）；时区用固定 +08:00，免 tzdata。
+- **接线**：`_on_balance_result` 成功时把 `pricing.subtitle_for(config)` 作为副标题，
+  `_notify(..., subtitle=)` → `say(..., subtitle=)`（老签名降级为无副标题）。
+- **配置**：4 个全局键 `balance_tier_labels_mode/label_peak/label_idle/color_enabled`。
+
+**验证**：pricing 13 例 + 副标题 5 例 + 设置页新增 4 例；`click_show_balance` 仍是
+按宠保存（取消回滚用例保留）。合并 L097 后同批 **115 passed**。
+
+## L099 — 2026-10-26 — 灵动岛五项视觉动效收尾
+
+**范围**：`petcore/island/layout.py`、`petcore/ui/island.py`、
+`petcore/ui/chat/controller.py`、`petcore/ui/screen/{ask_window,controller}.py`、
+`petcore/ui/app.py`、`tests/test_petcore_island_visuals.py`（新增）。
+
+**改了什么**
+- **五态状态点**：`layout.dot_state()`（错误 > 待确认 > 工作 > 隐藏 > 完成 > 空闲）+
+  `dot_style()`（实心/空心/感叹 × accent/muted/done/error）；完成是 4s 瞬态（单发表）；
+  空心环 pen 1.5 内缩 0.75（RoundJoin）；感叹笔画 `8×0.17`、比例 .18/.46/.82、
+  白 α235；珠感高光只给实心/感叹（空心环里是空的，高光会把环画回实心）。
+- **声纳环**：`sonar_ring_params(t)`（半径 5→13 线性、α = 90·(1−t)³），独立 33ms 表，
+  只在 `working` + 可见 + 非展开 + 非停靠 + `show_status` 时跑，画在内容之上。
+- **回复后呼吸**：`notify_event("reply")` 设 5s 窗口，`paintEvent` 整窗
+  `translate(0, round(1.5·sin(2.6t)))`；呼吸期间计入 `_animating()`，到点归零。
+- **130ms 内容淡化 + 位图缓存**：`_paint_content` 拆成 `_render_content_pixmap()`
+  （画进 `width×44` 的 QPixmap，DPR 自带）+ 内容层 blit；缓存键含段文案/状态/severity、
+  名字、开关、配色、accent、dot(形状,色)、字体键、DPR、宽度；**结构键**单独记账
+  （段 id 序列 + 折叠级 + 名字布局 + 宽度），只有结构变化才播淡化 —— 时间/百分比
+  换字不闪。淡化用旧图按新图透明区遮罩（`createMaskFromColor`）+ `opacity = 1−t`。
+- **外壳质感**：三层投影（(1,+1,α28)(2,+2.5,α16)(3,+4,α8)）、顶部 sheen
+  （top+3、42%、α14/0/34）、软陶 bevel（内缩 1.5、上白 26/下黑 46，light 230/20，
+  glass 90/(35,50,60,26)）、glass 四停点渐变（214/168/146/196 × opacity）+ 白 α130 keyline、
+  段间竖线竖直 alpha 渐变、头标内环（白 α46 / 黑 α20）、单位盒 α×0.7。
+- **真实来源**：chat 起流→`working`、`_apply_done`→`done`、`_apply_error`→`error`；
+  截图提问 `waiting_changed`→`working/idle`；`set_all_visible`→`hidden` 派生；
+  余额失败→`error`。
+- **边界**：`waiting` 态**只提供 API 与渲染**——petcore 目前没有审批/追问来源，
+  不臆造触发点（等 `ai.agent` 接审批后再上行）。
+
+**子 agent 审查后的修复（同一提交内）**
+- **状态按来源归并**：`set_agent_state(state, *, source=)` + `layout.resolve_agent_state()`
+  （错误 > 待确认 > 工作）。原来单标量后写覆盖：截图收尾发 idle 会把仍在流式回答的
+  working 关掉；反过来一次余额刷新会把 working 打回 idle。chat→`source="chat"`、
+  截图→`source="screen"`。`error` 加 8s TTL（petcore 没有 DSH 收敛器，否则永久红感叹）。
+- **余额不再动状态点**：`show_balance()` 只写余额面（卡片行 + 告警级 + 气泡）；
+  一次「没配余额服务」的点击曾把红感叹永久钉住。
+- **结构键去掉窗口宽度**：原来 `_structure_key()` 含 `width`，几何动画每帧都变 →
+  每帧重起淡化（180ms ≈ 11 帧），且新旧宽度不同时 `setMask` 尺寸不匹配被 Qt 静默丢掉 →
+  旧图新图各画一遍 = **重影**。改「行预算 + 段 id 序列」，`_fade_mask_for()` 尺寸不符
+  返回 None，`_content_layer()` 只在同尺寸时起淡化。
+- **位图内容平滑重采样**：`paintEvent` 开 `SmoothPixmapTransform`（悬停 1.02 缩放时
+  不开就是最近邻，正文发毛）。
+- **可见性四条路收口**：新增 `_sync_island_pet_visible()`，`PetWindow.set_visible()` 回调
+  宿主；快捷键、托盘全部、托盘逐宠、右键隐藏都能触发 hidden 派生。
+- **其余口径**：缓存键补 `box_text`/`elide_px`（GPU/FPS 换样本时盒宽才更新）、去掉多余的
+  `opacity`；`_sync_sonar()` 补到展开/收起、停靠落定、细条收回、滑出四个切换点；
+  展开态不再让 16ms 表为空跑的呼吸空转；投影下伸按剩余高度收敛（果冻+悬停+呼吸会推过
+  44px 窗高）；声纳环裁剪到胶囊路径。
+- **测试补强**：错误感叹改采竖杠（原采样点在红底上，`#f2777a` 亮度 181 让断言恒真）、
+  新增多来源归并、余额不动点、`stop()` 停四张表、声纳在展开/停靠被抑制、
+  缓存键含状态点、**宽度变化不淡化**、结构变化（指标换序）才淡化 —— 共 **30 例**。
+
+**验证**：新增 23 例（纯函数 + 离屏像素 + 缓存/淡化状态机）；全量
+`pytest -q $(ls tests/test_petcore*.py)` → **1784 项（1783 passed）**，唯一失败是
+`test_petcore_websearch.py::test_fetch_page_text_is_truncated` 的环境问题（本机 fake-ip DNS
+把 `e.test` 解析到 `198.18.0.0/15`），已修。性能实测：内容位图重建 mean 0.151ms、
+缓存命中 0.0044ms（约 34×）。
+
+## L100 — 2026-10-26 — 本轮文档、门禁、打包与提交
+
+**范围**：`docs/PETCORE-SPEC.md`、`docs/PETCORE-MAIN-PARITY-BACKLOG.md`、
+`petcore/AGENTS.md`、`docs/INDEX.md`、三份 PR 报告、`.gitignore`。
+
+**改了什么**
+- `.gitignore` 补 `rel-*/`：`scripts/build_petcore.ps1 -OutputRoot rel-<tag>` 的整包产物
+  是安装器输出（数千文件），不允许被 `git add -A` 捡进提交（本轮第一次提交时踩到，
+  已回滚暂存并加规则）。
+- SPEC 新增「2026-10-26 视觉与设置收尾」小节：图标口径、菜单几何、设置分页、
+  4 个峰谷键、灵动岛五项动效与缓存纪律。
+- `petcore/AGENTS.md` 加红线：笔画随画布缩放（不许钉死逻辑像素）、菜单行高 24、
+  内容缓存键与结构键分离、声纳只在 working、呼吸 5s 整数像素。
+- PARITY-BACKLOG：五态/声纳/呼吸/淡化/投影-sheen 从「未做」改「已做」，余项列明。
+
+**验证**：全量 petcore pytest + ruff + `python -m petcore --check`；构建
+`rel-visual-2026-10-26/dsh-pet-core-setup.exe`（开发证书签名 + 冒烟启动）；
+提交并推送 `feat/petcore-vpet-architecture`。

@@ -940,3 +940,65 @@ P5 的 petcore 运行时能力已按以下契约实现：
 - `petcore.update` 只信任 HTTPS manifest/asset host，支持 ETag、缓存、镜像、断点、Range、大小和 SHA-256；源码运行及非 Windows `install()` 固定返回 `unsupported_runtime`，只有冻结 Windows 进程可启动独立安装器。
 
 本节“已实现”不等同于“Windows 实机/候选安装包/公开 Release 已通过”；本轮证据见 `PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md`。
+
+## 2026-10-26 视觉与设置收尾（图标口径 / 外观分页 / 余额峰谷 / 岛动效）
+
+**图标口径（最终）**
+- 槽位：菜单 `icons.MENU_ICON_SIZE = 18`；设置侧栏按 `SIDEBAR_ICON_SIZE = 16` 绘制、
+  视图槽位 18、行高 34。矢量图标在 36 单位设计稿上整体缩放到槽位，**笔宽按设计单位
+  （1.6）一起缩放**（18px ≈0.8px，逻辑像素地板 0.75px）。把笔宽钉成恒逻辑像素会让
+  小槽位墨量翻数倍，属于禁止做法。
+- 菜单几何：`QMenu { padding 6; border-radius 12; icon-size: 18px }`、
+  `QMenu::item { min-height max(18, 字号+5); padding 3px 29px 3px 13px; border-radius 9 }`、
+  `QMenu::icon { left: 9px }`、分隔线 `margin 4px 4px`、右箭头 `7×11 / margin-right 10`
+  （= 主分支 modern 的 24px 行）。
+- 动画预览：整帧素材先按 alpha 包围盒裁剪，再按 **1.04** 填充率（y −0.2）画进槽位。
+
+**设置结构**
+- 「外观与交互」四页内分页：`size` 大小与外观 / `island` 灵动岛 / `text` 文字与快捷键 /
+  `screen` 屏幕与位置；搜索跨分页命中由 `base.reveal_text()` 自动切页。
+- 余额相关全部收在「互动与物理 → 点击与音效 → 余额提示」：点击查看余额、峰谷提示颜色、
+  峰谷文案（默认 / 梁文峰梁文谷 / 自定义）、两条自定义文本（仅自定义显示）。
+  API 页只保留余额服务选择与一行位置说明。
+
+**余额峰谷契约**
+- 新增全局键：`balance_tier_labels_mode`（default/liangwen/custom，默认 default）、
+  `balance_tier_label_peak` / `balance_tier_label_idle`（≤12 字，custom 生效）、
+  `balance_tier_color_enabled`（默认 True）。
+- `petcore/account/pricing.py` 是唯一判定处：北京时间（固定 +08:00）、周六日与法定节假日
+  全天空闲、工作日 09–12/14–18 高峰；下一档位在 09/12/14/18 边界上向后扫 40 天取最早翻转；
+  文案「DeepSeek 当前{峰} · 下一{谷} {今天 HH:MM|明天 HH:MM|周四 HH:MM|下周一 HH:MM}」；
+  颜色高峰 `#e5484d`、空闲 `#30a46c` 只作用在副标题文字上。节假日由调用方注入
+  `holiday_lookup(date)`（core 不反向依赖 `fun.festival`）。
+- 气泡副标题走既有 `subtitle` 通道（`_notify(..., subtitle=)` → `say(..., subtitle=)`）。
+
+**灵动岛动效与缓存纪律**
+- 状态点五态：实心 / 空心环 / 红底白感叹；优先级 错误 > 待确认 > 工作 > 隐藏 > 完成 > 空闲；
+  完成 4s 瞬态；空心环不画珠感高光。「隐藏」由宠物可见性派生（`set_pet_visible`）。
+- 声纳环：1600ms、半径 5→13、α = 90·(1−t)³、1.5px 笔；只在 working + 可见 + 非展开 +
+  非停靠 + `show_status` 时跑（33ms 表）。
+- 呼吸：`notify_event("reply")` 起 5s 窗口，整窗平移 `round(1.5·sin(2.6t))`，整数像素。
+- 内容淡化：结构变化播 130ms（旧图 α 1→0 线性、按新图透明区遮罩），读数换字不播；
+  **窗口宽度不进结构键**（几何动画每帧都变，含进去等于每帧重起淡化 + 掩码尺寸不符被
+  Qt 丢掉 → 旧新各画一遍 = 重影），改用行预算 + 段 id 序列；尺寸不同一律不淡化。
+- 内容位图缓存：`width × 44`（DPR 自带）单张；键含段文案/状态/severity/`box_text`/
+  `elide_px`、名字、`show_*`、配色、accent、dot(形状,色)、字体键、DPR、宽度；
+  `FontChange`/DPR 变化清缓存；起拖跳终点。
+- 状态按来源归并：`set_agent_state(state, source=…)`（chat / screen / core），
+  `layout.resolve_agent_state()` 取最高优先（错误 > 待确认 > 工作）；一个来源发 idle
+  不清别的来源。`error` 带 8s TTL。**余额结果只写余额面，不动状态点**。
+- 外壳与内容都有位图/形变：`paintEvent` 开 `SmoothPixmapTransform`；投影下伸按剩余
+  高度收敛（果冻 1.12 + 悬停 1.03 + 呼吸 +2 会推过 44px 窗高）；声纳环裁剪到胶囊路径。
+- 外壳：三层投影 `(1,+1,α28)(2,+2.5,α16)(3,+4,α8)`、顶部 sheen（top+3/42%/α14·0·34）、
+  软陶 bevel（内缩 1.5、上白 26 下黑 46，light 230/20，glass 90/(35,50,60,26)）、
+  glass 四停点渐变（214/168/146/196 × opacity）+ 白 α130 keyline、段间竖线竖直渐变、
+  头标内环（白 α46 / 黑 α20）、单位盒 α×0.7。
+
+**状态来源（真实接线）**：chat 起流→working（source=chat）、`_apply_done`→done、
+`_apply_error`→error；截图提问 `waiting_changed`→working/idle（source=screen）；
+可见性四条路（快捷键 / 托盘全部 / 托盘逐宠 / 桌宠右键隐藏）都经
+`PetWindow.set_visible()` → `host._sync_island_pet_visible()` → hidden 派生。
+`waiting` 目前只有 API 与渲染，没有真实触发点（等审批流接入后上行）。
+
+**语义说明**：胶囊状态点只表达**智能体五态**；指标告警仍由段数值颜色与 chip 上的
+4px 告警点表达（不使用状态点）。

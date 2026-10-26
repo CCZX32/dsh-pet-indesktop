@@ -130,3 +130,7 @@
 | L094 | 2026-10-26 | 画质与动画（审计修复） | 命中与绘制互逆、冷 meta 墙钟推进 + 看门狗、壁纸按 DPR、`load_pixmap` 按需解码、portable 根/空 root/实例缓存目录。 | hit-test、move、dpr、images、paths |
 | L095 | 2026-10-26 | 点击显示余额验收与构建冒烟等待修复 | 余额链路本就在 P5 实现（配置键→设置页→点击→单飞→气泡/岛），补 4 例点击回归；修构建冒烟对 -Windowed exe 不等待（& $exe 52ms 返回）导致读旧/缺报告的问题，改 Start-Process -Wait 并加新例。 | click_show_balance、balance、Start-Process、build gate、setup |
 | L096 | 2026-10-26 | 图标槽位与灵动岛停靠/动效移植 | 菜单/侧栏图标收到 18px 槽位（设计稿缩放 + 笔宽补偿），动画缩略图裁 alpha 包围盒后适配槽位；修灵动岛拖不动（QWidget 无 startDragDistance）、移植 40px 贴边停靠/16px 细条/悬停滑出/180ms 几何动画/悬停缩放/事件果冻，细条停采。 | icons、thumbnail、island、dock、GeoAnimation |
+| L097 | 2026-10-26 | 图标重量与菜单/侧栏几何对齐 | 笔画改回随画布缩放（18px ≈0.8px、地板 0.75px）；墨量 settings 120→64；菜单行高 32→24、`icon-size: 18px`、item `3px 29px 3px 13px`；侧栏行高 34、图标按 16 绘制；缩略图填充率 1.04；新增墨量/行高回归。 | icons、stroke、menu、sidebar、thumbnail、QSS |
+| L098 | 2026-10-26 | 外观页内分页、点击查看余额与峰谷提示 | 外观页切四页（大小与外观/灵动岛/文字与快捷键/屏幕与位置）；点击查看余额搬到「点击与音效 → 余额提示」；新增 `petcore/account/pricing.py`（档位/下一档位/措辞/标签/颜色/HTML 转义）；4 个全局峰谷键；余额气泡副标题接线。 | appearance、tabs、click_show_balance、pricing、peak、tier、subtitle |
+| L099 | 2026-10-26 | 灵动岛五项视觉动效收尾 | 五态状态点（含 4s 完成瞬态与感叹矢量）、工作态声纳环、回复后 5s 呼吸、130ms 内容淡化 + 内容位图缓存、三层投影/sheen/软陶 bevel/glass 渐变/竖线渐变/头标内环/单位 α；chat/截图/显隐/余额四处真实状态来源。 | island、dot、sonar、breathe、fade、cache、shadow、sheen、bevel |
+| L100 | 2026-10-26 | 本轮文档、门禁、打包与提交 | SPEC/AGENTS/BACKLOG/INDEX 同步；三份 PR 报告；`.gitignore` 补 `rel-*/`；全量门禁、构建签名安装器与推送。 | docs、spec、agents、backlog、build、gitignore、release |

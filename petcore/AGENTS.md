@@ -155,11 +155,15 @@
 - **命令反馈**：菜单/设置触发的命令反馈用 `say/notify(force=True)`，别被免打扰吞掉。
 - **菜单勾选**：勾选项必须渲染出对勾（`menu_style.menu_stylesheet()` 注入的 check 图片），
   勾选项不要再设 icon。
-- **图标槽位 18px**：菜单与设置侧栏的统一槽位是 `icons.MENU_ICON_SIZE = 18`
-  （主分支 `small_icon_size(menu)=18`、桌面版设置侧栏 18）。矢量图标必须在**36 单位设计稿**
-  上按槽位缩放并反向补偿笔宽（最终笔画固定 1.6 逻辑像素），不许把设计稿直接画进 18px
-  画布（会被裁一半）；`QMenu::icon` 的 width/height 与 `QMenu::item` 左内边距同源，
-  改一处就要同步另一处。QSS 里不能写 `#` 注释（会被当成 ID 选择器，整条规则失效）。
+- **图标槽位 18px / 笔画随画布缩放**：菜单槽位 `icons.MENU_ICON_SIZE = 18`（主分支
+  `small_icon_size(menu)=18`），设置侧栏按 `SIDEBAR_ICON_SIZE = 16` 绘制、视图槽位仍 18、
+  行高 34。矢量图标在**36 单位设计稿**上按槽位缩放，**笔宽按设计单位（1.6）一起缩放**
+  （18px ≈0.8px，逻辑像素地板 0.75px）——把笔宽钉成恒 1.6 逻辑像素会让 18px 墨量变成
+  初版的 1.8–6 倍，观感就是「图标又粗又大」（实测 settings 120 vs 初版 68）。不许把
+  设计稿直接画进 18px 画布（会被裁一半）。菜单尺寸走 `QMenu { icon-size: 18px }`
+  （`QMenu::icon { width/height }` 会被 Qt 忽略），行高 `max(18, 字号+5)` + item
+  `3px 29px 3px 13px`（= 主分支 modern 的 24px 行）。QSS 里不能写 `#` 注释
+  （会被当成 ID 选择器，整条规则失效）。
 - **动画缩略图必须裁剪**：整帧素材（640×390 里角色只占中间一小块）要先按 alpha
   包围盒裁掉透明留白、再适配进 18px 槽位（`icons.fitted_icon`，主分支
   `fitted_pet_pixmap_icon` 同款）；不许把整帧或带 DPR 的 pixmap 直接塞进 `QIcon`
@@ -170,6 +174,26 @@
   `arm_throw_egg()` 再 `_edge_probe.cancel("collision", restore=True)` 并完整分离；
   轻碰时探头 body 按 `static=True`（无限质量）处理，只推开对方并 `abort_move_plan()`，
   不得取消探头。
+- **状态点五态 + 多来源归并**：`island/layout.dot_state()` 的优先级是 错误 > 待确认 >
+  工作 > 隐藏 > 完成 > 空闲；「隐藏」由 `set_pet_visible()` 派生，**不接受**外部设
+  `hidden`；完成是 4s 瞬态（不可见时不点表）。状态**按来源归并**
+  （`set_agent_state(state, source=…)` + `layout.resolve_agent_state()`）：截图收尾发
+  `idle` 不许把仍在流式回答的 `working` 关掉，后写覆盖就是这类 bug。`error` 带 8s TTL
+  （petcore 的错误来源是「一次请求失败」，没有 DSH 收敛器）；**余额结果不许动状态点**
+  ——失败已有卡片红字，再写点会永久钉住红感叹。空心环不许画珠感高光。
+- **声纳只在 working**：`_sonar_active()` 要同时满足可见、非展开、非停靠、`show_status`、
+  状态为 working 五条；4s 完成表 / 33ms 声纳表 / 16ms 淡化表 / 8s 错误表都必须按需启停，
+  空闲时不许有常驻定时器；进出展开、停靠、滑出都要显式 `_sync_sonar()`（别等 1Hz 心跳）。
+- **内容缓存键 vs 结构键**：位图缓存键必须包含**所有会改变像素的输入**（段文案/状态/
+  severity、`box_text`、`elide_px`、名字、`show_*`、配色、accent、dot(形状,色)、字体键、
+  DPR、宽度）；结构键只含结构（**行预算**、段 id 序列、折叠级、名字布局、`show_*`），
+  **采样值与窗口宽度都不许进结构键**——前者让时间每秒播淡化，后者让几何动画每帧重起
+  淡化、还会因新旧宽度不同导致掩码尺寸不符被 Qt 丢掉 → 旧图新图各画一遍 = 重影。
+  `FontChange` 与 DPR 变化必须清缓存；起拖立即跳淡化终点帧；尺寸不同一律不淡化。
+- **内容层是位图**：`paintEvent` 必须开 `SmoothPixmapTransform`（悬停 1.02 缩放时
+  不 interpolation 就是最近邻，正文发毛）；呼吸位移取整（`layout.breath_offset()`）。
+- **呼吸 5s 整数像素**：只有 `notify_event("reply")` 起呼吸；位移用
+  `layout.breath_offset()` 取整，不许亚像素平移（13px 中文每帧重栅格化会糊）；5s 到点归零。
 - **子宠落座**：位置由 `engine.spawn.choose_spawn_position()` 决定（逐圈找空位，
   必须整只落在可用区内）；不许再写「主宠右侧 +24」这种硬编码。
 - **打包工具**：PyInstaller 安装在 `.venv`；Inno Setup 便携安装在
