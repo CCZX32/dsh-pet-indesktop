@@ -129,6 +129,11 @@ def test_free_engine_failure_names_both_attempts(monkeypatch) -> None:
 
 
 def test_fetch_page_text_is_truncated(monkeypatch) -> None:
+    # 本用例只验证**截断**；目标校验（`validate_target`）另有专门用例。
+    # 开发机上开了 fake-ip DNS 时 `e.test` 会被解析到 198.18.0.0/15（RFC 2544 保留段），
+    # `is_private_host` 会依法拒绝，于是「截断」永远测不到——把校验收口到放行，
+    # 让这条断言只对截断负责。
+    monkeypatch.setattr("petcore.net.websearch.validate_target", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "petcore.net.websearch._get",
         lambda *_a, **_k: ("<html><title>T</title><p>" + "字" * 50 + "</p></html>", "text/html"),
