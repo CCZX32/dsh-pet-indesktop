@@ -820,6 +820,9 @@ class CoreHost:
             )
             island.refresh_from_config()
             island.set_visible(True)
+            # 岛可能在后来的某一轮才被启用：启用时按当前可见性补一次，否则状态点
+            # 会停在「隐藏」直到下一次显隐变化。
+            self._sync_island_pet_visible()
         except Exception:  # noqa: BLE001 - 灵动岛坏了不许拖垮桌宠
             logger.exception("failed to apply island settings")
 
