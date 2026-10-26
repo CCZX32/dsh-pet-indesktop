@@ -87,8 +87,21 @@ class ModManifest:
     seasonal: dict[str, Any] | None = None
 
 
+#: NTFS 保留设备名：`mods/nul` 在 Windows 上永远「已存在」，且无法正常替换。
+_RESERVED_ID_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
 def is_valid_id(value: str) -> bool:
-    return bool(_ID_RE.match(value))
+    if not _ID_RE.match(value):
+        return False
+    # 只校验整个 id 与它的第一段：`com1.extra` 同样没法落盘。
+    if value.lower() in _RESERVED_ID_NAMES:
+        return False
+    return value.split(".")[0].lower() not in _RESERVED_ID_NAMES
 
 
 def parse_version(value: str) -> tuple[int, int, int] | None:

@@ -8,7 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit
 
 from ... import __version__
-from ...update import UpdateResult
+from ...update import UpdateResult, describe_state
 from .base import (
     SettingsPage,
     build_embedded_page,
@@ -168,17 +168,27 @@ class AboutPage(SettingsPage):
     def set_update_status(self, result: UpdateResult | None) -> None:
         if not hasattr(self, "update_status_label") or result is None:
             return
-        message = str(result.message or result.state or "尚未检查")
+        message = str(result.message or describe_state(result.state))
         if result.version:
             message = f"{message}（{result.version}）"
         if result.path:
             message = f"{message}\n文件：{result.path}"
         self.update_status_label.setText(message)
         self.download_update_button.setEnabled(result.state == "available")
+        # 源码运行/非 Windows 不能原地更新：按钮直接不给点亮，别让用户点了才知道。
         self.install_update_button.setEnabled(
-            result.state == "downloaded" and result.path is not None
+            result.state == "downloaded" and result.path is not None and self._can_auto_install()
         )
-        self.cancel_update_button.setEnabled(result.state == "downloading")
+        self.cancel_update_button.setEnabled(result.state in {"downloading", "checking"})
+
+    def _can_auto_install(self) -> bool:
+        checker = getattr(self.host, "_install_available", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:  # noqa: BLE001 - 探针失败按不可安装处理
+                return False
+        return False
 
     def _check_update(self) -> None:
         callback = getattr(self.host, "check_for_updates", None)

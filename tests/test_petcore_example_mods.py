@@ -68,7 +68,7 @@ def test_all_example_mods_install_into_fresh_root(tmp_path) -> None:
     assert list(result.diagnostics) == []
 
 
-def test_installer_trust_marker_loads_feature_mods_without_the_global_switch(tmp_path) -> None:
+def test_installer_trust_marker_loads_feature_mods_without_the_global_switch(tmp_path, monkeypatch) -> None:
     from petcore.mods import trust
 
     root = tmp_path / "data"
@@ -77,6 +77,8 @@ def test_installer_trust_marker_loads_feature_mods_without_the_global_switch(tmp
     import shutil
 
     shutil.copytree(EXAMPLES / "fun.divination", pack)
+    # 授信 = 位置 + 标记：这里把用户 mod 根当作「安装器投放目录」来模拟冻结包。
+    monkeypatch.setattr(trust, "install_trust_root", lambda: pack.parent)
     assert trust.is_trusted(pack) is False
     blocked = load_mods(root, (), allow_feature_mods=False)
     assert all(not mod.enabled for mod in blocked.mods if mod.manifest.id == "fun.divination")

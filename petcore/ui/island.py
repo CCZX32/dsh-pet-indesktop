@@ -8,8 +8,18 @@
 
 1. **宽度只由模板驱动**：段的盒宽来自声明样本（``max_text``），读数只在盒内伸缩。
    任何"按当前读数算宽"的写法都会让岛随数字抖。
-2. **看不清就不采**：岛隐藏 / 卡片折叠 / 段被折进 ``+N`` 时停掉对应采样线程。
+2. **看不清就不采**：岛隐藏 / 卡片折叠 / 段被折进 ``+N`` / **收进停靠细条**时停掉
+   对应采样线程。
 3. **点胶囊 = 展开/收起卡片**；``island_click_action=toggle_pet`` 时改为透传点击。
+
+停靠与动画口径（主分支 `pet/dynamic_island.py` 同源）：
+
+* 拖到屏幕边缘 ``DOCK_THRESHOLD`` 内松手 → 收成 ``STRIP_THICKNESS`` 细条；
+  悬停滑出预览（``_hover_peek``），光标离开 ``DOCK_BACK_MS`` 后收回，
+  收回前必须复检可悬停区，否则细条盖回光标会形成 1s 自持振荡。
+* 所有几何变化（停靠/滑出/展开/收起）都走 ``_animate_to``：180ms
+  ``ease_out_cubic``、16ms 表、**仅动画期间运行**；拖拽期间几何完全冻结。
+* 落点选屏按**松手光标**，不按窗口左上角（跨屏拖拽会"拖过去又弹回来"）。
 """
 
 from __future__ import annotations
@@ -19,9 +29,10 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -47,6 +58,28 @@ MIN_CAPSULE_WIDTH = layout._MIN_CAPSULE_W
 CARD_MIN_WIDTH = 340
 CARD_MAX_WIDTH = 420
 CARD_AUTO_COLLAPSE_MS = 15000
+#: 贴边停靠：拖到屏幕边缘 ``DOCK_THRESHOLD`` 内松手 → 收成细条；悬停滑出预览。
+DOCK_THRESHOLD = layout.DOCK_THRESHOLD_PX
+STRIP_THICKNESS = layout.STRIP_THICKNESS_PX
+STRIP_SIDE = layout.STRIP_SIDE_PX
+DOCK_BACK_MS = 800
+#: 几何动画（停靠 / 滑出 / 展开 / 收起共用）：180ms，ease-out-cubic。
+GEO_ANIM_SECONDS = 0.18
+ANIM_TICK_MS = 16
+#: 悬停放大目标与缩放弹簧（主分支 `_hover_scale_target`）：1.02 够被看见，又不会糊字。
+HOVER_SCALE = 1.02
+SCALE_STIFFNESS = 170.0
+SCALE_DAMPING = 15.0
+SCALE_MIN = 0.97
+SCALE_MAX = 1.03
+#: 事件反馈的果冻：竖压横鼓，绕胶囊中心。
+SQUISH_STIFFNESS = 150.0
+SQUISH_DAMPING = 8.5
+SQUISH_MIN = 0.85
+SQUISH_MAX = 1.12
+SQUISH_V_MAX = 3.5
+#: 桌宠让开后被挪走的胶囊，连续这么多个采样拍都无遮挡才回到原位（防抖动）。
+AVOID_RESTORE_TICKS = 3
 #: 内容行左内边距 / 图标 / 图标与名字间距 / 名字上限与间距。
 CONTENT_PAD = layout._CONTENT_PAD_PX
 ICON_PX = layout._ICON_PX
@@ -121,6 +154,7 @@ class IslandConfig:
     click_action: str = "expand"
     metrics: tuple[str, ...] = (isl.CPU, isl.MEM)
     character_name: str = ""
+    edge_dock: bool = True
 
     @classmethod
     def from_config(cls, config, *, character_name: str = "") -> "IslandConfig":
@@ -147,6 +181,7 @@ class IslandConfig:
             click_action=str(value("island_click_action", "expand")),
             metrics=tuple(str(item) for item in metrics),
             character_name=character_name,
+            edge_dock=bool(value("island_edge_dock", True)),
         )
 
 
@@ -186,6 +221,9 @@ class DynamicIsland(QWidget):
         # GPU/FPS are optional platform probes.  The island consumes their
         # snapshots through this seam; it never starts a second sampler.
         self._probe_segments: dict[str, isl.SegmentSnapshot] = {}
+        self._probe_unavailable: dict[str, str] = {}
+        self._probe_sync_callback = None
+        self._probe_wanted: frozenset[str] | None = None
         self._plan: layout.ShrinkPlan | None = None
         self._width_key: tuple | None = None
         self._expanded = False
@@ -194,7 +232,24 @@ class DynamicIsland(QWidget):
         self._drag_offset: QPoint | None = None
         self._ticks = 0
         self._avoidance_callback = None
+        self._avoid_home: QPoint | None = None
+        self._avoid_clear_ticks = 0
         self._feedback_until = 0.0
+        # ---- 停靠与动效（主分支 `_mode` 拆成「停靠/滑出/展开」三个布尔，
+        # 避免改遍旧的 `_expanded` 分支）
+        self._docked = False
+        self._hover_peek = False
+        self._dock_edge = "none"
+        self._geo_from: QRect | None = None
+        self._geo_to: QRect | None = None
+        self._geo_t = 0.0
+        self._anim_last = 0.0
+        self._hover_scale = 1.0
+        self._hover_scale_v = 0.0
+        self._hover_scale_target = 1.0
+        self._squish = 1.0
+        self._squish_v = 0.0
+        self._geometry_callback = None
 
         self.net_monitor = netmon.NetMonitor(interval=1.0)
         self.sys_monitor = sysmon.SysMonitor(interval=1.0)
@@ -207,6 +262,15 @@ class DynamicIsland(QWidget):
         self._card_timer.setSingleShot(True)
         self._card_timer.setInterval(CARD_AUTO_COLLAPSE_MS)
         self._card_timer.timeout.connect(self.collapse_card)
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(ANIM_TICK_MS)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+
+        self._dock_back_timer = QTimer(self)
+        self._dock_back_timer.setSingleShot(True)
+        self._dock_back_timer.setInterval(DOCK_BACK_MS)
+        self._dock_back_timer.timeout.connect(self._dock_back)
 
         self.card = _IslandCard(self)
         self.card.balance_requested.connect(self.balance_requested.emit)
@@ -239,15 +303,19 @@ class DynamicIsland(QWidget):
         """接收可选 GPU/FPS 探针快照，不在岛内创建采样线程。
 
         平台探针由宿主按自己的权限和生命周期负责；岛只接受稳定的
-        ``SegmentSnapshot``，并在 ``unsupported``/错误状态下保留明确原因，
-        不把不可用能力伪造成 0。
+        ``SegmentSnapshot``。``unsupported`` 沿用主分支口径：**整段不占位**，
+        原因只在卡片里说（占一个 ``--`` 盒会让用户以为指标坏了）。
         """
         if snapshot.id not in (isl.GPU, isl.FPS):
             raise ValueError("only GPU/FPS snapshots are accepted")
         state = snapshot.state if snapshot.state in isl.STATES else isl.STATE_UNKNOWN
         if state == isl.STATE_UNSUPPORTED:
             self._probe_segments.pop(snapshot.id, None)
+            self._probe_unavailable[snapshot.id] = str(
+                snapshot.detail.get("error_reason") or "当前环境不支持该指标"
+            )
         else:
+            self._probe_unavailable.pop(snapshot.id, None)
             if state != snapshot.state:
                 snapshot = isl.SegmentSnapshot(
                     snapshot.id,
@@ -264,11 +332,13 @@ class DynamicIsland(QWidget):
             self._rebuild_card()
 
     def clear_probe_snapshot(self, metric_id: str | None = None) -> None:
-        """清除一个或全部可选探针快照并回到明确的不可用状态。"""
+        """清除一个或全部可选探针快照并回到「未接入探针」的明确状态。"""
         if metric_id is None:
             self._probe_segments.clear()
+            self._probe_unavailable.clear()
         elif metric_id in (isl.GPU, isl.FPS):
             self._probe_segments.pop(metric_id, None)
+            self._probe_unavailable.pop(metric_id, None)
         else:
             return
         self._rebuild_row()
@@ -276,8 +346,22 @@ class DynamicIsland(QWidget):
         if self._expanded:
             self._rebuild_card()
 
+    def _probe_unavailable_reason(self, metric_id: str) -> str | None:
+        reason = self._probe_unavailable.get(metric_id)
+        if reason:
+            return reason
+        if metric_id not in (isl.GPU, isl.FPS):
+            return None
+        if metric_id in self._probe_segments:
+            return None
+        return "当前环境未接入可用 GPU/FPS 探针"
+
     def _feedback(self) -> None:
+        """余额/消息到的瞬时反馈：外圈强调 + 一下果冻（竖压横鼓）。"""
         self._feedback_until = time.monotonic() + 0.48
+        if not self._expanded:
+            self._squish_v = max(-SQUISH_V_MAX, self._squish_v - 1.2)
+            self._ensure_anim_timer()
         if self.isVisible():
             self.update()
             QTimer.singleShot(520, self, self.update)
@@ -320,6 +404,11 @@ class DynamicIsland(QWidget):
 
     def stop(self) -> None:
         self._feedback_until = 0.0
+        self._anim_timer.stop()
+        self._dock_back_timer.stop()
+        self._geo_from = None
+        self._geo_to = None
+        self._stop_hover_animation()
         self._clock.stop()
         self._card_timer.stop()
         self.net_monitor.stop()
@@ -338,6 +427,13 @@ class DynamicIsland(QWidget):
         self.settings = IslandConfig.from_config(
             self.config, character_name=self.settings.character_name
         )
+        if not self.settings.edge_dock and self._docked:
+            # 关掉「贴边停靠」= 立刻退出细条：细条只有 16px，留在那里等于岛消失。
+            self._docked = False
+            self._hover_peek = False
+            self._dock_back_timer.stop()
+            self._apply_fixed_size()
+            self._set_free_geometry(self._target_rect())
         self._rebuild_row()
         self._update_size()
         self._sync_sampling()
@@ -345,9 +441,18 @@ class DynamicIsland(QWidget):
             self._rebuild_card()
 
     def _sync_sampling(self) -> None:
-        """看不清就不采：岛隐藏、段没开、段被折叠时都停样本。"""
-        visible = self.isVisible() and self._clock.isActive() and self.settings.enabled
-        folded = set(self._plan.folded) if self._plan is not None else set()
+        """看不清就不采：岛隐藏、段没开、段被折叠、收进停靠细条时都停样本。"""
+        visible = (
+            self.isVisible()
+            and self._clock.isActive()
+            and self.settings.enabled
+            # 细条只有 16px：内容一个像素都不画，采样全是白烧。
+            and not self._strip_visible()
+        )
+        # 「看不清就不采」只对**胶囊**成立：胶囊上被折进 `+N` 的段确实看不见。
+        # 卡片态每段都有自己的明细行，折行只是排版，再据此停采会让推快照 →
+        # 折行 → 停采 → 清快照 → 复原变成 1Hz 振荡（审计 AUD-25）。
+        folded = set() if self._expanded else (set(self._plan.folded) if self._plan is not None else set())
         wants_net = (
             visible
             and isl.NETWORK in self.settings.metrics
@@ -364,6 +469,27 @@ class DynamicIsland(QWidget):
                 monitor.start()
             else:
                 monitor.stop()
+        # GPU/FPS 探针由宿主持有（权限、子进程、线程边界都在宿主侧），岛只报
+        # 「现在还需要采哪些段」；空集就等于全部停采。
+        wanted_probes = frozenset(
+            metric
+            for metric in (isl.GPU, isl.FPS)
+            if visible and metric in self.settings.metrics and metric not in folded
+        )
+        if wanted_probes != self._probe_wanted:
+            self._probe_wanted = wanted_probes
+            callback = self._probe_sync_callback
+            if callable(callback):
+                try:
+                    callback(wanted_probes)
+                except Exception:  # noqa: BLE001 - 探针同步失败不得影响绘制
+                    logger.debug("island probe sync failed", exc_info=True)
+
+    def set_probe_sync_callback(self, callback) -> None:
+        """注册 GPU/FPS 启停回调：参数是当前仍需要采样的段 id 集合。"""
+        self._probe_sync_callback = callback
+        self._probe_wanted = None
+        self._sync_sampling()
 
     # ------------------------------------------------------------ 字体与配色
 
@@ -482,38 +608,26 @@ class DynamicIsland(QWidget):
             elif metric_id in (isl.GPU, isl.FPS):
                 snapshot = self._probe_segments.get(metric_id)
                 if snapshot is None:
-                    label = CARD_NAMES.get(metric_id, metric_id)
-                    row.append(
-                        layout._InfoSeg(
-                            kind=layout.KIND_METRIC,
-                            seg_id=metric_id,
-                            label=label,
-                            text="--",
-                            box_text="--",
-                            state=isl.STATE_ERROR,
-                            detail={"error_reason": "当前环境未接入可用 GPU/FPS 探针"},
-                            severity=isl.ALERT_CRIT,
-                        )
+                    # 主分支口径：不支持就不占位，原因只在卡片里说一行。
+                    continue
+                state = snapshot.state if snapshot.state in isl.STATES else isl.STATE_UNKNOWN
+                detail = dict(snapshot.detail)
+                if state != isl.STATE_OK:
+                    detail.setdefault("error_reason", "GPU/FPS 探针暂不可用")
+                row.append(
+                    layout._InfoSeg(
+                        kind=layout.KIND_METRIC,
+                        seg_id=metric_id,
+                        label=snapshot.label or CARD_NAMES.get(metric_id, metric_id),
+                        text=snapshot.text if state == isl.STATE_OK else "--",
+                        box_text=snapshot.max_text or ("100" if metric_id == isl.GPU else "9999"),
+                        state=state,
+                        unit=str(detail.get("unit") or ""),
+                        detail=detail,
+                        severity=str(detail.get("severity") or ""),
                     )
-                else:
-                    state = snapshot.state if snapshot.state in isl.STATES else isl.STATE_UNKNOWN
-                    detail = dict(snapshot.detail)
-                    if state != isl.STATE_OK:
-                        detail.setdefault("error_reason", "GPU/FPS 探针暂不可用")
-                    row.append(
-                        layout._InfoSeg(
-                            kind=layout.KIND_METRIC,
-                            seg_id=metric_id,
-                            label=snapshot.label or CARD_NAMES.get(metric_id, metric_id),
-                            text=snapshot.text if state == isl.STATE_OK else "--",
-                            box_text=snapshot.max_text or ("100" if metric_id == isl.GPU else "9999"),
-                            state=state,
-                            unit=str(detail.get("unit") or ""),
-                            detail=detail,
-                            severity=str(detail.get("severity") or ""),
-                        )
-                    )
-            # 未知 id 不占位；已知但暂不可用的 GPU/FPS 明确呈现原因。
+                )
+            # 未知 id 不占位；GPU/FPS 未接入探针时也不占位（见卡片原因行）。
         return tuple(row)
 
     def _lead_trail(self, name_text: str) -> tuple[float, float]:
@@ -548,6 +662,17 @@ class DynamicIsland(QWidget):
             screen = QGuiApplication.primaryScreen()
         return screen
 
+    def _screen_at(self, point: QPoint):
+        """按**点**选屏（拖拽松手的落点）：``screenAt`` 命中不到时回退主屏。
+
+        不能用窗口左上角选屏：跨屏拖拽的触发带恰等于抓取偏移量，光标刚过屏缝
+        松手时左上角仍在原屏，会把整窗夹回原屏并弹回（主分支 issue #154）。
+        """
+        from PySide6.QtGui import QGuiApplication
+
+        screen = QGuiApplication.screenAt(point) if point is not None else None
+        return screen or QGuiApplication.primaryScreen()
+
     def _compute_plan(self, available_w: int | None = None) -> layout.ShrinkPlan:
         lead, trail = self._lead_trail(self._name_text())
         return layout.plan_info_row(
@@ -575,13 +700,40 @@ class DynamicIsland(QWidget):
         )
 
     def _update_size(self) -> None:
+        if self._dragging:
+            # 拖拽期间几何完全冻结（主分支 `_update_size` 首行）：否则岛会在光标
+            # 底下随换屏/读数抽动，抓取偏移量失效、手感变成「甩不掉」。
+            return
+        first_pass = self._width_key is None
         key = self._width_key_now()
         self._plan = self._compute_plan(self._card_budget() if self._expanded else None)
         self._width_key = key
         if self._expanded:
             self._apply_card_size()
+        elif self._strip_visible():
+            self._apply_fixed_size()
+            if self._geo_to is None:
+                self._set_free_geometry(self._target_rect())
         else:
-            self.setFixedSize(QSize(max(MIN_CAPSULE_WIDTH, self._plan.width), CAPSULE_HEIGHT))
+            target_width = max(MIN_CAPSULE_WIDTH, self._plan.width)
+            screen = self._screen()
+            area = screen.availableGeometry() if screen is not None else None
+            x = self.x()
+            if area is not None and not first_pass:
+                # 三分区锚点：贴左/贴右/居中各自固定一条边，避免「长出屏再弹回」。
+                # 首次定型（__init__）跳过：那时 self.width() 还是默认值，位置由
+                # `_apply_position()` 已经摆好，再锚一次会把恢复的位置挪走。
+                x = layout.anchored_x(
+                    x=self.x(),
+                    width=self.width(),
+                    new_width=target_width,
+                    screen_left=area.x(),
+                    screen_width=area.width(),
+                )
+            self.setFixedSize(QSize(target_width, CAPSULE_HEIGHT))
+            if area is not None:
+                self.move(x, self.y())
+                self._clamp_to_screen()
         self._sync_sampling()
 
     def _tick(self) -> None:
@@ -593,9 +745,9 @@ class DynamicIsland(QWidget):
         if self._width_key_now() != previous_key:
             self._update_size()
         elif self._expanded:
-            runtime_metrics.inc("coalesced_updates")
             self._rebuild_card()
         else:
+            # 只有「宽度没变、沿用现有盒宽」的拍才算合并更新；宽度重算另计。
             runtime_metrics.inc("coalesced_updates")
             self.update()
         self._sync_sampling()
@@ -611,36 +763,62 @@ class DynamicIsland(QWidget):
         self._avoidance_callback = callback
 
     def avoid_overlaps(self, obstacles) -> bool:
-        """在不移动桌宠的前提下把灵动岛移到不重叠的位置。
+        """在不移动桌宠的前提下把灵动岛挪开，桌宠走开后自动回到原位。
 
         候选点只来自当前屏幕四角；没有安全候选时保持原位置并返回 ``False``。
+        自动挪动**不落盘**：``island_x/island_y`` 只记录用户自己摆的位置，否则
+        桌宠路过一次就会把用户摆的胶囊永久挪到角落并写进配置。
         这是几何避让，不进入桌宠碰撞/物理模型。
         """
         if not self.isVisible():
             return True
+        if self._dragging or self._docked:
+            # 用户手里 / 已停靠在边上：自动避让会与拖拽抢 move()，也会把细条推离边缘。
+            return True
         obstacles = tuple(rect for rect in obstacles if rect is not None and not rect.isNull())
         current = self.geometry()
-        if not any(current.intersects(rect) for rect in obstacles):
+        blocked = any(current.intersects(rect) for rect in obstacles)
+        home = self._avoid_home
+        if home is not None and not blocked:
+            if any(QRect(home, self.size()).intersects(rect) for rect in obstacles):
+                self._avoid_clear_ticks = 0
+                return True
+            self._avoid_clear_ticks += 1
+            if self._avoid_clear_ticks >= AVOID_RESTORE_TICKS:
+                self._avoid_home = None
+                self._avoid_clear_ticks = 0
+                self.move(home)
             return True
+        if not blocked:
+            return True
+        point = self._free_corner(obstacles)
+        if point is None:
+            return False
+        if home is None:
+            self._avoid_home = QPoint(current.topLeft())
+        self._avoid_clear_ticks = 0
+        if point != current.topLeft():
+            self.move(point)
+        return True
+
+    def _free_corner(self, obstacles) -> QPoint | None:
         screen = self._screen()
         if screen is None:
-            return False
+            return None
         area = screen.availableGeometry()
-        candidates = (
+        for point in (
             QPoint(area.left(), area.top()),
             QPoint(area.right() - self.width() + 1, area.top()),
             QPoint(area.left(), area.bottom() - self.height() + 1),
             QPoint(area.right() - self.width() + 1, area.bottom() - self.height() + 1),
-        )
-        for point in candidates:
+        ):
             candidate = QRect(point, self.size())
-            if not area.contains(candidate) or any(candidate.intersects(rect) for rect in obstacles):
+            if not area.contains(candidate):
                 continue
-            if candidate.topLeft() != current.topLeft():
-                self.move(candidate.topLeft())
-                self._save_position()
-            return True
-        return False
+            if any(candidate.intersects(rect) for rect in obstacles):
+                continue
+            return point
+        return None
 
     # ------------------------------------------------------------ 位置
 
@@ -657,8 +835,21 @@ class DynamicIsland(QWidget):
             x = area.x() + area.width() - self.width() - EDGE_MARGIN
             y = area.y() + EDGE_MARGIN
         self.move(self._clamp_point(x, y, area))
+        # 读回上次停靠边：开关关着 / 值非法都退化为 none（存储值保留）。
+        saved_edge = "none"
+        try:
+            raw = self.config.get("island_dock_edge", "none")
+        except Exception:  # noqa: BLE001
+            raw = "none"
+        if str(raw or "none") in layout.DOCK_EDGES and str(raw) != "none":
+            saved_edge = str(raw)
+        self._dock_edge = saved_edge
+        self._docked = saved_edge != "none" and self.settings.edge_dock
         if initial:
             self.update()
+        if self._strip_visible():
+            self._apply_fixed_size()
+            self._set_free_geometry(self._target_rect())
 
     @staticmethod
     def _clamp_point(x: int, y: int, area) -> QPoint:
@@ -667,6 +858,9 @@ class DynamicIsland(QWidget):
         return QPoint(x, y)
 
     def _clamp_to_screen(self) -> None:
+        if self._strip_visible():
+            # 细条本来就贴着屏幕边，钳制会把它推离边缘（主分支同口径）。
+            return
         screen = self._screen()
         if screen is None:
             return
@@ -675,6 +869,7 @@ class DynamicIsland(QWidget):
         y = max(area.y(), min(area.y() + area.height() - self.height(), self.y()))
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
+            self._emit_geometry_changed()
 
     def _config_int(self, key: str) -> int | None:
         try:
@@ -691,7 +886,10 @@ class DynamicIsland(QWidget):
     def _save_position(self) -> None:
         screen = self._screen()
         x, y = self.x(), self.y()
-        if screen is not None:
+        # 停靠态存的是**胶囊滑出位**：细条的 x/y 由 dock_edge + 屏幕推出来，
+        # 把细条坐标写进配置会让下次启动在「细条位」上再判一次停靠。
+        # 另外停靠时跳过 12px 贴边吸附——细条本来就在边上，吸附会改写用户落点。
+        if screen is not None and self.dock_edge == "none":
             area = screen.availableGeometry()
             if abs(x - area.x()) <= 12:
                 x = area.x()
@@ -713,10 +911,220 @@ class DynamicIsland(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    def _save_dock_edge(self, edge: str) -> None:
+        """落盘停靠边（白名单校验）；``none`` 也要写，否则下次启动会复活旧停靠。"""
+        value = edge if edge in layout.DOCK_EDGES else "none"
+        self._dock_edge = value
+        self._docked = value != "none" and self.settings.edge_dock
+        try:
+            self.config.set("island_dock_edge", value)
+            self.config.save()
+        except Exception:  # noqa: BLE001 - 停靠写盘失败不该影响岛
+            logger.debug("island dock edge save failed", exc_info=True)
+
+    # ------------------------------------------------------------ 停靠与几何动画
+
+    @property
+    def dock_edge(self) -> str:
+        """当前生效的停靠边：开关关掉或不在停靠态时一律 ``none``（存储值保留）。"""
+        if not self.settings.edge_dock or not self._docked:
+            return "none"
+        return self._dock_edge
+
+    def dock_state(self) -> dict:
+        """测试/诊断快照（不含配置对象）。"""
+        return {
+            "docked": self._docked,
+            "edge": self.dock_edge,
+            "strip": self._strip_visible(),
+            "peek": self._hover_peek,
+            "expanded": self._expanded,
+            "animating": self._anim_timer.isActive(),
+        }
+
+    def _strip_visible(self) -> bool:
+        """细条态 = 已停靠（开关也开着）+ 没滑出 + 没展开；内容一个像素都不画。"""
+        if not self._docked or self._hover_peek or self._expanded:
+            return False
+        # 开关关掉时 `dock_edge` 退化为 none：此时按自由态处理，别把岛锁在 16px。
+        return self.dock_edge != "none"
+
+    def _strip_length(self) -> int:
+        screen = self._screen_at(self.pos())
+        area = screen.availableGeometry() if screen is not None else None
+        length = STRIP_SIDE if area is None else min(STRIP_SIDE, area.height())
+        return max(STRIP_THICKNESS, int(length))
+
+    def _rest_size(self) -> QSize:
+        if self._expanded:
+            return QSize(
+                self._card_width(),
+                CAPSULE_HEIGHT + self.card.sizeHint().height() + 2 * CAPSULE_INSET,
+            )
+        width = self._plan.width if self._plan is not None else MIN_CAPSULE_WIDTH
+        return QSize(max(MIN_CAPSULE_WIDTH, int(width)), CAPSULE_HEIGHT)
+
+    def _apply_fixed_size(self) -> None:
+        """按当前模式锁窗口尺寸（细条 16 厚；其余用 ``_rest_size``）。"""
+        size = self._rest_size()
+        if self._strip_visible():
+            edge = self.dock_edge
+            if edge in ("top", "bottom"):
+                size = QSize(size.width(), STRIP_THICKNESS)
+            elif edge in ("left", "right"):
+                size = QSize(STRIP_THICKNESS, self._strip_length())
+        self.setFixedSize(size)
+
+    def _clamp_rect(self, rect: QRect, area) -> QRect:
+        x = max(area.left(), min(rect.x(), area.right() - rect.width() + 1))
+        y = max(area.top(), min(rect.y(), area.bottom() - rect.height() + 1))
+        return QRect(x, y, rect.width(), rect.height())
+
+    def _target_rect(self) -> QRect:
+        """目标几何：细条贴边 / 从停靠边向内展开 / 自由态夹回屏幕。"""
+        size = self._rest_size()
+        screen = self._screen_at(self.pos()) or self._screen()
+        area = screen.availableGeometry() if screen is not None else None
+        if area is None:
+            return QRect(self.pos(), size)
+        rect = QRect(self.pos(), size)
+        if self._strip_visible():
+            # 二次居中：调用时窗口可能已经是 64 高的细条，直接拿左上角拼参考矩形
+            # 会让中心凭空高 (64-44)/2 = 10px，每次收回细条都上跳一截。
+            rect.moveTop(self.y() + self.height() // 2 - size.height() // 2)
+            x, y, w, h = layout.strip_rect_for(
+                (rect.x(), rect.y(), rect.width(), rect.height()),
+                self.dock_edge,
+                (area.x(), area.y(), area.width(), area.height()),
+                thickness=STRIP_THICKNESS,
+                side=STRIP_SIDE,
+            )
+            return QRect(x, y, w, h)
+        if self.dock_edge != "none" and self._expanded:
+            if self.dock_edge in ("top", "bottom"):
+                rect.moveTop(
+                    area.top()
+                    if self.dock_edge == "top"
+                    else area.bottom() - size.height() + 1
+                )
+            else:
+                rect.moveLeft(
+                    area.left()
+                    if self.dock_edge == "left"
+                    else area.right() - size.width() + 1
+                )
+                rect.moveTop(self.y() + self.height() // 2 - size.height() // 2)
+        return self._clamp_rect(rect, area)
+
+    def set_geometry_changed_callback(self, callback) -> None:
+        """几何每帧变化时的回调（碰撞体重提交用）：必须空转安全、幂等。"""
+        self._geometry_callback = callback
+
+    def _emit_geometry_changed(self) -> None:
+        callback = self._geometry_callback
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - 回调失败不该打断动画
+            logger.debug("island geometry callback failed", exc_info=True)
+
+    def _set_free_geometry(self, rect: QRect) -> None:
+        # 动画必须解锁固定尺寸，否则 setMinimumSize == setMaximumSize 会把
+        # setGeometry 钳回原尺寸（动画看起来"完全没动"）。
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        self.setGeometry(rect)
+        self._emit_geometry_changed()
+
+    def _animate_to(self, target: QRect) -> None:
+        if not self.isVisible():
+            # 隐藏态没有事件循环之外的帧：直接落位，否则 _geo_to 会永远停在半路，
+            # 下次显示时从一个不存在的中途几何开始。
+            self._geo_from = None
+            self._geo_to = None
+            self._set_free_geometry(QRect(target))
+            self._apply_fixed_size()
+            return
+        if QRect(target) == self.geometry() and not self._anim_timer.isActive():
+            self._set_free_geometry(QRect(target))
+            self._apply_fixed_size()
+            return
+        self._geo_from = QRect(self.geometry())
+        self._geo_to = QRect(target)
+        self._geo_t = 0.0
+        self._ensure_anim_timer()
+
+    def _ensure_anim_timer(self) -> None:
+        if not self.isVisible():
+            return  # 隐藏即休眠：不可见时不起表
+        if not self._anim_timer.isActive():
+            self._anim_last = time.monotonic()
+            self._anim_timer.start()
+
+    def _animating(self) -> bool:
+        if self._geo_to is not None:
+            return True
+        if self._expanded:
+            return False
+        return (
+            abs(self._hover_scale - self._hover_scale_target) > 0.001
+            or abs(self._hover_scale_v) > 0.005
+            or abs(self._squish - 1.0) > 0.01
+            or abs(self._squish_v) > 0.06
+        )
+
+    def _on_anim_tick(self) -> None:
+        now = time.monotonic()
+        dt = max(0.0, min(0.05, now - self._anim_last))
+        self._anim_last = now
+        changed = False
+        if self._geo_from is not None and self._geo_to is not None:
+            self._geo_t = min(1.0, self._geo_t + dt / GEO_ANIM_SECONDS)
+            k = layout.ease_out_cubic(self._geo_t)
+            start, end = self._geo_from, self._geo_to
+            rect = QRect(
+                round(start.x() + (end.x() - start.x()) * k),
+                round(start.y() + (end.y() - start.y()) * k),
+                round(start.width() + (end.width() - start.width()) * k),
+                round(start.height() + (end.height() - start.height()) * k),
+            )
+            self._set_free_geometry(rect)
+            changed = True
+            if self._geo_t >= 1.0:
+                self._geo_from = None
+                self._geo_to = None
+                # 终点再对齐一次（幂等）：动画途中屏可能变了。
+                self._set_free_geometry(self._target_rect())
+                self._apply_fixed_size()
+        # 悬停缩放弹簧（展开态整窗缩放会切卡片，目标强制 1.0）
+        scale_target = 1.0 if self._expanded else self._hover_scale_target
+        self._hover_scale_v += (
+            (scale_target - self._hover_scale) * SCALE_STIFFNESS
+            - self._hover_scale_v * SCALE_DAMPING
+        ) * dt
+        self._hover_scale = max(SCALE_MIN, min(SCALE_MAX, self._hover_scale + self._hover_scale_v * dt))
+        # 果冻弹簧：竖压横鼓（横向只鼓不缩）
+        if not self._expanded:
+            self._squish_v += (
+                (1.0 - self._squish) * SQUISH_STIFFNESS - self._squish_v * SQUISH_DAMPING
+            ) * dt
+            self._squish = max(SQUISH_MIN, min(SQUISH_MAX, self._squish + self._squish_v * dt))
+        if not self._animating():
+            self._anim_timer.stop()
+            self._hover_scale_v = 0.0
+            self._squish_v = 0.0
+            self._squish = 1.0
+        if changed or self._hover_scale != 1.0 or self._squish != 1.0:
+            self.update()
+
+
     # ------------------------------------------------------------ 卡片
 
     def _card_width(self) -> int:
-        capsule = self._plan.width if self._plan is not None else MIN_CAPSULE_WIDTH
+        # 用**胶囊态**（不折行）的自然宽度：拿展开态的 plan 宽度会随折叠缩水，
+        # 越折越窄（420→340），预算跟着缩，又折得更多。
+        capsule = self._compute_plan(None).width
         return max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, max(capsule, CARD_MIN_WIDTH)))
 
     def _card_budget(self) -> int:
@@ -757,6 +1165,17 @@ class DynamicIsland(QWidget):
             rows.append((snapshot.label or snapshot.id, snapshot.text or "--", detail, severity))
         for message in reversed(tuple(self._recent_messages)):
             rows.append(("最近消息", message, "", ""))
+        for metric_id in self.settings.metrics:
+            reason = self._probe_unavailable_reason(metric_id)
+            if reason:
+                rows.append(
+                    (
+                        CARD_NAMES.get(metric_id, metric_id),
+                        "--",
+                        f"该指标不可用：{reason}",
+                        isl.ALERT_CRIT,
+                    )
+                )
         for seg in self._row:
             if seg.kind == layout.KIND_PRIMARY:
                 continue
@@ -775,23 +1194,38 @@ class DynamicIsland(QWidget):
     def expand_card(self) -> None:
         if self._expanded:
             return
+        start = QRect(self.geometry())
         self._expanded = True
+        self._hover_peek = False
         self._plan = self._compute_plan(self._card_budget())
         self._rebuild_card()
         self._sync_sampling()
         self.card.show()
         self.card.move(CAPSULE_INSET, CAPSULE_HEIGHT)
         self._card_timer.start()
+        self._apply_fixed_size()
+        # 布局定型（setFixedSize）会立刻改几何；想播动画必须先退回起点再插值。
+        if self.isVisible():
+            self._set_free_geometry(start)
+        self._animate_to(self._target_rect())
         self.card_expanded.emit(True)
         self.update()
 
     def collapse_card(self) -> None:
         if not self._expanded:
             return
+        start = QRect(self.geometry())
         self._expanded = False
         self._card_timer.stop()
         self.card.hide()
-        self._update_size()
+        # 收起后必须按**胶囊预算**重排：沿用卡片预算的 plan 会让胶囊停在卡片宽度。
+        self._plan = self._compute_plan(None)
+        self._width_key = self._width_key_now()
+        self._sync_sampling()
+        self._apply_fixed_size()
+        if self.isVisible():
+            self._set_free_geometry(start)
+        self._animate_to(self._target_rect())
         self.card_expanded.emit(False)
         self.update()
 
@@ -806,6 +1240,11 @@ class DynamicIsland(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        # 点岛 = 用户明确要它在前（只改 z 序、不抢键盘焦点）。
+        try:
+            self.raise_()
+        except RuntimeError:
+            pass
         self._press_global = event.globalPosition().toPoint()
         self._drag_offset = self._press_global - self.pos()
         self._dragging = False
@@ -814,47 +1253,176 @@ class DynamicIsland(QWidget):
     def mouseMoveEvent(self, event) -> None:
         if self._press_global is None or self._drag_offset is None:
             return
+        buttons = getattr(event, "buttons", None)
+        if callable(buttons):
+            buttons = buttons()
+        if buttons is not None and not (buttons & Qt.MouseButton.LeftButton):
+            return
         point = event.globalPosition().toPoint()
         if not self._dragging:
-            distance = (point - self._press_global).manhattanLength()
-            if distance < self.startDragDistance():
+            # `QWidget` 没有 `startDragDistance()`（旧写法在这里抛 AttributeError，
+            # 于是每次拖拽都在第一帧死掉、退化成单击）。阈值走 Qt 平台值（约 10px）。
+            if (point - self._press_global).manhattanLength() < QApplication.startDragDistance():
                 return
             self._dragging = True
+            self._stop_hover_animation()
+            # 起拖先清几何插值：动画每 16ms 把窗口拽回目标位，会与拖拽 move() 互抢。
+            # 但不停动画表本身（弹簧通道还要收敛）。
+            self._geo_from = None
+            self._geo_to = None
+            if self._docked:
+                # 拖出停靠边 = 回到自由态；细条一像素内容都不画，恢复后要重新采样。
+                self._docked = False
+                self._hover_peek = False
+                self._dock_back_timer.stop()
+                self._apply_fixed_size()
+                self._sync_sampling()
         if self._expanded:
-            # 拖动即收起：展开态窗口更宽，跟着手走会把卡片拖出屏幕。
-            self.collapse_card()
+            # 拖拽中收起卡片直接落位（不播收起动画，否则会和跟手的 move() 打架）。
+            self._expanded = False
+            self._card_timer.stop()
+            self.card.hide()
+            self._plan = self._compute_plan(None)
+            self._width_key = self._width_key_now()
+            self._apply_fixed_size()
+            self.card_expanded.emit(False)
         self.move(point - self._drag_offset)
+        self._emit_geometry_changed()
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
         dragged = self._dragging
+        # 选屏按**松手光标**：跨屏拖拽的触发带恰等于抓取偏移量，按窗口左上角
+        # 选屏会把整窗夹回原屏，用户看到「拖过去又弹回来」（主分支 issue #154）。
+        screen = self._screen_at(event.globalPosition().toPoint())
+        area = screen.availableGeometry() if screen is not None else None
         self._press_global = None
         self._drag_offset = None
-        self._dragging = False
-        if dragged:
-            self._clamp_to_screen()
-            self._save_position()
+        if not dragged:
+            self._dragging = False
+            if self._strip_visible():
+                # 细条上单击 = 滑出预览（不停留展开卡片，保持轻量）。
+                self._hover_peek = True
+                self._apply_fixed_size()
+                self._animate_to(self._target_rect())
+                self._dock_back_timer.start()
+                self._sync_sampling()
+                event.accept()
+                return
+            if self.settings.click_action == "toggle_pet":
+                self.clicked.emit()
+                event.accept()
+                return
+            if self._expanded:
+                self.collapse_card()
+            else:
+                self.expand_card()
             event.accept()
             return
-        if self.settings.click_action == "toggle_pet":
-            self.clicked.emit()
-            return
-        if self._expanded:
-            self.collapse_card()
+        # ---- 拖动落定：夹回 → 判停靠（看夹后落点）→ 重算尺寸 → 存盘 → 切模式
+        if area is not None:
+            x = max(area.left(), min(self.x(), area.right() - self.width() + 1))
+            y = max(area.top(), min(self.y(), area.bottom() - self.height() + 1))
+            self.move(x, y)
+        edge = "none"
+        if area is not None and self.settings.edge_dock:
+            edge = layout.dock_edge_for(
+                (self.x(), self.y(), self.width(), self.height()),
+                (area.x(), area.y(), area.width(), area.height()),
+                DOCK_THRESHOLD,
+            )
+        # 先翻标志再动几何：判停靠看的是用户挑的落点，不该被"刚落定的收缩"改判。
+        self._dragging = False
+        self._update_size()
+        self._save_position()
+        self._save_dock_edge(edge)
+        self._hover_peek = False
+        if edge != "none":
+            self._apply_fixed_size()
+            self._animate_to(self._target_rect())
         else:
-            self.expand_card()
+            self._apply_fixed_size()
+            self._animate_to(self._target_rect())
+        # 用户亲手摆过之后，之前记录的「避让前原位」作废。
+        self._avoid_home = None
+        self._avoid_clear_ticks = 0
+        self._sync_sampling()
         event.accept()
+
+    def _hover_rects(self):
+        """可悬停区：停靠态要同时算**滑出胶囊**与**细条**两张矩形。
+
+        左右停靠时滑出胶囊（高 44）比细条（高 64）矮，细条上下各露 10px 死区：
+        只看其中一张矩形，光标停在死区里时收回 → 细条盖回光标 → enter 又滑出，
+        就是 1s 周期的自持振荡。逐矩形 ``contains``，不许取包围盒。
+        """
+        rect = self.geometry()
+        if not self._docked or self._expanded:
+            return (rect,)
+        screen = self._screen_at(self.pos())
+        area = screen.availableGeometry() if screen is not None else None
+        if area is None:
+            return (rect,)
+        x, y, w, h = layout.strip_rect_for(
+            (rect.x(), rect.y(), rect.width(), rect.height()),
+            self.dock_edge,
+            (area.x(), area.y(), area.width(), area.height()),
+            thickness=STRIP_THICKNESS,
+            side=STRIP_SIDE,
+        )
+        strip = QRect(x, y, w, h)
+        return (rect,) if strip == rect else (rect, strip)
+
+    def _cursor_in_hover_zone(self) -> bool:
+        from PySide6.QtGui import QCursor
+
+        point = QCursor.pos()
+        return any(rect.contains(point) for rect in self._hover_rects())
+
+    def _dock_back(self) -> None:
+        if not (self._docked and self._hover_peek):
+            return
+        if self._cursor_in_hover_zone():
+            # 复检：细条单击滑出的预览（光标就停在细条上）、以及光标还泡在死区里
+            # 都会走到这里。此刻收回 → 细条立刻盖回光标 → enter 再滑出 = 自持振荡。
+            self._dock_back_timer.start()
+            return
+        self._hover_peek = False
+        self._apply_fixed_size()
+        self._animate_to(self._target_rect())
+        self._sync_sampling()
+
+    def _stop_hover_animation(self) -> None:
+        """起拖 / 隐藏时停掉悬停缩放与果冻，跳到终点值（不留残影）。"""
+        self._hover_scale = 1.0
+        self._hover_scale_v = 0.0
+        self._hover_scale_target = 1.0
+        self._squish = 1.0
+        self._squish_v = 0.0
 
     def enterEvent(self, event) -> None:
         if self._expanded:
             self._card_timer.stop()  # 悬停时别自动收起
+        self._hover_scale_target = 1.0 if self._expanded else HOVER_SCALE
+        if self._strip_visible():
+            self._dock_back_timer.stop()
+            self._hover_peek = True
+            self._apply_fixed_size()
+            self._animate_to(self._target_rect())
+            self._sync_sampling()
+        self._ensure_anim_timer()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         if self._expanded:
             self._card_timer.start()
+        self._hover_scale_target = 1.0
+        if self._docked and self._hover_peek:
+            # 这里刻意不按可悬停区拦表：光标只离开窗口、没离开死区时仍起表，
+            # 到点由 `_dock_back` 复检；拦下会让「滑出」永久钉住。
+            self._dock_back_timer.start()
         super().leaveEvent(event)
 
     def hideEvent(self, event) -> None:
@@ -864,6 +1432,12 @@ class DynamicIsland(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.start()
+        # 隐藏可能打断停靠/滑出动画：显示时先把几何收口到目标位，再起表。
+        self._geo_from = None
+        self._geo_to = None
+        self._stop_hover_animation()
+        self._apply_fixed_size()
+        self._set_free_geometry(self._target_rect())
         self._raise_topmost()
 
     def _raise_topmost(self) -> None:
@@ -892,12 +1466,22 @@ class DynamicIsland(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         palette = self._palette()
+        if self._strip_visible():
+            self._paint_strip(painter, palette)
+            return
+        # 悬停缩放绕**胶囊中心**（展开态不缩放：整窗缩放会把卡片切边）。
+        if not self._expanded and abs(self._hover_scale - 1.0) > 0.001:
+            cx = self.width() / 2.0
+            cy = min(self.height(), CAPSULE_HEIGHT) / 2.0
+            painter.translate(cx, cy)
+            painter.scale(self._hover_scale, self._hover_scale)
+            painter.translate(-cx, -cy)
         if self._expanded:
             # 展开态是一整块圆角面板：胶囊顶条与卡片底板连成一片，不再画第二层胶囊。
             rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
             radius = 18.0
         else:
-            rect = self.capsule_rect()
+            rect = self._squished_capsule_rect()
             radius = rect.height() / 2.0
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
@@ -920,6 +1504,55 @@ class DynamicIsland(QWidget):
         if self._plan is None:
             return
         self._paint_content(painter, palette)
+
+    def _squished_capsule_rect(self) -> QRectF:
+        """果冻形变只作用在胶囊外壳上：竖压横鼓，绕中心，内容不参与形变。"""
+        base = self.capsule_rect()
+        squish = max(SQUISH_MIN, min(SQUISH_MAX, self._squish))
+        if abs(squish - 1.0) < 0.002:
+            return base
+        width = base.width() * (1.0 + max(0.0, 1.0 - squish) * 0.3)
+        height = base.height() * squish
+        center = base.center()
+        return QRectF(
+            center.x() - width / 2.0,
+            center.y() - height / 2.0,
+            width,
+            height,
+        )
+
+    def _paint_strip(self, painter: QPainter, palette) -> None:
+        """停靠细条：16px 扁平条 + 靠屏侧的 2px 强调线（内容不可见，故不画）。"""
+        rect = QRectF(0.5, 0.5, max(1.0, self.width() - 1.0), max(1.0, self.height() - 1.0))
+        radius = min(rect.width(), rect.height()) / 2.0
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        background = QColor(*palette["bg"])
+        background.setAlpha(int(210 * float(self.settings.opacity)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawPath(path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(*palette["keyline"]), 1.0))
+        painter.drawPath(path)
+        accent = self.accent_color()
+        accent.setAlpha(220)
+        painter.setPen(QPen(accent, 2.0))
+        edge = self.dock_edge
+        if edge == "top":
+            painter.drawLine(QPointF(4, 1.5), QPointF(self.width() - 4, 1.5))
+        elif edge == "bottom":
+            painter.drawLine(
+                QPointF(4, self.height() - 2.0), QPointF(self.width() - 4, self.height() - 2.0)
+            )
+        elif edge == "left":
+            painter.drawLine(
+                QPointF(1.5, 4), QPointF(1.5, self.height() - 4)
+            )
+        elif edge == "right":
+            painter.drawLine(
+                QPointF(self.width() - 2.0, 4), QPointF(self.width() - 2.0, self.height() - 4)
+            )
 
     def _paint_content(self, painter: QPainter, palette) -> None:
         plan = self._plan

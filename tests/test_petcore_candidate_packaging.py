@@ -65,3 +65,80 @@ def test_clean_switch_never_deletes_directories():
     assert '"--clean"' in text
     for destructive in ("Remove-Item", "rd /s", "rmdir /s"):
         assert destructive not in text, destructive
+
+
+def _pwsh() -> str | None:
+    import shutil
+
+    return shutil.which("pwsh")
+
+
+def test_dry_run_resolves_relative_output_root_under_the_repo() -> None:
+    """相对路径必须相对仓库根解析（AUD-37）：`GetFullPath` 用的是进程 CWD。"""
+    import subprocess
+    from pathlib import Path
+
+    pwsh = _pwsh()
+    if pwsh is None:
+        import pytest
+
+        pytest.skip("pwsh 不可用")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_petcore.ps1"
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-DryRun", "-OutputRoot", "rel-candidate"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    repo = str(Path(__file__).resolve().parents[1])
+    dist_line = next(line for line in result.stdout.splitlines() if line.startswith("dist:"))
+    assert "rel-candidate" in dist_line
+    assert repo.lower() in dist_line.lower()
+
+
+def test_dry_run_rejects_the_repository_root_even_with_a_trailing_separator() -> None:
+    import subprocess
+    from pathlib import Path
+
+    pwsh = _pwsh()
+    if pwsh is None:
+        import pytest
+
+        pytest.skip("pwsh 不可用")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_petcore.ps1"
+    repo = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-DryRun", "-OutputRoot", f"{repo}\\"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "must not be the repository root" in (result.stdout + result.stderr)
+
+
+def test_smoke_consumes_check_json_and_requires_strict_mode() -> None:
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "build_petcore.ps1").read_text(encoding="utf-8")
+    assert "--check --strict" in text
+    assert "ConvertFrom-Json" in text
+    assert "menu_template" in text
+
+
+def test_smoke_waits_for_the_windowed_exe() -> None:
+    """``-Windowed`` 产物是 GUI 子系统：``& $exe`` 立刻返回，必须 Start-Process -Wait。
+
+    实测（本机 2026-10-26）``& $exe --check --strict --out …`` 52ms 就返回、
+    ``$LASTEXITCODE`` 为空、``check.json`` 尚未落盘，冒烟步骤随后抛「路径不存在」，
+    整个构建在 dist 已生成的情况下失败。这条断言把「必须等待」钉在脚本里。
+    """
+    text = _text()
+    assert "Start-Process -FilePath $exe" in text
+    assert "-Wait -PassThru" in text
+    assert "& $exe --check" not in text

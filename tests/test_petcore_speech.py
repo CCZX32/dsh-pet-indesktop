@@ -544,3 +544,44 @@ def test_speech_never_plays_on_worker_when_gui_scheduler_is_unavailable(tmp_path
         app.processEvents()
     assert audio.paths == []
     assert callbacks == []
+
+
+def test_fallback_voice_is_cached_under_its_own_key(tmp_path, monkeypatch) -> None:
+    """兜底音色的产物不许写进「请求音色」的缓存键（AUD-20）。"""
+    monkeypatch.setattr(speech_service, "RETRY_DELAY_S", 0.0)
+    preferred = "zh-CN-YunxiNeural"
+    from petcore.net import tts as net_tts
+
+    fallback = net_tts.DEFAULT_VOICES.get("edge", "")
+    assert fallback and fallback != preferred
+
+    class _PickSynth(RecordingSynth):
+        def __call__(self, provider, request, out_path):
+            if request.voice == preferred:
+                with self._lock:
+                    self.calls.append((provider, request.voice, request.text))
+                raise speech_service.SpeechError("network", "boom")
+            return super().__call__(provider, request, out_path)
+
+    synth = _PickSynth(b"abc")
+    service = _make_service(tmp_path, synth=synth)
+    request = SpeechRequest(text="同一句台词", voice=preferred)
+
+    first = service.synthesize(request)
+    assert first.voice == fallback, "产物来自兜底音色，就必须报告兜底音色"
+
+    # 第二次命中缓存：必须报兜底音色，且不能再走首选音色的键。
+    second = service.synthesize(request)
+    assert second.cached is True
+    assert second.voice == fallback
+    assert second.path == first.path
+
+
+def test_truncated_audio_is_rejected(tmp_path) -> None:
+    from petcore.net.tts import _require_audio
+
+    path = tmp_path / "a.mp3"
+    path.write_bytes(b"partial")
+    with pytest.raises(Exception) as info:
+        _require_audio(path, "豆包", truncated=True)
+    assert "不完整" in str(info.value)

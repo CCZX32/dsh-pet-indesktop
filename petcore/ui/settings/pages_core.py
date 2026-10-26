@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -338,6 +339,17 @@ class AppearancePage(SettingsPage):
             "顶部一枚胶囊，显示时间与 CPU / 内存 / 网络读数；点开有详细卡片。默认关闭。",
         )
 
+        self.island_edge_dock_check = make_checkbox(self)
+        self.island_edge_dock_check.setChecked(
+            bool(self.config().get("island_edge_dock", True))
+        )
+        self.island_edge_dock_check.toggled.connect(self._on_island_changed)
+        island_card.add_row(
+            "贴边停靠",
+            self.island_edge_dock_check,
+            "拖到屏幕边缘约 40px 内松手会收成细条，悬停滑出预览；关闭后按拖动位置停留。",
+        )
+
         toggle_row = QWidget(self)
         toggle_layout = QHBoxLayout(toggle_row)
         toggle_layout.setContentsMargins(0, 0, 0, 0)
@@ -405,6 +417,8 @@ class AppearancePage(SettingsPage):
             ("network", "网络速率"),
             ("cpu", "CPU"),
             ("mem", "内存"),
+            ("gpu", "GPU"),
+            ("fps", "帧率"),
         ):
             box = make_checkbox(metrics_row)
             box.setChecked(metric_id in current_metrics)
@@ -421,9 +435,30 @@ class AppearancePage(SettingsPage):
         island_card.add_row(
             "指标段",
             metrics_row,
-            "勾选项按此顺序排在信息位之后；屏幕放不下时先折进「+N」，折叠即停采样。",
+            "勾选项按此顺序排在信息位之后；屏幕放不下时先折进「+N」，折叠即停采样。"
+            "GPU 走 PDH（无需权限）；帧率要读 ETW，需要一次授权。",
             expand=True,
         )
+
+        fps_perm_row = QWidget(self)
+        fps_perm_layout = QHBoxLayout(fps_perm_row)
+        fps_perm_layout.setContentsMargins(0, 0, 0, 0)
+        fps_perm_layout.setSpacing(10)
+        self.fps_permission_label = QLabel("", fps_perm_row)
+        self.fps_permission_label.setObjectName("settingHint")
+        self.fps_permission_label.setWordWrap(True)
+        self.fps_permission_button = make_button("授予帧率权限", fps_perm_row)
+        self.fps_permission_button.clicked.connect(self._request_fps_permission)
+        fps_perm_layout.addWidget(self.fps_permission_label, 1)
+        fps_perm_layout.addWidget(self.fps_permission_button)
+        island_card.add_row(
+            "游戏帧率权限",
+            fps_perm_row,
+            "把当前账户加入「Performance Log Users」只在本机生效，需要重新登录后才读数；"
+            "没授权时帧率段显示原因、不显示 0。",
+            expand=True,
+        )
+        self._refresh_fps_permission()
 
         style_row = QWidget(self)
         style_layout = QHBoxLayout(style_row)
@@ -577,8 +612,66 @@ class AppearancePage(SettingsPage):
     def _on_scale_percent(self, percent: int) -> None:
         self._apply_scale(percent / 100.0)
 
+    def _refresh_fps_permission(self) -> None:
+        label = getattr(self, "fps_permission_label", None)
+        button = getattr(self, "fps_permission_button", None)
+        if label is None or button is None:
+            return
+        from ...platform import fps_permission
+
+        try:
+            state = fps_permission.check()
+        except Exception:  # noqa: BLE001 - 探测失败按「不支持」呈现
+            state = "unsupported"
+        labels = {
+            "active": "已授权：帧率读数可用。",
+            "pending_relogon": "已加入「Performance Log Users」，重新登录后生效。",
+            "missing": "尚未授权：帧率段只会显示原因。",
+            "unsupported": "当前平台不支持帧率采集。",
+        }
+        label.setText(labels.get(str(state), str(state)))
+        button.setEnabled(str(state) not in ("active", "pending_relogon", "unsupported"))
+
+    def _request_fps_permission(self) -> None:
+        """一次性 UAC 授权（后台线程等，不能让 UAC 阻塞设置窗）。"""
+        from ...platform import fps_permission
+
+        label = self.fps_permission_label
+        button = self.fps_permission_button
+        button.setEnabled(False)
+        label.setText("已弹出系统授权窗口，请在 UAC 里确认；确认后需要重新登录才生效。")
+        outcomes = {
+            "ok": "已加入「Performance Log Users」，重新登录后帧率可用。",
+            "cancelled": "已取消授权。",
+            "unsupported": "当前平台不支持帧率采集。",
+            "unknown": "等待授权超时，请稍后重新查看状态。",
+        }
+
+        def worker() -> None:
+            try:
+                result = fps_permission.request_access()
+                text = outcomes.get(str(getattr(result, "outcome", "")), "") or str(
+                    getattr(result, "detail", "") or "授权结果未知"
+                )
+            except Exception:  # noqa: BLE001 - UAC 拉不起来必须可见但不崩设置
+                text = "授权失败：请手动把当前账户加入「Performance Log Users」。"
+
+            def apply() -> None:
+                label.setText(text)
+                self._refresh_fps_permission()
+                if label.text().startswith(("已加入", "已授权")):
+                    label.setText(text)
+
+            scheduler = getattr(self.host, "scheduler", None)
+            if scheduler is not None:
+                scheduler.call_later(0, apply)
+            else:
+                apply()
+
+        threading.Thread(target=worker, name="petcore-fps-grant", daemon=True).start()
+
     def _island_metrics(self) -> list[str]:
-        order = ["network", "cpu", "mem"]
+        order = ["network", "cpu", "mem", "gpu", "fps"]
         return [
             metric_id
             for metric_id in order
@@ -595,6 +688,7 @@ class AppearancePage(SettingsPage):
         config.set("island_info_mode", self.island_info_combo.currentData() or "time")
         config.set("island_custom_text", self.island_info_text.text().strip())
         config.set("island_metrics", self._island_metrics())
+        config.set("island_edge_dock", self.island_edge_dock_check.isChecked())
         config.set("island_style", self.island_style_combo.currentData() or "dark")
         config.set("island_accent", self.island_accent_combo.currentData() or "blue")
         config.set("island_opacity", round(self.island_opacity_slider.value() / 100.0, 2))

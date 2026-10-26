@@ -6,12 +6,14 @@ from contextlib import contextmanager
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -149,7 +151,8 @@ class SettingsPage(QWidget):
         scroll.setObjectName("settingsScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 窄窗（720×500）下内容会比视口宽：允许横向滚动，否则右侧按钮直接不可达。
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.viewport().setAutoFillBackground(False)
 
         content = QWidget()
@@ -356,15 +359,44 @@ def page_label_texts(page: QWidget) -> list[str]:
     return texts
 
 
+def page_search_texts(page: QWidget) -> list[str]:
+    """搜索口径：文字标签 + 按钮 + 勾选 + 下拉选项 + 列表项。
+
+    只扫 ``QLabel`` 会漏掉「生成子宠」「重新加载扩展」这类**按钮**文案，
+    用户照着菜单上的字搜却得到「没有匹配」（审计 AUD-29）。
+    """
+    texts = list(page_label_texts(page))
+    for button in page.findChildren(QAbstractButton):
+        text = button.text().strip()
+        if text:
+            texts.append(text)
+    for combo in page.findChildren(QComboBox):
+        for index in range(combo.count()):
+            text = combo.itemText(index).strip()
+            if text:
+                texts.append(text)
+    for view in page.findChildren(QListWidget):
+        for row in range(view.count()):
+            item = view.item(row)
+            if item is not None and item.text().strip():
+                texts.append(item.text().strip())
+    return texts
+
+
 def reveal_text(page: QWidget, needle: str) -> bool:
     """把命中文案的行滚到可见处，并切到它所在的页内分页。"""
     needle = str(needle or "").strip().lower()
     if not needle:
         return False
-    for label in page.findChildren(QLabel):
-        if label.isHidden():
+    for label in page.findChildren(QWidget):
+        text = ""
+        if isinstance(label, QLabel):
+            text = label.text()
+        elif isinstance(label, QAbstractButton):
+            text = label.text()
+        if not text or label.isHidden():
             continue
-        if needle not in label.text().strip().lower():
+        if needle not in text.strip().lower():
             continue
         widget = label
         while widget is not None:

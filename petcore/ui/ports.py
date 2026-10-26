@@ -69,25 +69,45 @@ class QtScheduler:
     def __init__(self) -> None:
         self._counter = itertools.count(1)
         self._bridge = _SchedulerBridge()
+        #: owner → 句柄：`cancel_owner()` 只撤这个 owner 的定时器。
+        self._owners: dict[str, list[str]] = {}
 
     def _new_handle(self) -> str:
         return f"timer-{next(self._counter)}"
 
-    def call_later(self, delay_ms: int, callback) -> str:
+    def _track(self, owner: str, handle: str) -> str:
+        key = str(owner or "")
+        if key:
+            self._owners.setdefault(key, []).append(handle)
+        return handle
+
+    def _forget(self, handle: str) -> None:
+        for key, handles in list(self._owners.items()):
+            if handle in handles:
+                handles.remove(handle)
+            if not handles:
+                self._owners.pop(key, None)
+
+    def call_later(self, delay_ms: int, callback, *, owner: str = "") -> str:
         handle = self._new_handle()
+        self._track(owner, handle)
         self._bridge.schedule.emit(handle, max(0, int(delay_ms)), callback, False)
         return handle
 
-    def call_every(self, interval_ms: int, callback) -> str:
+    def call_every(self, interval_ms: int, callback, *, owner: str = "") -> str:
         handle = self._new_handle()
+        self._track(owner, handle)
         self._bridge.schedule.emit(handle, max(1, int(interval_ms)), callback, True)
         return handle
 
     def cancel(self, handle: str) -> None:
+        self._forget(handle)
         self._bridge.stop.emit(handle)
 
     def cancel_owner(self, owner: str) -> None:
-        del owner
+        """撤掉这个 owner 注册过的全部定时器（卸载/重载扩展时必须调）。"""
+        for handle in self._owners.pop(str(owner or ""), []):
+            self._bridge.stop.emit(handle)
 
 
 class QtConfigPort:
@@ -451,10 +471,44 @@ class InteractionAdapter:
             if not wrappers:
                 registry.pop(key, None)
 
-    def on_tick(self, owner: str, callback, interval_ms: int = 16) -> str:
-        handle = self._scheduler.call_every(interval_ms, lambda: callback(interval_ms / 1000.0))
+    def on_tick(self, owner: str, callback, interval_ms: int = 16):
+        """周期回调；返回**注销函数**（契约是 ``Callable[[], None]``）。"""
+        handle = self._scheduler.call_every(
+            interval_ms, lambda: callback(interval_ms / 1000.0), owner=str(owner)
+        )
         self._timers.setdefault(owner, []).append(handle)
-        return handle
+
+        def _dispose() -> None:
+            self._scheduler.cancel(handle)
+            handles = self._timers.get(owner, [])
+            if handle in handles:
+                handles.remove(handle)
+            if not handles:
+                self._timers.pop(owner, None)
+
+        return _dispose
+
+    def detach_all(self) -> None:
+        """摘掉本适配器在所有窗口上的监听（重载扩展换 adapter 时调用）。"""
+        for registry, remover in (
+            (self._click_wrappers, "remove_click_listener"),
+            (self._drop_wrappers, "remove_drop_listener"),
+        ):
+            for key, (window, wrappers) in list(registry.items()):
+                remove = getattr(window, remover, None)
+                if callable(remove):
+                    for wrapper in list(wrappers.values()):
+                        try:
+                            remove(wrapper)
+                        except RuntimeError:
+                            pass
+                registry.pop(key, None)
+        self._click_callbacks.clear()
+        self._drop_callbacks.clear()
+        for handles in list(self._timers.values()):
+            for handle in handles:
+                self._scheduler.cancel(handle)
+        self._timers.clear()
 
     def cancel_owner(self, owner: str) -> None:
         for handle in self._timers.pop(owner, []):

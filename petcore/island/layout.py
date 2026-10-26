@@ -530,3 +530,71 @@ def anchored_x(*, x: int, width: int, new_width: int,
     if offset >= 2.0 * third:
         return int(round(float(x) + float(width) - float(new_width)))
     return int(round(center - float(new_width) / 2.0))
+
+
+# ---------------------------------------------------------------- 贴边停靠（纯函数）
+
+#: 拖到离屏幕边缘这么近就算「想停靠」。
+DOCK_THRESHOLD_PX = 40
+#: 停靠细条的厚度 / 左右停靠时的长度（主分支 `_STRIP_THICKNESS/_STRIP_SIDE`）。
+STRIP_THICKNESS_PX = 16
+STRIP_SIDE_PX = 64
+DOCK_EDGES = ("none", "top", "bottom", "left", "right")
+
+
+def dock_edge_for(rect, available, threshold: int = DOCK_THRESHOLD_PX) -> str:
+    """``rect`` 贴哪条边？四边等权取最近，超过 ``threshold`` 返回 ``"none"``。
+
+    ``rect`` / ``available`` 都是 ``(x, y, w, h)`` 的整数元组；比较用 ``abs``，
+    所以窗口被夹出边界（拖拽中途）也不会误判。
+    """
+    x, y, w, h = (int(value) for value in rect)
+    ax, ay, aw, ah = (int(value) for value in available)
+    distances = {
+        "top": abs(y - ay),
+        "bottom": abs((ay + ah) - (y + h)),
+        "left": abs(x - ax),
+        "right": abs((ax + aw) - (x + w)),
+    }
+    edge, distance = min(distances.items(), key=lambda item: item[1])
+    return edge if distance <= int(threshold) else "none"
+
+
+def strip_rect_for(
+    rect,
+    edge: str,
+    available,
+    *,
+    thickness: int = STRIP_THICKNESS_PX,
+    side: int = STRIP_SIDE_PX,
+):
+    """停靠细条的几何：``rect`` 只提供**沿边方向**的位置与中心。
+
+    左右停靠时长度取 ``min(side, 屏高)``，竖直中心用 ``rect.top() + h // 2``
+    而不是 ``QRect.center()``——后者对偶数高度向下取整 1px，滑出/收回每循环
+    会让细条上漂 1px（主分支实测过的漂移）。
+    """
+    x, y, w, h = (int(value) for value in rect)
+    ax, ay, aw, ah = (int(value) for value in available)
+    thickness = max(1, int(thickness))
+    side = max(1, int(side))
+    if edge == "top":
+        return (x, ay, w, thickness)
+    if edge == "bottom":
+        return (x, ay + ah - thickness, w, thickness)
+    if edge in ("left", "right"):
+        length = min(side, ah)
+        center_y = y + h // 2
+        strip_y = max(ay, min(center_y - length // 2, ay + ah - length))
+        strip_x = ax if edge == "left" else ax + aw - thickness
+        return (strip_x, strip_y, thickness, length)
+    return (x, y, w, h)
+
+
+def ease_out_cubic(t: float) -> float:
+    """几何动画的缓动（主分支唯一曲线）：起手快、收尾缓。"""
+    try:
+        value = max(0.0, min(1.0, float(t)))
+    except (TypeError, ValueError):
+        return 1.0
+    return 1.0 - (1.0 - value) ** 3

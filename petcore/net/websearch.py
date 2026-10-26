@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 
 from . import errors
-from .http import urlopen
+from .http import urlopen, validate_target
 
 __all__ = [
     "ENGINE_LABELS",
@@ -380,10 +380,19 @@ def fetch_page_text(
     max_chars: int = 5000,
     opener=None,
 ) -> str:
-    """读取网页正文（限长）；只支持 http/https。"""
+    """读取网页正文（限长）；只支持 http/https，且拒绝本机与内网地址。
+
+    这里的 URL 来自**模型生成的工具参数**，可以被网页内容诱导，所以必须比
+    普通取数更严：`file://` 能直接读本机文件，`127.0.0.1`/`10.x` 能读内网服务
+    与云元数据。
+    """
     url = str(url or "").strip()
     if urllib.parse.urlparse(url).scheme not in ("http", "https"):
         raise SearchError("只支持 http/https 网址", reason=errors.PROTOCOL)
+    try:
+        validate_target(url, allowed_schemes=("http", "https"), allow_private=False)
+    except errors.NetworkError as exc:
+        raise SearchError(str(exc), reason=errors.PROTOCOL) from None
     page, content_type = _get(
         url, timeout=timeout, verify_ssl=verify_ssl, opener=opener
     )

@@ -10,6 +10,8 @@ param(
     [switch]$Clean,
     [switch]$Installer,
     [switch]$Console,
+    # 只解析并打印最终路径（供候选包脚本与单测验证收束规则），不做任何构建。
+    [switch]$DryRun,
     [string]$SignThumbprint = "",
     [string]$TimestampServer = "http://timestamp.digicert.com",
     # 隔离输出：dist/work/spec 与 --check 结果全部落在该目录，便于候选包验收不污染根 dist。
@@ -22,23 +24,48 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$python = if ($PythonPath) { (Resolve-Path -LiteralPath $PythonPath).Path } else { Join-Path $root ".venv/Scripts/python.exe" }
-if (-not (Test-Path $python)) {
-    throw "missing python: $python"
+function Resolve-OutputRoot([string]$Value) {
+    # 相对路径必须相对**仓库根**解析：`[IO.Path]::GetFullPath` 用的是进程 CWD，
+    # 而 `Set-Location` 不改它，于是 `-OutputRoot rel` 会落到调用者目录（审计 AUD-37）。
+    if ([IO.Path]::IsPathRooted($Value)) { return [IO.Path]::GetFullPath($Value) }
+    return [IO.Path]::GetFullPath((Join-Path $root $Value))
 }
 
-$distRoot = if ($OutputRoot) { [IO.Path]::GetFullPath($OutputRoot) } else { Join-Path $root "dist" }
+function Normalize-Path([string]$Value) {
+    return ([IO.Path]::GetFullPath($Value)).TrimEnd('\', '/')
+}
+
+$python = if ($PythonPath) { (Resolve-Path -LiteralPath $PythonPath).Path } else { Join-Path $root ".venv/Scripts/python.exe" }
+
+$distRoot = if ($OutputRoot) { Resolve-OutputRoot $OutputRoot } else { Join-Path $root "dist" }
 if ($OutputRoot) {
-    if ($distRoot -eq [IO.Path]::GetFullPath($root)) {
+    # 尾部反斜杠会让 `-eq` 比较失配，先归一化再比。
+    if ((Normalize-Path $distRoot) -eq (Normalize-Path $root)) {
         throw "OutputRoot must not be the repository root"
     }
     if (Test-Path (Join-Path $distRoot "dsh-pet-core-setup.exe")) {
         throw "OutputRoot already contains an installer; choose a fresh directory"
     }
-    New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
 }
 $workRoot = if ($OutputRoot) { Join-Path $distRoot ".work" } else { Join-Path $root "build" }
 $specRoot = if ($OutputRoot) { $distRoot } else { $root }
+
+if ($DryRun) {
+    Write-Host "root:     $(Normalize-Path $root)"
+    Write-Host "dist:     $(Normalize-Path $distRoot)"
+    Write-Host "work:     $(Normalize-Path $workRoot)"
+    Write-Host "spec:     $(Normalize-Path $specRoot)"
+    Write-Host "python:   $python"
+    Write-Host "check:    $(Normalize-Path (Join-Path $distRoot 'check.json'))"
+    return
+}
+
+if (-not (Test-Path $python)) {
+    throw "missing python: $python"
+}
+if ($OutputRoot) {
+    New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
+}
 
 function Sign-Artifact([string]$Path) {
     if (-not $SignThumbprint) { return }
@@ -99,6 +126,9 @@ $pyiArgs = @(
     # 与主分支 build_onedir.ps1 同一口径：显式带 config.yaml/default_models.yaml，
     # 否则 rapidocr 会走「模型路径为空就下载」的分支。
     "--add-data", "$root/resources/rapidocr_models;resources/rapidocr_models",
+    # 游戏帧率探针（灵动岛 fps 段）：PresentMon 二进制随包分发，运行时不查 PATH。
+    # 构建前必须过 verify_presentmon.py 的文件名/SHA256/x86-64 三道门。
+    "--add-data", "$root/resources/presentmon;resources/presentmon",
     "--collect-submodules", "rapidocr",
     "--hidden-import", "onnxruntime",
     "--hidden-import", "cv2",
@@ -123,6 +153,13 @@ if (Test-Path $builtin) {
     $pyiArgs = @($pyiArgs[0], $pyiArgs[1], "--add-data", "$builtin;petcore/builtin") + $pyiArgs[2..($pyiArgs.Count - 1)]
 }
 
+Write-Host "== verify presentmon (source, before packaging) =="
+# 先验源文件：缺件/换版时不该先跑一遍完整打包（onedir + Qt + OCR 模型要几分钟）。
+& $python scripts/verify_presentmon.py --path resources/presentmon/PresentMon-2.6.0-x64.exe
+if ($LASTEXITCODE -ne 0) {
+    throw "bundled PresentMon failed verification (name/sha256/machine)"
+}
+
 Write-Host "== PyInstaller =="
 & $python @pyiArgs
 if ($LASTEXITCODE -ne 0) {
@@ -137,12 +174,55 @@ if (-not (Test-Path $exe)) {
 # Smart App Control/SmartScreen 会拦截未签名的新构建：先签名再冒烟。
 Sign-Artifact $exe
 
-Write-Host "== smoke --check =="
-$checkOut = Join-Path $distRoot "check.json"
-& $exe --check --out $checkOut
-if ($LASTEXITCODE -ne 0) {
-    throw "packaged --check failed with exit code $LASTEXITCODE"
+Write-Host "== verify presentmon (packaged) =="
+$builtPresentMon = Join-Path $distRoot "dsh-pet-core/_internal/resources/presentmon/PresentMon-2.6.0-x64.exe"
+if (Test-Path $builtPresentMon) {
+    & $python scripts/verify_presentmon.py --path $builtPresentMon
+    if ($LASTEXITCODE -ne 0) {
+        throw "packaged PresentMon failed verification"
+    }
+} else {
+    Write-Host "warn: packaged PresentMon not found at $builtPresentMon (onedir layout may differ)"
 }
+
+Write-Host "== smoke --check --strict =="
+$checkOut = Join-Path $distRoot "check.json"
+# 脚本约定「不删任何东西」：用时间戳识别旧报告，而不是先删文件。
+$checkBefore = $null
+if (Test-Path -LiteralPath $checkOut) {
+    $checkBefore = (Get-Item -LiteralPath $checkOut).LastWriteTimeUtc
+}
+# ``-Windowed`` 产物是 GUI 子系统：直接 ``& $exe`` 时 PowerShell 不等待进程退出
+# （实测 52ms 返回、$LASTEXITCODE 为空、check.json 还没落盘），冒烟读到的永远是
+# 上一份报告或直接抛「路径不存在」。必须用 Start-Process -Wait 拿真实退出码。
+$smoke = Start-Process -FilePath $exe `
+    -ArgumentList @("--check --strict", "--out", "`"$checkOut`"") `
+    -Wait -PassThru -NoNewWindow
+if ($smoke.ExitCode -ne 0) {
+    throw "packaged --check --strict failed with exit code $($smoke.ExitCode)"
+}
+if (-not (Test-Path -LiteralPath $checkOut)) {
+    throw "packaged --check --strict did not write $checkOut"
+}
+if ($checkBefore -and (Get-Item -LiteralPath $checkOut).LastWriteTimeUtc -le $checkBefore) {
+    throw "packaged --check --strict left a stale report at $checkOut"
+}
+# 退出码之外再读一遍报告：菜单模板/内置配图/角色缺失都必须让构建红。
+$report = Get-Content -Raw -LiteralPath $checkOut | ConvertFrom-Json
+if ($report.menu_template -ne "json") {
+    throw "packaged menu_template is '$($report.menu_template)' (expected json): petcore/menu_templates did not ship"
+}
+if ([int]$report.self_talk_images.builtin_readable -le 0) {
+    throw "packaged builtin self-talk images are unreadable (assets or Qt image plugin missing)"
+}
+if (-not $report.characters -or $report.characters.Count -eq 0) {
+    throw "packaged build contains no characters"
+}
+if ($report.diagnostics -and $report.diagnostics.Count -gt 0) {
+    throw "packaged --check reported $($report.diagnostics.Count) diagnostic(s): $($report.diagnostics -join '; ')"
+}
+Write-Host ("check: menu_template={0} characters={1} builtin_images={2} strict={3}" -f `
+    $report.menu_template, $report.characters.Count, $report.self_talk_images.builtin_readable, $report.strict.enabled)
 Write-Host "built: $(Join-Path $distRoot 'dsh-pet-core')"
 
 if ($Installer) {

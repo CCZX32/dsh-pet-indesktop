@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from threading import Lock
 
 
@@ -21,6 +21,11 @@ class PerformanceSnapshot:
     disk_writes: int = 0
     network_requests: int = 0
     active_threads: int = 0
+    gpu_samples: int = 0
+    fps_samples: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {name: int(value) for name, value in asdict(self).items()}
 
 
 class PerformanceCounters:

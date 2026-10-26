@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import tempfile
 import threading
 from collections import OrderedDict
@@ -30,7 +31,21 @@ REPRESENTATIVE_FRACTION = 0.62
 THUMBNAIL_MAX_SIDE = 64
 CACHE_LIMIT = 128
 MAX_THREADS = 2
-DISK_CACHE_DIR = Path(tempfile.gettempdir()) / "dsh-pet-core-thumbs"
+def _disk_cache_dir() -> Path:
+    """缩略图磁盘缓存：按 `--instance` 隔离，避免两个实例共用/互相清缓存。"""
+    suffix = ""
+    try:
+        from .. import paths
+
+        name = paths.normalize_instance(os.environ.get("PETCORE_INSTANCE"))
+        if name:
+            suffix = f"-{name}"
+    except Exception:  # noqa: BLE001 - 缓存目录解析失败就用默认
+        suffix = ""
+    return Path(tempfile.gettempdir()) / f"dsh-pet-core-thumbs{suffix}"
+
+
+DISK_CACHE_DIR = _disk_cache_dir()
 
 
 def representative_frame_index(frame_count: int, fraction: float = REPRESENTATIVE_FRACTION) -> int:

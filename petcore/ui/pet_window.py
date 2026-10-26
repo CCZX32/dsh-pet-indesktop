@@ -597,14 +597,40 @@ class PetWindow(QWidget):
             "frames_per_loop": frames_per_loop,
             "total_frames": frames_per_loop * loops,
             "curve": curve,
+            "duration": float(move_duration),
+            "started_at": time.monotonic(),
         }
         self._move_loop = 0
         self._move_last_frame = -1
         self._move_timer.start()
 
     def _tick_move(self) -> None:
-        if self._move_plan is None or self._clip is None or not self.isVisible():
+        plan = self._move_plan
+        if plan is None or self._clip is None or not self.isVisible():
             self._move_timer.stop()
+            return
+        duration = float(plan.get("duration") or 0.0)
+        started = float(plan.get("started_at") or 0.0)
+        if duration <= 0.0 or started <= 0.0:
+            return
+        elapsed = time.monotonic() - started
+        if elapsed > duration * 2.0 + 1.0:
+            # 帧回调断流（解码停摆/队列空转）：别让宠物永久停在走动姿态，
+            # 也别让 `maybe_enter()` 再也不被调用（审计 AUD-33）。
+            self._finish_move()
+            return
+        if int(plan.get("frames_per_loop") or 1) > 1:
+            return
+        # 冷 meta：clip 只有一帧，帧号推不动 → 按墙钟插值（否则首帧即到终点）。
+        progress = min(1.0, max(0.0, elapsed / duration))
+        start_x = float(plan.get("start_x") or 0.0)
+        start_y = float(plan.get("start_y") or 0.0)
+        target_x = float(plan.get("target_x") or start_x)
+        target_y = float(plan.get("target_y") or start_y)
+        x = start_x + (target_x - start_x) * progress
+        y = start_y + (target_y - start_y) * progress
+        x, y = self._clamp_position(int(round(x)), int(round(y)))
+        self.move(x, y)
 
     def _cancel_move_plan(self) -> None:
         self._move_timer.stop()
@@ -900,10 +926,14 @@ class PetWindow(QWidget):
             return True
         if self.width() <= 0 or self.height() <= 0:
             return True
+        # paintEvent 的合成是 R∘S（先旋转坐标系、再把整帧压进 Q 弹矩形），
+        # 逆变换必须是 S⁻¹∘R⁻¹：先反旋转，再在**未旋转**的坐标系里反 Q 弹。
+        # 顺序反了会让 Q 弹+旋转同时生效时点击偏移 5–20px（审计 AUD-34）。
+        local = self._unrotated_point(local)
         unsquashed = self._unsquash_point(local)
         if unsquashed is None:
             return True
-        local = self._unrotated_point(unsquashed)
+        local = unsquashed
         if not (0 <= local.x() < self.width() and 0 <= local.y() < self.height()):
             return True
         ix = int(local.x() * image.width() / self.width())

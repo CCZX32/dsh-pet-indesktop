@@ -1,32 +1,6 @@
 from __future__ import annotations
 
-from enum import Enum
+# 枚举住在契约层（mod 也在用）；这里 re-export，保持 `engine.enums` 的旧 import 可用。
+from ..contracts.enums import AnimatType, GraphType, ModeType
 
-
-class GraphType(str, Enum):
-    DEFAULT = "Default"
-    EVENT = "Event"
-    IDEL = "Idel"
-    MOVE = "Move"
-    TOUCH_HEAD = "Touch_Head"
-    TOUCH_BODY = "Touch_Body"
-    RAISED_STATIC = "Raised_Static"
-    RAISED_DYNAMIC = "Raised_Dynamic"
-    SAY = "Say"
-    SLEEP = "Sleep"
-    STARTUP = "StartUP"
-    WORK = "Work"
-
-
-class AnimatType(str, Enum):
-    SINGLE = "Single"
-    A_START = "A_Start"
-    B_LOOP = "B_Loop"
-    C_END = "C_End"
-
-
-class ModeType(str, Enum):
-    HAPPY = "Happy"
-    NOMAL = "Nomal"
-    POOR_CONDITION = "PoorCondition"
-    ILL = "Ill"
+__all__ = ["AnimatType", "GraphType", "ModeType"]

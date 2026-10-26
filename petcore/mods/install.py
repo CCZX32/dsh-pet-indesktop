@@ -15,10 +15,29 @@ from typing import Iterator
 
 from ..contracts.archive import ArchiveLimits, BudgetExceeded
 from .manifest import MOD_FILE, is_valid_id, load_manifest, path_within
+from .trust import TRUST_MARKER
 
 INSTALL_FILE = "install.json"
 INSTALL_SCHEMA = 1
 _CHUNK = 1024 * 1024
+
+#: NTFS 上的保留设备名：同名条目会被当成设备而不是文件（写进去就消失）。
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", "clock$"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _unsafe_entry_reason(name: str) -> str | None:
+    """条目名在 Windows 上的不安全形态：备用数据流、保留设备名。"""
+    if ":" in name:
+        return "备用数据流（ADS）"
+    for part in PurePosixPath(name.replace("\\", "/")).parts:
+        stem = part.split(".")[0].strip().lower()
+        if stem in _RESERVED_NAMES:
+            return f"保留设备名 {part}"
+    return None
 
 
 class InstallError(RuntimeError):
@@ -132,6 +151,7 @@ def _extract_zip(
         if limits is not None:
             _check_declared_budget(infos, limits)
         written = 0
+        seen_names: set[str] = set()
         for info in infos:
             name = info.filename
             if not name:
@@ -142,6 +162,14 @@ def _extract_zip(
             parts = PurePosixPath(name.replace("\\", "/")).parts
             if ".." in parts:
                 raise InstallError(f"unsafe zip entry: {name}")
+            reason = _unsafe_entry_reason(name)
+            if reason:
+                raise InstallError(f"unsafe zip entry: {name}（{reason}）")
+            folded = name.replace("\\", "/").rstrip("/").casefold()
+            if folded in seen_names:
+                # A.txt 与 a.txt 在 Windows 上互相覆盖：落盘内容会与作者意图不符。
+                raise InstallError(f"duplicate zip entry (case-insensitive): {name}")
+            seen_names.add(folded)
             if info.is_dir():
                 continue
             if stat.S_ISLNK(info.external_attr >> 16):
@@ -252,7 +280,14 @@ def install(
     *,
     force: bool = False,
     limits: ArchiveLimits | None = None,
+    keep_trust_marker: bool = False,
 ) -> tuple[bool, str]:
+    """把包安装到 ``<root>/mods/<id>``。
+
+    ``keep_trust_marker`` 只给「安装器投放」这一条路径用（市场里 ``BUNDLED``
+    来源）：那里会先校验官方清单再写标记。本地导入与市场下载一律剥掉包内自带的
+    ``.trusted``——包内容不能自己宣布自己被信任。
+    """
     root = Path(root)
     mods_root = root / "mods"
     staging: Path | None = None
@@ -268,6 +303,10 @@ def install(
             staging = mods_root / f".staging-{manifest.id}-{os.getpid()}"
             _remove_path(staging)
             _copy_pack(pack, staging)
+            # 包内容不等于授权：`.trusted` 只能由安装器投放到安装目录，
+            # 本地导入（ZIP/目录）一律剥掉，否则等于让包自己宣布自己被信任。
+            if not keep_trust_marker:
+                (staging / TRUST_MARKER).unlink(missing_ok=True)
             files = _digest_tree(staging)
             (staging / INSTALL_FILE).write_text(
                 _install_json(manifest.id, manifest.version, files), encoding="utf-8"

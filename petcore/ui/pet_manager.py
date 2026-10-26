@@ -24,6 +24,11 @@ from .pet_window import PetWindow
 logger = logging.getLogger("petcore.ui.pets")
 
 MAX_PETS = 16
+#: 播种子宠档案时不复制的键：位置/成员表/菜单布局是每宠独立的，`extra` 是全局的
+#: （扩展偏好由共享运行时读取，复制进子宠只会造成「文件里有值、实际不生效」）。
+SEED_EXCLUDED_KEYS = frozenset(
+    {"active_pets", "positions", "menu_layout", "menu_order", "menu_hidden", "extra"}
+)
 SHARED_KEYS = (
     "click_through",
     "active_pets",
@@ -72,7 +77,7 @@ class PetManager(QObject):
         seed = {
             key: value
             for key, value in self.config.data.items()
-            if key not in {"active_pets", "positions", "menu_layout", "menu_order", "menu_hidden"}
+            if key not in SEED_EXCLUDED_KEYS
         }
         if not bool(self.config.get("spawn_inherit_size", True)):
             seed["scale"] = float(self.config.get("spawn_scale") or 0.72)

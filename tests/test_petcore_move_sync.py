@@ -65,3 +65,63 @@ def test_move_facing_matches_target_direction(app, tmp_path: Path) -> None:
         window._cancel_move_plan()
     finally:
         window.shutdown()
+
+
+def test_cold_meta_walk_advances_by_wall_clock(app, tmp_path: Path) -> None:
+    """冷 meta（clip 只有一帧）时位移必须按墙钟推进，而不是首帧即到终点（AUD-33）。"""
+    import time
+
+    character = load_character("shenshen", frameseq_mode="off")
+    config = Config(tmp_path)
+    window = PetWindow(config, tmp_path, FakeHost(character))
+    window.start(character)
+    try:
+        plan = {
+            "spec": "walk",
+            "start_x": 100.0,
+            "start_y": 100.0,
+            "target_x": 300.0,
+            "target_y": 100.0,
+            "loops": 1,
+            "frames_per_loop": 1,
+            "total_frames": 1,
+            "curve": None,
+            "duration": 0.4,
+            "started_at": time.monotonic(),
+        }
+        window._move_plan = plan
+        time.sleep(0.2)
+        window._tick_move()
+        assert 100 < window.x() < 300, "冷 meta 下应走一半而不是瞬移"
+        window._cancel_move_plan()
+    finally:
+        window.shutdown()
+
+
+def test_move_watchdog_finishes_a_stalled_plan(app, tmp_path: Path) -> None:
+    """帧回调断流时由看门狗收口：不许永久停在走动姿态（AUD-33）。"""
+    import time
+
+    character = load_character("shenshen", frameseq_mode="off")
+    config = Config(tmp_path)
+    window = PetWindow(config, tmp_path, FakeHost(character))
+    window.start(character)
+    try:
+        plan = {
+            "spec": "walk",
+            "start_x": 100.0,
+            "start_y": 100.0,
+            "target_x": 260.0,
+            "target_y": 100.0,
+            "loops": 1,
+            "frames_per_loop": 8,
+            "total_frames": 8,
+            "curve": None,
+            "duration": 0.05,
+            "started_at": time.monotonic() - 5.0,
+        }
+        window._move_plan = plan
+        window._tick_move()
+        assert window._move_plan is None, "超时后必须收口"
+    finally:
+        window.shutdown()

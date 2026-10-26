@@ -43,6 +43,7 @@ BUILTIN_DEFAULT_LAYOUT: dict = {
                 {"type": "action", "id": "on_top", "visible": True},
                 {"type": "action", "id": "edge_probe", "visible": True},
                 {"type": "action", "id": "dynamic_island", "visible": True},
+                {"type": "action", "id": "show_balance", "visible": True},
                 {"type": "action", "id": "autostart", "visible": True},
                 {"type": "action", "id": "return_corner", "visible": True},
                 {"type": "action", "id": "hide_pet", "visible": True},
@@ -65,6 +66,7 @@ BUILTIN_DEFAULT_LAYOUT: dict = {
             "children": [
                 {"type": "action", "id": "tool.quick-launch:open_menu", "visible": True},
                 {"type": "action", "id": "api_settings", "visible": True},
+                {"type": "action", "id": "check_update", "visible": True},
                 {"type": "action", "id": "tool.links:deepseek_web", "visible": True},
                 {"type": "action", "id": "tool.links:github_project", "visible": True},
                 {"type": "action", "id": "tool.links:quark_download", "visible": True},

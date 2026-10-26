@@ -289,7 +289,11 @@ def test_stop_is_idempotent(make_island):
     assert island.sys_monitor.running() is False
 
 
-def test_expanding_card_stops_folded_network_and_collapse_restarts(make_island):
+def test_expanding_card_keeps_folded_metrics_sampling(make_island):
+    """卡片态折行只是排版：每段都有明细行，值仍然可见，不该停采（AUD-25）。
+
+    胶囊态被折进 `+N` 的段照旧停采（那才是真的看不见），见下一条用例。
+    """
     island = make_island({"island_metrics": ["cpu", "mem", "network"]},
                          character_name="Shenshen")
     island.show()
@@ -298,10 +302,23 @@ def test_expanding_card_stops_folded_network_and_collapse_restarts(make_island):
     assert island.net_monitor.running()
     island.expand_card()
     assert "network" in island.plan().folded
-    assert island.net_monitor.wait_stopped(5), "folded metric must stop its sampler"
-    assert not island.net_monitor.running()
+    assert island.net_monitor.running(), "卡片态不该因为折行停采"
     island.collapse_card()
     assert island.net_monitor.running()
+
+
+def test_capsule_folding_still_stops_the_sampler(make_island, monkeypatch):
+    """胶囊态折进 `+N` 的段看不见 → 停采（这条红线保留）。"""
+    island = make_island({"island_metrics": ["cpu", "mem", "network"]},
+                         character_name="Shenshen")
+    island.show()
+    app.processEvents()
+    assert island.net_monitor.running()
+    monkeypatch.setattr(island, "_available_width", lambda: 240)
+    island.refresh_from_config()
+    assert "network" in island.plan().folded
+    assert island.net_monitor.wait_stopped(5), "胶囊上被折进 +N 的段必须停采"
+    assert not island.net_monitor.running()
 
 
 def test_disabling_visible_island_stops_samplers(make_island):

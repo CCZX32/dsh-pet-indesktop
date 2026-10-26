@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +14,8 @@ from typing import Any
 from . import paths
 from .engine.geometry import SCALE_MAX, SCALE_MIN
 from .platform import hotkey_spec
+
+logger = logging.getLogger("petcore.config")
 
 SCHEMA_VERSION = 1
 
@@ -49,6 +54,11 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "allow_feature_mods",
         "market_index_url",
         "click_through",
+        # 这三个由**共享**的 feature 运行时读取（每个 owner 只有一个 runtime，
+        # 不按宠物实例化），所以必须是全局键，否则子宠设置页写入永远不生效。
+        "network_info_enabled",
+        "memory_trim_enabled",
+        "quiet_minutes_default",
         "hotkey_toggle_pet",
         "hotkey_open_chat",
         "hotkey_look_screen",
@@ -104,6 +114,8 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "island_metrics",
         "island_x",
         "island_y",
+        "island_edge_dock",
+        "island_dock_edge",
         "chat_always_on_top",
         "chat_follow_pet",
         "chat_background",
@@ -244,6 +256,9 @@ DEFAULTS: dict[str, Any] = {
     "island_metrics": ["cpu", "mem"],
     "island_x": None,
     "island_y": None,
+    # 贴边停靠：拖到屏幕边缘 40px 内松手 → 收成 16px 细条，悬停滑出预览。
+    "island_edge_dock": True,
+    "island_dock_edge": "none",
     "click_show_balance": False,
     "chat_always_on_top": False,
     "chat_follow_pet": False,
@@ -417,6 +432,111 @@ _LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# 旧壳里与 petcore **同名**的键：白名单式映射会静默丢掉它们（审计 AUD-08）。
+# 这些键在旧壳里真的被读取（待办/节日/报时/天气/音乐/快捷键），必须按同名直搬，
+# 否则用户升级后这些设置回到默认值，而迁移报告全绿。
+_LEGACY_SAME_NAME_KEYS = (
+    "chat_always_on_top",
+    "chat_background",
+    "chat_follow_pet",
+    "click_show_balance",
+    "divination_hint",
+    "divination_speak",
+    "festival_birthday",
+    "festival_custom_quotes_cn",
+    "festival_custom_quotes_west",
+    "festival_reminder_cn",
+    "festival_reminder_count",
+    "festival_reminder_enabled",
+    "festival_reminder_mode",
+    "festival_reminder_show_quote",
+    "festival_reminder_solar_terms",
+    "festival_reminder_speak",
+    "festival_reminder_times",
+    "festival_reminder_west",
+    "hotkey_look_screen",
+    "hotkey_open_chat",
+    "hotkey_screen_capture",
+    "island_metrics",
+    "music_browser_media_enabled",
+    "music_lyric_cache_limit",
+    "music_lyric_enabled",
+    "music_lyric_lead_seconds",
+    "music_player_paths",
+    "music_sing_enabled",
+    "music_sing_grace_seconds",
+    "todo_reminder_enabled",
+    "todo_reminder_lead_minutes",
+    "todo_reminder_speak",
+    "voice_chime_rate",
+    "voice_chime_schedule",
+    "voice_chime_show_bubble",
+    "voice_chime_voice",
+    "voice_chime_volume",
+    "weather_city",
+    "weather_city_codes",
+    "weather_city_list",
+    "weather_enabled",
+)
+_LEGACY_KEY_ALIASES.update({key: (key,) for key in _LEGACY_SAME_NAME_KEYS})
+
+# ---------------------------------------------------------------- 扩展偏好键
+# `config.json` 顶层只允许 `DEFAULTS` 里的键——这是「配置里永不出现 API Key」的
+# 唯一机制。第三方扩展的偏好键统一落在受管的 `extra` 区块，`get/set` 对调用方
+# 透明，但顶层键集仍然可枚举、可审计。
+_EXTRA_FIELD = "extra"
+_EXTRA_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_EXTRA_VALUE_LIMIT = 4096
+_EXTRA_TOTAL_LIMIT = 65536
+_SECRET_VALUE_RE = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,}|[A-Fa-f0-9]{32,})"
+)
+
+
+def _looks_like_secret(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(_SECRET_VALUE_RE.search(value))
+    if isinstance(value, dict):
+        return any(_looks_like_secret(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_looks_like_secret(item) for item in value)
+    return False
+
+
+def _sanitize_extra(raw: Any) -> dict[str, Any]:
+    """校验 `extra` 区块：键名白名单、单值/总量上限、拒绝密钥样式。"""
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, Any] = {}
+    total = 0
+    for key, value in raw.items():
+        text = str(key)
+        if not _EXTRA_KEY_RE.match(text):
+            logger.warning("config extra key rejected: %s", text[:64])
+            continue
+        if _looks_like_secret(value):
+            logger.warning("config extra value rejected as credential-like: %s", text[:64])
+            continue
+        try:
+            size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            continue
+        if size > _EXTRA_VALUE_LIMIT:
+            logger.warning("config extra value too large: %s", text[:64])
+            continue
+        if total + size > _EXTRA_TOTAL_LIMIT:
+            break
+        cleaned[text] = value
+        total += size
+    return cleaned
+
+
+def legacy_unmapped_keys(raw: dict[str, Any]) -> list[str]:
+    """旧壳里有、但别名表覆盖不到的键（迁移报告要如实点名，不许静默丢）。"""
+    known = {alias for aliases in _LEGACY_KEY_ALIASES.values() for alias in aliases}
+    return sorted(str(key) for key in raw if str(key) not in known)
+
+
 def _map_legacy_data(raw: dict[str, Any]) -> dict[str, Any]:
     """Map known v4/standalone keys without copying secrets or unknown data."""
     mapped: dict[str, Any] = {}
@@ -486,6 +606,7 @@ def _head_pat_names(value: Any) -> list[str]:
 ISLAND_METRIC_IDS = ("network", "cpu", "mem", "gpu", "fps")
 ISLAND_METRIC_LIMIT = 8
 #: 灵动岛的强调色词表。
+ISLAND_DOCK_EDGES = frozenset({"none", "top", "bottom", "left", "right"})
 ISLAND_ACCENTS = ("blue", "green", "purple", "pink", "orange")
 
 
@@ -647,6 +768,8 @@ class Config:
         self.path = self.root / filename if filename else paths.config_path(self.root)
         self.migration_records: list[MigrationRecord] = []
         self._legacy_source: Path | None = None
+        #: 损坏的 config.json 被改名留档后的路径（`--check` 会显示它）。
+        self.corrupt_backup: str = ""
         self.data = self._normalize(data if data is not None else dict(DEFAULTS))
 
     def _record_migration(self, status: str, **kwargs: object) -> None:
@@ -655,7 +778,20 @@ class Config:
         self.migration_records.append(MigrationRecord(status=status, **kwargs))
 
     @classmethod
-    def load(cls, root: Path, *, portable: bool = False, filename: str | None = None) -> "Config":
+    def load(
+        cls,
+        root: Path,
+        *,
+        portable: bool = False,
+        filename: str | None = None,
+        persist: bool = True,
+    ) -> "Config":
+        """读取配置。
+
+        ``persist=False`` 是「只读诊断」模式（``petcore --check``）：会算出与正常
+        启动一致的合并结果，但**不备份、不写文件、不迁 slot**。否则一次诊断命令
+        就会改动用户数据，而且绕开 `migration.json` 标记。
+        """
         root = Path(root)
         config = cls(root, filename=filename)
         if config.path.exists():
@@ -670,6 +806,8 @@ class Config:
                     error=type(exc).__name__,
                     retryable=True,
                 )
+                if persist:
+                    config.corrupt_backup = config._quarantine_corrupt()
                 raw = None
             if isinstance(raw, dict):
                 config.data = config._normalize({**DEFAULTS, **raw})
@@ -682,12 +820,21 @@ class Config:
             return config
         legacy = config._read_legacy()
         if legacy:
+            config.data.update(legacy)
+            config.data = config._normalize(config.data)
+            if not persist:
+                config._record_migration(
+                    "not_needed",
+                    source=str(config._legacy_source) if config._legacy_source else None,
+                    target=str(config.path),
+                    stage="read-only",
+                )
+                return config
             # The legacy source is backed up before either global or slot data is
             # written.  A backup failure leaves the old source untouched and is
             # explicitly retryable on the next startup.
             if not config._ensure_legacy_backup():
                 return config
-            config.data.update(legacy)
             try:
                 config.save()
             except OSError as exc:
@@ -711,6 +858,18 @@ class Config:
         elif not config.migration_records:
             config._record_migration("not_needed", target=str(config.path), stage="load")
         return config
+
+    def _quarantine_corrupt(self) -> str:
+        """把读不动的配置文件改名留档：否则下一次 save 会把它整份覆盖掉。"""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = self.path.with_name(f"{self.path.name}.bad-{stamp}")
+        try:
+            os.replace(self.path, target)
+        except OSError:
+            logger.warning("cannot quarantine corrupt config %s", self.path, exc_info=True)
+            return ""
+        logger.warning("config.json was unreadable and has been kept as %s", target.name)
+        return str(target)
 
     def _read_legacy(self) -> dict[str, Any]:
         for root in paths.legacy_data_roots():
@@ -841,6 +1000,7 @@ class Config:
         normalized = dict(DEFAULTS)
         normalized.update({key: data[key] for key in DEFAULTS if key in data})
         normalized["schema"] = SCHEMA_VERSION
+        normalized[_EXTRA_FIELD] = _sanitize_extra(data.get(_EXTRA_FIELD))
         normalized["character"] = str(normalized.get("character") or DEFAULTS["character"])
         normalized["scale"] = _number(
             normalized.get("scale"), DEFAULTS["scale"], SCALE_MIN, SCALE_MAX
@@ -1249,6 +1409,13 @@ class Config:
         normalized["click_show_balance"] = _bool(
             normalized.get("click_show_balance"), False
         )
+        normalized["island_edge_dock"] = _bool(
+            normalized.get("island_edge_dock"), True
+        )
+        dock_edge = str(normalized.get("island_dock_edge") or "none").strip().lower()
+        normalized["island_dock_edge"] = (
+            dock_edge if dock_edge in ISLAND_DOCK_EDGES else "none"
+        )
         for _axis in ("island_x", "island_y"):
             coordinate = _optional_number(normalized.get(_axis))
             normalized[_axis] = (
@@ -1277,10 +1444,26 @@ class Config:
         return normalized
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self.data.get(key, default)
+        text = str(key)
+        if text == _EXTRA_FIELD:
+            return dict(self.data.get(_EXTRA_FIELD) or {})
+        if text in DEFAULTS:
+            return self.data.get(text, default)
+        extra = self.data.get(_EXTRA_FIELD) or {}
+        if text in extra:
+            return extra[text]
+        return default
 
     def set(self, key: str, value: Any) -> None:
-        self.data[key] = value
+        text = str(key)
+        if text == _EXTRA_FIELD:
+            self.data[_EXTRA_FIELD] = _sanitize_extra(value)
+        elif text in DEFAULTS:
+            self.data[text] = value
+        else:
+            merged = dict(self.data.get(_EXTRA_FIELD) or {})
+            merged[text] = value
+            self.data[_EXTRA_FIELD] = _sanitize_extra(merged)
         self.data = self._normalize(self.data)
 
     def restore(self, snapshot: dict[str, Any]) -> None:
@@ -1322,7 +1505,13 @@ class ScopedConfig:
         self.pet_config = pet_config or global_config
 
     def _config(self, key: str) -> Config:
-        if self.pet_config is self.global_config or key in GLOBAL_CONFIG_KEYS:
+        # 全局键 + 未登记键（扩展偏好）都归全局：feature 运行时是**共享**的，
+        # 一份 per-pet 的扩展偏好会让「设置页写了、运行时看不到」。
+        if (
+            self.pet_config is self.global_config
+            or key in GLOBAL_CONFIG_KEYS
+            or key not in DEFAULTS
+        ):
             return self.global_config
         return self.pet_config
 
@@ -1341,6 +1530,8 @@ class ScopedConfig:
             merged.update(self.pet_config.snapshot())
             for key in GLOBAL_CONFIG_KEYS:
                 merged[key] = self.global_config.get(key)
+            # 扩展偏好是全局的，子宠快照不许盖掉它。
+            merged[_EXTRA_FIELD] = self.global_config.get(_EXTRA_FIELD)
         return merged
 
     def get(self, key: str, default: Any = None) -> Any:

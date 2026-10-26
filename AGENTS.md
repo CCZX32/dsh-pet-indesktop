@@ -223,6 +223,10 @@ exact breakpoint there; see `docs/agents/handoff.md`.
   [`docs/PETCORE-ANIMATION-BACKLOG.md`](docs/PETCORE-ANIMATION-BACKLOG.md)。
   P3 的设置聚合、可导入 mod 样板与移动同步见
   [`docs/PETCORE-MOD-FORMAT.md`](docs/PETCORE-MOD-FORMAT.md) §8 / `examples/petcore-mods/README.md`。
+  旧数据迁移（七域、标记幂等、dry-run、回滚）与平台探针（GPU/PDH、FPS/PresentMon）
+  的口径见 [`docs/PETCORE-ARCHITECTURE.md`](docs/PETCORE-ARCHITECTURE.md) §19.3–§19.4 与
+  [`docs/PR-REPORT-PETCORE-P5-FIX-P6-2026-10-26.md`](docs/PR-REPORT-PETCORE-P5-FIX-P6-2026-10-26.md)；
+  改迁移器、探针或岛段语义前必读。
   允许在独立 mod/纯逻辑/文档任务上用 AgentSwarm 并行；`PetWindow`/`app.py`/
   `config.py`/菜单模板/四大文档由主代理串行修改。
 

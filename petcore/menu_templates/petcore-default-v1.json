@@ -25,6 +25,7 @@
         {"type": "action", "id": "on_top", "visible": true},
         {"type": "action", "id": "edge_probe", "visible": true},
         {"type": "action", "id": "dynamic_island", "visible": true},
+        {"type": "action", "id": "show_balance", "visible": true},
         {"type": "action", "id": "autostart", "visible": true},
         {"type": "action", "id": "return_corner", "visible": true},
         {"type": "action", "id": "hide_pet", "visible": true},
@@ -47,6 +48,7 @@
       "children": [
         {"type": "action", "id": "tool.quick-launch:open_menu", "visible": true},
         {"type": "action", "id": "api_settings", "visible": true},
+        {"type": "action", "id": "check_update", "visible": true},
         {"type": "action", "id": "tool.links:deepseek_web", "visible": true},
         {"type": "action", "id": "tool.links:github_project", "visible": true},
         {"type": "action", "id": "tool.links:quark_download", "visible": true},

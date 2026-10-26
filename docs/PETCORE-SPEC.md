@@ -5,6 +5,23 @@
 > [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md)；每次改动的记录见
 > [`PETCORE-LOG.md`](PETCORE-LOG.md) 与 [`PETCORE-LOG-INDEX.md`](PETCORE-LOG-INDEX.md)。
 
+## 26.9 审计修复后的契约增补（2026-10-26）
+
+- **迁移回滚**：`rollback()` 覆盖/删除前先写 `<target>.pre-rollback-<时间戳>`；同一 target
+  的多条 restore 只按**最早**那条恢复；`not_found`/`failed_write` 计入失败，只有全部成功
+  才删标记；域级 `completed` 只在同批无失败时写入。
+- **更新安装**：`UpdateService.install()` 必须与 `select_asset(manifest)` 登记的文件名/
+  大小/摘要三者一致（侧车不能自证）；重启后可从缓存清单还原判据。
+- **诊断与构建门**：`petcore --check` 只读（`Config.load(persist=False)`，不写
+  `config.json`/`migration-backup`）；`--check --strict` 在 `menu_template != json`、
+  `builtin_readable == 0`、`characters` 为空或 diagnostics 非空时退出 1，构建脚本必须用
+  它并解析 `check.json`。
+- **对话完整性**：`ChatResult` 增加 `incomplete`/`end_reason`；SSE 无 `[DONE]`、无
+  `finish_reason`、或响应体为空时 `end_reason` 不是 `done`，调用方必须提示；HTTP 200 +
+  `data: {"error":…}` 按状态码分类抛错。
+- **配置扩展键**：见 `docs/PETCORE-MOD-FORMAT.md` §14.3.1（`extra` 区块）。
+
+
 ## 1. 一句话目标
 
 把 dsh-pet 从单体的 `pet/` 包重构成 **一个可独立运行的 core + 一组可插拔 mod**：
@@ -794,6 +811,20 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
      右上角 16px；拖动松手夹回屏幕并写 `island_x/island_y`。
    - 交互：点胶囊展开/收起卡片（`island_click_action=toggle_pet` 时改为透传点击）；
      拖动即收起卡片；展开时悬停暂停 15s 自动收起。
+   - **拖动与停靠（2026-10-26 移植主分支）**：起拖阈值取 Qt 平台值
+     （`QApplication.startDragDistance()`；`QWidget` 没有同名方法，旧实现每次拖拽都在
+     第一帧抛 `AttributeError`）；拖动期间几何完全冻结。落点按**松手光标**选屏，
+     先夹回屏幕再判停靠（距边 ≤40px，四边等权），随后重算尺寸、写
+     `island_x/island_y` 与 `island_dock_edge`，再切模式。
+   - **停靠细条**：停靠后窗口收成 16px 厚（左右停靠长 64px，竖直中心用
+     `rect.top() + h // 2` 防漂移），靠屏侧画 2px 强调线；细条态**内容一像素都不画**，
+     因此 `_sync_sampling()` 一并停掉全部采样器。
+   - **悬停滑出**：悬停在细条上滑出胶囊（可悬停区同时包含滑出胶囊与细条两张矩形，
+     逐矩形 `contains`，避免左右停靠上下各 10px 死区造成 1s 自持振荡）；
+     光标离开 800ms 后收回，收回前必须复检可悬停区。
+   - **几何动画**：停靠/滑出/展开/收起共用 180ms `ease_out_cubic` 插值，16ms 表
+     **只在动画期间运行**；每帧 `set_geometry_changed_callback` 通知宿主。
+     悬停另走 1.02 缩放弹簧，事件反馈（余额/消息）走竖压横鼓的果冻弹簧。
    - 卡片：一行一段（段名 / 值 · 详情），错误段写原因并标 `crit`；展开态整窗是一块圆角
      面板，行按**卡片宽**重排（放不下就折 `+N`，绝不画到窗外）。
    - 绘制：胶囊/面板自绘（深/浅/玻璃三套配色 + 五档强调色），颜色来自常量而不是 QSS；
@@ -811,12 +842,12 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
    | `island_opacity` | `1.0` | 0.4–1.0（只作用底板） |
    | `island_accent` | `"blue"` | blue/green/purple/pink/orange |
    | `island_click_action` | `"expand"` | `expand` / `toggle_pet` |
-   | `island_metrics` | `["cpu","mem"]` | `network/cpu/mem/gpu/fps`，去重保序，≤8；`gpu`/`fps` 本批不渲染 |
-   | `island_x` / `island_y` | `None` | 有限值且 \|v\| ≤ 100000，否则自动定位 |
+   | `island_metrics` | `["cpu","mem"]` | `network/cpu/mem/gpu/fps`，去重保序，≤8；`gpu`/`fps` 未接入探针时不占位（原因只在卡片一行） |
+   | `island_x` / `island_y` | `None` | 有限值且 \|v\| ≤ 100000，否则自动定位；停靠态存的是**胶囊滑出位** |
+   | `island_edge_dock` | `True` | 贴边停靠开关；关闭后不动 `island_dock_edge` 的存储值 |
+   | `island_dock_edge` | `"none"` | `none/top/bottom/left/right`，白名单校验；开关关闭时读取统一退化为 `none` |
 
-6. **本批不做（P5-a2）**：停靠细条（`edge_dock`）、弹簧动效/声纳/呼吸、卡片里的操作按钮
-   与最近消息、余额主信息（`balance_tier`）、第三方段注册面与组件目录、GPU（PDH）与
-   FPS（PresentMon）、灵动岛聊天与碰撞、"桌宠隐藏后由岛唤起对话"。
+6. **P5-a2 状态（2026-10-26 二次校正）**：已实现——卡片操作按钮与最近消息、余额主信息、第三方段注册面（`SegmentRegistry` + 释放回调）、GPU（PDH）与 FPS（PresentMon）真探针、折叠停采样、桌宠几何避让，以及本轮移植的**停靠细条（`island_edge_dock` / `island_dock_edge`）+ 悬停滑出 + 几何动画 + 悬停缩放 + 事件果冻**（L096）。**仍未做**：状态点五态与声纳环、回复呼吸浮动、内容淡化（需要内容位图缓存）、灵动岛聊天与碰撞、"桌宠隐藏后由岛唤起对话"。旧版此处把已实现项也写成"本批不做"，与代码和 ROADMAP 冲突，已更正。
 7. **菜单与设置**：右键「桌宠控制 → 灵动岛」是勾选项（`dynamic_island`），模板位置在
    `edge_probe` 之后；设置落点在「外观与交互 → 灵动岛」（启用/显示元素/信息位/指标段/
    配色/不透明度/单击行为），改动实时生效、取消回滚。

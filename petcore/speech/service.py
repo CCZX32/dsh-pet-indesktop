@@ -155,7 +155,6 @@ class SpeechService:
                 path=cached, provider=provider, voice=voice, cached=True, text=text
             )
 
-        destination = self._cache.path(provider, flavor, text, suffix=suffix)
         default_voice = net_tts.DEFAULT_VOICES.get(provider, "")
         candidates = [voice]
         if default_voice and default_voice != voice:
@@ -163,6 +162,22 @@ class SpeechService:
 
         last = SpeechError("unavailable")
         for index, candidate in enumerate(candidates):
+            # 缓存键必须按**实际使用的音色**算：兜底音色的产物写进首选音色的键，
+            # 之后同一句台词会永远播默认音色，却报告成用户选的那个（审计 AUD-20）。
+            candidate_flavor = self._flavor(provider, candidate, request)
+            destination = self._cache.path(provider, candidate_flavor, text, suffix=suffix)
+            if index:
+                cached_fallback = self._cache.hit(
+                    provider, candidate_flavor, text, suffix=suffix
+                )
+                if cached_fallback is not None:
+                    return SpeechResult(
+                        path=cached_fallback,
+                        provider=provider,
+                        voice=candidate,
+                        cached=True,
+                        text=text,
+                    )
             tries = RETRY_ATTEMPTS if index == 0 else FALLBACK_ATTEMPTS
             for attempt in range(tries):
                 if attempt:

@@ -2750,3 +2750,308 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 **交付**：先经 SSH 443 fetch 核对远端无新增提交，再普通 push 到 `origin/feat/petcore-vpet-architecture`；`ls-remote` 实际返回 `ce8c67fb1e626686c8e5553bcb5957289f798b55`。本条与索引/报告为独立文档回填，不 force push、不合并 main、不上传 Release。可使用 `git revert ce8c67fb` 回滚实现，不删除新格式缓存或用户配置。
 
 **回填文件与增删**：`docs/PETCORE-LOG-INDEX.md` +3/−2；`docs/PETCORE-LOG.md` +11/−0；`docs/PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md` +8/−0。行为未变化，文档交付免新增性能/实机测量；Windows 可见 UI、GPU/FPS 真读数、冻结安装器和真实服务验证缺口继续保留，不以推送成功替代验收。
+
+
+## L084 — 2026-10-26 — P5 硬伤修复（投递/死锁/入口/口径）
+
+**背景**：复核 P5 实现时发现「报告说做完、实际没接线」。三条是功能实质失效，四条是口径错误；本条只修这些，不扩功能。
+
+**逐项**：
+
+1. `petcore/ui/app.py` 新增 `gui_dispatch(scheduler)`，余额投递改走 `QtScheduler`。原 `QTimer.singleShot(0, callback)` 是无接收者的两参重载，从工作线程调用时定时器挂在没有事件循环的线程上，回调永不触发——实测 `two-arg from worker thread -> []`。后果是首次点「显示余额」毫无反应、之后每次显示上一次的缓存、失败永不提示。
+2. `petcore/account/presenter.py` 的 `cancel()` 改为锁内摘 future、锁外 `future.cancel()`。`Future.cancel()` 对 PENDING 任务会在调用线程同步执行 done_callback，进 `_done` 再抢同一把非重入锁 → 永久阻塞（实测 25 秒超时、线程仍存活）。这条路径正是 `quit_app` 退出时会走的。
+3. 菜单：`show_balance` / `check_update` 早已注册但不在 `petcore/menu_templates/petcore-default-v1.json`，而自动追加只收含 `:` 的 id，故永远不会渲染。现在分别落在「桌宠控制 → 动态岛之后」与「工具与帮助 → API 与账户之后」，`BUILTIN_DEFAULT_LAYOUT` 同步。
+4. 岛避让：障碍物从 `frameGeometry()` 改为桌宠 `body_rect()`（整窗四周是大片透明画布，按整窗判重叠会被远处走位反复推开）；自动挪动**不再 `_save_position()`**，并记住原位、连续 3 拍无遮挡后回原位；用户拖动后作废该记录。
+5. 更新：新增 `reset_cancel()` 只在提交任务时清理；`check()` 在每个源之前看取消；`download()` 不再自己 `clear()`（排队期间的取消会被开场吞掉）；`_finalize_download()` 写 `<asset>.verify.json` 侧车，`install()` 每次重算 size+sha256（支持重启后安装，挡住下载后被替换的包）；`install_update()` 与关于页按钮都按 `can_auto_install()` 门禁；`_publish_update_result()` 不再重复 `island.add_message()`（`_notify` 已写），状态码经 `describe_state()` 翻中文。
+6. `--check` 增加 `performance` 段：计数器原来只写不读，`PerformanceSnapshot.as_dict()` 是其读出口；`_tick()` 里两个分支都 `inc("coalesced_updates")` 导致该计数恒等于 `ui_updates`，改为只在「宽度没变」的拍计数。
+7. `petcore/ui/settings/page_api.py` 新增「余额服务」下拉（`api_service_id` 此前只读不写，永远退化成「第一个带余额协议的服务」），并显示当前生效的服务或「自动」的落点。
+8. 岛段语义对齐主分支：`set_probe_snapshot()` 收到 `unsupported` 时记原因并**不占位**（原来 pop 后会被渲染成 `--` + `ALERT_CRIT` 的错误段），卡片新增「该指标不可用：<原因>」行；`clear_probe_snapshot()` 同步清原因。
+
+**验证**：`ruff check petcore tests scripts` → `All checks passed!`；`tests/test_petcore_*.py` → **1522 passed / 127.96s / exit 0**（较上批 1513 +9，全是本批新增回归）。新增回归：取消死锁（daemon executor，失败只报断言不挂进程）、工作线程投递真落到 GUI 线程、避让不落盘且回原位、`unsupported` 不占位、两个新动作必须在模板里、取消不被吞、换包被摘要拦下、无侧车拒装。
+
+**未验证**：真实桌面下的岛避让手感与菜单渲染只有 offscreen 覆盖；本批未重建安装包。
+
+
+## L085 — 2026-10-26 — 旧数据全量迁移（七域 + CLI + 诊断）
+
+**范围**：新增 `petcore/migration/`（框架 + 配置/slot/活跃集合/会话/待办/API/凭据七域），`petcore/cli.py` 增加 `migrate` 子命令与 `--check` 的 `migration` 段。
+
+**设计**：幂等只认 `<root>/migration.json` 的 `completed`，**不认**「目标文件不存在」——`Config.load()` 原来只在目标缺失时迁，第一次启动后永久失效。`MigrationContext` 统一负责备份（`migration-backup/<kind>-<旧根>-<原名>`）、原子写、失败记账、回滚映射（目标原本不存在时 backup 记空串，回滚即删除）。配置域**只补缺不覆盖**，并直接写合并后的原始字典——若走 `Config.save()`，`DEFAULTS` 会把每个键填满，后续域再也补不进去（自查发现并修正）。`slot0` 是主宠，键并入全局 `config.json`；`config-slot-N`/`config-pet-N`（N≥1）写 `config-pet-N.json`。会话域把 ISO 时间转 epoch float（新 schema 只认 float）、丢弃 `provider_id/system_prompt/pinned` 并计数；待办域把 `fired_*_slot` 换算成 `marks` 时间戳，写出前用扩展自己的 `validate()` 校验两遍，写后复读再校验；API 域把 `chat.providers` 转成 `ApiService`（`api.deepseek.com` 才推 `deepseek` 余额协议），密钥一律丢弃；凭据域只做钥匙串到钥匙串（`provider/<id>`→`core.api:<id>`、`websearch/api`→`core.websearch:<engine>`、`tts/mimo`→`speech.mimo:api_key`），值不进报告与日志，keyring 不可用整域记 `unsupported`。
+
+**命令**：`petcore migrate [--dry-run] [--force] [--rollback] [--legacy-root P]`，输出 JSON 报告，有 `failed_*`/`unsupported` 时退出码 1；`--check` 只读标记与备份目录，**不跑迁移**。
+
+**逐文件增删**：新增 `petcore/migration/__init__.py` 379、`config_data.py` 238、`sessions.py` 236、`todos.py` 386、`accounts.py` 513；修改 `petcore/cli.py` +52/−0；新增 `tests/test_petcore_migration.py` 206、`_sessions.py` 249、`_todos.py` 373、`_accounts.py` 311。
+
+**验证**：迁移族 `41 passed in 1.26s`（四文件全绿）；整合测试 `10 passed`（含七域整链：配置+slot+活跃集合+会话+待办都搬、凭据域在无旧凭据时不写钥匙串、二次运行全 `already`）；`ruff` 通过；`--check` 实跑输出 `migration: {marker: false, completed: {}, backups: ["dsh-pet-standalone-config.json"]}`、`diagnostics: []`。
+
+**未验证 / 风险**：本机没有真实 `todo_items.json` 样本（三个旧根都没有），待办迁移只有构造数据覆盖；`overlay-active-pets.json` 同样无真实样本。旧 `config.json` 的 99 个未映射键（`chat_*`、`weather_*`、`voice_chime_*`、`festival_reminder_*`、`dialogue_*`、`music_*` 等）**仍未进别名表**，本轮只完成会话/待办/API/凭据与 slot0，键级扩表留作后续（属"只补缺"的同一机制，补表即生效）。发布入口未切换。
+
+
+## L086 — 2026-10-26 — GPU(PDH)/FPS(PresentMon) 真实探针与接线
+
+**范围**：新增 `petcore/platform/gpu.py`（1098）、`gpu_monitor.py`（112）、`fps.py`（1962）、`fps_permission.py`（513）、`petcore/ui/probes.py`（217）；`petcore/ui/app.py` 接探针 hub；`pages_core.py` 放开 GPU/帧率两段并加「游戏帧率权限」行；`scripts/build_petcore.ps1` 打包 PresentMon 并过 `verify_presentmon.py`；`petcore/performance.py` 增 `gpu_samples`/`fps_samples`。
+
+**口径**：GPU 走 ctypes PDH（`\GPU Engine(*)\Utilization Percentage`）+ DXGI 名字，聚合与主分支一致（引擎级跨进程求和 → 适配器 max → 跨适配器 max，报最忙引擎）；query 属于创建线程，跨线程 `read` 拒绝（owner 已退出时由新线程接管并重建基线，否则「停采→恢复」永久失效）；首拍/长停只建基线（`sampling`）。FPS 走随包 `PresentMon-2.6.0-x64.exe` 子进程，1 秒**事件时间**窗按 `(pid, swapchain)` 分窗取最忙活链，命令行禁 `--stop_existing_session/--restart_as_admin/--v1_metrics/--v2_metrics`，停止用官方 `--terminate_existing_session`，并用 Job `KILL_ON_JOB_CLOSE` 防孤儿。两段都只有 `ok` 带读数，其余 `None` + 具体原因，**不伪造 0**。岛只在「可见 + 段启用 + 未被折进 `+N`」时报需求，宿主据此 start/stop；空集同时清段快照。
+
+**本机实测**：GPU 三个适配器（AMD Radeon 780M ×2 + Microsoft Basic Render Driver），冷启首拍 283.6 ms，稳态单拍 2.14/3.16/3.49 ms（min/median/max，10 拍），第 3 拍起 `ok`（5.26/5.58/5.86/7.00%）——真实读数。FPS：`platform_supported=True`、后端文件与 sha256 通过、`permission check=missing`，PresentMon 退出 `access denied`，样本 `state=error` + 明确原因；**不宣称 FPS 验收通过**（与主分支 Game-FPS 报告一致，需 Performance Log Users 且重新登录）。
+
+**验证**：`ruff check petcore tests scripts` → `All checks passed!`；探针族（GPU 13 + FPS 29 + hub 4）全绿；petcore 全量最终门禁 **1613 passed / 117.81s / exit 0**（较 L084 的 1522 +91）。架构红线复核：`platform/*` 无 PySide6、无网络库、无 `import pet.*`。
+
+**未验证**：冻结包内 PresentMon 的实际落点（构建脚本有二次校验，本轮未重建安装包）；授权后的真实帧率读数；真实桌面下的岛段交互。
+
+## L087 — 2026-10-26 — petcore 全量代码审计（只读，不改产品代码）
+
+**范围**：无代码改动。新增 `docs/PETCORE-CODE-AUDIT-2026-10-26.md`，并在 `docs/INDEX.md` 登记。审计覆盖 `petcore/` 全部 194 个模块（48,716 行）、`tests/test_petcore_*.py`（118 文件 / 31,007 行 / 1613 用例）、`scripts/build_petcore.ps1`、`packaging/petcore.iss`、`docs/PETCORE-MOD-FORMAT.md`、`docs/PETCORE-MARKET.md`，逐条对照 `petcore/AGENTS.md` 的 429 行红线。
+
+**方法**：九个方向并行深读 → 每条 P0/P1 写最小实验复现（临时目录 / offscreen / localhost 服务端，不接受「看代码觉得会」）→ 另开两个独立红队 agent 专做证伪，逐条要求 `CONFIRMED / 降级 / FALSE POSITIVE / UNVERIFIABLE` 并附自己的实验输出 → 冲突处以实验为准。
+
+**结论**：28 条发现（P0 ×1、P1 ×9、P2 ×12、P3 ×6）。最严重的是 AUD-01：本地导入的 ZIP 自带空文件 `.trusted` 即被授信，绕过 `allow_feature_mods` 在用户进程里执行任意 Python（实测带标记得到 `[('evil.feature', True)]`、对照组 `False`，且执行发生在 `install` 的同一会话内、无任何确认框）；市场通道会剥标记，所以这是「本地导入路径独有的缺口」。P1 全在接缝上：`rollback()` 不是回滚（覆盖用户改动、多域共享 target 留下半迁移态、`not_found` 不计失败仍删标记）、`Config` 从 `DEFAULTS` 重建而丢弃所有未登记键（第三方 mod 的 `host.config.set` 存不住）、旧配置 159 个出厂键里 41 个同名可无损搬却没搬、「代理失败→直连」兜底因复用被 `ProxyHandler` 改写的 `Request` 而空转、`reload_mods()` 不清 `sys.modules`（「已重新加载」实际跑旧代码）、SSE 断流被当成回答完成、展开灵动岛卡片导致 GPU/FPS 1Hz 启停振荡并把两段报成「未接入探针」、720 宽下 API 页「保存服务」不可达、打包 `-OutputRoot` 用进程 CWD 解析且尾部反斜杠绕过守卫、冒烟只验退出码而不读 `check.json`。
+
+**红队纠错（写进报告 §四）**：推翻 1 条——「岛隐藏后探针跑到进程退出」是假阳性，hub 的 1Hz `_poll → set_probe_snapshot → _update_size → _sync_sampling` 会在 1.0s 内自愈（实测 `hide+0.6s wanted=[] hub_timer=False`）；降级 6 条（FPS 重试 P1→P2、设置整组回写 P1→P2 且「滚轮缩放」归因错误、菜单提前落盘 P1→P2 但额外发现 `is_dirty()` 恒 True、聊天壁纸 P1→P3 且症状是发虚不是放大、`SystemExit` P1→P2、interaction 订阅 P1→P2）；修正 4 处数字/机制（旧键是 41/159 不是 16/138；`_imports` 盲区不是 `continue` 分支放行而是相对 import 在第一层就被丢；rollback 不删用户新写的文件、只无声覆盖同一文件上的修改；待办备份格式冲突不会让扩展永久加载失败，只是待办功能不可用）。
+
+**验证**：审计开始时 `ruff check petcore tests scripts` → `All checks passed!`；`pytest tests/test_petcore_*.py` → **1613 passed in 204.70s**（即全部缺陷都在绿灯下存活，这是本轮最值得记录的事实）。审计后复跑 `tests/test_petcore_docs.py` 与 `tests/test_pr_report_discipline.py`，文档门禁保持绿。
+
+**未验证**：真实 PresentMon 帧率（本机无 Performance Log Users）、真实安装器全流程（SAC 拦截新构建）、真实钥匙串（实验全部注入内存假后端）、多屏混合 DPI、真实声卡、真实外网 API（全部 localhost）、真实 GUI 点击流程；覆盖空洞用静态引用分析代替行覆盖率（未装 coverage，19 个模块真空白）。
+
+**后续动作**：按报告 §六 的 S0–S8 批次排期。S0（AUD-01，约 5 行）与 S1（AUD-07 + AUD-08，同一文件）可立即做且互不冲突。修 AUD-36（守卫解析相对 import）之前必须先处理 `contracts/content.py:7 → ..engine.enums`，否则守卫修好即红。
+
+## L088 — 2026-10-26 — 安全与授权（审计修复）
+
+**范围**：`petcore/mods/{install,trust,manifest}.py`、`petcore/market/install.py`、`petcore/update/service.py`、`petcore/net/{http,errors,websearch}.py`、`petcore/ui/ports.py`。
+
+**改了什么**：
+- **AUD-01 授信双闸**：`mods.install.install(keep_trust_marker=False)` 落盘前剥掉包内 `.trusted`（市场 `BUNDLED` 来源显式传 True）；`trust.is_trusted()` 只认 `paths.install_mods_dir()` 下的标记。伪造标记的 feature 包现在 `allow_feature_mods=False` 时 `enabled=False` + 诊断。
+- **AUD-02 安装信任锚**：`UpdateService.install()` 除自洽侧车外，还必须与 `select_asset(manifest)` 的文件名/大小/摘要一致；清单缺失时回退到下载时写下的缓存清单，重启后仍可安装。换包+同步改侧车现在被拒。
+- **AUD-03/04 取数安全**：`fetch_url` 增 `allowed_schemes`（默认 http/https，`file://` 直接拒）与 `allow_private`；`fetch_page_text`（URL 来自模型）显式 `allow_private=False`；新增 `SafeRedirectHandler`（限 3 跳、禁 https→http 降级、跨源剥 `Authorization`/`X-Api-Key`/`Cookie`）。
+- **AUD-05 压缩包条目**：拒绝 NTFS 备用数据流（含 `:`）、Windows 保留设备名、大小写折叠后重名；`is_valid_id` 排除保留设备名。
+
+**验证**：新增 `tests/test_petcore_mods_trust.py`(13)、`tests/test_petcore_http_safety.py`(13)、`tests/test_petcore_update_anchor.py`(6)；`test_petcore_update.py`/`test_petcore_example_mods.py`/`test_petcore_extensions_nav.py` 按新语义更新（原用例把「侧车自证」「用户目录标记即授信」当成期望）。`ruff` 通过。
+
+**未做**：`HttpPort` 默认仍允许内网地址（本地 LLM/局域网设备是合法用法），只拦 `file://` 等非 http(s) 协议；内网拦截只加在模型驱动的 `fetch_page_text`。
+
+## L089 — 2026-10-26 — 配置与迁移的数据完整性（审计修复）
+
+**范围**：`petcore/config.py`、`petcore/migration/{__init__,config_data,todos}.py`、`petcore/cli.py`、`petcore/ui/pet_manager.py`。
+
+**改了什么**：
+- **AUD-07 `extra` 区块**：`config.json` 顶层仍只允许 `DEFAULTS` 键；扩展偏好落 `extra`（`get/set` 透明）。键名白名单、单值 ≤4KB、总量 ≤64KB、命中密钥样式直接拒绝。`ScopedConfig` 把未登记键路由到全局（共享运行时只有一份配置）。
+- **AUD-08 旧键不再静默丢**：别名表补 41 条同名键（`weather_city`/`todo_reminder_lead_minutes`/`voice_chime_voice`/`hotkey_open_chat`/`music_*`/`festival_*`/`island_metrics` 等）；config/slots 域 detail 增 `dropped:<n>:…`。
+- **AUD-11 `--check` 只读**：`Config.load(persist=False)` 不备份、不写 `config.json`、不迁 slot。
+- **AUD-12 坏配置留档**：读到坏 JSON 先改名 `config.json.bad-<时间戳>`，并在 `--check` 报 `config_corrupt_backup`。
+- **AUD-06 回滚可追溯**：覆盖/删除前写 `<target>.pre-rollback-<时间戳>`；同一 target 多条 restore 只按最早那条恢复；`not_found`/`failed_write` 计入失败；只有全部成功才删标记；目标是目录时拒绝。
+- **AUD-09 `completed` 判据**：同批有失败状态时不封存。
+- **AUD-10 待办历史格式**：`todo-slot-0-legacy-v1.json` 改写成扩展期望的 `[title, …]`（原文件仍在 migration-backup）。
+
+**验证**：新增 `tests/test_petcore_config_extra.py`(19)、`tests/test_petcore_migration_safety.py`(6)；`test_petcore_migration_todos.py` 的历史断言按新格式更新。`--check` 前后快照比对：新增文件里没有 `config.json`/`migration-backup`。
+
+**未做**：`unsupported` 仍计入 `FAILURE_STATUSES`（未装待办扩展时 `petcore migrate` 退出 1）——不在本轮审计清单内，留待产品决定。
+
+## L090 — 2026-10-26 — 网络与对话正确性（审计修复）
+
+**范围**：`petcore/net/{http,errors,tts}.py`、`petcore/api/chat.py`、`petcore/account/presenter.py`、`petcore/speech/service.py`、`examples/petcore-mods/ai.chat/host/runtime.py`。
+
+**改了什么**：
+- **AUD-13 代理兜底**：`urlopen` 每次尝试 `clone_request()` 重建请求（`ProxyHandler` 会就地改写 host/selector），兜底不再是空转。
+- **AUD-18 Retry-After**：带 `Retry-After` 的 500/502/504 不换路由；`http_error` 支持 HTTP-date 形态。
+- **AUD-17 分类**：新增 `tls`（证书校验失败，不再报「网络不可达」）；`http.client.HTTPException`（IncompleteRead/BadStatusLine）归 `protocol` 而不是 `None`。
+- **AUD-16 截断信号**：`fetch_url` 返回 `Body(bytes)`，带 `truncated`/`declared_length`；TTS 的 `_require_audio(truncated=)` 拒绝半截音频。
+- **AUD-15 SSE 完整性**：`ChatResult` 增 `incomplete`/`end_reason`；无 `[DONE]`/无 `finish_reason`/空体都要标记；HTTP 200 + `data: {"error":…}` 按状态码抛错；支持多行 `data:`；ai.chat 在半条回答后追加可见提示。
+- **AUD-23 检索预算**：`_RESEARCH_BUDGET_SECONDS = 45`，轮次与工具调用前都检查。
+- **AUD-24 取消打断读**：读超时压到 0.5s 并循环，取消/总预算在循环里生效；取消返回 `cancelled=True` 而不是「连接超时」。
+- **AUD-19 单飞**：`_done()` 只摘自己那条 future。
+- **AUD-20 兜底音色缓存键**：按**实际使用**的音色算路径，第二次命中也不会谎报音色。
+
+**验证**：新增 `tests/test_petcore_api_chat_stream.py`(7，裸 socket 覆盖断流/空体/错误帧/多行 data/取消)；`test_petcore_balance.py` 增单飞用例；`test_petcore_speech.py` 增兜底音色与截断用例。
+
+**未做**：真实外网 SSE 形状（DeepSeek/豆包/MiMo）仍未实测，全部 localhost。
+
+## L091 — 2026-10-26 — 运行时卫生（审计修复）
+
+**范围**：`petcore/ui/app.py`、`petcore/mods/feature.py`、`petcore/ui/ports.py`。
+
+**改了什么**：
+- **AUD-14 重载真的重载**：`reload_mods()` 换 adapter 前 `detach_all()`，并对用户 mod 根与内置特性目录逐个 `_drop_modules_under()`；`from .runtime import X` 现在读到新代码。
+- **AUD-21 SystemExit 不再打断启动**：`FeatureManager.load()` 捕 `BaseException`（`KeyboardInterrupt` 重抛），转成诊断。
+- **AUD-22 订阅可撤**：`stop_owner()` 增加 `interaction.cancel_owner()`；`QtScheduler` 按 owner 记句柄并实现 `cancel_owner()`；`InteractionAdapter.on_tick()` 返回注销函数（对齐契约），新增 `detach_all()`。
+
+**验证**：新增 `tests/test_petcore_mods_reload.py`(7)：改子模块后先 v1、`_drop_modules_under` 后 v2；`sys.exit(3)` 只产出诊断；`cancel_owner` 清定时器；`on_tick` 返回可调用注销函数。
+
+## L092 — 2026-10-26 — UI 可达性与采样口径（审计修复）
+
+**范围**：`petcore/ui/{island,probes}.py`、`petcore/ui/settings/{base,dialog,page_interaction,menu_editor,coverage,pages_core}.py`、`petcore/AGENTS.md`。
+
+**改了什么**：
+- **AUD-25 岛不再自激**：`_sync_sampling()` 只在**胶囊态**把 folded 段排除，卡片态按启用段继续采样；`_card_width()` 改用胶囊态自然宽，消除 420→340 的棘轮。同步改写 AGENTS 的「看不清就不采」红线。
+- **AUD-26 最小窗可达**：根滚动区横向策略改 `AsNeeded`（720×500 下右侧按钮可滚动到）。
+- **AUD-27 差异写入**：互动页 `_on_changed` 只写「与上次写出值不同」的键，不再整组回写覆盖右键菜单的改动。
+- **AUD-28 菜单编排**：`MenuEditor.confirm_save()` 不再自己 `config.save()`；`_initial_value` 与 `value()` 同结构（`is_dirty()` 不再恒真）。
+- **AUD-29 搜索覆盖**：`page_search_texts()` 含 QLabel + 按钮 + 勾选 + 下拉项 + 列表项；过滤时实时构建 haystack；`reveal_text` 支持按钮。
+- **AUD-30 覆盖表**：`ai_chat/look_screen/screen_capture` 指到 `appearance`，`api_settings` 指到真实存在的「服务」；测试改成「落点文案必须能在该页搜索文案里找到」。
+- **AUD-31 探针重试**：hub 记住 `_wanted`，`_poll()` 每拍 `_reconcile()`（只在监控器没在跑时重试 start）。
+
+**验证**：`test_petcore_island_window.py`（卡片态不停采、胶囊折叠仍停采）、`test_petcore_probe_hub.py`（拒绝后下一拍重试、卡片态不振荡）、`test_petcore_settings*.py`（720 宽可达、菜单不 dirty、整组回写不覆盖）通过。
+
+**未做**：`page_api` 左右两列在窄窗下仍是横向滚动（未改上下排布）。
+
+## L093 — 2026-10-26 — 结构守卫与构建门（审计修复）
+
+**范围**：`tests/test_petcore_architecture.py`、`petcore/contracts/{enums,content}.py`、`petcore/engine/enums.py`、`petcore/cli.py`、`scripts/build_petcore.ps1`、`tests/test_petcore_{candidate_packaging,installer,pages_smoke}.py`。
+
+**改了什么**：
+- **AUD-36 守卫看得见相对 import**：`_imports()` 按 `node.level` 还原绝对名；`contracts` 白名单改成「标准库 + 自身」；新增 `engine` 只依赖 stdlib+contracts、`island/speech/chat` 零 Qt、平台探针零 Qt 三组守卫；合并两条重复的 mod 守卫，并明确「设置页是受信 UI」的例外。为让 contracts 不再依赖 engine，把 `AnimatType/GraphType/ModeType` 移到 `contracts/enums.py`（`engine/enums.py` re-export）。
+- **AUD-37 OutputRoot 收束**：相对路径按仓库根解析、比较前 TrimEnd 分隔符；新增 `-DryRun` 打印最终绝对路径。
+- **AUD-38 构建门**：`petcore --check --strict` 在 `menu_template != json`、`builtin_readable == 0`、`characters` 空或 diagnostics 非空时退出 1；构建脚本改用它并 `ConvertFrom-Json` 复核四项。
+- **AUD-40 先验后打**：`verify_presentmon`（源文件）移到 PyInstaller 之前，产物侧校验保留。
+- **AUD-41 有读出口**：`--check` 输出 `capabilities`；新增 `test_petcore_pages_smoke.py`（常规页/多宠页/采样循环）。
+
+**验证**：`tests/test_petcore_architecture.py` 9 项全绿；`build_petcore.ps1 -DryRun` 实测相对路径落在仓库内、尾部反斜杠被拒；新增 3 条打包 dry-run 用例与「每条 mod `[Files]` 行必须带 `Tasks:`」用例。
+
+## L094 — 2026-10-26 — 画质、动画与路径（审计修复）
+
+**范围**：`petcore/ui/pet_window.py`、`petcore/ui/chat/{window,themes}.py`、`petcore/media/{images,thumbnails}.py`、`petcore/paths.py`、`petcore/cli.py`。
+
+**改了什么**：
+- **AUD-34 命中与绘制互逆**：`is_transparent_at` 改成「先反旋转、再反 Q 弹」，与 `paintEvent` 的 R∘S 对齐（原顺序在 Q 弹+旋转同时生效时偏移 5–20px）。
+- **AUD-33 冷 meta 与断流**：移动计划记录 `duration`/`started_at`；`frames_per_loop<=1` 时按墙钟插值（不再首帧即到终点）；帧龄超过 `duration*2+1s` 由看门狗收口。
+- **AUD-32 壁纸 DPR**：`scale_background_pixmap(dpr=)` 按 DPR 解到物理像素并写回，缓存键含 DPR，几何用 `deviceIndependentSize()`。
+- **AUD-35 解码开销**：`load_pixmap` 用 `QImageReader.setScaledSize`（12MP 约 92ms → 9ms），预缩放后不再二次放大。
+- **AUD-42 路径**：portable 数据根改用 `install_root()`；`--root ""` 按未指定处理；`--instance` 设置 `PETCORE_INSTANCE`，缩略图磁盘缓存按实例分目录。
+
+**验证**：`test_petcore_images.py`(8)、`test_petcore_move_sync.py`（冷 meta 半程、看门狗收口）、`test_petcore_chat_ui.py`(25) 全绿。
+
+**未做**：缩略图的 PNG 编码/落盘仍在 GUI 线程；缩略图磁盘缓存没有 LRU 上限（只做了实例隔离）。
+
+## L095 — 2026-10-26 — 点击显示余额验收与构建冒烟等待修复
+
+**范围**：`tests/test_petcore_click_balance.py`（新增）、`scripts/build_petcore.ps1`、
+`tests/test_petcore_candidate_packaging.py`、产物 `rel-balance-2026-10-26/`。
+
+**背景一（功能本身）**：用户问「点击显示余额做回来了吗」。该特性自 P5（`ce8c67fb`）起已在源码里
+全链路实现：`config.click_show_balance`（按 slot）→ 设置「API 与账户 → 点击显示余额」→
+`PetWindow._on_click()` → `_maybe_request_click_balance()` → `CoreHost.request_balance()`
+→ `BalancePresenter` 单飞 → `_on_balance_result()` 同时写气泡与灵动岛；右键「桌宠控制 →
+显示余额」也走同一入口。用户手上是 **10-23 19:39** 构建的旧 setup，早于 P5 提交（10-26 00:35），
+所以界面里没有这一项——属分发滞后，不是功能缺失。本轮不改产品代码，只补点击回归测试并重建候选包。
+
+**背景二（构建门真缺陷）**：首轮重建时 `--check --strict` 冒烟报
+「找不到路径 …\check.json」，但 dist 已生成、`check.json` 稍后出现。实测根因：
+
+```text
+& $exe --check --strict --out <path>   → elapsed_ms=52, exists_now=False, $LASTEXITCODE=(空)
+& $exe --check --out <path> | Out-Null → elapsed_ms=698, exists_now=True,  exit=0
+```
+
+`-Windowed` 产物是 **GUI 子系统**，PowerShell 用 `&` 调用时**不等待进程退出**，所以
+`$LASTEXITCODE` 是上一条命令（python）的残留值、报告还没落盘就被读取。上一轮同样的脚本能过，
+是因为当时 `check.json` 恰已存在——即这道门一直在「读旧报告或直接崩」，并没有真正校验。
+
+**改了什么**：
+- `scripts/build_petcore.ps1`：冒烟改为
+  `Start-Process -FilePath $exe -ArgumentList @("--check --strict","--out","…") -Wait -PassThru`，
+  按 `$smoke.ExitCode` 判红；新增「报告必须存在」「报告必须是本次新写（LastWriteTime 前进）」
+  两条断言；构建成功后打印 `menu_template / characters / builtin_images / strict` 摘要。
+  不引入任何 `Remove-Item`，保持「`-Clean` 只传 `--clean`、脚本不删目录」的既有约定。
+- `tests/test_petcore_candidate_packaging.py`：新增
+  `test_smoke_waits_for_the_windowed_exe`（断言 `Start-Process -FilePath $exe` + `-Wait -PassThru`
+  存在，且旧的 `& $exe --check` 不再出现）。
+- `tests/test_petcore_click_balance.py`（4 例）：点击按被点那只的 slot 发请求；关掉选项一次都不请求；
+  余额端口抛错不打断点击动画与监听者；飞行中（`motion.thrown`）不消费点击故不发请求。
+
+**验证**：
+- `pytest tests/test_petcore_click_balance.py -q` → **4 passed**；
+- `pytest tests/test_petcore_candidate_packaging.py -q` → **10 passed**（含新例）；
+- `pytest -q $(ls tests/test_petcore*.py)` 全量 → **1713 passed in 131.57s（exit 0）**；
+- `pytest tests/test_petcore_docs.py tests/test_pr_report_discipline.py -q` → **301 passed**；
+- `ruff check tests/test_petcore_click_balance.py tests/test_petcore_candidate_packaging.py` → 通过；
+- 真机计时探针见上表（同一台机器、同一个已签名 exe）；
+- 重建产物：`rel-balance-2026-10-26/dsh-pet-core-setup.exe`（签名主体 `CN=DSH Pet Core Dev`），
+  构建日志 `.scratch/build-l095-b.log`，`--check --strict` 摘要与 Inno 结果见当轮汇报。
+
+**未做 / 风险**：本机 Smart App Control 仍是强制模式（`VerifiedAndReputablePolicyState=1`），
+新 setup 能否直接双击运行取决于签名信任链；真机安装验收仍需用户执行。余额查询本身依赖
+「API 与账户」里配置了支持余额协议的服务，未配置时点击只会提示「没有配置余额服务」。
+冒烟等待的回归只做脚本结构断言（PowerShell 的 GUI 子系统等待语义不适合单测复现），
+真实验证靠每次构建的真机日志。
+
+## L096 — 2026-10-26 — 图标槽位、动画缩略图与灵动岛停靠/动效移植
+
+**范围**：`petcore/ui/icons.py`、`petcore/ui/menu_style.py`、`petcore/ui/menu_actions.py`、
+`petcore/ui/settings/{dialog,pages_core}.py`、`petcore/ui/island.py`、
+`petcore/island/layout.py`、`petcore/config.py`、`tests/test_petcore_icons.py`（新增）、
+`tests/test_petcore_island_dock.py`（新增）、`tests/test_petcore_menu.py`、
+`tests/test_petcore_settings.py`。
+
+**用户报的三件事**
+1. 设置与右键菜单图标过大；2. 动画预览图标过小；3. 灵动岛拖不动，且主分支的
+   动画效果与「吸附」都没做过来。
+
+**改了什么**
+
+*图标（1、2）*
+- `icons._pixmap()`：把「36 单位设计稿」与「显示槽位」分开。以前 `icon(name, 18)` 是
+  把 36 单位坐标硬画进 18px 画布（直接裁掉一半），所以没人敢改尺寸、只能让 QSS 用 24px
+  盒子；现在按 `size/36` 缩放并反向补偿笔宽，最终笔画恒为 1.6 逻辑像素。
+- `MENU_ICON_SIZE = 18`（主分支 `small_icon_size(menu)=18`、桌面版设置侧栏 18）：
+  菜单 QSS 的 `QMenu::icon` 从 24px 收到 18px，`QMenu::item` 左内边距 38→30
+  （4 图标 + 18 + 8 间隙），设置侧栏 `nav.setIconSize` 24→18。
+- `icons.fitted_icon()`：整帧素材先裁 alpha 包围盒、再按短边适配进槽位（主分支
+  `fitted_pet_pixmap_icon` 同款）。**这是「预览图标过小」的根因**：动画帧是 640×390
+  的视频画布，角色只占中间 100×150，直接缩进 18px 槽位只剩 3×7 像素。实测同素材
+  不透明像素 20 → 164。同时处理两个坑：无 alpha 通道的帧（RGB32）`createAlphaMask()`
+  返回空图，不能当「全透明」丢掉；整帧全透明才返回空图标（保留占位）。
+- `menu_actions._request_thumbnail()` 改用 `fitted_icon`，不再 `setDevicePixelRatio`
+  后直接塞 `QIcon`（DPR 会让 Qt 按物理像素当逻辑像素，图标再小一半）。
+
+*灵动岛（3）*
+- **拖不动的真根因**：`mouseMoveEvent` 调 `self.startDragDistance()`，而 `QWidget`
+  没有这个方法（实测 `AttributeError`），每次拖拽在第一帧抛异常 → 退化成单击。
+  改 `QApplication.startDragDistance()`，并补 `buttons()` 守卫与起拖三清
+  （停悬停动效、清 `_geo_from/_geo_to`、收卡片/退出停靠）。
+- **停靠（吸附）**：`petcore/island/layout.py` 新增零 Qt 纯函数
+  `dock_edge_for()`（四边等权、阈值 40px、取 `abs`）、`strip_rect_for()`
+  （16px 厚、左右 64 长、竖直中心用 `rect.top() + h // 2` 防 1px 漂移）、
+  `ease_out_cubic()`。窗口层：`_rest_size/_apply_fixed_size/_target_rect` 四种目标
+  几何、`_docked/_hover_peek` 两个状态、细条绘制（含靠屏侧 2px 强调线）。
+- **释放顺序**（主分支 issue #154 口径）：按**松手光标**选屏 → 夹回屏幕 → 判停靠
+  （看夹后落点）→ 翻 `_dragging` → `_update_size()` → 存位置/停靠边 → 切模式动画。
+- **悬停滑出**：可悬停区 = 滑出胶囊 + 细条两张矩形逐条 `contains`（左右停靠上下各有
+  10px 死区，取包围盒会振荡）；离开 800ms 收回，收回前复检，光标仍在区内就延后一拍。
+- **几何动画**：`_animate_to()` + 16ms 表（仅动画期间运行）+ 每帧
+  `_set_free_geometry` + `set_geometry_changed_callback`；不可见时直接落位（否则
+  `_geo_to` 永远停在半路）。拖拽期间 `_update_size()` 直接 return（几何冻结）。
+- **显示即收口**：`showEvent` 先把 `_geo_from/_geo_to` 清空、停悬停弹簧、
+  `_apply_fixed_size()` 后 `_set_free_geometry(_target_rect())`——隐藏可能打断
+  停靠/滑出动画，不先收口会让岛以一个中途几何重新出现。
+- **动效**：悬停 1.02 缩放弹簧（钳 0.97–1.03）、事件反馈（余额/消息）果冻弹簧
+  （竖压横鼓、绕胶囊中心、钳 0.85–1.12），都写在 `_on_anim_tick`，停止时连速度归零。
+- **看不清就不采**：`_strip_visible()` 时 `_sync_sampling()` 停掉全部采样器；
+  细条态 `_clamp_to_screen()` 直接 return；避让在拖拽/停靠时不参与（否则与拖拽抢
+  `move()`、把细条推离边缘）。
+- **配置**：新增 `island_edge_dock`（默认 True）与 `island_dock_edge`
+  （`none/top/bottom/left/right`，白名单校验）；设置「外观与交互 → 灵动岛」加
+  「贴边停靠」一行；`island_x/island_y` 在停靠时存**胶囊滑出位**且跳过 12px 吸附。
+- **宽度锚点**：`_update_size()` 接上已有的 `layout.anchored_x()`，但**首次定型跳过**
+  ——`__init__` 里 `self.width()` 还是默认值，锚点会把 `_apply_position()` 刚恢复的
+  位置挪走（测试实测 200 → 330）。
+
+**验证**
+- `QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest tests/test_petcore_icons.py -q` → **6 passed**
+  （字形不裁边且占槽位 ≥55%、整帧裁透明后角色撑满、宽高比不变、全透明返回空）；
+- `pytest tests/test_petcore_island_dock.py -q` → **18 passed**（拖动真的移动窗口、
+  40px 停靠、非边缘不停靠、开关关闭不停靠、拖出停靠恢复胶囊、悬停滑出/800ms 收回/
+  光标在区内不收回、细条停采滑出恢复、动画插值到终点、隐藏即落位、拖拽冻结宽度）；
+- `pytest tests/test_petcore_island_window.py tests/test_petcore_island_p5.py
+  tests/test_petcore_settings.py tests/test_petcore_menu.py tests/test_petcore_menu_icons.py
+  tests/test_petcore_pages_smoke.py -q` → 全绿（含把「占位图标 36px」「缩略图 64×51」
+  两条旧断言改成 18px 槽位与「cacheKey 变化」）；
+- `pytest -q $(ls tests/test_petcore*.py)` 全量 → **1737 passed in 125.59s（exit 0）**；
+- `pytest tests/test_petcore_docs.py tests/test_pr_report_discipline.py -q` → **303 passed**；
+- `ruff check petcore tests examples scripts` → 通过；
+- 离屏渲染核对：菜单项图标 18px、文本左内边距 30px；整帧素材裁剪后缩略图撑满 18px。
+
+**未做 / 风险**
+- 状态点五态、声纳环、回复后的呼吸浮动、内容淡化（需要内容位图缓存）仍未移植；
+  主分支的视觉装饰（三层投影 / sheen / 软陶笔）不逐像素对齐。
+- 停靠边切换的观感只在离屏环境验证，真实多屏（跨屏拖动落点、混合 DPI）需人工验收。
+- 设置侧栏图标 18px 与行高 42px 的观感需真机确认；若嫌小可只调
+  `nav.setIconSize`（图标本身按槽位缩放，不会再被裁）。

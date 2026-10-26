@@ -176,7 +176,19 @@ class ApiSettingsPage(SettingsPage):
         self.click_balance_check.toggled.connect(
             lambda checked: self.host.config.set("click_show_balance", bool(checked))
         )
+        self.balance_service_combo = QComboBox(panel)
+        self.balance_service_combo.setMinimumWidth(240)
+        self.balance_service_combo.currentIndexChanged.connect(self._on_balance_service_changed)
+        self.balance_service_hint = QLabel("", panel)
+        self.balance_service_hint.setObjectName("settingHint")
+        self.balance_service_hint.setWordWrap(True)
 
+        self._form_row(
+            form,
+            "余额服务",
+            self.balance_service_combo,
+            "左键点击、右键「显示余额」和灵动岛都用这个服务；选「自动」时取第一个支持余额协议的服务。",
+        )
         self._form_row(
             form,
             "点击显示余额",
@@ -193,6 +205,7 @@ class ApiSettingsPage(SettingsPage):
         self._form_row(form, "余额协议", self.balance_combo, "决定余额查询走哪套接口；未知服务选「无」。")
         self._form_row(form, "API Key", self.key_edit, "保存后再次打开不会回显；留空表示沿用已保存的密钥。")
         right.addLayout(form)
+        right.addWidget(self.balance_service_hint)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
@@ -282,6 +295,54 @@ class ApiSettingsPage(SettingsPage):
         else:
             self._start_draft(silent=True)
         self._sync_buttons()
+        self._refresh_balance_services()
+
+    def _refresh_balance_services(self) -> None:
+        """余额服务下拉：只列真的带余额协议的服务，外加「自动」。"""
+        combo = getattr(self, "balance_service_combo", None)
+        if combo is None:
+            return
+        current = str(self.host.config.get("api_service_id") or "")
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("自动（第一个支持余额的服务）", "")
+        for service in self.store.services():
+            if str(getattr(service, "balance_protocol", "none") or "none") == "none":
+                continue
+            combo.addItem(service.name or service.service_id, service.service_id)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        self._refresh_balance_service_hint()
+
+    def _refresh_balance_service_hint(self) -> None:
+        label = getattr(self, "balance_service_hint", None)
+        if label is None:
+            return
+        combo = self.balance_service_combo
+        chosen = str(combo.currentData() or "")
+        if chosen:
+            label.setText(f"当前宠物使用「{combo.currentText()}」查询余额。")
+            return
+        fallback = next(
+            (
+                service
+                for service in self.store.services()
+                if str(getattr(service, "balance_protocol", "none") or "none") != "none"
+            ),
+            None,
+        )
+        if fallback is None:
+            label.setText("还没有服务声明余额协议：先在上面选一个服务，把「余额协议」改成对应口径。")
+        else:
+            label.setText(f"自动：将使用「{fallback.name or fallback.service_id}」。")
+
+    def _on_balance_service_changed(self, _index: int) -> None:
+        if self._refreshing:
+            return
+        value = str(self.balance_service_combo.currentData() or "")
+        self.host.config.set("api_service_id", value)
+        self._refresh_balance_service_hint()
 
     def _current_id(self) -> str:
         if self._draft_id:

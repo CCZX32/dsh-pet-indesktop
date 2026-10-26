@@ -479,6 +479,8 @@ class InteractionPage(SettingsPage):
             self._sync_self_talk_dir()
 
         self._embed_owner(embedded, "tool.quiet-mode", "quiet", "免打扰")
+        # 差异写入的基准：控件建好后才拿得到当前值。
+        self._last_values = self._current()
 
     def _embed_owner(self, embedded: dict, owner: str, key: str, label: str) -> None:
         spec = embedded.pop(owner, None)
@@ -860,29 +862,19 @@ class InteractionPage(SettingsPage):
         return values
 
     def _on_changed(self, *_args) -> None:
+        """只写**用户真的改过**的键。
+
+        旧实现一次回写 35 个键（用打开设置时定格的控件值），会把右键菜单里刚改的
+        勾选项按旧值翻回去并落盘（审计 AUD-27）。以「上次写出去的值」为基准做差异
+        写入，未触碰的键一律不动。
+        """
         config = self.config()
         values = self._current()
-        for key in self._CHECK_KEYS:
-            config.set(key, values[key])
-        config.set("throw_strength", values["throw_strength"])
-        config.set("playback_speed", values["playback_speed"])
-        config.set("animation_gap_seconds", values["animation_gap_seconds"])
-        config.set("head_pat_enabled", values["head_pat_enabled"])
-        config.set("head_pat_animation_mode", values["head_pat_animation_mode"])
-        config.set("head_pat_animation_names", values["head_pat_animation_names"])
-        for key in self._weights:
-            config.set(key, values[key])
-        config.set("click_sound_pack", dict(self._sound_pack))
-        config.set("easter_egg_enabled", values["easter_egg_enabled"])
-        config.set(EASTER_DISPLAY_KEY, values["easter_egg_display"])
-        config.set("easter_egg_title", values["easter_egg_title"])
-        config.set("easter_egg_hint", values["easter_egg_hint"])
-        config.set("easter_egg_avatar", values["easter_egg_avatar"])
-        config.set("easter_egg_image_dir", values["easter_egg_image_dir"])
-        config.set("easter_egg_image_scale", values["easter_egg_image_scale"])
-        config.set("self_talk_image_dir", values["self_talk_image_dir"])
-        config.set("self_talk_image_scale", values["self_talk_image_scale"])
-        config.set("self_talk_image_chance", values["self_talk_image_chance"])
+        for key, value in values.items():
+            if value == self._last_values.get(key):
+                continue
+            config.set(EASTER_DISPLAY_KEY if key == "easter_egg_display" else key, value)
+            self._last_values[key] = value
         self.changed.emit()
 
     def dirty(self) -> bool:
@@ -891,12 +883,14 @@ class InteractionPage(SettingsPage):
     def confirm_save(self) -> None:
         self._on_changed()
         self._initial = self._snapshot()
+        self._last_values = self._current()
         self._embedded_confirm_save()
 
     def discard_changes(self) -> None:
         config = self.config()
         for key in self._CHECK_KEYS:
             config.set(key, self._initial[key])
+        self._last_values = dict(self._initial)
         config.set("throw_strength", self._initial["throw_strength"])
         config.set("playback_speed", self._initial["playback_speed"])
         config.set("animation_gap_seconds", self._initial["animation_gap_seconds"])

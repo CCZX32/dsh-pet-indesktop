@@ -164,4 +164,34 @@ def compare_versions(left: str, right: str) -> int:
     return (a > b) - (a < b)
 
 
-__all__ = ["UpdateAsset", "UpdateManifest", "UpdateResult", "compare_versions", "parse_manifest"]
+#: 状态码 → 中文短标签（界面文案不直接外露内部状态码）。
+STATE_LABELS: dict[str, str] = {
+    "idle": "未检查",
+    "checking": "检查中",
+    "available": "有新版本",
+    "up_to_date": "已是最新版本",
+    "check_failed": "检查失败",
+    "downloading": "下载中",
+    "downloaded": "已下载",
+    "download_failed": "下载失败",
+    "installer_started": "安装器已启动",
+    "installer_failed": "安装器启动失败",
+    "unsupported_runtime": "当前运行方式不支持自动更新",
+    "invalid_package": "更新包无效",
+    "cancelled": "已取消",
+}
+
+
+def describe_state(state: str) -> str:
+    return STATE_LABELS.get(str(state or ""), "更新状态未知")
+
+
+__all__ = [
+    "STATE_LABELS",
+    "UpdateAsset",
+    "UpdateManifest",
+    "UpdateResult",
+    "compare_versions",
+    "describe_state",
+    "parse_manifest",
+]

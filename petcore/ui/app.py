@@ -6,7 +6,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QTimer, QUrl
+from PySide6.QtCore import QLockFile, QRect, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -18,11 +18,12 @@ from ..account.service import AccountService
 from ..config import Config
 from ..content.collect import collect_characters as _collect
 from ..log import setup_logging
+from ..net.errors import describe as describe_net_error
 from ..platform import hotkey_spec
 from ..platform.hotkeys import GlobalHotkeyService
 from ..platform.session import SessionWatcher
 from ..platform.worker import WorkerHost
-from ..update import UpdateResult, UpdateService
+from ..update import UpdateResult, UpdateService, describe_state
 from .. import __version__
 from ..mods.feature import CORE_FEATURE_IDS, FeatureManager
 from .market_jobs import MarketJobRegistry
@@ -41,6 +42,7 @@ from .chat import ChatController, QuickChatController
 from .menu_model import MenuItem, MenuModel, add_submenu
 from .pet_manager import PetManager, SHARED_KEYS
 from .pet_window import PetWindow
+from .ports import QtScheduler
 from .tray import TrayIcon
 
 logger = logging.getLogger("petcore.ui.app")
@@ -189,12 +191,22 @@ class _PresentationAdapter:
         return str(getattr(window, "character_id", "") if window is not None else "")
 
 
+def gui_dispatch(scheduler):
+    """把工作线程的结果送回 GUI 线程的唯一通道。
+
+    ``QtScheduler`` 用信号跨线程排队；不能用无接收者的 ``QTimer.singleShot``
+    两参重载——定时器会挂在没有事件循环的工作线程上，回调永不触发。
+    """
+    return lambda callback: scheduler.call_later(0, callback)
+
+
 class CoreHost:
     def __init__(self, app: QApplication, config: Config, root: Path, mod_dirs):
         self.app = app
         self.config = config
         self.root = root
         self.mod_dirs = mod_dirs
+        self.scheduler = QtScheduler()
         self.api_store = ApiStore(self.root)
         self.api_credentials = KeyringCredentials()
         self.account = AccountService(self.api_store, self.api_credentials)
@@ -202,7 +214,7 @@ class CoreHost:
             self.account,
             service_id_provider=self._balance_service_id,
             on_result=self._on_balance_result,
-            dispatch=lambda callback: QTimer.singleShot(0, callback),
+            dispatch=gui_dispatch(self.scheduler),
         )
         self.update_service: UpdateService | None = None
         self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="petcore-update")
@@ -227,6 +239,7 @@ class CoreHost:
         self._active_window: PetWindow | None = None
         self.tray: TrayIcon | None = None
         self.island = None
+        self.probe_hub = None
         self.settings_dialog = None
         self.hotkeys: GlobalHotkeyService | None = None
         self.diagnostics: list[str] = []
@@ -264,7 +277,10 @@ class CoreHost:
             self._notify(slot, message)
             return
         reason = str(getattr(error, "reason", "network") or "network")
-        message = f"余额查询失败：{reason}"
+        detail = str(error) if str(error) and str(error) != reason else ""
+        message = f"余额查询失败：{describe_net_error(reason)}"
+        if detail and reason != detail:
+            message = f"{message}（{detail}）"
         if island is not None:
             island.show_balance(error=message)
         self._notify(slot, message)
@@ -296,6 +312,7 @@ class CoreHost:
         self._update_generation += 1
         generation = self._update_generation
         self._notify(None, "正在检查更新…")
+        service.reset_cancel()
         self._update_future = self._update_executor.submit(service.check, force=True)
         self._update_future.add_done_callback(
             lambda future, token=generation: QTimer.singleShot(
@@ -321,9 +338,13 @@ class CoreHost:
         setter = getattr(page, "set_update_status", None)
         if callable(setter):
             setter(result)
-        self._notify(None, result.message or "更新检查完成")
-        if self.island is not None:
-            self.island.add_message(result.message or "更新检查完成")
+        # 岛的消息队列由 _notify 统一写入，这里再写一次会让每条状态出现两遍。
+        self._notify(None, result.message or describe_state(result.state))
+
+    def _install_available(self) -> bool:
+        """只有冻结的 Windows 进程才能原地更新，源码运行不给装。"""
+        service = self.update_service
+        return bool(service is not None and service.can_auto_install())
 
     def update_status(self) -> UpdateResult:
         return self._ensure_update_service().status()
@@ -349,6 +370,7 @@ class CoreHost:
                 manifest=manifest,
             )
         )
+        service.reset_cancel()
         self._update_future = self._update_executor.submit(service.download, asset)
         self._update_future.add_done_callback(
             lambda future, token=generation: QTimer.singleShot(
@@ -376,6 +398,16 @@ class CoreHost:
 
     def install_update(self, package_path=None) -> None:
         service = self._ensure_update_service()
+        if not service.can_auto_install():
+            self._publish_update_result(
+                UpdateResult(
+                    False,
+                    "unsupported_runtime",
+                    "源码运行或非 Windows 环境不支持自动更新，请用安装包覆盖安装",
+                    manifest=service.manifest,
+                )
+            )
+            return
         path = package_path or service.status().path
         if path is None:
             self._notify(None, "请先下载更新包")
@@ -703,14 +735,43 @@ class CoreHost:
         self.island.balance_requested.connect(self.request_balance)
         self.island.settings_requested.connect(lambda: self.open_settings("api"))
         self.island.set_avoidance_callback(self._avoid_island_overlap)
+        self.probe_hub = self._build_probe_hub(self.island)
+        if self.probe_hub is not None:
+            self.island.set_probe_sync_callback(self.probe_hub.sync)
         return self.island
 
+    def _build_probe_hub(self, island):
+        """GPU/FPS 探针只在这里创建：采样器零 Qt，宿主负责启停与推送。"""
+        from .probes import IslandProbeHub
+
+        def gpu_factory():
+            from ..platform.gpu_monitor import GpuMonitor
+
+            return GpuMonitor()
+
+        def fps_factory():
+            from ..platform.fps import FpsProbe
+
+            return FpsProbe()
+
+        try:
+            return IslandProbeHub(
+                island, gpu_factory=gpu_factory, fps_factory=fps_factory, parent=self.app
+            )
+        except Exception:  # noqa: BLE001 - 探针接线失败只影响 gpu/fps 两段
+            logger.debug("island probe hub unavailable", exc_info=True)
+            return None
+
     def _avoid_island_overlap(self, island) -> None:
-        """避开当前可见桌宠窗口；避让失败时保持桌宠位置不变。"""
+        """避开当前可见桌宠**身体框**；避让失败时保持桌宠位置不变。
+
+        不能用 ``frameGeometry()``：桌宠窗口四周是大片透明画布，按整窗判重叠
+        会让胶囊被远处走位的桌宠反复推开。
+        """
         manager = self.pets
         windows = manager.each() if manager is not None else [self.window]
         obstacles = [
-            window.frameGeometry()
+            QRect(*window.body_rect())
             for window in windows
             if window is not None and window.isVisible()
         ]
@@ -906,10 +967,28 @@ class CoreHost:
 
     def reload_mods(self) -> None:
         if self.features is not None:
+            # 换 adapter 前先摘掉旧监听：否则一次点击会同时打到新旧两个运行时。
+            ports = getattr(self.features, "ports", None)
+            detach_all = getattr(getattr(ports, "interaction", None), "detach_all", None)
+            if callable(detach_all):
+                try:
+                    detach_all()
+                except Exception:  # noqa: BLE001 - 摘监听失败不该阻止重载
+                    logger.warning("interaction detach failed", exc_info=True)
             for owner in list(self.features.features):
                 self.menu_model.unregister_owner(owner)
             self.features.stop()
             self.features = None
+        # 丢掉扩展目录下的模块：不丢的话 `from .runtime import X` 仍命中旧对象，
+        # 「已重新加载」实际跑的还是旧代码（审计 AUD-14）。
+        for base in (*paths.user_mods_dirs(self.root), paths.builtin_features_dir()):
+            try:
+                children = sorted(Path(base).iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.is_dir():
+                    self._drop_modules_under(child)
         self.load_content()
         targets = self.pets.each() if self.pets is not None else ([self.window] if self.window else [])
         for window in targets:
@@ -1078,6 +1157,12 @@ class CoreHost:
         self._closing = True
         self.cancel_update()
         self.close_dialogs()
+        hub = getattr(self, "probe_hub", None)
+        if hub is not None:
+            try:
+                hub.shutdown()
+            except Exception:  # noqa: BLE001
+                logger.debug("probe hub shutdown failed", exc_info=True)
         if self.island is not None:
             try:
                 self.island.stop()

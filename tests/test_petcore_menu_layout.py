@@ -355,6 +355,15 @@ def test_tools_help_contains_web_links() -> None:
         assert expected in ids
 
 
+def test_balance_and_update_actions_are_reachable_from_the_default_menu() -> None:
+    """注册了不等于有入口：P5 的两个动作必须真的落进模板。"""
+    layout = load_default()
+    controls = next(node for node in layout["nodes"] if node.get("id") == "pet_controls")
+    assert "show_balance" in [child.get("id") for child in controls["children"]]
+    tools = next(node for node in layout["nodes"] if node.get("id") == "tools_help")
+    assert "check_update" in [child.get("id") for child in tools["children"]]
+
+
 def test_p10_moves_core_actions_out_of_the_extensions_hub() -> None:
     layout = {
         "schema_version": 1,

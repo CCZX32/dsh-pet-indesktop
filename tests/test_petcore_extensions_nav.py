@@ -238,7 +238,12 @@ def _mod(mod_id: str, name: str, name_zh: str, path: Path, *, enabled: bool = Tr
     return SimpleNamespace(id=mod_id, manifest=manifest, enabled=enabled, path=path)
 
 
-def _host_with_mods(tmp_path: Path) -> FakeHost:
+def _host_with_mods(tmp_path: Path, monkeypatch=None) -> FakeHost:
+    if monkeypatch is not None:
+        from petcore.mods import trust
+
+        # 本夹具把用户 mod 根当作「安装器投放目录」，模拟随包带标记的官方扩展。
+        monkeypatch.setattr(trust, "install_trust_root", lambda: tmp_path / "mods")
     host = FakeHost(tmp_path)
     builtin_demo = paths.builtin_features_dir().parent / "feature_demo"
     core_builtin = paths.builtin_features_dir() / "fun.self-talk"
@@ -260,8 +265,8 @@ def _host_with_mods(tmp_path: Path) -> FakeHost:
     return host
 
 
-def test_mods_page_filters_base_and_addon(app, tmp_path):
-    page = ModsPage(_host_with_mods(tmp_path))
+def test_mods_page_filters_base_and_addon(app, tmp_path, monkeypatch):
+    page = ModsPage(_host_with_mods(tmp_path, monkeypatch))
 
     assert page.filter_combo.count() == 3
     assert page.mods_list.count() == 4
@@ -289,8 +294,8 @@ def test_mods_page_filters_base_and_addon(app, tmp_path):
     assert page.mods_list.count() == 4
 
 
-def test_core_features_are_listed_as_merged_into_core(app, tmp_path):
-    page = ModsPage(_host_with_mods(tmp_path))
+def test_core_features_are_listed_as_merged_into_core(app, tmp_path, monkeypatch):
+    page = ModsPage(_host_with_mods(tmp_path, monkeypatch))
     rows = {
         page.mods_list.item(row).data(Qt.ItemDataRole.UserRole): row
         for row in range(page.mods_list.count())
@@ -311,8 +316,8 @@ def test_core_features_are_listed_as_merged_into_core(app, tmp_path):
     assert page.remove_button.isEnabled() is True
 
 
-def test_shipped_mod_can_be_removed_but_keeps_personal_data(app, tmp_path):
-    page = ModsPage(_host_with_mods(tmp_path))
+def test_shipped_mod_can_be_removed_but_keeps_personal_data(app, tmp_path, monkeypatch):
+    page = ModsPage(_host_with_mods(tmp_path, monkeypatch))
     rows = {
         page.mods_list.item(row).data(Qt.ItemDataRole.UserRole): row
         for row in range(page.mods_list.count())

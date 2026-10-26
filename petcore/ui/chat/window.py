@@ -364,19 +364,27 @@ class ChatWindow(QDialog):
         clip.addRoundedRect(QRectF(target), SHELL_RADIUS, SHELL_RADIUS)
         painter.setClipPath(clip)
         painter.fillPath(clip, QColor("#ffffff"))
-        if self._bg_scaled is None or self._bg_scaled_size != target.size():
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        if (
+            self._bg_scaled is None
+            or self._bg_scaled_size != target.size()
+            or abs(getattr(self, "_bg_dpr", 0.0) - dpr) > 1e-6
+        ):
             self._bg_scaled = themes.scale_background_pixmap(
-                self._bg_pixmap, target.width(), target.height(), "cover"
+                self._bg_pixmap, target.width(), target.height(), "cover", dpr=dpr
             )
             self._bg_scaled_size = target.size()
+            self._bg_dpr = dpr
         focus = themes.background_focus_rect(self._bg_theme, {}, self._bg_value)
+        # 壁纸 pixmap 带 DPR：几何一律用逻辑尺寸，别拿物理宽高去算偏移。
+        logical = self._bg_scaled.deviceIndependentSize()
         x, y = themes.background_draw_offset(
             target.x(),
             target.y(),
             target.width(),
             target.height(),
-            self._bg_scaled.width(),
-            self._bg_scaled.height(),
+            int(round(logical.width())),
+            int(round(logical.height())),
             focus,
             "cover",
         )

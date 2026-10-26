@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from ..engine.enums import AnimatType, GraphType, ModeType
+from .enums import AnimatType, GraphType, ModeType
 
 
 @dataclass(frozen=True, slots=True)

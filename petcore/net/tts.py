@@ -281,7 +281,14 @@ def _map_error(exc: BaseException) -> NetworkError:
     return NetworkError(type(exc).__name__, reason=reason)
 
 
-def _require_audio(path: Path, provider: str) -> None:
+def _require_audio(path: Path, provider: str, *, truncated: bool = False) -> None:
+    """音频产物必须非空且**完整**。
+
+    传输层会标记 ``Body.truncated``（响应被 ``max_bytes`` 截断，或实际字节数少于
+    ``Content-Length``）；半截 mp3 一旦原子写进缓存，同文本以后就永远播那段残缺音频。
+    """
+    if truncated:
+        raise NetworkError(f"{provider} 返回的音频不完整", reason=PROTOCOL)
     try:
         size = Path(path).stat().st_size
     except OSError:
@@ -400,7 +407,7 @@ def doubao_synthesize(
     destination = Path(out_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(audio)
-    _require_audio(destination, "豆包")
+    _require_audio(destination, "豆包", truncated=bool(getattr(payload, "truncated", False)))
 
 
 def _parse_doubao_sse(payload: bytes) -> bytes:
@@ -497,7 +504,7 @@ def mimo_synthesize(
     destination = Path(out_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(audio)
-    _require_audio(destination, "MiMo")
+    _require_audio(destination, "MiMo", truncated=bool(getattr(payload, "truncated", False)))
 
 
 def _parse_mimo_json(payload: bytes) -> bytes:

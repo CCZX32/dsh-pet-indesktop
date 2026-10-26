@@ -162,7 +162,11 @@ class FeatureManager:
                 feature.runtime = runtime
                 feature.commands = dict(getattr(runtime, "commands", {}) or {})
                 runtime.start()
-        except Exception as exc:
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - 单个扩展的任何异常都不许打断启动
+            # `sys.exit()` / `SystemExit` 在扩展里很常见（"提前退出"写法），
+            # 它们不是 `Exception`：不拦就会让整个 core 静默退出（审计 AUD-21）。
             diagnostics.append(f"{owner}: {type(exc).__name__}: {exc}")
             self.features.pop(owner, None)
         return diagnostics
@@ -298,7 +302,9 @@ class FeatureManager:
 
     def stop_owner(self, owner: str) -> None:
         """Stop this extension and revoke its deliveries before unloading."""
-        for service in (self.ports.speech, self.ports.reminders):
+        # interaction 也要撤：否则旧运行时的点击/投喂回调仍挂在窗口上，
+        # 重载后一次点击会触发两次（审计 AUD-22）。
+        for service in (self.ports.speech, self.ports.reminders, self.ports.interaction):
             cancel = getattr(service, "cancel_owner", None)
             if callable(cancel):
                 cancel(owner)

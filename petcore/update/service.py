@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform as platform_mod
 import subprocess
@@ -24,6 +25,8 @@ from .model import (
     compare_versions,
     parse_manifest,
 )
+
+logger = logging.getLogger("petcore.update")
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_UPDATE_BYTES = 512 * 1024 * 1024
@@ -112,7 +115,6 @@ class UpdateService:
         return response
 
     def check(self, *, force: bool = False) -> UpdateResult:
-        self._cancel.clear()
         if not force:
             cached = self._read_cached_manifest()
             if cached is not None:
@@ -122,6 +124,8 @@ class UpdateService:
         urls = (self.manifest_url, *self.fallback_manifest_urls)
         etag = self._cached_etag() if force else ""
         for index, manifest_url in enumerate(urls):
+            if self._cancel.is_set():
+                return self._cancelled("已取消检查更新")
             try:
                 headers = {"Accept": "application/json"}
                 # An ETag is tied to a source.  Reusing it for the fallback sources
@@ -197,10 +201,11 @@ class UpdateService:
         meta_temp = meta.with_suffix(".tmp")
         meta_temp.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
         os.replace(meta_temp, meta)
-        self._cancel.clear()
         errors: list[str] = []
         preserve_resume = False
         for url in candidate_urls:
+            if self._cancel.is_set():
+                raise InterruptedError("update download cancelled")
             try:
                 self._download_from_url(asset, url, part, cancel=cancel, progress=progress)
                 path = self._finalize_download(asset, part, final, meta)
@@ -333,11 +338,97 @@ class UpdateService:
             raise ValueError("update asset digest or size mismatch")
         os.replace(part, final)
         meta.unlink(missing_ok=True)
+        self._write_verified_meta(final, asset)
         runtime_metrics.inc("disk_writes")
         return final
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def reset_cancel(self) -> None:
+        """新任务提交时清掉上一次的取消标记（不能在 worker 里清，会把排队撤销吞掉）。"""
+        self._cancel.clear()
+
+    def _verified_meta_path(self, path: Path) -> Path:
+        return path.with_suffix(path.suffix + ".verify.json")
+
+    def _write_verified_meta(self, path: Path, asset: UpdateAsset) -> None:
+        payload = {
+            "name": path.name,
+            "size": int(asset.size),
+            "sha256": str(asset.sha256).lower(),
+        }
+        meta = self._verified_meta_path(path)
+        temp = meta.with_suffix(".tmp")
+        try:
+            temp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp, meta)
+        except OSError:
+            logger.debug("update verified meta write failed", exc_info=True)
+
+    def _read_verified_meta(self, path: Path) -> dict | None:
+        try:
+            payload = json.loads(self._verified_meta_path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("name") != path.name:
+            return None
+        return payload
+
+    def _package_is_verified(self, path: Path) -> bool:
+        """安装前重算摘要：侧车记录让重启后仍可安装，重算挡住下载后被替换的包。"""
+        payload = self._read_verified_meta(path)
+        if payload is None:
+            return False
+        sha = str(payload.get("sha256") or "").lower()
+        size = payload.get("size")
+        if not sha or not isinstance(size, int):
+            return False
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with path.open("rb") as source:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    total += len(block)
+                    digest.update(block)
+        except OSError:
+            return False
+        return total == size and digest.hexdigest().lower() == sha
+
+    def _expected_asset(self) -> UpdateAsset | None:
+        """清单里登记的、本平台应安装的那个资产（重启后从缓存清单恢复）。"""
+        manifest = self._manifest
+        if manifest is None:
+            try:
+                manifest = self._read_cached_manifest()
+            except Exception:  # noqa: BLE001 - 缓存坏了就当没有清单
+                manifest = None
+            self._manifest = manifest
+        return self.select_asset(manifest)
+
+    def _matches_expected(self, path: Path) -> bool:
+        """安装包必须与清单登记的文件名/大小/摘要三者一致。
+
+        侧车（`.verify.json`）与包在同一目录、同一用户可写，**它不能自证**：
+        真正的信任锚是下载时校验过的那份清单条目。
+        """
+        asset = self._expected_asset()
+        if asset is None:
+            return False
+        if str(asset.name) != path.name:
+            return False
+        payload = self._read_verified_meta(path)
+        if payload is None:
+            return False
+        try:
+            size = int(payload.get("size"))
+        except (TypeError, ValueError):
+            return False
+        sha = str(payload.get("sha256") or "").lower()
+        return size == int(asset.size) and sha == str(asset.sha256).lower()
 
     def can_auto_install(self) -> bool:
         return self.platform == "windows" and self.frozen
@@ -371,11 +462,19 @@ class UpdateService:
         if (
             not path.is_file()
             or path.suffix.lower() not in {".exe", ".msi"}
-            or self._status.state != "downloaded"
-            or self._status.path is None
-            or self._status.path.resolve() != path.resolve()
+            or not self._package_is_verified(path)
         ):
             result = UpdateResult(False, "invalid_package", "更新包尚未完成下载与校验", path=path, manifest=self._manifest)
+            self._status = result
+            return result
+        if not self._matches_expected(path):
+            result = UpdateResult(
+                False,
+                "invalid_package",
+                "更新包与更新清单登记的文件名/大小/摘要不一致，已拒绝安装",
+                path=path,
+                manifest=self._manifest,
+            )
             self._status = result
             return result
         try:
@@ -414,6 +513,17 @@ class UpdateService:
         state = "available" if compare_versions(manifest.version, self.current_version) > 0 else "up_to_date"
         message = f"发现新版本 {manifest.version}" if state == "available" else "当前已是最新版本"
         result = UpdateResult(True, state, message, version=manifest.version, manifest=manifest)
+        self._status = result
+        return result
+
+    def _cancelled(self, message: str) -> UpdateResult:
+        result = UpdateResult(
+            False,
+            "cancelled",
+            message,
+            version=self.current_version,
+            manifest=self._manifest,
+        )
         self._status = result
         return result
 

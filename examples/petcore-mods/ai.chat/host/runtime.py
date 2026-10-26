@@ -532,6 +532,9 @@ class AiChatRuntime:
                 self._request_callback(self._cancels, slot, cancel, failed, final=True)
             else:
                 final = "".join(partial) if cancel.is_set() or getattr(result, "cancelled", False) else str(getattr(result, "text", "") or "".join(partial))
+                if getattr(result, "incomplete", False) and final:
+                    # 半条回答必须让用户看得见（AUD-15）：否则下次翻会话会以为这就是全部。
+                    final += "\n\n（这次回答没有正常结束，内容可能不完整。请重试或重新提问。）"
                 self._request_callback(self._cancels, slot, cancel,
                     lambda: chat.done(OWNER, final, pet_slot=slot), final=True)
 
@@ -575,6 +578,8 @@ class AiChatRuntime:
             if not text:
                 publish(lambda: fail("empty_reply"))
                 return
+            if getattr(result, "incomplete", False):
+                text += "\n\n（这次回答没有正常结束，内容可能不完整。）"
             publish(lambda: on_done(text))
 
         threading.Thread(target=run, name=f"ai-look-{slot}", daemon=True).start()

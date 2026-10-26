@@ -124,3 +124,18 @@ def test_build_collects_dynamic_festival_calendar_dependency():
     assert '"--collect-submodules", "lunar_python"' in script
     from lunar_python import Solar
     assert Solar.fromYmd(2032, 2, 29).getLunar().getSolar().toYmd() == '2032-02-29'
+
+
+def test_every_bundled_mod_entry_is_gated_by_a_task() -> None:
+    """每条 mod `[Files]` 行都必须带 `Tasks:`，否则「不勾选也写盘」（AUD-39）。"""
+    text = _iss_text()
+    offenders: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Source:"):
+            continue
+        if "mods\\" not in stripped and "mods/" not in stripped:
+            continue
+        if "Tasks:" not in stripped:
+            offenders.append(stripped)
+    assert not offenders, offenders

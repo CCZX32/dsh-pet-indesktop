@@ -77,14 +77,19 @@ class BalancePresenter:
 
     def cancel(self, slot: int | None = None) -> None:
         slots = [int(slot)] if slot is not None else None
+        dropped: list[Future] = []
         with self._lock:
             targets = slots or list(self._inflight)
             for key in targets:
                 self._generation[key] = self._generation.get(key, 0) + 1
                 future = self._inflight.pop(key, None)
                 if future is not None:
-                    future.cancel()
+                    dropped.append(future)
             runtime_metrics.set_active_threads(len(self._inflight))
+        # ``Future.cancel()`` 对 PENDING 任务会在**调用线程里同步**跑 done_callback
+        # （进 ``_done`` 再抢同一把非重入锁）。必须在锁外取消，否则退出路径会挂死。
+        for future in dropped:
+            future.cancel()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -101,7 +106,10 @@ class BalancePresenter:
     def _done(self, slot: int, generation: int, future: Future) -> None:
         with self._lock:
             current = self._generation.get(slot, 0)
-            self._inflight.pop(slot, None)
+            # 只摘自己那一条：取消后立刻重发的请求已经占了这个槽位，
+            # 无条件 pop 会把新任务的在途记录删掉（从而允许第三个并发）。
+            if self._inflight.get(slot) is future:
+                self._inflight.pop(slot, None)
             runtime_metrics.set_active_threads(len(self._inflight))
             if self._closed or current != generation:
                 return

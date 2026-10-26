@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__, paths
 from .config import Config
 from .log import get_logger, setup_logging
+from .performance import runtime_metrics
 
 
 def _ensure_streams() -> None:
@@ -30,6 +31,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="petcore", description="dsh-pet core")
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument("--check", action="store_true", help="headless self check")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="--check 的构建门模式：菜单模板/内置配图/角色缺失即退出 1",
+    )
     parser.add_argument("--out", type=Path, default=None, help="write --check report to this path")
     parser.add_argument("--character", default=None)
     parser.add_argument("--scale", type=float, default=None)
@@ -110,8 +116,35 @@ def _speech_report(root: Path, config: Config) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
-def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | None = None) -> int:
+def _migration_report(root: Path) -> dict:
+    """`--check` 的迁移证据：完成标记与备份目录，只读，不跑迁移。"""
+    from . import migration
+
+    marker = migration.read_marker(root)
+    backup_root = root / migration.BACKUP_DIRNAME
+    try:
+        backups = sorted(path.name for path in backup_root.iterdir() if path.is_file())
+    except OSError:
+        backups = []
+    return {
+        "marker": bool(marker),
+        "completed": dict(marker.get("completed") or {}),
+        "restore_entries": len(marker.get("restore") or []),
+        "backup_dir": str(backup_root),
+        "backups": backups,
+    }
+
+
+def _check(
+    root: Path,
+    config: Config,
+    mod_dirs: tuple[Path, ...],
+    out: Path | None = None,
+    *,
+    strict: bool = False,
+) -> int:
     from .content.collect import collect_characters
+    from .contracts import capabilities
     from .ui import menu_layout
     from .update import UpdateService
 
@@ -171,6 +204,7 @@ def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | N
         "version": __version__,
         "data_root": str(root),
         "config": config.snapshot(),
+        "config_corrupt_backup": str(getattr(config, "corrupt_backup", "") or ""),
         "active_pets": list(config.get("active_pets") or [0]),
         "pet_configs": {
             str(slot): str(paths.pet_config_path(root, slot))
@@ -193,18 +227,40 @@ def _check(root: Path, config: Config, mod_dirs: tuple[Path, ...], out: Path | N
         },
         "speech": _speech_report(root, config),
         "update": UpdateService(root).diagnose(),
+        # 运行时计数器只写不读就是死代码：`--check` 是它们的读出口。
+        "performance": runtime_metrics.snapshot().as_dict(),
+        "migration": _migration_report(root),
+        # 能力声明是「宏大的纸面权力」时最容易腐烂的地方：至少让 `--check` 有读出口。
+        "capabilities": sorted(capabilities.CAPABILITIES),
     }
+    problems: list[str] = []
+    if strict:
+        # 构建门的唯一判据：这三项就是「包打全了没有」的证据（AGENTS 已写明
+        # `self_talk_images` 是素材/Qt 插件是否正常的第一证据）。
+        if menu_template_source != "json":
+            problems.append(f"menu_template={menu_template_source}")
+        if int(report["self_talk_images"].get("builtin_readable") or 0) <= 0:
+            problems.append("builtin self-talk images unreadable")
+        if not report.get("characters"):
+            problems.append("no characters packaged")
+        problems.extend(f"diagnostic:{item}" for item in (report.get("diagnostics") or []))
+    report["strict"] = {"enabled": bool(strict), "problems": problems}
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     print(payload)
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(payload + "\n", encoding="utf-8")
-    return 0
+    return 1 if problems else 0
 
 
 def _resolve_root(args: argparse.Namespace) -> Path:
+    # `--root ""` 在 Windows 上等于 `Path(".")`，会把数据根变成当前工作目录。
+    raw = getattr(args, "root", None)
+    if raw is not None and str(raw).strip():
+        return Path(str(raw).strip())
     if getattr(args, "root", None) is not None:
-        return Path(args.root)
+        logger = get_logger("cli")
+        logger.warning("--root 是空字符串，按未指定处理")
     return paths.data_root(portable=args.portable, instance=args.instance)
 
 
@@ -291,6 +347,35 @@ def main(argv: list[str] | None = None) -> int:
             "asset_available": service.select_asset(result.manifest) is not None,
         }, ensure_ascii=False, indent=2))
         return 0 if result.ok else 1
+
+    migrate_index = _subcommand_index(raw, ("migrate",))
+    if migrate_index is not None:
+        from . import migration
+
+        global_args, _extra_args = _parser().parse_known_args(raw[:migrate_index])
+        try:
+            root = _resolve_root(global_args)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        parser = argparse.ArgumentParser(prog="petcore migrate")
+        parser.add_argument("--dry-run", action="store_true", help="只预演，不写文件")
+        parser.add_argument("--force", action="store_true", help="忽略完成标记重跑")
+        parser.add_argument("--rollback", action="store_true", help="按备份恢复并清空完成标记")
+        parser.add_argument("--legacy-root", type=Path, default=None, help="指定旧壳数据目录")
+        migrate_args = parser.parse_args(raw[migrate_index + 1 :])
+        if migrate_args.rollback:
+            report = migration.rollback(root)
+        else:
+            report = migration.run(
+                root,
+                legacy_root=migrate_args.legacy_root,
+                dry_run=migrate_args.dry_run,
+                force=migrate_args.force,
+            )
+        payload = report.as_dict()
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1 if report.failures else 0
 
     if raw[:1] == ["pack-character"]:
         parser = argparse.ArgumentParser(prog="petcore pack-character")
@@ -388,9 +473,14 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(str(exc))
         return 2
+    if args.instance:
+        # 缩略图等进程级缓存按实例隔离（`_disk_cache_dir()` 读这个变量）。
+        os.environ.setdefault("PETCORE_INSTANCE", str(args.instance))
     setup_logging(paths.logs_dir(root), verbose=args.verbose)
     logger = get_logger("cli")
-    config = Config.load(root, portable=args.portable)
+    # `--check` 是诊断命令，必须只读：它会算出与正常启动一致的合并结果，但不备份、
+    # 不写 config.json、不迁 slot（否则一次排障就改了用户数据并绕开迁移标记）。
+    config = Config.load(root, portable=args.portable, persist=not args.check)
     if args.scale is not None:
         config.set("scale", args.scale)
     if args.character:
@@ -404,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     extra = tuple(Path(item) for item in args.mods_dir)
     mod_dirs = paths.mods_dirs(root, extra)
     if args.check:
-        return _check(root, config, mod_dirs, args.out)
+        return _check(root, config, mod_dirs, args.out, strict=bool(args.strict))
     logger.info("starting petcore %s", __version__)
     from .ui.app import run
 

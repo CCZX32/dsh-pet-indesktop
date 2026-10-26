@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,8 @@ DEFAULT_MODEL = "deepseek-chat"
 _MAX_RESEARCH_ROUNDS = 3
 _MAX_CALLS_PER_ROUND = 4
 _MAX_NOTES_CHARS = 24_000
+#: 整次联网检索的墙钟预算：最坏 3 轮 × 60s + 12 次工具 × 20s 会把对话卡到 7 分钟。
+_RESEARCH_BUDGET_SECONDS = 45.0
 
 _PLANNER_PROMPT = (
     "你是联网检索助手，当前时间：{today}。请判断：回答用户最后一条消息，是否需要联网"
@@ -87,11 +90,25 @@ class ChatTruncated(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ChatResult:
+    """一次流式回答的结果。
+
+    ``incomplete``/``end_reason`` 是**显式**的完整性信号：没有收到 ``[DONE]``、
+    没有 ``finish_reason``、或响应体为空时，``end_reason`` 不是 ``done``，
+    调用方必须提示用户，而不是把半条回答当成完整答复落盘（审计 AUD-15）。
+    """
+
     text: str
     chunks: int = 0
     finish_reason: str = ""
     cancelled: bool = False
     reasoning: str = ""
+    incomplete: bool = False
+    end_reason: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """是否有可展示的内容（空回答不算）。"""
+        return bool(self.text or self.reasoning)
 
 
 def _sends_thinking_param(request: ApiRequest, mode: str) -> bool:
@@ -361,10 +378,14 @@ def research(
     used = 0
     searched = False
     net_timeout = max(5.0, min(float(timeout), 20.0))
+    deadline = time.monotonic() + _RESEARCH_BUDGET_SECONDS
     _status(on_status, "正在判断是否需要联网…")
     for round_no in range(_MAX_RESEARCH_ROUNDS):
         if _cancelled(cancel):
             return ""
+        if time.monotonic() > deadline:
+            _status(on_status, "联网检索超时，改用已有资料继续回答")
+            break
         payload: dict[str, Any] = {
             "model": str(model or request.metadata.model or DEFAULT_MODEL),
             "messages": planner,
@@ -411,6 +432,9 @@ def research(
         for call in calls:
             if _cancelled(cancel):
                 return ""
+            if time.monotonic() > deadline:
+                _status(on_status, "联网检索超时，改用已有资料继续回答")
+                break
             function = call.get("function") or {}
             try:
                 args = json.loads(function.get("arguments") or "{}")
@@ -511,50 +535,86 @@ def stream_chat(
     finish_reason = ""
     plain_lines: list[str] = []
     saw_sse = False
+    saw_done = False
     cancelled = False
+
+    def _apply(data_text: str) -> None:
+        """处理一个完整 SSE 事件（多行 `data:` 已经按换行拼好）。"""
+        nonlocal finish_reason, saw_done, chunks
+        if data_text == STREAM_DONE:
+            saw_done = True
+            return
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            raise errors.NetworkError(reason=errors.PROTOCOL) from None
+        if not isinstance(payload, Mapping):
+            raise errors.NetworkError(reason=errors.PROTOCOL)
+        _raise_for_error_frame(payload)
+        delta, reasoning, finish = _extract_delta(payload)
+        if finish:
+            finish_reason = finish
+        if reasoning:
+            reasoning_parts.append(reasoning)
+            if on_reasoning is not None:
+                on_reasoning(reasoning)
+        if delta:
+            parts.append(delta)
+            chunks += 1
+            if on_delta is not None:
+                on_delta(delta)
+
+    stop_watch = threading.Event()
+    watcher = _start_cancel_watcher(response, cancel, stop_watch)
+    stream_deadline = time.monotonic() + max(1.0, float(timeout))
+    _set_read_timeout(response, SOCKET_POLL_SECONDS)
     try:
-        for raw in response:
-            if cancel is not None and getattr(cancel, "is_set", lambda: False)():
-                cancelled = True
-                break
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            if line.startswith(":"):
-                continue
-            if not line.startswith("data:"):
-                plain_lines.append(line)
-                continue
-            saw_sse = True
-            data_text = line[5:].strip()
-            if data_text == STREAM_DONE:
-                break
-            try:
-                data = json.loads(data_text)
-            except json.JSONDecodeError:
-                raise errors.NetworkError(reason=errors.PROTOCOL) from None
-            if not isinstance(data, Mapping):
-                raise errors.NetworkError(reason=errors.PROTOCOL)
-            delta, reasoning, finish = _extract_delta(data)
-            if finish:
-                finish_reason = finish
-            if reasoning:
-                reasoning_parts.append(reasoning)
-                if on_reasoning is not None:
-                    on_reasoning(reasoning)
-            if delta:
-                parts.append(delta)
-                chunks += 1
-                if on_delta is not None:
-                    on_delta(delta)
-    except errors.NetworkError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - 读流中断也归入稳定分类
-        reason = errors.classify_exception(exc)
-        if reason is None:
+        event_lines: list[str] = []
+        try:
+            while True:
+                if _cancelled(cancel):
+                    cancelled = True
+                    break
+                try:
+                    raw = _readline(response, cancel, stream_deadline)
+                except ChatCancelled:
+                    cancelled = True
+                    break
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").rstrip()
+                if not line.strip():
+                    # SSE 事件以空行分隔：一个事件可以拆成多行 `data:`。
+                    if event_lines:
+                        saw_sse = True
+                        _apply("\n".join(event_lines))
+                        event_lines.clear()
+                        if saw_done:
+                            break
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    saw_sse = True
+                    event_lines.append(line[5:].lstrip())
+                    continue
+                plain_lines.append(line.strip())
+            if event_lines and not saw_done and not cancelled:
+                _apply("\n".join(event_lines))
+        except errors.NetworkError:
             raise
-        raise errors.NetworkError(reason=reason) from exc
+        except Exception as exc:  # noqa: BLE001 - 读流中断也归入稳定分类
+            if _cancelled(cancel):
+                cancelled = True
+            else:
+                reason = errors.classify_exception(exc)
+                if reason is None:
+                    raise
+                raise errors.NetworkError(reason=reason) from exc
     finally:
+        stop_watch.set()
+        if watcher is not None:
+            watcher.join(timeout=0.2)
         try:
             response.close()
         except Exception:
@@ -562,12 +622,13 @@ def stream_chat(
 
     if not saw_sse and plain_lines:
         try:
-            data = json.loads("\n".join(plain_lines))
+            body = json.loads("\n".join(plain_lines))
         except json.JSONDecodeError:
             raise errors.NetworkError(reason=errors.PROTOCOL) from None
-        if not isinstance(data, Mapping):
+        if not isinstance(body, Mapping):
             raise errors.NetworkError(reason=errors.PROTOCOL)
-        text, reasoning, finish = _extract_delta(data)
+        _raise_for_error_frame(body)
+        text, reasoning, finish = _extract_delta(body)
         if reasoning:
             reasoning_parts.append(reasoning)
             if on_reasoning is not None:
@@ -579,6 +640,8 @@ def stream_chat(
                 on_delta(text)
         if finish:
             finish_reason = finish
+        # 一次性 JSON 响应没有 `[DONE]`：它本身就是完整答复。
+        saw_done = True
 
     if (
         reasoning_parts
@@ -592,10 +655,97 @@ def stream_chat(
             "请换一个更小的思考强度或在服务端调大输出上限。"
         )
 
+    if cancelled or _cancelled(cancel):
+        end_reason = "cancelled"
+    elif saw_done or finish_reason:
+        end_reason = "done"
+    elif not parts and not reasoning_parts:
+        end_reason = "empty"
+    else:
+        end_reason = "eof"
+
     return ChatResult(
         text="".join(parts),
         chunks=chunks,
         finish_reason=finish_reason,
         cancelled=cancelled,
         reasoning="".join(reasoning_parts),
+        incomplete=end_reason in {"eof", "empty"},
+        end_reason=end_reason,
     )
+
+
+SOCKET_POLL_SECONDS = 0.5
+
+
+def _set_read_timeout(response, seconds: float) -> bool:
+    """把底层 socket 的读超时压短：否则一次阻塞读会一直挂到全局 timeout。"""
+    try:
+        sock = response.fp.raw._sock
+    except Exception:  # noqa: BLE001 - 测试替身没有真实 socket
+        return False
+    try:
+        sock.settimeout(float(seconds))
+    except OSError:
+        return False
+    return True
+
+
+def _readline(response, cancel, deadline: float) -> bytes:
+    """读一行；反复超时只表示「暂时没数据」，取消与总预算在这里生效。"""
+    while True:
+        try:
+            return response.readline()
+        except errors.NetworkError:
+            raise
+        except TimeoutError:
+            if _cancelled(cancel):
+                raise ChatCancelled("已停止") from None
+            if time.monotonic() > deadline:
+                raise errors.NetworkTimeout("连接超时") from None
+            continue
+
+
+def _raise_for_error_frame(payload: Mapping[str, Any]) -> None:
+    """HTTP 200 + SSE 错误帧：不能吞成「空回答」，要按状态码分类抛错。
+
+    只取 ``code`` 做分类，**不回显** ``message``——响应体可能原样回显请求里的密钥。
+    """
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return
+    try:
+        status = int(error.get("code"))
+    except (TypeError, ValueError):
+        status = 0
+    if status:
+        reason = errors.classify_http_status(status)
+        if reason == errors.AUTH:
+            raise errors.AuthError(status)
+        if reason == errors.RATE_LIMIT:
+            raise errors.RateLimitError(status)
+        raise errors.HttpStatusError(status)
+    raise errors.NetworkError(reason=errors.PROTOCOL)
+
+
+def _start_cancel_watcher(response, cancel, stop: threading.Event):
+    """取消要能打断阻塞读：只靠「两行之间检查」会让线程一直卡到 socket 超时。"""
+    if cancel is None or not hasattr(cancel, "is_set"):
+        return None
+
+    def _watch() -> None:
+        while not stop.wait(0.05):
+            try:
+                if not cancel.is_set():
+                    continue
+            except Exception:  # noqa: BLE001 - 取消对象坏了就退出监视
+                return
+            try:
+                response.close()
+            except Exception:
+                pass
+            return
+
+    thread = threading.Thread(target=_watch, name="petcore-chat-cancel", daemon=True)
+    thread.start()
+    return thread

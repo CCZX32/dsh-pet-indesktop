@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QGuiApplication, QImageReader, QPixmap
 
 FALLBACK_DPR = 1.0
@@ -87,16 +87,34 @@ def scale_pixmap(
 def load_pixmap(
     path: Path | str, max_side: int, dpr: float = FALLBACK_DPR
 ) -> QPixmap | None:
-    """读图并缩放到 ``max_side`` 逻辑像素以内，返回带 DPR 的 ``QPixmap``。"""
+    """读图并缩放到 ``max_side`` 逻辑像素以内，返回带 DPR 的 ``QPixmap``。
+
+    **先**用 ``setScaledSize`` 让解码器按目标尺寸出图：整图解码一张 12MP 照片要
+    92ms（48MP 约 350ms、峰值内存 ~190MB），而按目标解码只要 9ms（审计 AUD-35）。
+    """
     reader = QImageReader(str(path))
     if not reader.canRead():
         return None
+    physical_limit = physical_side(max_side, dpr)
+    size = reader.size()
+    pre_scaled = False
+    if size.isValid() and max(size.width(), size.height()) > physical_limit:
+        scaled = QSize(size)
+        scaled.scale(physical_limit, physical_limit, Qt.AspectRatioMode.KeepAspectRatio)
+        if scaled.isValid() and not scaled.isEmpty():
+            reader.setScaledSize(scaled)
+            pre_scaled = True
     image = reader.read()
     if image.isNull():
         return None
     pixmap = QPixmap.fromImage(image)
     if pixmap.isNull():
         return None
+    if pre_scaled:
+        # 已经在解码阶段缩到物理上限：不要再交给 `scale_pixmap`，
+        # 否则会按 DPR 再放大一次（780 → 1170）。
+        pixmap.setDevicePixelRatio(sanitize_dpr(dpr))
+        return pixmap
     return scale_pixmap(pixmap, max_side, dpr)
 
 

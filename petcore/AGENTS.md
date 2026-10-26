@@ -155,6 +155,15 @@
 - **命令反馈**：菜单/设置触发的命令反馈用 `say/notify(force=True)`，别被免打扰吞掉。
 - **菜单勾选**：勾选项必须渲染出对勾（`menu_style.menu_stylesheet()` 注入的 check 图片），
   勾选项不要再设 icon。
+- **图标槽位 18px**：菜单与设置侧栏的统一槽位是 `icons.MENU_ICON_SIZE = 18`
+  （主分支 `small_icon_size(menu)=18`、桌面版设置侧栏 18）。矢量图标必须在**36 单位设计稿**
+  上按槽位缩放并反向补偿笔宽（最终笔画固定 1.6 逻辑像素），不许把设计稿直接画进 18px
+  画布（会被裁一半）；`QMenu::icon` 的 width/height 与 `QMenu::item` 左内边距同源，
+  改一处就要同步另一处。QSS 里不能写 `#` 注释（会被当成 ID 选择器，整条规则失效）。
+- **动画缩略图必须裁剪**：整帧素材（640×390 里角色只占中间一小块）要先按 alpha
+  包围盒裁掉透明留白、再适配进 18px 槽位（`icons.fitted_icon`，主分支
+  `fitted_pet_pixmap_icon` 同款）；不许把整帧或带 DPR 的 pixmap 直接塞进 `QIcon`
+  ——前者让角色只剩几个像素，后者让 Qt 按物理像素当逻辑像素算、图标再小一半。
 - **碰撞不瞬移**：`MotionController.set_velocity()` 切 `thrown` 前必须
   `_x/_y = window.x()/y()`——内部坐标只在该方法里重锚，漏掉就是「被撞闪现到别处」。
 - **探头只被真撞击打断**：`impact_speed >= HIT_FEEDBACK_MIN_SPEED` 时先
@@ -169,6 +178,12 @@
   候选包必须传 `-OutputRoot` 隔离输出（dist/work/spec、`--check` 与 Inno `/O` 全部收束；
   拒绝仓库根与已含 `dsh-pet-core-setup.exe` 的目录），`-Clean` 只传 PyInstaller 的
   `--clean`、不删除任何目录。
+  **冒烟必须等待 GUI 子系统进程**：`-Windowed` 产物用 `& $exe --check …` 调用时
+  PowerShell **不等待**（实测 52ms 返回、`$LASTEXITCODE` 为空、`check.json` 还没落盘），
+  于是构建门实际在「读旧报告或直接抛路径不存在」。必须
+  `Start-Process -FilePath $exe -ArgumentList @("--check --strict","--out","…") -Wait -PassThru`
+  并按 `$smoke.ExitCode` 判红，再断言报告存在且 `LastWriteTimeUtc` 前进（不许用删除旧文件
+  来绕开，`Remove-Item` 在本脚本里仍属禁止项）。
 - **构建产物必须签名**：本机 Smart App Control 会拦截未签名的新构建
   （`CreateProcess` 返回 4551「An Application Control policy has blocked this file」），
   PyInstaller exe 与 Inno setup 都会被拦。用
@@ -358,15 +373,88 @@
   不许把段判定写进窗口，也不许让窗口直接调 psutil。
 - **宽度只由模板驱动**：段盒宽来自声明样本（`max_text`），**读数与告警级不进宽度键**。
   任何"按当前读数算宽"的写法都会让岛随数字抖；`+N` 的 N 按实际折掉的段数算。
-- **看不清就不采**：岛隐藏、段未启用、段被折进 `+N` 时必须停掉对应采样线程；
+- **看不清就不采**：岛隐藏、段未启用、**胶囊上**段被折进 `+N` 时必须停掉对应采样线程；
   CPU/内存采样间隔硬上限 1 Hz（更快没有意义且浪费电）。
+  **卡片展开态例外**：每段都有自己的明细行，折行只是排版，不许据此停采——否则
+  「推快照 → 折行 → 停采 → 清快照 → 复原」会变成 1 Hz 的启停振荡（审计 AUD-25）。
+  卡片宽度必须取**胶囊态**（不折行）的自然宽，不许取折叠后的 plan 宽（越折越窄）。
 - **告警只染数值**：`warn/crit` 只作用于数值与单位盒，label、竖线、段底不沾；
   无读数的拍沿用上一级（不褪色），`error` 段折叠时 chip 按 `crit` 报。
 - **展开态预算**：卡片宽钳在 340–420；展开时行必须按**卡片宽**重排（放不下折 `+N`），
   收起时再用屏宽重算——两条路径共用 `layout.plan_info_row()`。
 - **灵动岛默认关闭**：`island_enabled=False`；菜单「桌宠控制 → 灵动岛」与设置页同一开关，
   改动实时生效，取消回滚。
+- **岛拖动/停靠**：起拖阈值只能用 `QApplication.startDragDistance()`——`QWidget`
+  **没有** `startDragDistance()`，写成 `self.startDragDistance()` 每次拖拽都会在
+  第一帧抛 `AttributeError`（退化成单击，用户说「拖不动」）。拖动期间 `_update_size()`
+  直接 return（几何冻结）、清 `_geo_from/_geo_to`（否则动画每 16ms 把窗口拽回去）；
+  落点按**松手光标**选屏（`screenAt`），先夹回屏幕再判停靠，顺序不许换。
+- **停靠口径**：距边 ≤`DOCK_THRESHOLD=40`（四边等权、取 `abs`）→ 收成
+  `STRIP_THICKNESS=16` 细条（左右停靠长 64，竖直中心用 `rect.top() + h // 2`，
+  不许用 `QRect.center()`，否则每循环漂 1px）。纯函数在
+  `petcore/island/layout.py::dock_edge_for/strip_rect_for`，窗口层只做 QRect 互转。
+- **细条不采样**：`_strip_visible()`（已停靠 + 没滑出 + 没展开）时内容一像素都不画，
+  `_sync_sampling()` 必须据此停掉全部采样器；细条态 `_clamp_to_screen()` 直接 return。
+- **悬停滑出**：可悬停区同时含「滑出胶囊」与「细条」两张矩形、逐矩形 `contains`，
+  不许取包围盒；离开 800ms 收回且收回前必须复检，否则细条盖回光标会形成 1s 自持振荡。
+- **岛几何动画**：停靠/滑出/展开/收起一律走 `_animate_to()`（180ms `ease_out_cubic`、
+  16ms 表仅动画期间运行、每帧 `set_geometry_changed_callback` 通知宿主）。布局定型
+  （`setFixedSize`）会立刻改几何，想播动画必须先退回起点再插值；不可见时直接落位。
+- **岛反馈动效**：悬停缩放 1.02（弹簧，钳 0.97–1.03，展开态强制 1.0）、事件反馈
+  果冻（竖压横鼓、绕胶囊中心、钳 0.85–1.12），两者都写在 `_on_anim_tick`；
+  新加形变通道必须同时给钳位与停止阈值，否则连撞会把振幅泵到画不出来。
+- **探针在 platform、接线在 ui**：GPU（`platform/gpu.py` + `gpu_monitor.py`，ctypes PDH +
+  DXGI 名字）与 FPS（`platform/fps.py` + `fps_permission.py`，随包 PresentMon 子进程）
+  都零 Qt、零网络库、不 import `pet.*`。岛**不许**直接调平台：它在 `_sync_sampling()`
+  里算「还需要哪些段」（可见 + 段启用 + 未被折进 `+N`），交给
+  `ui/probes.py:IslandProbeHub` 启停采样器并逐秒推快照；空集要停采并清段快照。
+- **探针不伪造读数**：GPU/FPS 只有 `ok` 带读数，其余一律 `None` + 具体原因；`unsupported`
+  与「未接入探针」**不占位**，原因只写卡片一行。首次读数前是 `sampling`（PDH 基线），
+  不是 0。
+- **GPU query 属于创建线程**：跨线程 `read`/`close` 必须拒绝（owner 线程已退出时由新线程
+  接管并重建基线，否则「停采→恢复」永久失效）。`poll()` 由调用线程付冷启成本（约 0.3 s），
+  GUI 线程只许 `snapshot()`。
+- **FPS 权限不许自动提权**：`fps_permission.request_access()` 只在用户点设置页按钮时弹
+  一次 UAC；点「否」是 `cancelled` 不是错误。没有 Performance Log Users 时如实报
+  `access denied`，不许写成「0 帧」或静默。
+- **迁移幂等只认标记**：`<root>/migration.json` 的 `completed` 是唯一判据，**不许**用
+  「目标文件不存在」代替（第一次启动后永久失效）。七个域各一个 `migrate(ctx)`，只返回
+  条目；备份/写失败由 `MigrationContext` 记账。配置域**只补缺不覆盖**，且直接写合并后的
+  原始字典——走 `Config.save()` 会被 `DEFAULTS` 填满，后续域再也补不进去。
+- **迁移不搬密钥到配置**：`api.json`/`config.json` 永不出现 Key；凭据只做钥匙串到钥匙串
+  （`dsh-pet-standalone` → `dsh-pet-core`），值不进日志、报告与异常文本。回滚靠标记里的
+  `restore` 映射（backup 为空串 = 删除新建文件），原旧文件一律不动。
+- **工作线程回 GUI 只经 `gui_dispatch`**：`QTimer.singleShot(0, cb)` 两参重载在没有事件
+  循环的工作线程上永不触发；用 `QtScheduler`（信号排队）。同理，持锁调
+  `Future.cancel()` 会让 PENDING 任务的 done_callback 同线程重入同一把锁 = 死锁，取消必须
+  在锁外做。
 
+
+- **授信 = 位置 + 标记**：`mods.trust.is_trusted()` 只认 `paths.install_mods_dir()` 下的
+  `.trusted`；本地导入（ZIP/目录）落盘前必须剥掉包里自带的标记（`install(keep_trust_marker=)`
+  只给市场 `BUNDLED` 来源用）。包内容不能宣布自己被信任（审计 AUD-01）。
+- **安装包信任锚是清单**：`UpdateService.install()` 除自洽侧车外，还必须与
+  `select_asset(manifest)` 登记的文件名/大小/摘要三者一致；侧车同目录可写，不能自证。
+- **config 的 `extra` 区块**：`config.json` 顶层只允许 `DEFAULTS` 键；第三方扩展偏好
+  一律落 `extra`（`Config.get/set` 对调用方透明）。键名匹配
+  `^[a-z0-9][a-z0-9._-]{0,127}$`，单值 ≤4KB、总量 ≤64KB，命中密钥样式的值直接拒绝。
+- **迁移回滚必须可追溯**：`rollback()` 覆盖/删除前先留 `<target>.pre-rollback-<时间戳>`；
+  同一 target 的多条 restore 只按**最早**那条恢复；`not_found`/`failed_write` 都算失败，
+  只有全部成功才删标记。域级 `completed` 只在**同批没有失败**时写入（审计 AUD-06/09）。
+- **`--check` 只读、`--strict` 才是构建门**：`--check` 用 `Config.load(persist=False)`，
+  不写 `config.json`、不建 `migration-backup`；构建脚本用 `--check --strict` 并解析
+  `check.json` 复核 `menu_template=json`、`builtin_readable>0`、`characters` 非空。
+- **SSE 必须给完整性信号**：`ChatResult.incomplete` / `end_reason`（`done|eof|empty|cancelled`）；
+  没有 `[DONE]`、没有 `finish_reason`、或响应体为空时，调用方必须提示，不许当完整回答落盘。
+  HTTP 200 + `data: {"error":…}` 要按状态码分类抛错，不许吞成空回答。
+- **换路由要重建请求**：`ProxyHandler`/重定向会**就地**改写 `Request`；`urlopen` 每次尝试
+  必须 `clone_request()`。换路条件除传输失败与 `retry_statuses` 外，还要求响应**不带**
+  `Retry-After`。
+- **设置页差异写入**：页面的 `_on_changed` 只写「与上次写出的值不同」的键；整组回写会把
+  右键菜单里刚改的勾选项按旧控件值翻回去。菜单编排只写内存，落盘统一由
+  `SettingsDialog._commit()` 在所有页通过后做。
+- **节流缓存与实例隔离**：`--instance` 会设置 `PETCORE_INSTANCE`，缩略图等进程级缓存目录
+  按实例分目录；`--root ""` 按未指定处理（Windows 上 `Path("")` 是当前目录）。
 
 ## 4. 变更纪律
 

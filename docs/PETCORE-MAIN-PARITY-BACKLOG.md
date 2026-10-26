@@ -265,7 +265,7 @@
 
 | 领域 | 当前结论 | 证据与边界 |
 |---|---|---|
-| 配置/会话/待办迁移 | **已实现，自动化通过** | `MigrationRecord`、备份优先、原子写入、诊断状态；`SessionStore` 与 reminder store 增加 schema/失败保真；损坏文件不删除。默认目录 `python -m petcore --check` 本次 exit 0。 |
+| 配置/会话/待办迁移 | **原快照口径过宽，2026-10-26 校正**：本快照当时只有「迁移记录/备份/原子写/schema 校验」，会话与待办**并没有迁移代码**；真正的七域迁移见 `petcore/migration/`（L085） | `MigrationRecord`、备份优先、原子写入、诊断状态；`SessionStore` 与 reminder store 的 schema/失败保真；损坏文件不删除。默认目录 `python -m petcore --check` 本次 exit 0。 |
 | WorkerHost | **已实现，自动化通过** | `petcore/platform/worker.py` 覆盖 READY、非法消息、取消、有界 shutdown、迟到回调边界；未新增虚构业务调用方。 |
 | 角色设置内导入 | **已实现，自动化通过** | `petcore/content/importer.py` 复用包校验边界，拒绝路径穿越/重复覆盖/恶意 ZIP；设置页提供入口；未实现远程角色素材下载。 |
 | GraphType 入口 | **已实现，自动化通过** | `menu_actions.py` 对已有 `GraphType` 提供懒加载分组；资源缺失时保持隐藏并回退现有动作，不宣称每个角色资源齐全。 |
@@ -280,10 +280,32 @@
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| 灵动岛 P5-a2 | 已实现 / petcore 自动化通过 | 停靠、展开、消息、余额、第三方段、折叠停采样和避让已接入；GPU/FPS 以探针可用性为准 |
+| 灵动岛 P5-a2 | 已实现 / petcore 自动化通过 | 展开、消息、余额、第三方段、折叠停采样和避让已接入；**停靠细条 `island_edge_dock` / `island_dock_edge` + 悬停滑出 + 180ms 几何动画 + 悬停缩放 + 事件果冻已移植（L096）**；GPU/FPS 已接真探针（见下节） |
 | 点击显示余额 | 已实现 / petcore 自动化通过 | 左键、右键、灵动岛共用 BalancePresenter，配置按 slot 隔离 |
 | 菜单与设置几何 | 已实现 / petcore 自动化通过 | 图标列宽、导航 icon size、下拉框文字与箭头槽已明确度量 |
 | 性能治理 | 已实现 / 有本机实测 | 1 Hz 采样约束、隐藏停采样、聚合计数；实测数据在 P5 报告与 scratch JSON |
 | 检查更新/Core 自更新 | 已实现 / petcore 自动化通过 | HTTPS/ETag/断点/摘要/镜像与源码安全降级；冻结包安装器和公开 Release 待另一台 Windows 机器验收 |
 
 不要把“自动化通过”改写为“Windows 安装器通过”或“远端发布完成”。
+
+## 2026-10-26 P5 修复与 P6 两项快照
+
+本快照记录本轮实际代码与实测，不把计划项写成已完成。实现细节与原始输出见
+[`PR-REPORT-PETCORE-P5-FIX-P6-2026-10-26.md`](PR-REPORT-PETCORE-P5-FIX-P6-2026-10-26.md)。
+
+| 条目 | 状态 | 说明与边界 |
+|---|---|---|
+| 余额投递 / 取消死锁 | 已修 + 有复现测试 | 投递改走 `QtScheduler`（两参 `singleShot` 从工作线程永不触发，已实测）；`cancel()` 锁外取消（PENDING future 同步回调会自锁，已实测挂死） |
+| 菜单入口 | 已修 | `show_balance`/`check_update` 进入模板与内置兜底布局，此前注册了但永远不渲染 |
+| 岛避让 | 已改口径 | 障碍物用桌宠 `body_rect()`；自动挪动不落盘、3 拍无遮挡回原位；用户拖动后作废 |
+| 更新取消 / 安装门禁 | 已修 | `check()` 可取消、排队取消不被吞、`install()` 重算摘要并支持重启后安装、源码运行不给点亮安装按钮、状态消息不双写 |
+| 段不可用语义 | 已对齐主分支 | `unsupported`/未接入探针不占位，原因只在卡片一行；此前会退化成 `--` + 告警红 |
+| 旧数据迁移 | **七域已实现** | `petcore/migration/`：配置 / slot（含 slot0 并入全局）/ 活跃集合 / 会话 / 待办 / API 规格 / 凭据引用；标记幂等、dry-run、回滚、`petcore migrate`、`--check` 诊断 |
+| 旧配置键级扩表 | **未做** | 旧 `config.json` 的 99 个未映射键（`chat_*`、`weather_*`、`voice_chime_*`、`festival_reminder_*`、`dialogue_*`、`music_*` 等）仍不在别名表；机制已就绪，补表即生效 |
+| GPU 真探针 | **已实现 / 本机实测** | PDH `\GPU Engine(*)\Utilization Percentage` + DXGI 名字；本机 AMD Radeon 780M 真实读数，稳态单拍 2–3.5 ms，冷启 283.6 ms |
+| FPS 真探针 | **已实现 / 本机未取得读数** | PresentMon 子进程 + 1 秒事件窗 + 进程级单会话；本机普通权限 `access denied`，样本报明确原因，**不宣称 FPS 通过**；需 Performance Log Users 且重新登录 |
+| 探针接线 | 已实现 | 岛报「还需要哪些段」，宿主启停；隐藏/折叠/关段即停采，`--check` 有 `performance` 计数出口 |
+| 岛动效余项 / 岛聊天 | 部分 | 停靠细条、几何动画、悬停缩放、事件果冻已做（L096）；**仍未做**：状态点五态、声纳环、回复呼吸浮动、内容淡化（需内容位图缓存）、灵动岛聊天与碰撞、隐藏后由岛唤起对话 |
+| 冻结包 PresentMon 落点 | 待验证 | 构建脚本有产物二次校验，本轮未重建安装包 |
+
+不要把「petcore 自动化通过」或「本机 GPU 读到数」改写成「安装器通过」「FPS 已验收」。

@@ -117,3 +117,16 @@
 
 | L082 | 2026-10-25 | P5 更新取消与可选探针收尾 | 更新下载中/取消状态和 generation 拒收，GPU/FPS 可选 snapshot 接入；Ruff、聚焦 121、CPU 压力 3×121、petcore 1513 通过；实机/冻结包仍留缺口。 实现提交 `ce8c67fb`。 | update、cancel、GPU、FPS、island、petcore-only |
 | L083 | 2026-10-26 | P5 远端交付 | 实现 `ce8c67fb` 已推送目标分支；提交前 Ruff、petcore 1513、文档/架构 306 通过，回填 SHA 与验收边界。 | Git、push、petcore-only、交付 |
+| L084 | 2026-10-26 | P5 硬伤修复 | 余额投递改走 QtScheduler、cancel 锁外取消、两个菜单项落模板、避让用 body_rect 且不落盘、更新取消/侧车摘要/安装门禁、段 unsupported 不占位、性能计数出口；1522 passed。 | balance、deadlock、menu、island、update、performance |
+| L085 | 2026-10-26 | 旧数据全量迁移 | `petcore/migration/` 七域（配置/slot/活跃集合/会话/待办/API/凭据）+ 标记幂等 + dry-run + 回滚 + `petcore migrate` + `--check` 诊断；迁移族 41 passed。 | migration、marker、rollback、sessions、todos、api、keyring |
+| L086 | 2026-10-26 | GPU/FPS 真探针 | PDH 读数器与 DXGI 名字、PresentMon 单会话与 1 秒事件窗、一次性 UAC 授权、岛探针 hub 与按需启停、打包随附 PresentMon；本机 GPU 真读数，FPS 权限受限；1612 passed。 | GPU、PDH、FPS、PresentMon、probes、packaging |
+| L087 | 2026-10-26 | petcore 全量代码审计（只读） | 九域并行深读 + 红队证伪，28 条发现（P0×1/P1×9/P2×12/P3×6）：本地导入 `.trusted` 绕过授权、rollback 非回滚、Config 丢未登记键、旧键 41/159 静默丢失、代理兜底空转、reload 跑旧代码、SSE 断流当成功、岛展开致探针 1Hz 振荡、API 页按钮不可达、打包收束失效；红队推翻 1 条、降级 6 条。 | audit、security、migration、config、http、reload、island、settings、packaging |
+| L088 | 2026-10-26 | 安全与授权（审计修复） | 授信=位置+标记（导入剥 `.trusted`）、更新安装回查清单、`file://`/内网拦截与重定向剥头、压缩包 ADS/保留名/大小写重名。 | security、trust、update、redirect、zip |
+| L089 | 2026-10-26 | 配置与迁移完整性（审计修复） | config `extra` 区块（未知键可存、密钥值拒绝）、补 41 条同名旧键并记 dropped、`--check` 只读、坏配置留档、回滚留 `.pre-rollback` 且失败保标记、completed 判据收紧、待办历史改 list[str]。 | config、extra、migration、rollback、dropped |
+| L090 | 2026-10-26 | 网络与对话正确性（审计修复） | `urlopen` 每轮重建请求、Retry-After 不换路、新增 tls 分类、`Body.truncated` 拒半截音频、SSE `incomplete/end_reason` 与错误帧、检索 45s 预算、取消打断阻塞读、余额单飞、兜底音色缓存键。 | http、sse、tts、balance、cancel |
+| L091 | 2026-10-26 | 运行时卫生（审计修复） | 重载前 detach + 清子模块、`SystemExit` 转诊断、`cancel_owner` 真实现、`on_tick` 返回注销函数。 | reload、mods、scheduler、uninstall |
+| L092 | 2026-10-26 | UI 可达性与采样口径（审计修复） | 岛卡片态不停采且卡片宽不再棘轮、设置页横向滚动、互动页差异写入、菜单编排不自行落盘、搜索含按钮/下拉、覆盖表修正、探针每拍调和重试。 | island、probes、settings、search、coverage |
+| L093 | 2026-10-26 | 结构守卫与构建门（审计修复） | 守卫解析相对 import + 三组新红线、枚举下沉 contracts、`-OutputRoot` 收束与 `-DryRun`、`--check --strict` 构建门、presentmon 前置校验、capabilities 读出口。 | architecture、contracts、build、strict |
+| L094 | 2026-10-26 | 画质与动画（审计修复） | 命中与绘制互逆、冷 meta 墙钟推进 + 看门狗、壁纸按 DPR、`load_pixmap` 按需解码、portable 根/空 root/实例缓存目录。 | hit-test、move、dpr、images、paths |
+| L095 | 2026-10-26 | 点击显示余额验收与构建冒烟等待修复 | 余额链路本就在 P5 实现（配置键→设置页→点击→单飞→气泡/岛），补 4 例点击回归；修构建冒烟对 -Windowed exe 不等待（& $exe 52ms 返回）导致读旧/缺报告的问题，改 Start-Process -Wait 并加新例。 | click_show_balance、balance、Start-Process、build gate、setup |
+| L096 | 2026-10-26 | 图标槽位与灵动岛停靠/动效移植 | 菜单/侧栏图标收到 18px 槽位（设计稿缩放 + 笔宽补偿），动画缩略图裁 alpha 包围盒后适配槽位；修灵动岛拖不动（QWidget 无 startDragDistance）、移植 40px 贴边停靠/16px 细条/悬停滑出/180ms 几何动画/悬停缩放/事件果冻，细条停采。 | icons、thumbnail、island、dock、GeoAnimation |

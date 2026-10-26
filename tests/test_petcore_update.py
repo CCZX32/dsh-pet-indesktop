@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from petcore.update import UpdateAsset, UpdateResult, UpdateService, parse_manifest
+from petcore.update import UpdateAsset, UpdateManifest, UpdateResult, UpdateService, parse_manifest
 
 
 class _Response:
@@ -202,6 +202,16 @@ def test_download_tries_trusted_asset_mirror_after_transport_failure(tmp_path: P
     assert service.status().state == "downloaded"
 
 
+def _write_verified_meta(package: Path, digest: str) -> None:
+    import json
+
+    meta = package.with_suffix(package.suffix + ".verify.json")
+    meta.write_text(
+        json.dumps({"name": package.name, "size": package.stat().st_size, "sha256": digest}),
+        encoding="utf-8",
+    )
+
+
 def test_update_install_is_source_safe_and_frozen_windows_only(tmp_path: Path) -> None:
     package = tmp_path / "updates" / "petcore-setup.exe"
     package.parent.mkdir()
@@ -221,8 +231,108 @@ def test_update_install_is_source_safe_and_frozen_windows_only(tmp_path: Path) -
     frozen_package = tmp_path / "frozen" / "updates" / package.name
     frozen_package.parent.mkdir(parents=True)
     frozen_package.write_bytes(b"candidate")
-    frozen_service._status = UpdateResult(True, "downloaded", path=frozen_package)
+    _write_verified_meta(frozen_package, hashlib.sha256(b"candidate").hexdigest())
+    # 侧车不能自证：安装门禁还要求「与更新清单登记条目一致」。
+    frozen_service._manifest = UpdateManifest(  # noqa: SLF001 - 单元测试直接给清单
+        version="9.0.0",
+        release_url="https://github.com/example/releases/9.0.0",
+        notes="",
+        assets=(
+            UpdateAsset(
+                frozen_package.name,
+                f"https://github.com/example/{frozen_package.name}",
+                frozen_package.stat().st_size,
+                hashlib.sha256(b"candidate").hexdigest(),
+            ),
+        ),
+    )
     result = frozen_service.install(frozen_package)
     assert result.ok is True
     assert result.state == "installer_started"
     assert launched == [frozen_package]
+
+
+def test_update_install_rejects_a_package_swapped_after_verification(tmp_path: Path) -> None:
+    launched: list[Path] = []
+    service = UpdateService(
+        tmp_path,
+        platform="windows",
+        frozen=True,
+        launcher=launched.append,
+    )
+    package = tmp_path / "updates" / "petcore-setup.exe"
+    package.parent.mkdir()
+    package.write_bytes(b"candidate")
+    _write_verified_meta(package, hashlib.sha256(b"candidate").hexdigest())
+
+    package.write_bytes(b"tampered")
+    result = service.install(package)
+    assert result.ok is False
+    assert result.state == "invalid_package"
+    assert launched == []
+
+
+def test_update_install_without_verified_meta_is_refused(tmp_path: Path) -> None:
+    """重启后靠侧车记录恢复可安装状态；没有侧车就不能装。"""
+    launched: list[Path] = []
+    service = UpdateService(tmp_path, platform="windows", frozen=True, launcher=launched.append)
+    package = tmp_path / "updates" / "petcore-setup.exe"
+    package.parent.mkdir()
+    package.write_bytes(b"candidate")
+    result = service.install(package)
+    assert result.ok is False
+    assert result.state == "invalid_package"
+    assert launched == []
+
+
+def test_update_download_writes_verified_meta_for_later_install(tmp_path: Path) -> None:
+    body = b"payload"
+    digest = hashlib.sha256(body).hexdigest()
+    asset = UpdateAsset(
+        name="petcore-setup.exe",
+        url="https://api.github.com/repos/o/r/releases/assets/1",
+        size=len(body),
+        sha256=digest,
+    )
+
+    def fetch(_request):
+        return _Response(body)
+
+    service = UpdateService(tmp_path, platform="windows", frozen=True, fetcher=fetch)
+    path = service.download(asset)
+    meta = path.with_suffix(path.suffix + ".verify.json")
+    assert meta.is_file()
+    assert service._package_is_verified(path) is True
+
+def test_update_check_stops_when_cancel_was_requested(tmp_path: Path) -> None:
+    requests: list[object] = []
+
+    def fetch(request):
+        requests.append(request)
+        raise AssertionError("取消后不应再发请求")
+
+    service = UpdateService(tmp_path, fetcher=fetch)
+    service.cancel()
+    result = service.check(force=True)
+    assert result.state == "cancelled"
+    assert requests == []
+    service.reset_cancel()
+
+
+def test_download_does_not_clear_a_cancel_that_arrived_before_it_started(tmp_path: Path) -> None:
+    """排队期间按下的取消不能被 worker 开头的 clear 吞掉。"""
+    body = b"payload"
+    asset = UpdateAsset(
+        name="petcore-setup.exe",
+        url="https://api.github.com/repos/o/r/releases/assets/1",
+        size=len(body),
+        sha256=hashlib.sha256(body).hexdigest(),
+    )
+
+    def fetch(_request):
+        raise AssertionError("取消后不应再发请求")
+
+    service = UpdateService(tmp_path, fetcher=fetch)
+    service.cancel()
+    with pytest.raises(InterruptedError):
+        service.download(asset)

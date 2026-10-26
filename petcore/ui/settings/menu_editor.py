@@ -51,7 +51,9 @@ class MenuEditor(QWidget):
         self.model = model
         self._preview: QMenu | None = None
         self._initial = self._editor_nodes()
-        self._initial_value = self._encode(self._initial)
+        # 基准要等树建好才拿得到；与 `value()` 同结构、同类型（dict），否则
+        # `is_dirty()` 恒为 True（审计 AUD-28）。`is_dirty()` 首次调用时惰性定基准。
+        self._initial_value: dict | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -107,6 +109,9 @@ class MenuEditor(QWidget):
 
         self._populate(self._initial)
         self._sync_buttons()
+        # 基准必须在树建好、填充完之后取：与 `value()` 同结构同类型（dict），
+        # 否则 `is_dirty()` 恒为 True（审计 AUD-28）。
+        self._initial_value = self.value()
 
     # ------------------------------------------------------------ data
     def _editor_nodes(self) -> list[dict]:
@@ -135,8 +140,9 @@ class MenuEditor(QWidget):
         return self.value() != self._initial_value
 
     def confirm_save(self) -> None:
+        # 只写内存，**不落盘**：落盘由 `SettingsDialog._commit()` 在所有页都通过后
+        # 统一做。这里自己 save 会让「API 页校验失败 → 取消」也留下已保存的菜单。
         self.host.config.set("menu_layout", self.value())
-        self.host.config.save()
         self._initial_value = self.value()
         if hasattr(self.host, "reload_menu"):
             self.host.reload_menu()

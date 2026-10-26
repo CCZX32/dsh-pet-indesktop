@@ -292,7 +292,7 @@ AI/识屏/音乐/语音等**执行**仍走 worker 或 mod；P3 表里的「账�
 | P3 | Core 账户/余额、AI 对话、识屏、截图提问、三个全局热键 | 已完成（基础 + 本轮效果对齐） | 主分支同款双栏对话窗、看看屏幕气泡+静默入历史、框选截图问答窗与 10% 鲸蛙彩蛋、按宠 slot 派发；OCR/翻译/主动识屏留给 P4 |
 | P4 | Agent、TTS、音乐歌词、天气、文件识别和提醒业务域 | 部分已实现 | a/b/c1/c2 只读联动已有代码；提醒调度、农历、48 签和写方未做；实机/外部服务验收不等同自动化 |
 | P5 | 灵动岛、性能治理、更新、安装器 E2E 和系统生命周期 | 代码域已实现 / petcore 自动化通过 | P5-a2、余额、UI 几何、性能计数和更新服务已落地；真实桌面、GPU/FPS、冻结安装器和 Release 仍按报告标记为环境缺口 |
-| P6 | 真双屏、混合 DPI、跨平台冒烟、发布入口切换和旧壳收敛 | 计划 | 新架构成为可回滚的正式发布入口 |
+| P6 | 真双屏、混合 DPI、跨平台冒烟、发布入口切换和旧壳收敛 | 进行中（旧数据全量迁移、GPU/FPS 真探针已完成） | 新架构成为可回滚的正式发布入口；剩余：入口切换、安装器 E2E、双屏/混合 DPI、macOS/Linux |
 
 执行纪律：每阶段先写红测试，完成代码/验证/报告后更新四份必同步文档并创建一个
 可运行的本地提交。播放速率 `0.5–2.0x`、VPet LPS/PNG 和首轮 16 宠上限是明确有意差异。
@@ -554,7 +554,7 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 
 | 状态 | 范围 | 证据与限制 |
 |---|---|---|
-| 已实现 | 灵动岛停靠/展开卡片、消息队列、余额刷新、第三方段注册、折叠停采样、避让、GPU/FPS unavailable 明确降级 | `petcore/ui/island.py`、`petcore/island/segments.py`；GPU/FPS 本机无探针时不显示伪造 0 |
+| 已实现 | 灵动岛展开卡片、消息队列、余额刷新、第三方段注册、折叠停采样、避让、GPU/FPS 真探针 | `petcore/ui/island.py`、`petcore/island/segments.py`、`petcore/platform/{gpu,gpu_monitor,fps}.py`、`petcore/ui/probes.py`；**停靠细条 `edge_dock` 未做**（只有 12 px 贴边吸附），弹簧动效/声纳/呼吸、岛聊天与碰撞仍未做 |
 | 已实现 | 左键/右键/灵动岛共用 `BalancePresenter`，按 slot 单飞、缓存、迟到结果拒收 | `petcore/account/presenter.py`、`petcore/ui/app.py`、`petcore/ui/pet_window.py` |
 | 已实现 | 菜单/托盘/设置导航显式图标尺寸、QSS 图标列宽、QComboBox 字体度量安全边距 | `petcore/ui/menu_model.py`、`petcore/ui/menu_style.py`、`petcore/ui/settings/dialog.py`、`style.py` |
 | 已实现 | 1 Hz 指标采样、隐藏/关闭停采样、UI 合并计数、缓存/网络/磁盘/worker 计数及 15s+60s×3 探针 | `.scratch/petcore-p5-complete/performance-2026-10-25.json`；当前机器为单屏 offscreen |
@@ -562,3 +562,20 @@ A–E收口后的功能扩展分发按[详细执行计划](superpowers/plans/202
 | petcore 自动化通过 | Ruff、全部 `tests/test_petcore_*.py`、P5 聚焦族、高负载 3 遍、`python -m petcore --check` | 本次报告 `PR-REPORT-PETCORE-P5-COMPLETE-2026-10-25.md` |
 | Windows 实机可见 UI | 未执行本轮真实桌面窗口/安装器交互 | 只执行了 Windows 进程级 `--check` 与 offscreen Qt；不可把它写成实机 UI 通过 |
 | 环境缺口 | GPU/FPS 原生探针、冻结安装器、双屏混合 DPI、真实余额服务、公开 CDN/Release | 已实现降级和安全拒绝路径，待具备条件时单独验收 |
+
+## 2026-10-26 P6 进展：旧数据全量迁移 + GPU/FPS 真探针
+
+| 项 | 状态 | 落点与边界 |
+|---|---|---|
+| 全局配置 / slot / 活跃集合迁移 | 已完成 | `petcore/migration/config_data.py`；只补缺不覆盖，slot0 并入全局；旧源不改 |
+| 会话迁移 | 已完成 | `petcore/migration/sessions.py`；ISO 时间 → epoch float（新 schema 只认 float） |
+| 待办迁移 | 已完成 | `petcore/migration/todos.py`；`todo_items.json` → `reminder.todo` v2，写出前后各用扩展 `validate()` 校验 |
+| API 规格 / 凭据迁移 | 已完成 | `petcore/migration/accounts.py`；`chat.providers` → `api.json`，钥匙串 `dsh-pet-standalone` → `dsh-pet-core`；密钥不进报告 |
+| 迁移幂等 / dry-run / 回滚 | 已完成 | `<root>/migration.json` 标记、`petcore migrate --dry-run/--rollback`、`--check` 的 `migration` 段 |
+| 旧配置键级扩表 | 未做 | 旧 `config.json` 99 个未映射键仍在别名表外；补 `_LEGACY_KEY_ALIASES` 即生效 |
+| GPU 探针（PDH） | 已完成 / 本机实测 | `petcore/platform/{gpu,gpu_monitor}.py`；本机 2–3.5 ms/拍，冷启 283.6 ms |
+| FPS 探针（PresentMon） | 代码完成 / 本机未取数 | `petcore/platform/fps.py`、`fps_permission.py`；本机 `access denied`，需 Performance Log Users + 重新登录 |
+| 探针接线与设置 | 已完成 | `petcore/ui/probes.py`，按需启停；设置放开 GPU/帧率两段并加授权行 |
+| 打包随附 PresentMon | 脚本已改 / 未重建 | `scripts/build_petcore.ps1` 带 `resources/presentmon` 并过 `verify_presentmon.py` |
+| 发布入口切换 | 未做 | 前置条件见 SPEC §「切换前置条件」；本轮不动 |
+| 安装器 E2E、真双屏/混合 DPI、macOS/Linux | 未做 | 需另一台机器与真实桌面条件 |

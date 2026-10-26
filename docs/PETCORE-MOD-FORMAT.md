@@ -412,6 +412,27 @@ class SystemPort(Protocol):
 `idle_seconds()` = 距离最后一次键鼠输入的秒数；非 Windows 或读取失败返回 0
 （= 不判定闲置）。`build_ports()` 现在会装配 `SystemAdapter`。
 
+### 14.3.1 扩展偏好键落在 `extra` 区块（2026-10-26 起）
+
+`config.json` 顶层只允许 `petcore.config.DEFAULTS` 里的键——这是「配置里永不出现
+API Key」的机制。第三方扩展的偏好键**照旧用** `host.config.set(key, value)`，
+但它们会落进受管的 `extra` 区块，`get/set` 对调用方透明：
+
+```json
+{ "schema": 1, "...": "...", "extra": { "mymod.enabled": true } }
+```
+
+约束（越界即被丢弃并记 warning）：键名匹配 `^[a-z0-9][a-z0-9._-]{0,127}$`；
+单值序列化后 ≤4KB、整块 ≤64KB；命中密钥样式（`sk-…`、`Bearer …`、32 位以上十六进制）
+的值**拒绝写入**。大块状态仍请用 `storage.data_dir(owner)` 自建版本化 JSON。
+
+### 14.3.2 `.trusted` 只在安装目录生效（2026-10-26 起）
+
+`mods.install.install()` 在落盘前剥掉包里自带的 `.trusted`，且
+`trust.is_trusted()` 只认 `{app}\mods`（`paths.install_mods_dir()`）下的标记。
+也就是说：**包内容不能宣布自己被信任**；本地导入的 feature 包必须靠全局
+`allow_feature_mods` 或安装器投放的标记。
+
 ### 14.3 `ConfigPort.set()`
 
 ```python

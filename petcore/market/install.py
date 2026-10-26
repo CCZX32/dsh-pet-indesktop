@@ -154,7 +154,8 @@ def _prune_backups(directory: Path) -> None:
 def _restore(root: Path, mod_id: str, backup: Path | None) -> str:
     if backup is None:
         return "没有可恢复的旧版本"
-    ok, message = mod_install.install(backup, Path(root), force=True)
+    # 恢复旧版本：备份里如果原本带官方标记，按原样还原。
+    ok, message = mod_install.install(backup, Path(root), force=True, keep_trust_marker=True)
     return f"恢复旧版本成功：{message}" if ok else f"恢复旧版本失败：{message}"
 
 
@@ -302,7 +303,9 @@ def install_package(
                         previous_version=previous,
                         attempts=downloaded.attempts,
                     )
-            ok, message = mod_install.install(pack, root, force=True)
+            ok, message = mod_install.install(
+                pack, root, force=True, keep_trust_marker=writes_trusted_marker(origin)
+            )
         if not ok:
             return InstallOutcome(
                 False,
@@ -497,7 +500,7 @@ def rollback(
                 root=root,
             )
 
-    ok, message = mod_install.install(backup, root, force=True)
+    ok, message = mod_install.install(backup, root, force=True, keep_trust_marker=True)
     if not ok:
         if staging_current is not None:
             shutil.rmtree(staging_current, ignore_errors=True)

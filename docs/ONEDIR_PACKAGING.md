@@ -468,6 +468,30 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build_petcore.ps1 `
   -Clean -Installer -SignThumbprint 217337C099EC8624AC481BFC9F3E1664D0A442E1 `
   -OutputRoot .scratch/petcore-p4c3-distribution/t08/dist
 ```
+## 冒烟必须等待 GUI 子系统进程（2026-10-26，L095）
+
+`-Windowed` 产物是 **GUI 子系统** exe：PowerShell 用 `& $exe --check --strict --out …`
+调用时**不等待进程退出**。实测同机同一个已签名 exe：
+
+```text
+& $exe --check --strict --out <path>      → elapsed_ms=52   exists_now=False  $LASTEXITCODE=(空)
+& $exe --check --out <path> | Out-Null    → elapsed_ms=698  exists_now=True   exit=0
+```
+
+后果是构建在 dist 已经生成的情况下抛「找不到路径 …\check.json」，而报告稍后才由子进程写出；
+也就是说这道门一直在读上一份报告或直接崩，**没有真正校验任何东西**。现在脚本改为：
+
+```powershell
+$smoke = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow `
+    -ArgumentList @("--check --strict", "--out", "`"$checkOut`"")
+if ($smoke.ExitCode -ne 0) { throw "packaged --check --strict failed" }
+```
+
+并额外断言报告存在、且 `LastWriteTimeUtc` 比构建前更新（用时间戳识别旧报告，脚本里仍不出现
+`Remove-Item`）。成功时会打印
+`check: menu_template=json characters=N builtin_images=M strict=True`。
+`tests/test_petcore_candidate_packaging.py::test_smoke_waits_for_the_windowed_exe` 锁定这条。
+
 ## petcore P5 更新安装器边界（2026-10-25）
 
 P5 的 Core 更新服务只消费已发布的 Windows 安装器资产，不改变现有 onedir 资源收集规则。构建机必须在项目专用环境生成安装器，并把实际文件名、大小和 SHA-256 写入 manifest；客户端不接受手填摘要或未声明大小的资产。

@@ -175,18 +175,26 @@ def scale_background_pixmap(
     width: int,
     height: int,
     fill_mode: str = "cover",
+    dpr: float = 1.0,
 ) -> QPixmap:
-    """Scale a wallpaper using browser-like cover/contain/stretch semantics."""
+    """Scale a wallpaper using browser-like cover/contain/stretch semantics.
+
+    `width`/`height` 是**逻辑**尺寸；按 `dpr` 解到物理像素并写回 DPR，
+    否则 150% 屏上会把 1 倍缓冲铺到 1.5 倍设备像素上，整面壁纸发虚（审计 AUD-32）。
+    """
     aspect_mode = {
         "contain": Qt.AspectRatioMode.KeepAspectRatio,
         "stretch": Qt.AspectRatioMode.IgnoreAspectRatio,
     }.get(fill_mode, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
-    return pixmap.scaled(
-        max(1, int(width)),
-        max(1, int(height)),
+    ratio = max(1.0, float(dpr or 1.0))
+    scaled = pixmap.scaled(
+        max(1, int(round(width * ratio))),
+        max(1, int(round(height * ratio))),
         aspect_mode,
         Qt.TransformationMode.SmoothTransformation,
     )
+    scaled.setDevicePixelRatio(ratio)
+    return scaled
 
 
 def scrim_rgba(theme: dict) -> tuple[int, int, int, int]:

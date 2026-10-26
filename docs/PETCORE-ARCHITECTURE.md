@@ -300,6 +300,22 @@ JSONL 握手/心跳/事件/错误、取消、超时、崩溃重启、代次拒�
 凭据引用；原文件先备份，失败保持原文件不变。发布入口切换必须可回滚，旧 `pet/` 在
 迁移完成前只作为兼容层，不承载新功能。
 
+实现（2026-10-26）：`petcore/migration/`。`__init__.py` 只管顺序、幂等标记
+（`<root>/migration.json` 的 `completed`）、dry-run、备份与回滚映射；七个域各一个
+`migrate(ctx)`：`config_data.py`（全局配置 / slot / 活跃集合）、`sessions.py`、
+`todos.py`、`accounts.py`（API 规格 + 凭据）。域函数只返回条目，备份与写失败由
+`MigrationContext` 自动记账。入口是 `petcore migrate [--dry-run|--force|--rollback]`，
+`--check` 只读标记与备份目录、不跑迁移。
+
+### 19.4 平台探针边界
+
+`petcore/platform/` 是唯一碰系统 API 的地方，且必须零 Qt、零网络库、不 import
+`pet.*`。GPU 用 ctypes 直连 `pdh.dll`（`gpu.py`）并复用 `SamplingLoop`
+（`gpu_monitor.py`）；FPS 用随包 PresentMon 子进程（`fps.py`）与一次性 UAC 授权
+（`fps_permission.py`）。三者的共同不变量：只有 `ok` 带读数，其余一律 `None` +
+具体原因，**不伪造 0**。岛不直接调平台：它在 `_sync_sampling()` 里报「还需要哪些
+段」，由 `petcore/ui/probes.py` 的 `IslandProbeHub` 启停采样器并逐秒推段快照。
+
 ## 23. AI 对话模块分布与 core 占用（2026-10-22）
 
 > 口径：**业务在 mod，窗口/会话/传输在 core**。这一节回答两个问题：AI 功能现在

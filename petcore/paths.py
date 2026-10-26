@@ -72,7 +72,9 @@ def normalize_instance(instance: str | None) -> str | None:
 def data_root(portable: bool = False, instance: str | None = None) -> Path:
     name = normalize_instance(instance)
     if portable:
-        return repo_root() / (f"data-{name}" if name else "data")
+        # 冻结包是 onedir：`repo_root()` 指向 `_internal`，升级/卸载替换该目录即丢数据。
+        # 绿色版的数据应该在 exe 旁边。
+        return install_root() / (f"data-{name}" if name else "data")
     return base_dir() / (f"{APP_NAME}-{name}" if name else APP_NAME)
 
 
