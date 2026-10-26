@@ -377,6 +377,21 @@ class ChatController(QObject):
     def _apply_record(self, owner: str, role: str, text: str, slot: int) -> None:
         self.append_to_session(owner, role, text, pet_slot=slot)
 
+    def _notify_island(self, state: str) -> None:
+        """把「AI 工作中 / 完成 / 出错」推给灵动岛状态点（没有岛就静默）。"""
+        notify = getattr(self.host, "notify_agent_state", None)
+        if not callable(notify):
+            return
+        try:
+            notify(state, source="chat")
+        except TypeError:
+            try:
+                notify(state)
+            except Exception:  # noqa: BLE001
+                logger.debug("island state notify failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - 状态点坏了不许影响对话
+            logger.debug("island state notify failed", exc_info=True)
+
     def _apply_token(self, owner: str, delta: str, slot: int) -> None:
         state = self._ensure(owner, slot)
         window = state.window
@@ -386,6 +401,7 @@ class ChatController(QObject):
             window.begin_stream()
             state.session.append("assistant", "")
             state.active = True
+            self._notify_island("working")
         window.append_token(delta)
 
     def _begin_stream_if_needed(self, state: _ChatState) -> None:
@@ -394,6 +410,7 @@ class ChatController(QObject):
         state.window.begin_stream()
         state.session.append("assistant", "")
         state.active = True
+        self._notify_island("working")
 
     def _apply_reasoning(self, owner: str, delta: str, slot: int) -> None:
         state = self._ensure(owner, slot, with_window=False)
@@ -416,6 +433,7 @@ class ChatController(QObject):
         if window is not None:
             window.finish_stream(text)
             thinking = window.last_thinking()
+            self._notify_island("done")
         final = str(text or "")
         if not final:
             if window is not None:
@@ -448,6 +466,7 @@ class ChatController(QObject):
         state = self._ensure(owner, slot)
         if state.window is not None:
             state.window.show_error(reason, message)
+        self._notify_island("error")
         if state.session.messages and state.session.messages[-1].get("content") == "":
             state.session.messages.pop()
         state.active = False

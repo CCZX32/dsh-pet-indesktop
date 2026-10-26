@@ -30,7 +30,18 @@ from collections import deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QBitmap,
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -250,6 +261,22 @@ class DynamicIsland(QWidget):
         self._squish = 1.0
         self._squish_v = 0.0
         self._geometry_callback = None
+        # ---- 五态状态点 / 声纳 / 呼吸 / 内容位图缓存（主分支同源，数值在 layout 里）
+        self._agent_state = layout.AGENT_IDLE
+        self._agent_sources: dict[str, str] = {}
+        self._pet_visible = True
+        self._dot_done_until = 0.0
+        self._sonar_started = 0.0
+        self._breathe_started = 0.0
+        self._breathe_until = 0.0
+        self._content_pixmap: QPixmap | None = None
+        self._content_key: tuple | None = None
+        self._content_structure: tuple | None = None
+        self._fade_from: QPixmap | None = None
+        self._fade_t = 1.0
+        self._fade_last = 0.0
+        self._fade_masked: QPixmap | None = None
+        self._fade_masked_key: tuple | None = None
 
         self.net_monitor = netmon.NetMonitor(interval=1.0)
         self.sys_monitor = sysmon.SysMonitor(interval=1.0)
@@ -271,6 +298,25 @@ class DynamicIsland(QWidget):
         self._dock_back_timer.setSingleShot(True)
         self._dock_back_timer.setInterval(DOCK_BACK_MS)
         self._dock_back_timer.timeout.connect(self._dock_back)
+
+        # 完成瞬态（4s 后回落空闲）、工作态声纳（30fps）、内容淡化（16ms）。
+        self._dot_done_timer = QTimer(self)
+        self._dot_done_timer.setSingleShot(True)
+        self._dot_done_timer.setInterval(layout.DOT_DONE_MS)
+        self._dot_done_timer.timeout.connect(self._on_dot_done_timeout)
+
+        self._sonar_timer = QTimer(self)
+        self._sonar_timer.setInterval(layout.SONAR_TICK_MS)
+        self._sonar_timer.timeout.connect(self._on_sonar_tick)
+
+        self._error_timer = QTimer(self)
+        self._error_timer.setSingleShot(True)
+        self._error_timer.setInterval(layout.AGENT_ERROR_TTL_MS)
+        self._error_timer.timeout.connect(self._on_error_timeout)
+
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(layout.CONTENT_FADE_TICK_MS)
+        self._fade_timer.timeout.connect(self._on_fade_tick)
 
         self.card = _IslandCard(self)
         self.card.balance_requested.connect(self.balance_requested.emit)
@@ -366,7 +412,145 @@ class DynamicIsland(QWidget):
             self.update()
             QTimer.singleShot(520, self, self.update)
 
+    # ------------------------------------------------------------ 状态与事件（五态点）
+    def set_agent_state(self, state: str, *, source: str = "core") -> None:
+        """外部状态入口：``idle/working/waiting/error/done``，按**来源**归并。
+
+        ``done`` 是瞬态：点亮 4s 完成绿并做一次「回复」呼吸，不写入来源表。
+        ``hidden`` 不接受外部设置——它由 :meth:`set_pet_visible` 派生。
+
+        多来源用 :func:`layout.resolve_agent_state` 归并（错误 > 待确认 > 工作）：
+        截图提问收尾发 ``idle`` 不该把仍在流式回答的对话（``working``）一起关掉。
+        ``error`` 带 8s TTL：petcore 的错误来源是「一次请求失败」，不像主分支有
+        DSH 收敛器把 turn 结束掉，不给 TTL 就会永久红感叹。
+        """
+        value = str(state or "").strip().lower()
+        if value == layout.AGENT_DONE:
+            self._agent_sources.pop(str(source), None)
+            self._dot_done_until = 0.0
+            self._arm_dot_done()
+            self.notify_event("reply")
+            self._apply_agent_state()
+            return
+        if value not in layout.AGENT_STATES:
+            return
+        key = str(source or "core")
+        if value == layout.AGENT_IDLE:
+            self._agent_sources.pop(key, None)
+        else:
+            self._agent_sources[key] = value
+        if value in (layout.AGENT_ERROR, layout.AGENT_WAITING):
+            # 更高优先级的态顶掉完成瞬态：绿灯不许盖在红色感叹上。
+            self._dot_done_until = 0.0
+            self._dot_done_timer.stop()
+        if value == layout.AGENT_ERROR:
+            self._error_timer.start()
+        else:
+            self._error_timer.stop()
+        self._apply_agent_state()
+
+    def _apply_agent_state(self) -> None:
+        self._agent_state = layout.resolve_agent_state(self._agent_sources.values())
+        self._sync_sonar()
+        if self.isVisible():
+            self.update()
+
+    def _on_error_timeout(self) -> None:
+        """错误态到期：只清掉 error 来源，别动别的来源。"""
+        for key, value in tuple(self._agent_sources.items()):
+            if value == layout.AGENT_ERROR:
+                self._agent_sources.pop(key, None)
+        self._apply_agent_state()
+
+    def notify_event(self, kind: str = "generic") -> None:
+        """事件反馈：一下果冻；``reply`` 额外做 5s 呼吸浮动（主分支同口径）。"""
+        impulse = {"reply": 5.0, "balance": 3.5, "tier": 4.0}.get(
+            str(kind or "generic"), 3.0
+        )
+        if not self._expanded:
+            # 主分支口径：冲量越大压得越狠（reply 5.0 → 速度 1.4，与旧的定点 1.2 同量级）。
+            self._squish_v = max(-SQUISH_V_MAX, self._squish_v - impulse * 0.28)
+        if str(kind) == "reply":
+            now = time.monotonic()
+            self._breathe_started = now
+            self._breathe_until = now + layout.BREATHE_SECONDS
+        self._ensure_anim_timer()
+        if self.isVisible():
+            self.update()
+
+    def set_pet_visible(self, visible: bool) -> None:
+        """桌宠整体显隐（托盘/菜单）：隐藏态的状态点是空心中性色。"""
+        value = bool(visible)
+        if value == self._pet_visible:
+            return
+        self._pet_visible = value
+        if self.isVisible():
+            self.update()
+
+    def _dot_state(self) -> str:
+        return layout.dot_state(
+            self._agent_state,
+            pet_visible=self._pet_visible,
+            done=self._dot_done_until > time.monotonic(),
+        )
+
+    def dot_style(self) -> tuple[str, str]:
+        return layout.dot_style(self._dot_state())
+
+    def _dot_color(self) -> QColor:
+        _shape, role = self.dot_style()
+        if role == "error":
+            return QColor(layout.DOT_ERROR_COLOR)
+        if role == "done":
+            return QColor(layout.DOT_DONE_COLOR)
+        if role == "accent":
+            return self.accent_color()
+        return QColor(*self._palette()["muted"])
+
+    def _arm_dot_done(self) -> None:
+        if not self.isVisible():
+            # 看不见就别点表：4s 后到点也让用户看不到，白起一次定时器。
+            self._dot_done_until = 0.0
+            return
+        self._dot_done_until = time.monotonic() + layout.DOT_DONE_MS / 1000.0
+        self._dot_done_timer.start()
+        self.update()
+
+    def _on_dot_done_timeout(self) -> None:
+        self._dot_done_until = 0.0
+        if self.isVisible():
+            self.update()
+
+    # ------------------------------------------------------------ 声纳环
+    def _sonar_active(self) -> bool:
+        return (
+            self.isVisible()
+            and not self._expanded
+            and not self._strip_visible()
+            and self.settings.show_status
+            and self._dot_state() == layout.AGENT_WORKING
+        )
+
+    def _sync_sonar(self) -> None:
+        if self._sonar_active():
+            if not self._sonar_timer.isActive():
+                self._sonar_started = time.monotonic()
+                self._sonar_timer.start()
+        elif self._sonar_timer.isActive():
+            self._sonar_timer.stop()
+
+    def _on_sonar_tick(self) -> None:
+        if not self._sonar_active():
+            self._sonar_timer.stop()
+            return
+        self.update()
+
     def show_balance(self, result=None, error: str | None = None) -> None:
+        """余额结果只写余额面（卡片行 + 告警级 + 气泡），**不动状态点**。
+
+        状态点由 :meth:`set_agent_state` 的来源表管；余额失败在岛卡片里已经是一行
+        红字，若再写状态点，一次没配服务的点击就会把红感叹永久钉住。
+        """
         if error:
             self._balance_text = "余额不可用"
             self._balance_detail = str(error)[:120]
@@ -376,6 +560,7 @@ class DynamicIsland(QWidget):
             self._balance_text = str(formatter() if callable(formatter) else result)[:160]
             self._balance_detail = "已更新"
             self._balance_severity = ""
+            self.notify_event("balance")
         self._feedback()
         if self._expanded:
             self._rebuild_card()
@@ -385,6 +570,7 @@ class DynamicIsland(QWidget):
         if not message:
             return
         self._recent_messages.append(message)
+        self.notify_event("generic")
         self._feedback()
         if self._expanded:
             self._rebuild_card()
@@ -406,6 +592,15 @@ class DynamicIsland(QWidget):
         self._feedback_until = 0.0
         self._anim_timer.stop()
         self._dock_back_timer.stop()
+        self._sonar_timer.stop()
+        self._dot_done_timer.stop()
+        self._error_timer.stop()
+        self._stop_content_fade()
+        self._dot_done_until = 0.0
+        self._agent_sources.clear()
+        self._agent_state = layout.AGENT_IDLE
+        self._breathe_until = 0.0
+        self._breathe_started = 0.0
         self._geo_from = None
         self._geo_to = None
         self._stop_hover_animation()
@@ -437,6 +632,8 @@ class DynamicIsland(QWidget):
         self._rebuild_row()
         self._update_size()
         self._sync_sampling()
+        self._content_key = None
+        self._sync_sonar()
         if self._expanded:
             self._rebuild_card()
 
@@ -751,6 +948,7 @@ class DynamicIsland(QWidget):
             runtime_metrics.inc("coalesced_updates")
             self.update()
         self._sync_sampling()
+        self._sync_sonar()
         callback = self._avoidance_callback
         if callable(callback):
             try:
@@ -1065,6 +1263,8 @@ class DynamicIsland(QWidget):
     def _animating(self) -> bool:
         if self._geo_to is not None:
             return True
+        if not self._expanded and time.monotonic() < self._breathe_until:
+            return True
         if self._expanded:
             return False
         return (
@@ -1203,6 +1403,7 @@ class DynamicIsland(QWidget):
         self.card.show()
         self.card.move(CAPSULE_INSET, CAPSULE_HEIGHT)
         self._card_timer.start()
+        self._sync_sonar()  # 展开态抑制声纳：进出都要重判，别等 1Hz 心跳
         self._apply_fixed_size()
         # 布局定型（setFixedSize）会立刻改几何；想播动画必须先退回起点再插值。
         if self.isVisible():
@@ -1223,6 +1424,7 @@ class DynamicIsland(QWidget):
         self._width_key = self._width_key_now()
         self._sync_sampling()
         self._apply_fixed_size()
+        self._sync_sonar()  # 回到胶囊态：working 时立刻把声纳环接回来
         if self.isVisible():
             self._set_free_geometry(start)
         self._animate_to(self._target_rect())
@@ -1266,6 +1468,8 @@ class DynamicIsland(QWidget):
                 return
             self._dragging = True
             self._stop_hover_animation()
+            # 起拖立即跳到淡化终点帧：拖拽中每帧混合两张位图没有意义，还会拖慢手感。
+            self._stop_content_fade()
             # 起拖先清几何插值：动画每 16ms 把窗口拽回目标位，会与拖拽 move() 互抢。
             # 但不停动画表本身（弹簧通道还要收敛）。
             self._geo_from = None
@@ -1349,6 +1553,7 @@ class DynamicIsland(QWidget):
         self._avoid_home = None
         self._avoid_clear_ticks = 0
         self._sync_sampling()
+        self._sync_sonar()  # 落定后进出细条态，声纳要立刻重判
         event.accept()
 
     def _hover_rects(self):
@@ -1393,6 +1598,7 @@ class DynamicIsland(QWidget):
         self._apply_fixed_size()
         self._animate_to(self._target_rect())
         self._sync_sampling()
+        self._sync_sonar()
 
     def _stop_hover_animation(self) -> None:
         """起拖 / 隐藏时停掉悬停缩放与果冻，跳到终点值（不留残影）。"""
@@ -1412,6 +1618,7 @@ class DynamicIsland(QWidget):
             self._apply_fixed_size()
             self._animate_to(self._target_rect())
             self._sync_sampling()
+            self._sync_sonar()  # 细条滑出成胶囊：working 时把声纳接回来
         self._ensure_anim_timer()
         super().enterEvent(event)
 
@@ -1432,6 +1639,9 @@ class DynamicIsland(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.start()
+        # 位图缓存带 DPR 与宽度：显示时一律重建，避免用上屏前的画布。
+        self._content_key = None
+        self._sync_sonar()
         # 隐藏可能打断停靠/滑出动画：显示时先把几何收口到目标位，再起表。
         self._geo_from = None
         self._geo_to = None
@@ -1449,6 +1659,7 @@ class DynamicIsland(QWidget):
             self._fonts.clear()
             self._metrics.clear()
             self._font_key_cache = None
+            self._content_key = None
             isl.clear_width_cache()
             self._update_size()
 
@@ -1465,10 +1676,18 @@ class DynamicIsland(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 内容现在是位图：悬停缩放 1.02 时不做平滑就是最近邻，正文会发毛。
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         palette = self._palette()
         if self._strip_visible():
             self._paint_strip(painter, palette)
             return
+        # 呼吸浮动：整窗（外壳 + 内容）一起上下 1.5px，整数像素保字锐利。
+        breath = 0
+        if not self._expanded and self._breathe_until > time.monotonic():
+            breath = layout.breath_offset(time.monotonic() - self._breathe_started)
+        if breath:
+            painter.translate(0, breath)
         # 悬停缩放绕**胶囊中心**（展开态不缩放：整窗缩放会把卡片切边）。
         if not self._expanded and abs(self._hover_scale - 1.0) > 0.001:
             cx = self.width() / 2.0
@@ -1486,24 +1705,357 @@ class DynamicIsland(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
 
-        background = QColor(*palette["bg"])
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawPath(path)
-
-        keyline = QColor(*palette["keyline"])
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(keyline, 1.0))
-        painter.drawPath(path)
+        self._paint_shell(painter, palette, rect, radius, path)
+        self._paint_sheen(painter, rect, radius)
+        if self._plan is not None:
+            layer = self._content_layer()
+            if layer is not None:
+                self._paint_content_layer(painter, layer, path)
+        self._paint_bevel(painter, rect, radius)
         if self._feedback_until > time.monotonic():
             accent = self.accent_color()
             accent.setAlpha(150)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(accent, 2.0))
             painter.drawPath(path)
+        self._paint_sonar(painter, path)
 
-        if self._plan is None:
+    # ------------------------------------------------------------ 外壳质感
+    def _paint_shell(self, painter: QPainter, palette, rect: QRectF, radius: float, path) -> None:
+        """外壳三层投影 → 背景（glass 四停点渐变）→ keyline。"""
+        style = str(self.settings.style or "dark")
+        if not self._expanded:
+            # 三层纯黑圆角矩形：只向下长、两侧内收（窗口高只有 44，没有外扩余量）。
+            # 果冻 1.12 + 悬停 1.03 + 呼吸 +2 会一起把底边推过窗口，`drop` 按剩余
+            # 高度收敛，否则底部描边被切平。
+            painter.setPen(Qt.PenStyle.NoPen)
+            headroom = max(0.0, self.height() - 1.5 - rect.bottom())
+            for inset, drop, alpha in layout.CAPSULE_SHADOW_LAYERS:
+                painter.setBrush(QColor(0, 0, 0, alpha))
+                painter.drawRoundedRect(
+                    rect.adjusted(inset, 1.0, -inset, min(drop, headroom)), radius, radius
+                )
+        painter.setPen(Qt.PenStyle.NoPen)
+        if style == "glass":
+            gradient = QLinearGradient(0, 0, 0, self.height())
+            opacity = max(0.4, min(1.0, float(self.settings.opacity)))
+            for stop, (red, green, blue, alpha) in layout.GLASS_STOPS:
+                gradient.setColorAt(stop, QColor(red, green, blue, round(alpha * opacity)))
+            painter.setBrush(QBrush(gradient))
+        else:
+            painter.setBrush(QColor(*palette["bg"]))
+        painter.drawPath(path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if style == "glass":
+            painter.setPen(QPen(QColor(*layout.GLASS_KEYLINE), 1.0))
+            painter.drawRoundedRect(
+                rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5
+            )
+        else:
+            painter.setPen(QPen(QColor(*palette["keyline"]), 1.0))
+            painter.drawPath(path)
+
+    def _paint_sheen(self, painter: QPainter, rect: QRectF, radius: float) -> None:
+        """顶部 sheen：从 rect.top()+3 起覆盖 42% 高，白 α 按配色分档（light 不开）。"""
+        alpha = layout.sheen_alpha(self.settings.style)
+        if alpha <= 0:
             return
-        self._paint_content(painter, palette)
+        sheen_rect = QRectF(
+            rect.left(),
+            rect.top() + layout.SHEEN_TOP_PX,
+            rect.width(),
+            max(0.0, rect.height() * layout.SHEEN_SPAN - layout.SHEEN_TOP_PX),
+        )
+        if sheen_rect.height() <= 0:
+            return
+        gradient = QLinearGradient(0, sheen_rect.top(), 0, sheen_rect.bottom())
+        gradient.setColorAt(0.0, QColor(255, 255, 255, alpha))
+        gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, radius, radius)
+        painter.setClipPath(clip)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRect(sheen_rect)
+        painter.restore()
+
+    def _paint_bevel(self, painter: QPainter, rect: QRectF, radius: float) -> None:
+        """软陶笔：内缩 1.5 的圆角路径，上半周高光 / 下半周暗边，各 1px。"""
+        inset = layout.BEVEL_INSET
+        if rect.width() <= inset * 2 + 2 or rect.height() <= inset * 2 + 2:
+            return
+        highlight, shadow = layout.bevel_colors(self.settings.style)
+        bevel_rect = rect.adjusted(inset, inset, -inset, -inset)
+        bevel_radius = max(1.0, radius - inset)
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setClipRect(
+            QRectF(rect.left(), rect.top(), rect.width(), rect.height() / 2.0)
+        )
+        painter.setPen(QPen(QColor(*highlight), 1.0))
+        painter.drawRoundedRect(bevel_rect, bevel_radius, bevel_radius)
+        painter.setClipRect(
+            QRectF(
+                rect.left(),
+                rect.top() + rect.height() / 2.0,
+                rect.width(),
+                rect.height() / 2.0,
+            )
+        )
+        painter.setPen(QPen(QColor(*shadow), 1.0))
+        painter.drawRoundedRect(bevel_rect, bevel_radius, bevel_radius)
+        painter.restore()
+
+    # ------------------------------------------------------------ 内容位图缓存 + 淡化
+    def _content_cache_key(self) -> tuple:
+        """位图缓存键：**所有会改变像素的输入**都必须在这里。
+
+        段文案进键（时间/百分比每秒变就重建一张 44px 高的位图，比每帧重新做
+        CJK shaping 便宜一个量级）；`box_text`/`elide_px` 也进键——它们是盒宽与
+        右省略的输入，漏了会在 GPU/FPS 快照换样本时命中旧位图、落位不更新。
+        不透明度**不进**键：内容层不画底色（`_palette()` 只把 bg 的 alpha 乘上它）。
+        """
+        plan = self._plan
+        dot = self.dot_style() if self.settings.show_status else ("", "")
+        return (
+            self.width(),
+            round(float(self.devicePixelRatioF() or 1.0), 2),
+            self._font_key(),
+            str(self.settings.style or "dark"),
+            bool(self.settings.show_icon),
+            bool(self.settings.show_name),
+            bool(self.settings.show_status),
+            str(self.settings.accent or "blue"),
+            self.accent_color().name(),
+            plan.name if plan is not None else "",
+            plan.level if plan is not None else 0,
+            tuple(plan.folded) if plan is not None else (),
+            tuple(
+                (
+                    seg.kind,
+                    seg.seg_id,
+                    seg.label,
+                    seg.text,
+                    seg.unit,
+                    seg.state,
+                    seg.severity,
+                    seg.box_text,
+                    seg.elide_px,
+                )
+                for seg in self._row
+            ),
+            dot,
+        )
+
+    def _structure_key(self) -> tuple:
+        """结构键：只有**结构**变化才播 130ms 淡化，读数换字不闪。
+
+        **不含窗口宽度**：宽度在几何动画里每帧都变，含进去等于每帧重起一次淡化
+        （180ms 停靠动画 = 11 帧、11 次位图重建 + 掩码，而且新旧宽度不同时掩码
+        尺寸不匹配会被 Qt 丢掉 → 旧图新图各画一遍 = 重影）。改用「行预算 + 段 id
+        序列」，与主分支 `_structure_key` 的 `budget` 口径一致。
+        """
+        plan = self._plan
+        return (
+            self._card_budget() if self._expanded else self._available_width(),
+            tuple(seg.seg_id for seg in self._row),
+            plan.level if plan is not None else 0,
+            plan.name if plan is not None else "",
+            tuple(plan.folded) if plan is not None else (),
+            bool(self.settings.show_icon),
+            bool(self.settings.show_name),
+            bool(self.settings.show_status),
+        )
+
+    def _content_layer(self) -> QPixmap | None:
+        key = self._content_cache_key()
+        if self._content_pixmap is not None and self._content_key == key:
+            return self._content_pixmap
+        previous = self._content_pixmap
+        rendered = self._render_content_pixmap()
+        if rendered is None:
+            return previous
+        structure = self._structure_key()
+        same_size = previous is not None and previous.size() == rendered.size()
+        if (
+            same_size
+            and self._content_structure is not None
+            and structure != self._content_structure
+            and not self._dragging
+        ):
+            self._start_content_fade(previous)
+        self._content_structure = structure
+        self._content_pixmap = rendered
+        self._content_key = key
+        return rendered
+
+    def _render_content_pixmap(self) -> QPixmap | None:
+        width = max(1, int(self.width()))
+        ratio = float(self.devicePixelRatioF() or 1.0)
+        pixmap = QPixmap(
+            max(1, round(width * ratio)), max(1, round(CAPSULE_HEIGHT * ratio))
+        )
+        if pixmap.isNull():
+            return None
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self._paint_content(painter, self._palette())
+        finally:
+            painter.end()
+        return pixmap
+
+    def _paint_content_layer(self, painter: QPainter, layer: QPixmap, path) -> None:
+        if self._fade_from is not None and self._fade_t < 1.0:
+            masked = self._fade_mask_for(layer)
+            if masked is not None:
+                painter.save()
+                painter.setClipPath(path)
+                painter.setOpacity(layout.content_fade_alpha(self._fade_t))
+                painter.drawPixmap(0, 0, masked)
+                painter.restore()
+        painter.drawPixmap(0, 0, layer)
+
+    def _fade_mask_for(self, layer: QPixmap) -> QPixmap | None:
+        """旧图按**新图的透明区**做遮罩：共用像素只画一次，避免淡化中途发白。
+
+        旧图与新图尺寸不同（宽度变了）时**必须返回 None**：`setMask` 遇到尺寸不匹配
+        会静默丢掉整张掩码，返回一张「没有掩码的副本」等于让调用方把旧图画两遍。
+        """
+        outgoing = self._fade_from
+        if outgoing is None:
+            return None
+        if outgoing.size() != layer.size():
+            return None
+        key = (outgoing.cacheKey(), layer.cacheKey())
+        if self._fade_masked is not None and self._fade_masked_key == key:
+            return self._fade_masked
+        mask = layer.toImage().createMaskFromColor(0, Qt.MaskMode.MaskOutColor)
+        if mask.isNull():
+            return None
+        masked = QPixmap(outgoing)
+        masked.setMask(QBitmap.fromImage(mask))
+        self._fade_masked = masked
+        self._fade_masked_key = key
+        return masked
+
+    def _start_content_fade(self, previous: QPixmap) -> None:
+        self._fade_from = previous
+        self._fade_masked = None
+        self._fade_masked_key = None
+        self._fade_t = 0.0
+        self._fade_last = time.monotonic()
+        if not self._fade_timer.isActive():
+            self._fade_timer.start()
+
+    def _stop_content_fade(self) -> None:
+        self._fade_timer.stop()
+        self._fade_from = None
+        self._fade_masked = None
+        self._fade_masked_key = None
+        self._fade_t = 1.0
+
+    def _on_fade_tick(self) -> None:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._fade_last)
+        self._fade_last = now
+        self._fade_t = min(
+            1.0, self._fade_t + elapsed * 1000.0 / max(1.0, layout.CONTENT_FADE_MS)
+        )
+        if self._fade_t >= 1.0:
+            self._stop_content_fade()
+        self.update()
+
+    # ------------------------------------------------------------ 状态点 / 声纳
+    def _status_dot_rect(self) -> QRectF | None:
+        plan = self._plan
+        if plan is None:
+            return None
+        _, trail = self._lead_trail(plan.name)
+        # 状态点落在行计划预留的 trail 槽里（end + STATUS_GAP），不能按窗口右边反推。
+        dot_x = self.width() - trail + STATUS_GAP
+        return QRectF(
+            dot_x,
+            CAPSULE_HEIGHT / 2.0 - STATUS_DOT / 2.0,
+            STATUS_DOT,
+            STATUS_DOT,
+        )
+
+    def _paint_status_dot(self, painter: QPainter, rect: QRectF) -> None:
+        """状态点五态：实心 / 空心环 / 红底白感叹，外加一颗珠感高光。"""
+        shape, _role = self.dot_style()
+        color = self._dot_color()
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if shape == layout.DOT_HOLLOW:
+            inset = layout.DOT_RING_PX / 2.0
+            pen = QPen(color, layout.DOT_RING_PX)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawEllipse(rect.adjusted(inset, inset, -inset, -inset))
+        elif shape == layout.DOT_GLYPH:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(rect)
+            glyph = QColor("#ffffff")
+            glyph.setAlpha(235)
+            pen = QPen(glyph, max(1.0, rect.width() * layout.DOT_GLYPH_W_RATIO))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            cx = rect.center().x()
+            painter.drawLine(
+                QPointF(cx, rect.top() + rect.height() * layout.DOT_GLYPH_BAR_TOP_RATIO),
+                QPointF(cx, rect.top() + rect.height() * layout.DOT_GLYPH_BAR_END_RATIO),
+            )
+            dot_y = rect.top() + rect.height() * layout.DOT_GLYPH_DOT_RATIO
+            painter.drawLine(QPointF(cx, dot_y), QPointF(cx, dot_y + 0.02))
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(rect)
+        if shape != layout.DOT_HOLLOW:
+            # 珠感高光只给实心/感叹点：空心环里本来是空的，高光会把环画回实心。
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, layout.DOT_HIGHLIGHT_ALPHA))
+            painter.drawEllipse(
+                QRectF(
+                    rect.x() + layout.DOT_HIGHLIGHT_INSET_X,
+                    rect.y() + layout.DOT_HIGHLIGHT_TOP,
+                    rect.width() - 2 * layout.DOT_HIGHLIGHT_INSET_X,
+                    rect.height() * layout.DOT_HIGHLIGHT_H_RATIO,
+                )
+            )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.restore()
+
+    def _paint_sonar(self, painter: QPainter, path) -> None:
+        """工作态声纳环：以状态点圆心为心，半径 5→13、α90→0，画在内容之上。"""
+        if not self._sonar_timer.isActive() or not self.settings.show_status:
+            return
+        dot = self._status_dot_rect()
+        if dot is None:
+            return
+        phase = (
+            (time.monotonic() - self._sonar_started) * 1000.0
+            % layout.SONAR_PERIOD_MS
+        ) / layout.SONAR_PERIOD_MS
+        radius, alpha = layout.sonar_ring_params(phase)
+        if alpha <= 0:
+            return
+        color = self._dot_color()
+        color.setAlpha(alpha)
+        painter.save()
+        # 最大半径 13 会顶出胶囊右缘 1–2px（末相位 α≤11，肉眼几乎看不出），仍要裁剪。
+        painter.setClipPath(path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, layout.SONAR_PEN_PX))
+        painter.drawEllipse(dot.center(), radius, radius)
+        painter.restore()
 
     def _squished_capsule_rect(self) -> QRectF:
         """果冻形变只作用在胶囊外壳上：竖压横鼓，绕中心，内容不参与形变。"""
@@ -1561,14 +2113,16 @@ class DynamicIsland(QWidget):
         baseline = CAPSULE_HEIGHT / 2.0 + BASELINE_DY
         x = CAPSULE_INSET + CONTENT_PAD
         if self.settings.show_icon:
-            ring = self.accent_color()
+            circle = QRectF(x, CAPSULE_HEIGHT / 2.0 - ICON_PX / 2.0, ICON_PX, ICON_PX)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(ring)
-            painter.drawEllipse(QRectF(x, CAPSULE_HEIGHT / 2.0 - ICON_PX / 2.0, ICON_PX, ICON_PX))
-            painter.setBrush(QColor(28, 30, 38, 200))
-            painter.drawEllipse(
-                QRectF(x + 4, CAPSULE_HEIGHT / 2.0 - ICON_PX / 2.0 + 4, ICON_PX - 8, ICON_PX - 8)
+            painter.setBrush(self.accent_color())
+            painter.drawEllipse(circle)
+            # 头标内环（主分支口径）：旧实现画的是深色实心圆，缩到 18px 像个洞。
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(
+                QPen(QColor(*layout.icon_ring_color(self.settings.style)), 1.0)
             )
+            painter.drawEllipse(circle.adjusted(0.5, 0.5, -0.5, -0.5))
             x += ICON_PX + ICON_GAP
         if plan.name:
             painter.setFont(self._font("name"))
@@ -1589,7 +2143,18 @@ class DynamicIsland(QWidget):
         for placement in placements:
             seg = placement.seg
             if placement.divider_x is not None:
-                painter.setPen(QPen(divider, 1.0))
+                # 段间竖线带竖直 alpha 渐变（0→本色→本色→0）：直绘实线会在两端留硬头。
+                base = QColor(*palette["divider"])
+                transparent = QColor(base)
+                transparent.setAlpha(0)
+                gradient = QLinearGradient(
+                    0, baseline - 7, 0, baseline + 7
+                )
+                gradient.setColorAt(0.0, transparent)
+                gradient.setColorAt(0.3, base)
+                gradient.setColorAt(0.7, base)
+                gradient.setColorAt(1.0, transparent)
+                painter.setPen(QPen(QBrush(gradient), 1.0))
                 painter.drawLine(
                     int(placement.divider_x),
                     int(baseline - 7),
@@ -1630,30 +2195,20 @@ class DynamicIsland(QWidget):
             painter.drawText(QPoint(int(placement.text_x), int(baseline)), placement.text)
             if placement.unit_x is not None and placement.unit_text:
                 painter.setFont(self._font("label"))
-                painter.setPen(color if seg.state == isl.STATE_OK else muted)
+                unit_color = QColor(color if seg.state == isl.STATE_OK else muted)
+                # 单位与数值同色但弱化到 70%：单位是装饰，不该和读数抢亮度。
+                unit_color.setAlphaF(
+                    max(0.0, min(1.0, unit_color.alphaF() * layout.UNIT_ALPHA))
+                )
+                painter.setPen(unit_color)
                 painter.drawText(
                     QPoint(int(placement.unit_x), int(baseline)), placement.unit_text
                 )
 
         if self.settings.show_status:
-            severity = isl.highest_severity(
-                placement.seg.severity for placement in placements
-            )
-            dot = QColor(ALERT_COLORS.get(severity, ACCENTS.get(self.settings.accent, "#40b8ff")))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(dot)
-            # 状态点落在行计划预留的 trail 槽里（end + STATUS_GAP），
-            # 不能按「窗口右边 - 内缩」反推——那会比内容右缘多退一个间距，压到末段上。
-            _, trail = self._lead_trail(plan.name)
-            dot_x = self.width() - trail + STATUS_GAP
-            painter.drawEllipse(
-                QRectF(
-                    dot_x,
-                    CAPSULE_HEIGHT / 2.0 - STATUS_DOT / 2.0,
-                    STATUS_DOT,
-                    STATUS_DOT,
-                )
-            )
+            dot_rect = self._status_dot_rect()
+            if dot_rect is not None:
+                self._paint_status_dot(painter, dot_rect)
 
 
 class _IslandCard(QWidget):

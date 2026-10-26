@@ -755,6 +755,7 @@ class CoreHost:
         self.island.balance_requested.connect(self.request_balance)
         self.island.settings_requested.connect(lambda: self.open_settings("api"))
         self.island.set_avoidance_callback(self._avoid_island_overlap)
+        self.island.set_pet_visible(self._any_pet_visible())
         self.probe_hub = self._build_probe_hub(self.island)
         if self.probe_hub is not None:
             self.island.set_probe_sync_callback(self.probe_hub.sync)
@@ -907,9 +908,11 @@ class CoreHost:
         if self.pets is not None:
             visible = not self.pets.primary.isVisible() if self.pets.primary is not None else True
             self.pets.set_visible_all(visible)
+            self._sync_island_pet_visible()
             return
         if self.window is not None:
             self.window.set_visible(not self.window.isVisible())
+            self._sync_island_pet_visible()
 
     def open_settings(self, initial_page: str | None = None, *, window=None) -> None:
         from .settings.dialog import SettingsDialog
@@ -1030,8 +1033,50 @@ class CoreHost:
             pets.set_visible_all(bool(visible))
         elif getattr(self, "window", None) is not None:
             self.window.set_visible(bool(visible))
+        # 状态点五态里的「隐藏」由宠物可见性派生（托盘隐藏 → 空心中性色）。
+        self._sync_island_pet_visible()
         if getattr(self, "tray", None) is not None:
             QTimer.singleShot(0, self.tray.refresh)
+
+    def _sync_island_pet_visible(self) -> None:
+        """把「还有没有桌宠露着」推给灵动岛（隐藏态的派生来源）。
+
+        可见性有四条改法：托盘「显示/隐藏桌宠」、全局快捷键、托盘逐宠开关、桌宠右键
+        隐藏。全部收口到本方法，否则状态点的「隐藏」态只在其中一条路上成立。
+        """
+        island = getattr(self, "island", None)
+        setter = getattr(island, "set_pet_visible", None)
+        if not callable(setter):
+            return
+        try:
+            setter(self._any_pet_visible())
+        except Exception:  # noqa: BLE001 - 状态点坏了不许挡住显隐
+            logger.debug("island pet visibility failed", exc_info=True)
+
+    def _any_pet_visible(self) -> bool:
+        pets = getattr(self, "pets", None)
+        windows = pets.each() if pets is not None else [getattr(self, "window", None)]
+        return any(window is not None and window.isVisible() for window in windows)
+
+    def notify_agent_state(self, state: str, *, source: str = "core") -> None:
+        """把「AI 工作中/完成/出错」推给灵动岛状态点（未启用灵动岛时静默）。
+
+        ``source`` 是来源名（chat / screen / ...）：岛按来源归并（错误 > 待确认 > 工作），
+        所以截图收尾发 idle 不会把仍在流式回答的对话一起关掉。
+        """
+        island = getattr(self, "island", None)
+        setter = getattr(island, "set_agent_state", None)
+        if not callable(setter):
+            return
+        try:
+            setter(state, source=source)
+        except TypeError:
+            try:
+                setter(state)
+            except Exception:  # noqa: BLE001
+                logger.debug("island agent state failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - 状态点坏了不许影响主流程
+            logger.debug("island agent state failed", exc_info=True)
 
     def toggle_all_visible(self) -> None:
         pets = getattr(self, "pets", None)
@@ -1115,6 +1160,7 @@ class CoreHost:
 
     def _toggle_one(self, window) -> None:
         window.set_visible(not window.isVisible())
+        self._sync_island_pet_visible()
         tray = getattr(self, "tray", None)
         if tray is not None:
             QTimer.singleShot(0, tray.refresh)

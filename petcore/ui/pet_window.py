@@ -884,6 +884,7 @@ class PetWindow(QWidget):
             self._stop_clip()
             self.bubble.hide()
             self.hide()
+            self._sync_host_pet_visibility()
             return
         self.show()
         self._edge_probe.resume()
@@ -892,6 +893,21 @@ class PetWindow(QWidget):
             self._clip.start()
         else:
             self._play_idle()
+        self._sync_host_pet_visibility()
+
+    def _sync_host_pet_visibility(self) -> None:
+        """显隐是四条路（快捷键/托盘全部/托盘逐宠/右键隐藏）共用的收口点。
+
+        灵动岛的「隐藏」态由宠物可见性派生，任何一个入口改了可见性都要通知它；
+        host 没有这个钩子（测试替身）时静默。
+        """
+        sync = getattr(self.host, "_sync_island_pet_visible", None)
+        if not callable(sync):
+            return
+        try:
+            sync()
+        except Exception:  # noqa: BLE001 - 状态点坏了不许挡住显隐
+            logger.debug("island pet visibility failed", exc_info=True)
 
     def _unrotated_point(self, local: QPoint) -> QPoint:
         angle = self._probe_angle + self.effects.effect_angle()

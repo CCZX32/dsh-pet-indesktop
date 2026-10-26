@@ -185,6 +185,8 @@ class ScreenAskWindow(QFrame):
     """截图问答浮窗（每次 ``start`` 开新会话，窗口本体复用）。"""
 
     submitted = Signal(str)
+    #: 等待态起落（截图识别中 → 灵动岛显示「工作中」声纳）。
+    waiting_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -406,6 +408,7 @@ class ScreenAskWindow(QFrame):
         self._send_button.setEnabled(False)
         self.input.setEnabled(False)
         self._set_status("正在看图…")
+        self.waiting_changed.emit(True)
 
     def end_waiting(self, error: str = "") -> None:
         """收口等待态；``error`` 非空时状态行显示失败理由（红色）。"""
@@ -417,6 +420,7 @@ class ScreenAskWindow(QFrame):
         self._set_status(str(error or ""), error=bool(error))
         if not error and self.isVisible():
             self.input.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.waiting_changed.emit(False)
 
     def append_user(self, text: str) -> None:
         self._append(str(text or ""), "user")

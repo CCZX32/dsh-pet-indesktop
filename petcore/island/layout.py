@@ -598,3 +598,198 @@ def ease_out_cubic(t: float) -> float:
     except (TypeError, ValueError):
         return 1.0
     return 1.0 - (1.0 - value) ** 3
+
+
+# ---------------------------------------------------------------- 岛屿视觉与动效（零 Qt）
+# 数值与主分支 ``pet/dynamic_island.py`` 同源：状态点五态（P2 Slice E1）、
+# 工作态声纳环（P3 视觉打磨）、回复后 5s 呼吸浮动、130ms 内容淡化、
+# 三层投影 / sheen / 软陶 bevel / glass 四停点渐变。这里只放**常量与纯函数**，
+# 绘制与定时器在 ``ui/island.py``——判定与几何因此可以脱离窗口单测。
+
+#: 状态点形状：实心圆 / 空心环 / 红底感叹（同刻只画一个）。
+DOT_SOLID = "solid"
+DOT_HOLLOW = "hollow"
+DOT_GLYPH = "glyph"
+
+#: 智能体状态词表（岛对外只认这几个字；`hidden` 由宠物可见性派生，不接受外部设置）。
+AGENT_IDLE = "idle"
+AGENT_WORKING = "working"
+AGENT_WAITING = "waiting"
+AGENT_ERROR = "error"
+AGENT_DONE = "done"
+AGENT_HIDDEN = "hidden"
+AGENT_STATES = frozenset(
+    {AGENT_IDLE, AGENT_WORKING, AGENT_WAITING, AGENT_ERROR, AGENT_DONE}
+)
+
+#: 完成瞬态停留时长与颜色（4s 后回落到空闲；隐藏态盖过它）。
+DOT_DONE_MS = 4000
+DOT_DONE_COLOR = "#50dc78"
+DOT_ERROR_COLOR = "#f2777a"
+#: 空心环描边宽度（外缘仍占满 8px 足迹，尺寸不变）。
+DOT_RING_PX = 1.5
+#: 感叹笔画宽 / 点径，以及竖杠与圆点的纵向比例。
+DOT_GLYPH_W_RATIO = 0.17
+DOT_GLYPH_BAR_TOP_RATIO = 0.18
+DOT_GLYPH_BAR_END_RATIO = 0.46
+DOT_GLYPH_DOT_RATIO = 0.82
+#: 珠感高光：上缘内缩 1.5、下移 1.0、高 38%、白 α70。
+DOT_HIGHLIGHT_INSET_X = 1.5
+DOT_HIGHLIGHT_TOP = 1.0
+DOT_HIGHLIGHT_H_RATIO = 0.38
+DOT_HIGHLIGHT_ALPHA = 70
+
+#: 工作态声纳环：1600ms 一圈、30fps、半径 5→13px、α90、1.5px 笔。
+SONAR_PERIOD_MS = 1600
+SONAR_TICK_MS = 33
+SONAR_R0_PX = 5.0
+SONAR_R1_PX = 13.0
+SONAR_ALPHA = 90
+SONAR_PEN_PX = 1.5
+
+#: 回复后呼吸浮动：5s、幅度 1.5px、角频率 2.6rad/s（周期 ≈2.42s）。
+BREATHE_SECONDS = 5.0
+BREATHE_AMPLITUDE_PX = 1.5
+BREATHE_OMEGA = 2.6
+
+#: 内容切换淡化：130ms、旧图 α 线性 1→0（新图恒 1.0）。
+CONTENT_FADE_MS = 130
+CONTENT_FADE_TICK_MS = 16
+
+#: 胶囊投影三层：(两侧内收 px, 底边下伸 px, 纯黑 alpha)。只向下长、两侧内收。
+CAPSULE_SHADOW_LAYERS = ((1.0, 1.0, 28), (2.0, 2.5, 16), (3.0, 4.0, 8))
+#: 顶部 sheen：从 rect.top()+3 起、覆盖 42% 高；白 α 按配色分档（light 不开）。
+SHEEN_TOP_PX = 3.0
+SHEEN_SPAN = 0.42
+SHEEN_ALPHA = {"dark": 14, "light": 0, "glass": 34}
+#: 软陶 bevel：内缩 1.5 的圆角路径，上半周高光 / 下半周暗边（各 1px）。
+BEVEL_INSET = 1.5
+BEVEL_COLORS = {
+    "dark": ((255, 255, 255, 26), (0, 0, 0, 46)),
+    "light": ((255, 255, 255, 230), (0, 0, 0, 20)),
+    "glass": ((255, 255, 255, 90), (35, 50, 60, 26)),
+}
+#: glass 的四停点竖直渐变（0 / 0.48 / 0.52 / 1.0），整体再乘不透明度。
+GLASS_STOPS = (
+    (0.00, (255, 255, 255, 214)),
+    (0.48, (234, 244, 255, 168)),
+    (0.52, (220, 235, 255, 146)),
+    (1.00, (244, 249, 255, 196)),
+)
+#: glass 的 keyline 是白 α130（不走常规 keyline）。
+GLASS_KEYLINE = (255, 255, 255, 130)
+#: 头标内环（主分支同值；旧实现画的是深色实心圆，缩到 18px 后像个洞）。
+ICON_RING_COLORS = {
+    "dark": (255, 255, 255, 46),
+    "light": (0, 0, 0, 20),
+    "glass": (255, 255, 255, 46),
+}
+#: 单位盒弱化系数（与数值同色，alpha ×0.7）。
+UNIT_ALPHA = 0.7
+
+
+def dot_state(agent_state: str, *, pet_visible: bool = True, done: bool = False) -> str:
+    """把「智能体状态 + 宠物可见性 + 完成瞬态」收敛成当前状态点的语义态。
+
+    优先级（主分支 ``_status_dot_state``）：错误 > 待确认 > 工作 > 隐藏 > 完成 > 空闲。
+    隐藏盖过完成瞬态是对的：桌宠都藏起来了，「刚完成」的绿灯没人看。
+    """
+    state = str(agent_state or AGENT_IDLE).strip().lower()
+    if state == AGENT_ERROR:
+        return AGENT_ERROR
+    if state == AGENT_WAITING:
+        return AGENT_WAITING
+    if state == AGENT_WORKING:
+        return AGENT_WORKING
+    if not pet_visible:
+        return AGENT_HIDDEN
+    if done:
+        return AGENT_DONE
+    return AGENT_IDLE
+
+
+def dot_style(state: str) -> tuple[str, str]:
+    """语义态 → ``(形状, 颜色角色)``；颜色角色由 UI 层映射到具体 QColor。"""
+    state = str(state or AGENT_IDLE).strip().lower()
+    if state == AGENT_ERROR:
+        return DOT_GLYPH, "error"
+    if state == AGENT_WAITING:
+        return DOT_HOLLOW, "accent"
+    if state == AGENT_WORKING:
+        return DOT_SOLID, "accent"
+    if state == AGENT_DONE:
+        return DOT_SOLID, "done"
+    if state == AGENT_HIDDEN:
+        return DOT_HOLLOW, "muted"
+    return DOT_SOLID, "muted"
+
+
+def sonar_ring_params(t: float) -> tuple[float, int]:
+    """声纳环在某相位的 ``(半径, alpha)``：半径线性 5→13，alpha = 90·(1−t)³。"""
+    try:
+        phase = max(0.0, min(1.0, float(t)))
+    except (TypeError, ValueError):
+        phase = 0.0
+    radius = SONAR_R0_PX + (SONAR_R1_PX - SONAR_R0_PX) * phase
+    alpha = round(SONAR_ALPHA * (1.0 - ease_out_cubic(phase)))
+    return radius, alpha
+
+
+def breath_offset(elapsed: float) -> int:
+    """回复后呼吸浮动的 y 位移（整数像素）：±1.5px · sin(2.6·t)，5s 外恒 0。
+
+    取整是刻意的：亚像素平移会让 13px 的中文在每帧重新栅格化，字面发糊。
+    """
+    import math
+
+    try:
+        value = float(elapsed)
+    except (TypeError, ValueError):
+        return 0
+    if value < 0.0 or value >= BREATHE_SECONDS:
+        return 0
+    return round(BREATHE_AMPLITUDE_PX * math.sin(BREATHE_OMEGA * value))
+
+
+def content_fade_alpha(t: float) -> float:
+    """内容淡化进度 → 旧图不透明度（1→0，线性）。"""
+    try:
+        value = max(0.0, min(1.0, float(t)))
+    except (TypeError, ValueError):
+        return 1.0
+    return 1.0 - value
+
+
+def sheen_alpha(style: str) -> int:
+    return int(SHEEN_ALPHA.get(str(style or "dark"), SHEEN_ALPHA["dark"]))
+
+
+def bevel_colors(style: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    return BEVEL_COLORS.get(str(style or "dark"), BEVEL_COLORS["dark"])
+
+
+def icon_ring_color(style: str) -> tuple[int, int, int, int]:
+    return ICON_RING_COLORS.get(str(style or "dark"), ICON_RING_COLORS["dark"])
+
+
+#: 错误态的自动回落时长：petcore 的错误来源是「一次对话/一次请求失败」，
+#: 不像主分支那样有 DSH 收敛器把 turn 结束掉，不给 TTL 就会永久红感叹。
+AGENT_ERROR_TTL_MS = 8000
+#: 多来源归并优先级：错误 > 待确认 > 工作。idle/done/hidden 不参与比较。
+AGENT_PRIORITY = {AGENT_ERROR: 3, AGENT_WAITING: 2, AGENT_WORKING: 1}
+
+
+def resolve_agent_state(states) -> str:
+    """把多个来源的状态归并成一个：取最高优先级，全空（或全 idle）返回 ``idle``。
+
+    来源是「谁在说话」而不是「先后顺序」：截图提问收尾发 idle 时不该把仍在流式
+    回答的对话（working）一起关掉，反之亦然。
+    """
+    best = AGENT_IDLE
+    best_rank = 0
+    for value in states or ():
+        state = str(value or "").strip().lower()
+        rank = AGENT_PRIORITY.get(state, 0)
+        if rank > best_rank:
+            best, best_rank = state, rank
+    return best

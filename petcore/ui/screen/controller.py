@@ -220,6 +220,7 @@ class ScreenAskController(QObject):
             return state
         window = ScreenAskWindow()
         window.submitted.connect(lambda text, k=key: self._on_submitted(k, text))
+        window.waiting_changed.connect(self._on_waiting_changed)
         state = _AskState(owner=owner, slot=slot, window=window)
         self._states[key] = state
         return state
@@ -249,6 +250,21 @@ class ScreenAskController(QObject):
             daemon=True,
             name=f"petcore-screen-ask-{key[1]}",
         ).start()
+
+    def _on_waiting_changed(self, waiting: bool) -> None:
+        """截图识别期间把灵动岛状态点推到「工作中」（有声纳环）。"""
+        notify = getattr(self.host, "notify_agent_state", None)
+        if not callable(notify):
+            return
+        try:
+            notify("working" if waiting else "idle", source="screen")
+        except TypeError:
+            try:
+                notify("working" if waiting else "idle")
+            except Exception:  # noqa: BLE001
+                logger.debug("island state notify failed", exc_info=True)
+        except Exception:  # noqa: BLE001 - 状态点坏了不许影响截图流程
+            logger.debug("island state notify failed", exc_info=True)
 
     def _ask_worker(
         self,
