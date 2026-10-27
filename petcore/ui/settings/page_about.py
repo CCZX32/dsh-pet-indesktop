@@ -16,6 +16,7 @@ from .base import (
     make_button,
     value_field,
 )
+from .page_about_thanks import ThanksPanel
 
 REPO_URL = "https://github.com/MerZlin/dsh-pet-indesktop"
 
@@ -30,17 +31,21 @@ class AboutPage(SettingsPage):
         super().__init__(host, parent)
         self._root = Path(str(getattr(host, "root", Path.cwd())))
         self._log_path = self._root / "logs" / "petcore.log"
+        self._disposed = False
 
         embedded = self._embedded_specs(host)
-        if embedded:
-            with self.tab("about", "版本与诊断"):
-                self._build_about_section()
-            for spec, page in embedded:
-                self.embed_page(page, str(spec.id), str(spec.title))
-        else:
+        with self.tab("about", "版本与诊断"):
             self._build_about_section()
+        with self.tab("thanks", "致谢"):
+            self._build_thanks_section()
+        for spec, page in embedded:
+            self.embed_page(page, str(spec.id), str(spec.title))
 
         self._refresh()
+
+    def _build_thanks_section(self) -> None:
+        self.thanks_panel = ThanksPanel(self.host, self)
+        self._append_section_widget(self.thanks_panel)
 
     @staticmethod
     def _embedded_specs(host) -> list[tuple[object, SettingsPage]]:
@@ -155,7 +160,53 @@ class AboutPage(SettingsPage):
             "mods": mods,
             "characters": characters,
             "pets": pets,
+            "speech": self._speech_report(),
+            "community": self._community_report(),
         }
+
+    def _speech_report(self) -> dict:
+        service = getattr(self.host, "speech", None)
+        if service is None:
+            return {"available": False}
+        try:
+            providers = [
+                {
+                    "id": info.id,
+                    "available": bool(info.available),
+                    "reason": str(info.reason or ""),
+                }
+                for info in service.providers()
+            ]
+            return {
+                "available": True,
+                "backend": service.backend(),
+                "fallback": service.fallback(),
+                "providers": providers,
+                "cache_dir": str(service.cache_dir()),
+                "cached_files": len(service.cache.entries()),
+            }
+        except Exception as exc:  # noqa: BLE001 - 诊断不能把设置页打挂
+            return {"available": False, "error": type(exc).__name__}
+
+    def _community_report(self) -> dict:
+        service = getattr(self.host, "community", None)
+        if service is None:
+            return {"available": False}
+        try:
+            fans = service.fans()
+            credits = service.credits()
+            return {
+                "available": True,
+                "fans": len(fans.names),
+                "fans_total": int(fans.total),
+                "fans_fetched_at": fans.fetched_at,
+                "credits_fetched_at": credits.fetched_at,
+                "contributors": len(credits.contributors),
+                "authors": len(credits.authors),
+                "bilibili_cookie": bool(service.bilibili_cookie_status()),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"available": False, "error": type(exc).__name__}
 
     def _refresh(self) -> None:
         report = self._report()
@@ -224,12 +275,18 @@ class AboutPage(SettingsPage):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._refresh()
+        panel = getattr(self, "thanks_panel", None)
+        if panel is not None:
+            panel.refresh_if_stale()
 
     def _reload(self) -> None:
         reload_mods = getattr(self.host, "reload_mods", None)
         if callable(reload_mods):
             reload_mods()
         self._refresh()
+        panel = getattr(self, "thanks_panel", None)
+        if panel is not None:
+            panel.reload()
 
     def dirty(self) -> bool:
         return self._embedded_dirty()
@@ -239,6 +296,13 @@ class AboutPage(SettingsPage):
 
     def discard_changes(self) -> None:
         self._embedded_discard()
+
+    def dispose(self) -> None:
+        self._disposed = True
+        panel = getattr(self, "thanks_panel", None)
+        if panel is not None:
+            panel.dispose()
+        super().dispose()
 
     def keywords(self) -> list[str]:
         return [
@@ -266,5 +330,16 @@ class AboutPage(SettingsPage):
             "安装更新",
             "取消下载",
             "update",
+            "致谢",
+            "贡献者",
+            "特别鸣谢",
+            "粉丝",
+            "签名",
+            "作者",
+            "鸣谢",
+            "contributors",
+            "thanks",
+            "fans",
+            "signature",
             *self._embedded_keywords(),
         ]

@@ -202,6 +202,9 @@ def _scaled_pixmap(
 class SpeechBubble(QWidget):
     #: 左键点在气泡上：桌宠用来打开「快速对话」（主分支同一条入口）。
     clicked = Signal()
+    #: 气泡收起（自动到时 / 手动 hide 都算，仅「原本可见」时发一次）。
+    #: 点击台词要排在余额气泡收起之后，窗口层靠它接续。
+    closed = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
@@ -211,6 +214,8 @@ class SpeechBubble(QWidget):
         self._content_kind = "text"
         self._anchor: QRect | None = None
         self._place_key: tuple | None = None
+        #: `showEvent/hideEvent` 里的可见标志（进 hideEvent 时 Qt 已清 visible）。
+        self._was_shown = False
         self._text_scale = 1.0
         self._stream_mode = False
         self._host_on_top = True
@@ -489,6 +494,10 @@ class SpeechBubble(QWidget):
     def page_index(self) -> int:
         return self._page_index
 
+    def full_text(self) -> str:
+        """当前气泡的完整正文（分页前），只读。"""
+        return self._full_text
+
     def subtitle_text(self) -> str:
         return self._subtitle
 
@@ -602,6 +611,22 @@ class SpeechBubble(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self.isVisible():
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """收起时发一次 `closed`（自动到时、手动 hide、桌宠隐藏都走这里）。
+
+        进 `hideEvent` 时 Qt 已经把 visible 标志清掉了，所以用 `showEvent` 记的
+        自己的标志判断「原本是否可见」——否则每条都会发，或者一条都不发。
+        """
+        was_visible = self._was_shown
+        super().hideEvent(event)
+        self._was_shown = False
+        if was_visible:
+            self.closed.emit()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        self._was_shown = True
 
     def _place(self, anchor: QRect) -> None:
         """贴着角色锚点放：上居中 → 上偏左右 → 两侧 → 下方，且不压住角色。"""

@@ -74,6 +74,23 @@ def _write_image(path: Path, width: int = 400, height: int = 200) -> Path:
     return path
 
 
+def test_bubble_emits_closed_only_when_it_was_visible(app, window) -> None:
+    """气泡收起要能被上层观察到（点击台词排队在余额气泡之后靠它）。"""
+    bubble = window.bubble
+    seen: list[int] = []
+    bubble.closed.connect(lambda: seen.append(1))
+    bubble.hide()  # 本来就没显示：不发
+    assert seen == []
+
+    window.say("余额 ¥1.00")
+    assert bubble.isVisible() is True
+    bubble.hide()
+    assert seen == [1]
+
+    bubble.hide()  # 已经收起：不重复发
+    assert seen == [1]
+
+
 def test_bubble_follows_the_pet_when_the_window_moves(app, window) -> None:
     window.say("跟着我")
     bubble = window.bubble
@@ -276,6 +293,20 @@ def test_bubble_keeps_the_pet_layer(app, window) -> None:
     window.set_always_on_top(True, persist=False)
     assert bubble.host_on_top() is True
     assert bubble.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+
+
+def test_bubble_is_owned_by_the_pet_window(app, window) -> None:
+    """气泡必须是桌宠窗口的从属窗口（owned window），而不只是「碰巧同层」。
+
+    只靠 ``WindowStaysOnTopHint`` 时，气泡是独立顶层窗口：非置顶状态下它自己
+    ``raise_()`` 会排到所有普通窗口（别的应用、QMenu）之上，用户看到的就是
+    「桌宠不在最上层，气泡却在最上面，还把右键菜单压住了」。
+    从属窗口的 z 序由宿主决定：宿主退它就退，``raise_()`` 只在宿主之上生效。
+    """
+    bubble = window.bubble
+    assert bubble.parent() is window, "气泡必须挂在桌宠窗口下，层级才跟得上"
+    assert bubble.isWindow(), "挂父窗口之后它仍然要是独立窗口（能伸出桌宠边界）"
+
 
 
 def test_text_and_image_bubbles_share_the_same_window(app, window, tmp_path) -> None:

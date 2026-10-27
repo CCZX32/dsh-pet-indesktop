@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,6 +64,7 @@ from .easter_egg import DEFAULT_EASTER_EGG_TITLE, EasterEggController
 from .edge_probe import EdgeProbeController
 from .effects import EffectController
 from .feeding import FeedingController
+from .menu import show_context_menu
 from .motion import MotionController
 from .renderer import frame_pixmap
 from .slingshot import SlingshotController
@@ -85,6 +87,9 @@ class PetWindow(QWidget):
     #: 桌宠移动后发出（拖动、抛掷、漫游、碰撞分离都会走 ``moveEvent``）；
     #: 聊天窗用它做「跟随桌宠」的合并定位。
     pet_moved = Signal()
+    #: 点击反馈被余额接管时，等余额气泡收起的兜底时限：结果一直不来、免打扰把气泡
+    #: 拦掉、窗口被隐藏时，到点仍要把点击台词放出来（不许永久憋住）。
+    CLICK_TALK_FALLBACK_MS = 9000
 
     def __init__(self, config: Config, root: Path, host, *, slot: int = 0):
         super().__init__(None)
@@ -114,7 +119,9 @@ class PetWindow(QWidget):
         self.sound = SoundPlayer(float(config.get("volume") or 0.8))
         self._click_sound_pair = ClickSoundPair(self.sound.play)
         self._click_sound_token: int | None = None
-        self.bubble = SpeechBubble()
+        # 从属窗口（owned window）：气泡的层级永远跟着桌宠走——桌宠置顶它才置顶，
+        # 桌宠退到其它窗口后面它也退，`raise_()` 不会再越过别的应用或右键菜单。
+        self.bubble = SpeechBubble(self)
         self.bubble.clicked.connect(self._on_bubble_clicked)
         self.bubble.set_text_scale(self._text_scale_factor())
         self.bubble.set_stream_mode(self.stream_capture_mode)
@@ -136,7 +143,23 @@ class PetWindow(QWidget):
         self._head_pat_no_spec_logged = False
         self._click_listeners: list = []
         self._drop_listeners: list = []
+        # 点击反馈排队：开「点击查看余额」时余额气泡先冒，点击台词等它收起。
+        self._click_talk_pending = False
+        self._click_talk_waiting_close = False
+        #: 余额结果「已经展示过」的序号：缓存命中时它是**同步**发生的，可能早于
+        #: 排队建立（`request()` 内部先发缓存），靠序号判断这次点击已经有过余额气泡。
+        self._click_balance_serial = 0
+        self._click_talk_timer = QTimer(self)
+        self._click_talk_timer.setSingleShot(True)
+        self._click_talk_timer.timeout.connect(self._flush_click_talk)
+        self.bubble.closed.connect(self._on_bubble_closed)
         self._bubble_follow_pending = False
+        # 多气泡序列（自言自语彩蛋）：单次定时器推进，新的 say/show_image/隐藏都会取消。
+        self._say_sequence_items: deque = deque()
+        self._say_sequence_on_show = None
+        self._say_sequence_timer = QTimer(self)
+        self._say_sequence_timer.setSingleShot(True)
+        self._say_sequence_timer.timeout.connect(self._advance_say_sequence)
         self._gap_until = 0.0
         self._move_timer = QTimer(self)
         self._move_timer.setInterval(16)
@@ -586,7 +609,9 @@ class PetWindow(QWidget):
         start_y = float(self.y())
         target_x = start_x + direction * distance_px
         target_y = start_y
-        target_x = float(self._clamp_position(int(round(target_x)), int(round(target_y)))[0])
+        target_x = float(
+            self._clamp_position(int(round(target_x)), int(round(target_y)), settle=False)[0]
+        )
         self._move_plan = {
             "spec": spec.name,
             "start_x": start_x,
@@ -681,12 +706,29 @@ class PetWindow(QWidget):
         x, y = self._clamp_position(
             int(round(plan.get("target_x") or self.x())),
             int(round(plan.get("target_y") or self.y())),
+            settle=False,
         )
         self.move(x, y)
         self._cancel_move_plan()
         self._edge_probe.maybe_enter()
 
-    def _clamp_position(self, x: int, y: int) -> tuple[int, int]:
+    def _clamp_position(self, x: int, y: int, *, settle: bool = True) -> tuple[int, int]:
+        """位置出口：先屏幕钳制，再岛墙钳制。
+
+        岛墙（``host.island_field``）挂在这里而不是 tick 里：拖拽/漫游/碰撞分离/
+        缩放/换屏全都经过它，和屏幕边界同语义——没有采样间隙就没有「钻进→被弹→
+        再钻回」的抽搐。宿主没装灵动岛时是一个 ``getattr`` 的距离，行为逐像素不变。
+
+        ``settle=False`` 只算几何、不结算（不算接近速度、不写速度、不清移动计划）：
+        发起漫游时先钳一次 60–240px 外的**目标点**，那不是「桌宠移动到这里」。
+        """
+        x, y = self._clamp_to_screen(x, y)
+        field = getattr(self.host, "island_field", None)
+        if field is not None:
+            x, y = field.clamp(self, x, y, settle=settle)
+        return x, y
+
+    def _clamp_to_screen(self, x: int, y: int) -> tuple[int, int]:
         if self._layout is None:
             return x, y
         width, height = self.width(), self.height()
@@ -882,6 +924,7 @@ class PetWindow(QWidget):
             self._head_pat_tracker.reset()
             self._edge_probe.pause()
             self._stop_clip()
+            self._cancel_say_sequence()
             self.bubble.hide()
             self.hide()
             self._sync_host_pet_visibility()
@@ -1183,8 +1226,13 @@ class PetWindow(QWidget):
         if bool(self.config.get("golden_spin_on_click")):
             if bool(self.config.get("golden_spin_direct")):
                 self.effects.start_spin(direct=True)
-                self._notify_click()
-                self._maybe_request_click_balance()
+                serial = self._click_balance_serial
+                if self._maybe_request_click_balance():
+                    self._begin_click_talk_wait(
+                        already_presented=self._click_balance_serial != serial
+                    )
+                else:
+                    self._notify_click()
                 return
             self.effects.arm_spin_after_click()
         spec = self.catalog.find_for(GraphType.TOUCH_BODY, AnimatType.SINGLE)
@@ -1194,19 +1242,71 @@ class PetWindow(QWidget):
         self.effects.start_squash(int(self.config.get("click_squash_ms") or 220))
         if bool(self.config.get("click_sound")) and not sound_already_played:
             QTimer.singleShot(0, self._play_click_sound)
-        self._notify_click()
-        self._maybe_request_click_balance()
+        serial = self._click_balance_serial
+        if self._maybe_request_click_balance():
+            # 余额气泡先冒；点击台词（点击监听者）等它收起后再通知。
+            self._begin_click_talk_wait(
+                already_presented=self._click_balance_serial != serial
+            )
+        else:
+            self._notify_click()
 
-    def _maybe_request_click_balance(self) -> None:
-        """按宠物配置异步请求余额；点击线程只提交请求，不执行网络 I/O。"""
+    def _maybe_request_click_balance(self) -> bool:
+        """按宠物配置异步请求余额；点击线程只提交请求，不执行网络 I/O。
+
+        返回真表示「这次点击的反馈归余额气泡」——调用方据此把 ``_notify_click()``
+        排到余额气泡收起之后（否则点击台词先闪一下、再被余额盖掉）。
+        """
         if not bool(self.config.get("click_show_balance")):
-            return
+            return False
         request = getattr(self.host, "request_balance", None)
-        if callable(request):
-            try:
-                request(self.slot, force=True)
-            except Exception:  # noqa: BLE001 - 余额提示不能破坏点击动画
-                logger.debug("click balance request failed", exc_info=True)
+        if not callable(request):
+            # 宿主没有余额回调（子壳 / 测试替身）：点击台词照常立刻冒，与主分支
+            # `callable(on_show_balance)` 的回落口径一致。
+            return False
+        try:
+            request(self.slot, force=True)
+        except Exception:  # noqa: BLE001 - 余额提示不能破坏点击动画
+            logger.debug("click balance request failed", exc_info=True)
+            return False
+        return True
+
+    def _begin_click_talk_wait(self, *, already_presented: bool = False) -> None:
+        """排一次点击反馈：等余额气泡收起；连点只保留一条（跟着最后一次点击）。
+
+        ``already_presented`` 用于缓存命中：余额气泡在 ``request()`` 里同步冒出来了
+        （``presented`` 回调早于这里），此时直接进入「等它收起」。
+        """
+        self._click_talk_pending = True
+        self._click_talk_waiting_close = bool(already_presented) and self.bubble.isVisible()
+        self._click_talk_timer.start(int(self.CLICK_TALK_FALLBACK_MS))
+        if already_presented and not self.bubble.isVisible():
+            # 缓存路径但气泡被免打扰/隐藏拦掉了：没有可等的气泡，立刻放台词。
+            self._flush_click_talk()
+
+    def notify_click_balance_presented(self) -> None:
+        """宿主把余额气泡（含失败原因那条）冒出来之后调用，接续点击台词。"""
+        self._click_balance_serial += 1
+        if not self._click_talk_pending:
+            return
+        if self.bubble.isVisible():
+            # 等这一条收起：`SpeechBubble.closed` 由 hideEvent 发。
+            self._click_talk_waiting_close = True
+            return
+        # 免打扰 / 窗口隐藏把气泡拦掉了：没有可等的气泡，立刻放台词。
+        self._flush_click_talk()
+
+    def _on_bubble_closed(self) -> None:
+        if self._click_talk_pending and self._click_talk_waiting_close:
+            self._flush_click_talk()
+
+    def _flush_click_talk(self) -> None:
+        if not self._click_talk_pending:
+            return
+        self._click_talk_pending = False
+        self._click_talk_waiting_close = False
+        self._click_talk_timer.stop()
+        self._notify_click()
 
     def _play_click_sound(self) -> None:
         candidates = self._click_sound_candidates()
@@ -1280,6 +1380,16 @@ class PetWindow(QWidget):
         if bool(self.config.get("collision_sound")):
             self._play_click_sound()
 
+    def island_hit_feedback(self) -> None:
+        """撞岛反馈（挤压 + 碰撞音效）。
+
+        节流由碰撞层统一持有（``IslandField.notify_hit``，0.25s）：非抛掷撞岛与
+        抛掷撞墙两条链共用一个闸，各留一份就会「先响一声、追着又响一声」。
+        """
+        self.effects.start_squash(int(self.config.get("click_squash_ms") or 220))
+        if bool(self.config.get("collision_sound")):
+            self._play_click_sound()
+
     def _on_motion_stopped(self) -> None:
         if not self.dragging:
             self._play_idle()
@@ -1297,7 +1407,7 @@ class PetWindow(QWidget):
             event.accept()
             return
         menu = self.host.build_menu(self)
-        menu.exec(event.globalPos())
+        show_context_menu(menu, event.globalPos(), topmost=self.always_on_top)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape and self.slingshot.aiming:
@@ -1333,6 +1443,7 @@ class PetWindow(QWidget):
         event.accept()
 
     def say(self, text: str, duration_ms: int = 4000, *, subtitle: str = "") -> bool:
+        self._cancel_say_sequence()
         if not self.isVisible():
             # 隐藏的桌宠不该继续冒泡；隐藏时 set_visible(False) 也会收起气泡。
             return False
@@ -1342,6 +1453,62 @@ class PetWindow(QWidget):
             text, self.bubble_anchor_rect(), duration_ms, subtitle=subtitle
         )
         return self.bubble.isVisible()
+
+    def say_sequence(
+        self,
+        items,
+        *,
+        gap_ms: int = 200,
+        on_show=None,
+    ) -> bool:
+        """依次显示多条气泡（``(text, subtitle, duration_ms)``）。
+
+        单实例气泡一次只能显示一条，序列由本方法用单次定时器推进；任何新的
+        ``say()`` / ``show_image()`` / 隐藏 / 关闭都会取消剩余条目。
+        """
+        self._cancel_say_sequence()
+        if not self.isVisible():
+            return False
+        lines = []
+        for item in items or ():
+            if not item:
+                continue
+            text = str(item[0] or "").strip()
+            if not text:
+                continue
+            subtitle = str(item[1] or "").strip() if len(item) > 1 else ""
+            duration = int(item[2]) if len(item) > 2 else 4000
+            lines.append((text, subtitle, max(800, duration)))
+        if not lines:
+            return False
+        self._say_sequence_items = deque(lines)
+        self._say_sequence_on_show = on_show
+        self._say_sequence_gap_ms = max(0, int(gap_ms))
+        self._advance_say_sequence()
+        return True
+
+    def _advance_say_sequence(self) -> None:
+        if not self._say_sequence_items:
+            self._say_sequence_on_show = None
+            return
+        text, subtitle, duration = self._say_sequence_items.popleft()
+        self.bubble.set_text_scale(self._text_scale_factor())
+        self.bubble.show_text(
+            text, self.bubble_anchor_rect(), duration, subtitle=subtitle
+        )
+        if self._say_sequence_on_show is not None and self.bubble.isVisible():
+            try:
+                self._say_sequence_on_show(text)
+            except Exception:  # noqa: BLE001 - 通知失败不影响后续气泡
+                logger.debug("say_sequence on_show failed", exc_info=True)
+        if self._say_sequence_items:
+            gap = getattr(self, "_say_sequence_gap_ms", 200)
+            self._say_sequence_timer.start(int(duration) + int(gap))
+
+    def _cancel_say_sequence(self) -> None:
+        self._say_sequence_timer.stop()
+        self._say_sequence_items.clear()
+        self._say_sequence_on_show = None
 
     def _on_bubble_clicked(self) -> None:
         """点气泡 = 打开快速对话（主分支同一条入口）。"""
@@ -1383,6 +1550,7 @@ class PetWindow(QWidget):
         image_scale: float | None = None,
     ) -> bool:
         """在气泡里显示一张图；``image_scale`` 缺省用彩蛋图片大小设置。"""
+        self._cancel_say_sequence()
         if not self.isVisible():
             return False
         if image_scale is None:
@@ -1508,7 +1676,7 @@ class PetWindow(QWidget):
         primary = self._layout.by_name(self._layout.primary)
         if primary is None:
             return
-        x, y = self._corner_position(primary)
+        x, y = self._clamp_position(*self._corner_position(primary))
         self.move(x, y)
         self._remember_geometry(primary.name)
 
@@ -1520,7 +1688,7 @@ class PetWindow(QWidget):
             screen = self._layout.by_name(self._layout.primary)
         if screen is None:
             return
-        x, y = self._corner_position(screen)
+        x, y = self._clamp_position(*self._corner_position(screen))
         self.move(x, y)
         self._remember_geometry(screen.name)
 
@@ -1601,6 +1769,7 @@ class PetWindow(QWidget):
         self._head_pat_tracker.reset()
         self._click_sound_pair.cancel_all()
         self._click_sound_token = None
+        self._cancel_say_sequence()
         self.sound.stop_all()
         self._stop_clip()
         self.library.close_all()
@@ -1618,6 +1787,9 @@ class PetWindow(QWidget):
         self._head_pat_tracker.reset()
         self._click_sound_pair.cancel_all()
         self._click_sound_token = None
+        self._click_talk_timer.stop()
+        self._click_talk_pending = False
+        self._cancel_say_sequence()
         self.sound.stop_all()
         self._edge_probe.shutdown()
         self.motion.shutdown()
@@ -1629,4 +1801,8 @@ class PetWindow(QWidget):
         self.library.close_all()
         if self._input_controller is not None:
             self._input_controller.stop()
+        try:
+            self.bubble.closed.disconnect(self._on_bubble_closed)
+        except (RuntimeError, TypeError):
+            pass
         self.bubble.close()

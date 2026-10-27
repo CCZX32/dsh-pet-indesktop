@@ -9,7 +9,7 @@ from petcore.ui.settings.base import SettingsPage, make_button, value_field
 
 DEEPSEEK_WEB_URL = "https://chat.deepseek.com/"
 GITHUB_URL = "https://github.com/MerZlin/dsh-pet-indesktop"
-QUARK_URL = "https://pan.quark.cn/"
+QUARK_URL = "https://pan.quark.cn/s/68fc681ae486"
 
 
 class LinksRuntime:

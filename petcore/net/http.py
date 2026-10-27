@@ -305,6 +305,7 @@ def fetch_url(
     params: tuple[tuple[str, str], ...] = (),
     timeout: float = DEFAULT_TIMEOUT,
     prefer_direct: bool = False,
+    direct_only: bool = False,
     retry_statuses: tuple[int, ...] = DEFAULT_FALLBACK_STATUSES,
     max_bytes: int = DEFAULT_MAX_BYTES,
     context=None,
@@ -323,11 +324,16 @@ def fetch_url(
     路由顺序由 ``prefer_direct`` 决定，最多两次；两次共享同一个 ``timeout``
     预算。换路由条件只有两种：传输失败，或状态码在 ``retry_statuses`` 里
     且响应**没有** ``Retry-After``（服务端明确要求等待时换路等于把限流当链路故障）。
-    ``allow_private=False`` 用于「URL 来自模型/搜索页」的场景：本机与内网地址一律拒绝。
+    ``direct_only=True`` 只走直连、失败也不切代理（本地模型用：不能把本地 Key
+    与朗读文本发给系统代理）。``allow_private=False`` 用于「URL 来自模型/搜索页」
+    的场景：本机与内网地址一律拒绝。
     """
     validate_target(url, allowed_schemes=allowed_schemes, allow_private=allow_private)
     deadline = clock() + max(0.05, float(timeout))
-    order = (False, True) if prefer_direct else (True, False)
+    if direct_only:
+        order = (False,)
+    else:
+        order = (False, True) if prefer_direct else (True, False)
     if opener is not None:
         build: OpenerFactory = opener
     elif max_redirects == DEFAULT_MAX_REDIRECTS:

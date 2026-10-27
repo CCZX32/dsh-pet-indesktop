@@ -31,8 +31,9 @@ from .page_api import ApiSettingsPage
 from .page_extensions import ExtensionsPage
 from .page_interaction import InteractionPage
 from .page_pets import PetsPage
+from .page_voice import VoicePage
 from .pages_core import AppearancePage, GeneralPage, MenuPage
-from .style import is_dark, stylesheet
+from .style import is_dark, nav_row_heights, stylesheet
 
 logger = logging.getLogger("petcore.ui.settings")
 
@@ -40,6 +41,7 @@ _PAGE_ICONS = {
     "常规": "settings",
     "外观与交互": "size",
     "互动与物理": "pointer",
+    "语音": "voice",
     "多宠": "spawn",
     "菜单": "application",
     "扩展管理": "application",
@@ -51,6 +53,7 @@ _PAGE_KEYS = {
     "常规": "general",
     "外观与交互": "appearance",
     "互动与物理": "interaction",
+    "语音": "voice",
     "多宠": "pets",
     "菜单": "menu",
     "扩展管理": "mods",
@@ -142,12 +145,39 @@ class SettingsDialog(QDialog):
             self.nav.setFocus()
 
     def refresh_style(self) -> None:
-        """按当前界面字号重设样式表；字号/主题未变时是空操作。"""
+        """按当前界面字号重设样式表；字号/主题未变时是空操作。
+
+        样式真的变了还要做两件收尾：主侧栏行高按字号重算（``nav_row_heights``
+        与 QSS 用同一个公式，否则 18px 的标签会被 34px 的行切掉），以及通知每个
+        页面重排自有几何（扩页导航宽/内容最小高都按字体度量算）。
+        """
         key = (is_dark(), int(self.config.get("ui_font_size") or 13))
         if key == getattr(self, "_style_key", None):
             return
         self._style_key = key
         self.setStyleSheet(stylesheet(key[0], key[1]))
+        self._apply_nav_row_height(key[1])
+        self._reflow_pages()
+
+    def _apply_nav_row_height(self, font_size: int) -> None:
+        height = nav_row_heights(font_size)[0]
+        nav = getattr(self, "nav", None)
+        if nav is None:
+            return
+        for row in range(nav.count()):
+            item = nav.item(row)
+            if item is not None:
+                item.setSizeHint(QSize(0, height))
+
+    def _reflow_pages(self) -> None:
+        for entry in getattr(self, "_pages", ()):  # 构造期还没有页面
+            hook = getattr(entry.page, "reflow", None)
+            if not callable(hook):
+                continue
+            try:
+                hook()
+            except Exception:
+                logger.warning("reflow of %s failed", entry.title, exc_info=True)
 
     def _build_ui(self) -> None:
         self.refresh_style()
@@ -228,6 +258,7 @@ class SettingsDialog(QDialog):
             GeneralPage(self.host),
             AppearancePage(self.host),
             InteractionPage(self.host),
+            VoicePage(self.host),
             PetsPage(self.host),
             MenuPage(self.host),
             ExtensionsPage(self.host),
@@ -240,12 +271,20 @@ class SettingsDialog(QDialog):
         for title, page, keywords, key in pages:
             item = QListWidgetItem(title, self.nav)
             item.setData(Qt.ItemDataRole.UserRole, len(self._pages))
-            # 行高 34、图标按 16 绘制（主分支 `SIDEBAR_ROW_HEIGHT=34` / `SIDEBAR_ICON_SIZE=16`）。
-            # 旧的 42px 行 + 18px 图标会让图标比 13px 标签高出一大截，看着「过大」。
-            item.setSizeHint(QSize(0, 34))
+            # 行高与 QSS 同源（`nav_row_heights`）：字号 13 → 34px、字号 18 → 39px。
+            # 旧的写法把 34 写死，字号一放大文字就被 min-height 切掉上下缘
+            # （主分支 `pet/settings_widgets.py` 的侧栏 pane 也是同一个教训）。
+            item.setSizeHint(QSize(0, self._nav_row_height()))
             item.setIcon(menu_icon(_page_icon(title), SIDEBAR_ICON_SIZE))
             self.stack.addWidget(page)
             self._pages.append(_PageEntry(title, page, keywords, key))
+
+    def _nav_row_height(self) -> int:
+        try:
+            value = int(self.config.get("ui_font_size") or 13)
+        except (TypeError, ValueError):
+            value = 13
+        return nav_row_heights(value)[0]
 
     def _fit_combo_widths(self) -> None:
         """按实际字体度量给下拉框留出箭头与左右安全区，避免末字被裁切。"""

@@ -50,10 +50,15 @@ def _ink() -> QColor:
 def _pixmap(size: int, dpr: float = 1.0) -> tuple[QPixmap, QPainter]:
     """按逻辑尺寸 ``size`` 建图；字形仍按 36 单位设计稿绘制。
 
-    两个尺寸口径必须分开：``size`` 是**显示槽位**（菜单 18px、侧栏 16px），
-    ``_GLYPH_UNITS`` 是 ``_draw()`` 里写死的设计坐标系。设计稿整体缩放到槽位，
-    笔画也按设计单位一起缩放（不是钉死在逻辑像素上）——这样小槽位下笔画自然变细，
-    与初版观感一致。
+    **DPR 只乘一次**：画布按 ``logical * ratio`` 建、并 ``setDevicePixelRatio``，
+    此后 QPainter 的坐标系就是**逻辑像素**（Qt 会自己把 DPR 套上去）。所以这里只
+    按 ``logical / 36`` 缩放设计稿——再乘一次 ratio 会让字形放大 1.5/2 倍、贴死画布
+    右下角并被裁掉（150% 屏上 play/screen/quit 的实测包围盒 (14,8,26,26)）。
+    主分支 ``pet/context_menus/icons.py::_new_icon_canvas`` 同口径：``scale(size/16)``。
+
+    ``size`` 是**显示槽位**（菜单 18px、侧栏 16px），``_GLYPH_UNITS`` 是 ``_draw()``
+    里写死的设计坐标系；笔画也按设计单位一起缩放（不是钉死在逻辑像素上）——这样小
+    槽位下笔画自然变细，与初版观感一致。
     """
     logical = max(8, int(size))
     ratio = sanitize_dpr(screen_dpr() if dpr is None else dpr)
@@ -62,9 +67,9 @@ def _pixmap(size: int, dpr: float = 1.0) -> tuple[QPixmap, QPainter]:
     pixmap.fill(Qt.GlobalColor.transparent)
     pixmap.setDevicePixelRatio(ratio)
     painter = QPainter(pixmap)
-    # 设计单位 → 设备像素；``scale`` 是设计单位 → 逻辑像素。
+    # 设计单位 → 逻辑像素；DPR 由 QPainter 按 pixmap 的 devicePixelRatio 自动套用。
     scale = logical / _GLYPH_UNITS
-    painter.scale(ratio * scale, ratio * scale)
+    painter.scale(scale, scale)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     pen = QPen(_ink())
     pen.setWidthF(max(_STROKE_UNITS, _MIN_STROKE_PX / scale) if scale > 0 else _STROKE_UNITS)
@@ -161,6 +166,18 @@ def _draw(name: str, painter: QPainter) -> None:
         painter.drawLine(QPointF(12, 30), QPointF(18, 24))
         painter.drawLine(QPointF(11, 13), QPointF(25, 13))
         painter.drawLine(QPointF(11, 17), QPointF(21, 17))
+    elif name == "voice":
+        # 喇叭 + 两道声波（36 单位设计稿）。
+        horn = QPainterPath(QPointF(6, 15))
+        horn.lineTo(11, 15)
+        horn.lineTo(17, 9)
+        horn.lineTo(17, 27)
+        horn.lineTo(11, 21)
+        horn.lineTo(6, 21)
+        horn.closeSubpath()
+        painter.drawPath(horn)
+        painter.drawArc(QRectF(18, 13, 7, 10), -60 * 16, 120 * 16)
+        painter.drawArc(QRectF(20, 9, 12, 18), -55 * 16, 110 * 16)
     elif name == "play":
         painter.drawPolygon([QPointF(14, 8), QPointF(28, 18), QPointF(14, 28)])
     elif name == "speed":
@@ -200,6 +217,47 @@ def _draw(name: str, painter: QPainter) -> None:
     elif name == "weather":
         painter.drawEllipse(QRectF(6, 7, 13, 13))
         painter.drawRoundedRect(QRectF(11, 16, 19, 12), 6, 6)
+    elif name == "pet":
+        # 桌宠：脸 + 两只耳朵（主分支 `pet` 字形的 36 单位版）。
+        painter.drawEllipse(QRectF(9.5, 13.5, 17, 14.5))
+        for cx, cy in ((10.5, 11.0), (25.5, 11.0)):
+            painter.drawEllipse(QRectF(cx - 3.0, cy - 3.4, 6.0, 6.8))
+    elif name == "tools":
+        # 工具箱：提手 + 箱体 + 箱盖线。
+        painter.drawArc(QRectF(13, 6, 10, 9), 0, 180 * 16)
+        painter.drawRoundedRect(QRectF(7, 13, 22, 16), 3, 3)
+        painter.drawLine(QPointF(7, 19), QPointF(29, 19))
+        painter.drawLine(QPointF(16, 16), QPointF(20, 16))
+    elif name == "web":
+        # 地球：外圈 + 子午线 + 赤道。
+        painter.drawEllipse(QRectF(7, 7, 22, 22))
+        painter.drawEllipse(QRectF(13.5, 7, 9, 22))
+        painter.drawLine(QPointF(7, 18), QPointF(29, 18))
+    elif name == "todo":
+        # 待办清单：板面 + 两行勾选。
+        painter.drawRoundedRect(QRectF(7, 6.5, 22, 23), 3.5, 3.5)
+        for y in (13.5, 22.5):
+            painter.drawLine(QPointF(11, y), QPointF(13.2, y + 2.2))
+            painter.drawLine(QPointF(13.2, y + 2.2), QPointF(16.8, y - 1.6))
+            painter.drawLine(QPointF(19.5, y), QPointF(26, y))
+    elif name == "download":
+        painter.drawLine(QPointF(18, 7), QPointF(18, 22))
+        painter.drawLine(QPointF(12.5, 16.5), QPointF(18, 22))
+        painter.drawLine(QPointF(23.5, 16.5), QPointF(18, 22))
+        painter.drawLine(QPointF(9, 28.5), QPointF(27, 28.5))
+    elif name == "capture":
+        # 截图提问：屏幕外框 + 内框（框选语义），与「看看屏幕」的纯显示器区分开。
+        painter.drawRoundedRect(QRectF(6, 7, 24, 18), 2.5, 2.5)
+        painter.drawRoundedRect(QRectF(12, 13, 12, 7), 1.5, 1.5)
+    elif name == "eye":
+        # 主动识屏：睁开的眼睛（无斜线），与「隐藏桌宠」的眯眼划线版区分。
+        painter.drawEllipse(QRectF(6, 11, 24, 14))
+        painter.drawEllipse(QRectF(14, 14, 8, 8))
+    elif name == "sparkles":
+        # 三枚四射星：主星居中偏左，两枚小星点缀右上/右下。
+        for cx, cy, radius in ((16, 17, 8.5), (26.5, 8.5, 4.5), (26, 27, 4.0)):
+            painter.drawLine(QPointF(cx - radius, cy), QPointF(cx + radius, cy))
+            painter.drawLine(QPointF(cx, cy - radius), QPointF(cx, cy + radius))
     else:
         painter.drawEllipse(QRectF(14, 14, 8, 8))
 

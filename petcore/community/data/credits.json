@@ -1,0 +1,745 @@
+{
+  "schema": 1,
+  "repo": "MerZlin/dsh-pet-indesktop",
+  "fetched_at": "2026-10-27T01:41:31+08:00",
+  "author_accounts": [
+    {
+      "platform": "BiliBili",
+      "handle": "@張墨林",
+      "url": ""
+    },
+    {
+      "platform": "BiliBili",
+      "handle": "@快乐小咸鱼a",
+      "url": ""
+    },
+    {
+      "platform": "抖音",
+      "handle": "@張墨林",
+      "url": ""
+    },
+    {
+      "platform": "GitHub",
+      "handle": "@MerZlin",
+      "url": "https://github.com/MerZlin"
+    }
+  ],
+  "special_thanks": [
+    {
+      "kind": "project",
+      "name": "PC2005-cloud/dsh-pet",
+      "url": "https://github.com/PC2005-cloud/dsh-pet",
+      "note": "本项目参考的上游项目；初始「蓝色大肥鱼」素材来源"
+    },
+    {
+      "kind": "bilibili",
+      "name": "@这个刀子真甜",
+      "url": "",
+      "note": "桌宠形象来源"
+    },
+    {
+      "kind": "bilibili",
+      "name": "@上善无形",
+      "url": "",
+      "note": "桌宠形象来源"
+    },
+    {
+      "kind": "bilibili",
+      "name": "@ZipZipPipe",
+      "url": "",
+      "note": "桌宠形象来源"
+    }
+  ],
+  "contributors": [
+    {
+      "login": "klxxya",
+      "contributions": 742
+    },
+    {
+      "login": "MerZlin",
+      "contributions": 314
+    },
+    {
+      "login": "ushio2026-alt",
+      "contributions": 21
+    },
+    {
+      "login": "lscatfish",
+      "contributions": 16
+    },
+    {
+      "login": "KagurazakaChizuru",
+      "contributions": 7
+    },
+    {
+      "login": "Anguis-L",
+      "contributions": 6
+    },
+    {
+      "login": "GiriGiriCase",
+      "contributions": 5
+    },
+    {
+      "login": "shinelon",
+      "contributions": 5
+    },
+    {
+      "login": "Vendela-Tu",
+      "contributions": 5
+    },
+    {
+      "login": "Daliuq",
+      "contributions": 3
+    },
+    {
+      "login": "NoelLuo",
+      "contributions": 2
+    },
+    {
+      "login": "CarpSec",
+      "contributions": 1
+    },
+    {
+      "login": "eruoos",
+      "contributions": 1
+    },
+    {
+      "login": "JanGShui",
+      "contributions": 1
+    },
+    {
+      "login": "lzyhappylife",
+      "contributions": 1
+    },
+    {
+      "login": "MYming-yue",
+      "contributions": 1
+    },
+    {
+      "login": "williamhadeslee",
+      "contributions": 1
+    }
+  ],
+  "authors": [
+    {
+      "login": "klxxya",
+      "issues": 2,
+      "prs": 96
+    },
+    {
+      "login": "KagurazakaChizuru",
+      "issues": 0,
+      "prs": 14
+    },
+    {
+      "login": "6750432",
+      "issues": 13,
+      "prs": 0
+    },
+    {
+      "login": "Anguis-L",
+      "issues": 0,
+      "prs": 9
+    },
+    {
+      "login": "lscatfish",
+      "issues": 3,
+      "prs": 4
+    },
+    {
+      "login": "Daliuq",
+      "issues": 0,
+      "prs": 6
+    },
+    {
+      "login": "JanGShui",
+      "issues": 0,
+      "prs": 6
+    },
+    {
+      "login": "ushio2026-alt",
+      "issues": 1,
+      "prs": 5
+    },
+    {
+      "login": "eugenewang5425",
+      "issues": 4,
+      "prs": 1
+    },
+    {
+      "login": "GiriGiriCase",
+      "issues": 0,
+      "prs": 5
+    },
+    {
+      "login": "dftyuc",
+      "issues": 0,
+      "prs": 4
+    },
+    {
+      "login": "CarpSec",
+      "issues": 2,
+      "prs": 1
+    },
+    {
+      "login": "Elysia-aaa",
+      "issues": 0,
+      "prs": 3
+    },
+    {
+      "login": "MYming-yue",
+      "issues": 2,
+      "prs": 1
+    },
+    {
+      "login": "NoelLuo",
+      "issues": 0,
+      "prs": 3
+    },
+    {
+      "login": "QuanWander",
+      "issues": 3,
+      "prs": 0
+    },
+    {
+      "login": "0x18d",
+      "issues": 1,
+      "prs": 1
+    },
+    {
+      "login": "bluzername",
+      "issues": 0,
+      "prs": 2
+    },
+    {
+      "login": "CDawa",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "CH2-littlefat",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "CN-WenYu",
+      "issues": 0,
+      "prs": 2
+    },
+    {
+      "login": "dcjingyu-cmd",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "feijiz241-cyber",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "liu841119467",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "LoTwT",
+      "issues": 0,
+      "prs": 2
+    },
+    {
+      "login": "lscatfish123-cell",
+      "issues": 1,
+      "prs": 1
+    },
+    {
+      "login": "maurap5mz4s9-cmd",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "Milo-Hart",
+      "issues": 1,
+      "prs": 1
+    },
+    {
+      "login": "PensiveFei",
+      "issues": 0,
+      "prs": 2
+    },
+    {
+      "login": "sakuya2521",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "shinelon",
+      "issues": 0,
+      "prs": 2
+    },
+    {
+      "login": "usaginya",
+      "issues": 1,
+      "prs": 1
+    },
+    {
+      "login": "VonLan233",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "WET1AND",
+      "issues": 2,
+      "prs": 0
+    },
+    {
+      "login": "williamhadeslee",
+      "issues": 1,
+      "prs": 1
+    },
+    {
+      "login": "1917811941",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "279390073-svg",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "3112538759",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "522861985-svg",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "535408248-oss",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "666456io",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "aads1111111",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Acaty",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Aeme4th",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "AirGuanZ",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "ap1529921128-design",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "AsK873",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "BIN76",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "CapableCCat",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Cjia26",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "cnjawi",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "cynide00",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Decho370",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "dejavu-China",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Dugu114514",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Dxxing0",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "EpiphanyLee",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "FurinaEsE",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "galaxy2868",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "handsomem123",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Hankui3x",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Healer7777",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "histion",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "HoujuChimi",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "Huffer342-WSH",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "hutaao",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "i13462325525-cyber",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Ivan-Lau-Next",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "jajahjkah-spec",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "JOYWang-dev",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "kendywjx",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "L010083",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "lcfzduola",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "lhdzs-creator",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "lingyun10086",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "llpgf",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "LMQH",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Lorin1470",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "LPHYSQS",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "lzyhappylife",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "Miaoshroom",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "miku19960917",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Mortis77",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "mvanhorn",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "MzeMR",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "naggerok",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Nephrus",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "nolocus",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "nonaman21",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "OnlyApasserby",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Qixuan111",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "QJYF666",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "QUIIIS",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "RGSh1k1",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "rzl-personal",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Sa1ted-Fi5h",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "sakura-deep",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "sasakojiro",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "seiunsky823",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "shelter-shutiao",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "snowhalationrain",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "suyeonku",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "U0-DR",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Vendela-Tu",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "Viteyun",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "w-j-y-wjy",
+      "issues": 0,
+      "prs": 1
+    },
+    {
+      "login": "WeiKeNiSi",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "weissy",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "wenjiechen526-lgtm",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "wqq00",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Xaisx-sys",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "xiaobo1012",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "XiaoYi2018",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "XingYueChenFu",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "xuyixi992",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "YCYANDME",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "yi985432",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "ys1586545012",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "YukidokeAzarea",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "zangxx66",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "zenggao4565465",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "zhaoty68-droid",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "Zoey-Chen1998",
+      "issues": 1,
+      "prs": 0
+    },
+    {
+      "login": "ZXF1-1",
+      "issues": 1,
+      "prs": 0
+    }
+  ]
+}

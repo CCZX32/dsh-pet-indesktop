@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -136,6 +136,8 @@ class SettingsCard(QFrame):
 class SettingsPage(QWidget):
     title = ""
     changed = Signal()
+    #: 页面内容的阅读宽度上限；``None`` = 跟随视口（两栏浏览器型页面用）。
+    content_max_width: int | None = 860
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
@@ -159,7 +161,8 @@ class SettingsPage(QWidget):
         self.content = content
         content.setObjectName("settingsPageContent")
         content.setAutoFillBackground(False)
-        content.setMaximumWidth(860)
+        if self.content_max_width:
+            content.setMaximumWidth(int(self.content_max_width))
         self.body = QVBoxLayout(content)
         self.body.setContentsMargins(30, 24, 28, 20)
         self.body.setSpacing(18)
@@ -306,6 +309,15 @@ class SettingsPage(QWidget):
     def dirty(self) -> bool:
         return False
 
+    def reflow(self) -> None:
+        """样式表（主题/字号）变化后重算自有几何；默认无操作。
+
+        由 ``SettingsDialog.refresh_style()`` 在样式真的变了之后调用——页面自己
+        按字体度量算宽度/最小高度的（如扩展管理页）必须实现它，否则字号改了还
+        按旧字号排版。
+        """
+        return None
+
     def draft(self) -> None:
         return None
 
@@ -383,11 +395,38 @@ def page_search_texts(page: QWidget) -> list[str]:
     return texts
 
 
+def _expand_collapsed_ancestors(widget: QWidget) -> None:
+    """搜索命中折叠区里的文案时先展开它（只认 ``set_expanded/is_expanded``）。"""
+    current = widget.parentWidget()
+    while current is not None:
+        expand = getattr(current, "set_expanded", None)
+        is_expanded = getattr(current, "is_expanded", None)
+        if callable(expand) and callable(is_expanded):
+            try:
+                if not is_expanded():
+                    expand(True)
+            except Exception:  # noqa: BLE001 - 折叠失败不影响继续定位
+                logger.debug("expand collapsed section failed", exc_info=True)
+        current = current.parentWidget()
+
+
+def _has_fold_ancestor(widget: QWidget) -> bool:
+    current = widget.parentWidget()
+    while current is not None:
+        if callable(getattr(current, "set_expanded", None)) and callable(
+            getattr(current, "is_expanded", None)
+        ):
+            return True
+        current = current.parentWidget()
+    return False
+
+
 def reveal_text(page: QWidget, needle: str) -> bool:
     """把命中文案的行滚到可见处，并切到它所在的页内分页。"""
     needle = str(needle or "").strip().lower()
     if not needle:
         return False
+    matches: list[QWidget] = []
     for label in page.findChildren(QWidget):
         text = ""
         if isinstance(label, QLabel):
@@ -398,20 +437,34 @@ def reveal_text(page: QWidget, needle: str) -> bool:
             continue
         if needle not in text.strip().lower():
             continue
-        widget = label
-        while widget is not None:
-            parent = widget.parentWidget()
-            if isinstance(parent, QStackedWidget):
-                parent.setCurrentWidget(widget)
-                # 直接切 stack 不会同步页内分页的按钮选中态；搜索定位要顺手切过去。
-                container = parent.parentWidget()
-                if isinstance(container, SettingsTabContainer):
-                    container.setCurrentIndex(parent.indexOf(widget))
-            elif isinstance(parent, QScrollArea):
-                parent.ensureWidgetVisible(label, 0, 80)
-            widget = parent
-        return True
-    return False
+        matches.append(label)
+    if not matches:
+        return False
+    # 折叠区里的命中优先展示；只展开**选中的那条**的祖先，别把无关折叠区全打开。
+    label = next((item for item in matches if _has_fold_ancestor(item)), matches[0])
+    _expand_collapsed_ancestors(label)
+
+    def _reveal() -> None:
+        try:
+            widget = label
+            while widget is not None:
+                parent = widget.parentWidget()
+                if isinstance(parent, QStackedWidget):
+                    parent.setCurrentWidget(widget)
+                    # 直接切 stack 不会同步页内分页的按钮选中态；搜索定位要顺手切过去。
+                    container = parent.parentWidget()
+                    if isinstance(container, SettingsTabContainer):
+                        container.setCurrentIndex(parent.indexOf(widget))
+                elif isinstance(parent, QScrollArea):
+                    parent.ensureWidgetVisible(label, 0, 80)
+                widget = parent
+        except RuntimeError:
+            # 页面在定时器触发前被销毁：搜索定位没有意义。
+            return
+
+    # 刚展开的折叠区还没重新布局；延后一拍再滚，否则按折叠几何算偏移。
+    QTimer.singleShot(0, _reveal)
+    return True
 
 
 def make_button(text: str, parent=None, *, primary: bool = False) -> QPushButton:

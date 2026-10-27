@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..contracts.speech import SpeechRequest
 from .errors import (
@@ -54,6 +55,12 @@ MIMO_MODEL = "mimo-v2.5-tts"
 MIMO_TIMEOUT_S = 30.0
 MIMO_MAX_BYTES = 8_000_000
 
+LOCAL_TIMEOUT_S = 30.0
+LOCAL_MAX_BYTES = 8_000_000
+#: 本地服务两种形状：OpenAI 兼容 / 可配置路径的简单 JSON。
+LOCAL_PROTOCOLS = ("openai", "simple")
+LOCAL_DEFAULT_PATHS = {"openai": "/v1/audio/speech", "simple": "/tts"}
+
 
 @dataclass(frozen=True, slots=True)
 class TtsProviderSpec:
@@ -62,6 +69,7 @@ class TtsProviderSpec:
     ``dependency`` 是可选第三方模块（``importlib.util.find_spec`` 探测，不 import）；
     ``platform`` 非空时还要求 ``os.name`` 相符（sapi 只在 Windows 可用）；
     ``secret_fields`` 是存进系统钥匙串的字段名（值绝不进 ``config.json``）；
+    ``optional_secrets`` 里的字段可留空（本地服务的 API Key 通常不需要）；
     ``suffix`` 是产物音频的真实扩展名（缓存文件按它落盘，播放器才不会误判）。
     """
 
@@ -74,6 +82,7 @@ class TtsProviderSpec:
     dependency: str = ""
     platform: str = ""
     secret_fields: tuple[str, ...] = ()
+    optional_secrets: tuple[str, ...] = ()
     voice_options: tuple[tuple[str, str], ...] = ()
 
 
@@ -180,6 +189,16 @@ PROVIDER_SPECS: dict[str, TtsProviderSpec] = {
             suffix="mp3",
             secret_fields=("api_key",),
             voice_options=MIMO_VOICE_OPTIONS,
+        ),
+        TtsProviderSpec(
+            id="local",
+            label="本地部署模型（HTTP）",
+            online=False,
+            fields=("endpoint", "protocol", "path", "model", "voice", "format", "timeout", "api_key"),
+            default_voice="",
+            suffix="mp3",
+            secret_fields=("api_key",),
+            optional_secrets=("api_key",),
         ),
     )
 }
@@ -533,6 +552,144 @@ def _parse_mimo_json(payload: bytes) -> bytes:
     raise NetworkError("MiMo 返回了无法识别的响应", reason=PROTOCOL)
 
 
+# ---------------------------------------------------------------- 本地模型（HTTP）
+
+
+def _local_protocol(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in LOCAL_PROTOCOLS else "openai"
+
+
+def _local_format(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in {"mp3", "wav"} else "mp3"
+
+
+def local_url(endpoint: str, path: str = "", protocol: str = "openai") -> str:
+    """拼接本地服务地址；地址缺失/非 http(s) 一律按协议错误处理。"""
+    base = str(endpoint or "").strip()
+    if not base:
+        raise NetworkError("本地语音地址未配置", reason=PROTOCOL)
+    if "://" not in base:
+        base = "http://" + base
+    parts = urlsplit(base)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise NetworkError("本地语音地址必须是 http(s)", reason=PROTOCOL)
+    route = str(path or "").strip() or LOCAL_DEFAULT_PATHS[_local_protocol(protocol)]
+    if not route.startswith("/"):
+        route = "/" + route
+    return base.rstrip("/") + route
+
+
+def local_synthesize(
+    text: str,
+    *,
+    endpoint: str = "",
+    protocol: str = "openai",
+    path: str = "",
+    model: str = "",
+    voice: str = "",
+    format: str = "mp3",
+    api_key: str = "",
+    rate: float = 1.0,
+    volume: float = 1.0,
+    out_path: Path | str,
+    timeout: float = LOCAL_TIMEOUT_S,
+) -> None:
+    """本地部署模型合成到 ``out_path``（OpenAI 兼容 / 简单 JSON 两种协议）。
+
+    本地请求**必须直连**：系统代理经常把 127.0.0.1 也带走，表现成「服务明明起着却
+    连不上」。响应既可以是音频字节，也可以是 JSON 里的 base64（``audio/data/
+    audio_base64``）。
+    """
+    del volume  # 本地服务没有统一的音量字段；音量在播放端控制
+    protocol = _local_protocol(protocol)
+    suffix = _local_format(format)
+    url = local_url(endpoint, path, protocol)
+    speed = _clamp(rate, 0.25, 4.0, 1.0)
+
+    if protocol == "openai":
+        body: dict[str, Any] = {
+            "model": str(model or "").strip() or "tts-1",
+            "input": str(text or ""),
+            "voice": str(voice or "").strip() or "default",
+            "response_format": suffix,
+        }
+        if abs(speed - 1.0) > 0.01:
+            body["speed"] = speed
+    else:
+        body = {
+            "text": str(text or ""),
+            "voice": str(voice or "").strip(),
+            "speed": speed,
+        }
+
+    headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "audio/*, application/json"),
+    ]
+    key = str(api_key or "").strip()
+    if key:
+        headers.append(("Authorization", f"Bearer {key}"))
+
+    try:
+        _status, response_headers, payload = fetch_url(
+            url,
+            method="POST",
+            headers=tuple(headers),
+            body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            timeout=max(1.0, float(timeout)),
+            max_bytes=LOCAL_MAX_BYTES,
+            prefer_direct=True,
+            direct_only=True,
+            allowed_schemes=("http", "https"),
+        )
+    except NetworkError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 传输层意外形态
+        raise _map_error(exc) from exc
+
+    content_type = ""
+    for name, value in response_headers:
+        if name.lower() == "content-type":
+            content_type = str(value).lower()
+            break
+    audio = payload
+    if "json" in content_type or payload.lstrip()[:1] == b"{":
+        audio = _parse_local_json(payload)
+    if not audio:
+        raise NetworkError("本地语音没有返回音频", reason=PROTOCOL)
+
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(audio)
+    _require_audio(destination, "本地语音", truncated=bool(getattr(payload, "truncated", False)))
+
+
+def _parse_local_json(payload: bytes) -> bytes:
+    try:
+        data = json.loads(payload.decode("utf-8", "replace"))
+    except (TypeError, ValueError):
+        raise NetworkError("本地语音返回了无法解析的响应", reason=PROTOCOL) from None
+    if not isinstance(data, dict):
+        raise NetworkError("本地语音返回了无法解析的响应", reason=PROTOCOL)
+    for field in ("audio", "data", "audio_base64"):
+        encoded = data.get(field)
+        if not isinstance(encoded, str) or not encoded:
+            continue
+        raw = encoded.split(",", 1)[1] if encoded.startswith("data:") else encoded
+        try:
+            return base64.b64decode(raw)
+        except (ValueError, TypeError):
+            raise NetworkError("本地语音音频解码失败", reason=PROTOCOL) from None
+    error = data.get("error")
+    if isinstance(error, dict):
+        code = error.get("code") or error.get("type")
+        reason = AUTH if str(code).lower() in {"401", "403", "authentication_error"} else PROTOCOL
+        raise NetworkError(f"本地语音返回 {str(code or 'error')[:40]}", reason=reason)
+    raise NetworkError("本地语音响应里没有音频", reason=PROTOCOL)
+
+
 # ---------------------------------------------------------------- 统一入口
 
 
@@ -542,6 +699,7 @@ def synthesize(
     out_path: Path | str,
     *,
     api_key: str = "",
+    local: dict[str, Any] | None = None,
 ) -> None:
     """按 provider 分派一次合成；``sapi`` 在 :mod:`petcore.platform.sapi`。"""
     pid = str(provider_id or "").strip().lower()
@@ -580,6 +738,25 @@ def synthesize(
             timeout=MIMO_TIMEOUT_S,
         )
         return
+    if pid == "local":
+        settings = dict(local or {})
+        if api_key:
+            settings["api_key"] = api_key
+        local_synthesize(
+            request.text,
+            endpoint=str(settings.get("endpoint") or ""),
+            protocol=str(settings.get("protocol") or "openai"),
+            path=str(settings.get("path") or ""),
+            model=str(settings.get("model") or ""),
+            voice=request.voice or str(settings.get("voice") or ""),
+            format=str(settings.get("format") or "mp3"),
+            api_key=str(settings.get("api_key") or ""),
+            rate=request.rate,
+            volume=request.volume,
+            out_path=out_path,
+            timeout=float(settings.get("timeout") or LOCAL_TIMEOUT_S),
+        )
+        return
     raise NetworkError(f"未知的语音后端：{pid}", reason=PROTOCOL)
 
 
@@ -603,6 +780,8 @@ __all__ = [
     "edge_rate_arg",
     "edge_synthesize",
     "edge_volume_arg",
+    "local_synthesize",
+    "local_url",
     "mimo_synthesize",
     "platform_modules",
     "provider_available",

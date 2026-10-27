@@ -35,6 +35,7 @@ CORE_TITLES = [
     "常规",
     "外观与交互",
     "互动与物理",
+    "语音",
     "多宠",
     "菜单",
     "扩展管理",
@@ -562,6 +563,48 @@ def test_appearance_page_splits_into_inner_tabs(app, tmp_path):
     dialog.close()
 
 
+def test_island_page_swaps_the_header_dot_for_a_message_toggle(app, tmp_path):
+    """「显示头标」退役，新增默认关闭的「消息显示」；开关直接写配置。"""
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host)
+    appearance = _page(dialog, "外观与交互")
+    # 头标（左侧圆点）已彻底删除：控件与配置键都不再存在。
+    assert not hasattr(appearance, "island_icon_check")
+    assert "island_show_icon" not in Config(tmp_path).data
+    # 消息显示默认关；勾上后立刻落到配置。
+    assert appearance.island_messages_check.isChecked() is False
+    appearance.island_messages_check.setChecked(True)
+    app.processEvents()
+    assert host.config.get("island_show_messages") is True
+    appearance.island_messages_check.setChecked(False)
+    app.processEvents()
+    assert host.config.get("island_show_messages") is False
+    dialog.close()
+
+
+def test_island_page_toggles_collision_and_the_disk_segment(app, tmp_path):
+    """「与桌宠碰撞」默认开、切换即写配置；「指标段」能勾上 C 盘剩余。"""
+    host = _host(tmp_path)
+    dialog = SettingsDialog(host)
+    appearance = _page(dialog, "外观与交互")
+    assert appearance.island_collision_check.isChecked() is True
+    appearance.island_collision_check.setChecked(False)
+    app.processEvents()
+    assert host.config.get("island_collision") is False
+    appearance.island_collision_check.setChecked(True)
+    app.processEvents()
+    assert host.config.get("island_collision") is True
+
+    assert "disk" in appearance.island_metric_boxes
+    appearance.island_metric_boxes["disk"].setChecked(True)
+    app.processEvents()
+    assert "disk" in host.config.get("island_metrics")
+    appearance.island_metric_boxes["disk"].setChecked(False)
+    app.processEvents()
+    assert "disk" not in host.config.get("island_metrics")
+    dialog.close()
+
+
 def test_appearance_search_switches_to_the_owning_inner_tab(app, tmp_path):
     """搜索要能落到非默认分页里：搜「边缘探头」应切到「大小与外观」并滚到那一行。"""
     host = _host(tmp_path)
@@ -651,7 +694,13 @@ def test_core_pages_host_their_feature_tabs(app, tmp_path):
     ]
 
     about = _page(dialog, "关于与诊断")
-    assert about.tab_container.labels() == ("版本与诊断", "链接与项目", "网络信息", "回收内存")
+    assert about.tab_container.labels() == (
+        "版本与诊断",
+        "致谢",
+        "链接与项目",
+        "网络信息",
+        "回收内存",
+    )
     assert [page.title for page in about._embedded_pages] == ["链接与项目", "网络信息", "回收内存"]
     dialog.close()
 

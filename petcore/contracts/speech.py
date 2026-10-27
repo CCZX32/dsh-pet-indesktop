@@ -38,14 +38,16 @@ class SpeechRequest:
 
     ``provider`` 留空表示用 core 配置里的后端链首项；``cache_key`` 留空时由
     core 按 ``provider/flavor`` 生成（换音色必须换缓存键）。
+    ``rate``/``volume`` 留空表示沿用 core 的 ``speech_rate``/``speech_volume``；
+    显式传值（如 ``voice.chime`` 的页面）优先。
     """
 
     text: str
     provider: str = ""
     voice: str = ""
-    rate: float = 1.0
+    rate: float | None = None
     pitch: float = 0.0
-    volume: float = 1.0
+    volume: float | None = None
     cache_key: str = ""
 
 

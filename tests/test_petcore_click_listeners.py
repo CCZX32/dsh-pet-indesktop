@@ -80,6 +80,110 @@ def test_click_talk_fires_for_primary_and_child(live_host) -> None:
         assert window.bubble.label.text() == expected
 
 
+def test_click_balance_bubble_comes_first_and_click_talk_follows(live_host, monkeypatch) -> None:
+    """开「点击查看余额」时：余额气泡先冒，收起后才通知点击台词（不再先闪一条台词）。"""
+    host, _manager, primary, _child = live_host
+    host._active_window = primary
+    balance_calls: list[tuple[int | None, bool]] = []
+    monkeypatch.setattr(
+        host,
+        "request_balance",
+        lambda slot=None, force=True: balance_calls.append((slot, force)),
+        raising=False,
+    )
+    primary.config.set("click_show_balance", True)
+    primary.config.set("click_talk_texts", ["余额之后的台词"])
+    primary.bubble.label.setText("")
+
+    primary._on_click()
+    assert balance_calls == [(0, True)], "点击仍要触发余额请求"
+    assert primary.bubble.label.text() == "", "台词不许抢在余额前面"
+
+    # 宿主把余额气泡冒出来后通知窗口
+    primary.bubble.show_text("余额 ¥1.00", primary.bubble_anchor_rect(), 6000)
+    primary.notify_click_balance_presented()
+    assert primary.bubble.label.text() == "余额 ¥1.00"
+
+    primary.bubble.hide()  # 余额气泡收起 → 台词接上
+    assert primary.bubble.label.text() == "余额之后的台词"
+
+
+def test_cached_balance_shown_inside_the_request_still_queues_the_talk(live_host, monkeypatch) -> None:
+    """缓存命中时余额气泡在 `request()` 里**同步**冒出（presented 早于排队建立）。"""
+    host, _manager, primary, _child = live_host
+    host._active_window = primary
+    primary.config.set("click_show_balance", True)
+    primary.config.set("click_talk_texts", ["缓存之后"])
+    primary.bubble.label.setText("")
+
+    def synchronous_request(slot=None, *, force=True):
+        primary.bubble.show_text("余额 ¥1.00", primary.bubble_anchor_rect(), 6000)
+        primary.notify_click_balance_presented()
+
+    monkeypatch.setattr(host, "request_balance", synchronous_request, raising=False)
+    primary._on_click()
+    assert primary.bubble.label.text() == "余额 ¥1.00"
+    primary.bubble.hide()
+    assert primary.bubble.label.text() == "缓存之后"
+
+
+def test_repeated_clicks_queue_a_single_click_talk(live_host, monkeypatch) -> None:
+    """连点只排一条台词（跟着最后一次点击），气泡收起后只通知一次。"""
+    host, _manager, primary, _child = live_host
+    host._active_window = primary
+    monkeypatch.setattr(host, "request_balance", lambda slot=None, force=True: None, raising=False)
+    primary.config.set("click_show_balance", True)
+    primary.config.set("click_talk_texts", ["只冒一次"])
+    fired: list[int] = []
+    primary.add_click_listener(lambda _window: fired.append(1))
+    try:
+        primary.bubble.label.setText("")
+        primary._on_click()
+        primary._on_click()
+        primary._on_click()
+        assert fired == []
+        primary.bubble.show_text("余额 ¥1.00", primary.bubble_anchor_rect(), 6000)
+        primary.notify_click_balance_presented()
+        primary.bubble.hide()
+        assert len(fired) == 1
+        assert primary.bubble.label.text() == "只冒一次"
+    finally:
+        primary.remove_click_listener(fired.append)
+
+
+def test_click_talk_falls_back_when_no_balance_bubble_ever_shows(live_host, monkeypatch) -> None:
+    """余额结果一直不来（或免打扰把气泡拦了）时，兜底时限到了仍要冒台词。"""
+    from PySide6.QtTest import QTest
+
+    from petcore.ui.pet_window import PetWindow
+
+    host, _manager, primary, _child = live_host
+    host._active_window = primary
+    monkeypatch.setattr(host, "request_balance", lambda slot=None, force=True: None, raising=False)
+    monkeypatch.setattr(PetWindow, "CLICK_TALK_FALLBACK_MS", 40, raising=False)
+    primary.config.set("click_show_balance", True)
+    primary.config.set("click_talk_texts", ["兜底台词"])
+    primary.bubble.label.setText("")
+
+    primary._on_click()
+    assert primary.bubble.label.text() == ""
+    QTest.qWait(160)
+    assert primary.bubble.label.text() == "兜底台词"
+
+
+def test_click_talk_still_fires_when_the_host_cannot_show_balance(live_host, monkeypatch) -> None:
+    """宿主没有余额回调时不许把台词扣住（主分支 `callable(...)` 的回落口径）。"""
+    host, _manager, primary, _child = live_host
+    host._active_window = primary
+    monkeypatch.setattr(host, "request_balance", None, raising=False)
+    primary.config.set("click_show_balance", True)
+    primary.config.set("click_talk_texts", ["照常说话"])
+    primary.bubble.label.setText("")
+
+    primary._on_click()
+    assert primary.bubble.label.text() == "照常说话"
+
+
 def test_attach_window_is_idempotent_and_cancel_removes_the_listener(live_host) -> None:
     _host, manager, _primary, child = live_host
     interaction = manager.host.features.ports.interaction

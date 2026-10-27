@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 
 from .api import ApiPort
 from .chat import ChatPort, QuickChatPort
@@ -20,6 +20,18 @@ class PresentationPort(Protocol):
         force: bool = False,
         subtitle: str = "",
     ) -> bool: ...
+    def say_sequence(
+        self,
+        items: Sequence[tuple[str, str, int]],
+        *,
+        force: bool = False,
+        on_show: Callable[[str], None] | None = None,
+    ) -> bool:
+        """依次显示多条气泡；``items`` 是 ``(正文, 副标题, 停留毫秒)``。
+
+        ``on_show`` 在每一条真正显示时回调（参数是正文），供调用方按条触发语音。
+        """
+        ...
     def for_slot(self, slot: int) -> PresentationPort: ...
     def show_image(
         self,

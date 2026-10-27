@@ -37,6 +37,7 @@ from .menu_layout import (
     migrate_p8_menu,
     migrate_p9_menu,
     migrate_p10_menu,
+    migrate_p11_menu,
     resolve,
 )
 from .chat import ChatController, QuickChatController
@@ -44,6 +45,7 @@ from .menu_model import MenuItem, MenuModel, add_submenu
 from .pet_manager import PetManager, SHARED_KEYS
 from .pet_window import PetWindow
 from .ports import QtScheduler
+from .settings.credits_job import cancel_all as cancel_community_jobs
 from .tray import TrayIcon
 
 logger = logging.getLogger("petcore.ui.app")
@@ -131,6 +133,46 @@ class _PresentationAdapter:
         island = getattr(self._host, "island", None)
         if shown and island is not None:
             island.add_message(text)
+        return shown
+
+    def say_sequence(self, items, *, force: bool = False, on_show=None) -> bool:
+        quiet = getattr(self._host, "quiet", None)
+        if not force and quiet is not None and quiet.quiet_active():
+            return False
+        window = self._window()
+        settings = getattr(self._host, "settings_dialog", None)
+        if window is None or not window.isVisible() or (settings and settings.isVisible()):
+            return False
+        lines = []
+        for item in items or ():
+            if not item:
+                continue
+            text = str(item[0] or "").strip()
+            if not text:
+                continue
+            subtitle = str(item[1] or "").strip() if len(item) > 1 else ""
+            duration = int(item[2]) if len(item) > 2 else 4000
+            lines.append((text, subtitle, max(800, duration)))
+        if not lines:
+            return False
+        island = getattr(self._host, "island", None)
+
+        def notify(text: str) -> None:
+            if island is not None:
+                island.add_message(text)
+            if on_show is not None:
+                try:
+                    on_show(text)
+                except Exception:  # noqa: BLE001 - 回调失败不影响后续气泡
+                    logger.debug("say_sequence on_show failed", exc_info=True)
+
+        runner = getattr(window, "say_sequence", None)
+        if not callable(runner):
+            first = lines[0]
+            return self.say(
+                first[0], duration_ms=first[2], force=force, subtitle=first[1]
+            )
+        shown = runner(lines, on_show=notify) is not False
         return shown
 
     def play_animation(self, name: str, *, loop: bool = False) -> bool:
@@ -227,6 +269,9 @@ class CoreHost:
         self.speech = SpeechService(
             self.root, config=self.config, credentials=self.api_credentials
         )
+        from ..community import CommunityService
+
+        self.community = CommunityService(self.root, credentials=self.api_credentials)
         self.chat = ChatController(self, self.root)
         self.quick_chat = QuickChatController(self)
         from .screen import ScreenAskController
@@ -240,6 +285,7 @@ class CoreHost:
         self._active_window: PetWindow | None = None
         self.tray: TrayIcon | None = None
         self.island = None
+        self.island_field = None
         self.probe_hub = None
         self.settings_dialog = None
         self.hotkeys: GlobalHotkeyService | None = None
@@ -276,6 +322,7 @@ class CoreHost:
             if island is not None:
                 island.show_balance(result=result)
             self._notify(slot, message, subtitle=self._balance_subtitle(window))
+            self._click_balance_presented(window)
             return
         reason = str(getattr(error, "reason", "network") or "network")
         detail = str(error) if str(error) and str(error) != reason else ""
@@ -285,6 +332,18 @@ class CoreHost:
         if island is not None:
             island.show_balance(error=message)
         self._notify(slot, message)
+        self._click_balance_presented(window)
+
+    @staticmethod
+    def _click_balance_presented(window) -> None:
+        """余额气泡已经冒出来：告诉窗口可以接续排队的点击台词了。"""
+        hook = getattr(window, "notify_click_balance_presented", None)
+        if not callable(hook):
+            return
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - 点击台词接续坏了不许影响余额展示
+            logger.debug("click balance presented hook failed", exc_info=True)
 
     def _balance_subtitle(self, window=None) -> str:
         """余额气泡副标题：DeepSeek 峰谷提示（高峰红/空闲绿，文案可自定义）。
@@ -533,13 +592,31 @@ class CoreHost:
                     checked=checked if callable(checked) else None,
                     callback=(
                         lambda owner=feature.owner, command=command_id: self._run_feature_command(
-                            owner, command
+                            owner, command, self._menu_slot()
                         )
                     ),
                 )
             )
 
-    def _run_feature_command(self, owner: str, command_id: str) -> None:
+    def _menu_slot(self) -> int | None:
+        """当前右键菜单属于哪只桌宠（子宠菜单的命令要落在它自己身上）。"""
+        window = self._active_window or self.window
+        return getattr(window, "slot", None)
+
+    def active_topmost(self) -> bool:
+        """当前桌宠是否置顶：扩展弹出的菜单要跟它同层（见 ``ui.menu``）。"""
+        window = self._active_window or self.window
+        return bool(getattr(window, "always_on_top", False))
+
+    def show_context_menu(self, menu, pos) -> None:
+        """扩展也能弹「和桌宠同层」的菜单（扩展不许 import ``petcore.ui``）。"""
+        from .menu import show_context_menu as _show_context_menu
+
+        _show_context_menu(menu, pos, topmost=self.active_topmost())
+
+    def _run_feature_command(
+        self, owner: str, command_id: str, slot: int | None = None
+    ) -> None:
         if self.features is None:
             return
         command = self.features.command(owner, command_id)
@@ -547,7 +624,7 @@ class CoreHost:
             logger.warning("feature command missing: %s/%s", owner, command_id)
             return
         try:
-            command()
+            _invoke_feature_command(command, slot)
         except Exception:
             logger.exception("feature command failed: %s/%s", owner, command_id)
 
@@ -648,6 +725,7 @@ class CoreHost:
             changed = migrate_p8_menu(raw)
             changed = migrate_p9_menu(raw) or changed
             changed = migrate_p10_menu(raw) or changed
+            changed = migrate_p11_menu(raw) or changed
             if changed:
                 self.config.set("menu_layout", raw)
                 self.config.save()
@@ -756,10 +834,31 @@ class CoreHost:
         self.island.settings_requested.connect(lambda: self.open_settings("api"))
         self.island.set_avoidance_callback(self._avoid_island_overlap)
         self.island.set_pet_visible(self._any_pet_visible())
+        self.island_field = self._build_island_field(self.island)
         self.probe_hub = self._build_probe_hub(self.island)
         if self.probe_hub is not None:
             self.island.set_probe_sync_callback(self.probe_hub.sync)
         return self.island
+
+    def _island_pets(self):
+        """碰撞侧要的「所有桌宠」：宠物表可能比岛晚建（懒加载），用回调现取。"""
+        manager = getattr(self, "pets", None)
+        if manager is not None:
+            return manager.each()
+        window = getattr(self, "window", None)
+        return [window] if window is not None else []
+
+    def _build_island_field(self, island):
+        """岛 × 桌宠碰撞：唯一 Qt 协调器，事件驱动、不建定时器。"""
+        from .island_collision import IslandField
+
+        try:
+            field = IslandField(island, self.config, self._island_pets, parent=self.app)
+        except Exception:  # noqa: BLE001 - 碰撞接线失败只影响撞岛手感
+            logger.debug("island collision unavailable", exc_info=True)
+            return None
+        island.set_geometry_changed_callback(field.on_geometry_changed)
+        return field
 
     def _build_probe_hub(self, island):
         """GPU/FPS 探针只在这里创建：采样器零 Qt，宿主负责启停与推送。"""
@@ -789,6 +888,11 @@ class CoreHost:
         不能用 ``frameGeometry()``：桌宠窗口四周是大片透明画布，按整窗判重叠
         会让胶囊被远处走位的桌宠反复推开。
         """
+        field = getattr(self, "island_field", None)
+        if field is not None and field.enabled():
+            # 碰撞开启时宠物进不了岛区，避让只会在用户拖着宠物压过来时把胶囊弹到
+            # 屏幕角落（主分支没有这个行为）。关掉碰撞则保留旧的「岛让位」语义。
+            return
         manager = self.pets
         windows = manager.each() if manager is not None else [self.window]
         obstacles = [
@@ -806,6 +910,9 @@ class CoreHost:
             if island is not None:
                 island.stop()
                 island.hide()
+            field = getattr(self, "island_field", None)
+            if field is not None:
+                field.reset()
             return
         island = self.ensure_island()
         logger.debug(
@@ -1091,13 +1198,18 @@ class CoreHost:
         """托盘右键菜单：隐藏后只靠鼠标也能把桌宠叫回来。"""
         from PySide6.QtWidgets import QMenu
 
+        from .menu_style import install_check_layer, menu_stylesheet
+
         menu = QMenu(_parent)
-        from .menu_style import menu_stylesheet
         menu.setStyleSheet(menu_stylesheet())
         self.populate_tray_menu(menu)
         # 每次弹出前原地重建动作（不替换 QMenu 对象，避免 Qt 正要显示时菜单被销毁）。
         menu._petcore_refresh = lambda: self.populate_tray_menu(menu)
         menu.aboutToShow.connect(menu._petcore_refresh)
+        # 勾选标记由行尾层画（QSS 的 indicator 只剩 1px）：必须装在重建钩子**之后**，
+        # 这样每次重建出来的新 QAction 才会在下一次 aboutToShow 里补接 `toggled`。
+        # 托盘是「开启鼠标穿透后唯一能关回来的入口」，勾选丢了等于状态不可见。
+        install_check_layer(menu)
         return menu
 
     def populate_tray_menu(self, menu) -> None:
@@ -1226,6 +1338,10 @@ class CoreHost:
         self._closing = True
         self.cancel_update()
         self.close_dialogs()
+        try:
+            cancel_community_jobs(0.5)
+        except Exception:  # noqa: BLE001 - 退出路径不能被刷新线程拖住
+            logger.debug("community refresh cancel failed", exc_info=True)
         hub = getattr(self, "probe_hub", None)
         if hub is not None:
             try:
@@ -1238,6 +1354,8 @@ class CoreHost:
                 self.island.hide()
             except Exception:  # noqa: BLE001
                 logger.debug("island shutdown failed", exc_info=True)
+        if self.island_field is not None:
+            self.island_field.reset()
         self.balance_presenter.shutdown()
         self._update_executor.shutdown(wait=False, cancel_futures=True)
         self.worker_host.shutdown_all()
@@ -1330,6 +1448,10 @@ def run(config: Config, *, root: Path, mod_dirs, instance: str | None = None) ->
         if host.hotkeys is not None:
             host.hotkeys.uninstall()
         host.close_dialogs()
+        try:
+            cancel_community_jobs(0.5)
+        except Exception:  # noqa: BLE001
+            logger.debug("community refresh cancel failed", exc_info=True)
         manager.shutdown()
         host.worker_host.shutdown_all()
         host.balance_presenter.shutdown()

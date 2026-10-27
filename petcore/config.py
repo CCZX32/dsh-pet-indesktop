@@ -108,9 +108,9 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "ai_agent_sound_done_path",
         "ai_agent_sound_error_path",
         "island_enabled",
-        "island_show_icon",
         "island_show_name",
         "island_show_status",
+        "island_show_messages",
         "island_info_mode",
         "island_custom_text",
         "island_style",
@@ -122,6 +122,7 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "island_y",
         "island_edge_dock",
         "island_dock_edge",
+        "island_collision",
         "chat_always_on_top",
         "chat_follow_pet",
         "chat_background",
@@ -150,6 +151,14 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "speech_cache_limit",
         "speech_doubao_voice",
         "speech_mimo_voice",
+        "speech_local_endpoint",
+        "speech_local_protocol",
+        "speech_local_path",
+        "speech_local_model",
+        "speech_local_voice",
+        "speech_local_format",
+        "speech_local_timeout",
+        "speech_sapi_voice",
         "voice_chime_enabled",
         "voice_chime_schedule",
         "voice_chime_times",
@@ -172,6 +181,7 @@ GLOBAL_CONFIG_KEYS = frozenset(
         "music_player",
         "music_filter_enabled",
         "music_filter_extra_ids",
+        "music_title_format",
     }
 )
 
@@ -250,9 +260,9 @@ DEFAULTS: dict[str, Any] = {
     "ai_agent_sound_done_path": "builtin:agent-done",
     "ai_agent_sound_error_path": "builtin:agent-error",
     "island_enabled": False,
-    "island_show_icon": True,
     "island_show_name": True,
     "island_show_status": True,
+    "island_show_messages": False,
     "island_info_mode": "time",
     "island_custom_text": "",
     "island_style": "dark",
@@ -265,6 +275,8 @@ DEFAULTS: dict[str, Any] = {
     # 贴边停靠：拖到屏幕边缘 40px 内松手 → 收成 16px 细条，悬停滑出预览。
     "island_edge_dock": True,
     "island_dock_edge": "none",
+    # 岛 × 桌宠碰撞：桌宠撞岛被弹、拖岛扫过桌宠把它顶飞。默认开（主分支同款）。
+    "island_collision": True,
     "click_show_balance": False,
     # DeepSeek 峰谷提示：文案模式、自定义文本（custom 模式生效）、颜色开关（高峰红/空闲绿）。
     "balance_tier_labels_mode": "default",
@@ -310,8 +322,12 @@ DEFAULTS: dict[str, Any] = {
     "self_talk_image_dir": "",
     "self_talk_image_scale": 100,
     "self_talk_image_chance": 30,
+    "self_talk_voice_enabled": True,
+    "self_talk_champion_enabled": True,
+    "self_talk_champion_chance": 8,
     "click_talk_enabled": False,
     "click_talk_texts": ["我在呢。"],
+    "click_talk_voice_enabled": True,
     "quick_launch_apps": [],
     "quiet_minutes_default": 30,
     "network_info_enabled": True,
@@ -365,6 +381,7 @@ DEFAULTS: dict[str, Any] = {
     "music_player": "",
     "music_filter_enabled": False,
     "music_filter_extra_ids": "",
+    "music_title_format": "",
     "speech_backend": "edge",
     "speech_fallback": "sapi",
     "speech_voice": "",
@@ -373,6 +390,14 @@ DEFAULTS: dict[str, Any] = {
     "speech_cache_limit": 200,
     "speech_doubao_voice": "",
     "speech_mimo_voice": "",
+    "speech_local_endpoint": "",
+    "speech_local_protocol": "openai",
+    "speech_local_path": "",
+    "speech_local_model": "tts-1",
+    "speech_local_voice": "",
+    "speech_local_format": "mp3",
+    "speech_local_timeout": 30.0,
+    "speech_sapi_voice": "",
     "menu_hidden": [],
     "menu_order": [],
     "menu_layout": None,
@@ -431,6 +456,9 @@ _LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "todo_items": ("todo_items",),
     "voice_chime_enabled": ("voice_chime_enabled",),
     "music_enabled": ("music_enabled",),
+    # 旧壳的 foobar 窗口标题格式串：新壳把它扩展到所有"不注册系统媒体"的播放器，
+    # 键名改成 music_title_format，迁移时按别名搬过来（否则老用户要重新填一遍）。
+    "music_title_format": ("music_title_format", "foobar_title_format"),
     "ui_font_size": ("ui_font_size",),
     "stream_capture_mode": ("stream_capture_mode",),
     "allow_feature_mods": ("allow_feature_mods",),
@@ -614,7 +642,7 @@ def _head_pat_names(value: Any) -> list[str]:
 
 
 #: 灵动岛指标段的合法 id；GPU/FPS 由可选平台探针提供，能力不可用时显示原因。
-ISLAND_METRIC_IDS = ("network", "cpu", "mem", "gpu", "fps")
+ISLAND_METRIC_IDS = ("network", "cpu", "mem", "disk", "gpu", "fps")
 ISLAND_METRIC_LIMIT = 8
 #: 灵动岛的强调色词表。
 ISLAND_DOCK_EDGES = frozenset({"none", "top", "bottom", "left", "right"})
@@ -688,7 +716,9 @@ _CLICK_SOUND_PATH_MAX = 500
 
 #: 语音合成的可选后端（与 ``petcore.net.tts.PROVIDER_SPECS`` 的 id 对应；这里不
 #: import 那个模块，配置层不该把网络实现拖进启动路径）。
-_SPEECH_BACKENDS = frozenset({"edge", "sapi", "doubao", "mimo"})
+_SPEECH_BACKENDS = frozenset({"edge", "sapi", "doubao", "mimo", "local"})
+_LOCAL_PROTOCOLS = frozenset({"openai", "simple"})
+_LOCAL_FORMATS = frozenset({"mp3", "wav"})
 
 
 def _speech_backend(value: Any) -> str:
@@ -702,6 +732,30 @@ def _speech_fallback(value: Any) -> str:
     if not text:
         return ""
     return text if text in _SPEECH_BACKENDS else DEFAULTS["speech_fallback"]
+
+
+def _local_endpoint(value: Any) -> str:
+    """本地模型地址：补 ``http://``、只留 http(s)、去尾部斜杠；空串表示未配置。
+
+    这里**不用** ``urllib.parse``：`petcore/config.py` 不在联网白名单里
+    （`tests/test_petcore_architecture.py` 会红），只做前缀与主机段校验即可。
+    """
+    text = str(value or "").strip()[:300]
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    lowered = text.lower()
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        return ""
+    if "?" in text or "#" in text:
+        # 路径是拼在地址后面的；带查询串/# 会拼出 http://host?x/v1/audio/speech。
+        return ""
+    rest = text.split("://", 1)[1]
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if not host or any(char.isspace() for char in host):
+        return ""
+    return text.rstrip("/")
 
 
 _CHIME_SCHEDULES = ("hourly", "every_30", "every_15", "every_5", "every_minute", "custom")
@@ -1128,8 +1182,20 @@ class Config:
         normalized["self_talk_image_chance"] = int(
             round(_number(normalized.get("self_talk_image_chance"), 30.0, 0.0, 100.0))
         )
+        normalized["self_talk_voice_enabled"] = _bool(
+            normalized.get("self_talk_voice_enabled"), True
+        )
+        normalized["self_talk_champion_enabled"] = _bool(
+            normalized.get("self_talk_champion_enabled"), True
+        )
+        normalized["self_talk_champion_chance"] = int(
+            round(_number(normalized.get("self_talk_champion_chance"), 8.0, 0.0, 100.0))
+        )
         normalized["click_talk_enabled"] = _bool(normalized.get("click_talk_enabled"), False)
         normalized["click_talk_texts"] = _text_list(normalized.get("click_talk_texts"))
+        normalized["click_talk_voice_enabled"] = _bool(
+            normalized.get("click_talk_voice_enabled"), True
+        )
         apps = normalized.get("quick_launch_apps")
         normalized["quick_launch_apps"] = apps if isinstance(apps, list) else []
         normalized["quiet_minutes_default"] = _number(
@@ -1258,6 +1324,9 @@ class Config:
         normalized["music_filter_extra_ids"] = str(
             normalized.get("music_filter_extra_ids") or ""
         ).strip()[:200]
+        normalized["music_title_format"] = str(
+            normalized.get("music_title_format") or ""
+        ).strip()[:120]
         normalized["speech_backend"] = _speech_backend(normalized.get("speech_backend"))
         normalized["speech_fallback"] = _speech_fallback(normalized.get("speech_fallback"))
         normalized["speech_voice"] = (
@@ -1277,6 +1346,33 @@ class Config:
         )
         normalized["speech_mimo_voice"] = (
             str(normalized.get("speech_mimo_voice") or "").strip()[:64]
+        )
+        normalized["speech_local_endpoint"] = _local_endpoint(
+            normalized.get("speech_local_endpoint")
+        )
+        protocol = str(normalized.get("speech_local_protocol") or "").strip().lower()
+        normalized["speech_local_protocol"] = (
+            protocol if protocol in _LOCAL_PROTOCOLS else "openai"
+        )
+        route = str(normalized.get("speech_local_path") or "").strip()[:120]
+        if route and not route.startswith("/"):
+            route = "/" + route
+        normalized["speech_local_path"] = route
+        normalized["speech_local_model"] = (
+            str(normalized.get("speech_local_model") or "").strip()[:64]
+        )
+        normalized["speech_local_voice"] = (
+            str(normalized.get("speech_local_voice") or "").strip()[:64]
+        )
+        audio_format = str(normalized.get("speech_local_format") or "").strip().lower()
+        normalized["speech_local_format"] = (
+            audio_format if audio_format in _LOCAL_FORMATS else "mp3"
+        )
+        normalized["speech_local_timeout"] = _number(
+            normalized.get("speech_local_timeout"), 30.0, 5.0, 120.0
+        )
+        normalized["speech_sapi_voice"] = (
+            str(normalized.get("speech_sapi_voice") or "").strip()[:64]
         )
         frameseq = str(normalized.get("frameseq") or "auto")
         normalized["frameseq"] = frameseq if frameseq in {"auto", "off", "only"} else "auto"
@@ -1400,8 +1496,12 @@ class Config:
                 str(normalized.get(_sound_key) or "").strip()[:500] or _fallback
             )
         normalized["island_enabled"] = _bool(normalized.get("island_enabled"), False)
-        for _island_flag in ("island_show_icon", "island_show_name", "island_show_status"):
+        for _island_flag in ("island_show_name", "island_show_status"):
             normalized[_island_flag] = _bool(normalized.get(_island_flag), True)
+        # 消息显示默认关：历史消息默认不进岛卡片（老键 island_show_icon 已退役，读入即弃）。
+        normalized["island_show_messages"] = _bool(
+            normalized.get("island_show_messages"), False
+        )
         mode = str(normalized.get("island_info_mode") or "time").strip().lower()
         normalized["island_info_mode"] = mode if mode in {"time", "custom"} else "time"
         normalized["island_custom_text"] = str(
@@ -1437,6 +1537,9 @@ class Config:
         )
         normalized["island_edge_dock"] = _bool(
             normalized.get("island_edge_dock"), True
+        )
+        normalized["island_collision"] = _bool(
+            normalized.get("island_collision"), True
         )
         dock_edge = str(normalized.get("island_dock_edge") or "none").strip().lower()
         normalized["island_dock_edge"] = (

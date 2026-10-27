@@ -65,15 +65,38 @@ class FakeInteraction:
 
 
 class SpyPresentation:
-    def __init__(self, *, image_ok: bool = True, with_image: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        image_ok: bool = True,
+        with_image: bool = True,
+        say_ok: bool = True,
+        visible: bool = True,
+    ) -> None:
         self.said: list[tuple[str, int, bool]] = []
         self.images: list[tuple[Path, str, int, float]] = []
+        self.sequences: list[list[tuple[str, str, int]]] = []
         self.image_ok = image_ok
+        self.say_ok = say_ok
+        self.visible_flag = visible
         if not with_image:
             self.show_image = None  # type: ignore[assignment]
 
-    def say(self, text: str, *, duration_ms: int = 4000, force: bool = False) -> None:
+    def say(self, text: str, *, duration_ms: int = 4000, force: bool = False, subtitle: str = "") -> bool:
         self.said.append((str(text), int(duration_ms), bool(force)))
+        return bool(self.say_ok)
+
+    def say_sequence(self, items, *, on_show=None) -> bool:
+        if not self.visible_flag:
+            return False
+        self.sequences.append([tuple(item) for item in items])
+        for item in items:
+            if on_show is not None:
+                on_show(item[0])
+        return True
+
+    def visible(self) -> bool:
+        return bool(self.visible_flag)
 
     def show_image(
         self, path, caption: str = "", *, duration_ms: int = 4000, scale: float = 1.0
@@ -91,6 +114,23 @@ class SpyPresentation:
 
     def notify(self, title: str, message: str, *, force: bool = False) -> None:
         del title, message, force
+
+
+class SpySpeech:
+    def __init__(self) -> None:
+        self.spoken: list[tuple[str, str, int | None]] = []
+        self.cancelled_owners: list[str] = []
+        self.cancelled_slots: list[int | None] = []
+
+    def speak(self, request, *, owner="", slot=None, guard=None, on_done=None, on_error=None, on_finished=None):
+        self.spoken.append((request.text, owner, slot))
+        return "speech-1"
+
+    def cancel_owner(self, owner: str) -> None:
+        self.cancelled_owners.append(owner)
+
+    def cancel_slot(self, slot) -> None:
+        self.cancelled_slots.append(slot)
 
 
 class FakeHost:
@@ -133,6 +173,9 @@ def _config(tmp_path: Path, *, chance: int, image_dir: Path | str) -> Config:
     config.set("self_talk_image_dir", str(image_dir))
     config.set("self_talk_image_scale", 150)
     config.set("self_talk_image_chance", chance)
+    # 彩蛋默认按概率触发；单测里关掉，避免随机命中把普通路径断言打穿。
+    config.set("self_talk_champion_enabled", False)
+    config.set("self_talk_voice_enabled", False)
     return config
 
 
@@ -347,4 +390,196 @@ def test_click_talk_can_show_images(app, tmp_path: Path) -> None:
     assert caption == "我在呢。"
     assert duration_ms == 3200
     assert scale == pytest.approx(1.2)
+    runtime.stop()
+
+
+# ---------------------------------------------------------------- champion 彩蛋 / 语音
+
+CHAMPION_EN = [
+    "Maybe not today,",
+    "maybe not tomorrow,",
+    "maybe not next month,",
+    "but one day,",
+    "you will be a champion.",
+]
+CHAMPION_ZH = [
+    "也许不是今天，",
+    "也许不是明天，",
+    "也许不是下个月，",
+    "但总有一天，",
+    "你会成为冠军。",
+]
+
+
+def _champion_config(tmp_path: Path, chance: int = 100) -> Config:
+    config = _config(tmp_path, chance=0, image_dir=tmp_path)
+    config.set("self_talk_champion_enabled", True)
+    config.set("self_talk_champion_chance", chance)
+    return config
+
+
+def test_champion_egg_plays_five_bubbles_and_speaks_every_line(app, tmp_path: Path) -> None:
+    config = _champion_config(tmp_path)
+    config.set("self_talk_voice_enabled", True)
+    presentation = SpyPresentation()
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler(), speech=speech),
+        config,
+    )
+
+    runtime._speak()
+
+    assert len(presentation.sequences) == 1
+    lines = presentation.sequences[0]
+    assert [line[0] for line in lines] == CHAMPION_EN
+    assert [line[1] for line in lines] == CHAMPION_ZH
+    assert [text for text, _owner, _slot in speech.spoken] == CHAMPION_EN
+    assert {owner for _text, owner, _slot in speech.spoken} == {"fun.self-talk"}
+    assert presentation.said == [], "彩蛋命中时不应再叠普通台词"
+
+
+def test_champion_chance_zero_never_triggers(app, tmp_path: Path) -> None:
+    config = _champion_config(tmp_path, chance=0)
+    presentation = SpyPresentation()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler()),
+        config,
+    )
+
+    runtime._speak()
+
+    assert presentation.sequences == []
+    assert presentation.said == [("今天也要好好休息。", 4000, False)]
+
+
+def test_self_talk_speaks_only_when_voice_is_enabled(app, tmp_path: Path) -> None:
+    config = _config(tmp_path, chance=0, image_dir=tmp_path)
+    config.set("self_talk_voice_enabled", True)
+    presentation = SpyPresentation()
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler(), speech=speech),
+        config,
+    )
+
+    runtime._speak()
+    assert speech.spoken == [("今天也要好好休息。", "fun.self-talk", None)]
+
+    runtime.stop()
+    assert "fun.self-talk" in speech.cancelled_owners
+
+
+def test_self_talk_stays_silent_when_voice_is_off(app, tmp_path: Path) -> None:
+    config = _config(tmp_path, chance=0, image_dir=tmp_path)
+    presentation = SpyPresentation()
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler(), speech=speech),
+        config,
+    )
+
+    runtime._speak()
+
+    assert presentation.said == [("今天也要好好休息。", 4000, False)]
+    assert speech.spoken == []
+
+
+def test_hidden_pet_does_not_speak_normal_self_talk(app, tmp_path: Path) -> None:
+    config = _config(tmp_path, chance=0, image_dir=tmp_path)
+    config.set("self_talk_voice_enabled", True)
+    presentation = SpyPresentation(say_ok=False, visible=False)
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler(), speech=speech),
+        config,
+    )
+
+    runtime._speak()
+
+    assert presentation.said, "调用仍会尝试冒泡"
+    assert speech.spoken == [], "隐藏的桌宠不该出声"
+
+
+def test_hidden_pet_does_not_speak_champion_egg(app, tmp_path: Path) -> None:
+    config = _champion_config(tmp_path)
+    config.set("self_talk_voice_enabled", True)
+    presentation = SpyPresentation(visible=False)
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        SELF_TALK_PACK,
+        "fun.self-talk",
+        HostPorts(presentation=presentation, scheduler=FakeScheduler(), speech=speech),
+        config,
+    )
+
+    runtime._speak()
+
+    assert presentation.sequences == []
+    assert speech.spoken == []
+
+
+def test_click_talk_speaks_when_voice_is_enabled(app, tmp_path: Path) -> None:
+    config = Config(tmp_path)
+    config.set("click_talk_enabled", True)
+    config.set("click_talk_texts", ["我在呢。"])
+    config.set("click_talk_voice_enabled", True)
+    config.set("self_talk_image_chance", 0)
+    presentation = SpyPresentation()
+    interaction = FakeInteraction()
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        CLICK_TALK_PACK,
+        "fun.click-talk",
+        HostPorts(
+            presentation=presentation,
+            interaction=interaction,
+            scheduler=FakeScheduler(),
+            speech=speech,
+        ),
+        config,
+    )
+
+    interaction.callbacks[0](None)
+
+    assert speech.spoken == [("我在呢。", "fun.click-talk", 0)]
+    runtime.stop()
+    assert "fun.click-talk" in speech.cancelled_owners
+
+
+def test_click_talk_voice_off_keeps_silence(app, tmp_path: Path) -> None:
+    config = Config(tmp_path)
+    config.set("click_talk_enabled", True)
+    config.set("click_talk_texts", ["我在呢。"])
+    config.set("click_talk_voice_enabled", False)
+    config.set("self_talk_image_chance", 0)
+    presentation = SpyPresentation()
+    interaction = FakeInteraction()
+    speech = SpySpeech()
+    runtime = _load_runtime(
+        CLICK_TALK_PACK,
+        "fun.click-talk",
+        HostPorts(
+            presentation=presentation,
+            interaction=interaction,
+            scheduler=FakeScheduler(),
+            speech=speech,
+        ),
+        config,
+    )
+
+    interaction.callbacks[0](None)
+
+    assert presentation.said == [("我在呢。", 3200, True)]
+    assert speech.spoken == []
     runtime.stop()

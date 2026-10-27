@@ -100,8 +100,14 @@ class SpeechService:
         infos: list[SpeechProviderInfo] = []
         for spec in net_tts.PROVIDER_SPECS.values():
             available, reason = net_tts.provider_available(spec.id)
+            if available:
+                available, reason = self._config_gate(spec.id)
             if available and spec.secret_fields:
-                if not all(self._secret(spec.id, field) for field in spec.secret_fields):
+                required = [
+                    field for field in spec.secret_fields
+                    if field not in spec.optional_secrets
+                ]
+                if not all(self._secret(spec.id, field) for field in required):
                     available, reason = False, "auth"
             infos.append(
                 SpeechProviderInfo(
@@ -141,11 +147,16 @@ class SpeechService:
         text = str(getattr(request, "text", "") or "")
         if not text.strip():
             raise SpeechError("protocol", "没有要合成的文字")
+        # 留空的语速/音量沿用语音页的全局值；显式传值优先（voice.chime 等）。
+        request = replace(
+            request,
+            rate=self._rate_value(request.rate),
+            volume=self._volume_value(request.volume),
+        )
 
         net_tts = self._net()
         provider = self.preflight(request.provider)
-        spec = net_tts.PROVIDER_SPECS.get(provider)
-        suffix = spec.suffix if spec is not None else "mp3"
+        suffix = self._suffix_for(provider)
         voice = self._voice_for(provider, request.voice)
         flavor = self._flavor(provider, voice, request)
 
@@ -252,8 +263,13 @@ class SpeechService:
         available, _reason = net_tts.provider_available(provider)
         if not available:
             return False
+        available, _reason = self._config_gate(provider)
+        if not available:
+            return False
         spec = net_tts.PROVIDER_SPECS.get(provider)
         for field in getattr(spec, "secret_fields", ()):
+            if field in getattr(spec, "optional_secrets", ()):
+                continue
             if not self._secret(provider, field):
                 return False
         return True
@@ -272,6 +288,8 @@ class SpeechService:
         key = {
             "doubao": "speech_doubao_voice",
             "mimo": "speech_mimo_voice",
+            "local": "speech_local_voice",
+            "sapi": "speech_sapi_voice",
         }.get(provider, "speech_voice")
         return str(self._cfg(key, "") or "").strip()[:64]
 
@@ -285,8 +303,7 @@ class SpeechService:
                 return default
         return voice or default
 
-    @staticmethod
-    def _flavor(provider: str, voice: str, request: SpeechRequest) -> str:
+    def _flavor(self, provider: str, voice: str, request: SpeechRequest) -> str:
         try:
             rate = float(request.rate)
         except (TypeError, ValueError):
@@ -299,7 +316,74 @@ class SpeechService:
             volume = float(request.volume)
         except (TypeError, ValueError):
             volume = 1.0
-        return f"{provider}|{voice}|{rate:.3f}|{pitch:.3f}|{volume:.3f}"
+        flavor = f"{provider}|{voice}|{rate:.3f}|{pitch:.3f}|{volume:.3f}"
+        if provider == "local":
+            # 本地服务的地址/协议/路径/模型/格式都会改变声音；不换键就会把
+            # 上一个服务的音频当命中（与兜底音色缓存键同一类审计）。
+            local = self._local_settings()
+            flavor = "|".join(
+                (
+                    flavor,
+                    str(local["endpoint"]),
+                    str(local["protocol"]),
+                    str(local["path"]),
+                    str(local["model"]),
+                    str(local["format"]),
+                )
+            )
+        return flavor
+
+    def _local_settings(self) -> dict[str, Any]:
+        net_tts = self._net()
+        protocol = str(self._cfg("speech_local_protocol", "openai") or "").strip().lower()
+        if protocol not in net_tts.LOCAL_PROTOCOLS:
+            protocol = "openai"
+        audio_format = str(self._cfg("speech_local_format", "mp3") or "").strip().lower()
+        if audio_format not in {"mp3", "wav"}:
+            audio_format = "mp3"
+        route = str(self._cfg("speech_local_path", "") or "").strip()[:120]
+        if route and not route.startswith("/"):
+            route = "/" + route
+        try:
+            timeout = float(self._cfg("speech_local_timeout", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            timeout = 30.0
+        return {
+            "endpoint": str(self._cfg("speech_local_endpoint", "") or "").strip().rstrip("/"),
+            "protocol": protocol,
+            "path": route,
+            "model": str(self._cfg("speech_local_model", "") or "").strip()[:64],
+            "voice": str(self._cfg("speech_local_voice", "") or "").strip()[:64],
+            "format": audio_format,
+            "timeout": max(5.0, min(120.0, timeout)),
+        }
+
+    def _config_gate(self, provider: str) -> tuple[bool, str]:
+        if provider == "local" and not self._local_settings()["endpoint"]:
+            return False, "config"
+        return True, ""
+
+    def _rate_value(self, value: Any) -> float:
+        number = self._cfg("speech_rate", 1.0) if value is None else value
+        try:
+            number = float(number)
+        except (TypeError, ValueError):
+            number = 1.0
+        return max(0.5, min(2.0, number))
+
+    def _volume_value(self, value: Any) -> float:
+        number = self._cfg("speech_volume", 1.0) if value is None else value
+        try:
+            number = float(number)
+        except (TypeError, ValueError):
+            number = 1.0
+        return max(0.0, min(1.0, number))
+
+    def _suffix_for(self, provider: str) -> str:
+        if provider == "local":
+            return str(self._local_settings()["format"])
+        spec = self._net().PROVIDER_SPECS.get(provider)
+        return spec.suffix if spec is not None else "mp3"
 
     def _call(self, provider: str, request: SpeechRequest, out_path: Path) -> None:
         synthesizer = self._synthesizer
@@ -329,6 +413,7 @@ class SpeechService:
             request,
             out_path,
             api_key=self._secret(provider, "api_key"),
+            local=self._local_settings() if provider == "local" else None,
         )
 
     def _trim(self) -> None:

@@ -67,10 +67,11 @@ QListWidget#settingsNav {
     background: transparent;
     border: none;
     outline: 0;
+    font-size: %(base)spx;
 }
 QListWidget#settingsNav::item {
     color: %(label)s;
-    min-height: 34px;
+    min-height: %(nav_row)spx;
     padding: 0 10px 0 12px;
     border-left: 3px solid transparent;
     border-radius: 6px;
@@ -87,10 +88,11 @@ QListWidget#extensionsNav {
     background: transparent;
     border: none;
     outline: 0;
+    font-size: %(base)spx;
 }
 QListWidget#extensionsNav::item {
     color: %(label)s;
-    min-height: 32px;
+    min-height: %(ext_nav_row)spx;
     padding: 0 10px 0 12px;
     border-left: 3px solid transparent;
     border-radius: 6px;
@@ -171,6 +173,41 @@ QFrame#settingsCard {
     background: %(card)s;
     border: 1px solid %(border)s;
     border-radius: 12px;
+}
+QPushButton#foldHeader {
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 4px 2px;
+    color: %(section)s;
+    font-size: %(base)spx;
+    font-weight: 600;
+}
+QPushButton#foldHeader:hover {
+    color: %(accent)s;
+}
+QPushButton#foldHeader:focus {
+    border: 1px solid %(accent)s;
+    border-radius: 6px;
+}
+QLabel#fanName {
+    color: %(label)s;
+    font-size: %(base_1)spx;
+    padding: 1px 4px;
+}
+QWidget#signaturePad {
+    background: %(input_bg)s;
+    border: 1px dashed %(input_border)s;
+    border-radius: 10px;
+}
+QLabel#signaturePreview {
+    background: transparent;
+}
+QListWidget#creditList {
+    background: %(input_bg)s;
+    border: 1px solid %(input_border)s;
+    border-radius: 8px;
+    color: %(label)s;
 }
 QFrame#cardDivider {
     background: %(divider)s;
@@ -364,17 +401,34 @@ def is_dark(app=None) -> bool:
     return color.lightness() < 128
 
 
+def nav_row_heights(font_size: int = 13) -> tuple[int, int]:
+    """两侧导航的行高 token：``(主侧栏, 扩展管理导航)``。
+
+    字号 13 时返回 ``(34, 32)``——与改动前逐像素一致（用户的「当前显示范围是
+    下限」口径）；字号变大时行高跟着长，否则 18px 的行内文字会被 min-height
+    切掉上下缘（`petcore/AGENTS.md` 菜单侧 `max(18, 字号+5)` 是同一类修正）。
+    """
+    try:
+        base = max(10, min(18, int(font_size)))
+    except (TypeError, ValueError):
+        base = 13
+    return max(34, base + 21), max(32, base + 19)
+
+
 def stylesheet(dark: bool = False, font_size: int = 13) -> str:
     """设置页样式表；``font_size`` 是正文基准字号（10–18），其余字号按它推导。"""
     try:
         base = max(10, min(18, int(font_size)))
     except (TypeError, ValueError):
         base = 13
+    nav_row, ext_nav_row = nav_row_heights(base)
     colors = dict(DARK if dark else LIGHT)
     colors.update(
         base=base,
         base_1=max(9, base - 1),
         base_2=max(9, base - 2),
         page_title=base + 9,
+        nav_row=nav_row,
+        ext_nav_row=ext_nav_row,
     )
     return _QSS % colors
