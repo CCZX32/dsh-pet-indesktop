@@ -99,6 +99,8 @@ $pyiArgs = @(
     # 右键菜单默认布局随包分发；PyInstaller 只收集 .py，漏掉这份 JSON 会让
     # 菜单退化成「桌宠设置/退出」（代码侧有内置兜底，但打包仍必须带文件）。
     "--add-data", "$root/petcore/menu_templates;petcore/menu_templates",
+    # 致谢/粉丝随包快照：关于页在断网时仍要显示「提交时状态」。
+    "--add-data", "$root/petcore/community/data;petcore/community/data",
     "--collect-submodules", "petcore",
     "--hidden-import", "pet.webm_clip",
     "--hidden-import", "pet.library",
@@ -231,8 +233,26 @@ if ($Installer) {
         throw "missing tools/InnoSetup/ISCC.exe; run scripts/setup_packaging.ps1 first"
     }
     $version = (& $python -c "import petcore; print(petcore.__version__)").Trim()
-    Write-Host "== Inno Setup =="
-    & $iscc "/DMyAppVersion=$version" "/DMySourceDist=$distRoot\dsh-pet-core" "/DMyOutputDir=$distRoot" "packaging/petcore.iss"
+    $isccArgs = @(
+        "/DMyAppVersion=$version"
+        "/DMySourceDist=$distRoot\dsh-pet-core"
+        "/DMyOutputDir=$distRoot"
+    )
+    if ($SignThumbprint) {
+        # 安装包里唯一「构建时不存在的 PE」是 unins000.exe（Inno 安装时现场生成），
+        # 而 Smart App Control 实测只拦它。这里把我们的签名脚本注册成 Inno 的
+        # SignTool（本机无 signtool.exe），由 iss 里的 SignedUninstaller=yes 调用。
+        # 路径不含空格时不用引号；$q$f$q 让 Inno 自己给文件路径加引号。
+        $signer = Join-Path $root "scripts/sign_artifact.ps1"
+        $isccArgs = @(
+            "/Sdevsign=pwsh -NoProfile -ExecutionPolicy Bypass -File $signer -Thumbprint $SignThumbprint -TimestampServer $TimestampServer -Path `$q`$f`$q"
+            "/DSignUninstaller=1"
+        ) + $isccArgs
+        Write-Host "== Inno Setup (signed uninstaller) =="
+    } else {
+        Write-Host "== Inno Setup =="
+    }
+    & $iscc @isccArgs "packaging/petcore.iss"
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }

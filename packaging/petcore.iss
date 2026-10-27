@@ -43,6 +43,15 @@ RestartApplications=no
 SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\dsh-pet-core.exe
 UninstallDisplayName=dsh-pet core
+; Smart App Control（VerifiedAndReputablePolicyState=1）会拦截安装包里未签名的 PE：
+; 实测本机只拦了安装时才生成的 unins000.exe（CodeIntegrity 3077/3118），而用开发证书
+; 签过的 setup/exe 都能跑。所以「装上时把卸载器也签掉」：签名工具由 build_petcore.ps1
+; 通过 /Sdevsign=... 传进来（本机没有 signtool，用 scripts/sign_artifact.ps1 包装）。
+; 不传 -SignThumbprint 时不生效，走原来的未签名流程。
+#ifdef SignUninstaller
+SignTool=devsign
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "ChineseSimplified.isl"
