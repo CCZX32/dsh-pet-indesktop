@@ -2,6 +2,8 @@
 
 > 基线：`feat/petcore-vpet-architecture`，2026-10-20。首版实现 content 与 feature 两类包；feature 仅在内置演示与显式开关下加载。
 
+> 这是**字段级参考**（每个键、每条报错、每类边界）。要动手建包、装到机器上跑起来，先看 [`PETCORE-MOD-DEVELOPMENT.md`](PETCORE-MOD-DEVELOPMENT.md)：里面有可复制的最小骨架、安装/重载/排错的完整闭环，以及角色包该放哪。
+
 ## 1. 目录
 
 ```
@@ -331,7 +333,7 @@ ports.presentation.release_loop()                          # 当前这圈播完�
 ### 参考实现
 
 - `examples/petcore-mods/voice.chime` 1.1.0：日程/台词/预缓存/免打扰 + 设置页（含四家后端与密钥状态）。
-- `examples/petcore-mods/media.music` 1.1.0：SMTC + 歌词（`HostPorts.http`）+ 唱跳循环 + 播放器启动。
+- `examples/petcore-mods/media.music` 1.2.0：三源识别（SMTC / 音频会话 / 播放器窗口标题）+ 歌词（三源打分，`HostPorts.http`）+ 唱跳循环 + 播放器启动。
 
 ## 13. 卸载、分组与音乐识别（P4-b2，2026-10-23）
 
@@ -359,14 +361,55 @@ ports.presentation.release_loop()                          # 当前这圈播完�
   `_append_mod_actions()` 塞进 hub 的 Core 项（links / 快捷启动 / 网络信息 /
   回收内存 / 免打扰）由 `migrate_p10_menu()` 幂等搬回模板位置。
 
-### 13.3 音乐识别范围
+### 13.3 音乐识别：三源判定与识别范围
 
-- `music_filter_enabled`（默认 false）：开启后只放行识别名命中集合的 SMTC 会话。
-- 识别名来源：`music_player_paths` 的 exe 文件名（去 `.exe`、小写）+
-  `music_filter_extra_ids`（逗号/顿号分隔，AUMID 与 exe 名不一致时用）。
-- 否决表（浏览器/系统提示类）仍然生效；过滤同时作用于唱歌、歌词和传输控制。
-- 过滤命中失败时 `read_playback_with_reason()` 点名被挡下的播放器，不静默为空。
-- 设置页「检测当前播放」显示 `识别名：<app_id>`，方便填额外识别名。
+> 2026-10-26 重写（`media.music` 1.2.0）。旧版只有 SMTC 一条源，下面这张表是
+> **唯一判定真源**；改判定必须先改这里与 `host/recognizer.py` 的用例。
+
+**三个来源各管一件事**
+
+| 来源 | 模块 | 回答什么 | 何时采 |
+|---|---|---|---|
+| 系统媒体会话（SMTC） | `host/now_playing.py` | 在放哪一首、时间轴、传输控制 | 每秒恒定 |
+| WASAPI 音频会话 | `host/audio_sessions.py` | **这个进程是否真的在出声**（Active / 静音 / 峰值） | 每秒恒定（实测 ~2ms） |
+| 播放器窗口标题 | `host/window_source.py` + `host/title_clean.py` | 不注册 SMTC 的播放器**在放哪一首** | 仅当 SMTC 没有"在播"会话 |
+
+**判定表**
+
+| 证据组合 | 判定 |
+|---|---|
+| SMTC 有被接受会话 + 该进程音频 Active 且未静音 | 在播 · 来源=SMTC · 置信度=有音频证据 |
+| SMTC 有被接受会话 + 该进程音频 Inactive / 被静音 | 暂停（曲目与歌词保留，宽限后解除唱歌循环） |
+| SMTC 有被接受会话 + 该进程**不在**音频会话表（蓝牙 / 独占模式 / 虚拟声卡） | 按 SMTC 的播放状态判，置信度=按系统状态推断 |
+| SMTC 有被接受会话但**处于暂停** + 另一台已登记播放器窗口可解析且其音频 Active | 在播 · 来源=窗口标题（「在播」的证据优先于「暂停」的证据）；理由里写明"系统媒体会话处于暂停，以窗口标题源为准" |
+| SMTC 无被接受会话 + 已登记播放器窗口标题可解析 + 该进程音频 Active | 在播 · 来源=窗口标题 |
+| SMTC 无被接受会话 + 已登记播放器窗口标题可由进程但音频不活跃 | 暂停（开着没在放时标题停在上一首，不许当在播） |
+| SMTC 无被接受会话 + 已登记播放器进程音频 Active、标题解析不出歌名 | 在播但无曲目（只唱歌、不取词；气泡对**同一台播放器**只说明一次「这首歌我认不出来」） |
+| 只有任意进程（游戏 / 语音 / 未知应用）音频 Active | **不在播**（不猜） |
+| SMTC 采样抛错 / 超时 | 读失败：保留上一拍状态，不清歌词、不计缺席 |
+
+- **识别范围**（`music_filter_enabled`，默认 false）：开启后只放行识别名命中集合的
+  会话，**对三个来源统一生效**；识别名来源是 `music_player_paths` 的 exe 文件名
+  （去 `.exe`、小写）+ `music_filter_extra_ids`（逗号/顿号分隔，AUMID 与 exe 名
+  不一致时用）。被挡下时 `reasons` 必须**点名播放器**，不许静默为空。
+- **否决表**（浏览器默认关闭 / 系统提示类应用）仍然生效，且是第二道闸。
+- **app_id 归一必须先取 basename**：有些 Win32 播放器把 app_id 报成完整安装路径，
+  只做 `endswith(".exe")` 会让"静音 / Inactive"这条证据永远匹配不上，还会把安装路径
+  带进气泡与诊断文本（`recognizer.exe_name` / `normalized_exe`）。
+- **窗口标题源允许的进程** = `host/players.py:KNOWN_MUSIC_EXES`（foobar2000 / AIMP /
+  Winamp / MusicBee / iTunes + 四家已支持启动的客户端）∪ 用户配置的路径 ∪ 额外识别名。
+  **故意不含 VLC / mpv / PotPlayer**：那些以放视频为主，收进来会把看视频当成听歌。
+- **标题格式串**：`music_title_format`（默认空）只给窗口标题源用；空 = 不猜歌名/歌手
+  顺序（整条同时作歌名与歌手参与搜索，显示只显示一次）。旧壳的
+  `foobar_title_format` 由 `config._LEGACY_KEY_ALIASES` 迁移过来。
+- **诊断**：设置页「识别诊断」与 `scripts/music_probe.py` 用同一份
+  `host/diagnostics.py` 渲染三源采样 + 判定 + 理由；只含 app_id / 可执行名 / 曲名 /
+  状态与数值，不含 URL、路径、代理与歌词正文。
+- **音乐识别的开关**：`music_enabled`（总开关）、`music_sing_enabled`（唱歌动画）、
+  `music_lyric_enabled`（歌词）、`music_browser_media_enabled`（浏览器会话参与）。
+  音频会话与窗口标题源**没有独立开关**：它们是可由应用稳定推断的实现参数，
+  不可用（非 Windows / 缺组件）时自动降级为只看 SMTC。
+
 
 ## 14. P4-c1 端口扩展：窗口采样与配置写入（2026-10-23）
 

@@ -674,8 +674,9 @@ DeepSeek 余额显示（气泡/小部件思路）参考了 [MeteorNOX/DeepSeek-B
 
 **特别感谢：**
 
-- [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)：参考实现与动画素材基础。
+- [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)：参考实现与动画素材基础；初始「蓝色大肥鱼」素材来源。
 - [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)：DeepSeek 余额气泡思路参考。
+- **B 站 @这个刀子真甜、@上善无形、@ZipZipPipe**：桌宠形象来源（以 B 站昵称为准，未给主页链接）。
 - **贡献者 [ushio2026-alt](https://github.com/ushio2026-alt)**：贡献了 v4.0.0 的现代桌面体验重构（PR #11：新版右键菜单、新版设置、现代双栏 AI 对话窗口、彩蛋入口、多开孵化）、CI 测试时序稳定（PR #12）与彩蛋弹窗时序/图片回退加固（PR #13）。
 - **贡献者 [klxxya](https://github.com/klxxya)**：贡献了拖拽物理、全屏自动隐藏、看看屏幕、聊天窗主题背景、裁切取景、文字动画免镜像、置顶看门狗等增强功能（PR #5），v4.0.0 的性能与主动陪伴体系（PR #7：隐藏零功耗、启动懒加载、主动识屏陪伴、Agent 联动、多实例避让）与合并后的加固修复（PR #16），v4.2.1 之后的大批主线工作（灵动岛段化、单进程多宠架构、歌词采样提速等，逐项见 [`docs/RELEASE-v4.3.0.md`](docs/RELEASE-v4.3.0.md) 的致谢）。
 - **贡献者 [lscatfish123-cell](https://github.com/lscatfish123-cell)**：贡献了 Windows「自动隐藏任务栏」下桌宠误隐藏的修复（PR #18：全屏判定增加标题栏检查）。
@@ -716,6 +717,7 @@ DeepSeek 余额显示（气泡/小部件思路）参考了 [MeteorNOX/DeepSeek-B
 - [`CONTEXT.md`](CONTEXT.md)：领域术语表（Shared UX Contract / Settings System / Menu Action Model 等）。
 - [`petcore/README.md`](petcore/README.md)：新 core + mod 架构的开发者上手（环境、运行、目录地图、加菜单项/mod/角色包、测试门禁）。在 `petcore/` 下改代码前还要读 [`petcore/AGENTS.md`](petcore/AGENTS.md) 与 [`docs/PETCORE-LOG-INDEX.md`](docs/PETCORE-LOG-INDEX.md)。
 - [`docs/PETCORE-MAIN-PARITY-BACKLOG.md`](docs/PETCORE-MAIN-PARITY-BACKLOG.md)：petcore 与主分支的功能差距台账（已对齐/部分/未做 + 计划批次），判断“还差什么”先看它。
+- [`docs/PETCORE-MOD-DEVELOPMENT.md`](docs/PETCORE-MOD-DEVELOPMENT.md)：**从零写一个 petcore 扩展**的动手指南——三类产物（功能扩展/角色包/内容块）各放哪个目录、最小可运行骨架（含可直接复制的模板）、菜单与设置页的接线键、端口与线程规则、安装/重载/排错的完整闭环。想给项目做扩展或改别人做的扩展，先读这篇；字段级细节再查 [`docs/PETCORE-MOD-FORMAT.md`](docs/PETCORE-MOD-FORMAT.md)，角色包规格查 [`docs/PETCORE-CHARACTER-PACKS.md`](docs/PETCORE-CHARACTER-PACKS.md)。
 
 改对应代码前的必读文档（完整触发表见 `AGENTS.md` 的 "Context pointers"）：
 

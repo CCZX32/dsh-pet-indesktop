@@ -497,3 +497,58 @@ if ($smoke.ExitCode -ne 0) { throw "packaged --check --strict failed" }
 P5 的 Core 更新服务只消费已发布的 Windows 安装器资产，不改变现有 onedir 资源收集规则。构建机必须在项目专用环境生成安装器，并把实际文件名、大小和 SHA-256 写入 manifest；客户端不接受手填摘要或未声明大小的资产。
 
 当前开发机只验证了源码 `--check`、更新模型/下载器和冻结条件测试；`.venv` 中没有 `PyInstaller` 模块，未生成候选安装器。冻结 Windows 安装器的关闭旧进程、替换、重启、回滚由候选包验收任务在另一台机器完成；本轮不覆盖现有安装和不上传 Release。
+
+## Smart App Control 拦截 setup / 卸载器：签卸载器（2026-10-27）
+
+**症状**：本机装过一次 petcore 后，`setup.exe` 与 `uninstall.exe` 都会弹出「智能应用控制
+已阻止此应用」。
+
+**定性（同一台机器、只读事件日志）**：
+
+```text
+VerifiedAndReputablePolicyState = 1          # Smart App Control 处于「开启」（强制）
+Microsoft-Windows-CodeIntegrity/Operational:
+  2026-10-27 01:25:37 / 41 / 57、01:26:02   id=3077 + 3118（Smart App Control Block Details）
+    … explorer.exe attempted to load E:\dsh-pet-core\unins000.exe that did not meet the
+      Enterprise signing level requirements or violated code integrity policy
+      (Policy ID:{0283ac0f-fff1-49ae-ada1-8a933130cad6})
+Get-MpThreatDetection                        # Defender 0 条检出，不是杀毒误报
+```
+
+同时能看到 `2026-10-24 22:05` 一次**未签名**的 `dist\dsh-pet-core-setup.exe` 也被 3077 拦过。
+也就是说：**SAC 只看签名**，被拦的恰好是「安装时才生成、从未签过」的 `unins000.exe`，
+而用开发证书签过的 `setup.exe` / `dsh-pet-core.exe` 在这台机器上是放行的——实测
+`dist\dsh-pet-core\dsh-pet-core.exe`（签名 `CN=DSH Pet Core Dev`）跑 `--check` 退出码 0、
+事件日志 3077 增量为 0。
+
+**修复**：
+
+| 位置 | 改动 |
+|---|---|
+| `packaging/petcore.iss` | `#ifdef SignUninstaller` → `SignTool=devsign` + `SignedUninstaller=yes`（Inno 在安装时用它签 `unins000.exe`） |
+| `scripts/build_petcore.ps1` | 带 `-SignThumbprint` 时给 ISCC 传 `/Sdevsign=… -Path $q$f$q` 与 `/DSignUninstaller=1`；不带时行为不变 |
+| `scripts/sign_artifact.ps1`（新） | 单文件签名（SHA256 + 时间戳，时间戳不可达则退回无时间戳），充当 Inno 的 SignTool；本机没有 Windows SDK 的 `signtool.exe` |
+| `scripts/install_dev_cert.ps1`（新） | 换测试机时把公钥 `.cer` 装进 `CurrentUser\Root` + `TrustedPublisher`（`-Check` 只校验）；拒绝导入带私钥的文件 |
+
+**实测验收**（`.scratch/verify_sac_install.ps1`，静默装到 `.scratch/sac-install`）：
+
+```text
+setup 签名                 Valid / CN=DSH Pet Core Dev
+installer exit code        0
+dsh-pet-core.exe ->        Valid / CN=DSH Pet Core Dev
+unins000.exe ->            Valid / CN=DSH Pet Core Dev     ← 修复点
+已安装 exe --check         exit 0，报告已写出
+uninstaller exit code      0，安装目录已删除
+3077 新拦截事件            0
+```
+
+**边界**：
+
+- **不改安全策略**。SAC 一旦关闭，只能重置/重装 Windows 才能重新打开，所以本项目从不替用户
+  关它；上面（以及 2026-10-24 那条「不得关闭安全策略规避运行阻断」）仍然有效。
+- 自签证书只在你自己的测试机上成立：**换机器必须先把 `dsh-pet-core-dev.cer` 装进
+  该机的 `CurrentUser\Root` + `TrustedPublisher`**，否则同一个 setup 照样被拦。
+- 对外分发时自签证书不够：SAC 的「有信誉」判定看的是 CA 签发者与云端信誉，正式发布要换成
+  受信任 CA 的代码签名证书（EV 证书有即时信誉），并对 setup、主程序、卸载器三处都签。
+- Inno 的 `SignedUninstaller` 依赖构建机上 `pwsh` 在 PATH 里（签名工具就是那个脚本）；
+  正式发布应换成 `signtool.exe` 走同一套 `/S…=` 定义。

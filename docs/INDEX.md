@@ -144,6 +144,10 @@
 
 ## PR 报告存档
 
+- [语音全链路 + champion 彩蛋 + 关于页致谢体系（2026-10-27）](PR-REPORT-PETCORE-THANKS-VOICE-2026-10-27.md)：新增侧边栏「语音」与本地 HTTP TTS provider（OpenAI 兼容 / 通用 JSON、强制直连、缓存键含 endpoint/model）、自言自语/点击台词语音与 8% champion 多气泡彩蛋、关于页「致谢」分页（作者账号/贡献者/特别鸣谢/issue·PR 协作者/B 站粉丝分页搜索/唯一手写签名）；含实测性能、真实 GUI 渲染与 B 站快照阻塞说明。**改语音后端、设置页分页、关于页或社区数据前必读**。
+
+- [音乐识别重写 + 扩展管理两轴弹性（2026-10-26）](PR-REPORT-MUSIC-RECOGNITION-2026-10-26.md)：`media.music` 1.2.0 三源识别（SMTC / WASAPI 音频会话 / 播放器窗口标题）与 8 个状态机缺陷修复、歌词候选打分 + lrclib + 查询词清洗、识别诊断与 `scripts/music_probe.py`、新增 `music_title_format`；设置「扩展管理」页导航宽/浏览器高/内容宽的弹性化（当前范围作下限）。**改识别判定、歌词匹配或扩展管理几何前必读**，含本机实测开销与实机验证记录。
+
 - [petcore 修复、重构收尾与分支交付（2026-10-25）](PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md)：运行时迁移/Worker、媒体与角色导入、点击音效、彩蛋/余额设置、GraphType 入口、petcore-only 门禁与环境缺口；接手本轮提交或核对推送结果前必读。
 
 - [petcore 候选包构建与隔离验收任务（2026-10-25）](PETCORE-CANDIDATE-PACKAGING-TASK-2026-10-25.md)：交给另一台 Windows 电脑执行的 PyInstaller/Inno Setup 构建、候选包 `--check`、隔离安装验收、SHA 证据和阻断条件；不包含公开 Release。
@@ -387,9 +391,10 @@
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [`PETCORE-ARCHITECTURE.md`](PETCORE-ARCHITECTURE.md) | `petcore` 的分层、契约、启动路径、数据目录与 VPet 对应关系。 | 改 `petcore/` 任何模块、判断 core 与 mod 边界前必读。 |
-| [`PETCORE-MOD-FORMAT.md`](PETCORE-MOD-FORMAT.md) | `mod.json` 字段、校验、发现/启停、安装与能力模型。 | 新增/修改 mod 包、改加载器或安装流程前必读。 |
+| [`PETCORE-MOD-FORMAT.md`](PETCORE-MOD-FORMAT.md) | `mod.json` 字段、校验、发现/启停、安装与能力模型（**字段级参考**）。 | 新增/修改 mod 包、改加载器或安装流程前必读；**动手写一个 mod 先看 [PETCORE-MOD-DEVELOPMENT.md](PETCORE-MOD-DEVELOPMENT.md)**（建包、接线、安装、排错的完整流程）。 |
+| [`PETCORE-MOD-DEVELOPMENT.md`](PETCORE-MOD-DEVELOPMENT.md) | **从零做一个 mod 的动手指南**：三类产物（feature / 角色包 / 内容块）分别放哪、最小可运行骨架（manifest+factory+runtime+设置页，代码已实测）、菜单与设置页的真实接线键、端口选型与线程铁律、本地安装/重载/排错闭环、ZIP 与安装器分发、角色包导入三条路径与不支持项、排错对照表与提交 checklist。 | **第一次写 petcore 扩展、判断「素材包该放哪」、或排查「装了为什么没生效」时先读这篇**；字段级细节再查 `PETCORE-MOD-FORMAT.md`，角色包规格查 `PETCORE-CHARACTER-PACKS.md`。 |
 | [`PETCORE-MARKET.md`](PETCORE-MARKET.md) | 插件市场 v1：静态索引契约、来源与缓存、下载校验、安装/更新/回滚、生效语义、npm 结论与信任边界。 | 改 `petcore/market/`、市场设置页、索引仓库，或排查「插件装不上 / 更新或回滚失败 / 索引过期」时必读。 |
-| [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读。 |
+| [`PETCORE-CHARACTER-PACKS.md`](PETCORE-CHARACTER-PACKS.md) | 角色包目录、动画分类、manifest、move_strides、WebP 帧序列采纳规则。 | 制作角色包、改 `content/legacy.py` 或帧序列采纳逻辑前必读；**打包与导入流程（放哪个目录、三条入口、`pack-character` 的真实产物）见 [PETCORE-MOD-DEVELOPMENT.md](PETCORE-MOD-DEVELOPMENT.md) §9**。 |
 | [`PETCORE-ROADMAP.md`](PETCORE-ROADMAP.md) | 本轮里程碑状态、历史批次 H1–H8.4、当前交付阶段 P0–P6、编号约定（§0）与延后项。 | 规划后续功能迁包、评估重构进度，或分不清「P1」指哪套编号时必读。 |
 | [`PETCORE-MAIN-PARITY-BACKLOG.md`](PETCORE-MAIN-PARITY-BACKLOG.md) | petcore ↔ 主分支功能差距台账：已对齐 / 部分 / 未做、默认安装口径、计划批次与验收方式。 | 回答「还差什么」「这个域算不算完成」「示例 mod 能不能算默认功能」前必读；每轮收口更新。 |
 | [`PETCORE-FUNCTION-MATRIX-2026-10-22.md`](PETCORE-FUNCTION-MATRIX-2026-10-22.md) | 2026-10-22 主分支 v4.3.4 与 petcore 的完整功能矩阵、阶段归属和有意差异。 | 做主分支对齐审查、判断某项是否已交付或分派迁移阶段前必读。 |
@@ -406,7 +411,7 @@
 | [`PETCORE-D1-ACCEPTANCE-2026-10-24.md`](PETCORE-D1-ACCEPTANCE-2026-10-24.md) | 分发能力 D1（T00–T07）对外验收说明：能做什么/不能做什么、15 项验收矩阵、复跑命令、四个设计决定、7 条已知缺口与给审查者的 4 个问题。 | 对外汇报分发进度、交给他人（含 AI）验收、或判断「市场到底能不能用」时先读这份，再按需打开各批 PR 报告。 |
 | [`PETCORE-EXTENSIONS-RELEASE.md`](PETCORE-EXTENSIONS-RELEASE.md) | 功能扩展发布手册（待执行）：产物 size/sha、三个先决确认、五步流程（重建/上传/索引/HTTPS 验收/切源）与逐步回滚、明确禁止的自动发布动作。 | **真正发布扩展或切换默认索引源之前必读**；确认「哪些是 agent 不许自动做的」也看这份。 |
 | [`../petcore/README.md`](../petcore/README.md) | 开发者上手指南：环境、运行、目录地图、加菜单项/mod/角色包、测试门禁、已知边界。 | 第一次接手 petcore、或需要一条可复制的命令时。 |
-| [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 10 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时。 |
+| [`../examples/petcore-mods/README.md`](../examples/petcore-mods/README.md) | 10 个可导入 feature mod 样板：安装、`allow_feature_mods`、端口、菜单/设置规范。 | 写/安装 petcore feature mod、复制样板或排查「装了为什么没生效」时；先按 [PETCORE-MOD-DEVELOPMENT.md](PETCORE-MOD-DEVELOPMENT.md) 走一遍最小骨架，再挑样板扩展。 |
 | [`../petcore/AGENTS.md`](../petcore/AGENTS.md) | petcore 的 agent/贡献者约定：每次改动必须写 log + index、架构红线、菜单/设置一致性、非模态与大小上限。 | 在 `petcore/` 下改任何代码或文档之前必读。 |
 
 ## 在线更新与网络发布
@@ -424,4 +429,6 @@
 - [图标槽位与灵动岛停靠/动效移植（2026-10-26）](PR-REPORT-PETCORE-ICONS-ISLAND-2026-10-26.md)：菜单与设置侧栏图标收到 18px 槽位（设计稿按槽位缩放 + 笔宽补偿），动画预览先裁 alpha 包围盒再适配槽位；修灵动岛「拖不动」（`QWidget` 没有 `startDragDistance()`），移植 40px 贴边停靠 / 16px 细条 /悬停滑出 / 180ms 几何动画 / 悬停缩放 / 事件果冻，细条态停采样。**改 `ui/icons.py`、`ui/menu_style.py` 或 `ui/island.py` 之前必读**。
 - [图标重量与菜单/侧栏几何对齐（2026-10-26）](PR-REPORT-PETCORE-ICON-WEIGHT-2026-10-26.md)：先量后改——18px 下 `settings` 墨量初版 68 / 上一版 120 / 主分支 121，定位「图标又粗又大」的真根因是笔宽被钉成恒 1.6 逻辑像素；笔画改回随画布缩放（≈0.8px、地板 0.75px），菜单行高 32→24 + `icon-size: 18px` + `QMenu::icon { left: 9px }`，侧栏行高 34 / 图标按 16 绘制，缩略图填充率 1.04。**改 `ui/icons.py`、`ui/menu_style.py`、设置侧栏或排查「图标过大/过小」前必读**。
 - [外观页内分页、点击查看余额与峰谷提示（2026-10-26）](PR-REPORT-PETCORE-SETTINGS-BALANCE-2026-10-26.md)：「外观与交互」切四页；「点击查看余额」搬到「点击与音效 → 余额提示」；新增 `petcore/account/pricing.py`（北京时间峰谷档位、40 天扫描下一档位、三种措辞、`#e5484d`/`#30a46c`、HTML 转义）与 4 个全局键，余额气泡副标题接峰谷提示。**改余额提示、互动页设置组或外观页结构前必读**。
-- [灵动岛视觉动效收尾（2026-10-26）](PR-REPORT-PETCORE-ISLAND-VISUALS-2026-10-26.md)：状态点五态（含 4s 完成瞬态与感叹矢量）、工作态声纳环、回复后 5s 呼吸、130ms 内容淡化 + 内容位图缓存（命中 0.0044ms vs 重建 0.151ms）、三层投影/sheen/软陶 bevel/glass 渐变/竖线渐变/头标内环/单位 α；chat/截图/显隐/余额四处真实状态来源。**改 `ui/island.py`、`island/layout.py` 或排查「岛闪烁/变糊/动效不触发」前必读**。
+- [灵动岛视觉动效收尾（2026-10-26）](PR-REPORT-PETCORE-ISLAND-VISUALS-2026-10-26.md)：状态点五态（含 4s 完成瞬态与感叹矢量）、工作态声纳环、回复后 5s 呼吸、130ms 内容淡化 + 内容位图缓存（命中 0.0044ms vs 重建 0.151ms）、三层投影/sheen/软陶 bevel/glass 渐变/竖线渐变/头标内环/单位 α；chat/截图/显隐/余额四处真实状态来源。**改 `ui/island.py`、`island/layout.py` 或排查「岛闪烁/变糊/动效不触发」前必读**。（头标内环已在 L101 随头标退役）
+- [菜单图标 DPR 修复与灵动岛去头标（2026-10-26）](PR-REPORT-PETCORE-ICON-DPR-2026-10-26.md)：非 100% 屏上「图标比槽位大、右下角缺一块」的真根因是 `icons._pixmap()` 把 DPR 乘了两次（150% 下 play/screen/quit 包围盒 (14,8,26,26)），改为只乘逻辑缩放并对齐主分支；勾选标记挪到行尾（`MenuCheckLayer`）让勾选项恢复图标、补齐 8 枚缺失字形、子菜单图标回退链；灵动岛删除头标与 `island_show_icon`，新增默认关闭的 `island_show_messages`。**改 `ui/icons.py`、`ui/menu_style.py`、`ui/menu_model.py` 或排查「图标被裁/勾选项没图标/岛上有圆点/卡片冒出历史消息」前必读**。
+- [灵动岛 × 桌宠碰撞回归 + C 盘剩余段（2026-10-26）](PR-REPORT-PETCORE-ISLAND-COLLISION-2026-10-26.md)：把主分支的「撞岛被弹 / 拖岛拍飞」重做成 petcore 的一套实现——几何在 `engine/island_field.py`（胶囊体育场 + 矩形径向半径 + 冲量），接线在 `ui/island_collision.py`（`host.island_field`，零定时器），墙挂 `PetWindow._clamp_position`、抛掷在 `_tick_throw` 反射、岛动时经同一出口推出被压住的桌宠；新增默认开的 `island_collision`。另加默认关的 C 盘剩余段（`platform/diskmon.py`，5s 一拍、33µs/次、折叠或隐藏即停采）。**改 `ui/island.py`、`ui/island_collision.py`、`engine/island_field.py`、`ui/motion.py` 的抛掷路径，或排查「桌宠穿岛/抽搐/被岛拍不动/落岛卡在飞行帧/C 盘段不显示」前必读**。

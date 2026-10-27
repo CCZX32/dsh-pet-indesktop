@@ -131,8 +131,10 @@ petcore/
     （候选台词等）允许换行。
 14. **命令反馈不受免打扰抑制**：`say/notify` 的 `force=True` 只给「用户主动点的命令」；
     自动冒泡（自言自语、提醒）仍受免打扰限制。
-15. **菜单勾选必须可见**：勾选项渲染出对勾（QSS 用生成的 check 图片）；勾选项不再
-    同时设 icon。
+15. **菜单勾选必须可见**：勾选标记画在**行尾**（`menu_style.MenuCheckLayer`，
+    13px 强调色圆 + 白勾；QSS 的 `QMenu::indicator` 只留 1px 且 `image: none`）；
+    勾选项**必须同时有图标**——QMenu 的勾选列与图标列是同一个位置，勾选塞回 indicator
+    就等于勾选项不能有图标（L101）。
 16. **碰撞不能瞬移**：`MotionController.set_velocity()` 切到抛掷前必须把内部坐标重锚到
     窗口当前位置；碰撞位移一律经过身体框钳制。
 17. **探头只被真撞击打断**：只有相对接近速度 ≥ `HIT_FEEDBACK_MIN_SPEED`（300px/s）
@@ -300,7 +302,7 @@ petcore/
 - **单进程多宠**：`PetManager` 管理 slot 0 主宠与 slot 1–15 子宠；每宠独立 `config-pet-N.json`；生成/收回/重启恢复；宠物间椭圆近似碰撞与 Q 弹；设置页「多宠」。
 - **交互 Core**：点击 Q 弹（220ms，旋转/探头叠加、命中逆变换）、拖动物理（弹簧/抛掷/碰边）、弹弓、黄金回旋、探头击飞旋转、拖文件投喂、碰撞；菜单「播放动画」「播放速率」「拖动物理」「不自动移动」「黄金回旋」「生小肥鱼」「退出子肥鱼」。
 - **内置 mod**：`fun.self-talk`、`fun.click-talk`、`tool.quick-launch`、`tool.quiet-mode`、`tool.links`、`tool.memory-trim`、`tool.network-info`；受信任内置包随 core 加载，第三方 feature 仍需 `allow_feature_mods`。`fun.divination`、`fun.festival`、`reminder.todo`、`voice.chime`、`media.music` 是 `examples/petcore-mods/` 的可导入样板，不再内置。
-- **设置聚合**：所有 mod `settings_page` 进入「扩展管理」页内标签（`SettingsTabContainer`）；P6 起侧边栏 8 页（新增「API 与账户」）。
+- **设置聚合**：所有 mod `settings_page` 进入「扩展管理」页内标签（`SettingsTabContainer`）；P6 起侧边栏 8 页（新增「API 与账户」）；2026-10-27 起 9 页（新增「语音」，排在「互动与物理」之后）。
 - **移动同步**：朝向由移动方向决定；窗口位置由 clip 帧号 + `move_curves` 推进，静态帧不位移，末拍精确到位。
 
 - **打包**：PyInstaller 6.22.3 装入 `.venv`；Inno Setup 6.7.3 便携安装到 `tools/InnoSetup`；`scripts/build_petcore.ps1 -Clean -Installer` 实际产出 onedir 与安装包，`--check --out` 取证。
@@ -352,7 +354,7 @@ petcore/
 - **气泡**：跟随桌宠移动与缩放；支持图片内容（彩蛋默认进气泡），可切独立窗口。
 - **彩蛋菜单行**：头像 + 标题 + 「请点击」的整行控件，点击在菜单关闭后打开。
 - **设置 IA**：「互动与物理」拆成 8 个页内分页；「菜单」拆菜单编排/快捷启动；
-  「关于与诊断」拆版本诊断/链接/网络/回收内存。
+  「关于与诊断」拆版本诊断/致谢/链接/网络/回收内存；新增侧边栏「语音」。
 - **Core 内置特性**：7 个原内置 feature 并入 Core，设置页按 `host_page` 内嵌；
   扩展管理只保留「扩展管理 + 基础扩展 + 加装扩展」，组头可折叠。
 - **安装向导**：目录页每次显示，已装过时预选上次安装路径。
@@ -369,6 +371,11 @@ petcore/
 - **自言自语出图**：`self_talk_image_chance`（0–100%，默认 30）命中时从
   `self_talk_image_dir`（空 = 内置 `assets/big_blue_fat_fish`）随机取图，作为气泡
   配图显示；0% = 只说话。点击台词是用户主动命令，`say(force=True)` 不受免打扰抑制。
+- **点击反馈顺序**：开「点击查看余额」时余额气泡先冒（含失败原因那条），点击台词
+  （`_notify_click()` → `fun.click-talk`）**等余额气泡收起后**才通知——`SpeechBubble.closed`
+  （`hideEvent` 发）→ `PetWindow._flush_click_talk()`；宿主在余额结果展示后调
+  `notify_click_balance_presented()` 接续。连点只排一条（跟最后一次点击），没有气泡可等
+  （免打扰/窗口隐藏/结果一直不来/宿主无 `request_balance`）时 9s 兜底或立刻回落。
 - **菜单顺序**：`easter_egg` 固定为第一项；`playback_speed` 默认隐藏；
   尾部固定为 `… → modern_settings → separator → quit`（分界线下方只有退出）。
   `migrate_p8_menu()` 对旧布局幂等迁移。
@@ -607,7 +614,7 @@ petcore/
 | 服务 | `petcore/speech/service.py`：后端链、无网预检换默认音色、缓存（非空才命中）、2 次重试 + 默认音色兜底、失败删产物、密钥 owner `speech.<provider>` |
 | 端口 | `petcore/ui/ports.py::CoreSpeechPort`：后台合成 → `AudioAdapter` 共享音频通道 → 回调；`stop/playing` |
 | 报时 | `voice.chime` 1.1.0：6 档日程 + 自定义时刻、按日轮换台词、朗读/气泡文案分离、60 秒预缓存、免打扰丢弃 |
-| 音乐 | `media.music` 1.1.0：SMTC 检测、歌词两源（直连→代理一次）、LRC 解析/偏移、唱跳循环、播放器启动 |
+| 音乐 | `media.music` 1.2.0：三源识别（SMTC / WASAPI 音频会话 / 播放器窗口标题，判定表见 `PETCORE-MOD-FORMAT.md` §13.3）、歌词三源打分（直连→代理一次）、LRC 解析/偏移、唱跳循环、播放器启动 |
 
 **动画循环接缝**：`PresentationPort.play_animation(name, loop=True)` 让一段素材一直播，
 `release_loop()` 解除；探头、击飞、拖拽接管时 `_on_finished()` 自动解除，不破
@@ -629,6 +636,30 @@ petcore/
 实测（2026-10-22，本机）：edge 合成 26,208 B / 3.39s，缓存命中 0.0s；SAPI 97,234 B
 wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47ms 返回明确原因。
 
+### 24.1 本地模型、语音页与多气泡（2026-10-27）
+
+- **本地 provider**：`PROVIDER_SPECS["local"]`（离线、API Key 可选、`optional_secrets`）。
+  两种协议：`openai` → `POST {endpoint}/v1/audio/speech`（`model/input/voice/response_format/speed`）；
+  `simple` → 可配路径的 `{text,voice,speed}`。响应可以是音频字节或 JSON 里的
+  `audio|data|audio_base64`。请求强制 `prefer_direct=True`、`allowed_schemes=("http","https")`。
+- **缓存键**：本地 flavor 额外包含 `endpoint/protocol/path/model/format`；换服务不会播旧音频。
+  缓存后缀由 `speech_local_format`（mp3/wav）决定。
+- **语音页**：侧边栏「语音」= 后端链/音色/语速/音量/缓存上限/试听 + 本地模型 + 在线 Key +
+  清缓存；密钥走钥匙串 `speech.<provider>`；本地 endpoint 为空时 provider 标记「未配置」并回退。
+  `SpeechRequest.rate/volume` 留空时由 core 用 `speech_rate`/`speech_volume` 填充，显式传值优先；
+  SAPI 音色独立键 `speech_sapi_voice`（不再与 Edge 共用）。
+- **本地直连**：本地请求用 `direct_only=True`，失败也不切系统代理（避免把本地 Key 与朗读
+  文本发给代理）。
+- **自言自语/点击台词出声**：`self_talk_voice_enabled`、`click_talk_voice_enabled` 默认 true；
+  朗读失败不影响气泡与下一次排期。报时/抽签/节日/待办仍用各自开关。
+- **champion 彩蛋**：`self_talk_champion_enabled` + `self_talk_champion_chance`（默认 8%）。
+  命中时 5 条气泡依次出现（英文主文案 + 中文副标题），逐句朗读：
+  `Maybe not today, / maybe not tomorrow, / maybe not next month, / but one day, /
+  you will be a champion.`
+- **多气泡接缝**：`PresentationPort.say_sequence(items)`（`text, subtitle, duration_ms`）；
+  `PetWindow` 单次定时器推进，新的 `say/show_image/隐藏/关闭` 取消剩余；免打扰与隐藏态同
+  `say()` 闸门。端口缺失时 feature 回退为单条合成气泡。
+
 ## 25. P4-b2：分组、可卸载与气泡分页（2026-10-23）
 
 1. **扩展分组**：右键「扩展」按 mod 分成二级子菜单；mod 设置页一个 H2 + 若干 H3。
@@ -639,7 +670,8 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
    每页短 3 行/长 6 行，页码点 + 滚轮翻页；副标题（音乐「我在唱《…》」）与正文
    同一卡片；点击仍打开快速对话。
 4. **音乐识别范围**：默认不过滤；开启后只认已配置播放器（exe 名或额外识别名），
-   过滤同时作用于唱歌、歌词与传输控制。
+   过滤同时作用于唱歌、歌词与传输控制。**2026-10-26 起**识别是三源合成
+   （SMTC / 音频会话 / 播放器窗口标题），完整判定表见 `PETCORE-MOD-FORMAT.md` §13.3。
 5. **P4-c 边界**：主动识屏、`ai.agent`、提醒域转正、菜单模板迁移本轮不做，
    见 ROADMAP §25.2。
 6. **窗口**：设置窗口保留原生标题栏并提供最小化/最大化（`WindowMinMaxButtonsHint`）；
@@ -711,7 +743,8 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
    读图口径（逻辑上限 × DPR 解码、写回 DPR）；不要在别处直接 `QPixmap(path)` 后再
    按逻辑尺寸贴图。
 8. 已知边界：混合 DPI 多屏下窗口跨屏时视觉大小随屏缩放变化（逻辑尺寸不变），
-   与主分支一致；菜单对勾图（14px QSS 资源）暂未做 @2x。
+   与主分支一致；菜单勾选标记是矢量自绘（`MenuCheckLayer`，按窗口 DPR 直接绘制），
+   不需要 @2x 资源。
 
 ## 28. P4-c2：Agent 联动 `ai.agent`（2026-10-23）
 
@@ -829,25 +862,44 @@ wav；歌词真实抓到 33 行（酷狗源，0.66s）；SMTC 无播放器时 47
      面板，行按**卡片宽**重排（放不下就折 `+N`，绝不画到窗外）。
    - 绘制：胶囊/面板自绘（深/浅/玻璃三套配色 + 五档强调色），颜色来自常量而不是 QSS；
      告警色只染数值与单位，label/竖线不沾；`island_show_status` 的画法是行尾一个状态点，
-     颜色取行内最高告警级（无色时用强调色）。
-5. **配置键**（全部全局作用域，13 个）
+     颜色取行内最高告警级（无色时用强调色）。胶囊左侧**不画头标**：内容（名字/信息位）
+     直接从 `CONTENT_PAD = 19px` 起排（L101 删掉了强调色圆点）。
+5. **配置键**（全部全局作用域，16 个）
 
    | 键 | 默认 | 取值 |
    |---|---|---|
    | `island_enabled` | `False` | 总开关（菜单「灵动岛」写它） |
-   | `island_show_icon` / `island_show_name` / `island_show_status` | `True` | 头标 / 角色名 / 状态点 |
+   | `island_show_name` / `island_show_status` | `True` | 角色名 / 状态点 |
+   | `island_show_messages` | `False` | 消息显示：开启才记录并在展开卡片列出最近 8 条气泡消息（含「清除消息」按钮）；关闭时不记录也不显示，胶囊读数不受影响 |
    | `island_info_mode` | `"time"` | `time` / `custom` |
    | `island_custom_text` | `""` | ≤80 字符 |
    | `island_style` | `"dark"` | `dark` / `light` / `glass` |
    | `island_opacity` | `1.0` | 0.4–1.0（只作用底板） |
    | `island_accent` | `"blue"` | blue/green/purple/pink/orange |
    | `island_click_action` | `"expand"` | `expand` / `toggle_pet` |
-   | `island_metrics` | `["cpu","mem"]` | `network/cpu/mem/gpu/fps`，去重保序，≤8；`gpu`/`fps` 未接入探针时不占位（原因只在卡片一行） |
+   | `island_metrics` | `["cpu","mem"]` | `network/cpu/mem/disk/gpu/fps`，去重保序，≤8；`gpu`/`fps` 未接入探针时不占位（原因只在卡片一行）；`disk` = 系统盘（`%SystemDrive%`）**剩余**容量，5s 一拍、默认关 |
    | `island_x` / `island_y` | `None` | 有限值且 \|v\| ≤ 100000，否则自动定位；停靠态存的是**胶囊滑出位** |
    | `island_edge_dock` | `True` | 贴边停靠开关；关闭后不动 `island_dock_edge` 的存储值 |
    | `island_dock_edge` | `"none"` | `none/top/bottom/left/right`，白名单校验；开关关闭时读取统一退化为 `none` |
+   | `island_collision` | `True` | 岛 × 桌宠碰撞开关：开=胶囊是硬墙（撞岛被弹、拖岛拍飞），关=不阻挡且恢复 1Hz 自动让位 |
 
-6. **P5-a2 状态（2026-10-26 二次校正）**：已实现——卡片操作按钮与最近消息、余额主信息、第三方段注册面（`SegmentRegistry` + 释放回调）、GPU（PDH）与 FPS（PresentMon）真探针、折叠停采样、桌宠几何避让，以及本轮移植的**停靠细条（`island_edge_dock` / `island_dock_edge`）+ 悬停滑出 + 几何动画 + 悬停缩放 + 事件果冻**（L096）。**仍未做**：状态点五态与声纳环、回复呼吸浮动、内容淡化（需要内容位图缓存）、灵动岛聊天与碰撞、"桌宠隐藏后由岛唤起对话"。旧版此处把已实现项也写成"本批不做"，与代码和 ROADMAP 冲突，已更正。
+6. **岛 × 桌宠碰撞（L103）**：胶囊是桌宠世界里的静态障碍物，三条不变量：
+   **同步硬墙**（身体框进不了岛区，挂在 `PetWindow._clamp_position`，与屏幕边界同语义，
+   不靠 16ms 采样——那是主分支 issue #146 的抽搐来源）、**只覆盖胶囊本体**
+   （`min(窗口高, 44)`，展开卡片的卡片区域不是幽灵墙）、**矩形径向半径**
+   （`rect_radial`，椭圆四角不判撞）。姿态闸门：不可见 / 停靠细条 / 几何动画中无墙；
+   探头宠豁免；拖拽中的桌宠只推出；抛掷中只推出（反射在物理步里做）。真撞门
+   `相对接近速度 ≥ 80px/s`（漫游实测 4.5–24px/s，所以走路只会被挡住），冲量
+   `-(1+1.3)vn` 经抛掷档软限速；抛掷撞墙用 `e=0.68`（绝不再乘 1.3，会能量泵）；
+   落在岛顶且竖直速度 <120 当帧收手。反馈（挤压/音效/岛果冻）只有一个 0.25s 闸。
+   岛速采样：动画不采样、尺寸变化只重置采样点、`dt<0.01` 跳过（拖拽中不清零、非拖拽的同 rect 上报清零）、
+   瞬移守卫、松手那一拍作废基线、同 rect 配对上报保速、非拖拽超速清零。碰撞开启时不做自动避让。
+   两条补丁：**发起漫游时对 60–240px 外目标点的预钳只算几何**（`settle=False`，否则站着不动的
+   桌宠会因为「目标点速度」被凭空弹飞）；**停在胶囊顶上的桌宠在岛走开后补一次自由落体**
+   （normal 态没有重力通道，不补就悬在半空；判据是它没被用户挪走）。宠-宠分离不许覆盖
+   已经在抛掷里的速度（岛冲量与分离速度只留先到的那个）。
+
+7. **P5-a2 状态（2026-10-26 二次校正）**：已实现——卡片操作按钮与最近消息、余额主信息、第三方段注册面（`SegmentRegistry` + 释放回调）、GPU（PDH）与 FPS（PresentMon）真探针、折叠停采样、桌宠几何避让，以及本轮移植的**停靠细条（`island_edge_dock` / `island_dock_edge`）+ 悬停滑出 + 几何动画 + 悬停缩放 + 事件果冻**（L096）。**仍未做**：灵动岛聊天、"桌宠隐藏后由岛唤起对话"。（状态点五态/声纳/呼吸/淡化见 L099，岛 × 桌宠碰撞与 C 盘剩余段见 L103。）旧版此处把已实现项也写成"本批不做"，与代码和 ROADMAP 冲突，已更正。
 7. **菜单与设置**：右键「桌宠控制 → 灵动岛」是勾选项（`dynamic_island`），模板位置在
    `edge_probe` 之后；设置落点在「外观与交互 → 灵动岛」（启用/显示元素/信息位/指标段/
    配色/不透明度/单击行为），改动实时生效、取消回滚。
@@ -957,7 +1009,8 @@ P5 的 petcore 运行时能力已按以下契约实现：
 **设置结构**
 - 「外观与交互」四页内分页：`size` 大小与外观 / `island` 灵动岛 / `text` 文字与快捷键 /
   `screen` 屏幕与位置；搜索跨分页命中由 `base.reveal_text()` 自动切页。
-- 余额相关全部收在「互动与物理 → 点击与音效 → 余额提示」：点击查看余额、峰谷提示颜色、
+- 余额相关全部收在「互动与物理 → 点击与音效 → 余额提示」：点击查看余额（开启后余额气泡
+  先冒、点击台词排在它收起之后）、峰谷提示颜色、
   峰谷文案（默认 / 梁文峰梁文谷 / 自定义）、两条自定义文本（仅自定义显示）。
   API 页只保留余额服务选择与一行位置说明。
 
@@ -992,7 +1045,7 @@ P5 的 petcore 运行时能力已按以下契约实现：
 - 外壳：三层投影 `(1,+1,α28)(2,+2.5,α16)(3,+4,α8)`、顶部 sheen（top+3/42%/α14·0·34）、
   软陶 bevel（内缩 1.5、上白 26 下黑 46，light 230/20，glass 90/(35,50,60,26)）、
   glass 四停点渐变（214/168/146/196 × opacity）+ 白 α130 keyline、段间竖线竖直渐变、
-  头标内环（白 α46 / 黑 α20）、单位盒 α×0.7。
+  单位盒 α×0.7（头标内环随头标一起在 L101 退役）。
 
 **状态来源（真实接线）**：chat 起流→working（source=chat）、`_apply_done`→done、
 `_apply_error`→error；截图提问 `waiting_changed`→working/idle（source=screen）；

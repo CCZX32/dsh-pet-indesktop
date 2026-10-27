@@ -88,14 +88,35 @@ has one owning domain; platform support changes availability, not ownership.
 _Avoid_: Module page, Windows settings page
 
 **Author Accounts**:
-The author's public accounts are a read-only section at the bottom of the Updates
-page, not a sidebar destination; every pet identity and both chat-capable and
-pet-only builds show it. Copying a handle or opening the GitHub profile does not
-write preferences, and the section never participates in Settings Reset. Account
-display and clipboard text share one static source in `pet/settings_about.py`;
-its icon ink follows the settings window's own theme, not the OS theme.
-_Avoid_: About page (there is no separate About page — the accounts live on the
-Updates page)
+The author's public accounts are a read-only block, never a second source of
+truth. In petcore they live in Settings → 关于与诊断 → 致谢; the static entries
+(BiliBili / 抖音 / GitHub) come from `petcore/community/data/credits.json`, copying a
+handle or opening the GitHub profile writes no preference, and the block never
+participates in Settings Reset. The legacy desktop build keeps its copy at the
+bottom of the Updates page (`pet/settings_about.py`); every pet identity and both
+chat-capable and pet-only builds show it there.
+_Avoid_: Treating the About/致谢 block as editable settings, duplicating accounts
+in each page.
+
+**Voice**:
+The petcore Settings System domain that owns the speech backend chain
+(`edge` / `sapi` / `doubao` / `mimo` / `local`), voice, rate, volume, cache and
+keyring credentials. It is the single place that exposes `speech_*` and
+`speech_local_*`; features keep their own "speak this feature" toggles. The local
+provider is HTTP-only (OpenAI-compatible `/v1/audio/speech` or a configurable
+simple JSON endpoint), always requests directly so a system proxy cannot swallow
+`127.0.0.1`, and never stores a key in `config.json`.
+_Avoid_: Per-feature voice/pitch overrides that bypass the shared chain.
+
+**Community Credits**:
+The read-only thanks data behind Settings → 关于与诊断 → 致谢: bundled snapshots
+(`petcore/community/data/credits.json`, `fans.json`) plus runtime caches under
+`<data_root>/community/`. Static entries come from the bundle; dynamic entries
+take the newer non-empty source. Refreshes are background-only, never rewrite the
+bundled files, keep the previous list on failure, and the B 站 credential lives
+only in the keyring. The signature is a single global PNG plus a small sidecar;
+it is not a preference and does not roll back with Settings Cancel.
+_Avoid_: A second credits list in another page, writing fan names into config.
 
 **Settings Reset**:
 The whole-settings recovery command in the Settings System sidebar. It restores

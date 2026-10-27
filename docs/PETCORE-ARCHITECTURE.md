@@ -106,6 +106,8 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 - 默认模板中 `size` 为 `visible: false`（P1-C 起）：大小调整默认收进设置 →「外观与交互」→「大小」，菜单编辑器仍可重新勾选；用户在菜单里取消隐藏后，子菜单尾部的「自定义大小…」会打开设置的外观页。
 - 旧默认布局的一次性迁移由 `migrate_default_size_visibility()` 负责：只有「去掉 mod 动作后 Core 结构与旧默认完全一致」的 `menu_layout` 才会把 `size` 改为隐藏；用户改过顺序、显隐、别名或图标的布局保持原样。
 - 菜单/设置一一对应（硬规则）：右键菜单里能看见、能调整的每个 Core 动作，必须在设置里有一个可到达的入口。映射表在 `petcore/ui/settings/coverage.py`，`tests/test_petcore_settings_coverage.py` 守住；新增菜单项却没给设置入口会直接红。`modern_settings`（设置宿主本身）豁免。mod 贡献的菜单项由 mod 自己的设置页负责说明。
+- 扩展功能只按注册出现（L108）：属于扩展的菜单项由该扩展的 `Contribution(kind="menu")` 注册成 `<owner>:<id>`，默认布局按这个 id 摆位；没装扩展就不注册、不出现。`AI 对话 / 看看屏幕 / 截图提问` 以前是 `core_items()` 里写死的特例（没装 `ai.chat` 也在），现已改成注册项，旧布局由 `migrate_p11_menu()` 改写 id。
+- 菜单层级：桌宠与气泡同属一个置顶层（气泡是桌宠窗口的**从属窗口**），菜单统一走 `petcore/ui/menu.py::show_context_menu`——桌宠置顶时菜单也置顶，否则它会被后 `raise_()` 的气泡压住。扩展侧通过 `host.show_context_menu()` 复用同一规则（扩展不许 import `petcore.ui`）。
 
 ## 8. 设置与窗口交互
 
@@ -215,15 +217,27 @@ feature 包的生命周期是 `discover → validate → enable → start`，`st
 - **气泡锚点**：`PetWindow.bubble_anchor_rect()` 用角色 `head_box`（回退 `body_box`/整窗）
   换算到全局坐标；`SpeechBubble._place()` 按「上居中 → 上偏左右 → 两侧 → 下方」找不压住
   角色的位置，`BUBBLE_GAP=6`。
-- **菜单对勾**：QSS 菜单项由样式表引擎绘制，`PE_IndicatorMenuCheckMark` 不会回调样式，
-  因此 `menu_style.check_image_path()` 运行时生成 14px 对勾 PNG，`menu_stylesheet()`
-  注入 `QMenu::indicator:checked { image: url(...) }`；勾选项不设 icon（图标与勾选共用
-  左边槽位）。mod 贡献可用 `data={"checked": callable}` 声明状态项。
+- **菜单对勾**：QSS 菜单项由样式表引擎绘制，`PE_IndicatorMenuCheckMark` 不会回调样式；
+  而 QMenu 的勾选列与图标列又是同一个位置，把勾选塞进 `QMenu::indicator` 就等于勾选项
+  不能有图标。因此勾选标记改由行尾层自绘（`menu_style.MenuCheckLayer`：13px 强调色圆 +
+  白勾，圆心距行右缘 21px，随 `aboutToShow`/`toggled` 重画；托盘菜单在
+  `CoreHost.build_tray_menu()` 里同样装层），`QMenu::indicator` 只留 1px + `image: none`，
+  勾选项照设 icon（L101 之前的「运行时生成 14px 对勾 PNG + 勾选项不设 icon」已退役）。
+  mod 贡献可用 `data={"checked": callable}` 声明状态项。
 - **免打扰**：`QuietMode.remaining_seconds()`；`PresentationPort.say/notify` 的 `force`
   决定是否绕过免打扰抑制——命令反馈走 `force=True`，自动冒泡不走。
 - **碰撞**：`engine/collision.py` 用内切三圆链（`circles_from_rect`）求最深重叠，
   分离遵循 0.5px slop / 60% 重叠 / 1..12px / 连续 3 tick 强制完整分离（上限 4×12px），
   同心用 `stable_tie_break(slot_a, slot_b)`；`PetManager` 每 tick 最多两轮分离。
+- **岛 × 桌宠碰撞（L103）**：灵动岛是静态障碍物，和屏幕边界同级——几何在
+  `engine/island_field.py`（零 Qt），接线在 `ui/island_collision.py`
+  （`CoreHost.island_field`，**零定时器 / 零线程**，全事件驱动）。三个入口：
+  `PetWindow._clamp_position`（拖拽/漫游/碰撞分离/缩放/换屏共用的位置出口，
+  身体框永远进不了岛区）、`MotionController._tick_throw`（抛掷绕开位置出口，
+  在物理步里按法向反射 + 落岛当落地）、岛的几何回调（拖岛/停靠/展开 → 把被压住的
+  桌宠经同一条 `_clamp_position` 推出）。岛速采样照主分支桥的全套闸门（动画不采样/
+  尺寸变化重置/`dt<0.01` 跳过且不清零/瞬移守卫/松手闸/配对上报/超速钳制）；
+  撞岛反馈（挤压/音效/岛果冻）只有一个 0.25s 闸。开碰撞时关闭 1Hz 自动避让。
 
 ## 18. P8：Core 内置特性、内嵌设置页与碰撞推动
 
@@ -458,3 +472,40 @@ Agent 侧（写方）                         桌宠侧（ai.agent mod）
   都不进键——所以数字跳变不会让窗口抖动，也不会每次刷新都重建布局。
 - **展开态预算**：卡片被 340–420px 钳住时，行按卡片宽重新收缩（折 `+N`），收起再用
   屏宽重排；两条路径都走同一个 `plan_info_row()`。
+
+## 27. 语音本地模型与社区致谢数据流（2026-10-27）
+
+```
+设置「语音」页 ──> Config(speech_local_*) ──> SpeechService.synthesize
+                                              │  flavor 含 endpoint/protocol/path/model/format
+                                              ▼
+                                    net/tts.local_synthesize
+                                    （prefer_direct=True，http/https）
+                                              │
+                                    本地服务 / 云端 edge/sapi/豆包/MiMo
+                                              ▼
+                                     <root>/cache/tts/<sha1>.<mp3|wav>
+
+自言自语/点击台词/彩蛋 ──> HostPorts.speech.speak（owner=fun.self-talk / fun.click-talk）
+                        └─> PresentationPort.say_sequence（PetWindow 单定时器推进）
+
+关于页 → 致谢 ──> CommunityService.credits()/fans()
+                    │  随包 petcore/community/data/{credits,fans}.json（只读）
+                    │  运行期 <root>/community/*-cache.json（刷新只写这里）
+                    ▼
+              CommunityRefreshJob（daemon thread）
+                    │  net/github（贡献者 + issue/PR 作者）
+                    │  net/bilibili（免登录粉丝总数；SESSDATA 才拉完整名单）
+                    ▼
+              失败/半截不覆盖；GUI 只收 progress/done/failed 信号
+```
+
+- **数据不可写随包**：`store` 只对 `<root>/community` 做写操作；`petcore/community/data` 是提交时快照。
+- **粉丝总数口径**：`fans.json` 与缓存同时记 `total`（B 站 `x/relation/stat` 的 `follower`，
+  含「账号已注销」这类同名占位）和去重后的 `names`。判断「有没有新粉丝」比较 `total`
+  （`CommunityService.known_total()`）：与 `fetch_fan_count` 同源，所以两次读数能直接比；
+  拿唯一名字数去比会永远差几条，导致每次打开关于页都重拉全部页。名单接口的 `total`
+  只在 stat 取数失败时兜底。
+- **凭据**：B 站 SESSDATA 与语音 Key 都只进钥匙串；诊断快照只输出 bool/计数。
+- **线程**：刷新是守护线程，关闭设置窗只取消信号，不 `wait`；网络单请求有超时上限。
+- **本地路由**：本地 TTS 不能被系统代理接管；云端 TTS 仍沿用 `net/http` 的代理/直连规则。

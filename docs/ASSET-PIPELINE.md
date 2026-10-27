@@ -139,3 +139,8 @@ python scripts/convert_to_gif.py --force --clean
 5. 使用源码运行或重新打包验证角色切换、播放、气泡定位和 Chat 身份区。
 6. 新增/替换素材后同步维护 [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) 的素材授权声明
    （含来源出处），这是硬要求——第三方素材的署名不能只活在 PR 里。
+
+> 上面的 1–3 是**官方入库**（改 `assets/characters/`，随包发布）。如果你只想给用户/自己做一只
+> 可安装的角色，走的是 content mod 那条路：`pack-character` 生成 `character.<id>` 再
+> `mods install`，落位与三条导入入口见
+> [`PETCORE-MOD-DEVELOPMENT.md`](PETCORE-MOD-DEVELOPMENT.md) §9。

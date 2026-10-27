@@ -63,7 +63,8 @@
 - **Q 弹/旋转命中**：`paintEvent` 与 `is_transparent_at()` 的逆变换顺序必须是
   「先 Q 弹逆变换、再旋转逆变换」；探头角度、黄金回旋、击飞旋转相加，不许互相覆盖。
 - **多宠配置隔离**：主宠 `config.json`、子宠 `config-pet-N.json`；子宠播种不得
-  复制位置/屏幕/朝向；碰撞只能通过 `PetManager` 的 tick 改位置与速度。
+  复制位置/屏幕/朝向；**宠-宠**碰撞只能通过 `PetManager` 的 tick 改位置与速度
+  （灵动岛是同步硬墙，见下面「岛 × 桌宠碰撞」一条）。
 - **Core 内置特性**：`petcore/builtin/features/<id>/` 里的 7 个包
   （`fun.click-talk`、`fun.self-talk`、`tool.quick-launch`、`tool.quiet-mode`、
   `tool.links`、`tool.memory-trim`、`tool.network-info`）是 `CORE_FEATURE_IDS`，
@@ -128,12 +129,43 @@
   import edge-tts / 豆包 / MiMo 的地方，`petcore/speech/` 禁 Qt；缓存命中必须**非空**，
   失败产物立刻删除；音色失效要无网兜底（`preflight`），`synthesize` 再兜底默认音色；
   密钥 owner 固定 `speech.<provider>`，`config.json`/`api.json` 不许出现。
+- **本地 TTS 必须直连**：`local` provider（OpenAI 兼容 / 通用 JSON）一律
+  `direct_only=True` + `allowed_schemes=("http","https")`（失败也不切代理），缓存键必须含
+  endpoint/protocol/path/model/format；endpoint 为空时 provider 标记「未配置」并回退，
+  不许在合成阶段才失败。
+- **音色独立键**：Edge 用 `speech_voice`、SAPI 用 `speech_sapi_voice`、豆包/MiMo/本地
+  各用自己的键；`SpeechRequest.rate/volume` 留空沿用 `speech_rate`/`speech_volume`。
+- **自语/点击台词语音默认开**：`self_talk_voice_enabled` / `click_talk_voice_enabled`
+  默认 true，彩蛋 `self_talk_champion_chance` 默认 8%；关闭后只冒泡。语音失败不得
+  影响气泡与下一次排期。
+- **致谢数据只读 + 断网可显示**：静态条目（作者账号/特别鸣谢）只从
+  `petcore/community/data/credits.json` 读；动态条目（贡献者/issue·PR 作者/粉丝）取缓存与
+  随包快照中「较新且非空」的一份。运行期**永不写回** `petcore/community/data/*`，刷新只写
+  `<data_root>/community/*-cache.json`；失败/半截名单不得覆盖完整名单。
+- **B 站凭据只进钥匙串**：SESSDATA 存 owner `community.bilibili`，界面只显示
+  「已配置/未配置」，日志、异常、诊断快照不得出现 Cookie；完整粉丝抓取只在有凭据时进行。
+- **粉丝总数按 B 站口径比**：`fans.json`/缓存同时记 `total`（`data.total`）与去重后的
+  `names`；判断「有没有新粉丝」只许比 `CommunityService.known_total()`，比唯一名字数会
+  永远差几条同名占位，退化成每次打开关于页都重拉全部页。
+- **签名全局唯一**：固定 `<data_root>/community/signature.png` + `signature.json`，
+  新签名原子覆盖；不新增配置键，也不随设置窗「取消」回滚（保存按钮即生效）。
+- **多气泡只走 presentation**：序列用 `PresentationPort.say_sequence`；新的
+  `say()/show_image()/隐藏/关闭` 必须取消剩余队列，禁止在 feature 里自己拼定时器。
+- **扩展功能只按注册出现**：属于某个扩展的菜单项必须由它自己的
+  `Contribution(kind="menu")` 注册（id 形如 `<owner>:<id>`）；**不许**在 `core_items()`
+  里为扩展功能写死入口——没装扩展时菜单里就该没有（L108 之前 AI 三项就是这么漏出来的）。
+  默认布局按注册 id 摆位，旧 id 用 `menu_layout.migrate_pNN_menu` 迁移。
+- **气泡是桌宠窗口的从属窗口**：`SpeechBubble(self)` 必须保持 parent 是桌宠窗口
+  （owned window），层级才会跟着宿主走；右键菜单一律走 `ui.menu.show_context_menu`
+  （扩展通过 `host.show_context_menu`），不要各自 `menu.exec()`——那会让菜单落回普通层，
+  被置顶的气泡压住。
 - **动画循环**：`play_animation(name, loop=True)` 只给「持续动作」（唱歌/报时）；
   `_play_spec()` 是循环的唯一清除点，`release_loop()` 只解除标志。探头、击飞、拖拽
   接管时 `_on_finished()` 必须先解除循环，不许让循环绕过「探头只播 idle/转向」的闸门。
 - **歌词**：直连优先，最多切一次代理（同一 deadline，仅传输失败或 500/502/504，
-  带 `Retry-After` 不切）；不重试、不落盘音频、不记录 URL/代理/密钥；歌词气泡
-  同一行只冒一次且间隔 ≥2s；无播放器时命令必须给明确原因。
+  带 `Retry-After` 不切）；**不重复换路**；取词失败的重试由运行时按 60 秒冷却控制
+  （每曲 ≤3 次，首次失败说清原因），不是网络层重发；不落盘音频、不记录 URL/代理/密钥；
+  歌词气泡同一行只冒一次且间隔 ≥2s；无播放器时命令必须给明确原因。
 - **朝向口径**：角色素材原生朝左，`facing == "right"` 才水平镜像（同主分支）。
   `PetState.facing` 默认 `left`；反了就是「位移方向和面朝向相反」。
 - **碰边反馈**：抛掷/弹射按「离地→接触」的接触沿触发 `_on_motion_bounce()`，每次
@@ -148,20 +180,56 @@
 - **碰撞几何**：`engine/collision.py` 只用内切三圆链 + 主分支分离规则
   （slop 0.5 / 60% / 1..12px / 连续 3 tick 强制分离）。不许退回整框椭圆——
   椭圆四角不判撞，看起来就是穿模。
+- **岛 × 桌宠碰撞 = 同步硬墙 + 事件驱动拍飞**：几何在 `engine/island_field.py`
+  （零 Qt：胶囊体育场 `min(高, 44)` + 矩形径向半径 + 中心在轴上强制向上 + 冲量公式），
+  接线在 `ui/island_collision.py`（`host.island_field`），**不建定时器**。墙挂在
+  `PetWindow._clamp_position`（拖拽/漫游/碰撞分离/缩放/换屏共用的位置出口）；抛掷走
+  `MotionController._tick_throw` 的反射；岛自己动了由几何回调推出被压住的桌宠，
+  且必须经 `window._clamp_position()` 同一条出口（否则推出但不结算）。
+  **发起漫游时对 60–240px 外目标点的预钳必须传 `settle=False`**（只算几何、不结算）：
+  否则「目标点位移」会被当成接近速度，站着不动的桌宠被凭空弹飞。不许改成
+  `PetManager` 的 16ms 采样——单宠时 `_tick_collision` 直接早退，而且帧间会钻进再被弹
+  （主分支 issue #146 的抽搐）。
+- **岛墙闸门一条都不能少**：不可见 / 停靠细条 / 几何动画中 → 无墙；探头宠豁免；
+  拖拽中的桌宠只推出不结算；抛掷中只推出（速度反射在物理步里做，两处改速度会打架）。
+- **岛速采样照桥**：几何动画不采样、尺寸变化只重置采样点、`dt<0.01` 跳过且**不清零**
+  （否则拖拽全程岛速恒 0、只推不拍）、瞬移守卫、松手那一拍作废基线、同 rect 的
+  配对上报保住速度、非拖拽超速清零、拖拽中钳到 1500px/s。少一条就是「凭空拍飞」
+  或「拖岛拍不动」。
+- **撞岛反馈只有一个闸**：挤压 + 音效 + 岛果冻统一走
+  `IslandField.notify_hit()`（0.25s/只），非抛掷撞岛与抛掷撞墙两条链共用；
+  各留一份节流就是「先响一声、追着又响一声」。抛掷撞岛用 `physics.RESTITUTION=0.68`，
+  **绝不能再乘 1.3**（能量泵）。
+- **落岛 = 落地**：抛掷撞到胶囊上表面且竖直速度已 <`GROUND_BOUNCE_STOP_VY` 时，
+  当帧清零速度并 `motion.stop()`；`physics.is_at_rest` 只认屏幕底边，不收尾就永远卡
+  在 thrown（动画停在飞行帧）。
+- **碰撞开启时不做自动避让**：`_avoid_island_overlap` 先判 `island_collision`；
+  两套语义同时开会把胶囊弹到屏幕角落。`avoid_overlaps()` 方法本身保留（关掉碰撞即
+  恢复旧的「岛让位」）。
+- **磁盘段（C 盘剩余）可选、默认关**：`platform/diskmon.py` 零 Qt、5 秒一拍
+  （钳制 [5,60]）、只做一次 `shutil.disk_usage`（GetDiskFreeSpaceEx，无磁盘 IO）；
+  读不到报 `error` + 原因，**绝不写 0**（0G 会被当成「C 盘满了」）。胶囊上是单盒
+  （`C 盘 412G`，单位不随读数在 G/T 间跳，盒样本 `888G`），卡片详情写「总/已用」。
+  它**不进告警表**：现表语义是「越高越危险」，剩余空间方向相反。
 - **气泡锚点**：`say()`/`show_image()` 用 `bubble_anchor_rect()`（`head_box` →
   `body_box` → 整窗），不许用整窗 `frameGeometry()`。桌宠 `moveEvent` 必须同帧合并后
   `bubble.reposition()`，缩放后也要重排；气泡不是一次性快照。
 - **设置键位**：`SettingsDialog` 里 Enter = 保存退出，只有多行文本框放行换行。
 - **命令反馈**：菜单/设置触发的命令反馈用 `say/notify(force=True)`，别被免打扰吞掉。
-- **菜单勾选**：勾选项必须渲染出对勾（`menu_style.menu_stylesheet()` 注入的 check 图片），
-  勾选项不要再设 icon。
-- **图标槽位 18px / 笔画随画布缩放**：菜单槽位 `icons.MENU_ICON_SIZE = 18`（主分支
-  `small_icon_size(menu)=18`），设置侧栏按 `SIDEBAR_ICON_SIZE = 16` 绘制、视图槽位仍 18、
-  行高 34。矢量图标在**36 单位设计稿**上按槽位缩放，**笔宽按设计单位（1.6）一起缩放**
-  （18px ≈0.8px，逻辑像素地板 0.75px）——把笔宽钉成恒 1.6 逻辑像素会让 18px 墨量变成
-  初版的 1.8–6 倍，观感就是「图标又粗又大」（实测 settings 120 vs 初版 68）。不许把
-  设计稿直接画进 18px 画布（会被裁一半）。菜单尺寸走 `QMenu { icon-size: 18px }`
-  （`QMenu::icon { width/height }` 会被 Qt 忽略），行高 `max(18, 字号+5)` + item
+- **菜单勾选**：勾选标记画在**行尾**（`menu_style.MenuCheckLayer`，13px 强调色圆 + 白勾，
+  圆心距行右缘 21px），QSS 的 `QMenu::indicator` 只留 1px 且 `image: none` —— QMenu 的
+  勾选列与图标列是同一个位置，勾选塞回 indicator 就等于勾选项不能有图标（旧实现正是如此，
+  主动识屏/Agent 联动/免打扰全部空白）。勾选项**必须**照设图标（L101）。
+- **图标槽位 18px / 笔画随画布缩放 / DPR 只乘一次**：菜单槽位 `icons.MENU_ICON_SIZE = 18`
+  （主分支 `small_icon_size(menu)=18`），设置侧栏按 `SIDEBAR_ICON_SIZE = 16` 绘制、视图
+  槽位仍 18、行高 34。矢量图标在**36 单位设计稿**上按槽位缩放，**笔宽按设计单位（1.6）
+  一起缩放**（18px ≈0.8px，逻辑像素地板 0.75px）——把笔宽钉成恒 1.6 逻辑像素会让 18px
+  墨量变成初版的 1.8–6 倍，观感就是「图标又粗又大」（实测 settings 120 vs 初版 68）。
+  画布按 `logical × DPR` 建并 `setDevicePixelRatio` 后，**QPainter 的坐标系已经是逻辑
+  像素**：`painter.scale()` 只许乘 `logical/36`，再乘一次 DPR 会让字形放大 1.5/2 倍并贴死
+  画布右下角（150% 屏上 play/screen/quit 实测包围盒 (14,8,26,26)，显示器底座整段被裁）。
+  不许把设计稿直接画进 18px 画布（会被裁一半）。菜单尺寸走 `QMenu { icon-size: 18px }`
+  （`QMenu::icon { width/height/left }` 会被 Qt 忽略），行高 `max(18, 字号+5)` + item
   `3px 29px 3px 13px`（= 主分支 modern 的 24px 行）。QSS 里不能写 `#` 注释
   （会被当成 ID 选择器，整条规则失效）。
 - **动画缩略图必须裁剪**：整帧素材（640×390 里角色只占中间一小块）要先按 alpha
@@ -233,6 +301,11 @@
 - **字号/图片大小**：`ui_font_size`（10–18）同时作用于设置页、右键菜单、彩蛋菜单行；
   `bubble_text_scale`（50–300）作用于气泡；`easter_egg_image_scale` 与
   `self_talk_image_scale` 只改显示上限。新增字号消费点必须读这三个键，不许另写死值。
+- **点击反馈顺序**：`click_show_balance` 开着时余额气泡先冒，点击台词
+  （`_notify_click()`）**等余额气泡收起后**才通知——`SpeechBubble.closed` → `_flush_click_talk()`，
+  宿主在余额结果展示后调 `window.notify_click_balance_presented()`。连点合并成一条，
+  无气泡可等时 9s 兜底（`CLICK_TALK_FALLBACK_MS`）；不许再写成「先 notify_click 再请求余额」
+  （那样台词会先闪一下再被余额盖掉）。
 - **自言自语配图**：`self_talk_image_chance`（0–100，默认 30）决定是否出图；空目录用
   `assets/big_blue_fat_fish`；出图失败必须回退 `say()`。点击台词固定 `force=True`。
 - **弹弓右键**：右键进瞄准以及发射/取消后的 0.35s 内，`contextMenuEvent` 必须直接
@@ -355,6 +428,21 @@
 - **音乐识别范围**：`music_filter_enabled` 默认关；开启后只放行
   `music_player_paths` 的 exe 名 + `music_filter_extra_ids`；否决表仍是第二道闸；
   过滤同时作用于唱歌、歌词与 `transport()`，被挡下时要点名播放器。
+- **音乐识别 = 三源合成**（`media.music` 1.2.0，判定表在
+  `docs/PETCORE-MOD-FORMAT.md` §13.3）：SMTC 主源、WASAPI 音频会话裁判"在不在出声"、
+  已登记播放器的窗口标题兜底。**"任意进程在出声"不等于音乐**（游戏/语音不算）；
+  **音频会话里查不到那个进程时按 SMTC 状态判**（蓝牙/独占/虚拟声卡不许误判暂停）；
+  **"读失败"与"没在放"必须分开**（前者保留上一拍状态，后者按暂停并在宽限后解除循环）。
+  窗口标题源只认 `players.KNOWN_MUSIC_EXES` ∪ 用户配置 ∪ 额外识别名，且必须有
+  Active 音频；**不许把 VLC/mpv/PotPlayer 加进识别表**（放视频会被当成听歌）。
+  **SMTC 会话处于暂停时仍要问窗口源**（"挂着的客户端 + 另一台在放"是常见姿势），
+  有在播证据就以它为准并把理由写进 `reasons`。
+- **app_id 先取 basename**：有些播放器把 app_id 报成完整安装路径；不取 basename
+  会让静音/Inactive 证据失配，还会把安装路径带进气泡与诊断文本。
+- **音乐状态机**：缺席不清歌词（只有换歌才替换）；唱歌失败按 2^n 拍退避、**永不永久
+  放弃**；每拍一个采样令牌，迟到结果丢弃；多宠逐 slot lease / release（`for_slot`）。
+  歌词取词失败按 60 秒冷却重试、每曲最多 3 次并在首次失败时说清原因；`say()` 失败
+  不推进行号（同一行仍只冒一次）。
 - **窗口抓屏只在 core**：`foreground_window()` / `sample_foreground()` /
   `capture_foreground()` 与 dHash 都在 `petcore/platform/`；mod 不许 import
   `petcore.platform`，只拿 `WindowSample`/`ScreenCapture`。**窗口矩形是物理像素**，
@@ -408,6 +496,10 @@
   收起时再用屏宽重算——两条路径共用 `layout.plan_info_row()`。
 - **灵动岛默认关闭**：`island_enabled=False`；菜单「桌宠控制 → 灵动岛」与设置页同一开关，
   改动实时生效，取消回滚。
+- **灵岛无头标 / 消息默认不显示**：胶囊左侧**不画**强调色圆点（`island_show_icon` 与
+  「显示头标」已退役，内容直接从 `CONTENT_PAD = 19px` 起排）；展开卡片的「最近消息」
+  由 `island_show_messages`（默认 `False`）控制——关闭时 `add_message()` 直接 return
+  （不记录、不弹事件果冻）、卡片不出历史行、「清除消息」按钮隐藏。
 - **岛拖动/停靠**：起拖阈值只能用 `QApplication.startDragDistance()`——`QWidget`
   **没有** `startDragDistance()`，写成 `self.startDragDistance()` 每次拖拽都会在
   第一帧抛 `AttributeError`（退化成单击，用户说「拖不动」）。拖动期间 `_update_size()`

@@ -58,6 +58,8 @@ dist-onedir/
 build-onedir/
 # 功能扩展候选 ZIP（T05 构建器产物，不入库）
 dist-extensions/
+dist-sac-*/
+dist-mod-kit/
 
 # 构建注入的变体标识（由 scripts/build_onedir.ps1 生成）
 packaging/build_variant.py

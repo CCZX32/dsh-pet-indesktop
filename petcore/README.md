@@ -14,6 +14,14 @@ Windows隔离源码和性能已验证；最终整仓9837passed/20skipped、正�
 
 下方运行/打包命令是开发说明，不代表本轮全部执行。P4-c3验收不创建或信任证书、不降低Smart App Control、不覆盖真实安装；遇安全策略拦截应保留证据并标记候选包验收阻断。
 
+**2026-10-27 追加**：语音链路（新增「语音」设置页、本地部署模型的 OpenAI 兼容/通用 JSON 接口、
+自语与点击台词朗读、8% 概率连说 5 句的自言自语彩蛋）、关于页致谢体系（作者/贡献者/特别鸣谢/
+issue·PR 协作者/B 站粉丝分页搜索/全局唯一手写签名，随包快照见 `petcore/community/data/`）、
+安装包签名（用 Inno 的 `SignedUninstaller` 在**安装时**签 `unins000.exe`，否则 Windows 11
+智能应用控制会拦卸载器；见 `../docs/ONEDIR_PACKAGING.md` 同名小节）、以及菜单注册化
+（`AI 对话 / 看看屏幕 / 截图提问` 改由 `ai.chat` 的 menu contribution 提供，没装扩展就不出现；
+气泡改为桌宠窗口的从属窗口，右键菜单与气泡同层）。逐条记录见 `../docs/PETCORE-LOG.md` L106–L109。
+
 ## 1. 环境
 
 Windows（Git Bash）：
@@ -126,8 +134,20 @@ mods/<id>/
 `mod.json` 的字段、校验规则、安装/停用语义见
 [`../docs/PETCORE-MOD-FORMAT.md`](../docs/PETCORE-MOD-FORMAT.md)。
 
-feature mod 的入口只能是 `host-only`（worker 还未实现）。开发期把包放在仓库
-`mods/` 下，并用 `--allow-feature-mods` 启动；用户包放在数据目录的 `mods/` 下。
+feature mod 的入口只能是 `host-only`（worker 还未实现）。**开发期也要装到数据目录**：
+loader 的判据是「位于 `user_mods_dirs`（`<数据根>/mods`、冻结包的 `<安装目录>/mods`）**且**
+（`allow_feature_mods` 或安装目录里的 `.trusted`）」，所以放在仓库 `mods/` 或 `--mods-dir`
+里的 **feature 包永远是 disabled**（content/角色包不受此限）。正确姿势：
+
+```bash
+.venv/Scripts/python -m petcore mods validate ./my-mod
+.venv/Scripts/python -m petcore mods install ./my-mod
+.venv/Scripts/python -m petcore --allow-feature-mods      # 或设置 →「扩展管理」勾选
+```
+
+动手写一个 mod 的完整流程（最小骨架、菜单/设置页接线、端口选型、线程铁律、安装与排错）
+见 [`../docs/PETCORE-MOD-DEVELOPMENT.md`](../docs/PETCORE-MOD-DEVELOPMENT.md)；该文件里的最小骨架
+是被脚本从文档抽出、实际 `validate → install → 加载 → 菜单可见` 跑过的，可直接复制。
 
 内置官方 mod 放在 `petcore/builtin/features/<id>/`，由
 `FeatureManager.load_builtin_features()` 直接加载（受信任，不要求
@@ -159,8 +179,10 @@ feature mod 的入口只能是 `host-only`（worker 还未实现）。开发期�
 目录、manifest、动画分类、`body_box`/`head_box`、`move_strides` 与帧序列采纳
 规则见 [`../docs/PETCORE-CHARACTER-PACKS.md`](../docs/PETCORE-CHARACTER-PACKS.md)。
 角色包导入用 `pack-character`：source 可以是 `manifest.json` + `videos/`（或媒体在根目录）
-的素材目录，产物是 `character.<id>` content mod，之后用 `petcore mods install` 安装。
-`pack-legacy` 与它共用同一构建器。
+的素材目录，产物是 `character.<id>` content mod（**是目录，不是 zip**），之后用
+`petcore mods install` 安装；也可以在设置 →「常规 → 数据 → 角色资源包」直接导入目录或 ZIP。
+`pack-legacy` 与它共用同一构建器。落位、三条导入入口与不支持项见
+[`../docs/PETCORE-MOD-DEVELOPMENT.md`](../docs/PETCORE-MOD-DEVELOPMENT.md) §9。
 
 ## 7. 测试与门禁
 

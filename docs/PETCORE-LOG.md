@@ -2685,7 +2685,7 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **改动**：更新 `PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md`、`PETCORE-MAIN-PARITY-BACKLOG.md`、`PETCORE-ROADMAP.md`、`PETCORE-SPEC.md`、`docs/INDEX.md`，补齐实现/自动化/Windows 源码/待验证状态；新增 `.scratch/petcore-refactor-final/HANDOFF.md` 精确记录提交、命令、缺口和 SSH over 443 推送断点。
 
-**逐文件增删（相对代码提交 `42856889` 的当前工作区实测）**：`docs/INDEX.md` +1/−1、`docs/PETCORE-LOG-INDEX.md` +1/−0、`docs/PETCORE-LOG.md` +11/−0、`docs/PETCORE-MAIN-PARITY-BACKLOG.md` +18/−0、`docs/PETCORE-ROADMAP.md` +13/−0、`docs/PETCORE-SPEC.md` +11/−0、`docs/PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md` +89/−108；最终提交前再次核对 `git diff --numstat`。
+**逐文件增删（相对代码提交 `42856889` 的当前工作区实测）**：`docs/INDEX.md` +1/−1、`docs/PETCORE-LOG-INDEX.md` +1/−0、`docs/PETCORE-LOG.md` +11/−0、`docs/PETCORE-MAIN-PARITY-BACKLOG.md` +18/−0、`docs/PETCORE-ROADMAP.md` +13/−0、`docs/PETCORE-SPEC.md` +11/−0、`docs/PR-REPORT-PETCORE-REFACTOR-FINAL-2026-10-25.md` +103/−108；最终提交前再次核对 `git diff --numstat`。
 
 **验证**：`tests/test_petcore_*.py` 由 PowerShell 显式展开后 **1479 passed in 132.94s (0:02:12)**；`tests/test_petcore_architecture.py tests/test_petcore_docs.py tests/test_petcore_settings_coverage.py tests/test_pr_report_discipline.py` **302 passed in 4.03s**；`.venv\Scripts\python.exe -m ruff check petcore tests scripts` → `All checks passed!`；`git diff --check` 在清理报告 Markdown 尾随空格后通过。此前已完成的一次整仓 **9957 passed / 20 skipped / 15 warnings / 3048.17s / exit 0** 仅保留为历史证据，不再重复。
 
@@ -2709,7 +2709,7 @@ R3 40.95%→33.3%，循环数 170–180→178–180。结论：无稳态回退�
 
 **改动**：新增纯逻辑 `HeadPatTracker`，按 4 px 单段、14 px 累计、反向向量点积 `<= -0.25`、1.2 秒轨迹窗口和 0.65 秒冷却判定；新增默认点击、自定义名称、全部合格单次动画三种选择及连续不重复选择。`PetWindow` 接入鼠标跟踪、逻辑坐标还原、透明像素过滤、忙碌/拖拽/投掷/click-through/隐藏/关闭/换角清理；`InteractionPage` 增加启用开关、模式、多选动画列表、全选/恢复点击/清空操作，配置按宠物 slot 保存并遵守 Save/Cancel/Esc 契约。
 
-**逐文件增删**：`petcore/engine/head_pat.py` +167/−0（新文件）；`petcore/config.py` +31/−0；`petcore/ui/pet_window.py` +89/−1；`petcore/ui/settings/page_interaction.py` +202/−0；`tests/test_petcore_head_pat.py` +137/−0（新文件）；`tests/test_petcore_interaction.py` +71/−1；`tests/test_petcore_settings.py` +43/−1。以上为本轮代码/测试变更的 `git diff --numstat` 加新文件实际行数；最终文档与报告增删以提交前 `git diff --numstat` 为准。
+**逐文件增删**：`petcore/engine/head_pat.py` +167/−0（新文件）；`petcore/config.py` +31/−0；`petcore/ui/pet_window.py` +103/−1；`petcore/ui/settings/page_interaction.py` +202/−0；`tests/test_petcore_head_pat.py` +137/−0（新文件）；`tests/test_petcore_interaction.py` +71/−1；`tests/test_petcore_settings.py` +43/−1。以上为本轮代码/测试变更的 `git diff --numstat` 加新文件实际行数；最终文档与报告增删以提交前 `git diff --numstat` 为准。
 
 **验证**：摸头/交互聚焦族 **24 passed / 1.10s**；设置聚焦族 **34 passed / 6.37s**；petcore 全部 `test_petcore_*.py` **1490 passed / 130.18s / exit 0**；`ruff check petcore tests scripts` 输出 **All checks passed!**；`python -m petcore --check` 返回 **0**。100,000 次纯逻辑更新耗时 **0.042175s**（约 **2,371,062 events/s，0.422 µs/event**）；设置开关/模式循环 30 次耗时 **0.235223s**（约 **7.841 ms/cycle**）。
 
@@ -3201,3 +3201,648 @@ QSS 用 `icon-size`）；`test_petcore_menu.py` 增「行高 24 / 菜单高 86 /
 - 离屏证据：`.scratch/icons-compare.png`、`.scratch/menu-now.png`、`.scratch/sidebar.png`、
   `.scratch/page-{appearance,interaction}.png`、`.scratch/island-visuals.png`；
 - 提交并推送 `feat/petcore-vpet-architecture`。
+
+## L101 — 2026-10-26 — 菜单/侧栏图标 DPR 修复 + 灵动岛去头标与消息开关
+
+**范围**：`petcore/ui/icons.py`、`petcore/ui/menu_style.py`、`petcore/ui/menu_model.py`、
+`petcore/ui/menu_actions.py`、`petcore/ui/settings/{menu_editor,pages_core}.py`、
+`petcore/ui/island.py`、`petcore/island/layout.py`、`petcore/config.py`、
+`examples/petcore-mods/ai.chat/host/__init__.py`、`tests/test_petcore_{icons,menu,menu_icons,p5,settings,island_p5,island_window,island_visuals,probe_hub}.py`。
+
+**改了什么**
+- **图标「变大 + 缺右下角」的真根因：DPR 乘了两次**。`icons._pixmap()` 先按
+  `logical × dpr` 建画布并 `setDevicePixelRatio`，随后又 `painter.scale(dpr*scale)`；
+  Qt6 的 QPainter 在带 DPR 的 QPixmap 上坐标系已经是逻辑像素，于是 150% 屏上字形按
+  1.5 倍绘制、贴死画布右下并被裁：实测 18px 槽位（27px 画布）play (14,8,**26,26**)、
+  screen (5,8,**26,26**)、quit (10,5,**26,26**)，显示器底座整段画到画布外（截图里
+  「看看屏幕/截图提问」只剩一个空框）。改为 `painter.scale(scale, scale)`，
+  口径对齐主分支 `_new_icon_canvas`（`scale(size/16)`，不再乘 dpr）。100% 屏无变化
+  （ratio==1），非整数 DPR 屏恢复正常留白。
+- **补齐字形**：新增 `pet`/`tools`/`web`/`todo`/`download`/`sparkles`/`capture`/`eye`
+  八枚 36 单位线条字形。`web`(5 处)、`todo`(4 处)、`download`(1 处)、`sparkles`(2 处)
+  在 builtin 与示例 mod 里早就在用，之前全部落到兜底的「小圆点」。
+- **勾选项恢复图标（勾选挪到行尾）**：`MenuModel._append_item` 去掉
+  `if not item.checkable`——那一行把 `主动识屏/Agent 联动/免打扰` 声明的
+  `screen/agent/pause` 静默丢掉了。勾选标记改由 `menu_style.MenuCheckLayer`
+  画在行右缘 21px（13px 强调色圆 + 白勾，主分支 `ModernCheckLayer` 移植），QSS 的
+  `QMenu::indicator` 只留 1px 且 `image: none`；`aboutToShow` 同步几何并补接
+  `toggled`/`triggered`，勾选/取消即时生效。QSS 临时对勾图片（`_render_check` /
+  `check_image_path` / `_CHECK_*`）整块退役。
+- **托盘菜单也装勾选层**：QSS 对勾退役后勾选只由 `MenuCheckLayer` 提供，而它原先只装在
+  `MenuModel.build()` 建的菜单上；托盘菜单（`CoreHost.build_tray_menu`，裸 QMenu + QSS）
+  于是把「鼠标穿透」的勾选状态画没了——托盘正是开启穿透后唯一能关回来的入口。
+  改为在重建钩子 `aboutToShow` **之后**装层，每次重建出的新 QAction 由层的
+  `aboutToShow → _sync_menu_checks` 补接 `toggled`。
+- **子菜单图标**：`_append_node` 的图标回退链改成「节点 icon → 已注册 MenuItem.icon →
+  `SUBMENU_ICONS`」——`扩展` 之前明明注册了 `application` 却不显示；`桌宠控制`/`工具与帮助`
+  是纯模板节点，由 `SUBMENU_ICONS` 兜底（老 layout 没有 icon 键也生效，不依赖模板迁移）。
+- **图标语义去重**：`截图提问` 改 `capture`（屏幕 + 内框）、`主动识屏` 改 `eye`
+  （`examples/petcore-mods/ai.chat` 的菜单贡献），原来三行连着三个一模一样的显示器。
+- **灵动岛去掉头标**：胶囊左侧强调色圆点与内环整块删除，`IslandConfig.show_icon`、
+  `island_show_icon` 键、设置页「显示头标」勾选、`layout._ICON_PX/_ICON_GAP_PX/
+  ICON_RING_COLORS/icon_ring_color()` 一并退役；内容（名字/信息位）从
+  `CONTENT_PAD = 19px` 直接起排，胶囊自然宽度相应收窄。老配置里的该键**读入即弃**
+  （同 `spawn_inherit_dynamic_island` 的退役先例，不写清洗代码）。
+- **灵动岛消息显示开关**：新增 `island_show_messages`（默认 `False`）。
+  `add_message()` 关闭时直接 return（不记录、不弹事件果冻）；`_card_rows()` 关闭时
+  不出「最近消息」行；`_IslandCard.set_show_messages()` 同时收起「清除消息」按钮。
+  设置落点在「外观与交互 → 灵动岛 → 消息显示」。
+
+**验证**
+- 先红后绿：`tests/test_petcore_icons.py::test_icons_stay_inside_the_canvas_at_every_device_pixel_ratio`
+  在 1.25 dpr 就红（play 右侧 21/22），修 `_pixmap` 后 1.0/1.25/1.5/2.0 全绿。
+- `QT_QPA_PLATFORM=offscreen pytest tests/test_petcore_*.py tests/test_architecture.py
+  tests/test_pr_report_discipline.py -q` → **2122 passed in 154.49s**；
+  全量 `pytest -q` → **10303 passed, 18 skipped in 1632.73s**。
+- `ruff check petcore/ tests/` → All checks passed。
+- 像素验收（真实平台插件，`.scratch/accept/*.png`）：菜单 1x/1.5x/2x 深浅两套，
+  14 个顶层行全部有图标、字形四周留白、勾选标记只在勾选行行尾；
+  侧栏 16px 图标 14 枚完整；灵动岛胶囊无头标、卡片 messages=0 无历史行且只有两个按钮、
+  messages=1 出现两条历史 + 三个按钮。
+- 性能（`.scratch/bench_icons.py`，同一进程 7 轮 × 50 次均值）：`icon()` ×14
+  @dpr1.5 **0.4712 → 0.4455 ms**（−5%）；`model.build()` 8 行 0.4196 → **0.5754 ms**
+  （勾选层 = 1 个子控件 + 几条信号，一次性）；`MenuCheckLayer.sync()` 0.0017 ms、
+  `render()` 0.1456 ms（只在菜单开着时随重绘跑）；岛内容层重建 0.1417 ms（口径未变）。
+
+**未验证/风险**
+- offscreen（fusion）下带 QSS 的 QMenu **根本不画图标**（实测 `QMenu::item` padding 一加
+  图标列就没墨），所以像素断言只能在 `icons.py` 的 pixmap 层做；菜单观感用真实平台
+  插件截图验收（`QT_SCALE_FACTOR` 1/1.5/2）。
+- 展开卡片三个按钮在深色卡片上仍是系统默认浅色底（既有观感问题，本轮未动）。
+- 头标退役后老配置里的 `island_show_icon` 不再回写，但也不会被清理（Config 只保留
+  `DEFAULTS` 键）。
+
+## L102 — 2026-10-26 — 点击余额先冒气泡，点击台词排队到它收起
+
+**范围**：`petcore/ui/pet_window.py`、`petcore/ui/bubble.py`、`petcore/ui/app.py`、
+`petcore/builtin/features/fun.click-talk/host/factory.py`（只改设置文案）、
+`petcore/ui/settings/page_interaction.py`、`tests/test_petcore_click_listeners.py`、
+`tests/test_petcore_bubble.py`。
+
+**改了什么**
+- **根因**：`PetWindow._on_click()` 先 `_notify_click()`（同步回调 `fun.click-talk`，
+  立刻冒一条 3.2s 台词）再 `_maybe_request_click_balance()`（异步，结果回来才冒余额）。
+  余额气泡 6s 一到就把台词盖掉，观感就是「台词闪一下」。主分支是 `if click_show_balance
+  … elif` 的二选一；本轮按用户要求改成**排队**（主分支没有这个顺序）。
+- **气泡新增 `closed` 信号**：`SpeechBubble.hideEvent` 里「原本可见才发」——进 hideEvent 时
+  Qt 已清 visible 标志，所以用 `showEvent` 记的 `_was_shown` 判定；自动到时、手动 hide、
+  桌宠隐藏三条路都覆盖。
+- **窗口层排队**：`_maybe_request_click_balance()` 改为返回 bool（配置开 + 宿主
+  `request_balance` 可调用且提交成功才算「余额接管点击」）。接管时走
+  `_begin_click_talk_wait()`（连点=重新计时、只留一条，`CLICK_TALK_FALLBACK_MS = 9000` 兜底），
+  否则行为与以前一致立刻 `_notify_click()`。新增公开钩子
+  `notify_click_balance_presented()`：气泡可见→等 `closed`；没有气泡（免打扰/隐藏）→ 立刻放行。
+  缓存命中时余额气泡在 `request()` 里**同步**冒出（presented 早于排队建立），用
+  `_click_balance_serial` 识别并直接进入「等它收起」。
+- **宿主接线**：`CoreHost._on_balance_result()` 成功与失败两条分支都在 `_notify(...)`
+  之后调 `window.notify_click_balance_presented()`（callable 探测，异常只记日志）。
+- **文案**：余额提示行与点击台词页都写清「余额气泡先冒，台词排在它收起之后」。
+
+**验证**
+- 新增 6 例（先红后绿）：余额先冒/台词等收起、连点只排一条、缓存同步路径、9s 兜底、
+  宿主无 `request_balance` 时立刻回落、`SpeechBubble.closed` 只在原本可见时发一次。
+  修复前前四例必红（台词已经抢在余额前面）。
+- 端到端实测（`.scratch/verify_click_balance_sequence.py`，真 `CoreHost` + `PetManager` +
+  真实 click-talk runtime，`QTest.mouseClick` 点桌宠）：
+  ```
+  [ 0.17s] click requested=[(0, True)] talk_now=''
+  [ 2.05s] bubble='余额 ¥3.00' visible=True
+  [ 6.20s] bubble='余额看完啦，今天也要加油' visible=True
+  [ 9.41s] bubble='' visible=False
+  ```
+  （第二行的时间戳是首轮 `processEvents` 解码动画阻塞后第一次采样；余额气泡实际在结果到达
+  那一刻就冒出来了，6.2s 收起后立刻接台词，9.4s 台词到点收起。）
+- `QT_QPA_PLATFORM=offscreen pytest tests/test_petcore_click_listeners.py
+  tests/test_petcore_click_balance.py tests/test_petcore_bubble.py
+  tests/test_petcore_self_talk.py tests/test_petcore_settings.py
+  tests/test_petcore_click_sound.py -q` → **90 passed**；`ruff check petcore/ tests/` → 通过；
+  全量 `pytest -q` → **10308 passed, 1 failed, 18 skipped**（2081s）。唯一失败是
+  `tests/test_chat_subsystem.py::test_append_message_atomic_across_store_instances`：
+  `pet/chat/session_store.py:514` 用 `str(updated_at)` 比较判断「吸收外部新消息」，
+  Windows 的 `datetime.now()` 只有 ~15.6ms 粒度，同一 tick 内创建+追加就判不出更新；
+  该文件本轮未改，单跑 10 次 0 失败、高负载下偶发（约 1/5–1/20），属既有 flake。
+
+**未验证/风险**
+- 兜底 9s 期间如果余额气泡超过 9s 还没收起（多页长文本），台词会覆盖它——余额文案很短，
+  实际不会触发；这是「不永久憋住」与「绝不覆盖」之间的取舍。
+- `_notify_click()` 是通用点击接缝：排队后**所有**点击监听者都晚于余额气泡，不只点击台词。
+  目前只有 `fun.click-talk` 用它。
+
+## L103 — 2026-10-26 — 灵动岛 × 桌宠碰撞回归 + C 盘剩余段
+
+**范围**：新增 `petcore/engine/island_field.py`、`petcore/platform/diskmon.py`、
+`petcore/ui/island_collision.py`；改 `petcore/ui/island.py`、`petcore/ui/pet_window.py`、
+`petcore/ui/motion.py`、`petcore/ui/app.py`、`petcore/island/segments.py`、
+`petcore/config.py`、`petcore/performance.py`、`petcore/ui/settings/pages_core.py`、
+`petcore/AGENTS.md`；测试新增 `tests/test_petcore_island_field.py`、
+`tests/test_petcore_island_collision.py`、`tests/test_petcore_disk_segment.py`，
+改 `tests/test_petcore_island_window.py`。
+
+**改了什么**
+- **岛 × 桌宠碰撞（主分支的「撞岛被弹 / 拖岛拍飞」）**。主分支有两套实现
+  （`pet/island_collision.py` 单窗同步硬墙、`pet/island_bridge.py` overlay 静态成员）；
+  petcore 只有一套拓扑（每只桌宠一个顶层窗口），于是取两者之长：**墙机制照 legacy
+  （同步钳制）+ 岛速采样照桥（闸门更完整）**。纯数学进 `engine/island_field.py`
+  （零 Qt：胶囊体育场 `min(高,44)`、矩形径向半径、中心在轴上强制向上、冲量
+  `-(1+e)vn`、`tracked_velocity`、`sample_island_velocity`），Qt 接线进
+  `ui/island_collision.py`（`host.island_field`，事件驱动、零定时器）。
+- **三个挂接点**：① `PetWindow._clamp_position` 末尾接 `field.clamp()`（拖拽/漫游/
+  碰撞分离/缩放/换屏共用的位置出口，身体框永远进不了岛区——这就是不抽搐的根因）；
+  ② `MotionController._tick_throw` 接 `field.reflect_throw()`（抛掷绕开位置出口，
+  必须在物理步里反射，`e=physics.RESTITUTION=0.68`，且**落岛当落地**：法线朝上 +
+  竖直速度 <120 时当帧 `stop()`，否则 is_at_rest 只认屏幕底边、motion 会永远卡在
+  thrown）；③ 岛的几何回调（`moveEvent`/`resizeEvent`/动画落定/显隐都 emit）把被压住的
+  桌宠经 `window._clamp_position()` 推出，真撞沿用同一条 `clamp` 业务链。
+- **闸门**：不可见 / 停靠细条 / 几何动画中 → 无墙；探头宠豁免；拖拽中的桌宠只推出；
+  抛掷中只推出（速度由物理步反射）。**碰撞开启时关掉 1Hz 自动避让**（两套语义同时开会
+  把胶囊弹到屏幕角落；`avoid_overlaps()` 保留，关掉碰撞即恢复）。
+- **撞岛反馈统一一个闸**：`IslandField.notify_hit()`（0.25s/只）覆盖挤压 + 音效 +
+  岛果冻，非抛掷撞岛与抛掷撞墙共用；岛新增 `bump()`（果冻冲量 + 定向 kick 弹簧，
+  kick 钳 ±3px、并进 `_animating()` 的停止判定）。
+- **C 盘剩余段（默认关）**：`platform/diskmon.py` 零 Qt、5 秒一拍（钳 [5,60]）、
+  只做一次 `shutil.disk_usage`（GetDiskFreeSpaceEx，无磁盘 IO）、读不到报 error 不给 0；
+  `island.DISK` 进 `BUILTIN_SEGMENT_IDS` + `config.ISLAND_METRIC_IDS`（双白名单），
+  胶囊上是单盒 `C 盘 412G`（盒样本 `888G`，单位不随读数跳），卡片详情「总 2.0T · 已用 1.6T」；
+  设置页「指标段」加「C 盘剩余」复选；**不进告警表**（现表语义是「越高越危险」）。
+- **新增设置键 1 个**：`island_collision`（全局、bool、默认 `True`），设置 →「灵动岛 →
+  与桌宠碰撞」；关闭后胶囊不阻挡桌宠、岛恢复旧的自动让位。`settings/coverage.py` 不变
+  （只登记菜单项）。
+
+**验证**
+- 新增 112 例（33 纯几何/采样 + 39 协调器/挂接点 + 40 磁盘段），先红的判据：纯几何模块
+  不存在时 `tests/test_petcore_island_field.py` 直接 collection error；松手闸一条做过
+  **变异验证**（把 `released=released` 改成 `released=False`，该例立刻红）。
+- 行为序列 `.scratch/verify_island_collision.py`（真 QApplication + 真 `DynamicIsland` +
+  真 `PetWindow` + 真 16ms motion 定时器），`QT_QPA_PLATFORM=windows` 与 `offscreen`
+  两轮 **A1–A6 全 PASS**：
+  - A1 拖宠进岛：被挡住的帧 = 78，进入重叠的帧数 = **0**，`thrown=False`，音效/挤压 0；
+  - A2 岛 255–387px/s 扫向静止宠：第 1 步切 thrown，速度沿法线向外，音效/挤压各 1，
+    岛 `_squish_v=0.32`、kick=(0, −1.4)；
+  - A3 900px/s 抛向胶囊：反射帧 6、出射 629px/s（≤0.7 入射）、重叠帧 **0**、
+    4.1s 回 `normal`；
+  - A4 从墙外小速度落下：第 5 帧收手、`mode=normal`、收手后不重叠；
+  - A5 `island_collision=False` 与「没有碰撞层」的位置出口序列逐像素一致；
+  - A6 隐藏 / 细条 / 几何动画中三态墙均不生效（返回输入原值）。
+- 性能实测 `.scratch/bench_island_collision.py`：`push_out` 命中 1.53µs、未命中
+  0.84µs；`clamp` 命中 6.2µs、关闭/隐藏路径 0.75µs；`on_geometry_changed` × 4 宠
+  18.6µs；**新增 QTimer 0、新增线程 0**；`shutil.disk_usage` 33µs/次，25s 内磁盘采样
+  4 次、进程 CPU 0.000s。
+- 视觉：`.scratch/verify_island_disk_visual.py`（**必须 `QT_QPA_PLATFORM=windows`**：
+  offscreen 后端在本机渲染不出字形，全是缺字方框）产出
+  `.scratch/accept/island-disk-{capsule,card}-{dark,light}.png` 与 `-real.png`；
+  真实读数 `C 盘 118G`，卡片行 `C 盘 | 412G | 总 2.0T · 已用 1.6T`。
+- 测试门：`QT_QPA_PLATFORM=offscreen pytest tests/test_petcore_*.py
+  tests/test_architecture.py tests/test_pr_report_discipline.py -q` → **2247 passed**
+  （208.7s，含本轮 112 例）；
+  `ruff check pet/ tests/ petcore/` → 通过；`python -m petcore --check` → 退出码 0；
+  全量 `QT_QPA_PLATFORM=offscreen pytest -q` → **10424 passed, 18 skipped**（1829s，
+  0 失败；上一轮那条 `test_chat_subsystem::test_append_message_atomic_across_store_instances`
+  时钟粒度 flake 本轮未复现）。
+
+**复核修复（子代理只读复核后补的 6 条）**
+- **P1 预钳目标被当真撞**：`_begin_move` 会先把 60–240px 外的**目标点**喂进位置出口，旧实现
+  拿它算接近速度（`dt` 在 0.12–0.5s 之间时躲过 2000px/s 守卫），站着不动的桌宠会凭空切
+  thrown 并与移动计划并存。新增 `clamp(..., settle=False)` / `_clamp_position(..., settle=False)`：
+  **只算几何、不结算**，`_begin_move` 与 `_finish_move` 的目标钳改用这个入口。
+- **落岛后悬空**：`rested` 收手后 normal 态没有重力，岛一被拖走桌宠就浮在半空。新增
+  `IslandField._resting`（记停稳时的 y），岛几何变化且该宠已不在胶囊上时补一次自由落体
+  （`set_velocity(0, GRAVITY*0.1)`）；用户自己挪走的不补。
+- **动画期间节流表被清**：几何动画每帧都会走到「无墙」分支，旧 `reset()` 把冷却/反馈表一起清
+  → 0.25s 单闸等于被 60 次/秒关掉。拆成 `reset_velocity()`（只清速度/基线/接触）与
+  `reset()`（岛关闭/退出时才全清）。
+- **宠-宠分离覆盖岛冲量**：`PetManager._apply_body` 在 `clamp` 已写过冲量之后又用分离速度
+  `set_velocity` 覆盖；加 `not window.motion.thrown` 守卫。
+- **岛速的"停手但没松手"幽灵**：`dt<0.01` 的密集上报里补一条「非拖拽且 rect 没动 → 清零」，
+  否则快速拖岛停住后，旁边走进来的桌宠会被停手前的速度拍飞。
+- **两处 5 列格式**：`9.96 GiB → "10.0G"`、`9.99 TiB → "10.0T"` 会撑破 `888G` 的段盒；两条 `.0f`
+  分支的门改 9.95，T 档起点改 0.975T（`999G → "1.0T"`、`972G → "972G"` 仍 4 列）。
+  另：`DiskMonitor.snapshot()` 保留最后一份样本，折叠→展开/隐藏→显示不再闪 5 秒 `--`。
+- 顺手：`_prune_stale_keys()` 清掉已关桌宠的 `id()` 键（新窗口可能复用 id）；
+  设置页补 `island_collision` / `disk` 两条用例。新增 13 例（预钳不结算、站位目标不弹飞、
+  动画不清节流、`reset` 全清、落岛补重力、自己走开不补、陈旧键清理、分离不覆盖冲量）。
+
+**实测补充（量出来才敢写）**
+- 漫游实际步速（`.scratch/measure_move_speed.py`，shenshen 全部 MOVE 素材）：
+  scale 0.5/0.72/1.0 下 **4.5–24 px/s**，远低于真撞门 80px/s —— 所以走路撞岛只会被
+  挡住，不会被弹飞（这一条决定了不需要给「自主移动计划」加第二道闸）。
+
+**未验证/风险**
+- 岛从下方**跨过身体中线**继续推时，法线会从下翻到上，桌宠会被「甩」到另一侧（主分支
+  同样的几何退化，没有扫掠解算）。实机手感是「拖到岛中间会被弹到上/下边」，不是穿模。
+- 真实鼠标手感的最终确认需要用户实机拖一次；自动化只覆盖到「几何 + 速度 + 反馈计数」。
+- 磁盘段读数按「系统盘（`%SystemDrive%`，默认 C:）」，不支持用户自选盘符；非 Windows
+  退化为 `/`。
+- `island_metrics` 的盘符概念是 `disk`，「C 盘剩余」是文案口径；将来要支持多盘需要新键。
+
+## L104 — 2026-10-26 — 设置「扩展管理」两轴弹性（宽 / 高随窗口与字号，当前范围作下限）
+
+**范围**：改 `petcore/ui/settings/page_extensions.py`、`petcore/ui/settings/base.py`、
+`petcore/ui/settings/dialog.py`、`petcore/ui/settings/style.py`；测试新增
+`tests/test_petcore_extensions_geometry.py`（12 例）。
+
+**改了什么**
+- **宽度轴**：左侧页面导航原来是「`NAV_MIN_WIDTH=190` 写死在 `_NavList.sizeHint()` +
+  `Policy.Fixed`」，`NAV_MAX_WIDTH=260` 是死代码，长 mod 名只能省略号。现在
+  `nav_width(widest_label_px, font_px) = clamp(最宽标签 + 35, 190, round(260×字号系数))`：
+  **下限恒 190（当前范围作下限）**，上限随 `ui_font_size` 放大（18 字号 → 360），
+  实际宽度由 `QFontMetrics(nav.font())` 量出来；标签变化（装载/卸载扩展）与样式
+  polish 都会重算。
+- **高度轴**：`page_extensions.py` 原来是 `stack.setMinimumHeight(420)` + 无 stretch
+  插入 + `base.py` 尾部 `addStretch(1)` → 浏览器高度恒 420，1600×1000 窗口下方空 464px。
+  改为容器 `stretch=1` 且把尾部 spacer 的 stretch 置 0：浏览器吃满整页剩余高度，
+  **下限仍是 420**（实测把下限也按字号放大到 582 会让默认窗口多出一层外层滚动条，
+  收益为负，故下限固定）。
+- **内容宽**：`SettingsPage` 新增类属性 `content_max_width = 860`（默认不变），
+  `ExtensionsPage` 置 `None` → 本页宽轴跟视口（1600 窗口下 860 → 1400），其它页仍按
+  860 阅读宽度居中。
+- **字号同源**：`style.nav_row_heights(font)` 同时供 QSS（`#settingsNav` /
+  `#extensionsNav` 的 `min-height` 与 `font-size`）与 `dialog._load_pages` 的
+  `QSize(0, …)` 使用：字号 13 → 34/32（逐像素等于改前），18 → 39/37。此前
+  `ui_font_size` 只放大标签，导航文字不动，行高写死 34 会在放大字号时切字。
+- **重排钩子**：`SettingsPage.reflow()`（默认空）+ `SettingsDialog.refresh_style()`
+  在样式真的变了之后调用它——字号热切换不必重建对话框。
+
+**验证**
+- 先红：该文件第一版 11 例在改前 **10 红 1 绿**（纯函数与几何断言全红，唯一绿的是
+  "其它页仍 860"——因为那时还没解除封顶）；改后全绿。关键判据是
+  `720×500` 下 `nav.width()==190`、`stack.minimumHeight()>=420`、Mods 页
+  `horizontalScrollBar().maximum() <= 110`（不回退）。
+- 实测几何（offscreen，日志见 PR 报告）：900×620 时浏览器 484 高（改前 420、下方空 84）；
+  1600×1000 时内容宽 1400（改前 860）、浏览器 864 高（改前 420、下方空 464）；
+  900×620 + 字号 18 时外层纵向滚动为 0。
+- 回归：`tests/test_petcore_settings.py`、`test_petcore_extensions_nav.py`、
+  `test_petcore_market_ui.py`、`test_petcore_settings_close.py`、
+  `test_petcore_p4_fixes.py` 共 81 例全绿。
+
+## L105 — 2026-10-26 — 音乐识别重写：三源合成 + 状态机修复 + 歌词候选打分
+
+**范围**：`examples/petcore-mods/media.music/`（新增 `audio_sessions.py`、
+`window_source.py`、`title_clean.py`、`recognizer.py`、`sampling.py`、`diagnostics.py`；
+重写 `runtime.py`；改 `now_playing.py`、`lyrics.py`、`players.py`、`settings_page.py`、
+`mod.json` 1.1.0→1.2.0）；`petcore/config.py`（新键 `music_title_format` + 迁移别名）；
+`scripts/music_probe.py`；测试新增 6 个文件、改 `tests/test_petcore_music_mod.py`。
+
+**改了什么**
+- **三源识别**（判定表见 `docs/PETCORE-MOD-FORMAT.md` §13.3）：SMTC 主源 +
+  WASAPI 音频会话（逐进程 Active/静音/峰值）裁判"在不在出声" + 已登记播放器的窗口
+  标题兜底（foobar2000/AIMP/Winamp）。原先只有 SMTC 一条源：不注册 SMTC 的播放器永远
+  识别不到，播放器静音时又照唱。
+- **修掉 8 个可复现缺陷**：①单拍采样失败就 `_forget_track()` → 现在区分"读失败"与
+  "没在放"，缺席只冻结时钟、不换歌（只有换歌才替换歌词）；②唱歌重试 4 次后永久放弃 →
+  2^n 拍退避、永不放弃；③取词一次失败拉黑整首 → 60 秒冷却、每曲最多 3 次、首次失败
+  说清原因；④切宠后循环残留 → 逐 slot lease/release（`presentation.for_slot`）；
+  ⑤无采样令牌 → 每拍一个，迟到结果丢弃；⑥纯音乐先唱 1–8 秒 → 曲目开始先观察一拍；
+  ⑦`say` 失败仍推进行号 → 不推进（同一行仍只冒一次）；⑧`_post` 抛错时 `_inflight`
+  永久为 True → 复位。
+- **歌词质量**：取词前用移植来的 `title_clean.clean_web_title` 清洗查询词（只用于搜索，
+  不改显示）；候选按「歌名 1.0 / 歌手 1.0 / 专辑 0.4 / 时长 1.0」加权、缺失字段重归一、
+  阈值 0.55，取分最高者而不是"第一个歌手名命中的"——这是"认错歌"的根因（翻唱同名曲
+  的歌手字段里也常带原唱名）；新增 lrclib 源（海外曲目 + 显式 instrumental 标记）。
+- **诊断**：设置页「识别诊断」卡（按钮 + 只读多行文本 + 复制）与 `scripts/music_probe.py`
+  共用 `host/diagnostics.py`；文本只有 app_id / 可执行名 / 曲名 / 状态与数值，无 URL、
+  路径、代理与歌词正文。
+- **新设置键 1 个**：`music_title_format`（全局，默认 `""`），旧壳 `foobar_title_format`
+  按别名迁移。音频会话与窗口标题源**不设开关**（可由应用推断的实现参数），不可用自动降级。
+
+**验证**
+- 测试：新增 6 个文件共 **102 例**（判定表 22 / 探针 22 / 标题真值 28 / 取词质量 14 /
+  状态机 11 / 诊断 5），改 `test_petcore_music_mod.py` 后 38 例；
+  与主分支 `pet/music_title.py` 做过**差分验证**（17 条真值 × 3 种 artist + 4000 组随机
+  输入，diffs=0）。
+- 实机（本机 Windows 11，2026-10-26，`.scratch/verify_music_runtime.py`，只读）：
+  ```text
+  A. 真实三源（网易云正在播）
+  SMTC：1 个会话  cloudmusic.exe MUSIC(1) PLAYING
+  音频会话：2 个（Active 1）  cloudmusic.exe active mute=no peak=1.00
+  判定：在播 · 来源=系统媒体会话 · 曲目=《开不了口》—周杰伦 · 置信度=有音频证据
+  运行时 4 拍：status=playing source=smtc track=周杰伦 - 开不了口 singing=True；事件 [('anim','悠闲哼歌',True)]
+  B. 窗口标题兜底（SMTC 置空，窗口枚举与音频会话都是真的）
+  播放器窗口标题：1 个  cloudmusic.exe 「开不了口 - 周杰伦」
+  判定：在播 · 来源=播放器窗口标题 · 置信度=有音频证据
+  运行时 4 拍：status=playing source=window track=开不了口 - 周杰伦 singing=True
+  ```
+  这轮验收抓到一个真实缺陷并已修：窗口源在无格式串时把整条标题同时当歌名与歌手，
+  气泡显示成《开不了口 - 周杰伦》—开不了口 - 周杰伦。
+- 开销（本机实测，每拍，200/100 次取中位与 p95）：SMTC 3.08ms、音频会话 median 1.73
+  / p95 2.48 / max 3.27ms（缓存 endpoint manager；不缓存是 24ms）、窗口枚举 median 0.57
+  / p95 1.34ms（仅 SMTC 无在播会话时）。生产走后台线程，GUI 线程每拍只做判定。
+- **全量门禁**：`1 failed, 10558 passed, 18 skipped in 1537.91s`。唯一失败是主分支
+  chat store 的既有时序 flake（`tests/test_chat_subsystem.py::test_append_message_atomic_across_store_instances`）：
+  本批未触碰 `pet/chat`，在 `git worktree` 的干净 HEAD 上同样 6 次里 1 次失败，
+  已登记进 PR 报告 §3.6，不在本批顺手改。
+- **独立审查（只读子代理 + 变异测试）后修复的 9 条**：①`control_playback` 写成类属性
+  被绑成方法，四个播放命令 100% 失败（改成实例属性 + 后台线程执行，补 2 例并做变异验证）；
+  ②SMTC 会话暂停时窗口源白采不采信 → 「在播」证据优先（补 3 例）；③`exe_name` 没取
+  basename（路径形状 app_id 让静音证据失配、泄漏安装路径）；④删掉没人用的
+  `MusicRuntime.diagnose()`；⑤删掉 `lyrics._get_json` 的重复定义；⑥设置页一次性线程补
+  `close_thread_loop()/audio_sessions.close()` 收尾；⑦"认不出曲目"按播放器说明一次；
+  ⑧取词在飞时最多再等 3 拍再唱（纯音乐少唱 2 秒，普通曲目不受影响）；⑨端口纪律测试
+  从 2 个模块扩到 10 个（变异验证会红）。
+
+**未验证 / 风险**
+- 蓝牙/独占输出（音频会话不可见 → 按 SMTC 判）、浏览器视频（开关关闭时整体否决）、
+  多宠同时唱歌的真机观感，均只有单测/静态论证，未实机复现。
+- 标题启发式「视频站点特征否决」**刻意没做**：B 站的 MV 标题同样带站点后缀，按标题否决
+  会把正经音乐视频也挡掉，代价大于收益；仍由"浏览器会话开关默认关闭"兜住。
+- Windows 以外的平台：`audio_sessions`/`window_source` 返回空，识别退化为 SMTC。
+
+## L106 — 2026-10-27 — 语音全链路 + champion 彩蛋 + 关于页致谢/签名
+
+**主题**：petcore 的语音真正可用（自语/点击/彩蛋出声、本地部署模型、语音页），关于页补上
+完整的致谢体系（作者、贡献者、特别鸣谢、issue/PR 协作者、B 站粉丝、签名），并把「自言自语」
+做成会连说 5 句 champion 台词的彩蛋。
+
+**实现（新增文件）**
+- `petcore/community/{__init__,model,store,service}.py`（+71/+352/+191/+338）：致谢数据模型、
+  随包快照/运行期缓存、刷新策略（GitHub 贡献者 + issue/PR 作者；B 站免登录总数 + SESSDATA
+  全量；失败/半截不覆盖）、B 站凭据与签名。
+- `petcore/net/{github,bilibili}.py`（+138/+203）：唯一联网出口；限流/风控/截断分类；
+  Cookie 只走请求头。
+- `petcore/ui/settings/{page_voice,folds,signature_pad,credits_job,page_about_thanks}.py`
+  （+722/+58/+322/+91/+579）：语音页、折叠区、手写签名、守护线程刷新、六区致谢面板。
+- `scripts/fetch_community_credits.py`（+173）：生成 `petcore/community/data` 快照；partial 拒绝写入；
+  Cookie 只从环境变量/文件读。
+- `petcore/community/data/credits.json`（+745，17 贡献者/124 协作者/4 作者账号/4 特别鸣谢）、
+  `petcore/community/data/fans.json`（+3955 / 86KB，3948 位粉丝，vmid 293026389，
+  `fetched_at=2026-10-27T08:43:44+08:00`）。
+- 测试：`test_petcore_speech_local.py`（+350）、`settings_voice`（+331）、`say_sequence`
+  （+185）、`community_store`（+176）、`community_service`（+298）、`net_credits`（+198）、
+  `about_thanks`（+349）、`credits_job`（+80）。
+
+**实现（修改）**
+- `petcore/net/tts.py`（+179/−0）：`local` provider、`local_synthesize`（OpenAI 兼容 /
+  通用 JSON；`prefer_direct=True`、`http/https`、base64 响应）。
+- `petcore/speech/service.py`（+91/−6）：local 可用性（endpoint 为空即未配置）、音色、后缀、
+  flavor 含 endpoint/protocol/path/model/format；`optional_secrets` 允许本地 Key 留空。
+- `petcore/config.py`（+108/−5）：7 个 `speech_local_*` + 4 个自语/点击语音与彩蛋键；归一化；
+  **不再 import `urllib.parse`**（架构门抓到后改手写前缀校验）。
+- `petcore/ui/settings/dialog.py`（+44/−5）、`page_about.py`（+80/−6）、`base.py`（+69/−16，
+  `reveal_text` 展开折叠区）、`style.py`（+56/−2）、`icons.py`（+64/−6，`voice` 字形）。
+- `petcore/contracts/host.py`（+9/−1）、`ui/app.py`（+103/−1）、`ui/pet_window.py`（+189/−16）、
+  `ui/bubble.py`（+25/−0）：`say_sequence` 端口/适配器/定时器链与取消点、`full_text()`。
+- `fun.self-talk`（+175/−7，mod 1.1.0）、`fun.click-talk`（+67/−3，mod 1.1.0）、
+  `tool.links`（+1/−1，夸克分享地址）、`dsh-pet-core.spec` 与
+  `scripts/build_petcore.ps1`（datas/--add-data 增加 `petcore/community/data`）。
+- 文档：SPEC/ARCHITECTURE/MAIN-PARITY/SETTINGS-CHANGE-GATES/CONTEXT/README/AGENTS；
+  测试：`test_petcore_settings.py`、`test_petcore_about_page.py`、`test_petcore_self_talk.py`。
+
+**行为**
+- 自语/点击台词默认朗读（各自开关）；彩蛋默认 8%，命中时 `say_sequence` 连冒 5 条
+  （英文主文案 + 中文副标题），**每出现一条才朗读该条**（`on_show`），不在开头就把 5 个
+  合成任务全塞进队列；任何新 `say/show_image/隐藏/关闭` 取消剩余；隐藏态不朗读。
+- 语音页统一 `speech_*` 与本地模型；`SpeechRequest.rate/volume` 留空时用 `speech_rate`/
+  `speech_volume`（页面滑条对自语/点击/报时都生效）；SAPI 独立 `speech_sapi_voice`；
+  本地服务未配置/未安装时回退 edge→sapi；服务已配置但连接失败时状态行给稳定原因，不自动换云端。缓存键包含本地服务身份。
+- 本地 TTS 用 `direct_only=True`（失败也不切系统代理）；endpoint 只收 http(s) 且拒绝
+  `?`/`#`。
+- 关于页始终有「版本与诊断 / 致谢」两个分页；六个折叠区；粉丝只渲染当前 60 条，
+  搜索/翻页不联网；打开关于页 10 分钟冷却、`credits` 6h/`fans` 24h 才后台刷新；
+  失败保留旧名单，半截名单不落盘；SESSDATA 只进钥匙串（保存时校验、只存值），
+  界面/日志/诊断不回显。
+- 签名固定 `<data_root>/community/signature.png` + `signature.json`，原子覆盖，不参与设置回滚。
+- 夸克网盘入口改为 `https://pan.quark.cn/s/68fc681ae486`。
+
+**独立审查（只读子代理）后修复**
+- P1：隐藏态下自语/彩蛋仍出声 → `_speak`/`_play_champion` 按 `say` 结果与 `visible()` 闸门；
+  补「隐藏不出声」两例。
+- P1：语音页语速/音量滑条没人读 → `SpeechRequest.rate/volume` 默认 None，服务端用
+  `speech_rate/volume` 填充；补一例断言合成器收到 1.4/0.6。
+- P2：彩蛋开头排队 5 条语音 → 改为 `say_sequence(on_show=...)` 逐条朗读；测试同步改为
+  按条触发。
+- P2：保存后 `dirty()` 不消（音色被截断 64 字）→ `confirm_save` 同步音色控件；补一例。
+- P2：`_on_job_done/_on_job_failed` 先碰控件后判 `_disposed` → 守卫提前；`_clear_layout`
+  先 `setParent(None)`。
+- P2：刷新线程与 Qt 退出无协调 → 新增 `cancel_all()`（守护线程 + 0.5s join），在
+  `quit_app`/`aboutToQuit` 调用；`_report` 在无 QApplication 时不再 emit；`_thread` 在
+  finally 清空。
+- P3：SAPI 与 Edge 共用音色键 → 新增 `speech_sapi_voice`；`sessdata_value` 拒绝不含
+  SESSDATA 的整段 Cookie；`fetch_url(direct_only=True)` 杜绝本地请求走代理；
+  endpoint 拒绝 `?`/`#`；`reveal_text` 只展开选中命中并延后一拍滚动；刷新只在结束时
+  reload 一次 memo；credits 6h TTL 真正生效（避免每次开关于页都打 5 次 GitHub）。
+
+**验证**
+- `.venv/Scripts/ruff check pet/ tests/ petcore/` → All checks passed。
+- 聚焦（审查修复后）：语音/自语/时序/社区/致谢/架构共 131 passed；`credits_job` 2 passed。
+- 架构门：`test_petcore_architecture.py` 通过（曾抓到 `config.py -> urllib.parse`，已修）。
+- 全量 petcore：`2148 passed in 183.37s (0:03:03)`（审查修复后重跑）；粉丝快照批次
+  （含 `Fans.total` 修复与 3 个新用例）后重跑为 `2154 passed in 281.43s (0:04:41)`；
+  第二轮审查修复后终跑 **`2160 passed in 278.84s (0:04:38)`**。
+- 全仓：`.venv/Scripts/python -m pytest -q` → `10652 passed, 19 skipped in 1375.53s (0:22:55)`。
+- `python -m petcore --check`：输出完整 JSON，`strict.problems=[]`。
+- 性能（Windows 11 26200 / Python 3.12.10 / PySide6 6.12.0，`.scratch/bench_thanks.py`）：
+  关于页构造 median 12.09ms / p95 17.20ms；致谢面板 10.70/15.78ms；粉丝翻页
+  3.80/6.41ms；搜索 0.65/1.11ms；内存增量 0.26MB。
+- 同一基准换成**随包真实快照**（3948 粉丝 / 17 贡献者 / 124 协作者，`.scratch/bench_thanks_real.py`，
+  每项 200/1000 次）：关于页构造 median 24.62ms / p95 42.43ms；致谢面板 12.91/21.27ms；
+  66 页里随机翻页 5.99/8.93ms；3948 条搜索 0.78/1.20ms；面板内存增量 0.26MB。
+  真实名字比合成名长，所以构造与翻页比合成数据略高，仍在目标线内。
+- 真实数据渲染（windows 平台，`.scratch/shots/thanks_real_*.png`）：第 1/66 页 60 个名字
+  4 列排布正常；搜「鱼」筛出 90 位、分 2 页；第 66 页正常；SESSDATA 行与签名区无重叠。
+- 实机：`python -m petcore --root .scratch/gui-app-root` 启动日志正常；真实平台渲染
+  `.scratch/about_thanks_full.png` / `voice.png` 目视通过（折叠头左对齐、卡片/按钮正常）。
+
+**B 站粉丝快照（2026-10-27 补抓）**
+- 用户装好 Kimi WebBridge 扩展后，用其登录态在 `space.bilibili.com/293026389/relation/fans`
+  页面内同源 `fetch` 抓 `x/relation/fans`：79 页 × 50，**0 报错、0 重试**，共 3950 条记录；
+  3 条「账号已注销」占位名按 `normalize_fan_name` 去重后为 **3948** 个唯一用户名，
+  与接口返回的 `data.total=3950` 对得上（差 2 即这两条重复占位）。
+- 落盘 `petcore/community/data/fans.json`（`{schema:1, vmid, fetched_at, total, names}`，与
+  `scripts/fetch_community_credits.py --fans` 写出的形状一致），UTF-8 无 BOM，86KB。
+- **真数据一到就暴露的缺陷（已修）**：「有没有新粉丝」原本拿 `len(去重后名字)` 和 B 站
+  `total` 比，而快照天然差 2（3 条「账号已注销」→ 1 条），于是配了 SESSDATA 的用户每次
+  打开关于页都会判定「名单变了」并重拉 79 页。改为把 B 站口径的 `total` 一起持久化：
+  `Fans.total`（`parse_fans` 读、`save_cached_fans` 写、`fans.json` 记 3950），
+  新增 `CommunityService.known_total()` 供 `refresh` 比较；`fans_changed` 从比长度改为
+  比名字元组（长度相同但内容变了也算更新）。回归用例
+  `test_refresh_skips_full_fans_when_duplicate_names_collapse`、
+  `test_full_pull_records_bilibili_total_so_the_next_check_is_cheap`。
+- 新增验收测试 `tests/test_petcore_community_bundle.py`（+4）：随包 `credits.json`/`fans.json`
+  必须存在、可解析、`vmid` 正确、名字非空/无重复/不超 64 字/过得了 normalize、
+  `total ≥ 名字数且 >0`、`fetched_at` 可解析、上游项目与三位画师在特别鸣谢里、
+  文件 UTF-8 无 BOM 且 ≤2MB。以后谁把快照退回空占位，这条测试会红。
+
+**第二轮审查（真数据到位后，只读子代理）后修复**
+- P2：比较用的数来自 `x/relation/stat`（`follower`），持久化的却是 `x/relation/fans`
+  的 `total`，两个接口一旦差 1，「拉完还是不等」会永久循环 → `_refresh_fans` 增加
+  `stat_total` 参数，优先记录 stat 的数（名单接口的 total 只作兜底）。
+- P2：名单接口缺 `total` 时 `total or 0` 会被 `parse_fans` 夹到名字数，等于把上面那个
+  P1 原样恢复 → 同上，改用 stat 的数；`parse_fans` 的夹取只用于防御坏数据。
+- P2：`fetch_fan_count` 在 `data` 缺 `follower` 时静默返回 `0`（假 0）→ 改为必填校验，
+  缺失/非数字一律 `NetworkError(reason=protocol)`；补 3 例参数化测试。
+- P2：`scripts/fetch_community_credits.py --fans` 不去重，按文档重跑会写出 3950 条，
+  `tests/test_petcore_community_bundle.py` 立刻红且报错指向「normalize」→ 脚本改为
+  与 `parse_fans` 同样的保序去重；测试报错文案拆开。
+- P3：`fans_changed` 用元组比较（页序抖动也算变了）→ 改为集合比较；`fan_total()`
+  这个返回名字数的旧方法删掉，只留 `known_total()`；`_refresh_fans` 不再可能报 `fan_total=0`。
+- P3（测试加严）：`total-len(names)` 落在 0..20、`fetched_at` 不在未来一年外、每个名字
+  `normalize_fan_name(name) == name`、`dsh-pet-core.spec` 与 `scripts/build_petcore.ps1`
+  都带 `petcore/community/data`（打包漏了源码树测试不会红）；新增「老缓存无 total →
+  一次全量自愈 → 之后不再全量」与「stat 口径优先于名单 total」两例。
+- P3（文案）：关于页粉丝数补「· B 站显示 3950 位（含同名占位）」，状态行同步，
+  避免同一页出现两个说不清的数字。
+
+**未验证 / 风险**
+- **粉丝快照是一个时间点**：`petcore/community/data/fans.json` 抓于 2026-10-27 08:43，
+  之后新关注的粉丝要等关于页「刷新名单」（需 SESSDATA）或重跑
+  `scripts/fetch_community_credits.py --fans` 才会出现；抓取本身需要登录态，
+  因此在 CI 里不可复现（本次是通过用户浏览器登录态抓的）。
+- 本地 TTS 只在注入传输上验证请求形状/缓存/回退，**真实本地服务发声未验证**。
+- 全仓 `pytest -q` 已通过（10652 passed / 19 skipped）；跑完后仅追加了「无效本地地址保存时给出状态」
+  这一条 UI 文案改动，已由聚焦用例覆盖。
+- 非 Windows 平台、真实 B 站刷新在 CI 中不可复现（需要登录态）。
+
+## L107 — 2026-10-27 — Smart App Control 拦截 setup/卸载器：安装时签 unins000.exe
+
+**主题**：用户报「之前装的桌宠 setup 和 uninstall 都被微软的应用安全控制拦」。定性为本机
+Smart App Control（`VerifiedAndReputablePolicyState=1`）拦下 CodeIntegrity 3077/3118，
+被拦对象是安装时才生成、从未签名的 `unins000.exe`；Defender 0 检出。修复是给安装器加
+「安装时签卸载器」，不关闭任何安全策略。
+
+**实现**
+- `packaging/petcore.iss`（+10）：`#ifdef SignUninstaller` → `SignTool=devsign` +
+  `SignedUninstaller=yes`。
+- `scripts/build_petcore.ps1`（+18/−2）：带 `-SignThumbprint` 时给 ISCC 传 `/Sdevsign=…`
+  与 `/DSignUninstaller=1`；不带时与原流程一致。
+- `scripts/sign_artifact.ps1`（+49，新）：单文件 Authenticode 签名（SHA256 + 时间戳，
+  时间戳失败退回无时间戳），充 Inno 的 SignTool（本机无 Windows SDK 的 signtool.exe）。
+- `scripts/install_dev_cert.ps1`（+74，新）：把公钥 `.cer` 装进 `CurrentUser\Root` +
+  `TrustedPublisher`，`-Check` 只校验；拒绝含私钥的证书文件。
+- `tests/test_petcore_sac_signing.py`（+76，新，4 例）：锁定 iss 的开关块、构建脚本的
+  `/Sdevsign=`/`/DSignUninstaller=1`、签名与装证书工具存在且不发私钥、以及
+  「先签名 exe 再做冒烟」的顺序。
+
+**证据（本机实测）**
+- 定向：`dsh-pet-core.exe`（`CN=DSH Pet Core Dev`）在 SAC 强制下跑 `--check` 退出 0，
+  3077 增量 0——说明本机开发证书能过 SAC，问题只在未签的卸载器。
+- 端到端（`.scratch/verify_sac_install.ps1`）：静默装到 `.scratch/sac-install` →
+  `dsh-pet-core.exe`/`unins000.exe` 均 `Valid / CN=DSH Pet Core Dev` → 已安装 exe
+  `--check` exit 0 → 静默卸载 exit 0、目录删除 → **3077 新拦截 0**。
+- 产物：`dist-sac-2026-10-27/dsh-pet-core-setup.exe`（285MB，已签）、
+  `dsh-pet-core-dev.cer`（公钥，换机器测试时装它）。
+- 回归门：`tests/test_petcore_candidate_packaging.py` + `test_packaging_keyring_notices.py`
+  26 passed；`tests/test_petcore_sac_signing.py` 4 passed；`ruff` 全绿。
+
+**未做（有意）**
+- 不关闭 Smart App Control（关了只能重置系统才能开回来），也不给 SAC 加「例外」——它不支持。
+- 自签证书只覆盖本机测试；对外分发仍需 CA 证书（EV 有即时信誉），文档
+  `docs/ONEDIR_PACKAGING.md`「Smart App Control 拦截 setup / 卸载器（2026-10-27）」写了边界。
+- 未在第二台机器上复验「装证书后放行」，只在本机与脚本 `-Check` 上验证。
+
+## L108 — 2026-10-27 — AI 三项改为扩展注册项 + 气泡层级跟随桌宠
+
+**主题**：用户报「全新安装、什么都没勾，右键菜单却出现 AI 对话/看看屏幕/截图提问，
+加装扩展里还列出 4 个没装过的扩展」。查证后是两件事：菜单三项是 core 写死的特例
+（没扩展也在），扩展列表是用户数据目录里的旧副本（不是 setup 装的）。顺带修掉「气泡压住
+右键菜单」。
+
+**根因（有证据）**
+- AI 三项在 `menu_actions.core_items()` 里是 `owner="core"`，默认布局
+  （`menu_templates/petcore-default-v1.json` 与 `menu_layout.BUILTIN_DEFAULT_LAYOUT`）
+  用裸 id `ai_chat/look_screen/screen_capture` 摆位；点下去才 `run_feature_command("ai.chat", …)`。
+  所以没装 ai.chat 也在。扩展的常规通道是 `Contribution(kind="menu")` → 注册成
+  `<owner>:<id>`，没装就不注册——三项没走这条路。
+- 那 4 个扩展在 `%APPDATA%\dsh-pet-core\mods`（2026-10-21 09:07，voice.chime 1.0.0，
+  随包已 1.1.1），当天日志有
+  `duplicate mod id 'voice.chime': …AppData… overridden by E:\dsh-pet-core\mods\voice.chime`
+  ——旧安装目录与用户目录两份并存，安装目录那份随 `E:\dsh-pet-core` 一起删了。安装包本身
+  每条 mod 的 `Source` 都带 `Tasks: mod_*`、任务全部 `Flags: unchecked`。
+- 气泡是**无父窗口的顶层** `Qt.Tool`：非置顶时它自己 `raise_()` 会排到所有普通窗口之上，
+  于是压住其它应用与右键菜单。置顶标志本来就跟着 `always_on_top` 走，问题在「独立顶层窗口」。
+
+**实现**
+- `examples/petcore-mods/ai.chat/host/__init__.py`（+30）：新增 `open` / `look_screen` /
+  `screen_capture` 三条菜单 contribution（label/icon/order 与旧 core 项一致）。
+- `petcore/ui/menu_actions.py`（−22）：删掉三个 core `MenuItem`；`run_ai_command` 保留给热键。
+- `petcore/ui/menu_layout.py`（+42/−6）：`BUILTIN_DEFAULT_LAYOUT` 改用 `ai.chat:*` id；
+  新增 `migrate_p11_menu()`（节点 id 改写，幂等）与 `LEGACY_ID_MAP` 三条映射（老 hidden/order 仍生效）。
+- `petcore/menu_templates/petcore-default-v1.json`（3 处 id）。
+- `petcore/ui/app.py`（+30/−6）：`_register_feature_menus` 的 callback 带 `_menu_slot()`；
+  新增 `active_topmost()` / `show_context_menu()`（扩展不许 import `petcore.ui`，走 host 鸭子类型）；
+  `reload_menu` 接上 `migrate_p11_menu`。
+- `petcore/ui/pet_window.py`（+8/−4）：`SpeechBubble(self)` —— 气泡成为桌宠窗口的从属窗口；
+  右键菜单改走 `show_context_menu(..., topmost=self.always_on_top)`。
+- `petcore/ui/menu.py`（+41）：`prepare_menu()` / `show_context_menu()` 统一层级规则。
+- `petcore/ui/settings/page_mods.py`（+27）：详情新增「来源：安装目录 / 用户数据目录 / 源码树」
+  （判据复用 `trust.is_trusted`，与「授权」同源）。
+- `petcore/ui/settings/coverage.py`（−3）：三项不再是 core 菜单项，移出覆盖表。
+- `examples/.../tool.quick-launch/host/factory.py`（+8/−1）：快捷启动菜单也走 host 的同层入口。
+
+**测试**
+- 新增 `tests/test_petcore_ai_menu_registration.py`（4 例）：没注册 → 菜单无三项；注册后按原位
+  回来且不重复；`migrate_p11_menu` 保留 hidden 记忆；老 `hidden=["ai_chat"]` 仍生效。
+- 新增 `tests/test_petcore_context_menu_layer.py`（3 例）：置顶时菜单带
+  `WindowStaysOnTopHint`、非置顶不带、`build_menu` 返回 None 不炸。
+- 新增 `tests/test_petcore_installer_mods_opt_in.py`（5 例）：`{app}\mods` 的 Source 必须带
+  `Tasks: mod_*`；每个 `mod_*` 必须 `unchecked`；构建脚本不把 examples 打进包；卸载只删
+  `{app}\mods`；每个示例 mod 有安装入口。
+- 扩充：`test_petcore_bubble.py`（气泡的 parent 就是桌宠窗口）、`test_petcore_feature_command_slot.py`
+  （菜单命令带打开菜单那只桌宠的 slot）、`test_petcore_extensions_nav.py`（来源三态）、
+  `test_petcore_ai_mod.py` / `test_petcore_menu_layout.py` / `test_petcore_slingshot_menu.py` 同步新 id 与
+  `MenuStub` 的层级接口。
+
+**实机验证**（`.scratch/verify_l108_menu.py`，真实 CoreHost + Config + paths.mods_dirs）
+- 干净 root：菜单 = 彩蛋图片/切换角色/播放动画/桌宠控制/工具与帮助/免打扰/扩展/桌宠设置/退出
+  —— **没有 AI 三项**，`load_result.mods` 为空；截图 `.scratch/shots/l108_menu_clean.png`。
+- 装上 `examples/petcore-mods/ai.chat`：菜单 = …播放动画/**AI 对话/看看屏幕/主动识屏/截图提问**/桌宠控制…
+  位置与旧版一致、不重复；截图 `.scratch/shots/l108_menu_with_chat.png`。
+- 用户机器上那 4 个旧副本已删除（`%APPDATA%\dsh-pet-core\mods` 现为空）。
+
+**未验证 / 风险**
+- 「气泡不再压住菜单」只做到 **层级根治（从属窗口）+ 菜单同层**：自动化里无法制造
+  「两个置顶窗口互相覆盖」的真实合成，只能靠单测（parent/flag）与实机观察。实机请重点看两条：
+  桌宠取消置顶后气泡是否跟着退；右键时菜单是否总在气泡之上。
+- 老用户布局迁移只覆盖 `menu_layout` 的节点 id 与 legacy hidden/order；若有人手改过
+  `menu_templates` 之外的私有布局文件（不存在此路径），不在覆盖范围。
+
+**门禁与产物（L108 收尾）**
+- `ruff check pet/ tests/ petcore/ examples/` → All checks passed。
+- 全量 petcore：**2180 passed in 248.09s**（L107 时 2164，+16 例：AI 注册 4、菜单层级 3、
+  安装器 opt-in 5、来源 1、slot 2、气泡从属 1）。
+- 文档门：`tests/test_petcore_docs.py tests/test_pr_report_discipline.py` → 317 passed。
+- `python -m petcore --check` → exit 0，`strict.problems=[]`。
+- 重新出包：`dist-sac-2026-10-27b/dsh-pet-core-setup.exe`（已签名 + 时间戳，附 `dsh-pet-core-dev.cer`）。
+  端到端 SAC 验收：installer exit 0 → `dsh-pet-core.exe` / `unins000.exe` 均
+  `Valid / CN=DSH Pet Core Dev` → 已安装 exe `--check` exit 0 → 静默卸载 exit 0、目录删除 →
+  **3077 新拦截 0**。
+
+## L109 — 2026-10-27 — 新增《petcore 扩展制作指南》（动手向）
+
+**主题**：用户要「各种 mod 的制作/开发方法、素材包放哪、功能型 mod 怎么做怎么接」。
+现有 `PETCORE-MOD-FORMAT.md` 是字段级参考（632 行）、`examples/README.md` 是样板清单，
+缺一份从零到能装进设置页的动手指南，尤其缺「东西放哪个目录」和「哪些声明其实没接线」。
+
+**实现（纯文档）**
+- 新增 `docs/PETCORE-MOD-DEVELOPMENT.md`（约 500 行）：
+  1. 三类产物（feature / 角色包 / 内容块）与「内置 feature 不算扩展」的边界；
+  2. **放哪**：仓库开发树 vs `<data_root>/mods` vs `<install>/mods` vs `--mods-dir`，
+     以及 `repo/mods` 与 `--mods-dir` 里 feature **永远 disabled** 的判据；
+  3. 最小可运行骨架（`mod.json` + `host/{__init__,factory,runtime,settings_page}.py`），
+     每个文件给完整代码与职责；
+  4. 接线点：`menu` / `settings_page` 的 `data` 键真实效力、命令面是 `runtime.commands`
+     （不是 `Contribution(kind="command")`）、`slot` 语义、端口选型表；
+  5. 线程铁律（只有 `scheduler` 跨线程安全；`http`/`synthesize` 阻塞；`on_ask` 在后台线程）；
+  6. 配置与数据（第三方键落 `extra` 的限额、`storage.data_dir` 原子写）；
+  7. 本地闭环（`mods validate/install/list/doctor/remove`、重载扩展、日志位置、两个已知坑）；
+  8. 打包与分发（单层 wrapper、ZIP 安全扫描、`install.json`、`.trusted` 只在安装目录、
+     无签名无校验）；
+  9. 角色包：两种来源、`manifest.json` 字段、15 类动画目录映射、`body_box` 的几何意义、
+     三条导入入口、`pack-character` 的真实行为与**不支持项**；
+  10. 内容块 `sounds/themes/phrases/seasonal` 当前无消费方（别照抄）；
+  11. 红线与门禁表、排错对照表（错误原文→原因→修法）、提交 checklist。
+- 互链：`docs/INDEX.md` 登记新行并同步 `PETCORE-MOD-FORMAT` / `PETCORE-CHARACTER-PACKS` /
+  `examples/petcore-mods/README.md` 的「何时必读」；上述三份 + `ASSET-PIPELINE.md` 正文首/尾
+  各加一条指向新指南的说明。
+
+**验证（不是"写了就算"）**
+- `.scratch/verify_mod_guide.py` 直接**解析文档**里的 5 个代码块生成 `hello.timer`，然后：
+  `mods validate → ok`；`mods install → installed hello.timer 1.0.0`；
+  真实 `CoreHost` 加载 → `loaded features` 含 `hello.timer`；右键菜单 →
+  `扩展 → 整点打招呼 → 打个招呼`；`runtime.commands == ['greet']`；设置导航出现「整点打招呼」。
+  文档里写的骨架因此是**可执行的最小实现**，不是示意。
+- 顺带纠正了三处容易抄错的 API：`ports.pets` 没有 `pet(slot)`（只有 `pets()/primary()/active()`）、
+  `value_field()` 是只读展示（可编辑要用 `QLineEdit`）、菜单项默认进「扩展 → <manifest 名>」子菜单。
+
+**未覆盖 / 风险**
+- 这是文档变更，不改运行行为；`tests/test_petcore_docs.py` 与索引互链规则已跑过。
+- 指南里标注了三处「代码与文档/注解不一致」：`settings_factory` 实收 host 而非 `FeatureContext`、
+  10 个 contribution kind 只有 2 个被消费、`execution: worker` 是死路。**只记录，不在这批修**。

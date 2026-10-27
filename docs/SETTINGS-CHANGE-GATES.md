@@ -83,6 +83,64 @@ recovery
 
 ## 变更记录
 
+### 2026-10-27 — 新增「语音」域 + 本地模型 provider + 关于页「致谢」分页/签名
+
+用户需求原文：「把自言自语、报时等的语音生成全部加上，另外提供本地部署音频生成模型的接口
+支持……在关于页设置一个致谢分页……加一个贡献者区……特别鸣谢……致谢区……感谢区（B 站
+粉丝）……最后再加一个签名区」。
+
+| 项 | 内容 |
+|---|---|
+| setting_id / 键 | 新增全局：`speech_local_endpoint`（str，默认 `""`，仅 http(s)、不带 `?`/`#`）、`speech_local_protocol`（`openai|simple`，默认 `openai`）、`speech_local_path`（str，默认 `""`）、`speech_local_model`（str，默认 `tts-1`）、`speech_local_voice`（str，默认 `""`）、`speech_local_format`（`mp3|wav`，默认 `mp3`）、`speech_local_timeout`（5–120 秒，默认 30）、`speech_sapi_voice`（str，默认 `""`，SAPI 独立音色，不再与 Edge 共用 `speech_voice`） |
+| 新增每宠键 | `self_talk_voice_enabled`（默认 true）、`self_talk_champion_enabled`（默认 true）、`self_talk_champion_chance`（0–100，默认 8）、`click_talk_voice_enabled`（默认 true） |
+| 归属 | 新侧边栏「语音」（排在「互动与物理」之后）：后端链/音色/语速/音量/缓存、本地模型、在线 Key、试听；自言自语/点击台词的语音与彩蛋开关留在各自的内嵌页 |
+| 为什么准入 | 后端与音色是长期偏好、无法由应用推断；本地服务地址/协议/模型是**只有用户知道**的部署事实；彩蛋概率是用户明确想调的频率。默认值让未配置时仍按 edge→sapi 工作 |
+| 明确不加键 | 贡献者/粉丝/签名都不写配置：粉丝名单是随包快照 + `<data_root>/community` 缓存，签名是固定 PNG + 同名 `signature.json`，不参与设置保存/取消回滚（点「保存签名」即生效，界面写明） |
+| 凭据 | 豆包/MiMo 的 `api_key` 与本地服务的可选 `api_key` 只进系统钥匙串（owner `speech.<provider>`）；B 站 SESSDATA 只进钥匙串（owner `community.bilibili`），界面/日志/诊断快照都不回显 |
+| migration / recovery | 新键全部有 `DEFAULTS` 与 `_normalize`；旧配置缺键 → 补默认（本地 provider 因 endpoint 为空自动标记「未配置」并回退）；清空 endpoint 即停用本地后端；签名/粉丝缓存删除不影响应用启动 |
+| 本地路由 | 本地 TTS 一律 `prefer_direct=True` + `allowed_schemes=("http","https")`，避免系统代理把 `127.0.0.1` 带走；缓存键包含 endpoint/protocol/path/model/format，换服务不会播旧音频 |
+| 测试 | `tests/test_petcore_speech_local.py`、`tests/test_petcore_settings_voice.py`、`tests/test_petcore_say_sequence.py`、`tests/test_petcore_self_talk.py`、`tests/test_petcore_community_store.py`、`tests/test_petcore_community_service.py`、`tests/test_petcore_net_credits.py`、`tests/test_petcore_about_thanks.py`；设置页标题/分页顺序同步更新 |
+| 未验证 | 本地 TTS 只验证了请求形状/缓存/回退，未在本机启动真实本地服务发声。B 站粉丝快照已于 2026-10-27 用浏览器登录态抓取（3950 条记录 → 3948 个唯一用户名，`petcore/community/data/fans.json` 86KB）；它是时间点数据，之后的新粉丝要靠关于页「刷新名单」（需 SESSDATA）或重跑 `scripts/fetch_community_credits.py --fans` 更新 |
+
+### 2026-10-26 — 新增「音乐 → 播放器标题格式（高级）」+ 扩展管理页两轴弹性
+
+用户需求原文：「音乐识别有问题……我们重写音乐识别功能。另外还有个小改进：让设置的
+「扩展管理」页的两个轴都能随设置缩放适当调整，当前的显示范围就作为下限。」
+
+| 项 | 内容 |
+|---|---|
+| setting_id / 键 | `music_title_format`（str，默认 `""`，≤120 字符） |
+| 归属 | 扩展管理 → 音乐 → 「识别范围」卡内的最后一行（高级披露，`expand=True`） |
+| search_aliases | 行内 `QLabel` 文案已含「播放器标题格式 / 窗口标题 / foobar」，搜索直接命中 |
+| 为什么准入 | **只有用户知道**自己在播放器里配了什么窗口标题格式（titleformat 是播放器侧设置），应用无法推断；默认空 = 自动（不猜顺序）仍然可用 |
+| 明确不加键 | 音频会话证据、窗口标题源本身**不设开关**：属「可由应用稳定推断的实现参数」，准入规则第 2 条不准入；不可用时自动降级为只看 SMTC，代价写进设置页说明 |
+| 依赖 / 平台 | 仅 Windows 的窗口标题源用得到；非 Windows 上该行照常可见（无副作用，留空即无效） |
+| migration / recovery | `_LEGACY_KEY_ALIASES` 把旧壳 `foobar_title_format` 搬到本键（同名优先）；旧配置无此键 → `_normalize` 补 `""` |
+| 扩展管理几何 | 导航宽 / 浏览器高 / 页面内容宽改为弹性：**字号 13 时逐像素等于现值**（190 / 260 / 420 / 860），只往上长；窗口拉大时内容跟视口、浏览器吃满高度；实现见 `petcore/ui/settings/page_extensions.py` 的 `font_scale/nav_bounds/nav_width` 与 `style.nav_row_heights` |
+| 版式与可达性 | `#settingsNav` / `#extensionsNav` 的字号与行高同源（`nav_row_heights`：13→34/32、18→39/37），避免 `ui_font_size` 只放大标签而导航被 min-height 切字；720×500 下导航仍 190、Mods 页横滚不超过改前（110px） |
+| 测试 | `tests/test_petcore_extensions_geometry.py`（12 例：纯函数边界、填充高度、宽轴跟窗口、字号热切换、最小窗口不回退、其它页仍 860）、`tests/test_petcore_music_mod.py`（标题格式 round-trip / 诊断视图）、`tests/test_petcore_music_lyric_quality.py`（取词打分）；`tests/test_petcore_settings.py`、`tests/test_petcore_extensions_nav.py` 全绿 |
+| 未验证 | 1280/1500 宽度下的观感需用户实机确认（自动化覆盖几何断言与截图，手感未自动判定） |
+
+### 2026-10-26 — 新增「灵动岛 → 与桌宠碰撞」键 + 「指标段」加 C 盘剩余
+
+用户需求原文：「灵动岛和桌宠的碰撞（原主分支的颠勺和相互碰撞）加回来；给灵动岛加一个可选的
+C 盘剩余空间显示选项（性能占用要低）」。
+
+| 项 | 内容 |
+|---|---|
+| setting_id / 键 | `island_collision`（bool，默认 `True`） |
+| 归属 | domain「外观与交互」/ group「灵动岛」，紧跟在「贴边停靠」之后（同一 `SettingsCard`，不新开页/标签） |
+| search_aliases | 文案已含「碰撞 / 桌宠 / 弹开 / 顶飞」，搜索按行内 `QLabel` 命中即可 |
+| 为什么准入 | 是**偏好**（用户可能不想要桌面互动），低频、有可靠默认（主分支同款默认开）、无法自动推断 |
+| 依赖 / 平台 | 无平台分支；关掉后胶囊不阻挡桌宠、岛恢复 1Hz 自动让位（旧行为） |
+| preview_target / commit_policy | `_on_island_changed` → `changed` → `apply_island_settings` 实时生效；标题栏 X / 确定走 `_commit()` 落盘，「取消」/Esc 恢复快照（现有语义不变） |
+| migration / recovery | 旧配置无此键 → `_normalize` 补 `True`（等同主分支行为）；无迁移、无删除路径 |
+| 指标段新增成员 | `island_metrics` 加合法 id `disk`（`C 盘剩余`，默认**不勾**）：「指标段」复选组第 4 位（mem 之后、gpu 之前），`_island_metrics()` 的写入顺序同步；`config.ISLAND_METRIC_IDS` 与 `island.segments.BUILTIN_SEGMENT_IDS` 两处白名单同时加（只加一处会「能勾、保存后消失」且无测试红） |
+| 默认值影响 | `DEFAULTS["island_metrics"]` 保持 `["cpu","mem"]`：升级用户不会凭空多出一个段 |
+| 性能说明 | 磁盘段 5 秒一拍（钳 [5,60]），单次 `shutil.disk_usage`（GetDiskFreeSpaceEx，无磁盘 IO）实测 33µs；隐藏/细条/折叠/关段即停采（无定时器、无轮询） |
+| 测试 | `tests/test_petcore_disk_segment.py`（36 例：格式化/采样/闸门/配置/卡片）、`tests/test_petcore_island_collision.py`（31 例：墙/反射/拍飞/闸门/无定时器）、`tests/test_petcore_settings.py` 现有设置页用例全绿；`ruff check pet/ tests/ petcore/` 通过 |
+| 未验证 | 真鼠标手感的最终确认需用户实机拖一次（自动化覆盖几何/速度/反馈计数，见 PR 报告 A1–A6） |
+
 ### 2026-10-19 — 设置页搜索：↑/↓ 逐条翻命中（无新增设置项）
 
 用户反馈「搜索结果不能用方向键上下翻」。审计：`eventFilter` 原本只吃 `Return`/`Enter`，

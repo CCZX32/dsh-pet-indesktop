@@ -2,6 +2,8 @@
 
 > 基线：`feat/petcore-vpet-architecture`，2026-10-20。
 
+> 本文是角色包的**规格**（目录、动画分类、manifest、帧序列）。打包与导入的实际流程——`pack-character` 产出的是目录而不是 zip、三条导入入口、数据目录里该放哪、哪些能力还不支持——见 [`PETCORE-MOD-DEVELOPMENT.md`](PETCORE-MOD-DEVELOPMENT.md) §9。
+
 ## 1. 包布局
 
 ```
