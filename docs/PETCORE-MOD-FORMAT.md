@@ -153,6 +153,18 @@ python -m petcore mods doctor
 - worker 监管（协议已定义，实现留给 P1/P3）；
 - 签名与沙箱；在线更新与多源下载见 [`PETCORE-MARKET.md`](PETCORE-MARKET.md)。
 
+2026-10-27 实测补充（`tool.ai-browser` 探针，详见
+[`PR-REPORT-AI-BROWSER-MOD-2026-10-27.md`](PR-REPORT-AI-BROWSER-MOD-2026-10-27.md)）：
+
+- **`capabilities` 不构成授权闸门**：`network.request` / `process.spawn`
+  既不产生端口，也没有运行期强制；扩展用 `subprocess` 拉外部程序不受任何检查。
+- **窗口**：没有窗口端口，但扩展在 GUI 线程的命令里可以自己 `QMainWindow`/`QDialog`
+  （官方样板 `fun.divination` 已如此）。置顶、跟随桌宠、多宠归属、关闭清理都得自己实现。
+- **宿主能力差异**：某个 Qt 模块是否可用取决于宿主打包（安装包 `_internal/PySide6` 里没有
+  `QtWebEngine*`），扩展必须自检并降级；`importlib.util.find_spec` 是约定写法。
+- **ZIP 安装**：CLI 与 GUI 共用 `install()` 的同一套校验；CLI 的 `mods install` 直接接受 `.zip`
+  （见 §6），导入时会剥掉包里自带的 `.trusted`。
+
 ## 8. 内置 feature 与端口（P2）
 
 - 内置包位于 `petcore/builtin/features/<id>/`，格式与用户 feature 包相同；由 `FeatureManager.load_builtin_features()` 扫描加载，**受信任**，不要求 `allow_feature_mods`。

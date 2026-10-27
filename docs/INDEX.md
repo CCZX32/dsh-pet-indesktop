@@ -144,6 +144,8 @@
 
 ## PR 报告存档
 
+- [AI 浏览器扩展 + mod 接口文档可行性实测（2026-10-27）](PR-REPORT-AI-BROWSER-MOD-2026-10-27.md)：新增 `tool.ai-browser` 1.0.0（8 个国模 AI 站白名单、内嵌 Chromium 窗口、Edge `--app`/系统浏览器三级降级、设置页内核档位），含真 CoreHost/真 WebEngine/真 SettingsDialog 与降级路径实测、进程树内存与首屏数字，并逐条列出文档与实机的五处差异（窗口能力、宿主 QtWebEngine 差异、capabilities 语义等）。**改扩展窗口/内核探测或 mod 文档前必读**。扩展包与对应测试是本地验证产物，本次仅提交文档。
+
 - [语音全链路 + champion 彩蛋 + 关于页致谢体系（2026-10-27）](PR-REPORT-PETCORE-THANKS-VOICE-2026-10-27.md)：新增侧边栏「语音」与本地 HTTP TTS provider（OpenAI 兼容 / 通用 JSON、强制直连、缓存键含 endpoint/model）、自言自语/点击台词语音与 8% champion 多气泡彩蛋、关于页「致谢」分页（作者账号/贡献者/特别鸣谢/issue·PR 协作者/B 站粉丝分页搜索/唯一手写签名）；含实测性能、真实 GUI 渲染与 B 站快照阻塞说明。**改语音后端、设置页分页、关于页或社区数据前必读**。
 
 - [音乐识别重写 + 扩展管理两轴弹性（2026-10-26）](PR-REPORT-MUSIC-RECOGNITION-2026-10-26.md)：`media.music` 1.2.0 三源识别（SMTC / WASAPI 音频会话 / 播放器窗口标题）与 8 个状态机缺陷修复、歌词候选打分 + lrclib + 查询词清洗、识别诊断与 `scripts/music_probe.py`、新增 `music_title_format`；设置「扩展管理」页导航宽/浏览器高/内容宽的弹性化（当前范围作下限）。**改识别判定、歌词匹配或扩展管理几何前必读**，含本机实测开销与实机验证记录。

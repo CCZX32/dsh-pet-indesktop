@@ -349,6 +349,30 @@ class TimerPage(SettingsPage):
 | 截图提问窗口 | `screen_ask` | `on_ask` 回调在**后台线程**，只许碰纯数据 |
 | 免打扰状态 | `quiet` | `quiet_active()`、`set_quiet(seconds)` |
 
+### 4.1 宿主能力与窗口：2026-10-27 实测边界（`tool.ai-browser` 探针）
+
+写扩展前必须知道的三条实测结论（不是推断，证据见
+[`PR-REPORT-AI-BROWSER-MOD-2026-10-27.md`](PR-REPORT-AI-BROWSER-MOD-2026-10-27.md)）：
+
+1. **窗口不是端口，但事实上能造。** 官方样板 `fun.divination/host/runtime.py` 就在命令里
+   `from .panel import DivinationCard` 再 `show()`；新样板 `tool.ai-browser` 同样在命令里
+   惰性导入 `QMainWindow`。`给AI的说明.md` §7 的「自定义 Qt 窗口做不到」应理解为
+   **core 不提供窗口端口/生命周期治理**（置顶、跟随桌宠、多宠归属都得自己做），不是技术上不能。
+   第三方要自造窗口时：把 Qt 代码单独放一个模块、只在 GUI 线程命令里惰性导入，
+   窗口对象自己持引用（`_WINDOW`），关闭时自己存几何。
+2. **宿主有没有某个 Qt 模块，取决于它怎么打包，不取决于你的 `mod.json`。** PyInstaller
+   产物只收被静态分析到/显式声明的模块：本机安装包 `_internal/PySide6/` 里**没有**
+   `QtWebEngine*`，而 `.venv` 里装了。同一个扩展因此在源码环境能内嵌 Chromium、
+   在安装包里只能降级。写法：`importlib.util.find_spec("PySide6.QtWebEngineWidgets")`
+   探测 → 不可用就走外部通道，并在设置页显示当前档位（`tool.ai-browser/host/engine.py`）。
+3. **`capabilities` 只是声明。** `network.request` / `process.spawn` 不产生端口、不产生闸门，
+   也没有沙箱：`tool.ai-browser` 用标准库 `subprocess` 直接拉 Edge `--app` 也在运行。
+   声明照写（便于阅读与将来审计），但不要指望它替你兜底。
+
+设置页容器还有一条几何事实：页面内容在 `QScrollArea` 里、默认阅读宽度 860
+（`content_max_width=None` 可放开）。**把 webview 塞进设置页不可用**——浏览器类 UI
+必须自造窗口。
+
 ---
 
 ## 5. 线程与生命周期铁律
@@ -551,6 +575,10 @@ B. 你自己做的角色（推荐）
 | `invalid character id: …` | 目录/ZIP 名带空格或大写 | 重命名成合法 id |
 | 角色装上了但「切换角色」里没有 | `character.media` 指向的目录不存在 / 媒体为空 | 检查 `mod.json` 的 `character.media` 与 `videos/` |
 | 改代码没生效 | 扩展模块被缓存；或只改了 `examples/` 源目录 | 「重新加载扩展」（会清 `sys.modules`）；确认改的是**已安装**那份 |
+| 自造的窗口不出现/被别的窗口压住 | 没有持住窗口引用；或只 `show()` 没有 `raise_()`/`activateWindow()` | 模块级 `_WINDOW` 持引用；`show()` 后再 `raise_()`；需要压过桌宠时才临时置顶 |
+| 设置页里塞 webview 变成一条缝 | 设置页内容在 `QScrollArea` 里，默认阅读宽度 860 | 浏览器/大画布类 UI 自造窗口；设置页只放开关与按钮 |
+| 内嵌 `QWebEngineView` 报 ImportError / 窗口空白 | 宿主安装包没打 QtWebEngine（`_internal/PySide6` 无 `QtWebEngine*`） | 先 `importlib.util.find_spec("PySide6.QtWebEngineWidgets")` 探测；不可用就走外部通道并在设置页显示档位 |
+| 窗口能开但关掉后内存不降 | QtWebEngine 进程复用，属引擎固有行为 | 不是泄漏；要省内存就别在常驻设置页里养 webview |
 
 ---
 
@@ -566,6 +594,10 @@ B. 你自己做的角色（推荐）
 8. 角色包：`body_box` 按 alpha≥128 量过；文件夹名对上 §9.3；不覆盖已有 id。
 9. 跑一遍 `tests/test_petcore_architecture.py`、`test_petcore_builtin_mods.py`、
    `test_petcore_example_mods.py`（如果你改的是内置/示例包）。
+10. 若自造窗口：Qt 代码单独成模块、只在 GUI 线程的命令里惰性导入；窗口自己持引用、
+    关闭时存几何/停定时器；**先探测宿主有无所需 Qt 模块**再决定是否降级（见 §4.1）。
+11. 若新增 example 包：`packaging/petcore.iss` 要加默认不勾选的安装项，
+   否则 `tests/test_petcore_installer_mods_opt_in.py` 会红。
 
 ### 本文骨架的实测记录（2026-10-27）
 

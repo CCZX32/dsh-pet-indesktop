@@ -3846,3 +3846,65 @@ Smart App Control（`VerifiedAndReputablePolicyState=1`）拦下 CodeIntegrity 3
 - 这是文档变更，不改运行行为；`tests/test_petcore_docs.py` 与索引互链规则已跑过。
 - 指南里标注了三处「代码与文档/注解不一致」：`settings_factory` 实收 host 而非 `FeatureContext`、
   10 个 contribution kind 只有 2 个被消费、`execution: worker` 是死路。**只记录，不在这批修**。
+
+## L110 — 2026-10-27 — 新增 `tool.ai-browser`：只开国模 AI 站的轻量浏览器 + 接口文档探针
+
+**主题**：用户要求「按 mod 开发文档做一个只开 DeepSeek/豆包/千问/Kimi 等站点的轻量浏览器扩展，
+打包 ZIP 导入，用来验证接口文档是否真的可行」。
+
+**实现（新扩展，未改 core）**
+- 新增 `examples/petcore-mods/tool.ai-browser/` 1.0.0（9 个文件、约 1073 行）：
+  `mod.json`、`host/{__init__,factory,sites,engine,external,runtime,browser_window,settings_page}.py`。
+  - `sites.py`：8 站站点表（含实测重定向的 `qianwen.com`、`baidu.com`）+ 关键词/URL 解析 +
+    后缀边界白名单（纯函数，零 Qt/零网络）。
+  - `browser_window.py`：`QMainWindow` + `QWebEngineView` + 工具栏/站点按钮/拦截横幅；
+    `acceptNavigationRequest` 只放行主框架白名单、`createWindow` 回落本页；命名 profile
+    （持久 cookie/cache + Chrome UA）、单例窗口、几何写 `feature-data` 并按屏幕可用区钳制。
+  - `engine.py`：`find_spec` 探测宿主是否有 QtWebEngine（安装包没有）。
+  - `external.py`：纯标准库降级——Edge `--app` 窗口（复用登录态）→ 系统默认浏览器。
+  - `runtime.py`：无 Qt；`commands={"open"}`、开关闸门、逐级降级气泡；`slot` 形参按契约声明。
+  - `settings_page.py`：开关 / 默认站点 / 额外白名单 / 当前内核档位 / 打开按钮；
+    `dirty/confirm_save/discard_changes/changed.emit()` 按契约。
+- 测试：新增 `tests/test_petcore_ai_browser_mod.py`（14 例，无 Qt 无网络）覆盖站点解析、
+  域名伪装、`extra` 归一化、清单/加载、menu+settings 配对、运行时代码红线、开关闸门与两条降级；
+  `tests/test_petcore_example_mods.py` 的 `IDS` 加入新 id。
+- 打包：`packaging/petcore.iss` 新增 opt-in 任务 `mod_aibrowser`（默认不勾选）+ 源目录/`.trusted`
+  两行；`test_petcore_installer_mods_opt_in.py` 要求每个 example 包都有安装入口。
+- 文档：`PETCORE-MOD-DEVELOPMENT.md` 新增 §4.1「宿主能力与窗口：实测边界」；
+  `PETCORE-MOD-FORMAT.md` §7 补 6 行（capabilities 不是闸门 / 窗口事实可行 / 宿主模块差异 /
+  CLI 接受 ZIP）；`examples/petcore-mods/README.md` 加包说明与安装命令。
+
+**验证（真实环境，非 mock）**
+- `mods validate → ok`；目录安装 → `enabled`；`dist-extensions/tool.ai-browser-1.0.0.zip`
+  （9 files / 14756 bytes / sha256 701969107fd4）→ 装进全新 root 也是 `enabled`。
+- 真 `CoreHost` + 真扩展 + 真 WebEngine：`features` 含 `tool.ai-browser`、`diagnostics == []`、
+  命令返回 true、窗口创建、Kimi 首屏可读 2188 ms、`https://example.com` 导航被拦
+  （横幅「已阻止跳转到 example.com…」）、地址栏 `example.org` 被拒。
+- 真 `SettingsDialog`：「扩展管理 → 加装扩展 → AI 浏览器」渲染正常；取消勾选 → 内存 false →
+  `_commit()` → 磁盘 false → 勾回 → 磁盘 true；「内核」行显示「内嵌 Chromium（源码运行环境）」。
+- 降级实机：把 `PySide6.QtWebEngine*` 从 import 系统摘掉后命令不抛异常、不导入窗口模块，
+  真的拉起 `msedge.exe --app=https://chat.deepseek.com`（pid 36172，测试后关闭）。
+- 性能（三次样本）：命令 1360–1985 ms、DeepSeek 首屏 4891 ms、Kimi 2188–2328 ms；进程树 RSS
+  72.6 → 409.9 MB（主 350.0 + QtWebEngineProcess 59.8），关窗后 390.5 MB **不释放**。
+- 门禁：`ruff check …` 全过；`pytest tests/test_petcore_ai_browser_mod.py
+  tests/test_petcore_example_mods.py tests/test_petcore_extension_build.py
+  tests/test_petcore_extension_candidates.py -q` → 35 passed。
+  相关套件 `pytest tests/test_petcore_*.py tests/test_architecture.py -q` → 2207 passed in 262.51s
+  （首轮红 1 条：新 example 包缺 `packaging/petcore.iss` 安装入口，补 `mod_aibrowser` 后全绿）。
+
+**暴露的文档问题（已写进 PR 报告 §六）**
+1. 「自定义 Qt 窗口做不到」与官方样板 `fun.divination/host/panel.py` 矛盾——窗口事实上能做，
+   缺的是端口级治理；
+2. 文档没写「宿主打包决定扩展能力」：安装包无 QtWebEngine，同一份 mod 行为不同；
+3. `settings_page` 是唯一 Qt 面的说法与 `panel.py` 不符；
+4. `capabilities`（`process.spawn`/`network.request`）无运行期强制，易被误读为授权；
+5. CLI `mods install` 直接接受 `.zip`（文档只写了目录与 GUI）。
+
+**提交范围**
+- 本条只提交 `docs/` 文档；扩展包、测试、`packaging/petcore.iss` 与 `examples/README` 的改动
+  是本地验证产物，未随本次提交推送。
+
+**未覆盖 / 风险**
+- 没做真实登录（无账号），登录 SSO 跳转域未全量验证，靠设置页「额外白名单」补。
+- Edge 应用窗口模式无法限制窗口内跳转；内嵌 Chromium 常驻 ≈330 MB 且关窗不释放。
+- 仅 Windows 11 本机验证；非 Windows 的 `webbrowser` 分支未测。
