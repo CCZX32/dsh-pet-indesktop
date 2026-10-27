@@ -364,7 +364,20 @@ def test_manifest_is_a_host_only_feature_with_capabilities() -> None:
 def test_definition_exposes_three_commands_and_a_settings_page(tmp_path: Path) -> None:
     definition = _create_host(_context(tmp_path))
     assert definition.owner == "ai.chat"
-    assert [item.kind for item in definition.contributions] == ["settings_page", "menu"]
+    assert [item.kind for item in definition.contributions] == [
+        "settings_page",
+        "menu",
+        "menu",
+        "menu",
+        "menu",
+    ]
+    # L108：AI 对话/看看屏幕/截图提问 也是这个扩展注册出来的菜单项
+    assert [item.id for item in definition.contributions if item.kind == "menu"] == [
+        "open",
+        "look_screen",
+        "screen_capture",
+        "proactive",
+    ]
     instance = definition.runtime_factory(_context(tmp_path))
     assert set(instance.commands) == {
         "open",
@@ -935,8 +948,8 @@ def test_menu_contribution_checkmark_reads_the_config(tmp_path: Path) -> None:
     context = _context(tmp_path)
     definition = _create_host(context)
     menu = [item for item in definition.contributions if item.kind == "menu"]
-    assert [item.id for item in menu] == ["proactive"]
-    contribution = menu[0]
+    assert [item.id for item in menu] == ["open", "look_screen", "screen_capture", "proactive"]
+    contribution = next(item for item in menu if item.id == "proactive")
     assert contribution.data["command"] == "proactive_toggle"
     assert contribution.data["label"] == "主动识屏"
     checked = contribution.data["checked"]

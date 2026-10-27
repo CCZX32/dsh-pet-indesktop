@@ -31,6 +31,35 @@ def create_host(context):
                 id="chat",
                 data={"title": "AI 对话", "order": 640, "icon": "chat"},
             ),
+            # 这三个以前是 core 写死的菜单项，没装本扩展也会出现（点了才提示
+            # 「AI 扩展未安装」）。改成注册项后：没装就没有，装了按默认布局
+            # （`ai.chat:open` / `ai.chat:look_screen` / `ai.chat:screen_capture`）
+            # 回到「播放动画」下面的原位。
+            Contribution(
+                kind="menu",
+                id="open",
+                data={"label": "AI 对话", "command": "open", "order": 21, "icon": "chat"},
+            ),
+            Contribution(
+                kind="menu",
+                id="look_screen",
+                data={
+                    "label": "看看屏幕",
+                    "command": "look_screen",
+                    "order": 22,
+                    "icon": "screen",
+                },
+            ),
+            Contribution(
+                kind="menu",
+                id="screen_capture",
+                data={
+                    "label": "截图提问",
+                    "command": "screen_capture",
+                    "order": 23,
+                    "icon": "capture",
+                },
+            ),
             Contribution(
                 kind="menu",
                 id="proactive",
@@ -38,7 +67,7 @@ def create_host(context):
                     "label": "主动识屏",
                     "command": "proactive_toggle",
                     "order": 55,
-                    "icon": "screen",
+                    "icon": "eye",
                     "checked": proactive_enabled,
                 },
             ),

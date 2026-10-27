@@ -3,10 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QMenu
 
-MENU_ICON_SIZE = QSize(24, 24)
+from .menu_style import install_check_layer
+
+#: 纯模板子菜单（没有注册 `MenuItem`）的图标：老 layout 里没有 icon 键，靠它兜底。
+SUBMENU_ICONS = {
+    "pet_controls": "pet",
+    "tools_help": "tools",
+    "extensions_hub": "application",
+}
 
 
 def add_submenu(parent: QMenu, title: str) -> QMenu:
@@ -178,21 +184,31 @@ class MenuModel:
         else:
             for item in self.visible_items():
                 self._append_item(menu, item)
+        # 勾选标记由行尾层画（QSS 的 indicator 只剩 1px）；这里失败就让异常冒出来，
+        # 否则「所有勾选静默消失」只会被用户发现。
+        install_check_layer(menu)
         return menu
 
     def _apply_style(self, menu: QMenu) -> None:
-        try:
-            from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtGui import QColor, QPalette
 
-            from .menu_style import accent_color, menu_stylesheet
+        from .menu_style import accent_color, menu_stylesheet
 
-            menu.setStyleSheet(menu_stylesheet(font_size=self._font_size))
-            palette = menu.palette()
-            if hasattr(QPalette.ColorRole, "Accent"):
-                palette.setColor(QPalette.ColorRole.Accent, QColor(accent_color()))
-                menu.setPalette(palette)
-        except Exception:
-            pass
+        menu.setStyleSheet(menu_stylesheet(font_size=self._font_size))
+        palette = menu.palette()
+        if hasattr(QPalette.ColorRole, "Accent"):
+            palette.setColor(QPalette.ColorRole.Accent, QColor(accent_color()))
+            menu.setPalette(palette)
+
+    def _submenu_icon_spec(self, item_id: str, node: dict) -> str:
+        """子菜单图标：节点声明 → 已注册项 → 纯模板子菜单的固定字形。"""
+        declared = node.get("icon")
+        if declared:
+            return declared
+        item = self._items.get(item_id)
+        if item is not None and item.icon:
+            return item.icon
+        return SUBMENU_ICONS.get(item_id, "")
 
     def _append_node(self, menu: QMenu, node: dict, placed: set[str]) -> None:
         node_type = node.get("type")
@@ -202,7 +218,7 @@ class MenuModel:
         item_id = str(node.get("id") or "")
         if node_type == "submenu":
             submenu = add_submenu(menu, str(node.get("alias") or node.get("label") or item_id))
-            icon = _resolve_icon(node.get("icon"))
+            icon = _resolve_icon(self._submenu_icon_spec(item_id, node))
             if icon is not None:
                 submenu.setIcon(icon)
             if item_id == "extensions_hub":
@@ -243,10 +259,11 @@ class MenuModel:
             return
         label = str((node or {}).get("alias") or item.label)
         action = menu.addAction(label)
-        if not item.checkable:
-            icon = _resolve_icon((node or {}).get("icon") or item.icon)
-            if icon is not None:
-                action.setIcon(icon)
+        # 勾选项**也要**有图标：QMenu 的勾选列与图标列是同一个位置，勾选标记已挪到行尾
+        # （`menu_style.MenuCheckLayer`），图标列因此空了出来（主分支同口径）。
+        icon = _resolve_icon((node or {}).get("icon") or item.icon)
+        if icon is not None:
+            action.setIcon(icon)
         action.setEnabled(item.enabled and self._availability.get(item.id, True))
         if item.checkable:
             action.setCheckable(True)

@@ -189,11 +189,11 @@ def test_default_template_uses_the_p8_top_level_order() -> None:
         "easter_egg",
         "character",
         "animations_hub",
-        "ai_chat",
-        "look_screen",
+        "ai.chat:open",
+        "ai.chat:look_screen",
         "ai.chat:proactive",
         "ai.agent:enabled",
-        "screen_capture",
+        "ai.chat:screen_capture",
         "playback_speed",
         "size",
         "pet_controls",
@@ -690,7 +690,7 @@ def test_merge_adds_the_proactive_action_to_existing_layouts() -> None:
     assert ids.count("ai.chat:proactive") == 1
     assert ids.index("ai.chat:proactive") > ids.index("animations_hub")
     assert ids.index("ai.chat:proactive") < ids.index("pet_controls"), (
-        "没见过 look_screen 的旧布局，应落在播放段（桌宠控制之前）"
+        "没见过 AI 项的旧布局，应落在播放段（桌宠控制之前）"
     )
 
     again, notes_again = merge_user_layout(merged, registered=registered)
@@ -704,13 +704,13 @@ def test_merge_places_the_proactive_action_right_after_look_screen() -> None:
         "layout_id": DEFAULT_LAYOUT_ID,
         "nodes": [
             {"type": "action", "id": "easter_egg", "visible": True},
-            {"type": "action", "id": "look_screen", "visible": True},
-            {"type": "action", "id": "screen_capture", "visible": True},
+            {"type": "action", "id": "ai.chat:look_screen", "visible": True},
+            {"type": "action", "id": "ai.chat:screen_capture", "visible": True},
             {"type": "action", "id": "quit", "visible": True},
         ],
     }
-    registered = REGISTERED | {"ai.chat:proactive"}
+    registered = REGISTERED | {"ai.chat:proactive", "ai.chat:look_screen", "ai.chat:screen_capture"}
     merged, notes = merge_user_layout(raw, registered=registered)
     ids = _ids(merged["nodes"])
-    assert ids.index("ai.chat:proactive") == ids.index("look_screen") + 1
+    assert ids.index("ai.chat:proactive") == ids.index("ai.chat:look_screen") + 1
     assert "default-action-added:ai.chat:proactive" in notes

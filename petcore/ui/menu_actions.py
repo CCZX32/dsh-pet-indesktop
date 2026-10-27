@@ -338,27 +338,9 @@ def core_items(window) -> dict[str, MenuItem]:
             "playback_speed", "播放速率", populate=populate_speed, icon="speed", order=15
         ),
         "size": MenuItem("size", "大小", populate=populate_scale, icon="size", order=20),
-        "ai_chat": MenuItem(
-            "ai_chat",
-            "AI 对话",
-            callback=lambda: window.run_ai_command("open"),
-            icon="chat",
-            order=21,
-        ),
-        "look_screen": MenuItem(
-            "look_screen",
-            "看看屏幕",
-            callback=lambda: window.run_ai_command("look_screen"),
-            icon="screen",
-            order=22,
-        ),
-        "screen_capture": MenuItem(
-            "screen_capture",
-            "截图提问",
-            callback=lambda: window.run_ai_command("screen_capture"),
-            icon="screen",
-            order=23,
-        ),
+        # AI 对话 / 看看屏幕 / 截图提问 是 ai.chat 扩展注册的菜单项
+        # （`ai.chat:open` / `ai.chat:look_screen` / `ai.chat:screen_capture`），
+        # 没装扩展就不会出现；默认布局按这三个 id 把它们摆在「播放动画」下面。
         "drag_physics": MenuItem(
             "drag_physics",
             "拖动物理",

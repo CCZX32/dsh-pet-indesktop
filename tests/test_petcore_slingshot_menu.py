@@ -18,8 +18,24 @@ from petcore.ui.pet_window import PetWindow
 
 
 class MenuStub:
+    """最小 QMenu 替身：`ui.menu.show_context_menu` 会读/写窗口层级。"""
+
     def __init__(self) -> None:
         self.executed = 0
+        self.flags = 0
+        self.raised = 0
+
+    def windowFlags(self):
+        return self.flags
+
+    def setWindowFlag(self, flag, on: bool = True) -> None:  # noqa: N802 - 对齐 Qt
+        if on:
+            self.flags |= int(flag)
+        else:
+            self.flags &= ~int(flag)
+
+    def raise_(self) -> None:
+        self.raised += 1
 
     def exec(self, *_args) -> None:
         self.executed += 1

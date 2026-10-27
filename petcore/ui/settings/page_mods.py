@@ -255,10 +255,13 @@ class ModsPage(SettingsPage):
             if name and name != display:
                 identity += f" · 英文名：{name}"
             parts.append(identity)
-            if path is not None:
-                parts.append(f"位置：{path}")
             core = mod_id in self._core_ids
             trusted = self._is_trusted(path)
+            if path is not None:
+                parts.append(f"位置：{path}")
+                source = self._source_of(path, trusted=trusted)
+                if source:
+                    parts.append(f"来源：{source}")
             if core:
                 parts.append("状态：已并入 Core，不再作为扩展启用/停用；设置见对应 Core 设置页")
             elif trusted:
@@ -273,6 +276,27 @@ class ModsPage(SettingsPage):
             self.detail_label.setText("\n".join(parts))
             return
         self.detail_label.setText("")
+
+    def _source_of(self, path, *, trusted: bool = False) -> str:
+        """扩展来自哪儿：安装目录（随安装器投放）/ 用户数据目录 / 源码树。
+
+        用户报过「初始没装却在加装扩展里看到旧扩展」——那批是用户数据目录里的旧副本
+        （安装目录那份随旧安装一起删了）。把来源写在详情里，下次一眼能分清是谁装的。
+        判据用 ``trust.is_trusted()``（标记 + 位置），和「授权」那一行同源，不另造口径。
+        """
+        if trusted:
+            return "安装目录（随安装器投放）"
+        try:
+            target = Path(str(path)).resolve()
+        except OSError:
+            return ""
+        try:
+            user_base = (self._root() / "mods").resolve()
+        except OSError:
+            user_base = None
+        if user_base is not None and (target == user_base or user_base in target.parents):
+            return "用户数据目录（导入或插件市场安装）"
+        return "源码树（开发环境）"
 
     def _feature_allowed(self) -> bool:
         config = getattr(self.host, "config", None)

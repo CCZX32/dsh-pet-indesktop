@@ -23,11 +23,11 @@ BUILTIN_DEFAULT_LAYOUT: dict = {
         {"type": "action", "id": "easter_egg", "visible": True, "section": "tools"},
         {"type": "action", "id": "character", "visible": True, "section": "profile"},
         {"type": "action", "id": "animations_hub", "visible": True, "section": "playback"},
-        {"type": "action", "id": "ai_chat", "visible": True, "section": "playback"},
-        {"type": "action", "id": "look_screen", "visible": True, "section": "playback"},
+        {"type": "action", "id": "ai.chat:open", "visible": True, "section": "playback"},
+        {"type": "action", "id": "ai.chat:look_screen", "visible": True, "section": "playback"},
         {"type": "action", "id": "ai.chat:proactive", "visible": True, "section": "playback"},
         {"type": "action", "id": "ai.agent:enabled", "visible": True, "section": "playback"},
-        {"type": "action", "id": "screen_capture", "visible": True, "section": "playback"},
+        {"type": "action", "id": "ai.chat:screen_capture", "visible": True, "section": "playback"},
         {"type": "action", "id": "playback_speed", "visible": False, "section": "playback"},
         {"type": "action", "id": "size", "visible": False, "section": "playback"},
         {"type": "separator", "id": "default.separator-playback", "visible": True},
@@ -102,6 +102,17 @@ LEGACY_ID_MAP = {
     "data": "open_data",
     "primary": "move_to_primary",
     "reset": "return_corner",
+    # L108：AI 三项从 core 菜单项改成 ai.chat 注册项。
+    "ai_chat": "ai.chat:open",
+    "look_screen": "ai.chat:look_screen",
+    "screen_capture": "ai.chat:screen_capture",
+}
+
+#: 同一组改名，用于**已有 layout** 的节点 id 改写（``migrate_p11_menu``）。
+AI_MENU_ID_RENAMES = {
+    "ai_chat": "ai.chat:open",
+    "look_screen": "ai.chat:look_screen",
+    "screen_capture": "ai.chat:screen_capture",
 }
 
 
@@ -726,6 +737,35 @@ def migrate_p10_menu(layout: dict, template: Mapping | None = None) -> bool:
     if moved:
         _clean_submenu_children(nodes)
     return moved
+
+
+def migrate_p11_menu(layout: dict) -> bool:
+    """把旧布局里的 AI 三项裸 id 改写成 ``ai.chat:*`` 注册 id（幂等）。
+
+    L108 之前 ``AI 对话 / 看看屏幕 / 截图提问`` 是 core 菜单项（``ai_chat`` 等裸 id）；
+    改成 ai.chat 扩展的注册项后，用户既有的 ``menu_layout`` 里还留着旧 id，
+    不改写就会「装了扩展也看不见这三项」。``visible``（隐藏记忆）跟着节点走，不用另存。
+    """
+    if not isinstance(layout, dict) or layout.get("layout_id") != DEFAULT_LAYOUT_ID:
+        return False
+    nodes = layout.get("nodes")
+    if not isinstance(nodes, list):
+        return False
+    changed = False
+
+    def walk(items) -> None:
+        nonlocal changed
+        for node in items if isinstance(items, list) else ():
+            if not isinstance(node, dict):
+                continue
+            renamed = AI_MENU_ID_RENAMES.get(str(node.get("id") or ""))
+            if renamed:
+                node["id"] = renamed
+                changed = True
+            walk(node.get("children", []))
+
+    walk(nodes)
+    return changed
 
 
 def _apply_legacy_hidden(nodes, hidden_ids: set[str]) -> None:

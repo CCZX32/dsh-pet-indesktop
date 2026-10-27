@@ -153,6 +153,146 @@ def test_menu_style_and_icons_are_applied(qapp) -> None:
     assert not icon("quit").isNull()
 
 
+def test_checkable_items_keep_their_icon_and_the_check_moves_to_the_row_end(qapp) -> None:
+    """勾选项不许丢图标：勾选标记从图标列挪到行尾（主分支 ModernCheckLayer）。
+
+    回归事实：旧 `_append_item` 对 checkable 项直接跳过 `setIcon`，于是「主动识屏 /
+    Agent 联动 / 免打扰」三项在右键菜单里是空白图标列——它们的 `icon` 声明
+    （screen / agent / pause）被静默丢掉。
+    """
+    from petcore.ui.menu_style import (
+        CHECK_LAYER_ATTR,
+        MenuCheckLayer,
+        menu_stylesheet,
+    )
+
+    model = MenuModel()
+    model.register(MenuItem("quiet", "免打扰", icon="pause", checked=lambda: True))
+    model.register(MenuItem("proactive", "主动识屏", icon="screen", checked=lambda: False))
+    menu = model.build()
+    actions = {action.text(): action for action in menu.actions()}
+    assert not actions["免打扰"].icon().isNull()
+    assert not actions["主动识屏"].icon().isNull()
+    assert actions["免打扰"].isCheckable() and actions["免打扰"].isChecked()
+
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    assert isinstance(layer, MenuCheckLayer)
+    # 勾选列不再吃图标列：indicator 只剩 1px，且不再挂对勾图片。
+    for dark in (False, True):
+        qss = menu_stylesheet(dark)
+        assert "QMenu::indicator { width: 1px; height: 1px; image: none; }" in qss
+        assert "QMenu::indicator:checked" not in qss
+        assert "image: url(" not in qss
+
+
+def test_template_submenus_get_icons(qapp) -> None:
+    """桌宠控制 / 工具与帮助 / 扩展 三个模板子菜单都要有图标。
+
+    `扩展` 明明注册了 `MenuItem(icon="application")`，旧实现只看 `node["icon"]`；
+    另两个是纯模板节点，代码侧的 `SUBMENU_ICONS` 给它们兜底（老 layout 没有 icon 键）。
+    """
+    model = MenuModel()
+    model.apply_layout(
+        (
+            {"type": "submenu", "id": "pet_controls", "label": "桌宠控制", "children": ()},
+            {"type": "submenu", "id": "tools_help", "label": "工具与帮助", "children": ()},
+            {"type": "submenu", "id": "extensions_hub", "label": "扩展", "children": []},
+        )
+    )
+    menu = model.build()
+    submenus = {action.text(): action for action in menu.actions()}
+    for label in ("桌宠控制", "工具与帮助", "扩展"):
+        assert not submenus[label].icon().isNull(), f"{label} 缺图标"
+
+
+def test_check_layer_paints_the_mark_at_the_row_end(qapp) -> None:
+    """行尾勾选：强调色圆 + 白勾，横坐标在行右缘 28px 以内，且只在勾选行出现。"""
+    from petcore.ui.menu_style import CHECK_LAYER_ATTR, accent_color
+
+    model = MenuModel()
+    model.register(MenuItem("on", "开着", icon="pause", checked=lambda: True))
+    model.register(MenuItem("off", "关着", icon="pause", checked=lambda: False))
+    menu = model.build()
+    menu.adjustSize()
+    menu.show()
+    qapp.processEvents()
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    layer.sync()
+
+    image = QImage(layer.size(), QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    layer.render(image)
+
+    accent = QColor(accent_color())
+
+    def is_mark(color: QColor) -> bool:
+        return (
+            color.alpha() > 120
+            and abs(color.red() - accent.red()) < 24
+            and abs(color.green() - accent.green()) < 24
+            and abs(color.blue() - accent.blue()) < 24
+        )
+
+    marks = [
+        (x, y)
+        for y in range(image.height())
+        for x in range(image.width())
+        if is_mark(image.pixelColor(x, y))
+    ]
+    assert marks, "行尾没有画出勾选标记"
+    left = min(point[0] for point in marks)
+    right = max(point[0] for point in marks)
+    assert left >= menu.width() - 32, "勾选标记画进了图标列"
+    assert right <= menu.width() - 8
+    # 只有「开着」那一行有标记：另一行不该出现强调色像素。
+    checked_row = menu.actionGeometry(
+        next(action for action in menu.actions() if action.text() == "开着")
+    )
+    unchecked_row = menu.actionGeometry(
+        next(action for action in menu.actions() if action.text() == "关着")
+    )
+    assert any(checked_row.top() <= y <= checked_row.bottom() for _x, y in marks)
+    assert not any(unchecked_row.top() <= y <= unchecked_row.bottom() for _x, y in marks)
+
+
+def test_check_layer_appears_through_the_real_popup_path(qapp) -> None:
+    """生产路径：build() 装层 → aboutToShow → 0ms 表 sync → 菜单上出现行尾勾。
+
+    单独调 `layer.sync()` 的用例盖不住这条链（chain 断了所有勾选会静默消失），
+    这里真 popup 一次菜单再数强调色像素。
+    """
+    from PySide6.QtCore import QPoint
+
+    from petcore.ui.menu_style import CHECK_LAYER_ATTR, accent_color
+
+    model = MenuModel()
+    model.register(MenuItem("on", "开着", icon="pause", checked=lambda: True))
+    model.register(MenuItem("off", "关着", icon="pause", checked=lambda: False))
+    menu = model.build()
+    menu.popup(QPoint(0, 0))
+    for _ in range(5):
+        qapp.processEvents()
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    try:
+        assert layer.isVisible()
+        assert layer.geometry() == menu.rect()
+        image = menu.grab().toImage()
+        accent = QColor(accent_color())
+        marks = [
+            (x, y)
+            for y in range(image.height())
+            for x in range(max(0, image.width() - 30), image.width())
+            if (lambda colour: colour.alpha() > 120
+                and abs(colour.red() - accent.red()) < 30
+                and abs(colour.green() - accent.green()) < 30
+                and abs(colour.blue() - accent.blue()) < 30)(image.pixelColor(x, y))
+        ]
+        assert marks, "菜单弹出后行尾没有勾选标记"
+    finally:
+        menu.close()
+    assert layer.isHidden()
+
+
 def test_menu_rows_use_the_main_branch_height(qapp) -> None:
     """行高 24px、菜单高 86px（主分支 modern 实测值）。
 

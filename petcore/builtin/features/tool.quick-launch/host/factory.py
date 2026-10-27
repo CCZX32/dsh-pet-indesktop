@@ -49,7 +49,14 @@ class QuickLaunchRuntime:
             name = str(app.get("name") or app.get("path") or "未命名")
             action = menu.addAction(name)
             action.triggered.connect(lambda _checked=False, item=app: _launch(item))
-        menu.exec(QCursor.pos())
+        # 层级规则由 host 统一施加（桌宠置顶时菜单也置顶，免被气泡压住）。
+        # 走 host 的鸭子类型入口，而不是 import petcore.ui.*：扩展只许拿端口。
+        host = getattr(self.context, "host", None)
+        show = getattr(host, "show_context_menu", None)
+        if callable(show):
+            show(menu, QCursor.pos())
+        else:
+            menu.exec(QCursor.pos())
 
     def start(self) -> None:
         return

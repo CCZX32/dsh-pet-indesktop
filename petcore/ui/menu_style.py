@@ -1,72 +1,32 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPointF, QTimer, Qt
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPolygonF
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 # 菜单图标槽位：与主分支 `small_icon_size(menu)`（modern 主题 18）一致。
 # 24px 的旧值让菜单图标比 13px 文字大近一倍，视觉上「图标压字」。
 MENU_ICON_SIZE = 18
-_CHECK_SIZE = 14
-_CHECK_CACHE: dict[bool, str] = {}
+#: 勾选层挂在 QMenu 上的属性名（避免被 GC，也供测试定位）。
+CHECK_LAYER_ATTR = "_menuCheckLayer"
 
 
-def _render_check(path: Path, color: str) -> None:
-    """画一根圆头折线对勾，存成 PNG 供 QSS `url()` 引用。
-
-    QSS 菜单项由样式表引擎绘制，`PE_IndicatorMenuCheckMark` 根本不会回调样式
-    （实测 `drawPrimitive` 一次都不进），所以只能给 `QMenu::indicator:checked`
-    一张现成图片。
-    """
-    pixmap = QPixmap(_CHECK_SIZE, _CHECK_SIZE)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    pen = QPen(QColor(color))
-    pen.setWidthF(2.0)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    size = float(_CHECK_SIZE)
-    painter.drawPolyline(
-        QPolygonF(
-            [
-                QPointF(size * 0.16, size * 0.52),
-                QPointF(size * 0.40, size * 0.78),
-                QPointF(size * 0.86, size * 0.22),
-            ]
-        )
-    )
-    painter.end()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pixmap.save(str(path))
-
-
-def check_image_path(dark: bool | None = None) -> str:
-    """返回当前主题的对勾图片路径（首次调用时生成，之后复用）。"""
-    dark = is_dark() if dark is None else bool(dark)
-    cached = _CHECK_CACHE.get(dark)
-    if cached and Path(cached).exists():
-        return cached
-    name = "dsh-pet-menu-check-dark-v1.png" if dark else "dsh-pet-menu-check-light-v1.png"
-    path = Path(tempfile.gettempdir()) / name
-    if not path.exists():
-        try:
-            _render_check(path, "#e4e4e9" if dark else "#252525")
-        except OSError:
-            return ""
-    value = path.as_posix()
-    _CHECK_CACHE[dark] = value
-    return value
+def is_dark() -> bool:
+    app = QApplication.instance()
+    if app is None:
+        return False
+    color = app.palette().color(QPalette.ColorRole.Window)
+    return color.lightness() < 128
 
 
 # 几何数值对齐主分支 modern 菜单（`pet/context_menus/menu_styles/modern.py`）：
 # 行 24px（min-height 18 + 上下各 3）、图标槽 18px、图标左缘 9px、文字缩进 13px。
 # 旧的 32px 行 + 30px 缩进让 18px 图标在行里只占 56%，菜单整体也比主分支厚一档。
 # 注意：QSS 里不能写 `#` 注释（会被当成 ID 选择器，整条规则失效）。
+#
+# `QMenu::indicator` 只留 1px 且不画：QMenu 的勾选列与图标列是同一个位置，勾选塞在
+# indicator 里 = 勾选项不能有图标（旧实现正是如此，主动识屏/Agent 联动/免打扰全部没
+# 图标）。勾选改由 `MenuCheckLayer` 画在行尾（主分支 `ModernCheckLayer` 同口径）。
 _LIGHT = """
 QMenu {
     background: #ffffff;
@@ -89,8 +49,7 @@ QMenu::separator {
     background: #eceef1;
     margin: 4px 4px;
 }
-QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { left: 9px; }
+QMenu::indicator { width: 1px; height: 1px; image: none; }
 QMenu::right-arrow { width: 7px; height: 11px; margin-right: 10px; }
 """
 
@@ -116,18 +75,9 @@ QMenu::separator {
     background: #3a3a42;
     margin: 4px 4px;
 }
-QMenu::indicator { width: 14px; height: 14px; }
-QMenu::icon { left: 9px; }
+QMenu::indicator { width: 1px; height: 1px; image: none; }
 QMenu::right-arrow { width: 7px; height: 11px; margin-right: 10px; }
 """
-
-
-def is_dark() -> bool:
-    app = QApplication.instance()
-    if app is None:
-        return False
-    color = app.palette().color(QPalette.ColorRole.Window)
-    return color.lightness() < 128
 
 
 def menu_stylesheet(dark: bool | None = None, font_size: int = 13) -> str:
@@ -142,16 +92,7 @@ def menu_stylesheet(dark: bool | None = None, font_size: int = 13) -> str:
         "min_height": max(18, size + 5),
         "icon_size": MENU_ICON_SIZE,
     }
-    image = check_image_path(dark)
-    marker = "QMenu::indicator { width: 14px; height: 14px; }"
-    if not image or marker not in qss:
-        return qss
-    extra = (
-        marker
-        + "\nQMenu::indicator:unchecked { image: none; border: none; background: transparent; }"
-        + "\nQMenu::indicator:checked { image: url(%s); }" % image
-    )
-    return qss.replace(marker, extra)
+    return qss
 
 
 def menu_text_color() -> str:
@@ -161,3 +102,108 @@ def menu_text_color() -> str:
 
 def accent_color() -> str:
     return "#0a84ff"
+
+
+class MenuCheckLayer(QWidget):
+    """行尾勾选层：QSS 的 indicator 让位给图标列，勾选标记自己画。
+
+    主分支 `ModernCheckLayer` 的移植：13px 强调色圆 + 白勾，圆心距行右缘 21px，
+    跟随 `aboutToShow` / `toggled` / `triggered` 重画，所以勾选与取消是即时的。
+    """
+
+    #: 圆的半径与圆心到行右缘的距离（逻辑 px）。
+    RADIUS = 6.5
+    RIGHT_INSET = 21.0
+
+    def __init__(self, menu: QMenu) -> None:
+        super().__init__(menu)
+        self.setObjectName("menuCheckLayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def sync(self) -> None:
+        menu = self.parentWidget()
+        if not isinstance(menu, QMenu):
+            return
+        self.setGeometry(menu.rect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        del event
+        menu = self.parentWidget()
+        if not isinstance(menu, QMenu):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for action in menu.actions():
+            if action.isSeparator() or not action.isVisible():
+                continue
+            if not action.isCheckable() or not action.isChecked():
+                continue
+            rect = menu.actionGeometry(action)
+            if not rect.isValid() or rect.isEmpty():
+                continue
+            center = QPointF(
+                max(self.RADIUS, self.width() - self.RIGHT_INSET),
+                rect.center().y() + 0.5,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(accent_color()))
+            painter.drawEllipse(center, self.RADIUS, self.RADIUS)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            pen = QPen(QColor("#ffffff"), 1.55)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(
+                QPolygonF(
+                    [
+                        QPointF(center.x() - 3.7, center.y()),
+                        QPointF(center.x() - 1.2, center.y() + 2.4),
+                        QPointF(center.x() + 3.8, center.y() - 2.8),
+                    ]
+                )
+            )
+
+
+def _sync_menu_checks(menu: QMenu) -> None:
+    layer = install_check_layer(menu)
+    if layer is not None:
+        layer.sync()
+
+
+def install_check_layer(menu: QMenu) -> MenuCheckLayer | None:
+    """给菜单（含子菜单）挂行尾勾选层；可重复调用，用于补接后来加进来的项。"""
+    if not isinstance(menu, QMenu):
+        return None
+    layer = getattr(menu, CHECK_LAYER_ATTR, None)
+    if not isinstance(layer, MenuCheckLayer):
+        layer = MenuCheckLayer(menu)
+        setattr(menu, CHECK_LAYER_ATTR, layer)
+        menu.aboutToShow.connect(
+            lambda menu=menu: QTimer.singleShot(0, menu, lambda: _sync_menu_checks(menu))
+        )
+        menu.aboutToHide.connect(layer.hide)
+        menu.triggered.connect(lambda _action=None, layer=layer: layer.update())
+    for action in menu.actions():
+        submenu = action.menu()
+        if isinstance(submenu, QMenu):
+            install_check_layer(submenu)
+        if action.isCheckable() and not action.property("menuCheckBound"):
+            action.setProperty("menuCheckBound", True)
+            action.toggled.connect(layer.update)
+    return layer
+
+
+__all__ = [
+    "CHECK_LAYER_ATTR",
+    "MENU_ICON_SIZE",
+    "MenuCheckLayer",
+    "accent_color",
+    "install_check_layer",
+    "is_dark",
+    "menu_stylesheet",
+    "menu_text_color",
+]

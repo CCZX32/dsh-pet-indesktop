@@ -40,6 +40,14 @@ ICON_CHOICES = (
     "settings",
     "info",
     "quit",
+    "pet",
+    "tools",
+    "web",
+    "todo",
+    "download",
+    "sparkles",
+    "capture",
+    "eye",
 )
 PICK_IMAGE = "选择图片文件…"
 

@@ -336,6 +336,29 @@ def test_shipped_mod_can_be_removed_but_keeps_personal_data(app, tmp_path, monke
     assert "可在此卸载" not in page.detail_label.text()
 
 
+def test_details_say_where_each_mod_came_from(app, tmp_path, monkeypatch):
+    """「来源」行：随安装器投放 vs 用户数据目录 vs 源码树。
+
+    用户把用户目录里的旧副本误当成「安装器装进来的」（2026-10-27 反馈），
+    详情里必须一眼能分清。
+    """
+    page = ModsPage(_host_with_mods(tmp_path, monkeypatch))
+    rows = {
+        page.mods_list.item(row).data(Qt.ItemDataRole.UserRole): row
+        for row in range(page.mods_list.count())
+    }
+
+    page.mods_list.setCurrentRow(rows["fun.festival"])
+    text = page.detail_label.text()
+    assert "来源：安装目录（随安装器投放）" in text
+
+    page.mods_list.setCurrentRow(rows["fun.divination"])
+    assert "来源：用户数据目录（导入或插件市场安装）" in page.detail_label.text()
+
+    page.mods_list.setCurrentRow(rows["fun.self-talk"])
+    assert "来源：源码树（开发环境）" in page.detail_label.text()
+
+
 # ---------------------------------------------------------------- manifest 中文名
 def _write_pack(root: Path, extra: dict | None = None) -> Path:
     pack = root / "demo.one"
