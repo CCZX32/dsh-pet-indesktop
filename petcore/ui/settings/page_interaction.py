@@ -148,7 +148,8 @@ class InteractionPage(SettingsPage):
             balance_card.add_row(
                 "点击查看余额",
                 self._checks["click_show_balance"],
-                "左键点击桌宠时异步查询余额并用气泡展示；按当前宠物保存，不阻塞点击动画。",
+                "左键点击桌宠时异步查询余额并用气泡展示；按当前宠物保存，不阻塞点击动画。"
+                "开启后余额气泡先冒，点击台词等它收起后再接上。",
             )
             balance_card.add_row(
                 "峰谷提示颜色",

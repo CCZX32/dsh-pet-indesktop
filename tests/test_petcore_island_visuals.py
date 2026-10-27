@@ -130,7 +130,6 @@ def test_depth_constants_match_the_main_branch() -> None:
     assert layout.SHEEN_ALPHA == {"dark": 14, "light": 0, "glass": 34}
     assert layout.sheen_alpha("light") == 0
     assert layout.bevel_colors("dark") == ((255, 255, 255, 26), (0, 0, 0, 46))
-    assert layout.icon_ring_color("light") == (0, 0, 0, 20)
     assert layout.GLASS_STOPS[0][1][3] == 214 and layout.GLASS_STOPS[-1][1][3] == 196
     assert layout.UNIT_ALPHA == 0.7
 
@@ -517,7 +516,8 @@ def test_bevel_draws_both_halves(make_island) -> None:
     assert top_half > 0 and bottom_half > 0
 
 
-def test_icon_ring_is_drawn_instead_of_a_dark_hole(make_island) -> None:
+def test_capsule_has_no_header_dot_and_content_starts_at_the_padding(make_island) -> None:
+    """头标（左侧强调色圆点）已退役：内容直接从 CONTENT_PAD 起排，不留空槽。"""
     island = make_island(
         {"island_show_name": False, "island_show_status": False, "island_metrics": []}
     )
@@ -525,9 +525,8 @@ def test_icon_ring_is_drawn_instead_of_a_dark_hole(make_island) -> None:
     layer = island._content_layer()  # noqa: SLF001
     assert layer is not None
     image = layer.toImage()
-    # 头标圆心附近不该是「深色实心洞」：底板是亮强调色，圆内亮度应高于深色底。
-    centre = image.pixelColor(
-        int(island_ui.CAPSULE_INSET + island_ui.CONTENT_PAD + island_ui.ICON_PX / 2),
-        int(island_ui.CAPSULE_HEIGHT / 2),
-    )
-    assert centre.alpha() > 60
+    centre_x = int(island_ui.CAPSULE_INSET + island_ui.CONTENT_PAD + 10)
+    centre_y = int(island_ui.CAPSULE_HEIGHT / 2)
+    # 旧头标圆心位置必须干净：没有一个强调色实心圆压在内容行左端。
+    assert image.pixelColor(centre_x, centre_y).alpha() == 0
+    assert island._lead_trail("")[0] == island_ui.CONTENT_PAD  # noqa: SLF001

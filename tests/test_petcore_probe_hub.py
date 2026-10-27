@@ -22,7 +22,6 @@ class _Config:
         self.data = {
             "island_enabled": True,
             "island_metrics": list(metrics),
-            "island_show_icon": True,
             "island_show_name": True,
             "island_show_status": True,
             "island_info_mode": "time",

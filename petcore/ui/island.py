@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..island import layout, segments as isl
-from ..platform import netmon, sysmon
+from ..platform import diskmon, netmon, sysmon
 from ..performance import runtime_metrics
 
 logger = logging.getLogger("petcore.ui.island")
@@ -89,12 +89,18 @@ SQUISH_DAMPING = 8.5
 SQUISH_MIN = 0.85
 SQUISH_MAX = 1.12
 SQUISH_V_MAX = 3.5
+#: 撞岛定向踢动：绘制层位移弹簧（窗口几何不动）。**必须钳**——窗口只有 44px 高、
+#: 上下各留 6px 内缩，位移超过 3px 就会被裁掉或压到边缘像素。
+KICK_STIFFNESS = 160.0
+KICK_DAMPING = 14.0
+KICK_MAX_PX = 3.0
+KICK_V_MAX = 220.0
+#: 一次撞击的动效时间上限：连撞每击各有段动画，最后一击之后最多再跑这么久。
+BUMP_ANIM_MAX_S = 0.9
 #: 桌宠让开后被挪走的胶囊，连续这么多个采样拍都无遮挡才回到原位（防抖动）。
 AVOID_RESTORE_TICKS = 3
-#: 内容行左内边距 / 图标 / 图标与名字间距 / 名字上限与间距。
+#: 内容行左内边距 / 名字上限与间距（头标已退役，内容从 CONTENT_PAD 直接起排）。
 CONTENT_PAD = layout._CONTENT_PAD_PX
-ICON_PX = layout._ICON_PX
-ICON_GAP = layout._ICON_GAP_PX
 NAME_MAX = layout._NAME_MAX_PX
 NAME_GAP = layout._NAME_GAP_PX
 #: 告警点尺寸（行尾状态点）。
@@ -143,8 +149,17 @@ ACCENTS = {
     "orange": "#ffa94d",
 }
 ALERT_COLORS = {"warn": "#f0b44c", "crit": "#f2777a"}
+#: 磁盘段在胶囊上的标签：明确是 **C 盘**，不是「磁盘占用率」。
+DISK_LABEL = "C 盘"
 #: 卡片行里的段名（胶囊上是纯 glyph 的段也要有可读名字）。
-CARD_NAMES = {"network": "网络", "cpu": "CPU", "mem": "内存", "gpu": "GPU", "fps": "帧率"}
+CARD_NAMES = {
+    "network": "网络",
+    "cpu": "CPU",
+    "mem": "内存",
+    "disk": "C 盘剩余",
+    "gpu": "GPU",
+    "fps": "帧率",
+}
 #: 主信息段（时间）的测宽样本：定宽形态，时间跳变不推邻居。
 TIME_BOX_SAMPLE = "88:88"
 
@@ -154,9 +169,9 @@ class IslandConfig:
     """一次刷新读到的一组设置（`refresh_from_config()` 现取）。"""
 
     enabled: bool = False
-    show_icon: bool = True
     show_name: bool = True
     show_status: bool = True
+    show_messages: bool = False
     info_mode: str = "time"
     custom_text: str = ""
     style: str = "dark"
@@ -181,9 +196,9 @@ class IslandConfig:
             metrics = []
         return cls(
             enabled=bool(value("island_enabled", False)),
-            show_icon=bool(value("island_show_icon", True)),
             show_name=bool(value("island_show_name", True)),
             show_status=bool(value("island_show_status", True)),
+            show_messages=bool(value("island_show_messages", False)),
             info_mode=str(value("island_info_mode", "time")),
             custom_text=str(value("island_custom_text", "") or ""),
             style=str(value("island_style", "dark")),
@@ -260,6 +275,11 @@ class DynamicIsland(QWidget):
         self._hover_scale_target = 1.0
         self._squish = 1.0
         self._squish_v = 0.0
+        self._kick_x = 0.0
+        self._kick_y = 0.0
+        self._kick_vx = 0.0
+        self._kick_vy = 0.0
+        self._bump_anim_left = 0.0
         self._geometry_callback = None
         # ---- 五态状态点 / 声纳 / 呼吸 / 内容位图缓存（主分支同源，数值在 layout 里）
         self._agent_state = layout.AGENT_IDLE
@@ -280,6 +300,10 @@ class DynamicIsland(QWidget):
 
         self.net_monitor = netmon.NetMonitor(interval=1.0)
         self.sys_monitor = sysmon.SysMonitor(interval=1.0)
+        # 磁盘剩余按分钟级变化：5 秒一拍（钳制区间也在 diskmon 里），比这更快纯浪费。
+        self.disk_monitor = diskmon.DiskMonitor(
+            interval=diskmon.DEFAULT_INTERVAL_SECONDS
+        )
 
         self._clock = QTimer(self)
         self._clock.setInterval(1000)
@@ -478,6 +502,27 @@ class DynamicIsland(QWidget):
         if self.isVisible():
             self.update()
 
+    def bump(self, strength: float = 1.0, dir_x: float = 0.0, dir_y: float = 0.0) -> None:
+        """被桌宠撞到：果冻冲量 + 定向踢动（只作用于绘制层，窗口几何不动）。
+
+        ``strength`` 由碰撞侧按``接近速度``换算并已在那边钳过上限；这里再钳一次
+        （``0.2..3.0``）——多宠连撞会叠加，不钳会把冲量泵到画不出来。
+        ``dir_x/dir_y`` 是「岛被顶着的方向」，即桌宠法线取反。
+        """
+        if self._expanded or self._strip_visible():
+            # 展开态是整块面板（内部控件跟着画面抖会糊），细条态一像素内容都不画。
+            return
+        strength = max(0.2, min(float(strength), 3.0))
+        self._squish_v = max(-SQUISH_V_MAX, min(SQUISH_V_MAX, self._squish_v - 1.15 * strength))
+        kick_vx = self._kick_vx + float(dir_x) * 110.0 * strength
+        kick_vy = self._kick_vy + float(dir_y) * 110.0 * strength
+        self._kick_vx = max(-KICK_V_MAX, min(KICK_V_MAX, kick_vx))
+        self._kick_vy = max(-KICK_V_MAX, min(KICK_V_MAX, kick_vy))
+        self._bump_anim_left = BUMP_ANIM_MAX_S
+        self._ensure_anim_timer()
+        if self.isVisible():
+            self.update()
+
     def set_pet_visible(self, visible: bool) -> None:
         """桌宠整体显隐（托盘/菜单）：隐藏态的状态点是空心中性色。"""
         value = bool(visible)
@@ -566,6 +611,10 @@ class DynamicIsland(QWidget):
             self._rebuild_card()
 
     def add_message(self, text: str) -> None:
+        if not self.settings.show_messages:
+            # 消息显示关掉 = 岛不接收消息：不进历史、也不弹事件果冻（否则用户会看到
+            # 「关了还在动」）。胶囊读数与余额反馈不受影响。
+            return
         message = " ".join(str(text or "").split())[:240]
         if not message:
             return
@@ -608,6 +657,7 @@ class DynamicIsland(QWidget):
         self._card_timer.stop()
         self.net_monitor.stop()
         self.sys_monitor.stop()
+        self.disk_monitor.stop()
 
     def set_visible(self, visible: bool) -> None:
         if visible and not self.isVisible():
@@ -659,7 +709,12 @@ class DynamicIsland(QWidget):
             metric in self.settings.metrics and metric not in folded
             for metric in (isl.CPU, isl.MEM)
         )
-        for monitor, wanted in ((self.net_monitor, wants_net), (self.sys_monitor, wants_sys)):
+        wants_disk = visible and isl.DISK in self.settings.metrics and isl.DISK not in folded
+        for monitor, wanted in (
+            (self.net_monitor, wants_net),
+            (self.sys_monitor, wants_sys),
+            (self.disk_monitor, wants_disk),
+        ):
             # Reconcile desired state, not thread liveness: a cancelled OS reader
             # may still be exiting. Retrying start on the next tick is safe.
             if wanted:
@@ -795,6 +850,38 @@ class DynamicIsland(QWidget):
             state=state,
         )
 
+    def _disk_segment(self) -> layout._InfoSeg:
+        """C 盘剩余：单盒（``412G``，单位不随读数在 G/T 间跳，行宽因此恒定）。"""
+        sample = self.disk_monitor.snapshot()
+        if sample is None:
+            return layout._InfoSeg(
+                kind=layout.KIND_METRIC,
+                seg_id=isl.DISK,
+                label=DISK_LABEL,
+                text="",
+                box_text=diskmon.FREE_FIELD_SAMPLE,
+                state=isl.STATE_SAMPLING,
+            )
+        if sample.free_bytes is None:
+            return layout._InfoSeg(
+                kind=layout.KIND_METRIC,
+                seg_id=isl.DISK,
+                label=DISK_LABEL,
+                text=diskmon.UNKNOWN_TEXT,
+                box_text=diskmon.FREE_FIELD_SAMPLE,
+                state=isl.STATE_ERROR,
+                detail={"error_reason": sample.error or "读不到磁盘容量"},
+            )
+        return layout._InfoSeg(
+            kind=layout.KIND_METRIC,
+            seg_id=isl.DISK,
+            label=DISK_LABEL,
+            text=sample.text,
+            box_text=diskmon.FREE_FIELD_SAMPLE,
+            state=isl.STATE_OK,
+            detail={"note": sample.note} if sample.note else {},
+        )
+
     def _metric_segments(self) -> tuple:
         row = []
         for metric_id in self.settings.metrics:
@@ -802,6 +889,8 @@ class DynamicIsland(QWidget):
                 row.append(self._percent_segment(metric_id))
             elif metric_id == isl.NETWORK:
                 row.append(self._network_segment())
+            elif metric_id == isl.DISK:
+                row.append(self._disk_segment())
             elif metric_id in (isl.GPU, isl.FPS):
                 snapshot = self._probe_segments.get(metric_id)
                 if snapshot is None:
@@ -829,8 +918,6 @@ class DynamicIsland(QWidget):
 
     def _lead_trail(self, name_text: str) -> tuple[float, float]:
         lead = CONTENT_PAD
-        if self.settings.show_icon:
-            lead += ICON_PX + ICON_GAP
         trail = CONTENT_PAD
         if self.settings.show_status:
             trail = STATUS_GAP + STATUS_DOT + STATUS_GAP
@@ -887,7 +974,6 @@ class DynamicIsland(QWidget):
     def _width_key_now(self) -> tuple:
         return (
             self._font_key(),
-            self.settings.show_icon,
             self.settings.show_name,
             self.settings.show_status,
             self.settings.info_mode,
@@ -1138,7 +1224,38 @@ class DynamicIsland(QWidget):
             "peek": self._hover_peek,
             "expanded": self._expanded,
             "animating": self._anim_timer.isActive(),
+            "dragging": self._dragging,
         }
+
+    @property
+    def dragging(self) -> bool:
+        """用户正拿着胶囊拖（碰撞侧据此采样岛速、并在松手那一拍作废基线）。"""
+        return bool(self._dragging)
+
+    @property
+    def geometry_animating(self) -> bool:
+        """几何插值中（停靠/滑出/展开/收起）：此刻的位移不是拖拽。"""
+        return self._geo_to is not None
+
+    def collision_rect(self) -> tuple[int, int, int, int] | None:
+        """碰撞体矩形：**只覆盖胶囊本体**，卡片区域不是幽灵墙。
+
+        不可见 / 未启用 / 停靠细条 / 几何动画中返回 ``None``——细条 16×64 被当成
+        直径 44 的胶囊会把贴边桌宠挤走；动画峰值上千 px/s 会凭空拍飞静止桌宠。
+        返回的是屏幕坐标（与桌宠 ``body_rect()`` 同一坐标系），窗口层只做 QRect
+        互转，判定在 ``petcore/engine/island_field.py``。
+        """
+        if not self.settings.enabled or not self.isVisible():
+            return None
+        if self._strip_visible() or self._geo_to is not None:
+            return None
+        rect = self.geometry()
+        return (
+            int(rect.x()),
+            int(rect.y()),
+            int(rect.width()),
+            int(min(rect.height(), CAPSULE_HEIGHT)),
+        )
 
     def _strip_visible(self) -> bool:
         """细条态 = 已停靠（开关也开着）+ 没滑出 + 没展开；内容一个像素都不画。"""
@@ -1219,7 +1336,7 @@ class DynamicIsland(QWidget):
         self._geometry_callback = callback
 
     def _emit_geometry_changed(self) -> None:
-        callback = self._geometry_callback
+        callback = getattr(self, "_geometry_callback", None)
         if not callable(callback):
             return
         try:
@@ -1272,6 +1389,11 @@ class DynamicIsland(QWidget):
             or abs(self._hover_scale_v) > 0.005
             or abs(self._squish - 1.0) > 0.01
             or abs(self._squish_v) > 0.06
+            or abs(self._kick_x) > 0.05
+            or abs(self._kick_y) > 0.05
+            or abs(self._kick_vx) > 0.5
+            or abs(self._kick_vy) > 0.5
+            or self._bump_anim_left > 0.0
         )
 
     def _on_anim_tick(self) -> None:
@@ -1297,6 +1419,9 @@ class DynamicIsland(QWidget):
                 # 终点再对齐一次（幂等）：动画途中屏可能变了。
                 self._set_free_geometry(self._target_rect())
                 self._apply_fixed_size()
+                # 落定再补发一拍：动画期间碰撞墙是关的（速度不可信），结束这一拍
+                # 必须让宿主重算一次，否则被动画覆盖的桌宠要等到下次移动才被推出。
+                self._emit_geometry_changed()
         # 悬停缩放弹簧（展开态整窗缩放会切卡片，目标强制 1.0）
         scale_target = 1.0 if self._expanded else self._hover_scale_target
         self._hover_scale_v += (
@@ -1310,12 +1435,37 @@ class DynamicIsland(QWidget):
                 (1.0 - self._squish) * SQUISH_STIFFNESS - self._squish_v * SQUISH_DAMPING
             ) * dt
             self._squish = max(SQUISH_MIN, min(SQUISH_MAX, self._squish + self._squish_v * dt))
+            # 撞岛定向踢动：绘制层位移弹簧，钳在 ±KICK_MAX_PX（44px 窗没有余量）。
+            self._kick_vx += (
+                (0.0 - self._kick_x) * KICK_STIFFNESS - self._kick_vx * KICK_DAMPING
+            ) * dt
+            self._kick_vy += (
+                (0.0 - self._kick_y) * KICK_STIFFNESS - self._kick_vy * KICK_DAMPING
+            ) * dt
+            self._kick_x = max(
+                -KICK_MAX_PX, min(KICK_MAX_PX, self._kick_x + self._kick_vx * dt)
+            )
+            self._kick_y = max(
+                -KICK_MAX_PX, min(KICK_MAX_PX, self._kick_y + self._kick_vy * dt)
+            )
+        self._bump_anim_left = max(0.0, self._bump_anim_left - dt)
         if not self._animating():
             self._anim_timer.stop()
             self._hover_scale_v = 0.0
             self._squish_v = 0.0
             self._squish = 1.0
-        if changed or self._hover_scale != 1.0 or self._squish != 1.0:
+            self._kick_x = 0.0
+            self._kick_y = 0.0
+            self._kick_vx = 0.0
+            self._kick_vy = 0.0
+            self._bump_anim_left = 0.0
+        if (
+            changed
+            or self._hover_scale != 1.0
+            or self._squish != 1.0
+            or self._kick_x != 0.0
+            or self._kick_y != 0.0
+        ):
             self.update()
 
 
@@ -1349,6 +1499,7 @@ class DynamicIsland(QWidget):
             muted=palette["muted"],
             accent=self.accent_color().name(),
         )
+        self.card.set_show_messages(bool(self.settings.show_messages))
         self.card.setWidth_and_rows(self._card_width() - 2 * CAPSULE_INSET, self._card_rows())
         self._apply_card_size()
 
@@ -1363,8 +1514,9 @@ class DynamicIsland(QWidget):
             if snapshot.state == isl.STATE_ERROR:
                 detail = str(snapshot.detail.get("error_reason") or detail or "读取失败")
             rows.append((snapshot.label or snapshot.id, snapshot.text or "--", detail, severity))
-        for message in reversed(tuple(self._recent_messages)):
-            rows.append(("最近消息", message, "", ""))
+        if self.settings.show_messages:
+            for message in reversed(tuple(self._recent_messages)):
+                rows.append(("最近消息", message, "", ""))
         for metric_id in self.settings.metrics:
             reason = self._probe_unavailable_reason(metric_id)
             if reason:
@@ -1385,7 +1537,10 @@ class DynamicIsland(QWidget):
                 rows.append((name, "--", reason, isl.ALERT_CRIT))
                 continue
             value = f"{seg.text}{seg.unit}" if seg.state == isl.STATE_OK else "--"
-            detail = "采样中" if seg.state == isl.STATE_SAMPLING else ""
+            if seg.state == isl.STATE_SAMPLING:
+                detail = "采样中"
+            else:
+                detail = str(seg.detail.get("note") or "")
             rows.append((name, value, detail, seg.severity))
         if not rows:
             rows.append(("提示", "没有启用的指标", "设置 → 外观与交互 → 灵动岛", ""))
@@ -1607,6 +1762,11 @@ class DynamicIsland(QWidget):
         self._hover_scale_target = 1.0
         self._squish = 1.0
         self._squish_v = 0.0
+        self._kick_x = 0.0
+        self._kick_y = 0.0
+        self._kick_vx = 0.0
+        self._kick_vy = 0.0
+        self._bump_anim_left = 0.0
 
     def enterEvent(self, event) -> None:
         if self._expanded:
@@ -1634,7 +1794,18 @@ class DynamicIsland(QWidget):
 
     def hideEvent(self, event) -> None:
         self.stop()
+        self._emit_geometry_changed()  # 隐藏 = 撤墙：碰撞侧要清掉速度与接触表
         super().hideEvent(event)
+
+    def moveEvent(self, event) -> None:
+        # 位置是碰撞体的一部分：所有移动路径（拖拽、避让、落位、夹回）都必须通知
+        # 碰撞侧，否则墙会停在旧位置（主分支在桥里装 Move/Resize 事件过滤器，同理）。
+        super().moveEvent(event)
+        self._emit_geometry_changed()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._emit_geometry_changed()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1642,6 +1813,7 @@ class DynamicIsland(QWidget):
         # 位图缓存带 DPR 与宽度：显示时一律重建，避免用上屏前的画布。
         self._content_key = None
         self._sync_sonar()
+        self._emit_geometry_changed()  # 显示 = 复墙
         # 隐藏可能打断停靠/滑出动画：显示时先把几何收口到目标位，再起表。
         self._geo_from = None
         self._geo_to = None
@@ -1688,6 +1860,9 @@ class DynamicIsland(QWidget):
             breath = layout.breath_offset(time.monotonic() - self._breathe_started)
         if breath:
             painter.translate(0, breath)
+        # 撞岛定向踢动：只搬绘制层（窗口几何永远由用户拖拽决定），已钳 ±3px。
+        if self._kick_x or self._kick_y:
+            painter.translate(self._kick_x, self._kick_y)
         # 悬停缩放绕**胶囊中心**（展开态不缩放：整窗缩放会把卡片切边）。
         if not self._expanded and abs(self._hover_scale - 1.0) > 0.001:
             cx = self.width() / 2.0
@@ -1823,7 +1998,6 @@ class DynamicIsland(QWidget):
             round(float(self.devicePixelRatioF() or 1.0), 2),
             self._font_key(),
             str(self.settings.style or "dark"),
-            bool(self.settings.show_icon),
             bool(self.settings.show_name),
             bool(self.settings.show_status),
             str(self.settings.accent or "blue"),
@@ -1863,7 +2037,6 @@ class DynamicIsland(QWidget):
             plan.level if plan is not None else 0,
             plan.name if plan is not None else "",
             tuple(plan.folded) if plan is not None else (),
-            bool(self.settings.show_icon),
             bool(self.settings.show_name),
             bool(self.settings.show_status),
         )
@@ -2112,18 +2285,6 @@ class DynamicIsland(QWidget):
             return
         baseline = CAPSULE_HEIGHT / 2.0 + BASELINE_DY
         x = CAPSULE_INSET + CONTENT_PAD
-        if self.settings.show_icon:
-            circle = QRectF(x, CAPSULE_HEIGHT / 2.0 - ICON_PX / 2.0, ICON_PX, ICON_PX)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self.accent_color())
-            painter.drawEllipse(circle)
-            # 头标内环（主分支口径）：旧实现画的是深色实心圆，缩到 18px 像个洞。
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(
-                QPen(QColor(*layout.icon_ring_color(self.settings.style)), 1.0)
-            )
-            painter.drawEllipse(circle.adjusted(0.5, 0.5, -0.5, -0.5))
-            x += ICON_PX + ICON_GAP
         if plan.name:
             painter.setFont(self._font("name"))
             painter.setPen(QColor(*palette["muted"]))
@@ -2244,6 +2405,8 @@ class _IslandCard(QWidget):
         self._refresh_button.clicked.connect(self.balance_requested.emit)
         self._settings_button.clicked.connect(self.settings_requested.emit)
         self._clear_button.clicked.connect(self.messages_cleared.emit)
+        # 消息显示默认关闭：没有历史可清，「清除消息」跟着收起。
+        self._clear_button.setVisible(False)
         self._text_color = "rgb(235, 238, 245)"
         self._muted_color = "rgb(160, 170, 190)"
         self._accent_color = "#40b8ff"
@@ -2260,6 +2423,10 @@ class _IslandCard(QWidget):
                 f"QPushButton {{ color: {self._text_color}; padding: 3px 8px; }}"
                 f"QPushButton:hover {{ border: 1px solid {self._accent_color}; }}"
             )
+
+    def set_show_messages(self, visible: bool) -> None:
+        """消息显示关掉时，连「清除消息」按钮一起收起来（没有历史可清）。"""
+        self._clear_button.setVisible(bool(visible))
 
     def setWidth_and_rows(self, width: int, rows: list[tuple[str, str, str, str]]) -> None:
         while len(self._rows) < len(rows):

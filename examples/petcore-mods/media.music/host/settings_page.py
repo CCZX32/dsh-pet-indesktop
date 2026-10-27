@@ -14,12 +14,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QWidget,
@@ -27,13 +29,14 @@ from PySide6.QtWidgets import (
 
 from petcore.ui.settings.base import SettingsPage, make_checkbox
 
-from . import now_playing, players
+from . import audio_sessions, diagnostics, now_playing, players, recognizer, sampling
 from .runtime import DEFAULTS
 
 
 class MusicPage(SettingsPage):
     title = "音乐"
     detect_done = Signal(str)
+    diagnose_done = Signal(str)
     transport_done = Signal(str)
 
     def __init__(self, host, parent=None):
@@ -76,18 +79,39 @@ class MusicPage(SettingsPage):
             "暂停或静音超过这个时间才停止唱歌动画；歌与歌之间的空隙不会打断。",
         )
 
-        self.detect_button = QPushButton("检测当前播放", self)
+        # -------------------------------------------------------- 识别诊断
+        diagnose_card = self.section("识别诊断", level=3)
+        buttons = QWidget(self)
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        self.detect_button = QPushButton("检测当前播放", buttons)
         self.detect_button.clicked.connect(self._detect)
-        card.add_row(
-            "当前曲目",
-            self.detect_button,
-            "只在你点它时读一次系统媒体会话；读不到会说明原因。",
+        self.copy_button = QPushButton("复制诊断", buttons)
+        self.copy_button.clicked.connect(self._copy_diagnostics)
+        self.copy_button.setEnabled(False)
+        button_layout.addWidget(self.detect_button)
+        button_layout.addWidget(self.copy_button)
+        button_layout.addStretch(1)
+        diagnose_card.add_row(
+            "识别诊断",
+            buttons,
+            "只在你点它时采一次：系统媒体会话、音频会话、播放器窗口标题各看到了什么，"
+            "以及最终判定为什么这么下。不联网、不录音。",
+            expand=True,
         )
 
         self.detect_status = QLabel("", self)
         self.detect_status.setObjectName("settingHint")
         self.detect_status.setWordWrap(True)
-        card.add_row("检测结果", self.detect_status, "", expand=True)
+        diagnose_card.add_row("检测结果", self.detect_status, "", expand=True)
+
+        self.diagnose_view = QPlainTextEdit(self)
+        self.diagnose_view.setReadOnly(True)
+        self.diagnose_view.setObjectName("musicDiagnostics")
+        self.diagnose_view.setMinimumHeight(150)
+        self.diagnose_view.setPlaceholderText("点「检测当前播放」后，这里会列出三个来源的采样与判定。")
+        diagnose_card.add_row("详细诊断", self.diagnose_view, "", expand=True)
 
         # -------------------------------------------------------- 歌词
         lyric_card = self.section("歌词显示", level=3)
@@ -190,6 +214,24 @@ class MusicPage(SettingsPage):
             expand=True,
         )
 
+        self.title_format = QLineEdit(
+            str(config.get("music_title_format", DEFAULTS["music_title_format"]) or ""),
+            self,
+        )
+        self.title_format.setPlaceholderText("留空 = 自动（不猜谁在前面）")
+        self.title_format.setMaxLength(120)
+        self.title_format.editingFinished.connect(
+            lambda: self._write("music_title_format", self.title_format.text().strip())
+        )
+        filter_card.add_row(
+            "播放器标题格式（高级）",
+            self.title_format,
+            "只有「不注册系统媒体、只能读窗口标题」的播放器（如 foobar2000）用得到。"
+            "通常留空；对不上时把播放器「窗口标题」设置里那串格式表达式原样贴进来，"
+            "例如 %artist% - %title%。",
+            expand=True,
+        )
+
         # -------------------------------------------------------- 切歌
         transport_card = self.section("切歌与播放控制", level=3)
         buttons = QWidget(self)
@@ -245,11 +287,15 @@ class MusicPage(SettingsPage):
             )
 
         self.add_note(
-            "隐私与网络：歌词只从公开接口取文本（网易云 / 酷狗，首选直连、单次预算 8 秒、"
-            "响应上限 2 MB），不下载音频、不记录收听历史；失败一首歌只试一轮。"
+            "识别方式：系统媒体会话为主源；再用系统音频会话判断「这个进程是否真的在出声」；"
+            "不在系统里登记播放信息的播放器（如 foobar2000 / AIMP / Winamp）读窗口标题兜底，"
+            "且只有该进程正在出声才采信。全程不录音、不做听声识曲。"
+            "隐私与网络：歌词只从公开接口取文本（网易云 / 酷狗 / lrclib，单次预算 8 秒、"
+            "响应上限 2 MB），不下载音频、不记录收听历史；同一首要失败冷却后才会重试。"
         )
 
         self.detect_done.connect(self._on_detect_done)
+        self.diagnose_done.connect(self._on_diagnose_done)
         self.transport_done.connect(self._on_transport_done)
         self._initial = self._snapshot()
 
@@ -266,96 +312,85 @@ class MusicPage(SettingsPage):
         raw = self.config().get("music_player_paths", {})
         return dict(raw) if isinstance(raw, dict) else {}
 
-    def _snapshot(self) -> tuple:
-        return (
-            bool(self.enabled.isChecked()),
-            bool(self.sing.isChecked()),
-            int(self.grace.value()),
-            bool(self.lyric.isChecked()),
-            round(float(self.lead.value()), 1),
-            int(self.cache.value()),
-            bool(self.browser.isChecked()),
-            str(self.player.currentData() or ""),
-            tuple(
-                (key, self.path_edits[key].text().strip())
-                for key in players.player_keys()
-                if key in self.path_edits
-            ),
-            bool(self.filter_enabled.isChecked()),
-            str(self.filter_extra.text().strip()),
-        )
+    def _snapshot(self) -> dict:
+        """当前控件状态（取消时按它整组回滚）。
+
+        用字典而不是位置元组：元组一旦插字段，``confirm_save`` / ``discard_changes``
+        里的下标就会静默错位（这一页已经被插过好几轮键）。
+        """
+        return {
+            "music_enabled": bool(self.enabled.isChecked()),
+            "music_sing_enabled": bool(self.sing.isChecked()),
+            "music_sing_grace_seconds": int(self.grace.value()),
+            "music_lyric_enabled": bool(self.lyric.isChecked()),
+            "music_lyric_lead_seconds": round(float(self.lead.value()), 1),
+            "music_lyric_cache_limit": int(self.cache.value()),
+            "music_browser_media_enabled": bool(self.browser.isChecked()),
+            "music_player": str(self.player.currentData() or ""),
+            "music_player_paths": {
+                key: edit.text().strip()
+                for key, edit in self.path_edits.items()
+                if edit.text().strip()
+            },
+            "music_filter_enabled": bool(self.filter_enabled.isChecked()),
+            "music_filter_extra_ids": str(self.filter_extra.text().strip()),
+            "music_title_format": str(self.title_format.text().strip()),
+        }
 
     def dirty(self) -> bool:
         return self._snapshot() != self._initial
 
     def confirm_save(self) -> None:
         config = self.config()
-        config.set("music_enabled", bool(self.enabled.isChecked()))
-        config.set("music_sing_enabled", bool(self.sing.isChecked()))
-        config.set("music_sing_grace_seconds", int(self.grace.value()))
-        config.set("music_lyric_enabled", bool(self.lyric.isChecked()))
-        config.set("music_lyric_lead_seconds", round(float(self.lead.value()), 1))
-        config.set("music_lyric_cache_limit", int(self.cache.value()))
-        config.set("music_browser_media_enabled", bool(self.browser.isChecked()))
-        config.set("music_player", str(self.player.currentData() or ""))
-        config.set("music_player_paths", dict(self._snapshot()[8]))
-        config.set("music_filter_enabled", bool(self.filter_enabled.isChecked()))
-        config.set("music_filter_extra_ids", str(self.filter_extra.text().strip()))
+        for key, value in self._snapshot().items():
+            config.set(key, value)
         self._initial = self._snapshot()
 
     def discard_changes(self) -> None:
         values = self._initial
-        mapping = {
-            "music_enabled": values[0],
-            "music_sing_enabled": values[1],
-            "music_sing_grace_seconds": values[2],
-            "music_lyric_enabled": values[3],
-            "music_lyric_lead_seconds": values[4],
-            "music_lyric_cache_limit": values[5],
-            "music_browser_media_enabled": values[6],
-            "music_player": values[7],
-            "music_player_paths": {key: path for key, path in values[8] if path},
-            "music_filter_enabled": values[9],
-            "music_filter_extra_ids": values[10],
-        }
         config = self.config()
-        for key, value in mapping.items():
+        for key, value in values.items():
             config.set(key, value)
 
-        for widget, value in (
-            (self.enabled, values[0]),
-            (self.sing, values[1]),
-            (self.lyric, values[3]),
-            (self.browser, values[6]),
-            (self.filter_enabled, values[9]),
+        for widget, key in (
+            (self.enabled, "music_enabled"),
+            (self.sing, "music_sing_enabled"),
+            (self.lyric, "music_lyric_enabled"),
+            (self.browser, "music_browser_media_enabled"),
+            (self.filter_enabled, "music_filter_enabled"),
         ):
             widget.blockSignals(True)
-            widget.setChecked(bool(value))
+            widget.setChecked(bool(values.get(key)))
             widget.blockSignals(False)
-        for widget, value in (
-            (self.grace, int(values[2])),
-            (self.cache, int(values[5])),
+        for widget, key in (
+            (self.grace, "music_sing_grace_seconds"),
+            (self.cache, "music_lyric_cache_limit"),
         ):
             widget.blockSignals(True)
-            widget.setValue(value)
+            widget.setValue(int(values.get(key) or 0))
             widget.blockSignals(False)
         self.lead.blockSignals(True)
-        self.lead.setValue(float(values[4]))
+        self.lead.setValue(float(values.get("music_lyric_lead_seconds") or 0.0))
         self.lead.blockSignals(False)
         self.player.blockSignals(True)
-        index = self.player.findData(values[7])
+        index = self.player.findData(str(values.get("music_player") or ""))
         self.player.setCurrentIndex(index if index >= 0 else 0)
         self.player.blockSignals(False)
-        for key, path in values[8]:
-            edit = self.path_edits.get(key)
-            if edit is not None:
-                edit.blockSignals(True)
-                edit.setText(path)
-                edit.blockSignals(False)
-        self.filter_extra.blockSignals(True)
-        self.filter_extra.setText(values[10])
-        self.filter_extra.blockSignals(False)
+        paths = values.get("music_player_paths") or {}
+        for key, edit in self.path_edits.items():
+            edit.blockSignals(True)
+            edit.setText(str(paths.get(key) or ""))
+            edit.blockSignals(False)
+        for edit, key in (
+            (self.filter_extra, "music_filter_extra_ids"),
+            (self.title_format, "music_title_format"),
+        ):
+            edit.blockSignals(True)
+            edit.setText(str(values.get(key) or ""))
+            edit.blockSignals(False)
         self.detect_status.setText("")
+        self.diagnose_view.clear()
+        self.copy_button.setEnabled(False)
         self.changed.emit()
 
     def keywords(self) -> list[str]:
@@ -374,6 +409,12 @@ class MusicPage(SettingsPage):
             "QQ音乐",
             "酷狗",
             "汽水",
+            "诊断",
+            "识别诊断",
+            "窗口标题",
+            "foobar",
+            "aimp",
+            "音频会话",
             "music",
             "lyric",
         ]
@@ -436,32 +477,66 @@ class MusicPage(SettingsPage):
         )
 
     def _detect(self) -> None:
+        """采一次三源并渲染诊断（后台线程；结果经信号回 GUI 线程）。"""
         self.detect_button.setEnabled(False)
-        self.detect_status.setText("正在读取系统媒体会话…")
+        self.copy_button.setEnabled(False)
+        self.detect_status.setText("正在采样：系统媒体会话 / 音频会话 / 播放器窗口标题…")
         browser_media = bool(self.browser.isChecked())
         allowed = self._allowed_ids_from_ui()
+        targets = players.recognition_targets(self._paths(), self.filter_extra.text().strip())
+        title_format = self.title_format.text().strip()
 
         def work() -> None:
             try:
-                playback, reason = now_playing.read_playback_with_reason(
+                sample = sampling.collect(
                     browser_media_enabled=browser_media,
                     allowed_ids=allowed or None,
+                    targets=targets,
                 )
+                decision = recognizer.decide(
+                    sample,
+                    allowed_ids=allowed,
+                    title_format=title_format,
+                )
+                text = diagnostics.render(sample, decision)
             except Exception:
-                playback, reason = None, "读取系统媒体信息失败。"
-            if playback is None:
-                text = reason or "没有读到正在播放的曲目。"
-            else:
-                state = "在播" if playback.playing else "已暂停"
-                app_id = playback.app_id or "未知"
-                text = f"{playback.label()}（{state}）· 识别名：{app_id}"
+                text = "采样失败：读取系统媒体信息时出了意外，请稍后重试。"
+            finally:
+                # 这条线程是一次性的：常驻事件循环与 COM apartment 都要收尾，
+                # 否则每次点击都漏一个 loop，还会把音频会话缓存绑到将死的线程上。
+                now_playing.close_thread_loop()
+                audio_sessions.close()
             try:
-                self.detect_done.emit(text)
+                self.diagnose_done.emit(text)
             except RuntimeError:
-                # 设置窗口在读取期间被销毁：信号对象已失效，丢弃结果即可。
+                # 设置窗口在采样期间被销毁：信号对象已失效，丢弃结果即可。
                 pass
 
         threading.Thread(target=work, name="music-detect", daemon=True).start()
+
+    def _on_diagnose_done(self, text: str) -> None:
+        self.diagnose_view.setPlainText(text)
+        self.copy_button.setEnabled(bool(text.strip()))
+        self.detect_button.setEnabled(True)
+        self._on_detect_done(self._summary_line(text))
+
+    def _summary_line(self, text: str) -> str:
+        for line in str(text or "").splitlines():
+            if line.startswith("判定："):
+                return line[len("判定：") :]
+        for line in str(text or "").splitlines():
+            if line.strip():
+                return line.strip()
+        return "没有采样结果。"
+
+    def _copy_diagnostics(self) -> None:
+        text = self.diagnose_view.toPlainText().strip()
+        if not text:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        self.detect_status.setText("诊断已复制到剪贴板。")
 
     def _on_detect_done(self, text: str) -> None:
         self.detect_status.setText(text)
@@ -477,6 +552,8 @@ class MusicPage(SettingsPage):
                 )
             except Exception:
                 ok, reason = False, "系统媒体控制调用失败，请稍后重试。"
+            finally:
+                now_playing.close_thread_loop()
             if ok:
                 text = f"已{now_playing.ACTION_LABELS.get(action, action)}"
             else:

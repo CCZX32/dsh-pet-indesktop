@@ -39,7 +39,8 @@ def test_menu_icons_have_owned_submenus_and_reserved_geometry(app):
         submenu = menu.actions()[0].menu()
         assert submenu is not None
         assert submenu.parent() is menu
-        assert "QMenu::icon" in menu.styleSheet()
+        # 图标槽位的真值走 QSS 的 `icon-size`（`QMenu::icon { left/width }` 被 Qt 忽略）。
+        assert "icon-size: 18px" in menu.styleSheet()
         action = submenu.actions()[0]
         assert not action.icon().isNull()
         size = action.icon().actualSize(QSize(24, 24))

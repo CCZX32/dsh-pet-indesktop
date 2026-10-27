@@ -166,13 +166,19 @@ class _Harness:
         self.sample = playback
         self.reads = 0
         self.runtime.clock = lambda: self.now
-        self.runtime.read_playback = self._read
+        # 采样接缝：SMTC 走替身，音频/窗口源显式空（本套用例只验收状态机，
+        # 三源合并的判定表在 tests/test_petcore_music_sources.py）。
+        self.runtime.sample_smtc = self._read
+        self.runtime.sample_audio = lambda: ()
+        self.runtime.sample_windows = lambda _targets: ()
         # 后台取词同步执行：结果在 poll() 里就位，测试不必等线程。
         self.runtime.background = lambda work: work()
 
     def _read(self, **_kwargs):
         self.reads += 1
-        return self.sample
+        if self.sample is None:
+            return now_playing.SmtcSample(reason="系统里没有正在播放的媒体会话。")
+        return now_playing.SmtcSample(playback=self.sample)
 
     def poll(self) -> None:
         self.runtime.poll()
@@ -252,15 +258,16 @@ def test_fetch_lyrics_falls_back_to_second_source():
     assert any("krcs.kugou.com" in request.url for request in port.requests)
 
 
-def test_fetch_lyrics_failure_names_both_sources():
+def test_fetch_lyrics_failure_names_every_source():
     port = FakeHttpPort(lambda request: HttpError("timeout"))
     with pytest.raises(lyrics_mod.LyricsError) as caught:
         lyrics_mod.fetch_lyrics(port, "蝴蝶", "陶喆")
 
     text = str(caught.value)
-    assert "网易云" in text and "酷狗" in text and "请求超时" in text
-    # 一首歌只试一轮：两个源各两跳以内的请求量，失败后不再重发。
-    assert len(port.requests) == 2
+    assert "网易云" in text and "酷狗" in text and "lrclib" in text
+    assert "请求超时" in text
+    # 一首歌只试一轮：三个源各一次请求，失败后不再重发。
+    assert len(port.requests) == 3
 
 
 def test_fetch_lyrics_marks_instrumental():
@@ -389,19 +396,29 @@ def test_playing_track_starts_singing_once():
     assert harness.presentation.released == 0
 
 
-def test_failed_animation_is_retried_three_times_then_quiet():
+def test_failed_animation_backs_off_then_recovers():
+    """唱歌失败按 2^n 拍退避重试，**永不永久放弃**（角色包补上素材后能自己唱起来）。"""
+    presentation = _Presentation(start=False)
     harness = _Harness(
         {"music_lyric_enabled": False},
-        presentation=_Presentation(start=False),
+        presentation=presentation,
         playback=_playback(),
     )
-    for _ in range(8):
+    for _ in range(5):
         harness.poll()
         harness.now += 1
+    # 1 + 2 + 4 ... 的退避里，5 拍只应尝试 1 次（第一次失败后等 2 秒）
+    attempts = len(presentation.animations)
+    assert 1 <= attempts <= 3, attempts
 
-    assert runtime_mod.SING_MAX_ATTEMPTS == 4
-    assert len(harness.presentation.animations) == runtime_mod.SING_MAX_ATTEMPTS
-    assert harness.presentation.released == 0
+    # 素材变得可用（角色包补上「悠闲哼歌」）后，退避到期就会唱
+    presentation.start = True
+    for _ in range(40):
+        harness.poll()
+        harness.now += 1
+    assert presentation.animations[-1] == (runtime_mod.SING_ANIM, True)
+    assert harness.runtime.singing is True
+    assert presentation.released == 0
 
 
 def test_silence_beyond_grace_releases_loop():
@@ -591,9 +608,9 @@ def test_runtime_passes_allowlist_only_when_filter_enabled():
 
     def read(**kwargs):
         seen.append(kwargs)
-        return None
+        return now_playing.SmtcSample(reason="系统里没有正在播放的媒体会话。")
 
-    harness.runtime.read_playback = read
+    harness.runtime.sample_smtc = read
     harness.poll()
     assert "allowed_ids" not in seen[-1]
 
@@ -655,7 +672,7 @@ def test_manifest_and_contributions_load():
     assert manifest.id == "media.music"
     assert manifest.kind == "feature"
     assert manifest.execution == "host-only"
-    assert manifest.version == "1.1.0"
+    assert manifest.version == "1.2.0"
 
     manager = feature_mod.FeatureManager(HostPorts())
     diagnostics = manager.load(
@@ -752,6 +769,7 @@ def test_settings_page_has_h2_and_h3_groups(app):
     assert headings[0] == ("groupTitle", "音乐")
     assert [text for name, text in headings if name == "subsectionTitle"] == [
         "播放与唱歌",
+        "识别诊断",
         "歌词显示",
         "识别范围",
         "切歌与播放控制",
@@ -764,6 +782,27 @@ def test_settings_page_detect_result_is_shown(app):
     page._on_detect_done("陶喆 - 蝴蝶（在播）")
     assert "蝴蝶" in page.detect_status.text()
     assert page.detect_button.isEnabled() is True
+
+    # 详细诊断进多行视图，并允许复制（用户报障时贴这段）
+    page._on_diagnose_done(
+        "SMTC：1 个会话\n判定：在播 · 来源=系统媒体会话\n理由：\n  · …"
+    )
+    assert "SMTC" in page.diagnose_view.toPlainText()
+    assert "在播" in page.detect_status.text()
+    assert page.copy_button.isEnabled() is True
+
+
+def test_settings_page_title_format_round_trips(app):
+    page = sys.modules[HOST_PKG].MusicPage(_Host({"music_enabled": True}))
+    page.title_format.setText("%artist% - %title%")
+    page._write("music_title_format", page.title_format.text().strip())
+    assert page.dirty() is True
+    page.confirm_save()
+    assert page.dirty() is False
+
+    page.title_format.setText("改坏了")
+    page.discard_changes()
+    assert page.title_format.text() == "%artist% - %title%"
     assert page.player.findData("netease") >= 0
     assert set(page.path_edits) == set(players_mod.player_keys())
 
@@ -780,9 +819,9 @@ def test_blocked_smtc_stop_retains_worker_and_cancel_generation():
         reads.append(threading.get_ident())
         entered.set()
         assert release.wait(10)
-        return _playback()
+        return now_playing.SmtcSample(playback=_playback())
 
-    runtime.read_playback = read
+    runtime.sample_smtc = read
     runtime.start()
     old = runtime._worker
     cancel = runtime._closing

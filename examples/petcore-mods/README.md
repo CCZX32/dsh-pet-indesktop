@@ -56,7 +56,7 @@ feature 包只从用户数据目录 `%APPDATA%/dsh-pet-core/mods/` 加载，仓�
   # 或包入口：host/__init__.py:create_host（loader 支持相对 import）
 ```
 
-规范见 [`../../docs/PETCORE-MOD-FORMAT.md`](../../docs/PETCORE-MOD-FORMAT.md)。
+规范见 [`../../docs/PETCORE-MOD-FORMAT.md`](../../docs/PETCORE-MOD-FORMAT.md)；从零写一个扩展的动手指南（最小骨架、接线、安装与排错）见 [`../../docs/PETCORE-MOD-DEVELOPMENT.md`](../../docs/PETCORE-MOD-DEVELOPMENT.md)。
 
 ## 可用的宿主端口
 

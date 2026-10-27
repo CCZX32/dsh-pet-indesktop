@@ -33,6 +33,7 @@ class MotionController(QObject):
         self._last_tick = self._clock()
         self._trail: list[tuple[float, float, float]] = []
         self._throw_touching: tuple[bool, bool, bool, bool] = (False, False, False, False)
+        self._island_touching = False
 
     # ---------------------------------------------------------------- 查询
     @property
@@ -55,6 +56,7 @@ class MotionController(QObject):
             self._x, self._y = float(self.window.x()), float(self.window.y())
             self.mode = "thrown"
             self._throw_touching = (False, False, False, False)
+            self._island_touching = False
             self._last_tick = self._clock()
             self._ensure_timer()
             callback = getattr(self.window, "_on_thrown", None)
@@ -102,6 +104,7 @@ class MotionController(QObject):
         self._vx, self._vy = float(vx), float(vy)
         self._x, self._y = float(self.window.x()), float(self.window.y())
         self._throw_touching = (False, False, False, False)
+        self._island_touching = False
         if bool(getattr(self.window, "probe_active", False)):
             effects = self._effects()
             if effects is not None:
@@ -120,6 +123,7 @@ class MotionController(QObject):
         was_active = self.mode != "normal"
         self.mode = "normal"
         self._vx = self._vy = 0.0
+        self._island_touching = False
         self._trail.clear()
         self._timer.stop()
         # 落地/停稳都无条件回正（幂等）；探头击飞彩蛋不设飞行时间上限，
@@ -174,6 +178,29 @@ class MotionController(QObject):
             bottom,
         )
         self._x, self._y, self._vx, self._vy = px, py, vx, vy
+        touched_island = False
+        field = getattr(getattr(self.window, "host", None), "island_field", None)
+        if field is not None:
+            resolution = field.reflect_throw(self.window, px, py, vx, vy)
+            px, py, vx, vy = resolution.px, resolution.py, resolution.vx, resolution.vy
+            self._x, self._y, self._vx, self._vy = px, py, vx, vy
+            touched_island = bool(resolution.hit)
+            if resolution.rested:
+                # 落在岛顶且竖直速度已很小 = 落地：不收尾就会永远在岛顶小反弹，
+                # `physics.is_at_rest` 只认屏幕底边，motion 会卡在 thrown。
+                self.window.move(int(round(px)), int(round(py)))
+                self.stop()
+                return
+            if (
+                resolution.hit
+                and not self._island_touching
+                and prev_speed >= physics.BOUNCE_TRIGGER_SPEED
+            ):
+                # 撞岛没有「屏幕边沿」可数（墙是曲面）：上升沿 + 速度门各给一次，
+                # 贴着墙滑行不会每帧响一声；节流在碰撞层（与轻撞共用 0.25s 闸）。
+                field.notify_hit(
+                    self.window, prev_speed, (resolution.nx, resolution.ny)
+                )
         touching = (
             px <= left + _CONTACT_EPS,
             px >= right - _CONTACT_EPS,
@@ -184,6 +211,7 @@ class MotionController(QObject):
         if any(now_on and not before for now_on, before in zip(touching, self._throw_touching)):
             if prev_speed >= physics.BOUNCE_TRIGGER_SPEED:
                 self.window._on_motion_bounce()
+        self._island_touching = touched_island
         self._throw_touching = touching
         self.window.move(int(round(px)), int(round(py)))
         effects = self._effects()

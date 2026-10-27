@@ -94,6 +94,33 @@ def test_icon_stroke_scales_with_the_canvas_instead_of_staying_heavy(app) -> Non
         assert bounds is not None and bounds[2] <= slot - 1 and bounds[3] <= slot - 1
 
 
+def test_icons_stay_inside_the_canvas_at_every_device_pixel_ratio(app) -> None:
+    """非 100% 缩放下图标不许被裁：画布按 DPR 放大，字形仍按**逻辑**槽位缩放。
+
+    回归事实：旧 ``_pixmap()`` 把 DPR 乘了两次——pixmap 本身已 ``setDevicePixelRatio``
+    （Qt 的 QPainter 自动按 DPR 缩放），画布 27px、字形又按 1.5 倍绘制，结果贴死画布
+    右下角并截掉最后一截：150% 下 play (14, 8, **26, 26**)、screen (5, 8, **26, 26**)、
+    quit (10, 5, **26, 26**)。用户看到的是「图标比槽位大、右下角缺一块、显示器只剩空框」。
+    """
+    for dpr in (1.0, 1.25, 1.5, 2.0):
+        physical = max(1, round(MENU_ICON_SIZE * dpr))
+        for name in ("play", "screen", "quit", "settings"):
+            pixmap = icon(name, MENU_ICON_SIZE, dpr=dpr).pixmap(
+                QSize(MENU_ICON_SIZE, MENU_ICON_SIZE), dpr
+            )
+            image = pixmap.toImage()
+            assert image.size() == QSize(physical, physical), f"{name}@{dpr} 画布尺寸不对"
+            bounds = _alpha_bounds(image)
+            assert bounds is not None, f"{name}@{dpr} 完全空白"
+            left, top, right, bottom = bounds
+            assert left >= 1 and top >= 1, f"{name}@{dpr} 贴死左上角 {bounds}"
+            assert right <= physical - 2, f"{name}@{dpr} 右侧被裁 {bounds}/{physical}"
+            assert bottom <= physical - 2, f"{name}@{dpr} 底部被裁 {bounds}/{physical}"
+            # 字形占槽位的 55%–80%：太小是缩水，太大就是多乘了一次 DPR。
+            assert (right - left + 1) <= physical * 0.8
+            assert (bottom - top + 1) <= physical * 0.85
+
+
 def test_glyph_boxes_stay_inside_the_slot(app) -> None:
     """所有字形都要落在画布内（未缩放的 36 单位设计稿会裁掉一半字形）。"""
     names = (
@@ -121,6 +148,14 @@ def test_glyph_boxes_stay_inside_the_slot(app) -> None:
         "network",
         "agent",
         "weather",
+        "pet",
+        "tools",
+        "web",
+        "todo",
+        "download",
+        "sparkles",
+        "capture",
+        "eye",
     )
     for name in names:
         image = icon(name, MENU_ICON_SIZE).pixmap(

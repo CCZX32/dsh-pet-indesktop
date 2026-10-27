@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidget,
@@ -29,8 +30,54 @@ EMPTY_GROUP_TEXT = "（暂无）"
 GROUP_ARROW_EXPANDED = "▾"
 GROUP_ARROW_COLLAPSED = "▸"
 GROUP_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# ---------------------------------------------------------------- 两轴几何
+#
+# 用户口径：**当前的显示范围就是下限**。
+#   · 宽度轴：下限恒为 190（不比现在窄），上限 260 随字号放大 —— 字号变大后
+#     长 mod 名有更多空间，但短标签不会把导航撑胖；实际宽度由标签文字量出来。
+#   · 高度轴：下限恒为 420，往上由窗口高度给（浏览器吃满整页剩余高度）。
+# 实测（900×620 + 字号 18）证明把高度下限也按字号放大到 582 会让整页多出一层
+# 外层滚动条，收益为负，所以高度下限固定。
+
+#: 界面字号的基准（``ui_font_size`` 默认 13，范围 10–18）。
+BASE_FONT = 13
 NAV_MIN_WIDTH = 190
 NAV_MAX_WIDTH = 260
+STACK_MIN_HEIGHT = 420
+#: 导航项里除文字以外的横向占位：QSS ``padding: 0 10px 0 12px``（22）+ 左边框 3
+#: + 竖向滚动条与列表内边距（约 10）。实测 190 宽的导航里文字可用约 155px。
+NAV_TEXT_CHROME_PX = 35
+#: 字号放大系数的上限：18/13 ≈ 1.38，留一点余量给未来更大的字号档。
+FONT_SCALE_MAX = 1.6
+
+
+def font_scale(font_px) -> float:
+    """字号 → 放大系数；**小于基准字号一律 1.0**（下限不缩）。"""
+    try:
+        value = float(font_px)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(1.0, min(FONT_SCALE_MAX, value / BASE_FONT))
+
+
+def nav_bounds(font_px) -> tuple[int, int]:
+    """导航宽度的 ``(下限, 上限)``：字号 13 → ``(190, 260)``，字号 18 → ``(190, 360)``。
+
+    下限**不随字号变**——「当前的显示范围就作为下限」；只放开上限，让放大的
+    字号有机会不被省略号裁掉。
+    """
+    return NAV_MIN_WIDTH, round(NAV_MAX_WIDTH * font_scale(font_px))
+
+
+def nav_width(widest_label_px: int, font_px) -> int:
+    """内容驱动、夹在 ``nav_bounds`` 之间的导航宽度。"""
+    low, high = nav_bounds(font_px)
+    try:
+        wanted = int(widest_label_px) + NAV_TEXT_CHROME_PX
+    except (TypeError, ValueError):
+        wanted = low
+    return max(low, min(high, wanted))
 
 
 def _group_of(spec) -> str:
@@ -38,10 +85,16 @@ def _group_of(spec) -> str:
 
 
 class _NavList(QListWidget):
-    """QListWidget 的默认 sizeHint 是 256 宽：导航固定取窄宽度，把空间留给右侧内容。"""
+    """QListWidget 的默认 sizeHint 是 256 宽：导航取「内容驱动、夹在下限与上限之间」的宽度。
+
+    宽度由 :meth:`ExtensionsPage._apply_geometry` 用 ``setFixedWidth`` 定下来，
+    这里只把当前宽度报给布局（固定宽度本就优先于 sizeHint，读当前值是为了让
+    「改完字号立刻生效」不必重建控件）。
+    """
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(NAV_MIN_WIDTH, super().sizeHint().height())
+        width = self.width() or NAV_MIN_WIDTH
+        return QSize(width, super().sizeHint().height())
 
 
 class _HostedWidgetPage(SettingsPage):
@@ -87,6 +140,8 @@ class _NavFacade:
 
 class ExtensionsPage(SettingsPage):
     title = "扩展管理"
+    #: 两栏浏览器型页面：宽轴跟随设置窗口（不再停在 860 阅读宽度）。
+    content_max_width = None
 
     def __init__(self, host, parent=None):
         super().__init__(host, parent)
@@ -104,6 +159,8 @@ class ExtensionsPage(SettingsPage):
         self._group_items: dict[str, list[QListWidgetItem]] = {}
         self._collapsed: dict[str, bool] = {}
         self._current_key = ""
+        #: ``(字体指纹, 最宽标签像素宽)`` 的度量缓存（见 ``_measure_widest_label``）。
+        self._label_cache: tuple[object, int] = (None, 0)
 
         container = QWidget(self.content)
         container.setObjectName("extensionsBrowser")
@@ -127,14 +184,19 @@ class ExtensionsPage(SettingsPage):
         self.stack.setObjectName("extensionsPages")
         self.stack.currentChanged.connect(self._on_stack_changed)
         # 右侧页面自带滚动体：给一个最小高度，避免被外层滚动区压成 0。
-        self.stack.setMinimumHeight(420)
+        # 具体数值由 `_apply_geometry()` 按界面字号算（字号 13 → 420）。
+        self.stack.setMinimumHeight(STACK_MIN_HEIGHT)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
         layout.addWidget(self.nav)
         layout.addWidget(self.stack, 1)
-        self.body.insertWidget(self.body.count() - 1, container)
+        # 高度轴：浏览器吃掉整页的剩余高度，而不是沿用页面末尾那个
+        # `addStretch(1)`（它会把大窗口的多余高度全吃掉，1600×1000 下方空 464px）。
+        self._browser = container
+        self.body.insertWidget(self.body.count() - 1, container, 1)
+        self.body.setStretch(self.body.count() - 1, 0)
 
         self.tabs = _NavFacade(self)
 
@@ -151,6 +213,74 @@ class ExtensionsPage(SettingsPage):
 
         self._fill_nav()
         self.select_tab("mods")
+        self._apply_geometry()
+
+    # ------------------------------------------------------------ 两轴几何
+    def _font_px(self) -> int:
+        """当前界面字号（px）：优先取 QSS 实际作用到导航上的值。"""
+        pixel = self.nav.font().pixelSize()
+        if pixel and pixel > 0:
+            return int(pixel)
+        try:
+            value = int(self.host.config.get("ui_font_size") or BASE_FONT)
+        except (AttributeError, TypeError, ValueError):
+            value = BASE_FONT
+        return max(10, min(18, value))
+
+    def _measure_widest_label(self) -> int:
+        """导航里最宽的一条文字（含分组标题与占位行）的像素宽度。
+
+        用**导航自己的** ``QFontMetrics``：字号放大后行高与文字都跟着变，用页面
+        字体量出来的值会偏小，长 mod 名又被省略号吃掉。按字体指纹缓存——样式
+        polish 是异步的，构造期量到的可能还是默认字体，所以每次应用几何时都
+        复查一次字体（缓存只省掉重复的 ``horizontalAdvance`` 循环）。
+        """
+        font_key = self.nav.font().key()
+        cached_key, cached = self._label_cache
+        if cached_key == font_key:
+            return cached
+        metrics = QFontMetrics(self.nav.font())
+        widest = 0
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            if item is not None:
+                widest = max(widest, metrics.horizontalAdvance(item.text()))
+        widest = max(widest, metrics.horizontalAdvance(EMPTY_GROUP_TEXT))
+        self._label_cache = (font_key, widest)
+        return widest
+
+    def _apply_geometry(self) -> None:
+        """把两轴的下限与实际宽度落到控件上（幂等，字号/窗口/标签变化都可调）。"""
+        if getattr(self, "nav", None) is None or getattr(self, "stack", None) is None:
+            return
+        font_px = self._font_px()
+        width = nav_width(self._measure_widest_label(), font_px)
+        if self.nav.width() != width or self.nav.minimumWidth() != width:
+            self.nav.setFixedWidth(width)
+        # 高度轴：下限是现值 420，往上由窗口给（容器 stretch=1 吃满剩余高度）。
+        if self.stack.minimumHeight() != STACK_MIN_HEIGHT:
+            self.stack.setMinimumHeight(STACK_MIN_HEIGHT)
+
+    def reflow(self) -> None:
+        """字号或主题变化后重排：作废度量缓存并重算两轴。"""
+        self._label_cache = (None, 0)
+        self._apply_geometry()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # 宽度轴由布局给（内容跟视口），这里只在尺寸真的变了以后复算下限，
+        # 免得高频 setFixedWidth 打断布局。
+        try:
+            self._apply_geometry()
+        except RuntimeError:
+            return
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """字体/样式变化（含 QSS 延迟 polish）后复算：扩展导航的字号是 QSS 给的。"""
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self.reflow()
+
 
     # ------------------------------------------------------------ 页面装载
     def _contributed_pages(self) -> list[tuple[object, QWidget]]:
@@ -306,6 +436,9 @@ class ExtensionsPage(SettingsPage):
         self.nav.blockSignals(False)
         # labels 与导航同序（分组顺序），不是贡献注册顺序。
         self._page_labels = ordered
+        # 标签变了（装载/卸载扩展）：宽度轴的内容依据要重算。
+        self._label_cache = (None, 0)
+        self._apply_geometry()
 
     def _add_nav_header(self, group: str, text: str) -> QListWidgetItem:
         item = QListWidgetItem(f"{GROUP_ARROW_EXPANDED} {text}")

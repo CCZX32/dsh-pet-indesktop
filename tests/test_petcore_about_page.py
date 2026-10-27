@@ -52,6 +52,8 @@ def test_about_is_a_settings_page_not_a_window(app, tmp_path: Path) -> None:
     page = AboutPage(FakeHost(tmp_path))
     try:
         assert page.title == "关于与诊断"
+        assert page.tab_container is not None
+        assert page.tab_container.labels() == ("版本与诊断", "致谢")
         assert "关于与诊断" in page.snapshot_view.toPlainText() or "version" in page.snapshot_view.toPlainText()
         assert '"pets"' in page.snapshot_view.toPlainText()
         page._copy_report()

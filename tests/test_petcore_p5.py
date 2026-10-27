@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QImage, QPainter, QRegion
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,7 +36,11 @@ from petcore.engine.collision import (
 )
 from petcore.ui.bubble import BUBBLE_GAP, SpeechBubble
 from petcore.ui.menu_model import MenuItem, MenuModel
-from petcore.ui.menu_style import check_image_path, menu_stylesheet
+from petcore.ui.menu_style import (
+    CHECK_LAYER_ATTR,
+    MenuCheckLayer,
+    menu_stylesheet,
+)
 from petcore.ui.settings.text_lines import format_lines, parse_lines
 
 
@@ -199,22 +203,15 @@ def test_enter_inserts_a_newline_inside_a_multiline_editor(app, tmp_path: Path) 
 
 
 # ---------------------------------------------------------------- 菜单对勾
-def test_check_image_is_generated_for_both_themes(app) -> None:
-    from PySide6.QtGui import QPixmap
-
-    for dark in (False, True):
-        path = Path(check_image_path(dark))
-        assert path.is_file()
-        pixmap = QPixmap(str(path))
-        assert not pixmap.isNull()
-        image = pixmap.toImage()
-        painted = sum(
-            1
-            for y in range(image.height())
-            for x in range(image.width())
-            if image.pixelColor(x, y).alpha() > 0
-        )
-        assert painted > 0
+def test_check_mark_is_drawn_on_the_row_end_layer(app) -> None:
+    """勾选标记由行尾层负责（QSS indicator 只剩 1px，不给图片）。"""
+    model = MenuModel()
+    model.register(MenuItem("a", "开着", checked=lambda: True))
+    menu = model.build()
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    assert isinstance(layer, MenuCheckLayer)
+    assert "QMenu::indicator:checked" not in menu_stylesheet(dark=True)
+    assert "QMenu::indicator:checked" not in menu_stylesheet(dark=False)
 
 
 def test_menu_actions_expose_checked_state(app) -> None:
@@ -227,30 +224,42 @@ def test_menu_actions_expose_checked_state(app) -> None:
     assert actions["关着"].isCheckable() and not actions["关着"].isChecked()
 
 
-@pytest.mark.parametrize("dark_theme", [False, True])
-def test_checked_menu_row_paints_a_mark(app, dark_theme: bool) -> None:
+def test_checked_menu_row_paints_a_mark(app) -> None:
+    """勾选行在**行尾**画出强调色标记，未勾选行不画。
+
+    勾选标记不再走 QSS 的 `QMenu::indicator`（那会把图标列占掉），而是由
+    `MenuCheckLayer` 画在行右缘——所以深浅主题同色，也不再依赖临时图片文件。
+    """
     model = MenuModel()
     model.register(MenuItem("a", "第一项", checked=lambda: True))
     model.register(MenuItem("b", "第二项", checked=lambda: False))
     menu = model.build()
-    # Explicit theme: other Qt tests may leave the application palette dark.
-    # Assert foreground contrast in both themes rather than assuming black ink.
-    menu.setStyleSheet(menu_stylesheet(dark=dark_theme))
     menu.show()
     app.processEvents()
-    image = menu.grab().toImage()
-    row = max(1, image.height() // 2)
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    layer.sync()
+    image = QImage(layer.size(), QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    layer.render(image, QPoint(0, 0), QRegion(), QWidget.RenderFlag.DrawChildren)
+
+    def row_of(label: str):
+        return menu.actionGeometry(
+            next(action for action in menu.actions() if action.text() == label)
+        )
 
     def ink(top: int, bottom: int) -> int:
         return sum(
             1
-            for y in range(top, min(bottom, image.height()))
-            for x in range(min(24, image.width()))
-            if (image.pixelColor(x, y).lightness() >= 130) == dark_theme
+            for y in range(top, max(top, bottom))
+            for x in range(max(0, image.width() - 32), image.width())
+            if image.pixelColor(x, y).alpha() > 120
         )
 
+    first = row_of("第一项")
+    second = row_of("第二项")
     try:
-        assert ink(0, row) > ink(row, image.height())
+        assert ink(first.top(), first.bottom()) > 0
+        assert ink(second.top(), second.bottom()) == 0
     finally:
         menu.close()
 

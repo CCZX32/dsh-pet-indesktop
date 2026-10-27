@@ -23,6 +23,7 @@ class PerformanceSnapshot:
     active_threads: int = 0
     gpu_samples: int = 0
     fps_samples: int = 0
+    disk_samples: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {name: int(value) for name, value in asdict(self).items()}

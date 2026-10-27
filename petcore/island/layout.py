@@ -27,8 +27,6 @@ _DIVIDER_W_PX = 1.0
 _DIVIDER_H_PX = 14.0
 #: 内容行内边距左右各 19px（= 6 内缩 + 13 内容边距，沿用既有视觉）。
 _CONTENT_PAD_PX = 19.0
-_ICON_PX = 26.0
-_ICON_GAP_PX = 8.0
 #: 数值盒与单位盒之间的固定间距（裁决稿 §二-5：k3 的「紧贴数字 1px」落在盒上，
 #: 数值盒右对齐 + 单位盒取最宽单位左对齐，两盒之间留 1px）。
 _UNIT_GAP_PX = 1.0
@@ -678,12 +676,6 @@ GLASS_STOPS = (
 )
 #: glass 的 keyline 是白 α130（不走常规 keyline）。
 GLASS_KEYLINE = (255, 255, 255, 130)
-#: 头标内环（主分支同值；旧实现画的是深色实心圆，缩到 18px 后像个洞）。
-ICON_RING_COLORS = {
-    "dark": (255, 255, 255, 46),
-    "light": (0, 0, 0, 20),
-    "glass": (255, 255, 255, 46),
-}
 #: 单位盒弱化系数（与数值同色，alpha ×0.7）。
 UNIT_ALPHA = 0.7
 
@@ -766,10 +758,6 @@ def sheen_alpha(style: str) -> int:
 
 def bevel_colors(style: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
     return BEVEL_COLORS.get(str(style or "dark"), BEVEL_COLORS["dark"])
-
-
-def icon_ring_color(style: str) -> tuple[int, int, int, int]:
-    return ICON_RING_COLORS.get(str(style or "dark"), ICON_RING_COLORS["dark"])
 
 
 #: 错误态的自动回落时长：petcore 的错误来源是「一次对话/一次请求失败」，

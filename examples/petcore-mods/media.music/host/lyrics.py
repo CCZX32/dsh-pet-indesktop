@@ -39,7 +39,8 @@ CACHE_LIMIT = 80
 #: 剩余预算低于该值就不再发请求（注定来不及的那发只会白占连接）。
 MIN_ATTEMPT_BUDGET = 0.25
 #: 缓存格式版本：解析口径变更时可据此作废旧条目。
-CACHE_VERSION = 1
+#: v2（2026-10-26）：带匹配分 ``score``（诊断要显示"这个源多少分命中"）。
+CACHE_VERSION = 2
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -90,6 +91,8 @@ class Lyrics:
     lines: tuple[LyricLine, ...] = ()
     instrumental: bool = False
     source: str = ""
+    #: 命中时该候选的匹配分（0..1）；诊断面板会显示它，用户报「歌词不对」时能一眼看出。
+    score: float = 0.0
 
     def __bool__(self) -> bool:
         # 纯音乐（无行、instrumental=True）也是有效结果，否则缓存永远读不中。
@@ -201,13 +204,13 @@ def looks_instrumental(lines: tuple[LyricLine, ...] | list[LyricLine]) -> bool:
     )
 
 
-def _lyrics_from_text(text: str, source: str) -> Lyrics | None:
+def _lyrics_from_text(text: str, source: str, *, score: float = 0.0) -> Lyrics | None:
     lines = parse_lrc(text)
     if not lines:
         return None
     if looks_instrumental(lines):
-        return Lyrics(instrumental=True, source=source)
-    return Lyrics(lines=lines, source=source)
+        return Lyrics(instrumental=True, source=source, score=score)
+    return Lyrics(lines=lines, source=source, score=score)
 
 
 # ---------------------------------------------------------------- 缓存
@@ -252,7 +255,10 @@ class LyricsCache:
             if not lines and not instrumental:
                 return None
             return Lyrics(
-                lines=lines, instrumental=instrumental, source=str(data.get("source") or "")
+                lines=lines,
+                instrumental=instrumental,
+                source=str(data.get("source") or ""),
+                score=float(data.get("score") or 0.0),
             )
         except Exception:
             return None
@@ -271,6 +277,7 @@ class LyricsCache:
                         "artist": artist,
                         "instrumental": bool(lyrics.instrumental),
                         "source": lyrics.source,
+                        "score": float(lyrics.score or 0.0),
                         "lines": [[line.at, line.text] for line in lyrics.lines],
                     },
                     ensure_ascii=False,
@@ -319,40 +326,6 @@ def describe_error(exc: BaseException) -> str:
     return "网络连接失败"
 
 
-def _get_json(
-    http,
-    url: str,
-    params: tuple[tuple[str, str], ...],
-    *,
-    timeout: float,
-    referer: str = "",
-):
-    """GET 一个 JSON 接口；非 2xx / 太大 / 解析失败都抛 ``HttpError``。"""
-    headers: tuple[tuple[str, str], ...] = (("User-Agent", _UA),)
-    if referer:
-        headers += (("Referer", referer),)
-    response = http.request(
-        HttpRequest(
-            url=url,
-            params=tuple(params),
-            headers=headers,
-            timeout=max(MIN_ATTEMPT_BUDGET, float(timeout)),
-            prefer_direct=True,
-            max_bytes=MAX_BYTES,
-        )
-    )
-    status = int(getattr(response, "status", 0) or 0)
-    body = bytes(getattr(response, "body", b"") or b"")
-    if len(body) > MAX_BYTES:
-        raise HttpError("protocol", message="歌词响应超出大小上限")
-    if status >= 400 or status == 0:
-        raise HttpError("protocol", status=status)
-    try:
-        return json.loads(response.text)
-    except ValueError:
-        raise HttpError("protocol", message="歌词响应不是 JSON") from None
-
-
 def _name_matches(candidate: str, wanted: str) -> bool:
     """歌手名匹配：大小写/空白不敏感，允许子串；两侧都是多歌手时逐段相等比对。"""
     a = re.sub(r"\s+", "", str(candidate or "").lower())
@@ -370,9 +343,198 @@ def _name_matches(candidate: str, wanted: str) -> bool:
     return any(pa == pb for pa in parts_a for pb in parts_b)
 
 
-def _fetch_netease(http, title: str, artist: str, *, timeout: float) -> Lyrics | None:
-    """网易云：搜索（``cloudsearch``）→ 歌词（``song/lyric``）。"""
-    query = " ".join(part for part in (title, artist) if part)
+# ---------------------------------------------------------------- 候选打分
+#
+# 「认错歌」的根因：旧实现只校验歌手名，然后取**第一个**命中的候选。搜「晴天
+# 周杰伦」时排在前面的往往是翻唱/同名曲，歌手字段里带"周杰伦"三个字就过了。
+# 这里改成四维加权：歌名、歌手、专辑、时长；**缺失的字段按可用权重重新归一**，
+# 所以"接口没返回歌名"不会被当成低分（那会让整条流程静默失效）。低于阈值就
+# 不取——宁可没有歌词，也不贴一首错的（与仓库"不猜"的纪律一致）。
+
+#: 候选接受阈值（0..1）。标定样本见
+#: ``tests/test_petcore_music_lyric_quality.py``：翻唱同名曲 0.50、原唱同名 1.00、
+#: 歌名带 ``(Live)`` 后缀 0.93。
+MATCH_THRESHOLD = 0.55
+
+#: 各字段权重（时长与歌名、歌手同权：7 分钟现场版和 4 分钟录音室版往往是两份词）。
+_FIELD_WEIGHTS = {"title": 1.0, "artist": 1.0, "album": 0.4, "duration": 1.0}
+
+# 归一化时去掉的字符：空白、标点、括号、分隔符（中文属 \w，会被保留）。
+_NORM_STRIP_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _norm(text: str) -> str:
+    """比较用归一：NFKC（全角→半角）→ casefold → 去空白与标点。"""
+    import unicodedata
+
+    return _NORM_STRIP_RE.sub("", unicodedata.normalize("NFKC", str(text or "")).casefold())
+
+
+def _title_similarity(wanted: str, candidate: str) -> float:
+    """歌名相似度：相等 1.0；互相包含 0.85（``晴天`` vs ``晴天 (Live)``）；否则 0。"""
+    a, b = _norm(wanted), _norm(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if len(a) >= 2 and len(b) >= 2 and (a in b or b in a):
+        return 0.85
+    return 0.0
+
+
+def _artist_similarity(wanted: str, candidate: str) -> float:
+    return 1.0 if _name_matches(candidate, wanted) else 0.0
+
+
+def _album_similarity(wanted: str, candidate: str) -> float:
+    a, b = _norm(wanted), _norm(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    return 0.7 if (a in b or b in a) else 0.0
+
+
+def _duration_similarity(wanted: float, candidate: float) -> float:
+    """时长接近度：同一录音通常差不到 1 秒，现场/剪辑版能差出十几秒。"""
+    diff = abs(float(wanted) - float(candidate))
+    if diff <= 3.0:
+        return 1.0
+    if diff <= 8.0:
+        return 0.6
+    if diff <= 15.0:
+        return 0.3
+    return 0.0
+
+
+def candidate_score(
+    *, title: str, artist: str, album: str = "", duration: float = 0.0, candidate
+) -> float:
+    """一个候选与"当前在放的这首"的综合匹配分（0..1，缺失字段重新归一）。
+
+    ``candidate`` 是各源自己组出来的字典：``title`` / ``artists``（列表）/
+    ``album`` / ``duration``（秒，可缺）。
+    """
+    scores: dict[str, float] = {}
+    cand_title = str(candidate.get("title") or "")
+    if cand_title:
+        scores["title"] = _title_similarity(title, cand_title)
+    artists = [str(item) for item in (candidate.get("artists") or []) if str(item)]
+    if artists:
+        scores["artist"] = _artist_similarity(artist, "/".join(artists))
+    cand_album = str(candidate.get("album") or "")
+    if cand_album and album:
+        scores["album"] = _album_similarity(album, cand_album)
+    cand_duration = candidate.get("duration")
+    try:
+        has_duration = (
+            cand_duration is not None and float(cand_duration) > 0 and float(duration) > 0
+        )
+    except (TypeError, ValueError):
+        has_duration = False
+    if has_duration:
+        scores["duration"] = _duration_similarity(float(duration), float(cand_duration))
+    if not scores:
+        return 0.0
+    total_weight = sum(_FIELD_WEIGHTS[name] for name in scores)
+    if total_weight <= 0:
+        return 0.0
+    weighted = sum(_FIELD_WEIGHTS[name] * value for name, value in scores.items())
+    return weighted / total_weight
+
+
+def pick_best(candidates, *, title: str, artist: str, album: str = "", duration: float = 0.0):
+    """在候选里挑分最高且过阈值的一个；返回 ``(候选, 分数)`` 或 ``None``。
+
+    **一个都不够分就不取**：同一首歌贴错词比没有词更糟（用户会以为桌宠在放另一首）。
+    """
+    best = None
+    best_score = 0.0
+    for candidate in candidates or ():
+        if not isinstance(candidate, dict) or candidate.get("id") in (None, ""):
+            continue
+        score = candidate_score(
+            title=title, artist=artist, album=album, duration=duration, candidate=candidate
+        )
+        if score > best_score:
+            best, best_score = candidate, score
+    if best is None or best_score < MATCH_THRESHOLD:
+        return None
+    return best, best_score
+
+
+@dataclass(frozen=True, slots=True)
+class _Wanted:
+    """一次取词要找的那首歌（查询词已清洗）。"""
+
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    duration: float = 0.0
+
+
+def _clean_query(title: str, artist: str) -> tuple[str, str]:
+    """把原始标题洗成查询词（网页标题 → 歌名/歌手）。
+
+    只用于**搜索**，不改显示：气泡里的「我在唱《…》」仍是播放器给的原始曲名。
+    清洗失败（结果为空/过短）时原样返回——``title_clean`` 保证只删片段不改写。
+    """
+    raw_title = str(title or "").strip()
+    raw_artist = str(artist or "").strip()
+    try:
+        from . import title_clean
+
+        cleaned_title, cleaned_artist = title_clean.clean_web_title(raw_title, raw_artist)
+    except Exception:
+        return raw_title, raw_artist
+    return (
+        str(cleaned_title or raw_title).strip() or raw_title,
+        str(cleaned_artist or raw_artist).strip() or raw_artist,
+    )
+
+
+def _get_json(
+    http,
+    url: str,
+    params: tuple[tuple[str, str], ...],
+    *,
+    timeout: float,
+    referer: str = "",
+    prefer_direct: bool = True,
+):
+    """GET 一个 JSON 接口；非 2xx / 太大 / 解析失败都抛 ``HttpError``。
+
+    ``prefer_direct``：国内曲库（网易云 / 酷狗）直连优先；海外源（lrclib）交回
+    系统路由——与 ``docs/NETWORK-PROXY-AND-VPN-2026-09-22.md`` 的分域口径一致。
+    """
+    headers: tuple[tuple[str, str], ...] = (("User-Agent", _UA),)
+    if referer:
+        headers += (("Referer", referer),)
+    response = http.request(
+        HttpRequest(
+            url=url,
+            params=tuple(params),
+            headers=headers,
+            timeout=max(MIN_ATTEMPT_BUDGET, float(timeout)),
+            prefer_direct=prefer_direct,
+            max_bytes=MAX_BYTES,
+        )
+    )
+    status = int(getattr(response, "status", 0) or 0)
+    body = bytes(getattr(response, "body", b"") or b"")
+    if len(body) > MAX_BYTES:
+        raise HttpError("protocol", message="歌词响应超出大小上限")
+    if status >= 400 or status == 0:
+        raise HttpError("protocol", status=status)
+    try:
+        return json.loads(response.text)
+    except ValueError:
+        raise HttpError("protocol", message="歌词响应不是 JSON") from None
+
+
+def _fetch_netease(http, wanted: _Wanted, *, timeout: float) -> Lyrics | None:
+    """网易云：搜索（``cloudsearch``）→ 按分挑候选 → 歌词（``song/lyric``）。"""
+    query = " ".join(part for part in (wanted.title, wanted.artist) if part)
     search = _get_json(
         http,
         "https://music.163.com/api/cloudsearch/pc",
@@ -381,20 +543,35 @@ def _fetch_netease(http, title: str, artist: str, *, timeout: float) -> Lyrics |
         referer="https://music.163.com/",
     )
     songs = ((search.get("result") or {}).get("songs") or []) if isinstance(search, dict) else []
-    song_id = None
+    candidates = []
     for song in songs:
         if not isinstance(song, dict):
             continue
-        singers = "/".join(
-            str(item.get("name") or "")
-            for item in (song.get("ar") or song.get("artists") or [])
-            if isinstance(item, dict)
+        artists_field = song.get("ar") or song.get("artists") or []
+        duration = song.get("dt")
+        candidates.append(
+            {
+                "id": song.get("id"),
+                "title": str(song.get("name") or ""),
+                "artists": [
+                    str(item.get("name") or "")
+                    for item in artists_field
+                    if isinstance(item, dict)
+                ],
+                "album": str((song.get("al") or {}).get("name") or ""),
+                "duration": (float(duration) / 1000.0) if duration else None,
+            }
         )
-        if not artist or _name_matches(singers, artist):
-            song_id = song.get("id")
-            break
-    if song_id is None:
+    best = pick_best(
+        candidates,
+        title=wanted.title,
+        artist=wanted.artist,
+        album=wanted.album,
+        duration=wanted.duration,
+    )
+    if best is None:
         return None
+    song_id, score = best[0].get("id"), best[1]
     payload = _get_json(
         http,
         "https://music.163.com/api/song/lyric",
@@ -404,12 +581,14 @@ def _fetch_netease(http, title: str, artist: str, *, timeout: float) -> Lyrics |
     )
     if not isinstance(payload, dict):
         return None
-    return _lyrics_from_text(str((payload.get("lrc") or {}).get("lyric") or ""), "网易云")
+    return _lyrics_from_text(
+        str((payload.get("lrc") or {}).get("lyric") or ""), "网易云", score=score
+    )
 
 
-def _fetch_kugou(http, title: str, artist: str, *, timeout: float) -> Lyrics | None:
-    """酷狗：搜索（``krcs/search``）→ 下载（``lyrics/download``，正文 base64）。"""
-    keyword = " - ".join(part for part in (title, artist) if part)
+def _fetch_kugou(http, wanted: _Wanted, *, timeout: float) -> Lyrics | None:
+    """酷狗：搜索（``krcs/search``）→ 按分挑候选 → 下载（正文 base64）。"""
+    keyword = " - ".join(part for part in (wanted.title, wanted.artist) if part)
     search = _get_json(
         http,
         "https://krcs.kugou.com/search",
@@ -422,28 +601,38 @@ def _fetch_kugou(http, title: str, artist: str, *, timeout: float) -> Lyrics | N
         timeout=timeout,
         referer="https://www.kugou.com/",
     )
-    candidates = search.get("candidates") if isinstance(search, dict) else None
-    if not candidates:
+    raw = search.get("candidates") if isinstance(search, dict) else None
+    candidates = []
+    for item in raw or ():
+        if not isinstance(item, dict) or item.get("id") is None or not item.get("accesskey"):
+            continue
+        singer = str(item.get("singer") or "")
+        candidates.append(
+            {
+                "id": item.get("id"),
+                "accesskey": item.get("accesskey"),
+                "title": str(item.get("song") or ""),
+                "artists": [singer] if singer else [],
+                "album": str(item.get("album") or ""),
+                "duration": item.get("duration"),
+            }
+        )
+    best = pick_best(
+        candidates,
+        title=wanted.title,
+        artist=wanted.artist,
+        album=wanted.album,
+        duration=wanted.duration,
+    )
+    if best is None:
         return None
-    lyric_id = accesskey = None
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        if artist and item.get("singer") and not _name_matches(str(item.get("singer")), artist):
-            continue
-        if item.get("id") is None or not item.get("accesskey"):
-            continue
-        lyric_id = item.get("id")
-        accesskey = item.get("accesskey")
-        break
-    if lyric_id is None or accesskey is None:
-        return None
+    chosen, score = best
     payload = _get_json(
         http,
         "https://lyrics.kugou.com/download",
         (
-            ("id", str(lyric_id)),
-            ("accesskey", str(accesskey)),
+            ("id", str(chosen.get("id"))),
+            ("accesskey", str(chosen.get("accesskey"))),
             ("fmt", "lrc"),
             ("charset", "utf8"),
             ("client", "pc"),
@@ -459,13 +648,38 @@ def _fetch_kugou(http, title: str, artist: str, *, timeout: float) -> Lyrics | N
         body = base64.b64decode(content).decode("utf-8", "replace")
     except Exception:
         return None
-    return _lyrics_from_text(body, "酷狗")
+    return _lyrics_from_text(body, "酷狗", score=score)
+
+
+def _fetch_lrclib(http, wanted: _Wanted, *, timeout: float) -> Lyrics | None:
+    """lrclib：按「歌手 + 歌名」精确查；海外曲目覆盖好，也是唯一给纯音乐标记的源。"""
+    if not wanted.title:
+        return None
+    payload = _get_json(
+        http,
+        "https://lrclib.net/api/get",
+        (
+            ("artist_name", wanted.artist),
+            ("track_name", wanted.title),
+        ),
+        timeout=timeout,
+        prefer_direct=False,
+    )
+    if not isinstance(payload, dict):
+        return None
+    synced = str(payload.get("syncedLyrics") or "")
+    if not synced:
+        if bool(payload.get("instrumental")):
+            return Lyrics(instrumental=True, source="lrclib", score=1.0)
+        return None
+    return _lyrics_from_text(synced, "lrclib", score=1.0)
 
 
 #: 歌词源，按匹配质量排序（靠前优先）。每个源最多两跳，失败直接换下一个。
 SOURCES: tuple[tuple[str, object], ...] = (
     ("网易云", _fetch_netease),
     ("酷狗", _fetch_kugou),
+    ("lrclib", _fetch_lrclib),
 )
 
 
@@ -474,22 +688,29 @@ def fetch_lyrics(
     title: str,
     artist: str,
     *,
+    album: str = "",
+    duration: float = 0.0,
     timeout: float = DEFAULT_TIMEOUT,
     cache: LyricsCache | None = None,
 ) -> Lyrics:
-    """取一首歌的歌词：缓存 → 网易云 → 酷狗；两源都失败抛 :class:`LyricsError`。
+    """取一首歌的歌词：清洗查询词 → 缓存 → 网易云 → 酷狗 → lrclib。
 
-    一首歌最多一轮（**失败不重试**，不给后台加重复流量）。``timeout`` 是整次取词的
-    预算，两个源共享同一份截止时刻：每个源只拿到剩余部分，因此源切换不会把总
-    耗时翻倍。
+    一首歌最多一轮（**失败不重试**：重试策略在运行时按冷却做，避免后台重复流量）。
+    ``timeout`` 是整次取词的预算，各源共享同一份截止时刻：每个源只拿到剩余部分，
+    因此源切换不会把总耗时翻倍。``duration``（秒）只用于候选打分，不参与请求。
     """
-    title = str(title or "").strip()
-    artist = str(artist or "").strip()
+    title, artist = _clean_query(title, artist)
     if not title and not artist:
         raise LyricsError("没有歌名信息，无法取歌词。")
+    wanted = _Wanted(
+        title=str(title or ""),
+        artist=str(artist or ""),
+        album=str(album or ""),
+        duration=float(duration or 0.0),
+    )
 
     if cache is not None:
-        hit = cache.get(title, artist)
+        hit = cache.get(wanted.title, wanted.artist)
         if hit is not None:
             return hit
 
@@ -501,7 +722,7 @@ def fetch_lyrics(
             reasons.append(f"{name}：时间预算不足")
             break
         try:
-            found = fetcher(http, title, artist, timeout=remaining)  # type: ignore[operator]
+            found = fetcher(http, wanted, timeout=remaining)  # type: ignore[operator]
         except HttpError as exc:
             reasons.append(f"{name}：{describe_error(exc)}")
             continue
@@ -513,7 +734,7 @@ def fetch_lyrics(
             continue
         if found is not None:
             if cache is not None:
-                cache.put(title, artist, found)
+                cache.put(wanted.title, wanted.artist, found)
             return found
         reasons.append(f"{name}：没有找到匹配的歌词")
     raise LyricsError("歌词获取失败：" + "；".join(reasons))

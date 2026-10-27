@@ -358,13 +358,22 @@ class AppearancePage(SettingsPage):
             "拖到屏幕边缘约 40px 内松手会收成细条，悬停滑出预览；关闭后按拖动位置停留。",
         )
 
+        self.island_collision_check = make_checkbox(self)
+        self.island_collision_check.setChecked(
+            bool(self.config().get("island_collision", True))
+        )
+        self.island_collision_check.toggled.connect(self._on_island_changed)
+        island_card.add_row(
+            "与桌宠碰撞",
+            self.island_collision_check,
+            "桌宠撞到胶囊会被弹开，拖着胶囊扫过桌宠会把它顶飞；关闭后胶囊不再阻挡桌宠"
+            "（岛也不再自动让位）。默认开启，改完立即生效。",
+        )
+
         toggle_row = QWidget(self)
         toggle_layout = QHBoxLayout(toggle_row)
         toggle_layout.setContentsMargins(0, 0, 0, 0)
         toggle_layout.setSpacing(14)
-        self.island_icon_check = make_checkbox(toggle_row)
-        self.island_icon_check.setChecked(bool(self.config().get("island_show_icon")))
-        self.island_icon_check.toggled.connect(self._on_island_changed)
         self.island_name_check = make_checkbox(toggle_row)
         self.island_name_check.setChecked(bool(self.config().get("island_show_name")))
         self.island_name_check.toggled.connect(self._on_island_changed)
@@ -372,7 +381,6 @@ class AppearancePage(SettingsPage):
         self.island_status_check.setChecked(bool(self.config().get("island_show_status")))
         self.island_status_check.toggled.connect(self._on_island_changed)
         for label, box in (
-            ("显示头标", self.island_icon_check),
             ("显示角色名", self.island_name_check),
             ("状态点", self.island_status_check),
         ):
@@ -387,8 +395,20 @@ class AppearancePage(SettingsPage):
         island_card.add_row(
             "显示元素",
             toggle_row,
-            "头标是左侧圆点；状态点按最高告警级变色（正常时用强调色）。",
+            "状态点按最高告警级变色（正常时用强调色）；角色名过长时右省略。",
             expand=True,
+        )
+
+        self.island_messages_check = make_checkbox(self)
+        self.island_messages_check.setChecked(
+            bool(self.config().get("island_show_messages", False))
+        )
+        self.island_messages_check.toggled.connect(self._on_island_changed)
+        island_card.add_row(
+            "消息显示",
+            self.island_messages_check,
+            "开启后展开卡片列出最近 8 条气泡消息，并可一键清除；"
+            "关闭时不记录也不显示历史，消息引发的胶囊果冻也一并停掉；读数不受影响。默认关闭。",
         )
 
         info_row = QWidget(self)
@@ -425,6 +445,7 @@ class AppearancePage(SettingsPage):
             ("network", "网络速率"),
             ("cpu", "CPU"),
             ("mem", "内存"),
+            ("disk", "C 盘剩余"),
             ("gpu", "GPU"),
             ("fps", "帧率"),
         ):
@@ -444,7 +465,8 @@ class AppearancePage(SettingsPage):
             "指标段",
             metrics_row,
             "勾选项按此顺序排在信息位之后；屏幕放不下时先折进「+N」，折叠即停采样。"
-            "GPU 走 PDH（无需权限）；帧率要读 ETW，需要一次授权。",
+            "C 盘剩余 5 秒采一次（只读容量，不扫盘）；GPU 走 PDH（无需权限）；"
+            "帧率要读 ETW，需要一次授权。",
             expand=True,
         )
 
@@ -502,7 +524,7 @@ class AppearancePage(SettingsPage):
         island_card.add_row(
             "配色与强调色",
             style_row,
-            "胶囊自己决定深浅色，不跟随系统主题；强调色用于头标与正常状态点。",
+            "胶囊自己决定深浅色，不跟随系统主题；强调色用于状态点与卡片强调。",
             expand=True,
         )
 
@@ -684,7 +706,7 @@ class AppearancePage(SettingsPage):
         threading.Thread(target=worker, name="petcore-fps-grant", daemon=True).start()
 
     def _island_metrics(self) -> list[str]:
-        order = ["network", "cpu", "mem", "gpu", "fps"]
+        order = ["network", "cpu", "mem", "disk", "gpu", "fps"]
         return [
             metric_id
             for metric_id in order
@@ -695,13 +717,14 @@ class AppearancePage(SettingsPage):
     def _on_island_changed(self, _value=None) -> None:
         config = self.config()
         config.set("island_enabled", self.island_enabled_check.isChecked())
-        config.set("island_show_icon", self.island_icon_check.isChecked())
         config.set("island_show_name", self.island_name_check.isChecked())
         config.set("island_show_status", self.island_status_check.isChecked())
+        config.set("island_show_messages", self.island_messages_check.isChecked())
         config.set("island_info_mode", self.island_info_combo.currentData() or "time")
         config.set("island_custom_text", self.island_info_text.text().strip())
         config.set("island_metrics", self._island_metrics())
         config.set("island_edge_dock", self.island_edge_dock_check.isChecked())
+        config.set("island_collision", self.island_collision_check.isChecked())
         config.set("island_style", self.island_style_combo.currentData() or "dark")
         config.set("island_accent", self.island_accent_combo.currentData() or "blue")
         config.set("island_opacity", round(self.island_opacity_slider.value() / 100.0, 2))

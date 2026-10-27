@@ -125,6 +125,21 @@ class Session:
         return _MEDIA_TYPE_RANK.get(self.media_type, _MEDIA_TYPE_RANK[MEDIA_TYPE_UNKNOWN])
 
 
+@dataclass(frozen=True, slots=True)
+class SmtcSample:
+    """一次 SMTC 采样：**全部会话的事实** + 被选中那一个的曲目信息。
+
+    与旧接口 ``(Playback | None, reason)`` 的区别在于 ``failed``：读失败（超时、
+    WinRT 异常、字段异常）和"系统里没有会话"是两回事——前者不许被当成"没在放"，
+    否则一次抖动就会清空歌词并重新取词（旧实现踩过这个坑）。
+    """
+
+    sessions: tuple[Session, ...] = ()
+    playback: "Playback | None" = None
+    reason: str = ""
+    failed: bool = False
+
+
 def normalized_app_id(app_id: str | None) -> str:
     """归一化 SMTC app_id：小写、去空白、去 ``.exe`` 后缀。
 
@@ -228,6 +243,46 @@ def pick_singing_session(
     return accepted[0]
 
 
+# ---------------------------------------------------------------- 位置外推
+
+
+def _utc_now():
+    """UTC 当前时间（独立函数便于测试注入）。"""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _extrapolate(position: float, timeline, *, is_playing: bool, end: float) -> float:
+    """把采样时刻的 position 外推到"现在"，消除轮询粒度造成的滞后。
+
+    SMTC 的 ``position`` 是某个瞬间的采样值，``last_updated_time`` 记录它被采样的
+    时刻；播放器推送间隔可能接近一秒，直接用会让歌词比声音慢最多一个间隔
+    （主分支实测 QQ 音乐有 ≤1 秒的音画不同步）。按微软推荐做法修正：
+
+        位置 ≈ position + (现在 - last_updated_time)
+
+    只在正在播放时外推（暂停时位置本就该冻结），并夹到 ``[0, 总时长]``。
+    时间戳无效（某些播放器给 1601-01-01 这类空值，网易云实测就是）时不外推。
+    """
+    if not is_playing:
+        return position
+    try:
+        stamp = timeline.last_updated_time
+        if stamp is None or getattr(stamp, "year", 0) < 2000:
+            return position
+        delta = _utc_now().timestamp() - stamp.timestamp()
+        # 只接受合理的前向偏移：负值或过大值说明时钟/字段异常，宁可不修。
+        if not (0.0 < delta < 5.0):
+            return position
+        corrected = position + delta
+        if end > 0:
+            corrected = min(corrected, end)
+        return max(0.0, corrected)
+    except Exception:
+        return position
+
+
 # ---------------------------------------------------------------- winrt 惰性导入
 
 
@@ -329,17 +384,22 @@ def _snapshot(session, index: int) -> Session:
     )
 
 
-async def _read_async(
+async def _sample_async(
     *, browser_media_enabled: bool, tracked_app_id: str, allowed_ids: frozenset[str] | None = None
-):
+) -> SmtcSample:
+    """采一次：全部会话的事实 + 被选中那一个的曲目。"""
     manager_class = _manager_class()
     if manager_class is None:
-        return None, unavailable_reason()
-    manager = await manager_class.request_async()
-    raw_sessions = list(manager.get_sessions() or ())
+        return SmtcSample(reason=unavailable_reason())
+    try:
+        manager = await manager_class.request_async()
+        raw_sessions = list(manager.get_sessions() or ())
+    except Exception:
+        return SmtcSample(reason="读取系统媒体信息失败。", failed=True)
     if not raw_sessions:
-        return None, "系统里没有正在播放的媒体会话。"
+        return SmtcSample(reason="系统里没有正在播放的媒体会话。")
     snapshots = [_snapshot(session, index) for index, session in enumerate(raw_sessions)]
+    facts = tuple(snapshots)
     chosen = pick_singing_session(
         snapshots,
         browser_media_enabled=browser_media_enabled,
@@ -354,8 +414,14 @@ async def _read_async(
         ]
         if blocked:
             names = "、".join(dict.fromkeys(name or "未知应用" for name in blocked))
-            return None, f"当前播放器（{names}）不在识别范围：设置 → 音乐 → 识别范围。"
-        return None, "当前媒体会话不是音乐（视频或未开启的浏览器会话已被过滤）。"
+            return SmtcSample(
+                sessions=facts,
+                reason=f"当前播放器（{names}）不在识别范围：设置 → 扩展管理 → 音乐 → 识别范围。",
+            )
+        return SmtcSample(
+            sessions=facts,
+            reason="当前媒体会话不是音乐（视频或未开启的浏览器会话已被过滤）。",
+        )
     session = raw_sessions[chosen.index]
 
     # 字段各自兜住：选取与读取之间会话可能失效，或时间轴字段异常。
@@ -365,23 +431,70 @@ async def _read_async(
         duration = float(timeline.end_time.total_seconds())
         raw_position = float(timeline.position.total_seconds())
     except Exception:
-        return None, "读取系统媒体信息失败。"
+        return SmtcSample(sessions=facts, reason="读取系统媒体信息失败。", failed=True)
     title = str(getattr(props, "title", "") or "").strip()
     artist = str(getattr(props, "artist", "") or "").strip()
     if not title and not artist:
-        return None, "当前会话没有曲目信息（可能还在加载）。"
+        return SmtcSample(
+            sessions=facts,
+            reason="当前会话没有曲目信息（可能还在加载）。",
+        )
     has_timeline = duration > _MIN_VALID_DURATION
-    return (
-        Playback(
+    position = raw_position if has_timeline else None
+    if position is not None:
+        position = _extrapolate(position, timeline, is_playing=chosen.playing, end=duration)
+    return SmtcSample(
+        sessions=facts,
+        playback=Playback(
             title=title,
             artist=artist,
             app_id=chosen.app_id,
-            position=raw_position if has_timeline else None,
+            position=position,
             duration=duration if has_timeline else 0.0,
             playing=chosen.playing,
             source="smtc",
         ),
-        "",
+    )
+
+
+async def _read_async(
+    *, browser_media_enabled: bool, tracked_app_id: str, allowed_ids: frozenset[str] | None = None
+) -> tuple[Playback | None, str]:
+    """旧接口的协程形态：``(Playback | None, reason)``（保留给已有调用方与测试）。"""
+    sample = await _sample_async(
+        browser_media_enabled=browser_media_enabled,
+        tracked_app_id=tracked_app_id,
+        allowed_ids=allowed_ids,
+    )
+    return sample.playback, sample.reason
+
+
+def _bounded(coro_factory) -> SmtcSample:
+    """跑一次采样并把所有失败折成 ``SmtcSample(failed=True)``（绝不抛）。"""
+    reason = unavailable_reason()
+    if reason:
+        return SmtcSample(reason=reason)
+    try:
+        return _run_sync(asyncio.wait_for(coro_factory(), CALL_TIMEOUT))
+    except (asyncio.TimeoutError, TimeoutError):
+        return SmtcSample(reason="读取系统媒体信息超时。", failed=True)
+    except Exception:
+        return SmtcSample(reason="读取系统媒体信息失败。", failed=True)
+
+
+def read_sample(
+    *,
+    browser_media_enabled: bool = False,
+    tracked_app_id: str = "",
+    allowed_ids: frozenset[str] | None = None,
+) -> SmtcSample:
+    """采样当前 SMTC：会话事实 + 曲目 + 原因 + ``failed``（不抛异常）。"""
+    return _bounded(
+        lambda: _sample_async(
+            browser_media_enabled=bool(browser_media_enabled),
+            tracked_app_id=str(tracked_app_id or ""),
+            allowed_ids=allowed_ids,
+        )
     )
 
 
@@ -392,24 +505,12 @@ def read_playback_with_reason(
     allowed_ids: frozenset[str] | None = None,
 ) -> tuple[Playback | None, str]:
     """采样当前曲目；读不到时第二项是给用户看的原因（不抛异常）。"""
-    reason = unavailable_reason()
-    if reason:
-        return None, reason
-    try:
-        return _run_sync(
-            asyncio.wait_for(
-                _read_async(
-                    browser_media_enabled=bool(browser_media_enabled),
-                    tracked_app_id=str(tracked_app_id or ""),
-                    allowed_ids=allowed_ids,
-                ),
-                CALL_TIMEOUT,
-            )
-        )
-    except (asyncio.TimeoutError, TimeoutError):
-        return None, "读取系统媒体信息超时。"
-    except Exception:
-        return None, "读取系统媒体信息失败。"
+    sample = read_sample(
+        browser_media_enabled=browser_media_enabled,
+        tracked_app_id=tracked_app_id,
+        allowed_ids=allowed_ids,
+    )
+    return sample.playback, sample.reason
 
 
 def read_playback(

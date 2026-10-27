@@ -411,8 +411,13 @@ class PetManager(QObject):
         if moved:
             window.move(new_x, new_y)
         # 只有真撞击才写速度：``set_velocity`` 会切到 thrown（换飞行素材、
-        # 停止掷骰），轻碰写速度 = 走路宠一碰就变抛掷态。
-        if not window.dragging and impact_speed >= HIT_FEEDBACK_MIN_SPEED:
+        # 停止掷骰），轻碰写速度 = 走路宠一碰就变抛掷态。已经在抛掷里的不覆盖——
+        # 位置出口可能刚因撞岛写过冲量，这里再按分离速度重写就是「两处改速度打架」。
+        if (
+            not window.dragging
+            and not window.motion.thrown
+            and impact_speed >= HIT_FEEDBACK_MIN_SPEED
+        ):
             window.motion.set_velocity(vx, vy)
         return moved
 

@@ -62,12 +62,13 @@ def make_island(tmp_path):
         widget.stop()
         assert widget.sys_monitor.wait_stopped(5)
         assert widget.net_monitor.wait_stopped(5)
+        assert widget.disk_monitor.wait_stopped(5)
         widget.close()
         widget.deleteLater()
 
 
 def test_capsule_has_fixed_height_and_a_minimum_width(make_island):
-    island = make_island({"island_show_name": False, "island_show_icon": False})
+    island = make_island({"island_show_name": False})
     assert island.height() == island_ui.CAPSULE_HEIGHT
     assert island.width() >= island_ui.MIN_CAPSULE_WIDTH
 
@@ -114,6 +115,32 @@ def test_expand_grows_the_window_and_show_a_card(make_island):
     island.collapse_card()
     assert island.is_expanded() is False
     assert island.height() == base
+
+
+def test_messages_are_off_by_default_and_never_enter_the_card(make_island):
+    """消息显示默认关：不记录、不进卡片、不弹「清除消息」。"""
+    island = make_island()
+    island.add_message("这条不该出现")
+    assert tuple(island._recent_messages) == ()  # noqa: SLF001
+    assert "最近消息" not in [row[0] for row in island._card_rows()]
+    island.expand_card()
+    assert island.card._clear_button.isHidden()  # noqa: SLF001
+
+
+def test_message_toggle_shows_and_hides_the_history(make_island):
+    """开关打开：新消息按行进卡片、可清除；关掉立刻从卡片消失。"""
+    island = make_island()
+    island.config.set("island_show_messages", True)
+    island.refresh_from_config()
+    island.add_message("第一条")
+    island.add_message("第二条")
+    assert [row[0] for row in island._card_rows()].count("最近消息") == 2
+    island.expand_card()
+    assert not island.card._clear_button.isHidden()  # noqa: SLF001
+    island.config.set("island_show_messages", False)
+    island.refresh_from_config()
+    assert "最近消息" not in [row[0] for row in island._card_rows()]
+    assert island.card._clear_button.isHidden()  # noqa: SLF001
 
 
 def test_expanded_row_folds_instead_of_clipping(make_island):

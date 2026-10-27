@@ -128,6 +128,25 @@ def test_tray_menu_rebuilds_actions_before_showing(app) -> None:
     assert menu.actions()[0].text() == "显示桌宠"
 
 
+def test_tray_menu_keeps_the_row_end_check_layer_across_rebuilds(app) -> None:
+    """托盘菜单也要勾选层：QSS indicator 只剩 1px，没层 = 鼠标穿透的状态看不见。"""
+    from petcore.ui.menu_style import CHECK_LAYER_ATTR, MenuCheckLayer
+
+    host, _windows = _host(visible=True)
+    menu = CoreHost.build_tray_menu(host)
+    layer = getattr(menu, CHECK_LAYER_ATTR)
+    assert isinstance(layer, MenuCheckLayer)
+
+    # 弹出前会原地重建动作：新 QAction 必须由层的 aboutToShow 同步链补接 toggled。
+    menu.aboutToShow.emit()
+    for _ in range(3):
+        app.processEvents()
+    rebuilt = next(item for item in menu.actions() if item.text() == "鼠标穿透")
+    assert rebuilt.property("menuCheckBound") is True
+    assert rebuilt.isCheckable() and rebuilt.isChecked() is False
+    menu.close()
+
+
 def test_tray_menu_toggles_click_through_for_every_pet(app) -> None:
     host, windows = _host(visible=True)
     menu = CoreHost.build_tray_menu(host)

@@ -41,9 +41,14 @@ GPU = "gpu"
 #: ``unsupported`` 不占位，卡片里写原因——"这台机器没有这个能力"与"配置里写了
 #: 个不存在的 id"必须分得开（同 GPU 的登记口径）。
 FPS = "fps"
+#: 系统盘剩余空间（**默认关**的选择性段）：读数是「还剩多少」，不是占用率。
+#: 口径见 ``petcore/platform/diskmon.py``——5 秒一拍、读不到报 error、绝不写 0。
+#: 它**不进告警表**：现表的语义是「越高越危险」，剩余空间方向相反，硬套会反告警
+#: （还剩 5G 时显示绿色、还剩 400G 时飘红）。
+DISK = "disk"
 #: 内置段 id 全集——它们是**保留字**：第三方段注册同名 id 会与内置段的折叠/卡片
 #: 索引撞车，故注册时直接拒注（见 :func:`register_segment`）。
-BUILTIN_SEGMENT_IDS = frozenset({NETWORK, CPU, MEM, GPU, FPS})
+BUILTIN_SEGMENT_IDS = frozenset({NETWORK, CPU, MEM, GPU, FPS, DISK})
 
 #: 段状态词表（呈现见 :func:`render_compact`）。
 STATE_OK = "ok"
